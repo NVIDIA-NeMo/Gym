@@ -368,12 +368,11 @@ def _convert_row_to_gym(row: dict, task: str) -> dict:
         expected = [str(expected)]
 
     return {
-        "responses_create_params": {
-            "input": [{"role": "user", "content": row["question"]}],
-        },
-        # Plain `question` field for the `prompt_config: prompts/default.yaml`
-        # placeholder — needed because Gym's benchmark mode uses prompt_config
-        # to bake input messages from raw rows at rollout time.
+        # No `responses_create_params.input` here on purpose: the benchmark dataset
+        # declares `prompt_config: benchmarks/ruler2/prompts/default.yaml`, and the two
+        # are mutually exclusive (see `nemo_gym.prompt.validate_prompt_compatibility`).
+        # The template is `user: "{question}"`, so the input messages are baked from the
+        # plain `question` field at collation time.
         "question": row["question"],
         "expected_answer": expected,
         "eval_type": eval_type,
@@ -404,7 +403,7 @@ def prepare(
 
     Parameters default to the ``RULER2_*`` environment variables (or the
     module-level defaults if those aren't set), so the function can be
-    invoked from ``ng_prepare_benchmark`` (which calls ``prepare()`` with
+    invoked from ``gym eval prepare`` (which calls ``prepare()`` with
     no arguments) and still respect the per-cluster overrides documented
     in the README.
     """

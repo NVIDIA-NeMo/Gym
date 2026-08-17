@@ -3,6 +3,7 @@
     "type": "example",
     "jsonl_fpath": "resources_servers/ruler2/data/example.jsonl",
     "num_repeats": 1,
+    "source": null,
     "gitlab_identifier": null,
     "huggingface_identifier": null,
     "license": "Apache 2.0",

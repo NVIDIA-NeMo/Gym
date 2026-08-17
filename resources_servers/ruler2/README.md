@@ -48,19 +48,19 @@ truncated reasoning trace.
 ## Running servers
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-resources_servers/ruler2/configs/ruler2.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --resources-server ruler2 \
+    --model-type vllm_model
 ```
 
 ## Collecting rollouts
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=ruler2_simple_agent \
-    +input_jsonl_fpath=resources_servers/ruler2/data/example.jsonl \
-    +output_jsonl_fpath=results/ruler2_rollouts.jsonl \
-    +num_repeats=1
+gym eval run --no-serve \
+    --agent ruler2_simple_agent \
+    --input resources_servers/ruler2/data/example.jsonl \
+    --output results/ruler2_rollouts.jsonl \
+    --num-repeats 1
 ```
 
 For the full benchmark run see

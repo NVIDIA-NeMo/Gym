@@ -31,7 +31,7 @@ verifies each row correctly:
 ## Prepare benchmark data
 
 ```bash
-ng_prepare_benchmark "+config_paths=[benchmarks/ruler2/config.yaml]"
+gym eval prepare --benchmark ruler2
 ```
 
 Knobs (set via env or pass to `prepare.py` directly):
@@ -50,20 +50,26 @@ private `.venv/` at `benchmarks/ruler2/`. Subsequent runs reuse it.
 ## Start environment
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/ruler2/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --benchmark ruler2 \
+    --model-type vllm_model
 ```
 
 ## Collect rollouts
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=ruler2_benchmark_simple_agent \
-    +input_jsonl_fpath=benchmarks/ruler2/data/ruler2_benchmark.jsonl \
-    +output_jsonl_fpath=results/ruler2_rollouts.jsonl \
-    +num_repeats=4
+gym eval run --no-serve \
+    --agent ruler2_benchmark_simple_agent \
+    --input benchmarks/ruler2/data/ruler2_benchmark.jsonl \
+    --output results/ruler2_rollouts.jsonl \
+    --prompt-config benchmarks/ruler2/prompts/default.yaml \
+    --num-repeats 4
 ```
+
+The generated rows carry a plain `question` field rather than a
+pre-populated `responses_create_params.input` — `--prompt-config` (the same
+template the benchmark config declares) is what turns them into input
+messages.
 
 ## Metrics
 
