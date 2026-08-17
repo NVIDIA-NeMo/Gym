@@ -89,6 +89,13 @@ genrm_model:
       openai_api_key: ${nv_inference_api_key}
       max_concurrent_requests: 16
 
+hle_benchmark_equivalence_judge_model:
+  responses_api_models:
+    openai_model:
+      openai_base_url: https://inference-api.nvidia.com/v1
+      openai_api_key: ${nv_inference_api_key}
+      openai_model: azure/openai/gpt-4o
+
 policy_model:
   responses_api_models:
     vllm_model:
