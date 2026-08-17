@@ -14,6 +14,7 @@
 # limitations under the License.
 from abc import abstractmethod
 from collections.abc import Mapping
+from functools import wraps
 from typing import Any, Optional
 
 from fastapi import Body, FastAPI, Request
@@ -24,7 +25,6 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyResponse,
 )
-from nemo_gym.base_responses_api_model import maybe_rollout_id_from_run_body
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX
 from nemo_gym.global_config import OBSERVABILITY_ENABLED_KEY_NAME, get_first_server_config_dict
 from nemo_gym.openai_utils import (
@@ -32,6 +32,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
+from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body, rollout_context
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
     BaseServer,
@@ -62,7 +63,18 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         # responses() recovers the rollout id from the path (see url_path_for_request) to correlate
         # its model calls. Same handler, so unprefixed calls are unaffected.
         app.post(f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/v1/responses")(self.responses)
-        app.post("/run")(self.run)
+
+        run = self.run
+
+        @wraps(run)
+        async def run_with_rollout_context(*args: Any, **kwargs: Any) -> BaseVerifyResponse:
+            body = kwargs.get("body")
+            if body is None:
+                body = next((arg for arg in args if isinstance(arg, BaseRunRequest)), None)
+            with rollout_context(self.rollout_id_from_run(body)):
+                return await run(*args, **kwargs)
+
+        app.post("/run")(run_with_rollout_context)
         app.post("/aggregate_metrics")(self.aggregate_metrics)
 
         return app

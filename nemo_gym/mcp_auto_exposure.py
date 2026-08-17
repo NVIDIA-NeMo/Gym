@@ -438,6 +438,8 @@ def harvest_tools(app: FastAPI, server: Any) -> dict[str, MCPTool]:
         cls = m.cls
         if f"{cls.__module__}.{cls.__name__}" == "starlette.middleware.sessions.SessionMiddleware":
             continue  # Gym's SessionMiddleware — replaced by a materialized session on direct dispatch
+        if f"{cls.__module__}.{cls.__name__}" == "nemo_gym.rollout_correlation.RolloutContextMiddleware":
+            continue  # Correlation prefixes are handled before resource routes; direct MCP dispatch has no prefix.
         dispatch = m.kwargs.get("dispatch")
         if dispatch is not None and getattr(dispatch, "__module__", None) in _GYM_MIDDLEWARE_MODULES:
             continue  # Gym's add_session_id / exception middleware

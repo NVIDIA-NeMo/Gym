@@ -42,6 +42,12 @@ from contextlib import nullcontext
 from functools import lru_cache
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 
+# Pre-import packages that nltk pulls in during its init so they are already in
+# sys.modules before nltk's inisec.py finder is installed. nltk>=3.9 blocks any
+# import originating from nltk if the module path falls inside the process CWD —
+# which happens in CI where the server venv lives inside the repo root.
+import defusedxml.ElementTree  # noqa: F401
+import regex  # noqa: F401
 from fastapi import FastAPI
 from pydantic import ConfigDict, PrivateAttr
 
@@ -53,12 +59,12 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeError, call_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import get_response_json
 
 
 LOG = logging.getLogger(__name__)
@@ -564,7 +570,7 @@ class RoleMRCResourcesServer(SimpleResourcesServer):
 
         reward = sum(aspect_scores.values()) / len(aspect_scores)
         per_aspect = {f"aspect_{k}": float(v) for k, v in aspect_scores.items()}
-        return RoleMRCVerifyResponse(
+        result = RoleMRCVerifyResponse(
             **data,
             reward=reward,
             generation=response[:500],
@@ -575,6 +581,10 @@ class RoleMRCResourcesServer(SimpleResourcesServer):
             judge_response=text,
             **per_aspect,
         )
+        # A judge call error is a judge failure, not a low score from averaging unscored aspects as 0.
+        if errors:
+            raise JudgeError(f"judge call failed for aspect(s): {', '.join(errors)}")
+        return result
 
     async def _call_judge(self, aspect_name: str, prompt: str) -> Optional[str]:
         """One judge call for a single aspect; returns text or None on failure."""
@@ -582,13 +592,14 @@ class RoleMRCResourcesServer(SimpleResourcesServer):
         params.input = [NeMoGymEasyInputMessage(role="user", content=prompt)]
         try:
             async with self._judge_semaphore:
-                resp = await self.server_client.post(
+                judge_response = await call_judge(
+                    self.server_client,
                     server_name=self.config.judge_model_server.name,
                     url_path="/v1/responses",
                     json=params,
+                    response_model=NeMoGymResponse,
                 )
-                judge_response = NeMoGymResponse.model_validate(await get_response_json(resp))
-        except Exception as exc:  # noqa: BLE001 -- retry-by-aspect is intentional
+        except JudgeError as exc:  # retry-by-aspect is intentional
             LOG.warning("RoleMRC judge[%s] call failed: %s", aspect_name, exc, exc_info=True)
             return None
         text = _strip_think(_response_text(judge_response))

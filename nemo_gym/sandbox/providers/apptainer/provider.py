@@ -20,12 +20,13 @@ import json
 import logging
 import os
 import posixpath
+import re
 import shlex
 import shutil
 import signal
 import tempfile
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,8 @@ from nemo_gym.sandbox.providers.base import (
     SandboxSpec,
     SandboxStatus,
 )
+from nemo_gym.sandbox.providers.utils import coerce_config as _coerce_config
+from nemo_gym.sandbox.providers.utils import path_under_mount as _path_under_mount
 
 
 LOGGER = logging.getLogger(__name__)
@@ -52,6 +55,8 @@ SANDBOX_RUNTIME_RETURN_CODE = 125
 # failed to run the command. Apptainer prefixes its own fatal errors with "FATAL:".
 APPTAINER_RUNTIME_ERROR_MARKERS = ("fatal:", "no instance found", "instance not found", "does not exist")
 APPTAINER_MISSING_INSTANCE_MARKERS = ("no instance found", "instance not found", "does not exist")
+APPTAINER_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+APPTAINER_ENV_FILE_READONLY = frozenset({"EUID", "GID", "HOME", "IFS", "OPTIND", "PWD", "UID"})
 
 
 class ApptainerCreateError(SandboxCreateError):
@@ -71,17 +76,6 @@ def _require_apptainer() -> str:
             "Install Apptainer before using env.sandbox.provider.name=apptainer."
         )
     return path
-
-
-def _coerce_config(value: Any, config_cls: type[Any]) -> Any:
-    """Accept either a config dataclass instance or a plain mapping (Hydra YAML)."""
-    if value is None:
-        return config_cls()
-    if isinstance(value, config_cls):
-        return value
-    if isinstance(value, Mapping):
-        return config_cls(**value)
-    raise TypeError(f"{config_cls.__name__} must be a mapping or {config_cls.__name__} instance")
 
 
 @dataclass(frozen=True)
@@ -191,24 +185,6 @@ def _to_sandbox_status(state: str | None) -> SandboxStatus:
     return SandboxStatus.UNKNOWN
 
 
-def _path_under_mount(mount_point: str, path: str) -> str | None:
-    """If `path` is inside the mount, return its path relative to the mount; else None."""
-    if not path.startswith("/"):
-        return None
-    mp = posixpath.normpath(mount_point.rstrip("/") or "/")
-    normalized = posixpath.normpath(path)
-    if normalized == mp:
-        return ""
-    try:
-        if posixpath.commonpath([mp, normalized]) != mp:
-            return None
-    except ValueError:
-        return None
-    if mp == "/":
-        return normalized.lstrip("/")
-    return normalized[len(mp) + 1 :]
-
-
 def _is_runtime_failure(stderr: str) -> bool:
     """Best-effort: did apptainer itself fail to run the command (vs the command failing)?"""
     low = stderr.lower()
@@ -234,6 +210,56 @@ def _coerce_binds(value: Any) -> list[str]:
     if isinstance(value, (list, tuple)):
         return [str(v) for v in value]
     raise ApptainerCreateError(f"provider_options['binds'] must be a string or list, got {type(value).__name__}")
+
+
+def _serialize_env_file(env: Mapping[str, str]) -> bytes:
+    """Serialize environment variables for Apptainer ``--env-file``.
+
+    Apptainer shell-evaluates env files once while reading them. POSIX
+    shell-quoting preserves each value through that evaluation, while the
+    accompanying ``--no-eval`` flag prevents a second evaluation during
+    container environment injection.
+    """
+    assignments: list[str] = []
+    for key, value in env.items():
+        if not isinstance(key, str) or APPTAINER_ENV_NAME.fullmatch(key) is None:
+            raise ValueError("Apptainer environment variable names must be POSIX shell identifiers")
+        if key in APPTAINER_ENV_FILE_READONLY:
+            raise ValueError("Apptainer --env-file cannot set a shell readonly environment variable")
+        if not isinstance(value, str):
+            raise TypeError("Apptainer environment variable values must be strings")
+        if "\x00" in value:
+            raise ValueError("Apptainer environment variable values cannot contain NUL")
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError("Apptainer environment variable values must be UTF-8 encodable") from None
+        assignments.append(f"{key}={shlex.quote(value)}")
+    return ("\n".join(assignments) + "\n").encode("utf-8") if assignments else b""
+
+
+@contextlib.contextmanager
+def _private_env_file(staging_dir: Path, content: bytes) -> Iterator[Path | None]:
+    """Yield a unique mode-0600 env file and remove it on every exit path."""
+    if not content:
+        yield None
+        return
+
+    fd = -1
+    path: Path | None = None
+    try:
+        fd, raw_path = tempfile.mkstemp(prefix=".apptainer-env-", dir=staging_dir)
+        path = Path(raw_path)
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            fd = -1
+            stream.write(content)
+        yield path
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        if path is not None:
+            path.unlink(missing_ok=True)
 
 
 class ApptainerProvider:
@@ -346,7 +372,7 @@ class ApptainerProvider:
            mount_point = self._create_config.mount_point, generate a unique
            name = INSTANCE_NAME_PREFIX + uuid4().hex.
         4. Build argv: [binary, "instance", "start", <--bind staging:mount_point>,
-           <config default_binds>, <spec.provider_options["binds"]>, <--env ...>,
+           <config default_binds>, <spec.provider_options["binds"]>, <--env-file ...>,
            _resource_flags(spec.resources), <extra_start_args>, image, name].
         5. await self._run(argv, timeout_s=self._create_config.start_timeout_s);
            on non-zero return, clean up the staging dir and raise
@@ -365,6 +391,10 @@ class ApptainerProvider:
         if spec.image is None:
             raise ApptainerCreateError("spec.image is required for the apptainer provider")
         image = _resolve_image(spec.image)
+        try:
+            env_file_content = _serialize_env_file(spec.env)
+        except (TypeError, ValueError) as e:
+            raise ApptainerCreateError(f"invalid Apptainer environment: {e}") from e
 
         # Extra per-sandbox bind mounts (validated before we allocate anything).
         extra_binds = _coerce_binds(spec.provider_options.get("binds"))
@@ -383,8 +413,6 @@ class ApptainerProvider:
             argv += ["--bind", bind]
         for bind in extra_binds:
             argv += ["--bind", bind]
-        for key, value in spec.env.items():
-            argv += ["--env", f"{key}={value}"]
         start_args = list(self._create_config.extra_start_args)
         resource_limit_flags = _resource_limit_flags(spec.resources)
         if resource_limit_flags and self._create_config.apply_resource_limits:
@@ -396,11 +424,18 @@ class ApptainerProvider:
                 argv += resource_limit_flags
         argv += _resource_passthrough_flags(spec.resources)
         argv += start_args
-        argv += [image, name]
 
         # start the instance; clean up the staging dir on any failure.
         try:
-            code, _out, err = await self._run(argv, timeout_s=self._create_config.start_timeout_s, daemonize=True)
+            with _private_env_file(staging_dir, env_file_content) as env_file:
+                if env_file is not None:
+                    argv += ["--no-eval", "--env-file", str(env_file)]
+                argv += [image, name]
+                code, _out, err = await self._run(
+                    argv,
+                    timeout_s=self._create_config.start_timeout_s,
+                    daemonize=True,
+                )
         except TimeoutError as e:
             shutil.rmtree(staging_dir, ignore_errors=True)
             raise ApptainerCreateError(f"apptainer instance start timed out for image={image!r}: {e}") from e
@@ -516,9 +551,7 @@ class ApptainerProvider:
         merged_env = dict(getattr(inst, "env", {}))
         if env:
             merged_env.update(env)
-        if merged_env:
-            for key, value in merged_env.items():
-                flags += ["--env", f"{key}={value}"]
+        env_file_content = _serialize_env_file(merged_env)
 
         effective_command = command
         is_root = user == "root" or user == 0
@@ -532,11 +565,14 @@ class ApptainerProvider:
 
         flags += list(self._exec_config.extra_exec_args)
 
-        argv = [self._binary, "exec", *flags, f"instance://{inst.name}", "sh", "-c", effective_command]
         effective_timeout = timeout_s if timeout_s is not None else self._exec_config.default_timeout_s
 
         try:
-            code, out, err = await self._run(argv, timeout_s=effective_timeout, stdin=stdin)
+            with _private_env_file(inst.staging_dir, env_file_content) as env_file:
+                if env_file is not None:
+                    flags += ["--no-eval", "--env-file", str(env_file)]
+                argv = [self._binary, "exec", *flags, f"instance://{inst.name}", "sh", "-c", effective_command]
+                code, out, err = await self._run(argv, timeout_s=effective_timeout, stdin=stdin)
         except TimeoutError as e:
             return SandboxExecResult(
                 stdout=None,

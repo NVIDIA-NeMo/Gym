@@ -16,32 +16,40 @@
 
 Two scoring layers:
 
-  * ``verify()`` returns a per-sample sentence-BLEU reward (useful as an RL
-    signal) plus a per-rollout xCOMET-XXL ``comet_score``. The COMET score
-    is computed by a persistent Ray actor pool (one actor per GPU on the
-    extra_gpu node) that keeps the xCOMET-XXL checkpoint resident; each
-    verify() call awaits its own future before returning, so every
-    rollout in ``rollouts.jsonl`` carries a finite ``comet_score`` whenever
-    the model produced a non-empty translation.
+  * ``verify()`` returns per-sample sentence-chrF and sentence-spBLEU, using
+    chrF as the RL reward, plus a per-rollout xCOMET-XXL ``comet_score`` and a per-rollout
+    language-consistency ``language_consistency_score`` (fraction of the generation
+    detected as the target language). The COMET score is computed by a
+    persistent Ray actor pool (one actor per GPU on the extra_gpu node) that
+    keeps the xCOMET-XXL checkpoint resident; each verify() call awaits its
+    own future before returning, so every rollout in ``rollouts.jsonl``
+    carries a finite ``comet_score`` whenever the model produced a non-empty
+    translation. Language-consistency backends are currently assumed to run
+    synchronously in-process on CPU.
   * ``compute_metrics(tasks)`` groups rollouts by
     ``(source_language, target_language, rollout_index)``, computes
-    corpus-BLEU with the language-specific sacrebleu tokenizer
-    (``13a`` default, ``ja-mecab``/``ko-mecab``/``zh`` as needed), and
-    aggregates the per-row COMET scores into per-pair + cross-pair means
-    (``xx->xx``, ``<src>->xx``, ``xx->{tgt}``) with ``std_dev_across_runs``.
+    corpus-chrF and corpus-spBLEU, and
+    aggregates the per-row COMET and language-consistency scores into per-pair
+    + cross-pair
+    means (``xx->xx``, ``<src>->xx``, ``xx->{tgt}``) with
+    ``std_dev_across_runs``.
 """
 
 from __future__ import annotations
 
 import logging
 import threading
+import unicodedata
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
 import ray
 from fastapi import FastAPI
-from pydantic import PrivateAttr
-from sacrebleu import corpus_bleu, sentence_bleu
+from language_consistency import LanguageConsistencyBackend, get_language_consistency_backend
+from pydantic import Field, PrivateAttr
+from sacrebleu import corpus_bleu as corpus_spbleu
+from sacrebleu import corpus_chrf, sentence_chrf
+from sacrebleu.metrics import BLEU
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -55,18 +63,21 @@ from nemo_gym.base_resources_server import (
 LOG = logging.getLogger(__name__)
 
 
-# --- Tokenizer selection ------------------------------------------------------
-# ``13a`` is sacrebleu's default; ``ja-mecab`` / ``ko-mecab`` need sacrebleu's
-# [ja]/[ko] extras installed; ``zh`` is built in.
-_TOKENIZER_BY_LANG_PREFIX = {
-    "ja": "ja-mecab",
-    "ko": "ko-mecab",
-    "zh": "zh",
-}
+SPBLEU_TOKENIZER = "flores200"
+BLEU_MIGRATION_WARNING = (
+    "We switched from the default SacreBLEU tokenizer to the FLORES-200 SentencePiece tokenizer "
+    'for computing BLEU. The new BLEU scores are reported as "spBLEU"—do NOT compare these spBLEU '
+    "scores to prior BLEU scores reported by this benchmark in the past; they are not comparable. "
+    "Also be very careful when comparing them to BLEU scores reported in papers or elsewhere: the "
+    "tokenizer must be the same for the scores to be comparable. In general, we recommend using "
+    "chrF instead of BLEU because it performs at least as well and requires no tokenization, so "
+    "there is no chance of tokenizer mismatch."
+)
 
 
-def _tokenizer_for(target_language: str) -> str:
-    return _TOKENIZER_BY_LANG_PREFIX.get(target_language[:2], "13a")
+def _normalize_for_scoring(text: str) -> str:
+    """Canonicalize equivalent Unicode sequences before metric comparison."""
+    return unicodedata.normalize("NFC", text)
 
 
 # --- Thinking-preamble handling ---------------------------------------------
@@ -74,8 +85,8 @@ def _tokenizer_for(target_language: str) -> str:
 # <think>...</think>. vLLM's reasoning parser strips the opening <think>
 # tag but keeps the closing </think>, so the raw response looks like
 #   "We need to translate ... </think>\nProlog"
-# We must drop the preamble before scoring or corpus BLEU is computed
-# against the reasoning text and collapses (~3x lower BLEU).
+# We must drop the preamble before scoring so the reasoning text does not
+# contaminate the translation metric.
 
 
 def _strip_reasoning_preamble(text: str) -> str:
@@ -108,7 +119,7 @@ class WmtTranslationResourcesServerConfig(BaseResourcesServerConfig):
     Attributes:
         compute_comet: Run xCOMET-XXL inside ``verify()`` and aggregate in
             ``compute_metrics``. Default True. Turn off for smoke tests or
-            RL training runs where only BLEU is needed.
+            RL training runs where only local spBLEU/chrF scoring is needed.
         comet_model: HuggingFace repo for the COMET checkpoint. Resolved via
             ``comet.download_model`` (cached under HF_HOME).
         comet_batch_size: Batch size passed to ``model.predict``.
@@ -116,6 +127,12 @@ class WmtTranslationResourcesServerConfig(BaseResourcesServerConfig):
             xCOMET-XXL once and serves score requests from the persistent
             actor pool. Each actor requests one ``extra_gpu`` Ray resource,
             so the upper limit is the extra node(s)' GPU count.
+        language_consistency_backend: Backend used to compute a per-rollout
+            language-consistency score in ``verify()``. ``None`` disables
+            language-consistency scoring.
+        language_consistency_warning_threshold: Emit an aggregation-time
+            warning for each source-target pair whose mean language-consistency
+            score is below this 0-100 threshold.
         strip_reasoning: When True, drop a ``<think>...</think>`` preamble
             before scoring. Required for reasoning models; safe to leave on
             for instruction-tuned models that don't emit reasoning traces.
@@ -125,6 +142,8 @@ class WmtTranslationResourcesServerConfig(BaseResourcesServerConfig):
     comet_model: str = "Unbabel/XCOMET-XXL"
     comet_batch_size: int = 16
     comet_num_shards: int = 8
+    language_consistency_backend: Optional[str] = None
+    language_consistency_warning_threshold: float = Field(default=50.0, ge=0.0, le=100.0)
     strip_reasoning: bool = True
 
 
@@ -144,12 +163,19 @@ class WmtTranslationVerifyRequest(WmtTranslationRunRequest, BaseVerifyRequest):
 class WmtTranslationVerifyResponse(WmtTranslationVerifyRequest, BaseVerifyResponse):
     # Model's translation, post-strip-reasoning if enabled.
     generation: str
-    # Per-sample sentence-BLEU, useful as a dense RL reward.
-    sentence_bleu: float
+    # Per-sample sentence-chrF, useful as a dense RL reward.
+    sentence_chrf: float
+    # Per-sample sentence-spBLEU, reported alongside chrF for comparison.
+    sentence_spbleu: float
     # Per-rollout xCOMET-XXL score (0–1). None for empty generations or
     # actor-pool failures; aggregate corpus COMET is computed in
     # compute_metrics().
     comet_score: Optional[float] = None
+    # Per-rollout language-consistency score (0–1): fraction of the
+    # generation attributed to the target language. 0.0 for empty or
+    # wrong-language output; None when no language-consistency backend is
+    # configured. Aggregated in compute_metrics().
+    language_consistency_score: Optional[float] = None
 
 
 # --- Ray COMET scoring --------------------------------------------------------
@@ -267,7 +293,7 @@ def _build_comet_actor_class():
 
             # Both download_model() and load_from_checkpoint() resolve
             # from the HF cache populated by the benchmark prepare step
-            # (see benchmarks/wmt24pp/prepare.py:_prefetch_comet_model).
+            # (see benchmarks/wmt24pp/prepare.py:prefetch_translation_models).
             # If the cache is missing, this falls back to fetching from
             # HF Hub at startup, subject to HF_HUB_OFFLINE.
             LOG.info("CometActor[%d]: loading %s on %s", gpu_idx, model_name, self._device)
@@ -301,8 +327,16 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
     _comet_state_lock: Any = PrivateAttr(default=None)
     _comet_actor_idx: int = PrivateAttr(default=0)
     _comet_init_attempted: bool = PrivateAttr(default=False)
+    # Constructing the FLORES-200 tokenizer loads its SentencePiece model from
+    # disk. Keep one metric instance per server instead of repeating that work
+    # for every verify() call.
+    _sentence_spbleu_metric: Optional[BLEU] = PrivateAttr(default=None)
+    # Backend loading may import heavyweight dependencies such as GlotLID.
+    # Resolve the configured backend once per server and reuse it.
+    _language_consistency_backend: Optional[LanguageConsistencyBackend] = PrivateAttr(default=None)
 
     def setup_webserver(self) -> FastAPI:
+        LOG.warning(BLEU_MIGRATION_WARNING)
         return super().setup_webserver()
 
     def _ensure_comet_actors(self) -> None:
@@ -375,8 +409,26 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
             LOG.exception("COMET actor.score.remote dispatch failed")
             return None
 
+    def _score_sentence_spbleu(self, generation: str, reference: str) -> float:
+        """Score one sentence while reusing the FLORES-200 tokenizer."""
+        if self._sentence_spbleu_metric is None:
+            self._sentence_spbleu_metric = BLEU(
+                tokenize=SPBLEU_TOKENIZER,
+                effective_order=True,
+            )
+        return self._sentence_spbleu_metric.sentence_score(generation, [reference]).score
+
+    def _get_language_consistency_backend(self) -> Optional[LanguageConsistencyBackend]:
+        """Resolve and cache the configured language-consistency backend."""
+        backend_name = self.config.language_consistency_backend
+        if backend_name is None:
+            return None
+        if self._language_consistency_backend is None:
+            self._language_consistency_backend = get_language_consistency_backend(backend_name)
+        return self._language_consistency_backend
+
     async def verify(self, body: WmtTranslationVerifyRequest) -> WmtTranslationVerifyResponse:
-        """Return per-sample sentence-BLEU as the RL reward + per-row COMET.
+        """Return sentence spBLEU/chrF, with chrF as reward, plus per-row auxiliary scores.
 
         Dispatches a per-rollout COMET score on the persistent actor pool
         and awaits the future before returning, so each row in
@@ -389,9 +441,10 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
         if self.config.compute_comet:
             self._ensure_comet_actors()
 
+        language_consistency_backend = self._get_language_consistency_backend()
+
         raw = body.response.output_text or ""
-        # Drop the reasoning preamble before scoring so BLEU is computed
-        # against the actual translation only.
+        # Drop the reasoning preamble before scoring the actual translation.
         if self.config.strip_reasoning:
             raw = _strip_reasoning_preamble(raw)
         generation = raw.strip()
@@ -400,14 +453,31 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
                 **body.model_dump(),
                 reward=0.0,
                 generation="",
-                sentence_bleu=0.0,
+                sentence_chrf=0.0,
+                sentence_spbleu=0.0,
+                # Empty output is genuinely 0% target language.
+                language_consistency_score=(0.0 if language_consistency_backend is not None else None),
             )
 
-        tokenize = _tokenizer_for(body.target_language)
-        # sentence_bleu returns a BLEUScore; .score is 0-100.
-        sent_score = sentence_bleu(generation, [body.translation], tokenize=tokenize).score
+        normalized_generation = _normalize_for_scoring(generation)
+        normalized_reference = _normalize_for_scoring(body.translation)
+
+        # sentence_chrf returns a CHRFScore; .score is 0-100.
+        sentence_chrf_score = sentence_chrf(normalized_generation, [normalized_reference]).score
+        # Sentence spBLEU uses the FLORES-200 SentencePiece tokenizer.
+        sentence_spbleu_score = self._score_sentence_spbleu(
+            normalized_generation,
+            normalized_reference,
+        )
         # Normalize to [0, 1] so the "reward" field stays conventional.
-        reward = sent_score / 100.0
+        reward = sentence_chrf_score / 100.0
+
+        language_consistency_score: Optional[float] = None
+        if language_consistency_backend is not None:
+            language_consistency_score = language_consistency_backend(
+                generation,
+                body.target_language,
+            )
 
         comet_score: Optional[float] = None
         if self.config.compute_comet:
@@ -428,8 +498,10 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
             **body.model_dump(),
             reward=reward,
             generation=generation,
-            sentence_bleu=sent_score,
+            sentence_chrf=sentence_chrf_score,
+            sentence_spbleu=sentence_spbleu_score,
             comet_score=comet_score,
+            language_consistency_score=language_consistency_score,
         )
 
     # --- COMET aggregation ----------------------------------------------------
@@ -459,19 +531,48 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
                     continue
                 comet_per_pair[(src, tgt)][k].append(float(score))
 
+    def _collect_per_row_language_consistency(
+        self,
+        tasks: List[List[Dict[str, Any]]],
+        max_k: int,
+        language_consistency_per_pair: Dict[Tuple[str, str], List[List[float]]],
+    ) -> None:
+        """Read per-row ``language_consistency_score`` from rollout dicts and bucket by pair/k.
+
+        verify() computes language_consistency_score in-process and stores it on each rollout
+        response, so by compute_metrics() the scores are already in ``tasks``.
+        This method just buckets them.
+        """
+        for task_rollouts in tasks:
+            for k, rollout in enumerate(task_rollouts):
+                if k >= max_k:
+                    break
+                score = rollout.get("language_consistency_score")
+                if score is None:
+                    continue
+                src = rollout.get("source_language")
+                tgt = rollout.get("target_language")
+                if not src or not tgt:
+                    continue
+                language_consistency_per_pair[(src, tgt)][k].append(float(score))
+
     # --- Aggregate metrics ---------------------------------------------------
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
-        """Compute corpus BLEU + (optional) COMET metrics.
+        """Compute corpus spBLEU and chrF plus optional auxiliary metrics.
 
         Output keys:
 
-          <src>-><tgt>/bleu                 (mean across rollouts)
-          <src>-><tgt>/bleu_std_dev_across_runs
+          <src>-><tgt>/chrF                 (mean across rollouts)
+          <src>-><tgt>/chrF_std_dev_across_runs
+          <src>-><tgt>/spBLEU                 (mean across rollouts)
+          <src>-><tgt>/spBLEU_std_dev_across_runs
           <src>-><tgt>/comet                (mean across rollouts)
           <src>-><tgt>/comet_std_dev_across_runs
-          <src>->xx/bleu  xx->xx/bleu  xx-><tgt>/bleu   (aggregations)
-          ... same with /comet
+          <src>-><tgt>/language_consistency                 (mean across rollouts)
+          <src>-><tgt>/language_consistency_std_dev_across_runs
+          <src>->xx/chrF  xx->xx/chrF  xx-><tgt>/chrF   (aggregations)
+          ... same with /spBLEU, /comet, and /language_consistency
         """
         if not tasks:
             return {}
@@ -487,6 +588,7 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
         )
 
         any_comet_rows = False
+        any_language_consistency_rows = False
         for task_rollouts in tasks:
             for k, rollout in enumerate(task_rollouts):
                 if k >= max_k:
@@ -500,19 +602,27 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
                 per_pair_runs[(src, tgt)][k].append((mt, ref))
                 if self.config.compute_comet and rollout.get("comet_score") is not None:
                     any_comet_rows = True
+                if (
+                    self.config.language_consistency_backend is not None
+                    and rollout.get("language_consistency_score") is not None
+                ):
+                    any_language_consistency_rows = True
 
-        # 2. Per-(src, tgt) corpus BLEU per rollout.
-        bleu_per_pair: Dict[Tuple[str, str], List[float]] = {}
+        # 2. Per-(src, tgt) corpus chrF and spBLEU per rollout.
+        chrf_per_pair: Dict[Tuple[str, str], List[float]] = {}
+        spbleu_per_pair: Dict[Tuple[str, str], List[float]] = {}
         for (src, tgt), runs in per_pair_runs.items():
-            tokenize = _tokenizer_for(tgt)
-            per_run = []
+            chrf_per_run = []
+            spbleu_per_run = []
             for run in runs:
                 if not run:
                     continue
-                preds = [mt for mt, _ in run]
-                refs = [ref for _, ref in run]
-                per_run.append(corpus_bleu(preds, [refs], tokenize=tokenize).score)
-            bleu_per_pair[(src, tgt)] = per_run
+                preds = [_normalize_for_scoring(mt) for mt, _ in run]
+                refs = [_normalize_for_scoring(ref) for _, ref in run]
+                chrf_per_run.append(corpus_chrf(preds, [refs]).score)
+                spbleu_per_run.append(corpus_spbleu(preds, [refs], tokenize=SPBLEU_TOKENIZER).score)
+            chrf_per_pair[(src, tgt)] = chrf_per_run
+            spbleu_per_pair[(src, tgt)] = spbleu_per_run
 
         # 3. COMET aggregation: bucket the per-row comet_score values that
         # verify() already populated.
@@ -529,6 +639,27 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
                     means.append(100.0 * sum(run_scores) / len(run_scores))
             comet_mean_per_pair[pair_key] = means
 
+        # 3b. Language-consistency aggregation: bucket the per-row
+        # language_consistency_score values that verify() populated in-process.
+        language_consistency_per_pair: Dict[Tuple[str, str], List[List[float]]] = defaultdict(
+            lambda: [list() for _ in range(max_k)]
+        )
+        if self.config.language_consistency_backend is not None and any_language_consistency_rows:
+            self._collect_per_row_language_consistency(
+                tasks=tasks,
+                max_k=max_k,
+                language_consistency_per_pair=language_consistency_per_pair,
+            )
+
+        # Per-rollout-index mean language-consistency score per (pair, k), then averaged across k.
+        language_consistency_mean_per_pair: Dict[Tuple[str, str], List[float]] = {}
+        for pair_key, per_run in language_consistency_per_pair.items():
+            means = []
+            for run_scores in per_run:
+                if run_scores:
+                    means.append(100.0 * sum(run_scores) / len(run_scores))
+            language_consistency_mean_per_pair[pair_key] = means
+
         # 4. Build output dict with per-pair + cross-pair aggregations.
         metrics: Dict[str, Any] = {}
         all_pairs = sorted(per_pair_runs.keys())
@@ -544,12 +675,18 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
             return (mean, var**0.5)
 
         # Per-pair
+        low_language_consistency_pairs: List[Tuple[float, str, str]] = []
         for src, tgt in all_pairs:
             pair_label = f"{src}->{tgt}"
-            bleu_runs = bleu_per_pair.get((src, tgt), [])
-            m, s = _mean_std(bleu_runs)
-            metrics[f"{pair_label}/bleu"] = m
-            metrics[f"{pair_label}/bleu_std_dev_across_runs"] = s
+            chrf_runs = chrf_per_pair.get((src, tgt), [])
+            m, s = _mean_std(chrf_runs)
+            metrics[f"{pair_label}/chrF"] = m
+            metrics[f"{pair_label}/chrF_std_dev_across_runs"] = s
+
+            spbleu_runs = spbleu_per_pair.get((src, tgt), [])
+            m, s = _mean_std(spbleu_runs)
+            metrics[f"{pair_label}/spBLEU"] = m
+            metrics[f"{pair_label}/spBLEU_std_dev_across_runs"] = s
 
             if self.config.compute_comet:
                 comet_runs = comet_mean_per_pair.get((src, tgt), [])
@@ -558,22 +695,50 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
                     metrics[f"{pair_label}/comet"] = cm
                     metrics[f"{pair_label}/comet_std_dev_across_runs"] = cs
 
+            if self.config.language_consistency_backend is not None:
+                language_consistency_runs = language_consistency_mean_per_pair.get((src, tgt), [])
+                if language_consistency_runs:
+                    lm, ls = _mean_std(language_consistency_runs)
+                    metrics[f"{pair_label}/language_consistency"] = lm
+                    metrics[f"{pair_label}/language_consistency_std_dev_across_runs"] = ls
+                    if lm < self.config.language_consistency_warning_threshold:
+                        low_language_consistency_pairs.append((lm, src, tgt))
+
+        if low_language_consistency_pairs:
+            threshold = self.config.language_consistency_warning_threshold
+            pair_scores = "\n".join(
+                f"  {src} -> {tgt}: {score:.1f}" for score, src, tgt in sorted(low_language_consistency_pairs)
+            )
+            LOG.warning(
+                "Warning - the following language pairs had language consistency scores < %.1f, "
+                "indicating the model is likely generating in the wrong language:\n%s",
+                threshold,
+                pair_scores,
+            )
+
         # Aggregations: xx->xx, <src>->xx, xx->{tgt}. For each, average per-run
-        # BLEU across the contributing pairs first (per-run mean of per-pair
-        # BLEU), then average across runs.
+        # metric across the contributing pairs first, then average across runs.
         def _aggregate(pair_filter) -> Dict[str, List[float]]:
-            """Return per-run aggregated BLEU/COMET across filtered pairs."""
+            """Return per-run spBLEU/chrF/COMET/language-consistency aggregates."""
             filtered_pairs = [p for p in all_pairs if pair_filter(p)]
             if not filtered_pairs:
-                return {"bleu": [], "comet": []}
+                return {"spbleu": [], "chrf": [], "comet": [], "language_consistency": []}
             # Align rollout-index across pairs: take the min number of rollouts
             # present across the pairs so we don't average over missing runs.
-            min_runs = min(len(bleu_per_pair.get(p, [])) for p in filtered_pairs)
-            bleu_runs = []
+            min_runs = min(len(chrf_per_pair.get(p, [])) for p in filtered_pairs)
+            chrf_runs = []
             for k in range(min_runs):
-                per_pair_k = [bleu_per_pair[p][k] for p in filtered_pairs if k < len(bleu_per_pair[p])]
+                per_pair_k = [chrf_per_pair[p][k] for p in filtered_pairs if k < len(chrf_per_pair[p])]
                 if per_pair_k:
-                    bleu_runs.append(sum(per_pair_k) / len(per_pair_k))
+                    chrf_runs.append(sum(per_pair_k) / len(per_pair_k))
+
+            spbleu_min = min(len(spbleu_per_pair.get(p, [])) for p in filtered_pairs)
+            spbleu_runs = []
+            for k in range(spbleu_min):
+                per_pair_k = [spbleu_per_pair[p][k] for p in filtered_pairs if k < len(spbleu_per_pair[p])]
+                if per_pair_k:
+                    spbleu_runs.append(sum(per_pair_k) / len(per_pair_k))
+
             comet_runs: List[float] = []
             if self.config.compute_comet:
                 comet_min = min(
@@ -586,46 +751,101 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
                     ]
                     if per_pair_k:
                         comet_runs.append(sum(per_pair_k) / len(per_pair_k))
-            return {"bleu": bleu_runs, "comet": comet_runs}
+
+            language_consistency_runs: List[float] = []
+            if self.config.language_consistency_backend is not None:
+                language_consistency_min = min(
+                    (len(language_consistency_mean_per_pair.get(p, [])) for p in filtered_pairs),
+                    default=0,
+                )
+                for k in range(language_consistency_min):
+                    per_pair_k = [
+                        language_consistency_mean_per_pair[p][k]
+                        for p in filtered_pairs
+                        if k < len(language_consistency_mean_per_pair.get(p, []))
+                    ]
+                    if per_pair_k:
+                        language_consistency_runs.append(sum(per_pair_k) / len(per_pair_k))
+
+            return {
+                "spbleu": spbleu_runs,
+                "chrf": chrf_runs,
+                "comet": comet_runs,
+                "language_consistency": language_consistency_runs,
+            }
 
         src_langs = sorted({p[0] for p in all_pairs})
         tgt_langs = sorted({p[1] for p in all_pairs})
 
         # xx->xx (global)
         agg = _aggregate(lambda p: True)
-        m, s = _mean_std(agg["bleu"])
-        metrics["xx->xx/bleu"] = m
-        metrics["xx->xx/bleu_std_dev_across_runs"] = s
+        m, s = _mean_std(agg["chrf"])
+        metrics["xx->xx/chrF"] = m
+        metrics["xx->xx/chrF_std_dev_across_runs"] = s
+        m, s = _mean_std(agg["spbleu"])
+        metrics["xx->xx/spBLEU"] = m
+        metrics["xx->xx/spBLEU_std_dev_across_runs"] = s
         if agg["comet"]:
             m, s = _mean_std(agg["comet"])
             metrics["xx->xx/comet"] = m
             metrics["xx->xx/comet_std_dev_across_runs"] = s
+        if agg["language_consistency"]:
+            m, s = _mean_std(agg["language_consistency"])
+            metrics["xx->xx/language_consistency"] = m
+            metrics["xx->xx/language_consistency_std_dev_across_runs"] = s
 
         # <src>->xx and xx-><tgt>
         for src in src_langs:
             agg = _aggregate(lambda p, _s=src: p[0] == _s)
-            m, s = _mean_std(agg["bleu"])
-            metrics[f"{src}->xx/bleu"] = m
-            metrics[f"{src}->xx/bleu_std_dev_across_runs"] = s
+            m, s = _mean_std(agg["chrf"])
+            metrics[f"{src}->xx/chrF"] = m
+            metrics[f"{src}->xx/chrF_std_dev_across_runs"] = s
+            m, s = _mean_std(agg["spbleu"])
+            metrics[f"{src}->xx/spBLEU"] = m
+            metrics[f"{src}->xx/spBLEU_std_dev_across_runs"] = s
             if agg["comet"]:
                 m, s = _mean_std(agg["comet"])
                 metrics[f"{src}->xx/comet"] = m
                 metrics[f"{src}->xx/comet_std_dev_across_runs"] = s
+            if agg["language_consistency"]:
+                m, s = _mean_std(agg["language_consistency"])
+                metrics[f"{src}->xx/language_consistency"] = m
+                metrics[f"{src}->xx/language_consistency_std_dev_across_runs"] = s
         for tgt in tgt_langs:
             agg = _aggregate(lambda p, _t=tgt: p[1] == _t)
-            m, s = _mean_std(agg["bleu"])
-            metrics[f"xx->{tgt}/bleu"] = m
-            metrics[f"xx->{tgt}/bleu_std_dev_across_runs"] = s
+            m, s = _mean_std(agg["chrf"])
+            metrics[f"xx->{tgt}/chrF"] = m
+            metrics[f"xx->{tgt}/chrF_std_dev_across_runs"] = s
+            m, s = _mean_std(agg["spbleu"])
+            metrics[f"xx->{tgt}/spBLEU"] = m
+            metrics[f"xx->{tgt}/spBLEU_std_dev_across_runs"] = s
             if agg["comet"]:
                 m, s = _mean_std(agg["comet"])
                 metrics[f"xx->{tgt}/comet"] = m
                 metrics[f"xx->{tgt}/comet_std_dev_across_runs"] = s
+            if agg["language_consistency"]:
+                m, s = _mean_std(agg["language_consistency"])
+                metrics[f"xx->{tgt}/language_consistency"] = m
+                metrics[f"xx->{tgt}/language_consistency_std_dev_across_runs"] = s
 
         return metrics
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
         """Headline metrics: global + per-source aggregations."""
-        keys_of_interest = ("xx->xx/bleu", "xx->xx/comet", "en->xx/bleu", "en->xx/comet")
+        keys_of_interest = (
+            "xx->xx/chrF",
+            "xx->xx/spBLEU",
+            "xx->xx/comet",
+            "xx->xx/language_consistency",
+            "en->xx/chrF",
+            "en->xx/spBLEU",
+            "en->xx/comet",
+            "en->xx/language_consistency",
+            "eng_Latn->xx/chrF",
+            "eng_Latn->xx/spBLEU",
+            "eng_Latn->xx/comet",
+            "eng_Latn->xx/language_consistency",
+        )
         return {k: agent_metrics[k] for k in keys_of_interest if k in agent_metrics}
 
 
