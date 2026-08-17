@@ -275,15 +275,6 @@ def patch_swebench_multilingual_golden_patch_pass(eval_sh: str, instance_id: str
     if instance_id == "apache__druid-16875":
         eval_sh = eval_sh.replace("mvn test", "mvn test -Dgit.commit.id.skip=true")
 
-    # apache__lucene-12626's Gradle wrapper uses a 10s network timeout, which
-    # is too short for the initial distribution download in OpenSandbox.
-    if instance_id == "apache__lucene-12626":
-        eval_sh = eval_sh.replace(
-            "./gradlew",
-            "sed -i '/^networkTimeout=/d' gradle/wrapper/gradle-wrapper.properties && "
-            "echo 'networkTimeout=120000' >> gradle/wrapper/gradle-wrapper.properties\n./gradlew",
-        )
-
     # These projects resolve Gradle plugins through Plugin Portal. Load the
     # uploaded mirror script explicitly because the sandbox Gradle process does
     # not auto-discover init.d under /root.
@@ -347,7 +338,7 @@ fi""")
         await sandbox.upload(settings_xml_path, "/root/.m2/settings.xml")
 
         # This init.d is necessary for some Java tests to properly pull from the maven mirror
-        await sandbox.upload(init_gradle_path, "/root/.gradle/init.d/maven_central_mirror.gradle")
+        await sandbox.upload(init_gradle_path, "~/.gradle/init.d/maven_central_mirror.gradle")
 
     # tokio-rs__tokio-4384 otherwise resolves getrandom 0.4.3, which
     # requires Cargo 1.85 while its image provides Cargo 1.81.
