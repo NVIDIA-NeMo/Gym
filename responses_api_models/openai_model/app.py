@@ -49,6 +49,16 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
         ),
     )
 
+    drop_input_reasoning_items: bool = Field(
+        default=False,
+        description=(
+            "Strip type=reasoning items from the Responses API input before the "
+            "upstream call. Workaround for endpoints (e.g. NVIDIA-hosted gpt-oss) "
+            "that 500 with KeyError 'content' on their own content-less reasoning "
+            "items when echoed back across tool-use turns."
+        ),
+    )
+
 
 class SimpleModelServer(SimpleResponsesAPIModel):
     config: SimpleModelServerConfig
@@ -70,6 +80,12 @@ class SimpleModelServer(SimpleResponsesAPIModel):
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         body_dict = self.config.extra_body | body.model_dump(exclude_unset=True)
         body_dict["model"] = self.config.openai_model
+        if self.config.drop_input_reasoning_items:
+            input_items = body_dict.get("input")
+            if isinstance(input_items, list):
+                body_dict["input"] = [
+                    item for item in input_items if not (isinstance(item, dict) and item.get("type") == "reasoning")
+                ]
         async with self._semaphore:
             openai_response_dict = await self._client.create_response(**body_dict)
         return NeMoGymResponse.model_validate(openai_response_dict)

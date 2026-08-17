@@ -14,18 +14,26 @@
 
 """Public sandbox API for NeMo Gym."""
 
-from nemo_gym.sandbox.api import AsyncSandbox, Sandbox
+from nemo_gym.sandbox.api import AsyncSandbox, Sandbox, SandboxPty
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.providers import (
+    ConnectableProvider,
     ExecResult,
     SandboxCreateError,
     SandboxCreateVerificationError,
+    SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
     SandboxProvider,
+    SandboxPtyError,
+    SandboxPtySession,
+    SandboxPtySpec,
     SandboxResources,
     SandboxSpec,
     SandboxStatus,
+    SupportsSandboxEndpoint,
+    SupportsSandboxPty,
+    SupportsSandboxPtyAttach,
     create_provider,
     get_provider_class,
     list_providers,
@@ -37,15 +45,24 @@ from nemo_gym.sandbox.utils import rewrite_image
 __all__ = [
     "Sandbox",
     "AsyncSandbox",
+    "ConnectableProvider",
     "ExecResult",
     "SandboxCreateError",
     "SandboxCreateVerificationError",
+    "SandboxEndpoint",
     "SandboxExecResult",
     "SandboxHandle",
     "SandboxProvider",
+    "SandboxPty",
+    "SandboxPtyError",
+    "SandboxPtySession",
+    "SandboxPtySpec",
     "SandboxResources",
     "SandboxSpec",
     "SandboxStatus",
+    "SupportsSandboxEndpoint",
+    "SupportsSandboxPty",
+    "SupportsSandboxPtyAttach",
     "create_provider",
     "get_provider_class",
     "list_providers",

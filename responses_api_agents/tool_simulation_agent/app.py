@@ -14,7 +14,7 @@
 # limitations under the License.
 import json
 
-from fastapi import Body
+from fastapi import Body, Request
 from pydantic import ConfigDict, ValidationError
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
@@ -44,10 +44,12 @@ class ToolSimulationAgentVerifyResponse(BaseVerifyResponse):
 class ToolSimulationAgent(SimpleResponsesAPIAgent):
     config: ToolSimulationAgentConfig
 
-    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+    async def responses(
+        self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
+    ) -> NeMoGymResponse:
         model_response = await self.server_client.post(
             server_name=self.config.model_server.name,
-            url_path="/v1/responses",
+            url_path=self.url_path_for_request("/v1/responses", request),
             json=body,
         )
 
@@ -66,7 +68,7 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
         config = self.config
         response = await self.server_client.post(
             server_name=config.name,
-            url_path="/v1/responses",
+            url_path=self.url_path_for_run("/v1/responses", body),
             json=body.responses_create_params,
         )
         await raise_for_status(response)

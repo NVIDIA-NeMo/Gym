@@ -1,0 +1,33 @@
+reasoning_gym:
+  resources_servers:
+    reasoning_gym:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      description: Codex agent harness for reasoning gym tasks
+      value: Evaluate model capabilities in the Codex agent harness
+
+reasoning_gym_codex_agent:
+  responses_api_agents:
+    codex_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: reasoning_gym
+      concurrency: 32
+      model: ${openai_model_name}
+      openai_api_key: ${openai_api_key}
+      # Must serve the OpenAI Responses API over SSE (include /v1; Codex appends /responses).
+      # null -> https://api.openai.com/v1. Chat-completions-only endpoints need the
+      # reasoning_gym_codex_agent_model_server config instead (Gym adapts the dialect).
+      openai_base_url: ${openai_base_url}
+      sandbox_mode: danger-full-access
+      timeout: 600
+      codex_version: 0.144.4
+      system_prompt: |
+        You are a precise reasoning assistant. You can run shell commands to use Python for calculations.
+        For every problem: think step by step, use code to verify when helpful, and state your final answer clearly.
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/reasoning_gym/data/example.jsonl

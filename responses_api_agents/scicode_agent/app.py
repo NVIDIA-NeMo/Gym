@@ -28,6 +28,7 @@ Templated on responses_api_agents/proof_refinement_agent (the multi-turn run() s
 """
 
 import logging
+import statistics
 from typing import Any, Dict, List
 
 from fastapi import Request, Response
@@ -47,6 +48,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -90,6 +92,43 @@ def _empty_response() -> dict:
         tool_choice="auto",
         tools=[],
     ).model_dump()
+
+
+def _across_run_stats(tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+    """Across-run (repeat-to-repeat) variability of the two headline metrics.
+
+    Run i is "take repeat i of every problem" (repeats aligned by their rollout
+    index, run count = minimum repeat count so the matrix stays rectangular).
+    Per run, problem accuracy is the mean of problem_accuracy over problems and
+    subtask accuracy is the sub-step-weighted pool — the same definitions as
+    the headline mean/problem_accuracy and subtask_accuracy, so the std-dev
+    over the per-run values (sample std, ddof=1) is the run-to-run variability
+    of exactly those metrics. Single-repeat collections emit nothing.
+    """
+    max_k = min((len(t) for t in tasks if t), default=0)
+    if max_k < 2:
+        return {}
+
+    rows = [sorted(t, key=lambda r: r.get(ROLLOUT_INDEX_KEY_NAME, 0))[:max_k] for t in tasks if len(t) >= max_k]
+
+    problem_runs: List[float] = []
+    subtask_runs: List[float] = []
+    for i in range(max_k):
+        acc = [float(r[i]["problem_accuracy"]) for r in rows if r[i].get("problem_accuracy") is not None]
+        if acc:
+            problem_runs.append(sum(acc) / len(acc))
+        passed = sum(r[i].get("num_steps_passed", 0) for r in rows)
+        total = sum(r[i].get("num_steps_total", 0) for r in rows)
+        if total:
+            subtask_runs.append(passed / total)
+
+    metrics: Dict[str, Any] = {}
+    for key, runs in (("mean/problem_accuracy", problem_runs), ("subtask_accuracy", subtask_runs)):
+        if len(runs) < 2:
+            continue
+        std_dev = 0.0 if all(v == runs[0] for v in runs) else statistics.stdev(runs)
+        metrics[f"{key}/std_dev_across_runs"] = std_dev
+    return metrics
 
 
 class ScicodeAgent(SimpleResponsesAPIAgent):
@@ -193,13 +232,12 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
         """Headline SciCode metric: sub-step-weighted accuracy = total passed / total over all rollouts."""
         passed = sum(r.get("num_steps_passed", 0) for task in tasks for r in task)
         total = sum(r.get("num_steps_total", 0) for task in tasks for r in task)
-        return {"subtask_accuracy": passed / total if total else 0.0}
+        metrics = {"subtask_accuracy": passed / total if total else 0.0}
+        metrics.update(_across_run_stats(tasks))
+        return metrics
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
-        key = {k: v for k, v in agent_metrics.items() if k.startswith("mean/")}
-        if "subtask_accuracy" in agent_metrics:
-            key["subtask_accuracy"] = agent_metrics["subtask_accuracy"]
-        return key
+        return {k: v for k, v in agent_metrics.items() if k.startswith("mean/") or k.startswith("subtask_accuracy")}
 
 
 if __name__ == "__main__":

@@ -14,29 +14,40 @@
 # limitations under the License.
 """Unit tests for the shared Responses API <-> Chat Completions converter."""
 
+from types import SimpleNamespace
+
 import pytest
+from openai.types.completion_usage import CompletionTokensDetails, CompletionUsage, PromptTokensDetails
 
 from nemo_gym.openai_utils import (
+    NeMoGymChatCompletion,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionMessage,
     NeMoGymChatCompletionMessageToolCall,
     NeMoGymChoice,
     NeMoGymEasyInputMessage,
     NeMoGymFunction,
     NeMoGymFunctionCallOutput,
+    NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseInputText,
+    NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
+    NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseReasoningItem,
+    NeMoGymResponseUsage,
     NeMoGymSummary,
+    training_variant_of,
 )
 from nemo_gym.responses_converter import (
     ResponsesConverter,
     ResponsesConverterState,
     VLLMConverter,
     VLLMConverterResponsesToChatCompletionsState,
+    _usage_detail,
     split_responses_input_output_items,
 )
 
@@ -66,6 +77,12 @@ def _fixed_uuid(monkeypatch: pytest.MonkeyPatch):
 def test_backwards_compatible_aliases():
     assert VLLMConverter is ResponsesConverter
     assert VLLMConverterResponsesToChatCompletionsState is ResponsesConverterState
+
+
+def test_usage_detail_ignores_ambiguous_top_level_names():
+    usage = {"cached_tokens": 99, "cached_input_tokens": 7, "reasoning_tokens": 88, "reasoning_output_tokens": 3}
+    assert _usage_detail(usage, "prompt_tokens_details", "cached_tokens", "cached_input_tokens") == 7
+    assert _usage_detail(usage, "completion_tokens_details", "reasoning_tokens", "reasoning_output_tokens") == 3
 
 
 # ===========================================================================
@@ -126,6 +143,23 @@ def test_flush_assistant_emits_training_message_when_token_info_present():
     state.flush_assistant()
     assert state.messages[0]["prompt_token_ids"] == [1, 2]
     assert state.messages[0]["generation_token_ids"] == [3]
+    assert state.token_information is None
+
+
+def test_flush_assistant_clears_token_info_when_no_assistant_is_buffered():
+    state = ResponsesConverterState(
+        return_token_id_information=True,
+        token_information={
+            "prompt_token_ids": [1],
+            "generation_token_ids": [2],
+            "generation_log_probs": [-0.1],
+        },
+    )
+
+    state.flush_assistant()
+
+    assert state.messages == []
+    assert state.token_information is None
 
 
 # ===========================================================================
@@ -160,6 +194,44 @@ def test_responses_to_chat_completion_all_message_roles(converter: ResponsesConv
     roles = [m["role"] for m in params.messages]
     assert roles == ["system", "developer", "user", "user", "assistant"]
     assert params.messages[-1]["content"] == "assistant content"
+
+
+def test_responses_to_chat_completion_instructions_become_leading_system_message(converter: ResponsesConverter):
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            instructions="you are a coding agent",
+            input=[NeMoGymEasyInputMessage(role="user", content="usr", type="message")],
+        )
+    )
+    # instructions are inserted before any input-derived messages (Responses API semantics)
+    assert params.messages[0] == {"role": "system", "content": "you are a coding agent"}
+    assert [m["role"] for m in params.messages] == ["system", "user"]
+
+
+def test_responses_to_chat_completion_instructions_fold_leading_system_and_developer(converter: ResponsesConverter):
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            instructions="you are a coding agent",
+            input=[
+                NeMoGymEasyInputMessage(role="system", content="sys", type="message"),
+                NeMoGymEasyInputMessage(role="developer", content="dev", type="message"),
+                NeMoGymEasyInputMessage(role="user", content="usr", type="message"),
+            ],
+        )
+    )
+    # chat backends commonly admit a single system message at position 0, so the leading run of
+    # system/developer messages is folded into the instructions message
+    assert params.messages[0] == {"role": "system", "content": "you are a coding agent\n\nsys\n\ndev"}
+    assert [m["role"] for m in params.messages] == ["system", "user"]
+
+
+def test_responses_to_chat_completion_no_instructions_adds_no_message(converter: ResponsesConverter):
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[NeMoGymEasyInputMessage(role="user", content="usr", type="message")]
+        )
+    )
+    assert [m["role"] for m in params.messages] == ["user"]
 
 
 def test_responses_to_chat_completion_input_image_part(converter: ResponsesConverter):
@@ -228,6 +300,111 @@ def test_responses_to_chat_completion_function_call_and_output(converter: Respon
     assert tool_msg["content"] == "sunny"
 
 
+def test_responses_to_chat_completion_preserves_structured_function_output_text(converter: ResponsesConverter):
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": [
+                        {"type": "input_text", "text": "first"},
+                        {"type": "input_text", "text": "second"},
+                    ],
+                }
+            ]
+        )
+    )
+
+    assert params.messages == [
+        {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": [
+                {"type": "text", "text": "first"},
+                {"type": "text", "text": "second"},
+            ],
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("output", "unsupported_type"),
+    [
+        ([{"type": "input_image", "file_id": "file_123"}], "input_image"),
+        ([{"type": "input_file", "file_id": "file_123"}], "input_file"),
+    ],
+)
+def test_responses_to_chat_completion_rejects_unrepresentable_function_output(
+    converter: ResponsesConverter, output: list[dict], unsupported_type: str
+):
+    responses_params = NeMoGymResponseCreateParamsNonStreaming(
+        input=[{"type": "function_call_output", "call_id": "call_1", "output": output}]
+    )
+
+    with pytest.raises(
+        NotImplementedError,
+        match=rf"Chat tool messages cannot represent content part type\(s\) '{unsupported_type}'",
+    ):
+        converter.responses_to_chat_completion_create_params(responses_params)
+
+
+def test_responses_to_chat_completion_plain_assistant_turn_omits_tool_calls(converter: ResponsesConverter):
+    """A plain assistant turn must not carry `tool_calls: []`.
+
+    OpenAI rejects an empty array outright ("empty array. Expected an array with minimum
+    length 1"), which breaks any dataset row that carries conversation history.
+    """
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"},
+                {"role": "user", "content": "bye"},
+            ]
+        )
+    )
+    assistant_msg = params.messages[1]
+    assert assistant_msg["content"] == "hello"
+    assert "tool_calls" not in assistant_msg
+
+
+def test_responses_to_chat_completion_chat_shaped_tool_turn(converter: ResponsesConverter):
+    """Chat-Completions-shaped tool turns embedded in `input` convert without loss.
+
+    Datasets that carry pre-canned tool turns (e.g. IHEval) express them as an assistant
+    message with `tool_calls` and no `content` key at all, followed by a `role: "tool"`
+    result, rather than as `function_call`/`function_call_output` items.
+    """
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {"role": "user", "content": "call a tool"},
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "get_weather", "arguments": '{"city": "nyc"}'},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_1", "name": "get_weather", "content": "sunny"},
+            ]
+        )
+    )
+    assert [m["role"] for m in params.messages] == ["user", "assistant", "tool"]
+    assistant_msg = params.messages[1]
+    assert assistant_msg["content"] is None
+    assert assistant_msg["tool_calls"] == [
+        {"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": "nyc"}'}}
+    ]
+    tool_msg = params.messages[2]
+    assert tool_msg["tool_call_id"] == "call_1"
+    assert tool_msg["content"] == "sunny"
+
+
 def test_responses_to_chat_completion_reasoning_prepended(converter: ResponsesConverter):
     reasoning = NeMoGymResponseReasoningItem(
         id="rs_1",
@@ -282,6 +459,82 @@ def test_responses_to_chat_completion_model_and_max_tokens_and_tools(converter: 
     assert params.tools[0]["function"]["name"] == "get_weather"
 
 
+@pytest.mark.parametrize("tools_kwargs", [{}, {"tools": []}], ids=["tools_absent", "tools_empty"])
+def test_responses_to_chat_completion_no_tools_drops_tool_choice(converter: ResponsesConverter, tools_kwargs: dict):
+    # vLLM rejects tool_choice without tools ("When using `tool_choice`, `tools` must be set."),
+    # so requests with absent or empty tools must not carry tool_choice / parallel_tool_calls.
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input="hi",
+            model="my-model",
+            tool_choice="auto",
+            parallel_tool_calls=True,
+            **tools_kwargs,
+        )
+    )
+    dumped = params.model_dump(exclude_unset=True)
+    assert "tools" not in dumped
+    assert "tool_choice" not in dumped
+    assert "parallel_tool_calls" not in dumped
+
+
+@pytest.mark.parametrize("tools_kwargs", [{}, {"tools": []}], ids=["tools_absent", "tools_empty"])
+def test_responses_to_chat_completion_no_tools_rejects_required_tool_choice(
+    converter: ResponsesConverter, tools_kwargs: dict
+):
+    with pytest.raises(ValueError, match="requires at least one tool"):
+        converter.responses_to_chat_completion_create_params(
+            NeMoGymResponseCreateParamsNonStreaming(
+                input="hi",
+                model="my-model",
+                tool_choice="required",
+                **tools_kwargs,
+            )
+        )
+
+
+def test_responses_to_chat_completion_with_tools_keeps_tool_choice(converter: ResponsesConverter):
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input="hi",
+            model="my-model",
+            tool_choice="auto",
+            tools=[
+                {
+                    "type": "function",
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "parameters": {"type": "object", "properties": {}},
+                    "strict": True,
+                }
+            ],
+        )
+    )
+    dumped = params.model_dump(exclude_unset=True)
+    assert dumped["tool_choice"] == "auto"
+    assert len(params.tools) == 1
+
+
+def test_chat_completion_to_responses_tools_accepts_none(converter: ResponsesConverter):
+    assert converter._chat_completion_to_responses_tools(None) == []
+
+
+@pytest.mark.parametrize("effort", ["minimal", "low", "medium", "high"])
+def test_reasoning_effort_round_trips_between_request_schemas(converter: ResponsesConverter, effort: str):
+    responses_params = converter.chat_completion_to_responses_create_params(
+        NeMoGymChatCompletionCreateParamsNonStreaming(
+            messages=[{"role": "user", "content": "hi"}],
+            reasoning_effort=effort,
+            tools=[],
+        )
+    )
+
+    assert responses_params.reasoning == {"effort": effort}
+
+    chat_params = converter.responses_to_chat_completion_create_params(responses_params)
+    assert chat_params.reasoning_effort == effort
+
+
 def test_responses_to_chat_completion_token_id_information_path():
     converter = ResponsesConverter(return_token_id_information=True)
     params = converter.responses_to_chat_completion_create_params(
@@ -301,6 +554,107 @@ def test_responses_to_chat_completion_token_id_information_path():
     msg = params.messages[0]
     assert msg["prompt_token_ids"] == [1, 2, 3]
     assert msg["generation_token_ids"] == [4, 5]
+
+
+def test_responses_to_chat_completion_preserves_empty_prompt_token_ids():
+    converter = ResponsesConverter(return_token_id_information=True)
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {
+                    "role": "assistant",
+                    "type": "message",
+                    "content": "trained answer",
+                    "prompt_token_ids": [],
+                    "generation_token_ids": [4],
+                    "generation_log_probs": [-0.1],
+                }
+            ]
+        )
+    )
+
+    assert params.messages[0]["prompt_token_ids"] == []
+    assert params.messages[0]["generation_token_ids"] == [4]
+
+
+def test_responses_to_chat_completion_does_not_leak_token_info_between_turns():
+    converter = ResponsesConverter(return_token_id_information=True)
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {
+                    "role": "assistant",
+                    "type": "message",
+                    "content": "trained answer",
+                    "prompt_token_ids": [1],
+                    "generation_token_ids": [2],
+                    "generation_log_probs": [-0.1],
+                },
+                {"role": "user", "type": "message", "content": "next"},
+                {"role": "assistant", "type": "message", "content": "plain answer"},
+            ]
+        )
+    )
+
+    first_assistant, _, second_assistant = params.messages
+    assert first_assistant["prompt_token_ids"] == [1]
+    assert "prompt_token_ids" not in second_assistant
+    assert "generation_token_ids" not in second_assistant
+    assert "generation_log_probs" not in second_assistant
+
+
+def test_responses_to_chat_completion_preserves_empty_training_assistant():
+    converter = ResponsesConverter(return_token_id_information=True)
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {
+                    "role": "assistant",
+                    "type": "message",
+                    "content": "",
+                    "prompt_token_ids": [],
+                    "generation_token_ids": [],
+                    "generation_log_probs": [],
+                }
+            ]
+        )
+    )
+
+    assert params.messages == [
+        {
+            "role": "assistant",
+            "content": None,
+            "prompt_token_ids": [],
+            "generation_token_ids": [],
+            "generation_log_probs": [],
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "token_metadata",
+    [
+        {"prompt_token_ids": [1]},
+        {
+            "prompt_token_ids": [1],
+            "generation_token_ids": "not-a-list",
+            "generation_log_probs": [-0.1],
+        },
+    ],
+    ids=["partial", "malformed"],
+)
+def test_response_input_rejects_invalid_token_metadata_atomically(token_metadata: dict):
+    with pytest.raises(ValueError, match="token|Token"):
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {
+                    "role": "assistant",
+                    "type": "message",
+                    "content": "answer",
+                    **token_metadata,
+                }
+            ]
+        )
 
 
 # ===========================================================================
@@ -375,6 +729,18 @@ def test_postprocess_token_id_information_wraps_last_item():
     assert output[-1].prompt_token_ids == [1, 2]
 
 
+def test_postprocess_rejects_partial_token_metadata():
+    converter = ResponsesConverter(return_token_id_information=True)
+    with pytest.raises(ValueError, match="missing"):
+        converter.postprocess_assistant_message_dict(
+            {
+                "role": "assistant",
+                "content": "answer",
+                "prompt_token_ids": [1, 2],
+            }
+        )
+
+
 # ===========================================================================
 # chat_completions_messages_to_responses_items
 # ===========================================================================
@@ -394,9 +760,110 @@ def test_chat_messages_to_responses_items_all_roles(converter: ResponsesConverte
     assert any(isinstance(item, NeMoGymFunctionCallOutput) for item in items)
 
 
+def test_chat_structured_tool_text_to_responses_preserves_parts(converter: ResponsesConverter):
+    items = converter.chat_completions_messages_to_responses_items(
+        [
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": [
+                    {"type": "text", "text": "first"},
+                    {"type": "text", "text": "second"},
+                ],
+            }
+        ]
+    )
+
+    assert items[0].model_dump()["output"] == [
+        {"type": "input_text", "text": "first"},
+        {"type": "input_text", "text": "second"},
+    ]
+
+
 def test_chat_messages_to_responses_items_unrecognized_role_raises(converter: ResponsesConverter):
     with pytest.raises(NotImplementedError):
         converter.chat_completions_messages_to_responses_items([{"role": "alien", "content": "x"}])
+
+
+# ===========================================================================
+# chat_completion_to_response
+# ===========================================================================
+
+
+@pytest.mark.parametrize(
+    ("finish_reason", "status", "incomplete_details"),
+    [
+        ("tool_calls", "completed", None),
+        ("length", "incomplete", {"reason": "max_output_tokens"}),
+        ("content_filter", "incomplete", {"reason": "content_filter"}),
+    ],
+)
+def test_chat_completion_to_response_sanity(converter: ResponsesConverter, finish_reason, status, incomplete_details):
+    actual_response = converter.chat_completion_to_response(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+            model="",
+            input=[
+                dict(
+                    role="user",
+                    content="hello",
+                ),
+            ],
+        ),
+        chat_completion=NeMoGymChatCompletion(
+            id="",
+            created=0,
+            model="",
+            object="chat.completion",
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason=finish_reason,
+                    message=NeMoGymChatCompletionMessage(
+                        role="assistant",
+                        content="hi",
+                        tool_calls=[],
+                    ),
+                )
+            ],
+            usage=CompletionUsage(
+                prompt_tokens=11,
+                completion_tokens=5,
+                total_tokens=19,
+                prompt_tokens_details=PromptTokensDetails(cached_tokens=7),
+                completion_tokens_details=CompletionTokensDetails(reasoning_tokens=3),
+            ),
+        ),
+    )
+
+    expected_response = NeMoGymResponse(
+        id="resp_123",
+        created_at=0.0,
+        model="",
+        object="response",
+        output=[
+            NeMoGymResponseOutputMessage(
+                id="msg_123",
+                content=[
+                    NeMoGymResponseOutputText(text="hi", type="output_text", annotations=[]),
+                ],
+                role="assistant",
+            )
+        ],
+        parallel_tool_calls=True,
+        status=status,
+        incomplete_details=incomplete_details,
+        usage=NeMoGymResponseUsage(
+            input_tokens=11,
+            input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=7),
+            output_tokens=5,
+            output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=3),
+            total_tokens=19,
+        ),
+        tool_choice="auto",
+        tools=[],
+    )
+
+    assert expected_response == actual_response
 
 
 # ===========================================================================
@@ -422,6 +889,28 @@ def test_split_on_assistant_message():
     assert outputs == [assistant]
 
 
+def test_a_non_message_item_with_an_assistant_role_is_not_a_boundary():
+    """The role shortcut must not decide the split for items that are not messages.
+
+    An item type outside the boundary set stays on the prompt side however its role reads.
+    No item type at the pinned SDK carries a role without being a message, so this is a guard
+    against a later version adding one rather than a fix for something reachable today.
+    A non-message item that opened the trained segment would label replayed prompt as generation.
+    """
+
+    class _RoledNonMessage:
+        type = "not_a_boundary_type"
+        role = "assistant"
+
+    user = NeMoGymEasyInputMessage(role="user", content="hi", type="message")
+    carrier = _RoledNonMessage()
+
+    inputs, outputs = split_responses_input_output_items([user, carrier])
+
+    assert inputs == [user, carrier], "a non-message item must not open the trained segment"
+    assert outputs == []
+
+
 def test_split_on_function_call():
     user = NeMoGymEasyInputMessage(role="user", content="hi", type="message")
     fc = NeMoGymResponseFunctionToolCall(
@@ -443,6 +932,39 @@ def test_split_on_reasoning():
     inputs, outputs = split_responses_input_output_items([user, reasoning])
     assert inputs == [user]
     assert outputs == [reasoning]
+
+
+@pytest.mark.parametrize(
+    "output_type",
+    [
+        "code_interpreter_call",
+        "computer_call",
+        "custom_tool_call",
+        "file_search_call",
+        "function_call",
+        "image_generation_call",
+        "local_shell_call",
+        "mcp_approval_request",
+        "mcp_call",
+        "mcp_list_tools",
+        "reasoning",
+        "web_search_call",
+    ],
+)
+def test_split_on_model_output_item_type(output_type: str):
+    user = NeMoGymEasyInputMessage(role="user", content="hi", type="message")
+    output_item = SimpleNamespace(type=output_type)
+    inputs, outputs = split_responses_input_output_items([user, output_item])
+    assert inputs == [user]
+    assert outputs == [output_item]
+
+
+def test_split_input_only_items():
+    system = NeMoGymEasyInputMessage(role="system", content="policy", type="message")
+    user = NeMoGymEasyInputMessage(role="user", content="hi", type="message")
+    inputs, outputs = split_responses_input_output_items([system, user])
+    assert inputs == [system, user]
+    assert outputs == []
 
 
 def test_round_trip_with_tool_calls(converter: ResponsesConverter):
@@ -470,3 +992,63 @@ def test_round_trip_with_tool_calls(converter: ResponsesConverter):
     assert assistant_msg["role"] == "assistant"
     assert assistant_msg["content"] == "<think>thinking</think>chatting"
     assert assistant_msg["tool_calls"][0]["function"]["name"] == "get_weather"
+
+
+# ===========================================================================
+# training_variant_of
+# ===========================================================================
+
+
+def test_training_variant_of_returns_the_registered_variant():
+    assert training_variant_of(NeMoGymResponseOutputMessage) is NeMoGymResponseOutputMessageForTraining
+
+
+def test_training_variant_of_covers_everything_postprocess_can_emit():
+    """postprocess_assistant_message_dict passes response_output[-1] to training_variant_of, so
+    every class it appends must be registered."""
+    for cls in (
+        NeMoGymResponseReasoningItem,
+        NeMoGymResponseOutputMessage,
+        NeMoGymResponseFunctionToolCall,
+    ):
+        assert training_variant_of(cls) is not None
+
+
+def test_downconverting_an_unsupported_type_names_it_and_the_way_out():
+    """A Responses-only item reaching a chat backend must say which type and what to do.
+
+    This is the sibling of the training-variant error.
+    It fires mid-rollout, on whichever model server downconverts.
+    The message names the type rather than dumping the item, because an item can carry an opaque blob.
+    """
+    converter = ResponsesConverter(return_token_id_information=False)
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input=[
+            {
+                "type": "file_search_call",
+                "id": "fs_1",
+                "queries": ["a-query-that-should-not-reach-the-error"],
+                "status": "completed",
+            }
+        ]
+    )
+
+    with pytest.raises(NotImplementedError) as excinfo:
+        converter.responses_to_chat_completion_create_params(params)
+
+    message = str(excinfo.value)
+    assert "'file_search_call'" in message, "the error must name the offending type"
+    assert "Responses through" in message, "the error must point at the way out"
+    assert "a-query-that-should-not-reach-the-error" not in message, (
+        "the item payload must not be interpolated into the error"
+    )
+
+
+def test_training_variant_of_raises_a_named_error_for_an_unregistered_class():
+    """An unregistered class raises NotImplementedError, not KeyError."""
+
+    class _NotAnItem:
+        pass
+
+    with pytest.raises(NotImplementedError, match="has no ForTraining variant"):
+        training_variant_of(_NotAnItem)

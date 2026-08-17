@@ -1,0 +1,4 @@
+-e nemo-gym[dev] @ ../../
+# RAGTruth scoring and dataset prep are pure-stdlib (json/urllib/re) — no
+# extra runtime dependencies. The dataset is fetched from the public
+# ParticleMedia/RAGTruth GitHub repo by prepare_ragtruth.py.

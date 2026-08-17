@@ -9,7 +9,7 @@ rdkit
 regex
 tenacity
 matplotlib
-Pillow==12.2.0
+Pillow==12.3.0
 contourpy
 cycler
 kiwisolver

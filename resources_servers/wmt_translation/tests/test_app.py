@@ -12,18 +12,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
 import sys
 from pathlib import Path
+from typing import Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
 from app import (
+    BLEU_MIGRATION_WARNING,
+    SPBLEU_TOKENIZER,
     WmtTranslationResourcesServer,
     WmtTranslationResourcesServerConfig,
     WmtTranslationVerifyRequest,
     _build_comet_actor_class,
+    _normalize_for_scoring,
     _strip_reasoning_preamble,
-    _tokenizer_for,
 )
 
 from nemo_gym.openai_utils import NeMoGymResponse
@@ -52,7 +56,11 @@ def _make_response(text: str) -> NeMoGymResponse:
 
 
 def _make_server(
-    compute_comet: bool = False, strip_reasoning: bool = False, comet_num_shards: int = 8
+    compute_comet: bool = False,
+    strip_reasoning: bool = False,
+    comet_num_shards: int = 8,
+    language_consistency_backend: Optional[str] = "wmt24pp_cld2",
+    language_consistency_warning_threshold: float = 50.0,
 ) -> WmtTranslationResourcesServer:
     # Tests default strip_reasoning=False so plain-text generations score
     # against the reference directly. Production default is True (drops the
@@ -65,6 +73,8 @@ def _make_server(
         compute_comet=compute_comet,
         strip_reasoning=strip_reasoning,
         comet_num_shards=comet_num_shards,
+        language_consistency_backend=language_consistency_backend,
+        language_consistency_warning_threshold=language_consistency_warning_threshold,
     )
     return WmtTranslationResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
@@ -115,23 +125,60 @@ class TestStripReasoningPreamble:
         assert _strip_reasoning_preamble("") == ""
 
 
-class TestTokenizer:
-    def test_default_tokenizer(self) -> None:
-        assert _tokenizer_for("de_DE") == "13a"
-        assert _tokenizer_for("fr_FR") == "13a"
-        assert _tokenizer_for("en") == "13a"
+class TestScoringHelpers:
+    def test_normalizes_canonically_equivalent_text_to_nfc(self) -> None:
+        assert _normalize_for_scoring("Cafe\u0301") == "Café"
 
-    def test_japanese_tokenizer(self) -> None:
-        assert _tokenizer_for("ja_JP") == "ja-mecab"
+    def test_spbleu_always_uses_flores200_tokenizer(self) -> None:
+        assert SPBLEU_TOKENIZER == "flores200"
 
-    def test_korean_tokenizer(self) -> None:
-        assert _tokenizer_for("ko_KR") == "ko-mecab"
 
-    def test_chinese_tokenizer(self) -> None:
-        assert _tokenizer_for("zh_CN") == "zh"
+class TestServerSetup:
+    def test_warns_that_spbleu_is_not_comparable_to_prior_bleu(self, caplog) -> None:
+        server = _make_server()
+
+        with caplog.at_level(logging.WARNING, logger="app"):
+            server.setup_webserver()
+
+        assert BLEU_MIGRATION_WARNING in caplog.messages
 
 
 class TestVerify:
+    @pytest.mark.parametrize("target_language", ["de_DE", "ja_JP", "zho_Hans"])
+    async def test_spbleu_uses_flores200_for_every_target_language(self, target_language: str) -> None:
+        server = _make_server(language_consistency_backend=None)
+        request = _make_request(
+            text="Hello world.",
+            translation="Hallo Welt.",
+            generation="Hallo Welt.",
+            target_language=target_language,
+        )
+        with patch("app.BLEU") as mock_bleu:
+            mock_bleu.return_value.sentence_score.return_value.score = 100.0
+            result = await server.verify(request)
+
+        assert result.sentence_spbleu == 100.0
+        mock_bleu.assert_called_once_with(tokenize="flores200", effective_order=True)
+        mock_bleu.return_value.sentence_score.assert_called_once_with("Hallo Welt.", ["Hallo Welt."])
+
+    async def test_spbleu_metric_is_reused_across_verify_calls(self) -> None:
+        server = _make_server(language_consistency_backend=None)
+        request = _make_request(
+            text="Hello world.",
+            translation="Hallo Welt.",
+            generation="Hallo Welt.",
+            target_language="de_DE",
+        )
+        with patch("app.BLEU") as mock_bleu:
+            mock_bleu.return_value.sentence_score.return_value.score = 100.0
+            first_result = await server.verify(request)
+            second_result = await server.verify(request)
+
+        assert first_result.sentence_spbleu == 100.0
+        assert second_result.sentence_spbleu == 100.0
+        mock_bleu.assert_called_once_with(tokenize="flores200", effective_order=True)
+        assert mock_bleu.return_value.sentence_score.call_count == 2
+
     async def test_empty_generation_scores_zero(self) -> None:
         server = _make_server()
         request = _make_request(
@@ -142,8 +189,120 @@ class TestVerify:
         )
         result = await server.verify(request)
         assert result.reward == 0.0
-        assert result.sentence_bleu == 0.0
+        assert result.sentence_chrf == 0.0
+        assert result.sentence_spbleu == 0.0
         assert result.generation == ""
+        # Empty output is 0% target language.
+        assert result.language_consistency_score == 0.0
+
+    async def test_language_consistency_high_for_correct_language(self) -> None:
+        server = _make_server()
+        ref = "Der schnelle braune Fuchs springt über den faulen Hund im schönen Garten."
+        request = _make_request(
+            text="The quick brown fox jumps over the lazy dog in the beautiful garden.",
+            translation=ref,
+            generation=ref,
+            target_language="de_DE",
+        )
+        result = await server.verify(request)
+        assert result.language_consistency_score is not None
+        assert result.language_consistency_score > 0.5
+
+    async def test_language_consistency_low_for_wrong_language(self) -> None:
+        server = _make_server()
+        request = _make_request(
+            text="The quick brown fox jumps over the lazy dog.",
+            translation="Der schnelle braune Fuchs springt über den faulen Hund.",
+            generation="This is clearly an English sentence, not German at all.",
+            target_language="de_DE",
+        )
+        result = await server.verify(request)
+        assert result.language_consistency_score is not None
+        assert result.language_consistency_score < 0.5
+
+    @patch("app.get_language_consistency_backend")
+    async def test_language_consistency_backend_receives_full_flores_code(
+        self, mock_get_language_consistency_backend
+    ) -> None:
+        scorer = MagicMock(return_value=0.75)
+        mock_get_language_consistency_backend.return_value = scorer
+        server = _make_server(language_consistency_backend="flores_glotlid")
+        request = _make_request(
+            text="Hello.",
+            translation="مرحبًا.",
+            generation="مرحبًا.",
+            target_language="apc_Arab_sout3123",
+        )
+
+        result = await server.verify(request)
+
+        mock_get_language_consistency_backend.assert_called_once_with("flores_glotlid")
+        scorer.assert_called_once_with("مرحبًا.", "apc_Arab_sout3123")
+        assert result.language_consistency_score == 0.75
+
+    @patch("app.get_language_consistency_backend")
+    async def test_language_consistency_backend_is_reused_across_verify_calls(
+        self, mock_get_language_consistency_backend
+    ) -> None:
+        scorer = MagicMock(return_value=0.75)
+        mock_get_language_consistency_backend.return_value = scorer
+        server = _make_server(language_consistency_backend="flores_glotlid")
+        request = _make_request(
+            text="Hello.",
+            translation="مرحبًا.",
+            generation="مرحبًا.",
+            target_language="apc_Arab_sout3123",
+        )
+
+        with patch.object(WmtTranslationResourcesServer, "_score_sentence_spbleu", return_value=100.0):
+            first_result = await server.verify(request)
+            second_result = await server.verify(request)
+
+        mock_get_language_consistency_backend.assert_called_once_with("flores_glotlid")
+        assert scorer.call_args_list == [
+            (("مرحبًا.", "apc_Arab_sout3123"),),
+            (("مرحبًا.", "apc_Arab_sout3123"),),
+        ]
+        assert first_result.language_consistency_score == 0.75
+        assert second_result.language_consistency_score == 0.75
+
+    async def test_language_consistency_none_when_disabled(self) -> None:
+        server = _make_server(language_consistency_backend=None)
+        ref = "Der schnelle braune Fuchs springt über den faulen Hund im schönen Garten."
+        request = _make_request(
+            text="The quick brown fox jumps over the lazy dog in the beautiful garden.",
+            translation=ref,
+            generation=ref,
+            target_language="de_DE",
+        )
+        result = await server.verify(request)
+        assert result.language_consistency_score is None
+
+    @patch("app.get_language_consistency_backend")
+    async def test_language_consistency_none_when_no_backend_is_configured(
+        self, mock_get_language_consistency_backend
+    ) -> None:
+        server = _make_server(language_consistency_backend=None)
+        ref = "Der schnelle braune Fuchs springt über den faulen Hund im schönen Garten."
+        request = _make_request(
+            text="The quick brown fox jumps over the lazy dog in the beautiful garden.",
+            translation=ref,
+            generation=ref,
+            target_language="de_DE",
+        )
+        result = await server.verify(request)
+        assert result.language_consistency_score is None
+
+        empty_request = _make_request(
+            text="The quick brown fox jumps over the lazy dog in the beautiful garden.",
+            translation=ref,
+            generation="",
+            target_language="de_DE",
+        )
+        empty_result = await server.verify(empty_request)
+        assert empty_result.language_consistency_score is None
+
+        mock_get_language_consistency_backend.assert_not_called()
 
     async def test_perfect_generation_high_reward(self) -> None:
         server = _make_server()
@@ -156,9 +315,24 @@ class TestVerify:
             target_language="de_DE",
         )
         result = await server.verify(request)
-        assert result.sentence_bleu > 50.0
-        assert result.reward == result.sentence_bleu / 100.0
+        assert result.sentence_chrf > 50.0
+        assert result.sentence_spbleu > 50.0
+        assert result.reward == result.sentence_chrf / 100.0
         assert result.generation == ref
+
+    async def test_canonically_equivalent_unicode_scores_perfectly(self) -> None:
+        server = _make_server()
+        request = _make_request(
+            text="Coffee.",
+            translation="Café",
+            generation="Cafe\u0301",
+            target_language="fr_FR",
+        )
+        result = await server.verify(request)
+        assert result.sentence_chrf == pytest.approx(100.0)
+        assert result.sentence_spbleu == pytest.approx(100.0)
+        assert result.reward == pytest.approx(1.0)
+        assert result.generation == "Cafe\u0301"
 
     async def test_bad_generation_low_reward(self) -> None:
         server = _make_server()
@@ -169,7 +343,7 @@ class TestVerify:
             target_language="de_DE",
         )
         result = await server.verify(request)
-        assert result.reward < 0.1
+        assert result.reward < 0.2
 
     async def test_strip_reasoning_recovers_score(self) -> None:
         """With strip_reasoning=True, a reasoning preamble must not
@@ -187,9 +361,10 @@ class TestVerify:
             target_language="de_DE",
         )
         result = await server.verify(request)
-        # Exactly the reference should land in generation, giving near-perfect BLEU.
+        # Exactly the reference should produce a near-perfect score.
         assert result.generation == ref
-        assert result.sentence_bleu > 50.0
+        assert result.sentence_chrf > 50.0
+        assert result.sentence_spbleu > 50.0
 
     async def test_strip_reasoning_empty_when_truncated_mid_reasoning(self) -> None:
         """If <think> opens but never closes, verify() emits no generation."""
@@ -221,23 +396,59 @@ class TestVerify:
         )
         result = await server.verify(request)
         assert result.generation == ref
-        assert result.sentence_bleu > 50.0
+        assert result.sentence_chrf > 50.0
+        assert result.sentence_spbleu > 50.0
 
 
 class TestComputeMetrics:
+    def test_corpus_spbleu_uses_flores200_for_every_language_pair(self) -> None:
+        server = _make_server(compute_comet=False)
+        tasks = [
+            [
+                {
+                    "translation": "Hallo Welt.",
+                    "generation": "Hallo Welt.",
+                    "source_language": "en",
+                    "target_language": target_language,
+                }
+            ]
+            for target_language in ("de_DE", "ja_JP", "zho_Hans")
+        ]
+        with patch("app.corpus_spbleu") as mock_spbleu:
+            mock_spbleu.return_value.score = 100.0
+            server.compute_metrics(tasks)
+
+        assert len(mock_spbleu.call_args_list) == 3
+        assert all(call.kwargs["tokenize"] == "flores200" for call in mock_spbleu.call_args_list)
+
     def test_empty_tasks(self) -> None:
         server = _make_server()
         assert server.compute_metrics([]) == {}
 
-    def test_bleu_per_pair_and_aggregations(self) -> None:
-        """Feed two language pairs x two rollouts each; expect per-pair BLEU,
+    def test_corpus_chrf_normalizes_canonically_equivalent_unicode(self) -> None:
+        server = _make_server(compute_comet=False)
+        metrics = server.compute_metrics(
+            [
+                [
+                    {
+                        "translation": "Café au lait chaud",
+                        "generation": "Cafe\u0301 au lait chaud",
+                        "source_language": "en",
+                        "target_language": "fr_FR",
+                    }
+                ]
+            ]
+        )
+        assert metrics["en->fr_FR/chrF"] == pytest.approx(100.0)
+        assert metrics["en->fr_FR/spBLEU"] == pytest.approx(100.0)
+
+    def test_spbleu_and_chrf_per_pair_and_aggregations(self) -> None:
+        """Feed two language pairs x two rollouts each; expect spBLEU and chrF
         cross-pair aggregates, and std-dev keys without COMET fields."""
         server = _make_server(compute_comet=False)
-        # Sentences long enough that 4-gram matches exist (sacrebleu's
-        # corpus_bleu uses the default 4-gram geometric mean, which is 0
-        # when any n-gram precision is 0). Two "tasks", 2 rollouts each:
-        # rollout 0 is perfect, rollout 1 is a slight variant, so std_dev
-        # across runs is non-zero but BLEU > 0 on both.
+        # Two tasks with two rollouts each: rollout 0 is perfect and rollout 1
+        # is a slight variant, so the standard deviation across runs is
+        # non-zero while both runs have positive chrF.
         de_ref = "Der schnelle braune Fuchs springt \u00fcber den faulen Hund in dem sch\u00f6nen Garten."
         de_perfect = de_ref
         de_variant = "Der schnelle braune Fuchs springt \u00fcber den faulen Hund im sch\u00f6nen Garten."
@@ -282,20 +493,30 @@ class TestComputeMetrics:
         ]
         m = server.compute_metrics(tasks)
 
-        # Per-pair BLEU
-        assert "en->de_DE/bleu" in m
-        assert "en->fr_FR/bleu" in m
-        assert m["en->de_DE/bleu"] > 0
-        assert m["en->fr_FR/bleu"] > 0
+        # Per-pair chrF
+        assert "en->de_DE/chrF" in m
+        assert "en->fr_FR/chrF" in m
+        assert m["en->de_DE/chrF"] > 0
+        assert m["en->fr_FR/chrF"] > 0
         # Std-dev keys exist for per-pair
-        assert "en->de_DE/bleu_std_dev_across_runs" in m
-        assert "en->fr_FR/bleu_std_dev_across_runs" in m
+        assert "en->de_DE/chrF_std_dev_across_runs" in m
+        assert "en->fr_FR/chrF_std_dev_across_runs" in m
+
+        # Per-pair spBLEU
+        assert m["en->de_DE/spBLEU"] > 0
+        assert m["en->fr_FR/spBLEU"] > 0
+        assert "en->de_DE/spBLEU_std_dev_across_runs" in m
+        assert "en->fr_FR/spBLEU_std_dev_across_runs" in m
 
         # Cross-pair aggregations
-        assert "xx->xx/bleu" in m
-        assert "en->xx/bleu" in m
-        assert "xx->de_DE/bleu" in m
-        assert "xx->fr_FR/bleu" in m
+        assert "xx->xx/chrF" in m
+        assert "en->xx/chrF" in m
+        assert "xx->de_DE/chrF" in m
+        assert "xx->fr_FR/chrF" in m
+        assert "xx->xx/spBLEU" in m
+        assert "en->xx/spBLEU" in m
+        assert "xx->de_DE/spBLEU" in m
+        assert "xx->fr_FR/spBLEU" in m
 
         # No COMET when disabled
         assert not any(k.endswith("/comet") for k in m)
@@ -316,23 +537,41 @@ class TestComputeMetrics:
             ]
         ]
         m = server.compute_metrics(tasks)
-        # BLEU is emitted; /comet keys are not.
-        assert "en->de_DE/bleu" in m
+        # spBLEU and chrF are emitted; /comet keys are not.
+        assert "en->de_DE/chrF" in m
+        assert "en->de_DE/spBLEU" in m
         for k in m:
             assert "/comet" not in k
 
     def test_get_key_metrics_filters(self) -> None:
         server = _make_server()
         agent = {
-            "xx->xx/bleu": 35.0,
+            "xx->xx/chrF": 35.0,
+            "xx->xx/spBLEU": 30.0,
             "xx->xx/comet": 78.0,
-            "en->xx/bleu": 32.0,
+            "en->xx/chrF": 32.0,
+            "en->xx/spBLEU": 27.0,
             "en->xx/comet": 77.0,
-            "en->de_DE/bleu": 30.0,  # not in key metrics
+            "eng_Latn->xx/chrF": 31.0,
+            "eng_Latn->xx/spBLEU": 26.0,
+            "eng_Latn->xx/comet": 76.0,
+            "eng_Latn->xx/language_consistency": 96.0,
+            "en->de_DE/chrF": 30.0,  # not in key metrics
             "mean/reward": 0.45,  # not in key metrics
         }
         key = server.get_key_metrics(agent)
-        assert set(key.keys()) == {"xx->xx/bleu", "xx->xx/comet", "en->xx/bleu", "en->xx/comet"}
+        assert set(key.keys()) == {
+            "xx->xx/chrF",
+            "xx->xx/spBLEU",
+            "xx->xx/comet",
+            "en->xx/chrF",
+            "en->xx/spBLEU",
+            "en->xx/comet",
+            "eng_Latn->xx/chrF",
+            "eng_Latn->xx/spBLEU",
+            "eng_Latn->xx/comet",
+            "eng_Latn->xx/language_consistency",
+        }
 
     def test_per_row_comet_scores_emit_aggregate_metrics(self) -> None:
         """When rollouts carry comet_score (from verify()'s actor pool await),
@@ -384,9 +623,143 @@ class TestComputeMetrics:
         assert m["xx->de_DE/comet"] == pytest.approx(90.0)
         assert m["xx->fr_FR/comet"] == pytest.approx(90.0)
 
-    def test_no_comet_rows_emits_bleu_only(self) -> None:
+    def test_per_row_language_consistency_scores_emit_aggregate_metrics(self) -> None:
+        """When rollouts carry language_consistency_score (computed in verify()), compute_metrics
+        buckets those values into per-pair and cross-pair aggregates."""
+        server = _make_server(
+            compute_comet=False,
+            language_consistency_backend="wmt24pp_cld2",
+        )
+        de_ref = "Der schnelle braune Fuchs springt über den faulen Hund im schönen Garten."
+        fr_ref = "Le renard brun rapide saute par dessus le chien paresseux dans le beau jardin."
+        tasks = [
+            [
+                {
+                    "text": "T1",
+                    "translation": de_ref,
+                    "generation": de_ref,
+                    "source_language": "en",
+                    "target_language": "de_DE",
+                    "language_consistency_score": 0.80,
+                },
+            ],
+            [
+                {
+                    "text": "T2",
+                    "translation": de_ref,
+                    "generation": de_ref,
+                    "source_language": "en",
+                    "target_language": "de_DE",
+                    "language_consistency_score": 1.00,
+                },
+            ],
+            [
+                {
+                    "text": "T3",
+                    "translation": fr_ref,
+                    "generation": fr_ref,
+                    "source_language": "en",
+                    "target_language": "fr_FR",
+                    "language_consistency_score": 0.90,
+                },
+            ],
+        ]
+        m = server.compute_metrics(tasks)
+        # Per-pair: en->de_DE = mean(0.80, 1.00) × 100 = 90.0; en->fr_FR = 90.0
+        assert m["en->de_DE/language_consistency"] == pytest.approx(90.0)
+        assert m["en->fr_FR/language_consistency"] == pytest.approx(90.0)
+        # Cross-pair aggregations.
+        assert m["xx->xx/language_consistency"] == pytest.approx(90.0)
+        assert m["en->xx/language_consistency"] == pytest.approx(90.0)
+        assert m["xx->de_DE/language_consistency"] == pytest.approx(90.0)
+        assert m["xx->fr_FR/language_consistency"] == pytest.approx(90.0)
+        # spBLEU and chrF are present; COMET is absent (disabled).
+        assert "en->de_DE/chrF" in m
+        assert "en->de_DE/spBLEU" in m
+        assert not any(k.endswith("/comet") for k in m)
+
+    def test_no_language_consistency_rows_emits_no_language_consistency_keys(self) -> None:
+        """Rollouts without language_consistency_score yield no /language_consistency keys."""
+        server = _make_server(
+            compute_comet=False,
+            language_consistency_backend="wmt24pp_cld2",
+        )
+        tasks = [
+            [
+                {
+                    "text": "The quick brown fox jumps over the lazy dog in the beautiful garden.",
+                    "translation": "Der schnelle braune Fuchs springt über den faulen Hund im schönen Garten.",
+                    "generation": "Der schnelle braune Fuchs springt über den faulen Hund im schönen Garten.",
+                    "source_language": "en",
+                    "target_language": "de_DE",
+                    # No language_consistency_score field.
+                }
+            ]
+        ]
+        m = server.compute_metrics(tasks)
+        assert "en->de_DE/chrF" in m
+        assert "en->de_DE/spBLEU" in m
+        assert not any("/language_consistency" in k for k in m)
+
+    def test_warns_for_low_language_consistency_pairs_with_scores(self, caplog) -> None:
+        server = _make_server(
+            compute_comet=False,
+            language_consistency_backend="flores_glotlid",
+            language_consistency_warning_threshold=50.0,
+        )
+        tasks = [
+            [
+                {
+                    "translation": "reference text",
+                    "generation": "generated text",
+                    "source_language": src,
+                    "target_language": tgt,
+                    "language_consistency_score": score,
+                }
+            ]
+            for src, tgt, score in (
+                ("en", "jpn_Jpan", 0.40),
+                ("de", "jpn_Jpan", 0.20),
+                ("en", "fra_Latn", 0.50),
+            )
+        ]
+
+        with caplog.at_level(logging.WARNING, logger="app"):
+            server.compute_metrics(tasks)
+
+        warning = next(
+            message for message in caplog.messages if message.startswith("Warning - the following language pairs")
+        )
+        assert "scores < 50.0" in warning
+        assert "  de -> jpn_Jpan: 20.0\n  en -> jpn_Jpan: 40.0" in warning
+        assert "en -> fra_Latn" not in warning
+
+    def test_does_not_warn_when_language_consistency_pairs_meet_threshold(self, caplog) -> None:
+        server = _make_server(
+            compute_comet=False,
+            language_consistency_backend="wmt24pp_cld2",
+            language_consistency_warning_threshold=50.0,
+        )
+        tasks = [
+            [
+                {
+                    "translation": "reference text",
+                    "generation": "generated text",
+                    "source_language": "en",
+                    "target_language": "ja_JP",
+                    "language_consistency_score": 0.50,
+                }
+            ]
+        ]
+
+        with caplog.at_level(logging.WARNING, logger="app"):
+            server.compute_metrics(tasks)
+
+        assert not any(message.startswith("Warning - the following language pairs") for message in caplog.messages)
+
+    def test_no_comet_rows_emits_local_metrics_only(self) -> None:
         """Rollouts without comet_score (compute_comet disabled mid-run, or
-        actor pool unavailable) yield BLEU metrics with no /comet keys."""
+        actor pool unavailable) yield spBLEU/chrF metrics with no /comet keys."""
         server = _make_server(compute_comet=True)
         tasks = [
             [
@@ -401,7 +774,8 @@ class TestComputeMetrics:
             ]
         ]
         m = server.compute_metrics(tasks)
-        assert "en->de_DE/bleu" in m
+        assert "en->de_DE/chrF" in m
+        assert "en->de_DE/spBLEU" in m
         assert not any(k.endswith("/comet") for k in m)
 
 

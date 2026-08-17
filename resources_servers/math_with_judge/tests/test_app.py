@@ -20,10 +20,10 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 from math_verify.errors import TimeoutException
-from pydantic import ValidationError
 from pytest import approx, fixture, raises, skip
 
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -660,7 +660,8 @@ class TestApp:
         server_mock.post = AsyncMock(return_value=post_mock)
 
         response_mock.return_value = json.dumps({})
-        with raises(ValidationError, match="Field required"):
+        # A body that isn't a valid Response is a broken judge call, not a wrong answer.
+        with raises(JudgeError, match="Field required"):
             await resources_server._generate_judge_evaluation("invalid_response", "invalid_1", "invalid_2")
 
         reasoning_item = NeMoGymResponseReasoningItem(id="reasoning_item", summary=[], type="reasoning")
