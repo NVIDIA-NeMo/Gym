@@ -578,6 +578,54 @@ class TestMissingRolloutWarning:
         assert result.repeat_level_metrics == []
 
 
+class TestConfidenceIntervalZeroSem:
+    """When sem is exactly 0 (every value in the sample is identical), scipy's t.interval
+    returns NaN due to an internal ±inf * 0, rather than the mathematically-correct degenerate
+    interval. RewardProfiler._confidence_interval should special-case this to (mean, mean)
+    and warn, rather than silently serializing the CI as null.
+    """
+
+    def test_collapses_to_mean_and_warns(self) -> None:
+        with pytest.warns(UserWarning, match="Standard error is 0"):
+            ci = RewardProfiler()._confidence_interval(mean=0.5, sem=0.0, n=4)
+
+        assert ci == (0.5, 0.5)
+
+    def test_no_warning_for_nonzero_sem(self) -> None:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            ci = RewardProfiler()._confidence_interval(mean=0.5, sem=0.1, n=4)
+
+        assert ci is not None
+        assert not any("Standard error is 0" in str(w.message) for w in caught)
+
+    def test_n_le_1_returns_none_without_warning(self) -> None:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            ci = RewardProfiler()._confidence_interval(mean=0.5, sem=0.0, n=1)
+
+        assert ci is None
+        assert not any("Standard error is 0" in str(w.message) for w in caught)
+
+    def test_end_to_end_identical_per_repeat_means_yield_point_ci(self) -> None:
+        """Reproduces the exact case from production: 2 repeats whose per-task rewards differ
+        but whose per-repeat means happen to be identical (both 0.5) -> se/mean/reward == 0.0,
+        so the cross-repeat CI should collapse to a point instead of being null.
+        """
+        responses = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0},
+            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0},
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 1.0},
+            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 0.0},
+        ]
+        with pytest.warns(UserWarning, match="Standard error is 0"):
+            result = compute_aggregate_metrics(responses)
+
+        assert result.agent_metrics["se/mean/reward"] == pytest.approx(0.0)
+        assert result.agent_metrics["ci_low_95/mean/reward"] == pytest.approx(0.5)
+        assert result.agent_metrics["ci_high_95/mean/reward"] == pytest.approx(0.5)
+
+
 class TestAggregateRepeatLevelMetrics:
     """Unit tests for RewardProfiler._aggregate_repeat_level_metrics, which collapses the
     per-repeat estimates in repeat_level_metrics (one row per rollout_index) down to a single

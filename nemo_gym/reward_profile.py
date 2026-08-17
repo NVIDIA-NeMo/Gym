@@ -168,24 +168,14 @@ class RewardProfiler:
 
         return Histogram(data)
 
-    def confidence_interval(self, df: DataFrame) -> Tuple[Series, Series]:
-        ci_low, ci_high = stats.t.interval(
-            confidence=0.95,
-            df=df.count() - 1,  # degrees of freedom per column
-            loc=df.mean(),
-            scale=stats.sem(df, nan_policy="omit"),
-        )
-        return Series(ci_low, index=df.columns), Series(ci_high, index=df.columns)
-
     def describe_dataframe(self, df: DataFrame) -> DataFrame:
-        stat_index = ["mean", "max", "min", "median", "std", "ci_low_95", "ci_high_95", "histogram"]
+        stat_index = ["mean", "max", "min", "median", "std", "histogram"]
         d: List[Series] = [
             df.mean(),
             df.max(),
             df.min(),
             df.median(),
             df.std(),
-            *self.confidence_interval(df),
             df.apply(self.histogram, axis=0),
         ]  # type: ignore
 
@@ -210,6 +200,24 @@ class RewardProfiler:
         return [
             {k: v for k, v in group_metrics.items() if v is not None and notna(v)} for group_metrics in grouped_metrics
         ]
+
+    def _confidence_interval(
+        self, mean: float, sem: float, n: int, confidence: float = 0.95
+    ) -> Optional[Tuple[float, float]]:
+        """Return (ci_low, ci_high) t-interval at the given confidence level, or None when n <= 1."""
+        if n <= 1:
+            return None
+        if sem == 0:
+            # scipy's t.interval computes ±inf * 0 internally when scale=0, which is
+            # indeterminate and returns NaN rather than the degenerate (mean, mean) interval.
+            warnings.warn(
+                f"Standard error is 0 (all {n} values are identical) -- confidence interval "
+                "collapses to a single point rather than being computed.",
+                stacklevel=2,
+            )
+            return mean, mean
+        ci_low, ci_high = stats.t.interval(confidence, df=n - 1, loc=mean, scale=sem)
+        return float(ci_low), float(ci_high)
 
     def _compute_repeat_level_metrics(self, df: DataFrame) -> List[Dict[str, Any]]:
         """Per-agent, per-rollout-index summary stats across all tasks.
@@ -260,10 +268,8 @@ class RewardProfiler:
                         f"p75/{col}": float(col_data.quantile(0.75)),
                     }
                 )
-                if n > 1:
-                    ci_low, ci_high = stats.t.interval(0.95, df=n - 1, loc=mean, scale=sem)
-                    entry[f"ci_low_95/{col}"] = float(ci_low)
-                    entry[f"ci_high_95/{col}"] = float(ci_high)
+                if ci := self._confidence_interval(mean, sem, n):
+                    entry[f"ci_low_95/{col}"], entry[f"ci_high_95/{col}"] = ci
             repeat_metrics.append(entry)
 
         incomplete_repeats = [entry for entry in repeat_metrics if entry["missing_count"] > 0]
@@ -295,7 +301,9 @@ class RewardProfiler:
 
         df = DataFrame.from_records(repeat_level_metrics)
         df["agent_name"] = df[AGENT_REF_KEY_NAME].apply(lambda ref: ref["name"])
-        numeric_cols = df.select_dtypes(include="number").columns.difference([ROLLOUT_INDEX_KEY_NAME])
+        # Only aggregate per-repeat means (mean/{col}) — not derived stats like CI bounds,
+        # std, sem, or quartiles, which are meaningless to average across repeats.
+        numeric_cols = [c for c in df.select_dtypes(include="number").columns if c.startswith("mean/")]
 
         aggregated_metrics = []
         for agent_name, group in df.groupby("agent_name"):
@@ -305,10 +313,14 @@ class RewardProfiler:
                 n = len(col_data)
                 if n == 0:
                     continue
+                mean = float(col_data.mean())
                 std = float(col_data.std(ddof=1)) if n > 1 else 0.0
-                entry[f"mean/{col}"] = float(col_data.mean())
+                se = std / n**0.5
+                entry[f"mean/{col}"] = mean
                 entry[f"median/{col}"] = float(col_data.median())
-                entry[f"se/{col}"] = std / n**0.5
+                entry[f"se/{col}"] = se
+                if ci := self._confidence_interval(mean, se, n):
+                    entry[f"ci_low_95/{col}"], entry[f"ci_high_95/{col}"] = ci
             aggregated_metrics.append(entry)
         return aggregated_metrics
 
