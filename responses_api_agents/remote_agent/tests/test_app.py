@@ -410,6 +410,26 @@ class TestAgentToolLoop:
         types = [o["type"] for o in dumped["response"]["output"]]
         assert types.count("function_call") == 2 and types.count("function_call_output") == 2
 
+    async def test_duplicate_call_ids_execute_once_with_last_arguments(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # call_id is unique by contract; a malformed duplicate collapses to the last occurrence.
+        service = scripted_service(
+            traj(
+                [
+                    fn_call("dup", "increment_counter", '{"count": 1}'),
+                    fn_call("dup", "increment_counter", '{"count": 3}'),
+                ]
+            ),
+            traj([msg("done")]),
+        )
+        agent, _, server_client = make_wired_agent(monkeypatch, service, tool_handler=self.counter_tool_handler)
+
+        result = await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row(tools=_COUNTER_TOOLS)))
+
+        assert NG_FAILURE_CLASS_KEY not in result.model_dump()
+        tool_calls = [c for c in server_client.calls if c["url_path"] == "/increment_counter"]
+        assert len(tool_calls) == 1
+        assert tool_calls[0]["json"] == {"count": 3}
+
     async def test_unknown_tool_error_fed_back_not_raised(self, monkeypatch: pytest.MonkeyPatch) -> None:
         service = scripted_service(
             traj([fn_call("c1", "web_search", "{}")]),  # unpaired ask for a tool the env doesn't serve

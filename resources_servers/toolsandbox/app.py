@@ -55,7 +55,13 @@ import sys
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
+# Pre-import packages that nltk pulls in during its init so they are already in
+# sys.modules before nltk's inisec.py finder is installed. nltk>=3.9 blocks any
+# import originating from nltk if the module path falls inside the process CWD —
+# which happens in CI where the server venv lives inside the repo root.
+import defusedxml.ElementTree  # noqa: F401
 import polars as pl
+import regex  # noqa: F401
 from fastapi import FastAPI, Request
 from openai import NOT_GIVEN
 from openai.types.chat import ChatCompletion

@@ -15,12 +15,15 @@
 
 import asyncio
 import json
+import logging
+from functools import partial
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import yaml
+from omegaconf import OmegaConf
 
-from nemo_gym.config_types import ResourcesServerRef
+from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -51,6 +54,20 @@ def _make_agent(**kwargs) -> KiloCodeAgent:
     with patch("responses_api_agents.kilocode_agent.app.KiloCodeAgent.model_post_init"):
         agent = KiloCodeAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
     agent.sem = asyncio.Semaphore(agent.config.concurrency)
+    return agent
+
+
+def _make_model_server_agent(**kwargs) -> KiloCodeAgent:
+    """An agent wired to a Gym model server, with just enough server client to resolve its URL.
+
+    The mocked client carries no global config, so the model server entry and the real base-URL
+    builder are attached to it; base-URL resolution itself runs unmocked.
+    """
+    agent = _make_agent(model_server=ModelServerRef(type="responses_api_models", name="policy_model"), **kwargs)
+    agent.server_client.global_config_dict = OmegaConf.create(
+        {"policy_model": {"responses_api_models": {"vllm_model": {"host": "model-host", "port": 9000}}}}
+    )
+    agent.server_client._build_server_base_url = partial(ServerClient._build_server_base_url, agent.server_client)
     return agent
 
 
@@ -165,6 +182,22 @@ class TestParseKiloEvents:
         _, usage = parse_kilo_events(stream)
         assert usage["input_tokens"] == 105
         assert usage["output_tokens"] == 20
+
+    def test_empty_length_stop_warns(self, caplog) -> None:
+        # The signature of an output budget that does not fit the model server's context window.
+        event = _step_finish_event({"input": 10368, "output": 0})
+        event["part"]["reason"] = "length"
+        with caplog.at_level(logging.WARNING):
+            _, usage = parse_kilo_events(_events(event))
+        assert usage["output_tokens"] == 0
+        assert "max_output_tokens" in caplog.text
+
+    def test_length_stop_with_output_does_not_warn(self, caplog) -> None:
+        event = _step_finish_event({"input": 10368, "output": 8192})
+        event["part"]["reason"] = "length"
+        with caplog.at_level(logging.WARNING):
+            parse_kilo_events(_events(event))
+        assert "max_output_tokens" not in caplog.text
 
     def test_reasoning_prepended_to_next_text(self) -> None:
         stream = _events(_reasoning_event("let me think"), _text_event("final answer"))
@@ -282,6 +315,96 @@ class TestWriteConfig:
         assert written["provider"] == {"policy": {}}
 
 
+class TestModelServer:
+    def test_effective_model_prefixed_only_with_model_server(self) -> None:
+        assert _make_agent(model="policy/m")._effective_model() == "policy/m"
+        assert _make_model_server_agent(model="Qwen/Qwen3-8B")._effective_model() == "nemo/Qwen/Qwen3-8B"
+
+    def test_base_url_resolution(self) -> None:
+        assert _make_agent()._resolve_model_base_url() == ""
+        agent = _make_model_server_agent()
+        assert agent._resolve_model_base_url() == "http://model-host:9000/v1"
+        assert agent._resolve_model_base_url("r1") == "http://model-host:9000/ng-rollout/r1/v1"
+
+    def test_nemo_provider_written(self, tmp_path) -> None:
+        # A slashed model name stays whole: kilo splits `-m` on the first `/` only, so the provider is
+        # `nemo` and the model is `Qwen/Qwen3-8B`, which is the key it looks up in `models`.
+        agent = _make_model_server_agent(model="Qwen/Qwen3-8B")
+        agent._write_kilo_config(tmp_path, agent._resolve_model_base_url())
+        provider = json.loads((tmp_path / "kilo.json").read_text())["provider"]["nemo"]
+        assert provider["npm"] == "@ai-sdk/openai-compatible"
+        assert provider["options"] == {
+            "apiKey": "EMPTY",  # pragma: allowlist secret
+            "baseURL": "http://model-host:9000/v1",
+        }
+        assert provider["models"] == {
+            "Qwen/Qwen3-8B": {
+                "name": "Qwen/Qwen3-8B",
+                "limit": {"context": 32768, "output": 8192},
+                "interleaved": {"field": "reasoning_content"},
+            }
+        }
+
+    def test_model_server_config_written_without_kilo_config(self, tmp_path) -> None:
+        # An empty kilo_config used to short-circuit before kilo.json was written, which would leave a
+        # model-server-only run with no provider at all.
+        agent = _make_model_server_agent(model="m")
+        agent._write_kilo_config(tmp_path, agent._resolve_model_base_url())
+        assert json.loads((tmp_path / "kilo.json").read_text())["provider"]["nemo"]["models"].keys() == {"m"}
+
+    def test_kilo_config_merged_and_overridable(self, tmp_path) -> None:
+        agent = _make_model_server_agent(
+            model="m",
+            kilo_config={"permission": {"bash": "allow"}, "provider": {"nemo": {"name": "mine"}}},
+        )
+        agent._write_kilo_config(tmp_path, agent._resolve_model_base_url())
+        written = json.loads((tmp_path / "kilo.json").read_text())
+        assert written["permission"]["bash"] == "allow"
+        assert written["provider"]["nemo"]["name"] == "mine"
+
+    def test_limits_and_reasoning_field_configurable(self, tmp_path) -> None:
+        agent = _make_model_server_agent(
+            model="m", context_window=262144, max_output_tokens=16384, reasoning_field=None
+        )
+        agent._write_kilo_config(tmp_path, agent._resolve_model_base_url())
+        model = json.loads((tmp_path / "kilo.json").read_text())["provider"]["nemo"]["models"]["m"]
+        assert model["limit"] == {"context": 262144, "output": 16384}
+        assert "interleaved" not in model
+
+    def test_rollout_prefix_applied_to_base_url(self, tmp_path) -> None:
+        agent = _make_model_server_agent(model="m")
+        agent._write_kilo_config(tmp_path, agent._resolve_model_base_url("task0-rollout1"))
+        written = json.loads((tmp_path / "kilo.json").read_text())
+        assert written["provider"]["nemo"]["options"]["baseURL"].endswith("/ng-rollout/task0-rollout1/v1")
+
+    def test_command_uses_effective_model(self) -> None:
+        agent = _make_model_server_agent(model="Qwen/Qwen3-8B")
+        cmd = agent._build_command(Path("/tmp/ws"), "hi")
+        assert cmd[cmd.index("-m") + 1] == "nemo/Qwen/Qwen3-8B"
+
+    def test_run_kilo_threads_resolved_url_into_config_and_env(self, tmp_path) -> None:
+        # The seam _run_kilo owns: resolve once, then hand the same URL to kilo.json and the env.
+        # repo_dir is the project dir, and unlike the workspace it survives the run's cleanup.
+        agent = _make_model_server_agent(model="m", repo_dir=str(tmp_path))
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.communicate = AsyncMock(return_value=(b"", b""))
+        with patch("responses_api_agents.kilocode_agent.app.asyncio.create_subprocess_exec") as spawn:
+            spawn.return_value = proc
+            asyncio.run(agent._run_kilo("hi", None, "task0-rollout1"))
+
+        expected = "http://model-host:9000/ng-rollout/task0-rollout1/v1"
+        written = json.loads((tmp_path / "kilo.json").read_text())
+        assert written["provider"]["nemo"]["options"]["baseURL"] == expected
+        assert spawn.call_args.kwargs["env"]["OPENAI_BASE_URL"] == expected
+
+    def test_env_prefers_model_server_over_openai_base_url(self) -> None:
+        agent = _make_model_server_agent(openai_api_key="k", openai_base_url="https://api.openai.com/v1")
+        env = agent._env("/tmp/data", "/tmp/config", agent._resolve_model_base_url("r1"))
+        assert env["OPENAI_BASE_URL"] == "http://model-host:9000/ng-rollout/r1/v1"
+        assert env["OPENAI_API_KEY"] == "EMPTY"  # pragma: allowlist secret
+
+
 class TestConfigYaml:
     def test_module_parses(self) -> None:
         app_path = Path(__file__).resolve().parent.parent / "app.py"
@@ -295,5 +418,7 @@ class TestConfigYaml:
         assert inner["entrypoint"] == "app.py"
         assert inner["concurrency"] == 8
         assert inner["command"] == "kilo"
-        # kilo resolves `model` as <provider>/<name>, so the prefix has to name a declared provider.
-        assert inner["model"].split("/")[0] in inner["kilo_config"]["provider"]
+        # The shipped config routes model calls through a Gym model server, so `model` is the bare
+        # name and the agent supplies the provider; kilo_config must not declare one to collide with.
+        assert inner["model_server"] == {"type": "responses_api_models", "name": "policy_model"}
+        assert "provider" not in inner["kilo_config"]

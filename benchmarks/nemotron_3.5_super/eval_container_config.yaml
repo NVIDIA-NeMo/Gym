@@ -1,15 +1,109 @@
 config_paths:
 - benchmarks/gpqa/config.yaml
 - benchmarks/tau2/configs/banking_bm25_grep_artificial_analysis.yaml
+- benchmarks/tau2/configs/tau2.yaml
+- benchmarks/aalcr/config.yaml
+- benchmarks/scicode/config.yaml
+- benchmarks/omniscience/config.yaml
 - responses_api_models/vllm_model/configs/vllm_model.yaml
-- env.yaml
+# TODO @bxyu-nvidia: need to figure out AA key
+# - benchmarks/critpt/config.yaml
+# TODO @bxyu-nvidia: Implementing in the harness x benchmark decoupling effort.
+- benchmarks/swebench/verified/opencode.yaml
+# - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+# SWE Bench Multilingual
+# SWE Bench Pro
+# Terminal Bench 2.1
+# TODO @bxyu-nvidia: need clarification from arajfer and config update in gym
+# HLE w/o tool
+# TODO @bxyu-nvidia: need test efficiency
+# BrowseComp
+# TODO @bxyu-nvidia: need pipeclean (may be very complex)
+# GDPVal-AA-V2
+# TODO @bxyu-nvidia: need internal branch
+# LM Arena proxy (To help text Arena)
+
+########################################
+# START Secrets
+# The following secrets identified with `dummy` must be filled in via env.yaml at runtime
+########################################
+
+nv_inference_api_key: dummy  # pragma: allowlist secret
+
+# Used in SWE Verified
+sandbox:
+  opensandbox:
+    connection:
+      domain: dummy
+      api_key: dummy  # pragma: allowlist secret
+
+critpt_benchmark_resources_server:
+  resources_servers:
+    critpt:
+      api_key: dummy  # pragma: allowlist secret
+
+########################################
+# END Secrets
+########################################
+
+########################################
+# START Nvidia-specific configs
+########################################
 
 policy_base_url: dummy
 policy_api_key: dummy  # pragma: allowlist secret
 policy_model_name: dummy
 
-# The following secrets must be filled in via env.yaml at runtime
+# Used in Tau3 Banking
 gpt-5_4-mini-2026-03-17:
   responses_api_models:
     openai_model:
-      openai_api_key: dummy  # pragma: allowlist secret
+      openai_base_url: https://inference-api.nvidia.com/v1
+      openai_model: azure/openai/gpt-5.4-mini
+      openai_api_key: ${nv_inference_api_key}
+
+# Used in AA-LCR
+Qwen3-235B-A22B-Instruct-2507-FP8:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      model: nvidia/qwen/qwen-235b
+      base_url: https://inference-api.nvidia.com/v1
+      api_key: ${nv_inference_api_key}
+
+# Used in Tau2
+gpt-5_2-2025-12-11:
+  responses_api_models:
+    openai_model:
+      openai_base_url: https://inference-api.nvidia.com/v1
+      openai_model: openai/openai/gpt-5.2
+      openai_api_key: ${nv_inference_api_key}
+
+# Used in AA-Omniscience
+# TODO @bxyu-nvidia: Need to properly rename this and add this Gemini config
+genrm_model:
+  responses_api_models:
+    openai_model:
+      openai_base_url: https://inference-api.nvidia.com/v1
+      openai_model: gcp/google/gemini-3-flash-preview
+      openai_api_key: ${nv_inference_api_key}
+      max_concurrent_requests: 16
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      num_workers: 16
+
+# TODO @bxyu-nvidia: Remove this to turn on SWE Verified after it is validated. This is a placeholder for container build.
+opencode_sandboxed_agent_swebench_verified:
+  _inherit_from: opencode_sandboxed_agent
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      resources_server:
+        type: resources_servers
+        name: opencode_swebench_verified_resources_server
+      datasets: []
+
+########################################
+# END Nvidia-specific configs.
+########################################

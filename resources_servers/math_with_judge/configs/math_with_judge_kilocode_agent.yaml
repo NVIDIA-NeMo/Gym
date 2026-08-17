@@ -1,6 +1,6 @@
 # kilocode_agent.yaml stays the single source of truth for the harness (command, model, kilo_version,
-# permissions, provider); _inherit_from pulls it in so this file only sets what the math environment
-# changes: the resources server it talks to, the prompt, and the dataset.
+# permissions, model server); _inherit_from pulls it in so this file only sets what the math
+# environment changes: the resources server it talks to, the prompt, and the dataset.
 config_paths:
   - responses_api_agents/kilocode_agent/configs/kilocode_agent.yaml
 

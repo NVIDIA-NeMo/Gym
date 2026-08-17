@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
+import re
 import sys
 from argparse import ArgumentParser
 from collections import defaultdict
@@ -31,6 +32,7 @@ import rich
 import wandb
 import wandb.util
 from omegaconf import MISSING, DictConfig, ListConfig, OmegaConf, open_dict
+from omegaconf.errors import InterpolationResolutionError
 from openai import __version__ as openai_version
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from ray import __version__ as ray_version
@@ -40,6 +42,7 @@ from nemo_gym import CACHE_DIR, RESULTS_DIR, WORKING_DIR, _resolve_under_cwd_or_
 from nemo_gym.config_types import (
     AlmostServerError,
     ConfigError,
+    ConfigInterpolationError,
     ConfigMissingValuesError,
     ConfigPathNotFoundError,
     InheritPathNotFoundError,
@@ -73,6 +76,9 @@ RAY_HEAD_NODE_ADDRESS_KEY_NAME = "ray_head_node_address"
 PORT_RANGE_LOW_KEY_NAME = "port_range_low"
 PORT_RANGE_HIGH_KEY_NAME = "port_range_high"
 DRY_RUN_KEY_NAME = "dry_run"
+UVICORN_TIMEOUT_WORKER_HEALTHCHECK = "uvicorn_timeout_worker_healthcheck"
+MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME = "model_endpoint_readiness_timeout_seconds"
+ALLOW_OPENAI_VERSION_SKEW_KEY_NAME = "allow_openai_version_skew"
 UV_CACHE_DIR_KEY_NAME = "uv_cache_dir"
 UV_VENV_DIR_KEY_NAME = "uv_venv_dir"
 INHERIT_FROM_KEY_NAME = "_inherit_from"
@@ -107,6 +113,8 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     PORT_RANGE_LOW_KEY_NAME,
     PORT_RANGE_HIGH_KEY_NAME,
     DRY_RUN_KEY_NAME,
+    MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME,
+    ALLOW_OPENAI_VERSION_SKEW_KEY_NAME,
     UV_CACHE_DIR_KEY_NAME,
     UV_VENV_DIR_KEY_NAME,
     INHERIT_FROM_KEY_NAME,
@@ -168,6 +176,9 @@ class GlobalConfigDictParserConfig(BaseModel):
     skip_load_from_dotenv: bool = False
 
     hide_secrets: bool = False
+    # Static inspection avoids network and process side effects. Assigned ports are placeholders,
+    # not evidence that a runtime is ready.
+    offline: bool = False
 
     # This is a shorthand we use for config resolution use cases that shouldn't require a model
     # e.g. data loading, etc
@@ -195,6 +206,55 @@ def _load_config_yaml(config_path):
         location = f" at line {mark.line + 1}, column {mark.column + 1}" if mark is not None else ""
         problem = getattr(e, "problem", None) or str(e).splitlines()[0]
         raise ConfigError(f"Malformed YAML in '{config_path}'{location}: {problem}") from e
+
+
+def _nemo_gym_openai_requirement() -> Optional[str]:
+    """Return nemo-gym's own openai requirement string (name plus specifier, as declared in its metadata).
+
+    Returns ``None`` when the requirement cannot be determined (nemo-gym not
+    installed as a distribution, ``packaging`` unavailable, only marker'd
+    requirements found).
+    """
+    try:
+        # Lazy imports: `packaging` is not a declared nemo-gym dependency; any
+        # import or lookup failure means "constraint unknown".
+        from importlib.metadata import requires
+
+        from packaging.requirements import Requirement
+        from packaging.utils import canonicalize_name
+
+        for req_str in requires("nemo-gym") or []:
+            req = Requirement(req_str)
+            if canonicalize_name(req.name) == "openai" and req.marker is None:
+                return req_str
+        return None
+    except Exception:
+        return None
+
+
+def _openai_version_matches_nemo_gym_constraint(version: str) -> bool:
+    """True when `version` satisfies nemo-gym's own openai requirement.
+
+    head_server_deps normally pins the parent process's openai version into every
+    sub-venv for consistency. When the parent environment ships an openai release
+    outside nemo-gym's own constraint (e.g. the base image preinstalls a newer
+    openai than nemo-gym's cap allows), that pin makes every
+    sub-venv resolution unsatisfiable — and the dry-run prefetch then bakes
+    venvs that contain nothing but pip. The parser uses this to fail fast (or,
+    with the explicit opt-in, to fall back to nemo-gym's own resolution) instead
+    of emitting an impossible pin. Returns True (preserving the original
+    pin-the-parent behavior) when the constraint cannot be determined.
+    """
+    req_str = _nemo_gym_openai_requirement()
+    if req_str is None:
+        return True
+    try:
+        from packaging.requirements import Requirement
+        from packaging.version import Version
+
+        return Requirement(req_str).specifier.contains(Version(version), prereleases=True)
+    except Exception:
+        return True
 
 
 class GlobalConfigDictParser(BaseModel):
@@ -325,6 +385,7 @@ Duplicate config paths:
         port_range_low: int,
         port_range_high: int,
         initial_disallowed_ports: Optional[List[int]] = None,
+        probe_ports: bool = True,
     ) -> List[int]:
         server_refs = [c.get_server_ref() for c in server_instance_configs]
 
@@ -357,13 +418,18 @@ Duplicate config paths:
                 if not run_server_config_dict.get("host"):
                     run_server_config_dict["host"] = default_host
                 if not run_server_config_dict.get("port"):
-                    port = _find_open_port_using_range(
-                        disallowed_ports=disallowed_ports,
-                        port_range_low=port_range_low,
-                        port_range_high=port_range_high,
-                    )
+                    if probe_ports:
+                        port = _find_open_port_using_range(
+                            disallowed_ports=disallowed_ports,
+                            port_range_low=port_range_low,
+                            port_range_high=port_range_high,
+                        )
+                    else:
+                        # Offline resolution must not imply that a runnable port was allocated.
+                        port = -1
                     run_server_config_dict["port"] = port
-                    disallowed_ports.append(port)  # Disallow newly allocated port.
+                    if probe_ports:
+                        disallowed_ports.append(port)  # Disallow newly allocated port.
                 else:
                     # Port already exists, add it to the disallowed list.
                     disallowed_ports.append(run_server_config_dict["port"])
@@ -586,6 +652,9 @@ Pass each config with --config (it builds the list for you), e.g.:
 
         config_paths, extra_configs = self.load_extra_config_paths(config_paths)
 
+        # Reverse here so the "inner" configs (appended to the list) are ovreridden by the outer configs.
+        extra_configs.reverse()
+
         # Dot env overrides previous configs
         extra_configs.append(dotenv_extra_config)
 
@@ -653,7 +722,7 @@ Found global config dict yaml:
 
         with open_dict(global_config_dict):
             use_absolute_ip = global_config_dict.setdefault(USE_ABSOLUTE_IP, False)
-        if use_absolute_ip:
+        if use_absolute_ip and not parse_config.offline:
             default_host = gethostbyname(gethostname())
         else:
             # Do one pass through all the configs validate and populate various configs for our servers.
@@ -674,6 +743,7 @@ Found global config dict yaml:
             initial_disallowed_ports=initial_disallowed_ports,
             port_range_low=port_range_low,
             port_range_high=port_range_high,
+            probe_ports=not parse_config.offline,
         )
 
         with open_dict(global_config_dict):
@@ -688,13 +758,42 @@ Found global config dict yaml:
             global_config_dict[DISALLOWED_PORTS_KEY_NAME] = disallowed_ports
 
             # Constrain sensitive package versions
-            global_config_dict[HEAD_SERVER_DEPS_KEY_NAME] = [
+            head_server_deps = [
                 # The ray version is very sensitive. The children ray versions must exactly match those of the parent ray.
                 # The ray extra [default] should also exactly match the extra in the top-level Gym pyproject.toml.
                 f"ray[default]=={ray_version}",
-                # OpenAI version is also sensitive since it changes so often and may introduce subtle incompatibilities.
-                f"openai=={openai_version}",
             ]
+            # OpenAI version is also sensitive since it changes so often and may introduce subtle
+            # incompatibilities — but only pin the parent's version when nemo-gym's own constraint
+            # accepts it; otherwise the sub-venv resolutions are unsatisfiable and the venvs come
+            # out empty (see _openai_version_matches_nemo_gym_constraint).
+            allow_openai_skew = global_config_dict.setdefault(ALLOW_OPENAI_VERSION_SKEW_KEY_NAME, False)
+            if not isinstance(allow_openai_skew, bool):
+                raise ConfigError(
+                    f"{ALLOW_OPENAI_VERSION_SKEW_KEY_NAME} must be a boolean (true/false), got {allow_openai_skew!r}."
+                )
+            if _openai_version_matches_nemo_gym_constraint(openai_version):
+                head_server_deps.append(f"openai=={openai_version}")
+            elif allow_openai_skew:
+                logging.warning(
+                    f"Not pinning the parent process's openai=={openai_version} into server venvs: "
+                    f"it does not satisfy nemo-gym's own constraint ({_nemo_gym_openai_requirement()}). "
+                    "Server venvs resolve openai from nemo-gym's constraint instead, so the parent and "
+                    "the servers exchange requests across the HTTP boundary with different openai "
+                    f"versions ({ALLOW_OPENAI_VERSION_SKEW_KEY_NAME}=true)."
+                )
+            else:
+                raise ConfigError(
+                    f"The parent process runs openai=={openai_version}, which does not satisfy "
+                    f"nemo-gym's own openai constraint ({_nemo_gym_openai_requirement()}). Pinning it "
+                    "into the server venvs would make every server venv resolution unsatisfiable "
+                    "(and the dry-run prefetch would bake venvs containing nothing but pip). "
+                    "Install an openai version compatible with nemo-gym in the parent environment, "
+                    f"or set {ALLOW_OPENAI_VERSION_SKEW_KEY_NAME}=true to let server venvs resolve "
+                    "openai from nemo-gym's own constraint (the parent and the servers then run "
+                    "different openai versions across the HTTP boundary)."
+                )
+            global_config_dict[HEAD_SERVER_DEPS_KEY_NAME] = head_server_deps
 
             # Constrain python version since ray is sensitive to this.
             global_config_dict[PYTHON_VERSION_KEY_NAME] = python_version()
@@ -704,11 +803,16 @@ Found global config dict yaml:
 
             global_config_dict.setdefault(DRY_RUN_KEY_NAME, False)
 
+            # How long `gym env start` waits for the model endpoints named in the config to accept
+            # a connection. Generous because vLLM can take minutes to load weights; 0 skips it.
+            global_config_dict.setdefault(MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME, 600)
+
             # UV related configuration
             # UV caching directory overrides to local folders.
             global_config_dict.setdefault(UV_CACHE_DIR_KEY_NAME, str(CACHE_DIR / "uv"))
-            # Set the appropriate environment variable here, and matche the config
-            environ["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
+            # Runtime subprocesses inherit the configured cache directory.
+            if not parse_config.offline:
+                environ["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
             # By default, build the directories in their individual folders using the root repository
             # e.g. WORKING_DIR/responses_api_models/my_server
             global_config_dict.setdefault(UV_VENV_DIR_KEY_NAME, str(WORKING_DIR))
@@ -718,7 +822,7 @@ Found global config dict yaml:
 
         # Set up W&B and log config. This must happen at the very last step.
         wandb_config = WANDBConfig.model_validate(global_config_dict)
-        if wandb_config.is_available:  # pragma: no cover
+        if wandb_config.is_available and not parse_config.offline:  # pragma: no cover
             environ["WANDB_API_KEY"] = wandb_config.wandb_api_key
 
             global _WANDB_RUN
@@ -828,7 +932,24 @@ def set_global_config_dict(
     global_config_dict_parser_cls: Type[GlobalConfigDictParser] = GlobalConfigDictParser,
 ) -> None:
     global _GLOBAL_CONFIG_DICT
-    global_config_dict = global_config_dict_parser_cls().parse(global_config_dict_parser_config)
+    try:
+        global_config_dict = global_config_dict_parser_cls().parse(global_config_dict_parser_config)
+    except InterpolationResolutionError as e:
+        # Same class of user error as an unset '???' (see raise_on_missing_values), so report it the same
+        # way instead of letting omegaconf's traceback reach the top level. Covers both a missing `${key}`
+        # (InterpolationKeyError) and a failing resolver such as `${oc.env:VAR}`, which carries its own
+        # message and so is passed through as-is.
+        match = re.search(r"Interpolation key '([^']+)' not found", str(e))
+        if not match:
+            raise ConfigInterpolationError(str(e)) from e
+        key = match.group(1)
+        raise ConfigInterpolationError(
+            f"""Config value '{e.full_key}' references '{key}', which is not set after merging.
+
+Provide it via a CLI override, in env.yaml, or in a config you pass via config_paths.
+For example, on the command line:
+  ++{key}=<value>"""
+        ) from e
 
     _GLOBAL_CONFIG_DICT = global_config_dict
 
