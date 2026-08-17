@@ -31,5 +31,7 @@ with open(args.rollout_jsonl) as f_in:
             continue
 
         with open(f"temp_{num}.log", "w") as f_out:
-            f_out.write(f"Reward: {row['reward']}\n\nTest output: {row['test_output']}")
+            f_out.write(
+                f"Reward: {row['reward']}\n\nTest output:\n{row['test_output']}\n\nOpencode stdout:\n{row['opencode_run_stdout']}"
+            )
         num += 1
