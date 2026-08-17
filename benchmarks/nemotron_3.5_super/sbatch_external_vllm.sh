@@ -15,6 +15,10 @@ SBATCH_TIME=${SBATCH_TIME:-04:00:00}
 # When unset, preserve Gym's existing configured/default behavior.
 NUM_SAMPLES_IN_PARALLEL=${NUM_SAMPLES_IN_PARALLEL:-}
 NUM_SAMPLES_IN_PARALLEL_ARG=""
+# Opt in to a stable per-experiment output path and Gym's task-index cache so
+# requeued or freshly resubmitted jobs continue unfinished rollouts.
+RESUME_EVAL_ON_REQUEUE=${RESUME_EVAL_ON_REQUEUE:-0}
+RESUME_FROM_CACHE_ARG=""
 # coupled preserves the existing multi-node DP/EP deployment. independent runs one
 # TP/EP replica per decode node and registers every replica with the router.
 VLLM_DECODE_MODE=${VLLM_DECODE_MODE:-coupled}
@@ -32,6 +36,18 @@ if [[ -n "$NUM_SAMPLES_IN_PARALLEL" ]]; then
     fi
     NUM_SAMPLES_IN_PARALLEL_ARG="++num_samples_in_parallel=$NUM_SAMPLES_IN_PARALLEL"
 fi
+
+case "$RESUME_EVAL_ON_REQUEUE" in
+    0)
+        ;;
+    1)
+        RESUME_FROM_CACHE_ARG="++resume_from_cache=true"
+        ;;
+    *)
+        echo "ERROR: RESUME_EVAL_ON_REQUEUE must be 0 or 1; got '$RESUME_EVAL_ON_REQUEUE'." >&2
+        exit 1
+        ;;
+esac
 
 case "$VLLM_DECODE_MODE" in
     coupled|independent)
@@ -131,7 +147,11 @@ cd /opt/Gym
 
 gym eval prepare $@ +use_cached_prepared_benchmarks=true
 
-experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%d_%H%M%S)
+if (( $RESUME_EVAL_ON_REQUEUE )); then
+    experiment_name=$EXPERIMENT_NAME/resumable
+else
+    experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%d_%H%M%S)
+fi
 # +uv_venv_dir=/opt/uv_venvs is from the container.
 # +skip_venv_if_present=true will reuse the venvs baked into the container if possible.
 # ++use_absolute_ip=true: Necessary for communication between harness in sandbox and Gym model servers
@@ -150,6 +170,7 @@ gym eval run \
     ++split=benchmark \
     ++use_absolute_ip=true \
     ++reuse_existing_data_preparation=true \
+    $RESUME_FROM_CACHE_ARG \
     ++policy_base_url=http://\$(getent hosts "\$PREFILL_HEAD" | awk 'NR == 1 {print \$1}'):$ROUTER_SERVER_PORT/v1 \
     ++policy_api_key=dummy_api_key \
     ++policy_model_name=$MODEL \
