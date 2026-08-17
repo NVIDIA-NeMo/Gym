@@ -24,6 +24,11 @@ else
     EXPORT_CSV_TO_MODEL_DIR=0
 fi
 
+eval_args=""
+if (( should_run_eval )); then
+    printf -v eval_args ' %q' "$@"
+fi
+
 # Fixed vLLM Port configurations
 PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT=5600
 DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT=5700
@@ -60,17 +65,11 @@ cleanup_sandboxes() {
     trap - EXIT INT TERM
     set +e
 
-    opensandbox_domain="\$(awk '/^sandbox:/{s=1} s && /domain:/{print \$2; exit}' env.yaml)"
-    opensandbox_protocol="\$(awk '/^sandbox:/{s=1} s && /protocol:/{print \$2; exit}' env.yaml)"
-
-    awk '/^sandbox:/{s=1} s && /api_key:/{print \$2; exit}' env.yaml \
-        | python nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py \
-            --domain "\$opensandbox_domain" \
-            --protocol "\${opensandbox_protocol:-http}" \
-            --api-key-stdin \
-            --run-id "\$SLURM_JOB_ID" \
-            --user "\$NEMO_GYM_USER" \
-            --reap
+    python nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py \
+        $eval_args \
+        --run-id "\$NEMO_GYM_RUN_ID" \
+        --user "\$NEMO_GYM_USER" \
+        --reap
     cleanup_status=\$?
     if (( cleanup_status != 0 )); then
         echo "OpenSandbox cleanup failed with status \$cleanup_status" >&2
@@ -81,7 +80,7 @@ trap cleanup_sandboxes EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-gym eval prepare $@ +use_cached_prepared_benchmarks=true
+gym eval prepare$eval_args +use_cached_prepared_benchmarks=true
 
 experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%d_%H%M%S)
 # +uv_venv_dir=/opt/uv_venvs is from the container.
@@ -91,7 +90,7 @@ experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%
 # global_aiohttp_connector_limit_per_host: 16k concurrent requests should be enough. We can raise further if our inference is efficient enough to support.
 # port_range_low, port_range_high: Move into ephemeral ports
 gym eval run \
-    $@ \
+    $eval_args \
     +wandb_project=$USER-gym-eval \
     +wandb_name=\$experiment_name \
     +uv_venv_dir=/opt/uv_venvs \
