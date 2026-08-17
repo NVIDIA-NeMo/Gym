@@ -12,7 +12,7 @@ and `simple_agent` (single-turn, matching NeMo-Skills' evaluation protocol).
 ## Preparation
 
 ```bash
-ng_prepare_benchmark "+config_paths=[benchmarks/putnam_bench/config.yaml]"
+gym eval prepare --benchmark putnam_bench
 ```
 
 Clones the upstream repo into a temp dir, runs its `rewrite_solutions.py` subprocess, parses the output `.lean` files, and writes `data/putnam_bench_benchmark.jsonl`. Each row has `name`, `split`, `header`, `informal_prefix`, `formal_statement` (no `goal` field — the `math_formal_lean` server doesn't use it, and the upstream prepare omits it).
@@ -28,19 +28,20 @@ and set `NEMO_SKILLS_SANDBOX_HOST` / `NEMO_SKILLS_SANDBOX_PORT` before starting
 the server.
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/putnam_bench/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark putnam_bench
 ```
 
 ## Collecting rollouts
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=putnam_bench_math_formal_lean_simple_agent \
-    +input_jsonl_fpath=benchmarks/putnam_bench/data/putnam_bench_benchmark.jsonl \
-    +output_jsonl_fpath=results/putnam_bench_rollouts.jsonl \
-    +num_repeats=32 \
-    +prompt_config=benchmarks/prompts/lean4/formal-proof-deepseek-prover-v2.yaml \
-    "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}"
+gym eval run --no-serve \
+    --agent putnam_bench_math_formal_lean_simple_agent \
+    --input benchmarks/putnam_bench/data/putnam_bench_benchmark.jsonl \
+    --output results/putnam_bench_rollouts.jsonl \
+    --num-repeats 32 \
+    --max-output-tokens 16384 \
+    --temperature 1.0 \
+    --prompt-config benchmarks/prompts/lean4/formal-proof-deepseek-prover-v2.yaml
 ```

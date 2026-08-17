@@ -36,8 +36,7 @@ Qwen3-235B-A22B-Instruct-2507-FP8:
 
 # Prepare benchmark data
 ```bash
-config_paths="benchmarks/nemotron_3_ultra/config_short.yaml"
-ng_prepare_benchmark "+config_paths=[$config_paths]"
+gym eval prepare --config benchmarks/nemotron_3_ultra/config_short.yaml
 ```
 
 # Run
@@ -65,10 +64,9 @@ This example uses:
 WANDB_PROJECT=<>
 EXPERIMENT_NAME=<>
 
-config_paths="benchmarks/nemotron_3_ultra/remote_endpoint.yaml,\
-benchmarks/nemotron_3_ultra/config_short.yaml"
-ng_e2e_collect_rollouts \
-    "+config_paths=[${config_paths}]" \
+gym eval run \
+    --config benchmarks/nemotron_3_ultra/remote_endpoint.yaml \
+    --config benchmarks/nemotron_3_ultra/config_short.yaml \
     +wandb_project=$WANDB_PROJECT \
     +wandb_name=$EXPERIMENT_NAME \
     ++output_jsonl_fpath=results/$EXPERIMENT_NAME.jsonl \
@@ -86,10 +84,9 @@ ng_e2e_collect_rollouts \
 WANDB_PROJECT=<>
 EXPERIMENT_NAME=<>
 
-config_paths="benchmarks/nemotron_3_ultra/local_endpoint.yaml,\
-benchmarks/nemotron_3_ultra/config_short.yaml"
-ng_e2e_collect_rollouts \
-    "+config_paths=[${config_paths}]" \
+gym eval run \
+    --config benchmarks/nemotron_3_ultra/local_endpoint.yaml \
+    --config benchmarks/nemotron_3_ultra/config_short.yaml \
     +wandb_project=$WANDB_PROJECT \
     +wandb_name=$EXPERIMENT_NAME \
     ++output_jsonl_fpath=results/$EXPERIMENT_NAME.jsonl \
@@ -105,10 +102,9 @@ ng_e2e_collect_rollouts \
 WANDB_PROJECT=<>
 EXPERIMENT_NAME=<>
 
-config_paths="benchmarks/nemotron_3_ultra/local_endpoint_no_gpus.yaml,\
-benchmarks/nemotron_3_ultra/config_short_no_gpus.yaml"
-ng_e2e_collect_rollouts \
-    "+config_paths=[${config_paths}]" \
+gym eval run \
+    --config benchmarks/nemotron_3_ultra/local_endpoint_no_gpus.yaml \
+    --config benchmarks/nemotron_3_ultra/config_short_no_gpus.yaml \
     +wandb_project=$WANDB_PROJECT \
     +wandb_name=$EXPERIMENT_NAME \
     ++output_jsonl_fpath=results/$EXPERIMENT_NAME.jsonl \

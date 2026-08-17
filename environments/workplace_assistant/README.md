@@ -1,6 +1,6 @@
 # Description
 
-1. Environment: This is a tool use - multi step agentic environment that tests the agents ability to execute tasks in a workplace setting. Workplace assistant contains a sandbox environment with five databases, 26 tools, and 690 tasks. These tasks represent common business activities, such as sending emails and scheduling meetings.
+1. Environment: This is a tool use - multi step agentic environment that tests the agents ability to execute tasks in a workplace setting. Workplace assistant contains a sandbox environment with five databases, 27 tools, and 690 tasks. These tasks represent common business activities, such as sending emails and scheduling meetings.
 2. Domain: Business activities
 3. Source of prompts: 
 - Full set of prompts (1260): https://huggingface.co/datasets/nvidia/Nemotron-RL-agent-workplace_assistant
@@ -11,22 +11,23 @@ Commands -
 Spin up server:
 
 ```
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
-environments/workplace_assistant/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type openai_model \
+    --environment workplace_assistant
 ```
 
 Collect trajectories:
 ```
-ng_collect_rollouts +agent_name=workplace_assistant_simple_agent \
-    +input_jsonl_fpath=environments/workplace_assistant/data/example.jsonl \
-    +output_jsonl_fpath=results/workplace_assistant_trajectory_collection.jsonl \
-   +limit=1
+gym eval run --no-serve \
+    --agent workplace_assistant_simple_agent \
+    --input environments/workplace_assistant/data/example.jsonl \
+    --output results/workplace_assistant_trajectory_collection.jsonl \
+   --limit 1
 ```
 
 ## Generating Additional Training Data
 
-To generate your own training JSONL for this environment using NeMo Data Designer, see the [synthetic data generation example](notebooks/synthetic-data-generation/).
+To generate your own training JSONL for this environment using NeMo Data Designer, see the [synthetic data generation example](../../resources_servers/workplace_assistant/notebooks/synthetic-data-generation/).
 
 # Licensing information
 Code: Apache 2.0

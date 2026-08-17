@@ -20,7 +20,7 @@ at a pinned commit into a local `.ifbench/` folder and add it to sys.path.
 This way, we can just `import instructions_registry`.
 
 IFbench dependencies (spaCy, nltk, syllapy, etc.) are listed in requirements.txt
-and installed during `ng_run`. The `.installed` marker tracks whether the git
+and installed during `gym env start`. The `.installed` marker tracks whether the git
 clone has been done.
 """
 

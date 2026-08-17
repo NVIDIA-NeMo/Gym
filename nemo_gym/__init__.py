@@ -12,9 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
+import os
 import sys
 from os import environ
 from pathlib import Path
+from typing import Callable, List, Optional, Union
 
 
 # /path/to/dir/Gym (PARENT_DIR)
@@ -35,7 +38,91 @@ WORKING_DIR = PARENT_DIR if _is_editable_install else Path.cwd()
 CACHE_DIR = WORKING_DIR / "cache"
 RESULTS_DIR = WORKING_DIR / "results"
 
-sys.path.append(str(PARENT_DIR))
+
+# Extra component/artifact search roots, `os.pathsep`-separated. The single source of extra roots — the
+# CLI's `--search-dir` is folded into this var (see nemo_gym.cli.main), so flag and env var are one channel.
+# Read at call time so it reflects the current environment (incl. spawned server subprocesses).
+NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME = "NEMO_GYM_EXTRA_ROOTS"
+
+
+def _extra_roots() -> List[Path]:
+    return [Path(d) for d in os.environ.get(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, "").split(os.pathsep) if d]
+
+
+def component_search_roots(*, sys_path: List[Path] | None = None) -> List[Path]:
+    """Ordered, de-duplicated roots to look for a Gym component/artifact under: the ``NEMO_GYM_EXTRA_ROOTS``
+    roots first, then cwd and the install root (``PARENT_DIR``, the built-ins) last.
+
+    Earlier roots win on a name collision, so user components shadow built-ins. De-duplicated by resolved
+    path, since cwd/install root coincide in an editable checkout. The single source of truth for where Gym
+    looks for components — used by path resolution (:func:`_resolve_under_cwd_or_install`), module imports
+    (:func:`_augment_sys_path`) and the ``gym list``/``gym search`` discovery functions.
+
+    ``sys_path`` weaves existing ``sys.path`` entries in for import precedence: they slot in after the extra
+    roots but before cwd/built-ins. Any entry that is itself cwd or the install root is dropped so those two
+    always stay last — matching the file-lookup order even in a wheel install, where the install root is
+    already on ``sys.path`` as ``site-packages``.
+    """
+    # cwd and the built-ins are always searched last; drop them from the woven sys.path entries so they
+    # can't get pinned mid-path (e.g. site-packages == PARENT_DIR in a wheel install).
+    trailing = [Path.cwd(), PARENT_DIR]
+    trailing_resolved = {root.resolve() for root in trailing}
+    middle = [entry for entry in (sys_path or []) if entry.resolve() not in trailing_resolved]
+    candidates = [*_extra_roots(), *middle, *trailing]
+    roots: List[Path] = []
+    seen: set[Path] = set()
+    for root in candidates:
+        resolved = root.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            roots.append(root)
+    return roots
+
+
+def _resolve_under_cwd_or_install(
+    rel_path: Union[str, Path], *, validator: Optional[Callable[[Path], bool]] = None
+) -> Path:
+    """Resolve a possibly-relative path for *reading* a built-in or user-supplied file against the ordered
+    :func:`component_search_roots`.
+
+    Absolute paths are returned unchanged. A relative path is returned rooted at the first root where it
+    exists (earliest-wins: extra roots > cwd > install root), so a repo-relative path like
+    ``benchmarks/<name>/config.yaml`` or ``resources_servers/<env>/data/example.jsonl`` resolves by name
+    from any cwd or plugin root. ``validator`` overrides the default ``Path.exists`` check — pass it when a
+    candidate is valid only if specific markers are present (e.g. a server dir must ship
+    ``requirements.txt`` or ``pyproject.toml``). If nothing matches, the path under the highest-priority
+    root is returned so error messages point at the user's own location.
+
+    Use this for read paths only — never for write targets (e.g. metrics written next to a dataset), which
+    must stay relative to the user's writable cwd rather than the install root.
+    """
+    p = Path(rel_path)
+    if p.is_absolute():
+        return p
+    is_valid = validator if validator is not None else Path.exists
+    roots = component_search_roots()
+    for root in roots:
+        candidate = root / p
+        if is_valid(candidate):
+            return candidate
+    return roots[0] / p
+
+
+def _augment_sys_path() -> None:
+    """Put the artifact roots on ``sys.path`` so plugin modules (e.g. a benchmark's ``prepare.py``) import.
+
+    Extra roots go to the front and cwd/``PARENT_DIR`` (the built-ins) to the end, so import precedence
+    matches file resolution under :func:`component_search_roots` (a plugin shadows a same-named Gym module).
+    Idempotent; reads ``NEMO_GYM_EXTRA_ROOTS`` at call time, so it can be re-run after ``--search-dir`` folds
+    roots into the env (see nemo_gym.cli.main).
+    """
+    new_path = [str(root) for root in component_search_roots(sys_path=(Path(path) for path in sys.path))]
+    logging.debug(f"Replacing sys.path {sys.path} with {new_path}")
+    sys.path[:] = new_path
+
+
+_augment_sys_path()
+
 
 # TODO: Maybe eventually we want an override for OMP_NUM_THREADS ?
 
@@ -74,3 +161,81 @@ from nemo_gym.package_info import (
     __shortversion__,
     __version__,
 )
+
+
+# Public API surface for downstream environment, agent, and model authors.
+#
+# Symbols are resolved lazily via PEP 562.
+# Importing ``nemo_gym`` does not eagerly pull in FastAPI, pydantic, OpenAI, or the server stack.
+# Keep this surface focused on common extension points and boundary types.
+# Specialized implementation types remain available from their defining modules.
+#
+# Maps each public name to its defining submodule. Existing deep import paths continue to work.
+_LAZY_EXPORTS: dict[str, str] = {
+    # Resources server extension points and contracts
+    "BaseResourcesServerConfig": "base_resources_server",
+    "SimpleResourcesServer": "base_resources_server",
+    "BaseRunRequest": "base_resources_server",
+    "BaseVerifyRequest": "base_resources_server",
+    "BaseVerifyResponse": "base_resources_server",
+    "BaseMultiRewardVerifyResponse": "base_resources_server",
+    "BaseSeedSessionRequest": "base_resources_server",
+    "BaseSeedSessionResponse": "base_resources_server",
+    "ReverifyMode": "base_resources_server",
+    # Agent and model extension points
+    "BaseResponsesAPIAgentConfig": "base_responses_api_agent",
+    "SimpleResponsesAPIAgent": "base_responses_api_agent",
+    "BaseResponsesAPIModelConfig": "base_responses_api_model",
+    "SimpleResponsesAPIModel": "base_responses_api_model",
+    # Common server-client utilities
+    "ServerClient": "server_utils",
+    "raise_for_status": "server_utils",
+    "get_response_json": "server_utils",
+    "SESSION_ID_KEY": "server_utils",
+    # Author-facing config and metrics types
+    "BaseServerConfig": "config_types",
+    "BaseRunServerInstanceConfig": "config_types",
+    "Domain": "config_types",
+    "AggregateMetrics": "config_types",
+    "AggregateMetricsRequest": "config_types",
+    "ModelServerRef": "config_types",
+    # High-level OpenAI-compatible client and API boundary types
+    "NeMoGymAsyncOpenAI": "openai_utils",
+    "NeMoGymResponse": "openai_utils",
+    "NeMoGymResponseCreateParamsNonStreaming": "openai_utils",
+    "NeMoGymChatCompletion": "openai_utils",
+    "NeMoGymChatCompletionCreateParamsNonStreaming": "openai_utils",
+}
+
+# Eagerly-defined names (path constants + package metadata) that live directly in this module.
+_EAGER_PUBLIC: tuple[str, ...] = (
+    "ROOT_DIR",
+    "PARENT_DIR",
+    "WORKING_DIR",
+    "CACHE_DIR",
+    "RESULTS_DIR",
+    "__version__",
+    "__package_name__",
+)
+
+__all__ = sorted({*_EAGER_PUBLIC, *_LAZY_EXPORTS})
+
+
+def __getattr__(name: str):
+    # PEP 562 calls module-level __getattr__ only for names that are absent from the module globals.
+    # Eager symbols and resolved lazy symbols never reach this function.
+    module_name = _LAZY_EXPORTS.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    import importlib
+
+    module = importlib.import_module(f"{__name__}.{module_name}")
+    value = getattr(module, name)
+    # Cache on the package so subsequent lookups skip __getattr__ entirely.
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted({*globals(), *_LAZY_EXPORTS})

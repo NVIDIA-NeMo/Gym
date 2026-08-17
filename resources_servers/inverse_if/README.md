@@ -6,17 +6,18 @@ Evaluates model responses on the **Inverse IF** (Instruction Following) benchmar
 
 ```bash
 # 1. Run unit tests
-ng_test +entrypoint=resources_servers/inverse_if
+gym env test --resources-server inverse_if
 
 # 2. Start servers (in terminal 1)
-config_paths="resources_servers/inverse_if/configs/inverse_if.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml"
-ng_run "+config_paths=[${config_paths}]"
+gym env start \
+    --resources-server inverse_if \
+    --model-type vllm_model
 
 # 3. Collect rollouts on example data (in terminal 2)
-ng_collect_rollouts \
-  +agent_name=inverse_if_simple_agent \
-  +input_jsonl_fpath=resources_servers/inverse_if/data/example.jsonl \
-  +output_jsonl_fpath=/tmp/inverse_if_rollouts.jsonl
+gym eval run --no-serve \
+  --agent inverse_if_simple_agent \
+  --input resources_servers/inverse_if/data/example.jsonl \
+  --output /tmp/inverse_if_rollouts.jsonl
 ```
 
 ## Overview
@@ -58,10 +59,10 @@ The environment:
 The `data/example.jsonl` file contains 3 synthetic tasks ready to use:
 
 ```bash
-ng_collect_rollouts \
-  +agent_name=inverse_if_simple_agent \
-  +input_jsonl_fpath=resources_servers/inverse_if/data/example.jsonl \
-  +output_jsonl_fpath=/tmp/test_rollouts.jsonl
+gym eval run --no-serve \
+  --agent inverse_if_simple_agent \
+  --input resources_servers/inverse_if/data/example.jsonl \
+  --output /tmp/test_rollouts.jsonl
 ```
 
 ### Option B: Full Dataset Setup
@@ -88,10 +89,10 @@ ng_collect_rollouts \
 
 2. **Run on full dataset**:
    ```bash
-   ng_collect_rollouts \
-     +agent_name=inverse_if_simple_agent \
-     +input_jsonl_fpath=resources_servers/inverse_if/data/inverse_if.jsonl \
-     +output_jsonl_fpath=/tmp/inverse_if_rollouts.jsonl
+   gym eval run --no-serve \
+     --agent inverse_if_simple_agent \
+     --input resources_servers/inverse_if/data/inverse_if.jsonl \
+     --output /tmp/inverse_if_rollouts.jsonl
    ```
 
 ## Testing
@@ -100,7 +101,7 @@ ng_collect_rollouts \
 
 ```bash
 # Run all unit tests
-ng_test +entrypoint=resources_servers/inverse_if
+gym env test --resources-server inverse_if
 
 # Or run directly with pytest
 cd resources_servers/inverse_if
@@ -117,17 +118,18 @@ Tests cover:
 
 1. **Start servers**:
    ```bash
-   config_paths="resources_servers/inverse_if/configs/inverse_if.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml"
-   ng_run "+config_paths=[${config_paths}]"
+   gym env start \
+       --resources-server inverse_if \
+       --model-type vllm_model
    ```
 
 2. **In another terminal, run on example data**:
    ```bash
-   ng_collect_rollouts \
-     +agent_name=inverse_if_simple_agent \
-     +input_jsonl_fpath=resources_servers/inverse_if/data/example.jsonl \
-     +output_jsonl_fpath=/tmp/inverse_if_rollouts.jsonl \
-     +limit=3
+   gym eval run --no-serve \
+     --agent inverse_if_simple_agent \
+     --input resources_servers/inverse_if/data/example.jsonl \
+     --output /tmp/inverse_if_rollouts.jsonl \
+     --limit 3
    ```
 
 3. **View results**:
@@ -227,7 +229,7 @@ Each line contains:
 Key transformations:
 - Inconsistent rubric keys normalised to `{"id", "criteria"}`
 - Per-task judge template and system prompt extracted from messages
-- `responses_create_params` wraps input for `ng_collect_rollouts`
+- `responses_create_params` wraps input for `gym eval run --no-serve`
 - `model_responses` are discarded
 
 ## File Structure

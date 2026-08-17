@@ -21,14 +21,16 @@ policy_model_name: "Qwen/Qwen3-4B-Instruct-2507"
 
 ```
 # start nemo gym servers
-ng_run "+config_paths=[responses_api_agents/verifiers_agent/configs/acereason-math.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+gym env start \
+    --config responses_api_agents/verifiers_agent/configs/acereason-math.yaml \
+    --model-type vllm_model
 
 # generate a rollout
-ng_collect_rollouts \
-    +agent_name=verifiers_agent \
-    +input_jsonl_fpath=responses_api_agents/verifiers_agent/data/acereason-math-example.jsonl \
-    +output_jsonl_fpath=responses_api_agents/verifiers_agent/data/acereason-math-example-rollouts.jsonl \
-    +limit=1
+gym eval run --no-serve \
+    --agent verifiers_agent \
+    --input responses_api_agents/verifiers_agent/data/acereason-math-example.jsonl \
+    --output responses_api_agents/verifiers_agent/data/acereason-math-example-rollouts.jsonl \
+    --limit 1
 
 # view the rollout
 tail -n 1 responses_api_agents/verifiers_agent/data/acereason-math-example-rollouts.jsonl | jq | less
@@ -98,21 +100,23 @@ deactivate
 source .venv/bin/activate
 
 # start nemo gym servers
-ng_run "+config_paths=[responses_api_agents/verifiers_agent/configs/ascii-tree.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+gym env start \
+    --config responses_api_agents/verifiers_agent/configs/ascii-tree.yaml \
+    --model-type vllm_model
 
 # generate a rollout
-ng_collect_rollouts \
-    +agent_name=verifiers_agent \
-    +input_jsonl_fpath=responses_api_agents/verifiers_agent/data/ascii-tree-example.jsonl \
-    +output_jsonl_fpath=responses_api_agents/verifiers_agent/data/ascii-tree-example-rollouts.jsonl \
-    +limit=1
+gym eval run --no-serve \
+    --agent verifiers_agent \
+    --input responses_api_agents/verifiers_agent/data/ascii-tree-example.jsonl \
+    --output responses_api_agents/verifiers_agent/data/ascii-tree-example-rollouts.jsonl \
+    --limit 1
 ```
 
 ## Integration notes
 
 The patch to include prompt and generation token ids for preventing retokenization error when training with NeMo RL has been upstreamed into verifiers' `NeMoRLChatCompletionsClient`. We currently track verifiers `main` (`git+https://github.com/PrimeIntellect-ai/verifiers.git@main`) for this support; once verifiers `0.1.13` is released, the requirements pin will move to that tagged version.
 
-For installing new prime environments and generating datasets, use a separate venv (outside of Gym) to avoid dependency conflicts with the `exclude-dependencies` section of Gym `pyproject.toml` and the server's pinned verifiers version. After generating your dataset, deactivate the separate venv and return to the Gym venv for running servers. Make sure to restart NeMo Gym servers with `ng_run` after any environment changes to ensure the pinned version of verifiers is used.
+For installing new prime environments and generating datasets, use a separate venv (outside of Gym) to avoid dependency conflicts with the `exclude-dependencies` section of Gym `pyproject.toml` and the server's pinned verifiers version. After generating your dataset, deactivate the separate venv and return to the Gym venv for running servers. Make sure to restart NeMo Gym servers with `gym env start` after any environment changes to ensure the pinned version of verifiers is used.
 
 # Licensing information
 Code: Apache 2.0

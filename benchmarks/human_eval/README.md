@@ -20,23 +20,23 @@ holds the dataset definition + prompt + prepare script.
 
 ```bash
 # Prepare benchmark data
-ng_prepare_benchmark "+config_paths=[benchmarks/human_eval/config.yaml]"
+gym eval prepare --benchmark human_eval
 
 # Running servers
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/human_eval/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark human_eval
 
 # Collecting rollouts. The +prompt_config= override is required because
 # the prepared JSONL stores raw `question` rows (no `responses_create_params.input`);
-# ng_collect_rollouts does not pick up the `prompt_config:` field on the dataset
-# entry in config.yaml the way ng_run does.
-ng_collect_rollouts \
-    +agent_name=human_eval_evalplus_simple_agent \
-    +input_jsonl_fpath=benchmarks/human_eval/data/human_eval_benchmark.jsonl \
-    +prompt_config=benchmarks/prompts/generic/codegen.yaml \
-    +output_jsonl_fpath=results/human_eval_rollouts.jsonl \
-    +num_repeats=4
+# gym eval run --no-serve does not pick up the `prompt_config:` field on the dataset
+# entry in config.yaml the way gym env start does.
+gym eval run --no-serve \
+    --agent human_eval_evalplus_simple_agent \
+    --input benchmarks/human_eval/data/human_eval_benchmark.jsonl \
+    --prompt-config benchmarks/prompts/generic/codegen.yaml \
+    --output results/human_eval_rollouts.jsonl \
+    --num-repeats 4
 ```
 
 Start vLLM with `--reasoning-parser <name>` (e.g. `deepseek_r1` for

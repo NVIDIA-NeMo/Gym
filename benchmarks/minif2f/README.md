@@ -13,7 +13,7 @@ evaluation protocol).
 ## Preparation
 
 ```bash
-ng_prepare_benchmark "+config_paths=[benchmarks/minif2f/config.yaml]"
+gym eval prepare --benchmark minif2f
 ```
 
 Downloads the source JSONL, splits header from theorem body, strips `sorry`
@@ -30,21 +30,22 @@ and set `NEMO_SKILLS_SANDBOX_HOST` / `NEMO_SKILLS_SANDBOX_PORT` before starting
 the server.
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/minif2f/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark minif2f
 ```
 
 ## Collecting rollouts
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=minif2f_math_formal_lean_simple_agent \
-    +input_jsonl_fpath=benchmarks/minif2f/data/minif2f_benchmark.jsonl \
-    +output_jsonl_fpath=results/minif2f_rollouts.jsonl \
-    +num_repeats=32 \
-    +prompt_config=benchmarks/prompts/lean4/formal-proof-deepseek-prover-v2.yaml \
-    "+responses_create_params={max_output_tokens: 16384, temperature: 1.0}"
+gym eval run --no-serve \
+    --agent minif2f_math_formal_lean_simple_agent \
+    --input benchmarks/minif2f/data/minif2f_benchmark.jsonl \
+    --output results/minif2f_rollouts.jsonl \
+    --num-repeats 32 \
+    --prompt-config benchmarks/prompts/lean4/formal-proof-deepseek-prover-v2.yaml \
+    --temperature 1.0 \
+    --max-output-tokens 16384
 ```
 
 Reproduce published miniF2F numbers on a DeepSeek-Prover / Goedel-Prover class

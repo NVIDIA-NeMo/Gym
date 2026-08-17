@@ -31,16 +31,18 @@ policy_model_name: gpt-5-2025-08-07  # or gpt-4.1-2025-04-14
 ```bash
 cd /path/to/Gym
 source .venv/bin/activate
-ng_run "+config_paths=[resources_servers/verifif/configs/verifif.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
+gym env start \
+    --resources-server verifif \
+    --model-type openai_model
 ```
 
 ### 3. Run a test
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=verifif_simple_agent \
-    +input_jsonl_fpath=resources_servers/verifif/data/example.jsonl \
-    +output_jsonl_fpath=results.jsonl
+gym eval run --no-serve \
+    --agent verifif_simple_agent \
+    --input resources_servers/verifif/data/example.jsonl \
+    --output results.jsonl
 ```
 
 ## Architecture
@@ -243,7 +245,7 @@ For high-throughput training:
 
 View server logs:
 ```bash
-# Check terminal output from ng_run
+# Check terminal output from gym env start
 # Or view Ray dashboard at http://127.0.0.1:8265
 ```
 

@@ -15,7 +15,7 @@ PUBLISH_WORKFLOW := Publish Fern Docs
 .DEFAULT_GOAL := help
 
 .PHONY: help \
-        docs docs-check docs-preview docs-publish docs-login docs-generate-library
+        docs docs-check docs-preview docs-publish docs-login docs-login-remote docs-generate-library
 
 help:
 	@echo ""
@@ -57,14 +57,18 @@ docs-login:
 	@echo ""
 	@echo "      https://dashboard.buildwithfern.com/login"
 	@echo ""
-	@echo "  in a browser and sign in with your @nvidia.com email. Use the"
-	@echo "  email / magic-link flow — NOT the Google SSO button — because"
-	@echo "  Google sign-in does not always provision the account record"
-	@echo "  that the CLI later needs."
+	@echo "  in a browser and sign in:"
+	@echo "    - NVIDIA employees: use your @nvidia.com email"
+	@echo "    - External contributors: any email works (Fern provisions a"
+	@echo "      personal account)"
+	@echo "  Use the email / magic-link flow — NOT the Google SSO button —"
+	@echo "  because Google sign-in does not always provision the account"
+	@echo "  record that the CLI later needs."
 	@echo ""
-	@echo "  External contributors: any email works (Fern provisions a"
-	@echo "  personal account); ask in #fern to be added to the 'nvidia'"
-	@echo "  org if you want to run library autodoc generation."
+	@echo "  Docs PRs do not require org membership — edit MDX and rely on"
+	@echo "  CI/preview. For local autodoc only, open a GitHub issue titled"
+	@echo "  'Fern nvidia org access request' (label community-request)."
+	@echo "  NVIDIA employees with Slack can also ask in #fern."
 	@echo ""
 	@echo "  Step 2: confirm the 'nvidia' organization shows in the"
 	@echo "  dashboard sidebar. If it doesn't, you signed in with the wrong"
@@ -80,7 +84,14 @@ docs-login:
 		*) echo ""; echo "Bailing. Open the dashboard URL above, sign in, then re-run 'make docs-login'."; exit 1 ;; \
 	esac
 	@echo ""
-	npx -y fern-api@latest login
+	npx -y fern-api@latest login $(LOGIN_FLAGS)
+
+# Same as docs-login, but uses Fern's device-code flow instead of opening a
+# browser locally — needed on headless remote machines (SSH dev boxes, etc.)
+# where the OAuth callback can't reach a browser. Prints a URL + short code
+# you complete on your laptop.
+docs-login-remote: LOGIN_FLAGS := --device-code
+docs-login-remote: docs-login
 
 # Local-only preview. `fern docs md generate` populates fern/product-docs/ from
 # the nemo_gym package source (declared under `libraries:` in fern/docs.yml);

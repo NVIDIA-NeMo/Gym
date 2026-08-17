@@ -6,3 +6,4 @@ policy_model:
       openai_api_key: ${policy_api_key}
       openai_model: ${policy_model_name}
       openai_default_headers: {}
+      drop_input_reasoning_items: ${oc.env:POLICY_DROP_REASONING_ITEMS,false}

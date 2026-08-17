@@ -1,0 +1,8 @@
+-e nemo-gym[dev] @ ../..
+# The executed SciCode solutions + test helpers import these at runtime, so they must be in
+# this server's venv. scipy>=1.14.1 is required for Python 3.13 wheels.
+scipy>=1.14.1
+numpy
+matplotlib
+h5py
+sympy

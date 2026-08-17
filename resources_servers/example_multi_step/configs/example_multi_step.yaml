@@ -19,7 +19,11 @@ example_multi_step_simple_agent:
       - name: train
         type: train
         jsonl_fpath: resources_servers/example_multi_step/data/train.jsonl
-        gitlab_identifier:
+        # Unified dataset source. `type` selects the backend; the remaining
+        # fields are backend-specific. This replaces the deprecated gitlab_identifier:/
+        # huggingface_identifier: blocks (which still work but are no longer recommended).
+        source:
+          type: gitlab
           dataset_name: example_multi_step
           version: 0.0.1
           artifact_fpath: train.jsonl
@@ -27,10 +31,16 @@ example_multi_step_simple_agent:
       - name: validation
         type: validation
         jsonl_fpath: resources_servers/example_multi_step/data/validation.jsonl
-        gitlab_identifier:
+        source:
+          type: gitlab
           dataset_name: example_multi_step
           version: 0.0.1
           artifact_fpath: validation.jsonl
+        # A HuggingFace-hosted split would instead look like:
+        #   source:
+        #     type: huggingface
+        #     repo_id: nvidia/example_multi_step
+        #     artifact_fpath: validation.jsonl   # optional
         license: Apache 2.0
       - name: example
         type: example

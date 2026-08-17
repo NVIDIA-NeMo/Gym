@@ -7,15 +7,15 @@ Math benchmark from [google-deepmind/superhuman](https://github.com/google-deepm
 `prepare.py` downloads `proofbench.csv` from the exact pinned superhuman commit Skills uses (`c1ee02e03d4cdb2ab21cd01ac927d895f5287fc8`) and writes `data/imo_proofbench_benchmark.jsonl`. Each row carries `problem`, `reference_solution`, `rubric`, plus `problem_id` / `category` / `level` / `expected_answer` / `source`.
 
 ```bash
-ng_prepare_benchmark "+config_paths=[benchmarks/imo_proofbench/config.yaml]"
+gym eval prepare --benchmark imo_proofbench
 ```
 
 ## Run servers
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/imo_proofbench/config.yaml"
-ng_run "+config_paths=[$config_paths]" \
+gym env start \
+    --model-type vllm_model \
+    --benchmark imo_proofbench \
     +judge_base_url=https://generativelanguage.googleapis.com/v1beta/openai \
     "+judge_api_key=$GEMINI_API_KEY" \
     +judge_model_name=gemini-2.5-pro
@@ -25,16 +25,16 @@ ng_run "+config_paths=[$config_paths]" \
 
 `prepare.py` writes raw problem fields and does **not** bake
 `responses_create_params.input` into each row. Pass `+prompt_config` so
-`ng_collect_rollouts` materialises the chat messages from
+`gym eval run --no-serve` materialises the chat messages from
 `prompts/default.yaml` at rollout time:
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=imo_proofbench_imo_proofbench_judge_simple_agent \
-    +prompt_config=benchmarks/imo_proofbench/prompts/default.yaml \
-    +input_jsonl_fpath=benchmarks/imo_proofbench/data/imo_proofbench_benchmark.jsonl \
-    +output_jsonl_fpath=results/imo_proofbench_rollouts.jsonl \
-    +num_repeats=4 \
+gym eval run --no-serve \
+    --agent imo_proofbench_imo_proofbench_judge_simple_agent \
+    --input benchmarks/imo_proofbench/data/imo_proofbench_benchmark.jsonl \
+    --output results/imo_proofbench_rollouts.jsonl \
+    --num-repeats 4 \
+    --prompt-config benchmarks/imo_proofbench/prompts/default.yaml \
     +num_repeats_add_seed=true
 ```
 

@@ -23,7 +23,7 @@ python resources_servers/code_gen/scripts/preprocess_train_dataset.py
 
 Upload:
 ```bash
-ng_upload_dataset_to_gitlab \
+gym dataset upload --storage gitlab \
     +dataset_name=opencodereasoning_filtered \
     +version=0.0.1 \
     +input_jsonl_fpath=resources_servers/code_gen/data/opencodereasoning_filtered_25k_train.jsonl
@@ -31,7 +31,7 @@ ng_upload_dataset_to_gitlab \
 
 Rollout collection. We match the LCB setting for reward profiling. For gpt-4o-2024-05-13 this should be around 33%.
 ```bash
-ng_collect_rollouts +agent_name=code_gen_simple_agent \
+gym eval run --no-serve +agent_name=code_gen_simple_agent \
     +input_jsonl_fpath=resources_servers/code_gen/data/opencodereasoning_filtered_25k_train.jsonl \
     +output_jsonl_fpath=resources_servers/code_gen/data/opencodereasoning_filtered_25k_train_1k_gpt-4o-2024-05-13_rollouts.jsonl \
     +responses_create_params.temperature=0.2 \

@@ -16,7 +16,7 @@
 
 Hits ``format_entry`` with hand-rolled instruction dicts; does NOT
 network out to HuggingFace or the upstream PolyMath repo (those are
-covered by the on-cluster ``ng_prepare_benchmark`` step).
+covered by the on-cluster ``gym eval prepare`` step).
 """
 
 from benchmarks.polymath.prepare import DIFFICULTY_LEVEL_DIC, QUESTION_TEMPLATE, format_entry

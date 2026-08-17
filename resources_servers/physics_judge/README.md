@@ -32,10 +32,10 @@ existing math_with_judge consumers (`aime24`, `aime25`, `gsm8k`,
 ## Running servers
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-resources_servers/physics_judge/configs/physics_judge.yaml,\
-resources_servers/physics_judge/configs/judge_openai.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --resources-server physics_judge \
+    --resources-server physics_judge/judge_openai
 ```
 
 The bundled `judge_openai.yaml` defaults the judge to `openai/gpt-oss-20b`
@@ -53,11 +53,11 @@ CLI, or replace `judge_openai.yaml` with your own config that defines a
 ## Collecting rollouts
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=physics_judge_simple_agent \
-    +input_jsonl_fpath=resources_servers/physics_judge/data/example.jsonl \
-    +output_jsonl_fpath=results/physics_judge_rollouts.jsonl \
-    +num_repeats=1
+gym eval run --no-serve \
+    --agent physics_judge_simple_agent \
+    --input resources_servers/physics_judge/data/example.jsonl \
+    --output results/physics_judge_rollouts.jsonl \
+    --num-repeats 1
 ```
 
 ## Metrics

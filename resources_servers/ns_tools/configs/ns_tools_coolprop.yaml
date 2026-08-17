@@ -1,0 +1,12 @@
+ns_tools_coolprop:
+  resources_servers:
+    ns_tools_coolprop:
+      entrypoint: app.py
+      default_verifier: math_with_judge
+      verifiers: {}
+      nemo_skills_tools:
+        - nemo_skills.mcp.servers.coolprop_tool.CoolPropTool
+      domain: agent
+      verified: false
+      description: NeMo Skills CoolProp thermophysical fluid property tool
+      value: Enable fluid property lookup through NeMo Skills MCP tools

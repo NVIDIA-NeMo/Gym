@@ -32,7 +32,7 @@ resulting JSONL back into ``prepare`` via ``--baseline-file``.
 When ``--baseline-file`` is omitted, ``baseline_answer`` is set to the
 empty string so the JSONL is still well-formed for tooling that only
 needs the question set (e.g. data exploration or Skills-vs-Gym prepare
-parity checks). ``ng_prepare_benchmark`` calls ``prepare()`` with no
+parity checks). ``gym eval prepare`` calls ``prepare()`` with no
 arguments and so always takes this no-baseline path; use the script
 entry-point (``python prepare.py --baseline-file ...``) for full
 arena_judge runs.
@@ -82,7 +82,7 @@ def _format_entry(row: dict, language: str) -> dict:
 def prepare(languages: list[str] | None = None, baseline_file: str | None = None) -> Path:
     """Download m-ArenaHard from HF, optionally join baselines, write JSONL.
 
-    Called with no arguments by ``ng_prepare_benchmark``. Returns the
+    Called with no arguments by ``gym eval prepare``. Returns the
     path to the written JSONL.
     """
     DATA_DIR.mkdir(parents=True, exist_ok=True)

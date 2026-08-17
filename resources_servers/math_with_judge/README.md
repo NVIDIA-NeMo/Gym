@@ -11,38 +11,38 @@ on Hugging Face.
 ## Running servers
 The following are example commands for running this resources server, along with the simple agent and an OpenAI model:
 ```bash
-config_paths="responses_api_models/openai_model/configs/openai_model.yaml, \
-resources_servers/math_with_judge/configs/math_with_judge.yaml"
-ng_run "+config_paths=[$config_paths]" \
+gym env start \
+    --model-type openai_model \
+    --resources-server math_with_judge \
     +math_with_judge.resources_servers.math_with_judge.judge_model_server.name=policy_model
 ```
 
 To download the OpenMathReasoning dataset, the following command can be run:
 ```bash
-ng_download_dataset_from_gitlab \
-    +dataset_name=math_open_math_reasoning \
-    +version=0.0.1 \
-    +artifact_fpath=open_math_reasoning_problems.jsonl \
-    +output_fpath=data/open_math_reasoning_problems.jsonl
+gym dataset download --storage gitlab \
+    --name math_open_math_reasoning \
+    --revision 0.0.1 \
+    --artifact open_math_reasoning_problems.jsonl \
+    --output data/open_math_reasoning_problems.jsonl
 ```
 
 Then, rollouts can be collected using a command such as the following:
 ```bash
-ng_collect_rollouts \
-    +agent_name=math_with_judge_simple_agent \
-    +input_jsonl_fpath=data/open_math_reasoning_problems.jsonl \
-    +output_jsonl_fpath=results/example_open_math_reasoning_verify_responses.jsonl \
-    +limit=5
+gym eval run --no-serve \
+    --agent math_with_judge_simple_agent \
+    --input data/open_math_reasoning_problems.jsonl \
+    --output results/example_open_math_reasoning_verify_responses.jsonl \
+    --limit 5
 ```
 
 ## Prepare for trajectory collection
 ```bash
-config_paths="resources_servers/math_with_judge/configs/dapo17k_trajectory_collection.yaml,\
-responses_api_models/openai_model/configs/openai_model.yaml"
-ng_prepare_data "+config_paths=[$config_paths]" \
-    +output_dirpath=data/dapo17k_trajectory_collection \
-    +mode=train_preparation \
-    +should_download=true
+gym dataset collate \
+    --config resources_servers/math_with_judge/configs/dapo17k_trajectory_collection.yaml \
+    --config responses_api_models/openai_model/configs/openai_model.yaml \
+    --output-dir data/dapo17k_trajectory_collection \
+    --mode train_preparation \
+    --download
 ```
 
 # Licensing information

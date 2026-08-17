@@ -46,16 +46,16 @@ compute pass@k for each separately.
 
 ```bash
 # Running servers
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-resources_servers/evalplus/configs/evalplus.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --resources-server evalplus
 
 # Collecting rollouts (5-example smoke test)
-ng_collect_rollouts \
-    +agent_name=evalplus_simple_agent \
-    +input_jsonl_fpath=resources_servers/evalplus/data/example.jsonl \
-    +output_jsonl_fpath=results/evalplus_rollouts.jsonl \
-    +num_repeats=1
+gym eval run --no-serve \
+    --agent evalplus_simple_agent \
+    --input resources_servers/evalplus/data/example.jsonl \
+    --output results/evalplus_rollouts.jsonl \
+    --num-repeats 1
 ```
 
 Start vLLM with `--reasoning-parser <name>` (e.g. `deepseek_r1` for

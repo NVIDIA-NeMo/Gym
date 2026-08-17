@@ -9,7 +9,9 @@ Example data provided in `data/example.jsonl` (system prompt only, no verifier_m
 ## Run
 
 ```bash
-ng_run "+config_paths=[resources_servers/blackjack/configs/blackjack.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+gym env start \
+    --resources-server blackjack \
+    --model-type vllm_model
 ```
 
 ## Data
@@ -19,8 +21,8 @@ Each game is generated on the fly during `reset()`, so every row in `example.jso
 ## Collect rollouts
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=blackjack_gymnasium_agent \
-    +input_jsonl_fpath=resources_servers/blackjack/data/example.jsonl \
-    +output_jsonl_fpath=results/blackjack_rollouts.jsonl
+gym eval run --no-serve \
+    --agent blackjack_gymnasium_agent \
+    --input resources_servers/blackjack/data/example.jsonl \
+    --output results/blackjack_rollouts.jsonl
 ```
