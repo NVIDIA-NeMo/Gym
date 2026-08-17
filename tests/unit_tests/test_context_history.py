@@ -3,15 +3,17 @@
 
 from nemo_gym.context_history import (
     ContextGuardConfig,
+    ContextHistoryConfig,
     ContextMeasurements,
     HistoryController,
     HistoryPolicyConfig,
     IdentityHistoryPolicy,
+    ImageRecencyConfig,
+    ReasoningRecencyConfig,
+    RecencyHistoryPolicy,
     RecencyHistoryPolicyConfig,
     SemanticHistory,
     TurnChunkedHistoryController,
-    ContextHistoryConfig,
-    RecencyHistoryPolicy,
     assert_identity_shadow_matches,
     build_guard_outcome_records,
     build_history_policy,
@@ -38,6 +40,43 @@ def _observation(text: str, *images: str) -> dict:
     }
 
 
+def _reasoning(text: str) -> dict:
+    return {
+        "type": "reasoning",
+        "content": text,
+    }
+
+
+def _image_recency_config(
+    keep_last_groups: int,
+    *,
+    protect_initial_context: bool = True,
+    omission_marker: str | None = "[Earlier image omitted]",
+) -> RecencyHistoryPolicyConfig:
+    return RecencyHistoryPolicyConfig(
+        images=ImageRecencyConfig(
+            enabled=True,
+            protect_initial_context=protect_initial_context,
+            keep_last_groups=keep_last_groups,
+            omission_marker=omission_marker,
+        )
+    )
+
+
+def _reasoning_recency_config(
+    keep_last_blocks: int,
+    *,
+    keep_first_block: bool = False,
+) -> RecencyHistoryPolicyConfig:
+    return RecencyHistoryPolicyConfig(
+        reasoning=ReasoningRecencyConfig(
+            enabled=True,
+            keep_first_block=keep_first_block,
+            keep_last_blocks=keep_last_blocks,
+        )
+    )
+
+
 def _image_urls(items) -> list[str]:
     return [
         part["image_url"]
@@ -61,6 +100,10 @@ def _texts(items) -> list[str]:
                 if isinstance(part, dict) and part.get("type") in {"input_text", "text"}
             )
     return values
+
+
+def _reasoning_texts(items) -> list[str]:
+    return [item["content"] for item in items if item.get("type") == "reasoning"]
 
 
 def test_identity_policy_preserves_semantics_and_strips_completion_evidence():
@@ -129,7 +172,7 @@ def test_recency_protects_initial_images_and_keeps_latest_three_groups():
     history.append_items([_observation("repeat A", "data:image/png;base64,A")], turn_id=4)
     history.append_items([_observation("latest E", "data:image/png;base64,E")], turn_id=5)
 
-    policy = RecencyHistoryPolicy(RecencyHistoryPolicyConfig(keep_last_image_groups=3))
+    policy = RecencyHistoryPolicy(_image_recency_config(3))
     plan = policy.plan(history, decision_turn=6)
     view = materialize_history_view(history, plan)
 
@@ -168,7 +211,7 @@ def test_recency_policy_is_deterministic_and_does_not_mutate_history():
         history.append_items([_observation(f"turn {turn}", image)], turn_id=turn)
     original_events = history.events
 
-    policy = RecencyHistoryPolicy(RecencyHistoryPolicyConfig(keep_last_image_groups=2))
+    policy = RecencyHistoryPolicy(_image_recency_config(2))
     first = policy.plan(history, decision_turn=5)
     second = policy.plan(history, decision_turn=5)
 
@@ -187,10 +230,110 @@ def test_pending_observation_counts_toward_recency_window():
         conditions_action_turn=3,
     )
 
-    policy = RecencyHistoryPolicy(RecencyHistoryPolicyConfig(keep_last_image_groups=1))
+    policy = RecencyHistoryPolicy(_image_recency_config(1))
     view = materialize_history_view(history, policy.plan(history, decision_turn=3))
 
     assert _image_urls(view.items) == ["A", "C"]
+
+
+def test_reasoning_only_recency_keeps_first_and_latest_blocks():
+    history = SemanticHistory("rollout-reasoning-first")
+    history.append_items([_observation("initial", "A")], turn_id=0, is_initial_context=True)
+    for turn in range(1, 6):
+        history.append_items([_reasoning(f"reasoning {turn}")], turn_id=turn)
+        history.append_items([_observation(f"screen {turn}", chr(65 + turn))], turn_id=turn)
+
+    policy = RecencyHistoryPolicy(_reasoning_recency_config(2, keep_first_block=True))
+    view = materialize_history_view(history, policy.plan(history, decision_turn=6))
+
+    assert _reasoning_texts(view.items) == ["reasoning 1", "reasoning 4", "reasoning 5"]
+    assert _image_urls(view.items) == ["A", "B", "C", "D", "E", "F"]
+
+
+def test_reasoning_only_recency_can_remove_first_block():
+    history = SemanticHistory("rollout-reasoning-no-first")
+    for turn in range(1, 6):
+        history.append_items([_reasoning(f"reasoning {turn}")], turn_id=turn)
+
+    policy = RecencyHistoryPolicy(_reasoning_recency_config(2, keep_first_block=False))
+    plan = policy.plan(history, decision_turn=6)
+    view = materialize_history_view(history, plan)
+
+    assert _reasoning_texts(view.items) == ["reasoning 4", "reasoning 5"]
+    assert plan.decision.omitted_part_count == 3
+    assert len(plan.decision.changed_part_ranges) == 1
+
+
+def test_reasoning_zero_window_respects_first_block_setting():
+    history = SemanticHistory("rollout-reasoning-zero")
+    for turn in range(1, 4):
+        history.append_items([_reasoning(f"reasoning {turn}")], turn_id=turn)
+
+    protected = materialize_history_view(
+        history,
+        RecencyHistoryPolicy(_reasoning_recency_config(0, keep_first_block=True)).plan(history, decision_turn=4),
+    )
+    unprotected = materialize_history_view(
+        history,
+        RecencyHistoryPolicy(_reasoning_recency_config(0, keep_first_block=False)).plan(history, decision_turn=4),
+    )
+
+    assert _reasoning_texts(protected.items) == ["reasoning 1"]
+    assert _reasoning_texts(unprotected.items) == []
+
+
+def test_image_only_recency_preserves_all_reasoning():
+    history = SemanticHistory("rollout-image-only")
+    history.append_items([_observation("initial", "A")], turn_id=0, is_initial_context=True)
+    for turn, image in enumerate(("B", "C", "D"), start=1):
+        history.append_items([_reasoning(f"reasoning {turn}")], turn_id=turn)
+        history.append_items([_observation(f"screen {turn}", image)], turn_id=turn)
+
+    view = materialize_history_view(
+        history,
+        RecencyHistoryPolicy(_image_recency_config(1)).plan(history, decision_turn=4),
+    )
+
+    assert _image_urls(view.items) == ["A", "D"]
+    assert _reasoning_texts(view.items) == ["reasoning 1", "reasoning 2", "reasoning 3"]
+
+
+def test_image_and_reasoning_recency_compose_in_one_decision():
+    history = SemanticHistory("rollout-combined-recency")
+    history.append_items([_observation("initial", "A")], turn_id=0, is_initial_context=True)
+    for turn, image in enumerate(("B", "C", "D"), start=1):
+        history.append_items([_reasoning(f"reasoning {turn}")], turn_id=turn)
+        history.append_items([_observation(f"screen {turn}", image)], turn_id=turn)
+
+    config = RecencyHistoryPolicyConfig(
+        images=ImageRecencyConfig(enabled=True, keep_last_groups=1),
+        reasoning=ReasoningRecencyConfig(
+            enabled=True,
+            keep_first_block=True,
+            keep_last_blocks=1,
+        ),
+    )
+    plan = RecencyHistoryPolicy(config).plan(history, decision_turn=4)
+    view = materialize_history_view(history, plan)
+
+    assert _image_urls(view.items) == ["A", "D"]
+    assert _reasoning_texts(view.items) == ["reasoning 1", "reasoning 3"]
+    assert plan.decision.policy_name == "recency"
+    assert plan.decision.policy_version == "2"
+
+
+def test_reasoning_items_from_one_turn_form_one_atomic_block():
+    history = SemanticHistory("rollout-reasoning-atomic")
+    history.append_items([_reasoning("reasoning 1a"), _reasoning("reasoning 1b")], turn_id=1)
+    history.append_items([_reasoning("reasoning 2")], turn_id=2)
+    history.append_items([_reasoning("reasoning 3")], turn_id=3)
+
+    view = materialize_history_view(
+        history,
+        RecencyHistoryPolicy(_reasoning_recency_config(1, keep_first_block=True)).plan(history, decision_turn=4),
+    )
+
+    assert _reasoning_texts(view.items) == ["reasoning 1a", "reasoning 1b", "reasoning 3"]
 
 
 def test_descriptor_append_compatibility_breaks_when_recency_rewrites_view():
@@ -217,9 +360,7 @@ def test_descriptor_append_compatibility_breaks_when_recency_rewrites_view():
     history.append_items([_observation("third", "C")], turn_id=2)
     compacted = materialize_history_view(
         history,
-        RecencyHistoryPolicy(RecencyHistoryPolicyConfig(keep_last_image_groups=1)).plan(
-            history, decision_turn=2
-        ),
+        RecencyHistoryPolicy(_image_recency_config(1)).plan(history, decision_turn=2),
     )
     assert not descriptor_is_append_compatible(current.descriptor, compacted.descriptor)
 
@@ -238,14 +379,55 @@ def test_recency_configuration_uses_documented_config_shape():
         {
             "type": "recency",
             "config": {
-                "protect_initial_context": True,
-                "keep_last_image_groups": 2,
+                "images": {
+                    "enabled": True,
+                    "protect_initial_context": True,
+                    "keep_last_groups": 2,
+                },
             },
         }
     )
 
     assert policy.type == "recency"
-    assert policy.config.keep_last_image_groups == 2
+    assert isinstance(policy.config, RecencyHistoryPolicyConfig)
+    assert policy.config.images.keep_last_groups == 2
+
+
+def test_recency_configuration_requires_an_enabled_kind():
+    try:
+        HistoryPolicyConfig.model_validate(
+            {
+                "type": "recency",
+                "config": {
+                    "images": {"enabled": False},
+                    "reasoning": {"enabled": False},
+                },
+            }
+        )
+    except ValueError as exc:
+        assert "requires images.enabled or reasoning.enabled" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("recency without an enabled kind must fail closed")
+
+
+def test_disabled_kind_rejects_retention_settings():
+    try:
+        HistoryPolicyConfig.model_validate(
+            {
+                "type": "recency",
+                "config": {
+                    "images": {
+                        "enabled": False,
+                        "keep_last_groups": 2,
+                    },
+                    "reasoning": {"enabled": True},
+                },
+            }
+        )
+    except ValueError as exc:
+        assert "require images.enabled=true" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("disabled image recency settings must fail closed")
 
 
 def test_agent_owned_history_policy_can_be_registered():
@@ -366,7 +548,10 @@ def test_shadow_configuration_rejects_non_identity_policy():
             {
                 "enabled": True,
                 "shadow_only": True,
-                "policy": {"type": "recency"},
+                "policy": {
+                    "type": "recency",
+                    "config": {"images": {"enabled": True}},
+                },
             }
         )
     except ValueError:
@@ -407,7 +592,7 @@ def test_recency_controller_keeps_boundary_pending_until_acknowledged():
     history.append_items([_observation("later B", "B")], turn_id=1)
     controller = HistoryController(
         history,
-        RecencyHistoryPolicy(RecencyHistoryPolicyConfig(keep_last_image_groups=1)),
+        RecencyHistoryPolicy(_image_recency_config(1)),
     )
 
     first = controller.prepare(applies_to_step=1)
@@ -437,13 +622,47 @@ def test_recency_controller_keeps_boundary_pending_until_acknowledged():
     assert controller.boundary_events == (prepared.boundary,)
 
 
+def test_reasoning_recency_creates_boundary_only_after_chunk_closes():
+    history = SemanticHistory("rollout-controller-reasoning")
+    history.append_items("task", turn_id=0, is_initial_context=True)
+    controller = TurnChunkedHistoryController(
+        history,
+        RecencyHistoryPolicy(_reasoning_recency_config(1)),
+        actions_per_chunk=2,
+    )
+
+    first = controller.prepare(applies_to_step=1)
+    controller.acknowledge_action(
+        first,
+        action_id="action-one",
+        completion_id="completion-one",
+    )
+    history.append_items([_reasoning("reasoning one")], turn_id=1)
+
+    second = controller.prepare(applies_to_step=2)
+    assert second.boundary is None
+    assert _reasoning_texts(second.view.items) == ["reasoning one"]
+    controller.acknowledge_action(
+        second,
+        action_id="action-two",
+        completion_id="completion-two",
+    )
+    history.append_items([_reasoning("reasoning two")], turn_id=2)
+
+    third = controller.prepare(applies_to_step=3)
+    assert third.boundary is not None
+    assert not third.append_compatible
+    assert _reasoning_texts(third.view.items) == ["reasoning two"]
+    assert third.boundary.trigger_after_step == 2
+
+
 def test_pending_boundary_rejects_changed_retry_view():
     history = SemanticHistory("rollout-controller-changed")
     history.append_items([_observation("initial", "A")], turn_id=0, is_initial_context=True)
     history.append_items([_observation("later B", "B")], turn_id=1)
     controller = HistoryController(
         history,
-        RecencyHistoryPolicy(RecencyHistoryPolicyConfig(keep_last_image_groups=1)),
+        RecencyHistoryPolicy(_image_recency_config(1)),
     )
     first = controller.prepare(applies_to_step=1)
     controller.acknowledge(first)
@@ -603,9 +822,8 @@ def test_image_guard_closes_chunk_before_pending_observation_action():
     )
     controller = TurnChunkedHistoryController(
         history,
-        RecencyHistoryPolicy(RecencyHistoryPolicyConfig(keep_last_image_groups=0)),
+        RecencyHistoryPolicy(_image_recency_config(0)),
         actions_per_chunk=4,
-        history_groups=0,
     )
 
     first = controller.prepare(applies_to_step=1)
@@ -660,14 +878,8 @@ def test_hundred_turn_chunked_recency_stays_bounded_and_accounts_for_every_actio
     )
     controller = TurnChunkedHistoryController(
         history,
-        RecencyHistoryPolicy(
-            RecencyHistoryPolicyConfig(
-                protect_initial_context=True,
-                keep_last_image_groups=3,
-            )
-        ),
+        RecencyHistoryPolicy(_image_recency_config(3)),
         actions_per_chunk=2,
-        history_groups=3,
     )
 
     active_image_counts = []

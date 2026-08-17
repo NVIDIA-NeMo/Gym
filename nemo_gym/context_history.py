@@ -120,15 +120,58 @@ _PRIVATE_ID_FIELDS = frozenset(
 )
 
 
-class RecencyHistoryPolicyConfig(BaseModel):
-    """Configuration for the initial visual-recency policy."""
+class ImageRecencyConfig(BaseModel):
+    """Retention controls for image observation groups."""
 
     model_config = ConfigDict(extra="forbid")
 
+    enabled: bool = False
     protect_initial_context: bool = True
-    keep_last_image_groups: int = Field(default=3, ge=0)
-    keep_all_text: bool = True
-    image_omission_marker: str | None = "[Earlier image omitted]"
+    keep_last_groups: int = Field(default=3, ge=0)
+    omission_marker: str | None = "[Earlier image omitted]"
+
+    @model_validator(mode="after")
+    def validate_disabled_configuration(self) -> "ImageRecencyConfig":
+        configured_fields = self.model_fields_set - {"enabled"}
+        if not self.enabled and configured_fields:
+            raise ValueError(
+                f"Image recency settings require images.enabled=true: configured={sorted(configured_fields)}"
+            )
+        return self
+
+
+class ReasoningRecencyConfig(BaseModel):
+    """Retention controls for reasoning blocks grouped by model-call turn."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    keep_first_block: bool = False
+    keep_last_blocks: int = Field(default=3, ge=0)
+
+    @model_validator(mode="after")
+    def validate_disabled_configuration(self) -> "ReasoningRecencyConfig":
+        configured_fields = self.model_fields_set - {"enabled"}
+        if not self.enabled and configured_fields:
+            raise ValueError(
+                f"Reasoning recency settings require reasoning.enabled=true: configured={sorted(configured_fields)}"
+            )
+        return self
+
+
+class RecencyHistoryPolicyConfig(BaseModel):
+    """Composable per-kind recency configuration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    images: ImageRecencyConfig = Field(default_factory=ImageRecencyConfig)
+    reasoning: ReasoningRecencyConfig = Field(default_factory=ReasoningRecencyConfig)
+
+    @model_validator(mode="after")
+    def validate_at_least_one_kind(self) -> "RecencyHistoryPolicyConfig":
+        if not self.images.enabled and not self.reasoning.enabled:
+            raise ValueError("The recency policy requires images.enabled or reasoning.enabled")
+        return self
 
 
 class HistoryPolicyConfig(BaseModel):
@@ -137,7 +180,13 @@ class HistoryPolicyConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     type: str = Field(default="identity", min_length=1)
-    config: RecencyHistoryPolicyConfig | dict[str, Any] = Field(default_factory=RecencyHistoryPolicyConfig)
+    config: RecencyHistoryPolicyConfig | dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_builtin_policy_config(self) -> "HistoryPolicyConfig":
+        if self.type == "recency" and not isinstance(self.config, RecencyHistoryPolicyConfig):
+            self.config = RecencyHistoryPolicyConfig.model_validate(self.config)
+        return self
 
 
 class CompactionScheduleConfig(BaseModel):
@@ -509,7 +558,7 @@ class FinalizedChunkRecord:
     first_action_turn: int
     last_action_turn: int
     configured_actions_per_chunk: int
-    configured_history_groups: int | None
+    policy_config_digest: str
     actual_action_count: int
     early_close_reason: str | None
     active_observation_group_count: int
@@ -821,21 +870,16 @@ class TurnChunkedHistoryController(HistoryController):
         policy: "HistoryPolicy",
         *,
         actions_per_chunk: int,
-        history_groups: int | None = None,
     ):
         if actions_per_chunk < 1:
             raise ValueError("actions_per_chunk must be at least 1")
-        if history_groups is not None and history_groups < 0:
-            raise ValueError("history_groups must be non-negative")
         super().__init__(history, policy)
         self.actions_per_chunk = actions_per_chunk
-        self.history_groups = history_groups
         self.schedule_config_digest = _config_digest(
             {
                 "schedule": self.schedule_name,
                 "version": self.schedule_version,
                 "actions_per_chunk": actions_per_chunk,
-                "history_groups": history_groups,
             }
         )
         self._base_plan: HistoryViewPlan | None = None
@@ -995,7 +1039,7 @@ class TurnChunkedHistoryController(HistoryController):
                 first_action_turn=self._action_turns[0],
                 last_action_turn=self._action_turns[-1],
                 configured_actions_per_chunk=self.actions_per_chunk,
-                configured_history_groups=self.history_groups,
+                policy_config_digest=(self._last_acknowledged.view.decision.config_digest),
                 actual_action_count=len(self._action_ids),
                 early_close_reason=early_close_reason,
                 active_observation_group_count=len(active_group_ids),
@@ -1361,70 +1405,103 @@ class IdentityHistoryPolicy:
 
 class RecencyHistoryPolicy:
     name = "recency"
-    version = "1"
+    version = "2"
 
     def __init__(self, config: RecencyHistoryPolicyConfig):
-        if not config.keep_all_text:
-            raise NotImplementedError("The initial visual-recency policy requires keep_all_text=true")
         self.config = config
         self._config_dict = config.model_dump(mode="json")
         self._digest = _config_digest({"type": self.name, "config": self._config_dict})
 
     def plan(self, history: SemanticHistory, *, decision_turn: int) -> HistoryViewPlan:
         ordered_parts = history.parts
-        groups: list[tuple[str, list[tuple[SemanticEvent, SemanticPart]]]] = []
-        group_index: dict[str, int] = {}
+        image_groups: list[tuple[str, list[tuple[SemanticEvent, SemanticPart]]]] = []
+        image_group_index: dict[str, int] = {}
         for event, part in ordered_parts:
             if part.kind != "image":
                 continue
             assert part.observation_group_id is not None
             group_id = part.observation_group_id
-            if group_id not in group_index:
-                group_index[group_id] = len(groups)
-                groups.append((group_id, []))
-            groups[group_index[group_id]][1].append((event, part))
+            if group_id not in image_group_index:
+                image_group_index[group_id] = len(image_groups)
+                image_groups.append((group_id, []))
+            image_groups[image_group_index[group_id]][1].append((event, part))
 
-        protected_group_ids = {
-            group_id
-            for group_id, members in groups
-            if self.config.protect_initial_context and any(event.is_initial_context for event, _ in members)
-        }
-        pending_group_ids = {
-            group_id
-            for group_id, members in groups
-            if any(event.conditions_action_turn == decision_turn for event, _ in members)
-        }
-        recency_candidate_group_ids = [group_id for group_id, _ in groups if group_id not in protected_group_ids]
-        retained_recent_group_ids = set(
-            recency_candidate_group_ids[-self.config.keep_last_image_groups :]
-            if self.config.keep_last_image_groups
-            else []
-        )
-        # Pending observations count toward the configured recency window. They
-        # are unioned back in so a zero-sized window can never discard the
-        # observation that must condition the next action.
-        retained_group_ids = protected_group_ids | retained_recent_group_ids | pending_group_ids
+        all_image_group_ids = {group_id for group_id, _ in image_groups}
+        protected_image_group_ids: set[str] = set()
+        pending_image_group_ids: set[str] = set()
+        retained_image_group_ids = set(all_image_group_ids)
+        if self.config.images.enabled:
+            protected_image_group_ids = {
+                group_id
+                for group_id, members in image_groups
+                if self.config.images.protect_initial_context and any(event.is_initial_context for event, _ in members)
+            }
+            pending_image_group_ids = {
+                group_id
+                for group_id, members in image_groups
+                if any(event.conditions_action_turn == decision_turn for event, _ in members)
+            }
+            recency_candidates = [
+                group_id for group_id, _ in image_groups if group_id not in protected_image_group_ids
+            ]
+            retained_recent = set(
+                recency_candidates[-self.config.images.keep_last_groups :]
+                if self.config.images.keep_last_groups
+                else []
+            )
+            # Pending observations count toward the configured recency window,
+            # but are unioned back for a zero-sized window because they must
+            # condition the next action.
+            retained_image_group_ids = protected_image_group_ids | retained_recent | pending_image_group_ids
+
+        reasoning_turns: list[int] = []
+        seen_reasoning_turns: set[int] = set()
+        for event, part in ordered_parts:
+            if part.kind == "reasoning" and event.turn_id not in seen_reasoning_turns:
+                seen_reasoning_turns.add(event.turn_id)
+                reasoning_turns.append(event.turn_id)
+
+        protected_reasoning_turns: set[int] = set()
+        retained_reasoning_turns = set(reasoning_turns)
+        if self.config.reasoning.enabled:
+            if self.config.reasoning.keep_first_block and reasoning_turns:
+                protected_reasoning_turns.add(reasoning_turns[0])
+            recency_candidates = [turn_id for turn_id in reasoning_turns if turn_id not in protected_reasoning_turns]
+            retained_recent = set(
+                recency_candidates[-self.config.reasoning.keep_last_blocks :]
+                if self.config.reasoning.keep_last_blocks
+                else []
+            )
+            retained_reasoning_turns = protected_reasoning_turns | retained_recent
 
         keep: list[KeepPartRef] = []
         protected_part_ids: list[str] = []
         omitted_part_ids: list[str] = []
         for event, part in ordered_parts:
-            retained = part.kind != "image" or (part.observation_group_id in retained_group_ids)
+            if part.kind == "image":
+                retained = part.observation_group_id in retained_image_group_ids
+                protected = part.observation_group_id in (protected_image_group_ids | pending_image_group_ids)
+            elif part.kind == "reasoning":
+                retained = event.turn_id in retained_reasoning_turns
+                protected = event.turn_id in protected_reasoning_turns
+            else:
+                retained = True
+                protected = False
             if retained:
                 keep.append(KeepPartRef(event.event_id, part.part_id))
-                if part.kind == "image" and part.observation_group_id in (protected_group_ids | pending_group_ids):
+                if protected:
                     protected_part_ids.append(part.part_id)
             else:
                 omitted_part_ids.append(part.part_id)
 
         artifacts: list[OmissionArtifact] = []
         artifact_by_source_part: dict[str, OmissionArtifact] = {}
-        marker = self.config.image_omission_marker
+        marker = self.config.images.omission_marker if self.config.images.enabled else None
         omitted_group_runs: list[list[tuple[str, list[tuple[SemanticEvent, SemanticPart]]]]] = []
         current_run: list[tuple[str, list[tuple[SemanticEvent, SemanticPart]]]] = []
-        for group in groups:
+        for group in image_groups:
             group_id, _ = group
-            if group_id not in retained_group_ids:
+            if group_id not in retained_image_group_ids:
                 current_run.append(group)
             elif current_run:
                 omitted_group_runs.append(current_run)
@@ -1447,6 +1524,18 @@ class RecencyHistoryPolicy:
                 artifacts.append(artifact)
                 for part_id in source_parts:
                     artifact_by_source_part[part_id] = artifact
+
+        omitted_part_id_set = set(omitted_part_ids)
+        changed_part_ranges: list[tuple[str, str]] = []
+        current_omitted_run: list[str] = []
+        for _, part in ordered_parts:
+            if part.part_id in omitted_part_id_set:
+                current_omitted_run.append(part.part_id)
+            elif current_omitted_run:
+                changed_part_ranges.append((current_omitted_run[0], current_omitted_run[-1]))
+                current_omitted_run = []
+        if current_omitted_run:
+            changed_part_ranges.append((current_omitted_run[0], current_omitted_run[-1]))
 
         retained_part_ids = tuple(ref.part_id for ref in keep)
         retained_part_id_set = set(retained_part_ids)
@@ -1485,9 +1574,7 @@ class RecencyHistoryPolicy:
             policy_version=self.version,
             config_digest=self._digest,
             protected_part_ids=tuple(protected_part_ids),
-            changed_part_ranges=tuple(
-                (artifact.source_first_part_id, artifact.source_last_part_id) for artifact in artifacts
-            ),
+            changed_part_ranges=tuple(changed_part_ranges),
             retained_part_count=len(retained_part_ids),
             omitted_part_count=len(omitted_part_ids),
             selection_digest=_ordered_id_digest((*retained_part_ids, "--omitted--", *omitted_part_ids)),
@@ -1495,7 +1582,7 @@ class RecencyHistoryPolicy:
             decision_turn=decision_turn,
             lineage=_lineage_record(
                 history,
-                transformation_type="visual_recency",
+                transformation_type="recency",
                 transformation_version=self.version,
                 configuration_digest=self._digest,
                 disposition_by_part_id=disposition_by_part_id,

@@ -41,6 +41,7 @@ from nemo_gym.context_compaction import (
     build_generation_contract,
     build_transport_response,
 )
+from nemo_gym.context_history import ContextHistoryConfig, ContextMeasurements
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -59,7 +60,6 @@ from nemo_gym.rollout_observability import (
     TrajectoryTurn,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, raise_for_status
-from nemo_gym.context_history import ContextHistoryConfig, ContextMeasurements
 
 
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"

@@ -298,11 +298,6 @@ class ContextCompactionSession:
                 self.semantic_history,
                 history_policy,
                 actions_per_chunk=config.schedule.actions_per_chunk,
-                history_groups=getattr(
-                    config.policy.config,
-                    "keep_last_image_groups",
-                    None,
-                ),
             )
         else:
             self.history_controller = HistoryController(
