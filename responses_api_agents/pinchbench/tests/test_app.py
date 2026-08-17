@@ -101,7 +101,7 @@ def test_task_env_model_base_url_override():
 def test_build_spec_uses_model_base_url_override():
     agent = make_agent(
         max_turns=3,
-        sandbox_spec={"image": "/sif/pinchbench.sif"},
+        sandbox_spec={"image": "docker://pinchbench"},
     )
     spec = agent._build_spec("task_x", model_base_url="http://127.0.0.1:4242/v1")
     assert spec.env["MODEL_BASE_URL"] == "http://127.0.0.1:4242/v1"

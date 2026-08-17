@@ -31,6 +31,7 @@ from typing import Any, Literal, Optional
 from fastapi import Request, Response
 from pydantic import ConfigDict, Field, model_validator
 
+from nemo_gym.adapters.turn_counter_proxy import TurnCounterProxy, start_turn_counter_proxy
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
@@ -52,7 +53,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
-from nemo_gym.adapters.turn_counter_proxy import TurnCounterProxy, start_turn_counter_proxy
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
 from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, get_provider_class
@@ -104,6 +104,9 @@ class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
     # (apptainer host net: 127.0.0.1).
     max_turns: Optional[int] = None
     turn_reminder_position: Literal["system_message", "user_message"] = "system_message"
+    # Reminder cadence. `auto` uses proportional 80%/95% thresholds for budgets large
+    # enough for a warning to be actionable, and reminds on every turn for small ones.
+    turn_reminder_trigger: Literal["threshold", "per_turn", "auto"] = "auto"
     # Optional OpenClaw provider request timeout in seconds. None keeps OpenClaw's 120s default.
     openclaw_provider_timeout_seconds: Optional[int] = None
     openclaw_agent_timeout_seconds: Optional[int] = None
@@ -214,13 +217,10 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         *,
         model_base_url: Optional[str] = None,
     ) -> dict:
-        model_base_url = (
-            model_base_url
-            or (
-                self.resolve_model_base_url(self.config.model_server.name, rollout_id)
-                if self.config.model_server is not None
-                else self.config.model_base_url
-            )
+        model_base_url = model_base_url or (
+            self.resolve_model_base_url(self.config.model_server.name, rollout_id)
+            if self.config.model_server is not None
+            else self.config.model_base_url
         )
         judge_base_url = (
             self.resolve_model_base_url(self.config.judge_model_server.name, rollout_id)
@@ -280,19 +280,16 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             metadata={"task_id": task_id},
         )
 
-    async def _maybe_start_turn_proxy(self, rollout_id: Optional[str]) -> Optional[TurnCounterProxy]:
+    async def _maybe_start_turn_proxy(self, upstream_base_url: str, label: str = "-") -> Optional[TurnCounterProxy]:
         if self.config.max_turns is None:
             return None
-        upstream_base_url = (
-            self.resolve_model_base_url(self.config.model_server.name, rollout_id)
-            if self.config.model_server is not None
-            else self.config.model_base_url
-        )
         return await start_turn_counter_proxy(
             upstream_base_url=upstream_base_url,
             api_key=self.config.model_api_key,
             max_turns=self.config.max_turns,
             position=self.config.turn_reminder_position,
+            trigger=self.config.turn_reminder_trigger,
+            label=label,
         )
 
     async def _run_in_sandbox(
@@ -306,8 +303,13 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         Returns the apptainer exit code when the direct_exec path exits non-zero but
         still produced an archive (non-clean exit), or None in all other cases.
         """
-        proxy = await self._maybe_start_turn_proxy(rollout_id)
-        model_base_url = proxy.base_url if proxy is not None else None
+        upstream = (
+            self.resolve_model_base_url(self.config.model_server.name, rollout_id)
+            if self.config.model_server is not None
+            else self.config.model_base_url
+        )
+        proxy = await self._maybe_start_turn_proxy(upstream, label=task_id)
+        model_base_url = proxy.base_url if proxy is not None else upstream
         try:
             provider = self.config.sandbox_provider or {}
             apptainer_cfg = provider.get("apptainer") if isinstance(provider, dict) else None
@@ -340,6 +342,9 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             return None
         finally:
             if proxy is not None:
+                LOG.info(
+                    "turn_counter %s: task finished after %d/%d turns", task_id, proxy.turns_used, proxy.max_turns
+                )
                 await proxy.stop()
 
     def _write_direct_exec_wrapper(self, staging_dir: Path) -> Path:
