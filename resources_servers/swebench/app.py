@@ -248,7 +248,13 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         result = await eval_sandbox.exec(
             f"""WORKING_DIRECTORY={wd} bash anti_cheat_setup.sh && rm anti_cheat_setup.sh"""
         )
-        assert result.return_code == 0
+        if result.return_code != 0:
+            print(f"""Failed to setup anti-cheating. Return code: {result.return_code}
+Stdout:
+{result.stdout}
+Stderr:
+{result.stderr}""")
+            assert result.return_code == 0
 
         return SWEBenchSeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)
 
