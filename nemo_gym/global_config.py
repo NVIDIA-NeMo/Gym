@@ -305,26 +305,28 @@ class GlobalConfigDictParser(BaseModel):
         """
         Returns the new total config_paths and the extra configs, ordered for merging.
 
-        Two rules decide precedence, and they are independent:
+        Two rules decide precedence:
 
         - A config named in another config's ``config_paths`` is *inner*. The config
           that pulled it in overrides it, however deep the nesting goes.
-        - Configs at the same level are siblings, in the order they were listed. A
-          later sibling overrides an earlier one.
+        - Configs listed together are siblings, in the order they were listed. A later
+          sibling overrides an earlier one, and so does everything it pulled in.
 
         The returned configs are ordered so that a left-to-right ``OmegaConf.merge``
-        produces both rules: deepest level first, and within a level, listed order.
+        produces both rules: the include tree flattened so that a config follows
+        everything it pulled in, with each subtree kept contiguous.
         """
         config_paths = config_paths.copy()
-        # Nesting level per entry in config_paths, parallel to it: 0 for the entries
-        # the caller passed, +1 for each config pulled in by another config.
-        depths: List[int] = [0] * len(config_paths)
+        # The entries the caller passed; everything appended below was pulled in by one
+        # of them, directly or transitively.
+        root_count = len(config_paths)
+        # Entries pulled in by each entry, parallel to config_paths, in listed order.
+        children: List[List[int]] = [[] for _ in config_paths]
 
         extra_configs: List[DictConfig] = []
         duplicate_config_paths: List[str] = []
         # Just a careful note here that we explicitly mutate config_paths as it is being appended to
         for index, config_path in enumerate(config_paths):
-            depth = depths[index]
             original_entry = config_path
             config_path = Path(config_path)
             # Search NEMO_GYM_EXTRA_ROOTS, cwd, then the install root (see _resolve_under_cwd_or_install).
@@ -347,7 +349,8 @@ Check the path is spelled correctly and is relative to your working directory, a
             for new_config_path in extra_config.get(CONFIG_PATHS_KEY_NAME) or []:
                 if new_config_path not in config_paths:
                     config_paths.append(new_config_path)
-                    depths.append(depth + 1)
+                    children.append([])
+                    children[index].append(len(config_paths) - 1)
                 else:
                     duplicate_config_paths.append(new_config_path)
             extra_configs.append(extra_config)
@@ -359,11 +362,19 @@ In cases like these, you may want to consider using the `inherit_from` OmegaConf
 Duplicate config paths:
 {duplicate_config_paths_str}""")
 
-        # Deepest level first, so an outer config merges after -- and therefore
-        # overrides -- anything it pulled in. The sort is stable, so configs at the
-        # same level keep the order they were listed in and a later sibling still
-        # overrides an earlier one.
-        merge_order = sorted(range(len(extra_configs)), key=lambda i: -depths[i])
+        # Flatten the include tree so that every config merges after -- and therefore
+        # overrides -- the ones it pulled in, and each subtree stays contiguous in
+        # listed order, so a later sibling and its own includes override an earlier
+        # sibling's. Iterative post-order, since include chains can nest arbitrarily.
+        merge_order: List[int] = []
+        pending: List[Tuple[int, bool]] = [(root, False) for root in reversed(range(root_count))]
+        while pending:
+            index, children_visited = pending.pop()
+            if children_visited:
+                merge_order.append(index)
+                continue
+            pending.append((index, True))
+            pending.extend((child, False) for child in reversed(children[index]))
         extra_configs = [extra_configs[i] for i in merge_order]
 
         return config_paths, extra_configs
@@ -672,8 +683,8 @@ Pass each config with --config (it builds the list for you), e.g.:
   gym env start --config resources_servers/<env>/configs/<env>.yaml"""
             ) from e
 
-        # Returned in merge order: inner configs first, so the config that pulled them
-        # in overrides them; siblings in listed order, so a later one overrides earlier.
+        # Returned in merge order: a config follows everything it pulled in, so it
+        # overrides them; siblings in listed order, so a later one overrides earlier.
         config_paths, extra_configs = self.load_extra_config_paths(config_paths)
 
         # Dot env overrides previous configs

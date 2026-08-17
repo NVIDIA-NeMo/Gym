@@ -492,6 +492,59 @@ c: inner
             == global_config_dict
         )
 
+    def test_get_global_config_dict_config_paths_later_sibling_subtree_wins_at_uneven_depth(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Sibling order covers everything a sibling pulled in, whatever depth it sits
+        at. ``first.yaml`` nests one level and ``second.yaml`` two, and the key both of
+        their innermost configs set resolves to the later sibling's."""
+        self._mock_versions_for_testing(monkeypatch)
+
+        (tmp_path / "first.yaml").write_text(f"""\
+config_paths:
+- {tmp_path}/first_inner.yaml
+
+first: first
+        """)
+        (tmp_path / "first_inner.yaml").write_text("""first: first_inner
+contested: first_inner
+        """)
+        (tmp_path / "second.yaml").write_text(f"""\
+config_paths:
+- {tmp_path}/second_middle.yaml
+
+second: second
+        """)
+        (tmp_path / "second_middle.yaml").write_text(f"""\
+config_paths:
+- {tmp_path}/second_inner.yaml
+
+second: second_middle
+        """)
+        (tmp_path / "second_inner.yaml").write_text("""second: second_inner
+contested: second_inner
+        """)
+
+        self._mock_config_paths_env(monkeypatch, [f"{tmp_path}/first.yaml", f"{tmp_path}/second.yaml"])
+
+        global_config_dict = get_global_config_dict()
+        assert (
+            self._default_global_config_dict_values
+            | {
+                "config_paths": [
+                    f"{tmp_path}/first.yaml",
+                    f"{tmp_path}/second.yaml",
+                    f"{tmp_path}/first_inner.yaml",
+                    f"{tmp_path}/second_middle.yaml",
+                    f"{tmp_path}/second_inner.yaml",
+                ],
+                "first": "first",
+                "second": "second",
+                "contested": "second_inner",
+            }
+            == global_config_dict
+        )
+
     def test_get_global_config_dict_server_host_port_defaults(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_versions_for_testing(monkeypatch)
 
