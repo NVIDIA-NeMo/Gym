@@ -60,7 +60,7 @@ gdown --folder "https://drive.google.com/drive/folders/1W5GZW6_bdiDAiipuFMqdUhvU
 # END Benchmark specific preparation
 ########################################
 
-gym eval prepare --config $GYM_CONFIG
+gym eval prepare +num_prepare_benchmark_processes=4 --config $GYM_CONFIG
 
 gym env start \
     --config $GYM_CONFIG \
