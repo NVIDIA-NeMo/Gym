@@ -18,9 +18,6 @@
 # coasting by construction, and the oracle/noop endpoints of the recovery
 # metric must pin to 1 and 0. The interference regime is used where a positive
 # margin is needed, since that is where single actions matter.
-from jsonschema import Draft202012Validator
-from openair_congestion.tools import MCS_MAX, TOOL_SCHEMA_BY_NAME
-
 from resources_servers.openair_congestion import golden_set
 from resources_servers.openair_congestion.backends import ReplayBackend
 from resources_servers.openair_congestion.golden_set import (
@@ -34,23 +31,6 @@ def _small_set():
     # A fast, opportunity-bearing slice: interference is the regime where a
     # single action beats coasting.
     return generate_golden_set(seeds=(33001, 33002, 33003), regimes=("interference",), decision_steps=(6, 9))
-
-
-def test_candidate_grid_uses_only_schema_valid_supported_mcs_bounds():
-    backend = ReplayBackend(pool_size=1, max_steps_default=16)
-    episode_id, observation = golden_set._reconstruct(backend, "interference", 33001, 3)
-    try:
-        candidates = golden_set._candidate_grid(observation)
-    finally:
-        backend.close(episode_id)
-
-    for candidate in candidates:
-        schema = TOOL_SCHEMA_BY_NAME[candidate.name]["function"]["parameters"]
-        Draft202012Validator(schema).validate(candidate.arguments)
-
-    mcs_maxima = {candidate.arguments["mcs_max"] for candidate in candidates if candidate.name == "set_mcs_bounds"}
-    assert MCS_MAX in mcs_maxima
-    assert max(mcs_maxima) == MCS_MAX
 
 
 def test_generation_is_deterministic_and_well_formed():

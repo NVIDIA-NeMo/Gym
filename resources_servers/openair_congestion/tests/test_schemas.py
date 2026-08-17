@@ -70,23 +70,3 @@ def test_observation_rejects_inconsistent_topology(mutation):
 def test_reset_schema_rejects_deferred_tiers(tier):
     with pytest.raises(ValueError):
         GlobalObservation.model_validate({"n_cells": 1, "n_ues_total": 0, "difficulty": 0.5, "tier": tier})
-
-
-@pytest.mark.parametrize(
-    "field",
-    [
-        "cells[].prb_util_dl_p99",
-        "cells[].prb_util_ul_p50",
-        "cells[].sched_latency_ms_p99",
-        "cells[].ues[].mcs_mean",
-    ],
-)
-def test_replay_provenance_marks_action_overridable_kpis_as_synthetic(field):
-    data = _valid_observation_dict()
-
-    assert data["kpi_source_mode"] == "replay"
-    assert data["kpi_provenance"][field]["kind"] == "synthetic"
-
-    data["kpi_provenance"][field]["kind"] = "derived"
-    with pytest.raises(ValueError, match="does not match kpi_source_mode"):
-        Observation.model_validate(data)

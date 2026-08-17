@@ -25,13 +25,11 @@
 # The scripted policies are test oracles, not shipped baselines; they live
 # here on purpose.
 import json
-import math
 import random
 from typing import Callable
 
 from openair_congestion.rewards import compute, compute_breakdown, compute_terms
 from openair_congestion.schemas import Observation, ToolCall
-from openair_congestion.tools import PRB_MAX
 
 from resources_servers.openair_congestion.backends import ReplayBackend
 
@@ -40,7 +38,7 @@ from resources_servers.openair_congestion.backends import ReplayBackend
 # deterministic, so the orderings asserted below are stable, not statistical.
 _LADDER_TASKS = ((42, 0.9), (123, 0.5), (555, 0.95), (888, 0.95))
 # Pinned high-difficulty congested episode for the floor test.
-_FLOOR_SEED, _FLOOR_DIFFICULTY = 42, 0.9
+_FLOOR_SEED, _FLOOR_DIFFICULTY = 555, 0.95
 _MAX_STEPS = 16
 # Trials per (policy, task): only the random policy varies across trials, but
 # every policy is averaged the same way so the ladder compares like with like.
@@ -72,18 +70,18 @@ def _noop_policy(obs: Observation, step_idx: int, rng: random.Random) -> ToolCal
 
 
 def _relief_policy(obs: Observation, step_idx: int, rng: random.Random) -> ToolCall:
-    # Scripted congestion relief: MaxCI can clear a single borderline SLA
-    # violation by prioritizing the stronger link without reducing aggregate
-    # delivery. Abstain when the state does not expose that narrow condition.
-    if step_idx == 0:
-        cell = next((item for item in obs.cells if item.sla_violations_last_window == 1), None)
-        if cell is None:
-            return ToolCall(name="noop", arguments={})
-        return ToolCall(
-            name="set_scheduler_policy",
-            arguments={"cell_id": cell.cell_id, "policy": "MaxCI"},
-        )
-    return ToolCall(name="noop", arguments={})
+    # Scripted congestion relief: raise UL power on the most-loaded cell every
+    # step. On the synthetic action-effect model set_ul_power_control lifts
+    # SINR -> delivered_mbps and drains buffers for every UE in the cell. The
+    # A high p0/alpha setting provides relief in the deterministic replay
+    # model for this PRB-exhaustion-heavy oracle. The p0_dbm sweep keeps
+    # consecutive calls distinct, so the guardrail's
+    # identical-action rate limit (2 s window, 1 s logical step) never fires.
+    cell = max(obs.cells, key=lambda c: (c.sla_violations_last_window, c.prb_util_dl_p99))
+    return ToolCall(
+        name="set_ul_power_control",
+        arguments={"cell_id": cell.cell_id, "p0_dbm": 8 + (step_idx % 8), "alpha": 1.0},
+    )
 
 
 def _catastrophic_policy(obs: Observation, step_idx: int, rng: random.Random) -> ToolCall:
@@ -109,14 +107,13 @@ def _make_random_valid_policy() -> Callable[[Observation, int, random.Random], T
             )
         if choice == 1:
             ue = rng.choice(cell.ues)
-            equal_share_floor = math.ceil(PRB_MAX / max(1, len(cell.ues)))
             return ToolCall(
                 name="set_prb_cap",
                 arguments={
                     "cell_id": cell_id,
                     "target": "ue",
                     "target_id": ue.ue_id,
-                    "max_prb": rng.randrange(equal_share_floor, PRB_MAX + 1),
+                    "max_prb": rng.randrange(10, 273),
                 },
             )
         if choice == 2:
@@ -129,7 +126,7 @@ def _make_random_valid_policy() -> Callable[[Observation, int, random.Random], T
                 name="set_admission_policy",
                 arguments={
                     "cell_id": cell_id,
-                    "accept_threshold_pct": 100,
+                    "accept_threshold_pct": rng.randrange(10, 100),
                     "slice_reservation": {},
                 },
             )
@@ -192,10 +189,7 @@ class TestPolicyLadder:
             random_valid = _mean_return(backend, _make_random_valid_policy, seed, difficulty)
             noop = _mean_return(backend, lambda: _noop_policy, seed, difficulty)
             catastrophic = _mean_return(backend, lambda: _catastrophic_policy, seed, difficulty)
-            # A useful policy is allowed to abstain and tie noop when the
-            # observation has no SLA violation. On actionable states it must
-            # improve, which the separate pinned floor check enforces.
-            assert relief >= noop > catastrophic and random_valid > catastrophic, (
+            assert relief > noop > catastrophic and relief > random_valid > catastrophic, (
                 f"ladder broken on seed={seed} difficulty={difficulty}: "
                 f"relief={relief:.4f} random={random_valid:.4f} noop={noop:.4f} catastrophic={catastrophic:.4f}"
             )

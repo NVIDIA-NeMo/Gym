@@ -17,10 +17,10 @@
 
 No public benchmark exists for this telco control task, so we derive one from
 the environment itself. The replay backend is deterministic, so for any state
-the best single intervention in a finite bounded grid is *computable*:
-reconstruct the state, try every candidate, and keep the one whose value
-(below) is highest. The label is derived from the dynamics, not opined by a
-model -- any reviewer can recompute it, which is the whole point.
+the best single intervention is *computable*: reconstruct the state, try every
+action in a finite grid, and keep the one whose value (below) is highest. The
+label is derived from the dynamics, not opined by a model -- any reviewer can
+recompute it, which is the whole point.
 
 Each golden row is a decision point drawn from the do-nothing (noop)
 trajectory of a fixed evaluation seed -- "the network has been left alone for k steps
@@ -47,13 +47,8 @@ replays the golden action recovers ~all the margin and noop recovers none.
 The hand-written relief rule is reported descriptively, not used as a gate.
 
 This is a v0: best-single-intervention value over a finite action grid, not
-multi-step optimal control, on a fixed evaluation seed band. The grid omits
-traffic-shedding settings that synthetic replay rejects: admission reductions,
-slice reservations, and PRB caps below the active-UE equal-share floor.
-At/above-floor cap candidates still fail closed when displaced throughput
-cannot be fully reassigned; an applied cap may be suspended on a later
-transition for the same reason. This contribution does not establish that
-those seeds are disjoint from an external training run.
+multi-step optimal control, on a fixed evaluation seed band. This contribution
+does not establish that those seeds are disjoint from an external training run.
 
 Usage:
     python resources_servers/openair_congestion/golden_set.py
@@ -65,13 +60,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import math
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from openair_congestion import render
 from openair_congestion.schemas import Observation, ToolCall
-from openair_congestion.tools import MCS_MAX, PRB_MAX
 
 from resources_servers.openair_congestion.backends import ReplayBackend
 
@@ -96,14 +89,12 @@ _SCHEDULERS = ("PF", "RR", "MaxCI")
 
 
 def _candidate_grid(obs: Observation) -> list[ToolCall]:
-    """A finite, deterministic set of bounded tool-call candidates.
+    """A finite, deterministic set of valid tool calls for this state.
 
-    Small on purpose -- a representative discretization of supported controls
-    over the observed topology, not the full action space -- so the brute-force
-    argmax is exhaustive within this grid and reproducible. Traffic-shedding
-    settings with known static failures are omitted. A cap may still fail the
-    transition-specific full-reassignment check. noop is included, so the
-    golden action can be "do nothing" when acting does not help.
+    Small on purpose -- a representative discretization of each tool family
+    over the observed topology, not the full continuous space -- so the
+    brute-force argmax is exhaustive and reproducible. noop is included, so
+    the golden action can be "do nothing" when acting does not help.
     """
     grid: list[ToolCall] = [_NOOP]
     for cell in obs.cells:
@@ -112,25 +103,22 @@ def _candidate_grid(obs: Observation) -> list[ToolCall]:
             grid.append(ToolCall(name="set_scheduler_policy", arguments={"cell_id": cid, "policy": policy}))
         for p0 in (-95, -90, -85, -80):
             grid.append(ToolCall(name="set_ul_power_control", arguments={"cell_id": cid, "p0_dbm": p0, "alpha": 0.8}))
-        for mcs_max in (14, MCS_MAX):
+        for mcs_max in (14, 28):
             grid.append(
                 ToolCall(
                     name="set_mcs_bounds",
                     arguments={"cell_id": cid, "mcs_min": 0, "mcs_max": mcs_max, "target_bler": 0.1},
                 )
             )
-        for ue in cell.ues:
-            # Lower caps fail closed. At/above-floor candidates still need
-            # enough recipient headroom to reassign all displaced throughput.
-            equal_share_floor = math.ceil(PRB_MAX / max(1, len(cell.ues)))
-            cap_grid = sorted(
-                {
-                    equal_share_floor,
-                    (equal_share_floor + PRB_MAX) // 2,
-                    PRB_MAX - 2,
-                }
+        for accept in (50, 100):
+            grid.append(
+                ToolCall(
+                    name="set_admission_policy",
+                    arguments={"cell_id": cid, "accept_threshold_pct": accept, "slice_reservation": {}},
+                )
             )
-            for max_prb in cap_grid:
+        for ue in cell.ues:
+            for max_prb in (50, 137, 273):
                 grid.append(
                     ToolCall(
                         name="set_prb_cap",

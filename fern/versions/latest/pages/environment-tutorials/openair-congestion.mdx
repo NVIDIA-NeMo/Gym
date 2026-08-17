@@ -5,8 +5,6 @@ position: 6
 ---
 import { NavButton } from "../../../../components/NavButton";
 
-# Build a 5G Congestion-Control Environment
-
 This tutorial walks through `openair_congestion`, a multi-turn environment in
 which a policy reads 5G cell and UE telemetry and chooses one bounded network
 control per turn. You will run its causal synthetic replay, inspect the
@@ -58,12 +56,9 @@ Clone NeMo Gym and install its development environment:
 ```bash
 git clone https://github.com/NVIDIA-NeMo/Gym.git
 cd Gym
-uv venv --python 3.13.14
+uv sync --all-extras --all-groups
 source .venv/bin/activate
-uv sync --extra dev
 ```
-
-The recorded-data walkthrough also uses `jq` to make a temporary task file.
 
 The scripted client, package tests, JSONL inspection, and golden-set generation
 run without a model endpoint, GPU, OAI lab, or external simulator.
@@ -78,7 +73,7 @@ resources_servers/openair_congestion/
 ├── backends.py                    # backend contract and selection
 ├── client.py                      # scripted HTTP client
 ├── dataset_backend.py             # recorded-data diagnostics
-├── generate_example_rollouts.py   # reproducible server-contract trajectories
+├── generate_example_rollouts.py   # reproducible API trajectories
 ├── golden_set.py                  # finite-grid single-intervention oracle
 ├── configs/openair_congestion.yaml
 ├── data/example.jsonl
@@ -140,7 +135,7 @@ The canonical observation schema is in `openair_congestion/schemas.py`:
 | Scope | Representative fields |
 |---|---|
 | Cell | PRB p50/p99, uplink PRB, scheduler latency, connected UE count, PRACH collision rate, Jain fairness, SLA violations |
-| UE | offered and delivered Mbps, BLER, MCS, SINR, buffer occupancy, PDB violations, 5QI |
+| UE | offered and delivered Mbps, PRB cap, BLER, MCS, SINR, buffer occupancy, PDB violations, 5QI |
 | Episode | time, episode ID, KPI provenance, last action, last reward, last rejection, step index |
 
 The default `replay` path exposes eight tools:
@@ -148,36 +143,21 @@ The default `replay` path exposes eight tools:
 | Tool | Synthetic control |
 |---|---|
 | `set_scheduler_policy` | PF, RR, or MaxCI scheduling |
-| `set_prb_cap` | Persistent cap subject to the equal-share floor and full-reassignment checks |
+| `set_prb_cap` | Persistent PRB cap for an observed UE |
 | `set_mcs_bounds` | MCS and BLER target bounds |
 | `set_qos_weights` | Per-5QI scheduling weights |
-| `set_admission_policy` | Topology-neutral 100% admission only; slices are not modeled |
+| `set_admission_policy` | Admission threshold; `slice_reservation` must be empty because slices are not modeled |
 | `set_handover_trigger` | A3 offset and time-to-trigger |
 | `set_ul_power_control` | P0 and fractional path-loss compensation |
 | `noop` | Keep current setpoints for one step |
 
 The policy must emit exactly one function call. Missing, malformed, unknown,
-or multiple calls advance the selected backend once with `noop` and add the
-bounded negative protocol penalty. In `replay` that fallback is causal; in
-`dataset_replay` it advances the recorded diagnostic sequence. The episode
-continues unless that turn reaches its normal horizon. A well-formed unsafe
-call is rejected by the guardrail and scored as a rejected transition.
+or multiple calls terminate the episode with a finite protocol penalty. A
+well-formed unsafe call is rejected by the guardrail and scored as a rejected
+transition.
 
-Supported replay controls are deterministic, parameter-aware, persistent
-setpoints; applying the same setpoint again is idempotent. Traffic-shedding
-settings that the synthetic state cannot score honestly fail closed. Replay
-rejects admission thresholds below 100%, non-empty slice reservations, and PRB
-caps below `ceil(273 / active UEs)`. A 100% admission setting is accepted but
-does not change the topology. An at/above-floor PRB cap is also rejected if
-other observed UEs cannot absorb all displaced throughput. A persistent cap is
-suspended on any later transition without enough reassignment headroom. Lower
-settings require persistent denied-demand and per-UE PRB accounting, which
-this backend does not model.
-
-After the baseline transition and action effects, replay enforces the
-scenario's shared per-cell throughput capacity (60 Mbps in the bundled
-examples) and recomputes buffer, packet-delay, SLA, UE-count, and Jain-fairness
-fields from the final UE deliveries.
+Accepted replay controls are persistent setpoints. Supported setpoint changes
+can alter later synthetic KPIs; applying the same setpoint again is idempotent.
 
 <Warning>
 The tool names describe network controls, but the bundled backend applies
@@ -200,17 +180,15 @@ For each `step()`, the server:
 6. returns the next observation and termination state.
 
 A failed reward computation does not partially advance an episode. Normal
-completion, truncation, and explicit close release the session. A protocol
-violation instead consumes a penalized `noop` turn and leaves the episode open
-unless the normal horizon is reached. Inactive sessions left by a hard client
-crash are reclaimed after the configured lease.
+completion, truncation, protocol failure, and explicit close release the
+session. Inactive sessions left by a hard client crash are reclaimed after
+the configured lease.
 
 Every successful backend step contains the `openair_v1` reward version, raw
-measurements, weighted terms, and scalar total. A protocol violation receives
-the selected backend's `noop` reward plus the configured protocol surcharge,
-with both visible in the reward breakdown. The terms cover SLA violations, throughput,
-Jain fairness, PRB/access/fairness/buffer pressure, action magnitude, and
-rejected actions.
+measurements, weighted terms, and scalar total. Protocol violations instead
+receive the configured fixed penalty. The terms cover SLA violations,
+throughput, Jain fairness, PRB/access/fairness/buffer pressure, action
+magnitude, and rejected actions.
 
 Always compare policies on the same task manifest, backend, reward version,
 horizon, and decoding settings.
@@ -235,7 +213,7 @@ that one policy controls the network better than another. It contains no
 counterfactual next state for an action that was not recorded.
 </Warning>
 
-### Inspect the checked-in synthetic recorded-data fixture
+### Inspect the checked-in recording
 
 Copy the config so the default replay setup remains unchanged:
 
@@ -291,44 +269,42 @@ not a causal policy evaluation.
 
 ### Use your own nested KPI-snapshot JSONL
 
-Keep real measurements outside the repository, then point the copied config at
-their absolute path. Do not commit customer, subscriber, credential, or other
-sensitive data.
+Place the data at a reproducible package-relative location:
 
-Replace the resource-server keys in the copied config:
+```bash
+mkdir -p resources_servers/openair_congestion/data/user
+cp /absolute/path/my_5g_measurements.jsonl \
+  resources_servers/openair_congestion/data/user/my_5g_measurements.jsonl
+```
+
+Then replace the resource-server keys in the copied config:
 
 ```yaml
 openair_congestion:
   resources_servers:
     openair_congestion:
       backend: dataset_replay
-      dataset_path: /absolute/path/my_5g_measurements.jsonl
+      dataset_path: data/user/my_5g_measurements.jsonl
       cell_capacity_mbps: 60.0
 ```
 
 Each nested KPI-snapshot JSONL row is one timestep. Rows sharing an
-`episode_id` form an episode and require at least two observations. Every row
-needs a non-empty `cells` list; every cell needs `prb_util_dl_p50` and a
-non-empty `ues` list; every UE needs `delivered_mbps`. Rows labeled `measured`
-or `recorded` must also include `rrc_connected_ues` for every cell and `bler`
-and `sinr_db` for every UE. The loader fails closed instead of synthesizing
-those measured exporter values.
+`episode_id` form an episode and require at least two observations. At minimum,
+each row needs a non-empty `cells` list; every cell needs
+`prb_util_dl_p50` and a non-empty `ues` list; every UE needs
+`delivered_mbps`.
 
 Set `kpi_source_mode` explicitly for measured snapshots. If omitted, it
 defaults to `replay` and the observation is stamped synthetic.
-Fields labeled `derived` in the KPI provenance contract are recomputed from
-their named source fields; omit them, or supply values that match the canonical
-formula within an absolute tolerance of `1e-6` (with no relative tolerance).
 
 ```jsonl
-{"episode_id":"run_a","step":0,"kpi_source_mode":"measured","recorded_action":{"name":"noop","arguments":{}},"cells":[{"cell_id":0,"prb_util_dl_p50":0.55,"rrc_connected_ues":1,"ues":[{"ue_id":0,"offered_mbps":20.0,"delivered_mbps":18.0,"bler":0.05,"sinr_db":12.0}]}]}
-{"episode_id":"run_a","step":1,"kpi_source_mode":"measured","cells":[{"cell_id":0,"prb_util_dl_p50":0.70,"rrc_connected_ues":1,"ues":[{"ue_id":0,"offered_mbps":20.0,"delivered_mbps":16.0,"bler":0.08,"sinr_db":10.0}]}]}
+{"episode_id":"run_a","step":0,"kpi_source_mode":"measured","recorded_action":{"name":"noop","arguments":{}},"cells":[{"cell_id":0,"prb_util_dl_p50":0.55,"ues":[{"ue_id":0,"offered_mbps":20.0,"delivered_mbps":18.0,"bler":0.05,"sinr_db":12.0}]}]}
+{"episode_id":"run_a","step":1,"kpi_source_mode":"measured","cells":[{"cell_id":0,"prb_util_dl_p50":0.70,"ues":[{"ue_id":0,"offered_mbps":20.0,"delivered_mbps":16.0,"bler":0.08,"sinr_db":10.0}]}]}
 ```
 
 When `step` is present, every row in that episode must provide a unique integer;
-the loader sorts those rows by `step`, then requires `t_s` to be nondecreasing.
-Malformed topology, duplicate IDs, fractional integer fields, and non-finite
-values fail with source provenance.
+the loader sorts those rows by `step`. Malformed topology, duplicate IDs,
+fractional integer fields, and non-finite values fail with source provenance.
 
 An optional `recorded_action` is validated and returned as diagnostic metadata;
 it does not control the prerecorded next state. Stored scalar rewards are
@@ -370,8 +346,7 @@ subsection. The temporary config and task file now point at the custom JSONL.
 
 ## 7. Generate deterministic evidence
 
-Regenerate the five scripted trajectories through the resource server's
-reset/step/close contract:
+Regenerate the five scripted trajectories through the actual HTTP surface:
 
 ```bash
 PYTHONPATH=.:resources_servers/openair_congestion \

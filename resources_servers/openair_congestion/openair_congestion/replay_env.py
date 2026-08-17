@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import copy
 import logging
-import math
 import threading
 import time
 import uuid
@@ -43,7 +42,7 @@ LOG = logging.getLogger("openair_congestion.replay_env")
 
 # --- Synthetic dynamics ----------------------------------------------------
 
-ACTION_EFFECT_VERSION = "synthetic_action_effect_v6_shared_capacity"
+ACTION_EFFECT_VERSION = "synthetic_action_effect_v5_conditioned_tradeoffs"
 
 
 @dataclass
@@ -246,25 +245,15 @@ def _apply_collective_prb_caps(
         offered = {ue_id: max(0.0, float(ue.get("offered_mbps", 0.0))) for ue_id, ue in ues.items()}
         # A cap may never increase a target above the base or its offered load.
         final = {ue_id: min(base_delivered[ue_id], offered[ue_id]) for ue_id in ues}
-        base_total = sum(base_delivered.values())
-        offered_total = sum(offered.values())
-        allocation_basis = base_delivered if base_total > 1e-12 else offered
-        allocation_total = base_total if base_total > 1e-12 else offered_total
-        utilized_prbs = PRB_MAX * _clip(float(cell.get("prb_util_dl_p99", 0.0)), 0.0, 1.0)
-        estimated_prb_usage = {
-            ue_id: (utilized_prbs * allocation_basis[ue_id] / allocation_total if allocation_total > 1e-12 else 0.0)
-            for ue_id in ues
-        }
         target_shed: dict[int, float] = {}
         for ue_id, max_prb in active.items():
             before = final[ue_id]
-            estimated_usage = estimated_prb_usage[ue_id]
-            scale = min(1.0, float(max_prb) / max(1e-12, estimated_usage))
-            after = before * scale
+            after = before * (float(max_prb) / float(PRB_MAX))
             target_shed[ue_id] = max(0.0, before - after)
             final[ue_id] = after
 
         total_shed = sum(target_shed.values())
+        base_total = sum(base_delivered.values())
         cell_total_limit = min(base_total, capacity)
         current_total = sum(final.values())
         # Synthetic noise should already respect capacity, but fail safe by
@@ -280,26 +269,6 @@ def _apply_collective_prb_caps(
             sum(recipient_headroom.values()),
             max(0.0, cell_total_limit - current_total),
         )
-        if redistributable + 1e-9 < total_shed:
-            # A literal cap would drop served traffic that replay cannot carry
-            # forward as denied demand. Suspend the persistent setpoint for
-            # this transition instead of manufacturing a reward improvement
-            # by making that service disappear.
-            state.last_prb_cap_diagnostics[cell_id] = {
-                "active_setpoints": dict(sorted(active.items())),
-                "estimated_prb_usage": {ue_id: estimated_prb_usage[ue_id] for ue_id in sorted(active)},
-                "base_delivered_mbps": base_total,
-                "cell_capacity_mbps": capacity,
-                "requested_shed_mbps": total_shed,
-                "recipient_headroom_mbps": sum(recipient_headroom.values()),
-                "effect_applied": False,
-                "suspension_reason": "displaced service cannot be fully reassigned",
-                "target_shed_mbps": 0.0,
-                "recipient_boost_mbps": 0.0,
-                "unredistributed_shed_mbps": 0.0,
-                "final_delivered_mbps": base_total,
-            }
-            continue
         recipient_boosts = _waterfill_recipient_headroom(
             remaining=redistributable,
             headroom=recipient_headroom,
@@ -330,7 +299,6 @@ def _apply_collective_prb_caps(
         cell["prb_util_dl_p99"] = float(cell.get("prb_util_dl_p99", 0.0)) - relief
         state.last_prb_cap_diagnostics[cell_id] = {
             "active_setpoints": dict(sorted(active.items())),
-            "estimated_prb_usage": {ue_id: estimated_prb_usage[ue_id] for ue_id in sorted(active)},
             "base_delivered_mbps": base_total,
             "cell_capacity_mbps": capacity,
             "target_shed_mbps": total_shed,
@@ -338,7 +306,6 @@ def _apply_collective_prb_caps(
             "recipient_headroom_mbps": sum(recipient_headroom.values()),
             "unredistributed_shed_mbps": unredistributed,
             "final_delivered_mbps": final_total,
-            "effect_applied": True,
         }
 
 
@@ -359,8 +326,6 @@ def _apply_state_biases(
 def _synthetic_replay_guardrail(
     action: ToolCall,
     result: _guardrail.GuardrailResult,
-    *,
-    prev_obs: Observation,
 ) -> _guardrail.GuardrailResult:
     """Reject action shapes the synthetic replay cannot model truthfully."""
 
@@ -380,39 +345,12 @@ def _synthetic_replay_guardrail(
                 "slice membership is not present in replay observations"
             ),
         )
-    if result.accepted and action.name == "set_admission_policy":
-        threshold = float(action.arguments.get("accept_threshold_pct", 100.0))
-        if threshold < 100.0:
-            return _guardrail.GuardrailResult(
-                accepted=False,
-                reason=("synthetic replay rejects admission reductions until denied-demand accounting is modeled"),
-            )
-    if result.accepted and action.name == "set_prb_cap":
-        cell_id = int(action.arguments.get("cell_id", -1))
-        cell = _prev_cell(prev_obs, cell_id)
-        n_ues = len(cell.ues) if cell is not None else 0
-        equal_share_floor = math.ceil(PRB_MAX / max(1, n_ues))
-        max_prb = int(action.arguments.get("max_prb", 0))
-        if max_prb < equal_share_floor:
-            return _guardrail.GuardrailResult(
-                accepted=False,
-                reason=(
-                    f"synthetic replay requires max_prb>={equal_share_floor}, "
-                    "the active-UE equal-share floor; lower caps require "
-                    "per-UE PRB and denied-service accounting"
-                ),
-            )
     return result
 
 
-def _finalize_observation_payload(
-    data: dict[str, Any],
-    *,
-    cell_capacity_mbps: float,
-) -> dict[str, Any]:
-    """Enforce synthetic cell capacity and recompute delivery-derived KPIs."""
+def _clamp_observation_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Clamp mutated observation fields back into the Pydantic schema bounds."""
 
-    capacity = max(1e-6, float(cell_capacity_mbps))
     for cell in data.get("cells", []):
         cell["prb_util_dl_p50"] = _clip(float(cell.get("prb_util_dl_p50", 0.0)), 0.0, 1.0)
         cell["prb_util_dl_p99"] = _clip(float(cell.get("prb_util_dl_p99", 0.0)), 0.0, 1.0)
@@ -428,6 +366,9 @@ def _finalize_observation_payload(
             0.0,
             1.0,
         )
+        cell["fairness_jain"] = _clip(float(cell.get("fairness_jain", 1.0)), 0.0, 1.0)
+        sla_count = 0
+
         for ue in cell.get("ues", []):
             ue["offered_mbps"] = max(0.0, float(ue.get("offered_mbps", 0.0)))
             ue["delivered_mbps"] = _clip(
@@ -438,31 +379,14 @@ def _finalize_observation_payload(
             ue["bler"] = _clip(float(ue.get("bler", 0.0)), 0.0, 1.0)
             ue["mcs_mean"] = _clip(float(ue.get("mcs_mean", 0.0)), 0.0, 27.0)
             ue["sinr_db"] = _clip(float(ue.get("sinr_db", 0.0)), -20.0, 40.0)
-            ue["5qi"] = int(max(1, min(127, round(float(ue.get("5qi", 9))))))
-
-        ues = cell.get("ues", [])
-        delivered_total = sum(float(ue["delivered_mbps"]) for ue in ues)
-        if delivered_total > capacity + 1e-12:
-            scale = capacity / delivered_total
-            for ue in ues:
-                ue["delivered_mbps"] = float(ue["delivered_mbps"]) * scale
-
-        delivered_values: list[float] = []
-        sla_count = 0
-        for ue in ues:
-            delivered = float(ue["delivered_mbps"])
-            delivered_values.append(delivered)
-            ue["buffer_occupancy_kb"] = max(0.0, (float(ue["offered_mbps"]) - delivered) * 50.0)
+            ue["buffer_occupancy_kb"] = max(
+                0.0,
+                float(ue.get("buffer_occupancy_kb", 0.0)),
+            )
             ue["pdb_violations"] = 1 if ue["buffer_occupancy_kb"] > 500.0 else 0
             sla_count += int(ue["pdb_violations"])
-
-        cell["rrc_connected_ues"] = len(ues)
-        cell["fairness_jain"] = _jain_fairness(delivered_values)
+            ue["5qi"] = int(max(1, min(127, round(float(ue.get("5qi", 9))))))
         cell["sla_violations_last_window"] = sla_count
-
-    global_data = data.get("global")
-    if isinstance(global_data, dict):
-        global_data["n_ues_total"] = sum(len(cell.get("ues", [])) for cell in data.get("cells", []))
 
     return data
 
@@ -500,7 +424,6 @@ def _rebuild_action_biases(
     *,
     state: ReplayActionState,
     prev_obs: Observation,
-    base_next_obs: Observation,
 ) -> None:
     """Derive KPI biases from absolute setpoints without accumulation."""
 
@@ -516,6 +439,7 @@ def _rebuild_action_biases(
             # trajectory, so selecting it must not manufacture KPI credit.
             continue
         elif policy == "MaxCI":
+            _add_cell_bias(state, cell_id, "fairness_jain", -0.08)
             _add_cell_bias(state, cell_id, "sched_latency_ms_p99", -1.0)
             if prev_cell.ues:
                 strongest = max(prev_cell.ues, key=lambda ue: ue.sinr_db)
@@ -528,56 +452,63 @@ def _rebuild_action_biases(
                         "delivered_mbps",
                         delivery_delta,
                     )
+                    _add_ue_bias(
+                        state,
+                        cell_id,
+                        ue.ue_id,
+                        "buffer_occupancy_kb",
+                        -50.0 * delivery_delta,
+                    )
         else:
+            _add_cell_bias(state, cell_id, "fairness_jain", +0.05)
             _add_cell_bias(state, cell_id, "sched_latency_ms_p99", +1.5)
-            if prev_cell.ues:
-                mean_delivery = sum(float(ue.delivered_mbps) for ue in prev_cell.ues) / len(prev_cell.ues)
-                for ue in prev_cell.ues:
-                    # RR moves delivery toward the cell mean rather than
-                    # creating service. A small efficiency cost preserves its
-                    # fairness/latency tradeoff against PF.
-                    delivery_delta = 0.25 * (mean_delivery - float(ue.delivered_mbps)) - 0.05
-                    _add_ue_bias(state, cell_id, ue.ue_id, "delivered_mbps", delivery_delta)
+            for ue in prev_cell.ues:
+                _add_ue_bias(state, cell_id, ue.ue_id, "delivered_mbps", -0.15)
+                _add_ue_bias(state, cell_id, ue.ue_id, "buffer_occupancy_kb", +7.5)
 
     for cell_id, weights in state.qos_weights.items():
         prev_cell = _prev_cell(prev_obs, cell_id)
-        if prev_cell is None or not prev_cell.ues:
+        if prev_cell is None:
             continue
-        raw_weights = [float(weights.get(str(ue.qos_5qi), 1.0)) for ue in prev_cell.ues]
-        mean_weight = sum(raw_weights) / len(raw_weights)
-        normalizer = max(1.0, abs(mean_weight))
+        strengths: list[float] = []
         for ue in prev_cell.ues:
-            strength = (float(weights.get(str(ue.qos_5qi), 1.0)) - mean_weight) / normalizer
+            strength = float(weights.get(str(ue.qos_5qi), 1.0)) - 1.0
+            strengths.append(strength)
             _add_ue_bias(state, cell_id, ue.ue_id, "delivered_mbps", strength)
+            _add_ue_bias(state, cell_id, ue.ue_id, "buffer_occupancy_kb", -500.0 * strength)
+        if strengths:
+            _add_cell_bias(
+                state,
+                cell_id,
+                "fairness_jain",
+                0.03 * (sum(strengths) / len(strengths)),
+            )
 
     for cell_id, (mcs_min, mcs_max, target_bler) in state.mcs_setpoint.items():
         prev_cell = _prev_cell(prev_obs, cell_id)
-        next_cell = _prev_cell(base_next_obs, cell_id)
-        if prev_cell is None or next_cell is None:
+        if prev_cell is None:
             continue
-        prev_ues = {ue.ue_id: ue for ue in prev_cell.ues}
-        for next_ue in next_cell.ues:
-            decision_ue = prev_ues.get(next_ue.ue_id, next_ue)
-            current_mcs = float(next_ue.mcs_mean)
+        for ue in prev_cell.ues:
+            current_mcs = float(ue.mcs_mean)
             # Outer-loop link adaptation lowers MCS when observed BLER exceeds
             # the requested target and permits a raise only when the link has
             # explicit SINR headroom. A forced minimum above that headroom is
             # therefore harmful instead of a free throughput increase.
-            target_mcs = float(decision_ue.mcs_mean) - 8.0 * (float(decision_ue.bler) - float(target_bler))
+            target_mcs = current_mcs - 8.0 * (float(ue.bler) - float(target_bler))
             bounded_mcs = _clip(target_mcs, float(mcs_min), float(mcs_max))
             mcs_delta = bounded_mcs - current_mcs
-            supported_mcs = _clip(1.2 * (float(decision_ue.sinr_db) + 5.0) + 2.0, 0.0, 27.0)
+            supported_mcs = _clip(1.2 * (float(ue.sinr_db) + 5.0) + 2.0, 0.0, 27.0)
             safe_raise = min(max(0.0, mcs_delta), max(0.0, supported_mcs - current_mcs))
             unsafe_raise = max(0.0, mcs_delta - safe_raise)
             lower = max(0.0, -mcs_delta)
             delivery_delta = 0.08 * safe_raise - 0.20 * unsafe_raise - 0.04 * lower
             bler_delta = 0.004 * safe_raise + 0.020 * unsafe_raise - 0.008 * lower
-            _add_ue_bias(state, cell_id, next_ue.ue_id, "mcs_mean", mcs_delta)
-            _add_ue_bias(state, cell_id, next_ue.ue_id, "bler", bler_delta)
+            _add_ue_bias(state, cell_id, ue.ue_id, "mcs_mean", mcs_delta)
+            _add_ue_bias(state, cell_id, ue.ue_id, "bler", bler_delta)
             _add_ue_bias(
                 state,
                 cell_id,
-                next_ue.ue_id,
+                ue.ue_id,
                 "delivered_mbps",
                 delivery_delta,
             )
@@ -606,6 +537,8 @@ def _rebuild_action_biases(
             )
             worst = max(prev_cell.ues, key=lambda u: u.buffer_occupancy_kb)
             _add_ue_bias(state, cell_id, worst.ue_id, "delivered_mbps", 1.2 * effect)
+            _add_ue_bias(state, cell_id, worst.ue_id, "buffer_occupancy_kb", -250.0 * effect)
+            _add_cell_bias(state, cell_id, "fairness_jain", 0.05 * effect)
             _add_cell_bias(state, cell_id, "prb_util_dl_p99", -0.02 * effect)
 
     for cell_id, (p0_dbm, alpha) in state.ul_power_setpoint.items():
@@ -628,6 +561,7 @@ def _rebuild_action_biases(
             _add_ue_bias(state, cell_id, ue.ue_id, "sinr_db", signal_delta)
             _add_ue_bias(state, cell_id, ue.ue_id, "bler", -0.025 * signal_delta)
             _add_ue_bias(state, cell_id, ue.ue_id, "delivered_mbps", 0.35 * signal_delta)
+            _add_ue_bias(state, cell_id, ue.ue_id, "buffer_occupancy_kb", -70.0 * signal_delta)
         _add_cell_bias(
             state,
             cell_id,
@@ -716,36 +650,21 @@ def apply_action_effect(
     action-blind replay transition.
     """
 
+    if state is None and (not accepted or action.name == "noop"):
+        return base_next_obs
+
     state = state or ReplayActionState()
     if accepted and action.name != "noop":
         _record_action_effect(state=state, prev_obs=prev_obs, action=action)
-    _rebuild_action_biases(
-        state=state,
-        prev_obs=prev_obs,
-        base_next_obs=base_next_obs,
-    )
+    _rebuild_action_biases(state=state, prev_obs=prev_obs)
     data = base_next_obs.model_dump(by_alias=True)
-    # Admission changes the emitted topology. Apply it first so persistent
-    # per-UE controls cannot consume or redistribute capacity for a UE that is
-    # absent from this transition.
-    _apply_admission_setpoints(data, state)
     _apply_state_biases(
         data,
         state,
         cell_capacity_mbps=cell_capacity_mbps,
     )
-    data = _finalize_observation_payload(
-        data,
-        cell_capacity_mbps=cell_capacity_mbps,
-    )
-    for cell in data.get("cells", []):
-        cell_id = int(cell.get("cell_id", -1))
-        diagnostics = state.last_prb_cap_diagnostics.get(cell_id)
-        if diagnostics is not None:
-            diagnostics["final_delivered_mbps"] = sum(
-                float(ue.get("delivered_mbps", 0.0)) for ue in cell.get("ues", [])
-            )
-    obs = Observation.model_validate(data)
+    _apply_admission_setpoints(data, state)
+    obs = Observation.model_validate(_clamp_observation_payload(data))
     return obs
 
 
@@ -882,12 +801,6 @@ def build_trajectory(
             episode=placeholder,
             t_s=float(t),
         )
-        obs = Observation.model_validate(
-            _finalize_observation_payload(
-                obs.model_dump(by_alias=True),
-                cell_capacity_mbps=fingerprint.cell_capacity_mbps,
-            )
-        )
         obs_list.append(obs)
 
     return obs_list, fingerprint
@@ -1012,7 +925,7 @@ class ReplayEnv:
             # Never report a synthetic action as accepted unless replay can
             # apply it causally. Slice membership is not observed, so mapping
             # a slice cap to affected UEs would invent topology.
-            gr = _synthetic_replay_guardrail(action, gr, prev_obs=prev_obs)
+            gr = _synthetic_replay_guardrail(action, gr)
             rejected = not gr.accepted
 
             # Advance to the next pre-baked observation. step_idx is incremented
@@ -1028,27 +941,6 @@ class ReplayEnv:
                 state=candidate_state,
                 cell_capacity_mbps=episode.fingerprint.cell_capacity_mbps,
             )
-            if gr.accepted and action.name == "set_prb_cap":
-                cell_id = int(action.arguments.get("cell_id", -1))
-                cap_diagnostics = candidate_state.last_prb_cap_diagnostics.get(cell_id)
-                if cap_diagnostics is not None and not cap_diagnostics.get("effect_applied", True):
-                    gr = _guardrail.GuardrailResult(
-                        accepted=False,
-                        reason=(
-                            "synthetic replay cannot reassign all service displaced by this PRB cap; "
-                            "the action was not applied"
-                        ),
-                    )
-                    rejected = True
-                    candidate_state = copy.deepcopy(episode.action_state)
-                    new_obs = apply_action_effect(
-                        prev_obs=prev_obs,
-                        base_next_obs=base_next_obs,
-                        action=action,
-                        accepted=False,
-                        state=candidate_state,
-                        cell_capacity_mbps=episode.fingerprint.cell_capacity_mbps,
-                    )
 
             reward_profile = select_reward_profile(episode.fingerprint.tier)
             reward_breakdown = _rewards.compute_breakdown(

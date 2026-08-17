@@ -37,7 +37,7 @@ from . import SCHEMA_VERSION
 from .tools import MAX_CELLS, MAX_UES, TOOL_NAMES
 
 
-KPI_PROVENANCE_VERSION: str = "1.2.0"
+KPI_PROVENANCE_VERSION: str = "1.1.0"
 SUPPORTED_REGIMES: tuple[str, ...] = (
     "prb_exhaustion",
     "bursty",
@@ -131,20 +131,6 @@ KPI_PROVENANCE_V1: dict[str, dict[str, str]] = {
     },
 }
 
-_SOURCE_MODE_RAW_FIELDS = (
-    "cells[].prb_util_dl_p50",
-    "cells[].rrc_connected_ues",
-    "cells[].ues[].delivered_mbps",
-    "cells[].ues[].bler",
-    "cells[].ues[].sinr_db",
-)
-_REPLAY_ACTION_OVERRIDABLE_FIELDS = (
-    "cells[].prb_util_dl_p99",
-    "cells[].prb_util_ul_p50",
-    "cells[].sched_latency_ms_p99",
-    "cells[].ues[].mcs_mean",
-)
-
 
 def default_kpi_provenance() -> dict[str, dict[str, str]]:
     """Return a deep copy so Observation instances cannot share mutable state."""
@@ -161,31 +147,36 @@ def kpi_provenance_for_source_mode(source_mode: str) -> dict[str, dict[str, str]
 
     provenance = default_kpi_provenance()
     mode = (source_mode or "unknown").strip().lower()
+    raw_fields = (
+        "cells[].prb_util_dl_p50",
+        "cells[].rrc_connected_ues",
+        "cells[].ues[].delivered_mbps",
+        "cells[].ues[].bler",
+        "cells[].ues[].sinr_db",
+    )
+
     if mode in {"replay", "synthetic", "synthetic_fallback"}:
-        for field in _SOURCE_MODE_RAW_FIELDS:
+        for field in raw_fields:
             provenance[field]["kind"] = "synthetic"
             provenance[field]["notes"] = (
                 f"{provenance[field]['notes']} Source mode {mode!r} is generated "
                 "for local/replay testing, not a lab-measured RAN KPI."
             )
-        for field in _REPLAY_ACTION_OVERRIDABLE_FIELDS:
-            provenance[field]["kind"] = "synthetic"
-            provenance[field]["notes"] = (
-                f"{provenance[field]['notes']} In synthetic replay this is the "
-                "baseline; the causal action model may override it. It is not "
-                "a lab-measured RAN KPI."
-            )
         return provenance
 
     if mode in {"unknown", ""} or mode not in {"measured", "recorded"}:
-        for field in _SOURCE_MODE_RAW_FIELDS[:3]:
+        for field in (
+            "cells[].prb_util_dl_p50",
+            "cells[].rrc_connected_ues",
+            "cells[].ues[].delivered_mbps",
+        ):
             provenance[field]["kind"] = "estimate"
             provenance[field]["notes"] = (
                 f"{provenance[field]['notes']} Source mode {mode!r} is not "
                 "recognized; treat this field as an estimate until the exporter "
                 "advertises a known mode."
             )
-        for field in _SOURCE_MODE_RAW_FIELDS[3:]:
+        for field in ("cells[].ues[].bler", "cells[].ues[].sinr_db"):
             provenance[field]["kind"] = "placeholder"
             provenance[field]["notes"] = (
                 f"{provenance[field]['notes']} Source mode {mode!r} is not "
@@ -371,7 +362,13 @@ class Observation(_Base):
     @model_validator(mode="after")
     def _provenance_matches_source_mode(self) -> "Observation":
         expected = kpi_provenance_for_source_mode(self.kpi_source_mode)
-        for field in _SOURCE_MODE_RAW_FIELDS + _REPLAY_ACTION_OVERRIDABLE_FIELDS:
+        for field in (
+            "cells[].prb_util_dl_p50",
+            "cells[].rrc_connected_ues",
+            "cells[].ues[].delivered_mbps",
+            "cells[].ues[].bler",
+            "cells[].ues[].sinr_db",
+        ):
             expected_kind = expected[field]["kind"]
             actual_kind = self.kpi_provenance[field].kind
             if actual_kind != expected_kind:

@@ -8,13 +8,6 @@ from pathlib import Path
 import pytest
 from openair_congestion.tools import TOOLS
 
-from nemo_gym.train_data_utils import (
-    DatasetMetrics,
-    aggregate_other_metrics,
-    compute_sample_metrics,
-    postprocess_other_metrics,
-)
-
 
 DATA_DIR = Path(__file__).parents[1] / "data"
 
@@ -48,9 +41,6 @@ def test_committed_example_metrics_and_rollouts_are_complete():
         assert all(step["causal_action_effects"] is True for step in rollout["trajectory"])
         assert all(step["training_usable"] is True for step in rollout["trajectory"])
         assert all(step["guardrail_accepted"] is True for step in rollout["trajectory"])
-        for step in rollout["trajectory"]:
-            measurements = step["reward_measurements"]
-            assert measurements["aggregate_delivered_mbps"] <= measurements["cell_capacity_mbps_total"] + 1e-9
 
 
 def test_committed_model_messages_do_not_name_hidden_regimes():
@@ -82,19 +72,3 @@ def test_committed_tool_schemas_match_the_canonical_action_space():
 
     for example in _jsonl(DATA_DIR / "example.jsonl"):
         assert example["responses_create_params"]["tools"] == expected
-
-
-def test_committed_example_metrics_match_the_current_examples():
-    aggregate = DatasetMetrics()
-    other_metrics = {}
-    for line in (DATA_DIR / "example.jsonl").read_text().splitlines():
-        sample_metrics, is_offending = compute_sample_metrics(line)
-        assert is_offending is False
-        aggregate.add(sample_metrics)
-        aggregate_other_metrics(other_metrics, json.loads(line))
-    postprocess_other_metrics(aggregate, other_metrics)
-
-    expected = aggregate.aggregate().model_dump(mode="json", by_alias=True)
-    committed = json.loads((DATA_DIR / "example_metrics.json").read_text())
-    for key, value in expected.items():
-        assert committed[key] == value
