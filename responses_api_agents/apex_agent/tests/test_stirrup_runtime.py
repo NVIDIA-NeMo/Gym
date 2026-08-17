@@ -10,13 +10,21 @@ from responses_api_agents.apex_agent import stirrup_runtime
 
 
 def test_tool_output_uses_head_and_tail_excerpt() -> None:
-    text = "H" * 20_000 + "removed" * 100 + "T" * 5_000
+    text = "H" * 20_000 + "removed" * 11_000 + "T" * 5_000
 
     result = stirrup_runtime.truncate_tool_text(text)
 
     assert result.startswith("H" * 20_000)
     assert result.endswith("T" * 5_000)
     assert "characters truncated" in result
+
+
+def test_tool_output_within_estimated_token_budget_is_unchanged() -> None:
+    text = "x" * (
+        stirrup_runtime.TOOL_OUTPUT_TOKEN_BUDGET * stirrup_runtime.TOOL_OUTPUT_ESTIMATED_CHARACTERS_PER_TOKEN
+    )
+
+    assert stirrup_runtime.truncate_tool_text(text) == text
 
 
 def test_mcp_call_arguments_omit_optional_nulls() -> None:

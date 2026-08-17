@@ -29,8 +29,7 @@ apex_agent:
       sandbox_provider:
         apptainer:
           create:
-            # Hide host mounts/env and give the upstream image a writable
-            # ephemeral layer for per-task world state.
+            start_timeout_s: 1800
             extra_start_args: ${oc.select:apex_agent_apptainer_extra_start_args,[--containall,--cleanenv,--writable-tmpfs,--fakeroot]}
       sandbox_spec:
         resources: ${oc.select:apex_agent_sandbox_resources,{}}
@@ -39,7 +38,10 @@ apex_agent:
       # replace it with a Gym/NVIDIA identity.
       edgar_user_agent: ${oc.select:apex_edgar_user_agent,"Mercor APEX-Agents apex@mercor.com"}
       max_turns: ${oc.select:apex_agent_max_turns,200}
-      max_output_tokens: ${oc.select:apex_agent_max_output_tokens,4096}
+      # Stirrup 0.1 uses this value as its context-window budget and as the
+      # request's completion ceiling. Match GDPval's 262,144-token context
+      # instead of imposing a smaller Gym-side cap.
+      max_output_tokens: ${oc.select:apex_agent_max_output_tokens,262144}
       temperature: ${oc.select:apex_agent_temperature,1.0}
       top_p: ${oc.select:apex_agent_top_p,1.0}
       max_snapshot_bytes: ${oc.select:apex_agent_max_snapshot_bytes,null}

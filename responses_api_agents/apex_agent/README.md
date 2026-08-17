@@ -16,7 +16,8 @@ Each rollout:
 The initial Stirrup toolbelt contains `list_tools`, `inspect_tool`, `add_tool`, `remove_tool`, `todo_write`, and
 `finish`. MCP tools are absent until the model adds them. Adding/removing a tool changes the schemas sent on the next
 model turn. MCP calls time out after 60 seconds. Long text output uses a 20,000-character head plus 5,000-character
-tail excerpt; Stirrup compresses image blocks to about one megapixel when serializing them for the model.
+tail excerpt when it exceeds a 24,000-token budget, estimated at four characters per token; Stirrup compresses image
+blocks to about one megapixel when serializing them for the model.
 
 `finish` is the only submission mechanism. A completed submission is rejected while any todo is pending or in
 progress. A max-turn exit or `status="incomplete"` does not call the grader; its initial/final snapshots are still
