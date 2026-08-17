@@ -136,9 +136,15 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         if not episode.ok:
             error = episode.last_error or (episode.traces[-1].last_error if episode.traces else None)
             raise RuntimeError(error.message if error else "Verifiers rollout failed")
+        if not episode.traces:
+            raise RuntimeError("Verifiers rollout produced no traces")
 
         trace = episode.traces[0]
-        branch = trace.branches[-1]
+        branches = trace.branches
+        if not branches:
+            detail = f" (stop condition: {trace.stop_condition})" if trace.stop_condition else ""
+            raise RuntimeError(f"Verifiers rollout produced no branches{detail}")
+        branch = branches[-1]
         calls = iter(branch.calls)
         input_items, output = [], []
         items = input_items
