@@ -93,5 +93,5 @@ bbq_two_judge_simple_agent:
       datasets:
       - name: example
         type: example
-        jsonl_fpath: resources_servers/bbq_two_judge/data/example.jsonl
+        jsonl_fpath: resources_servers/bbq/data/example.jsonl
         num_repeats: 1

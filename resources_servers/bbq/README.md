@@ -172,7 +172,7 @@ policy models recorded in `data/example_metrics.json`).
 
 ## Requirements and tests
 
-Python 3.12 and NeMo Gym `0.4.0rc0` are the tested compatibility target.
+Python 3.13 and NeMo Gym `0.4.0rc0` are the tested compatibility target.
 This server lives in the Gym tree under `resources_servers/bbq`; install
 Gym editable with its dev extra:
 
@@ -180,7 +180,7 @@ Gym editable with its dev extra:
 git clone https://github.com/NVIDIA-NeMo/Gym.git
 cd Gym
 
-python3.12 -m venv .venv
+python3.13 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e ".[dev]"
 cd resources_servers/bbq
