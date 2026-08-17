@@ -1585,12 +1585,17 @@ AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
         # openai_model proxy force-overrides). tomlkit refuses to serialize None,
         # so coerce to an empty string here; the value is unused once the proxy
         # substitutes its configured backend.
-        config["llm"]["model"] |= {
+        llm_model_config = {
             "model": self.config.body.model or "",
             "base_url": "",  # May need to populate this
             "temperature": self.config.inference_params["temperature"],
             "top_p": self.config.inference_params["top_p"],
         }
+        max_output_tokens = self.config.inference_params.get("tokens_to_generate")
+        if max_output_tokens is not None:
+            llm_model_config["max_output_tokens"] = max_output_tokens
+
+        config["llm"]["model"] |= llm_model_config
 
         config_str = tomlkit.dumps(config)
 
