@@ -242,6 +242,11 @@ class VLLMModel(SimpleResponsesAPIModel):
         "required_prefix_token_ids",
     )
 
+    def setup_webserver(self):
+        app = super().setup_webserver()
+        app.post("/tokenize")(self.tokenize)
+        return app
+
     def get_converter(self) -> "VLLMConverter":
         """Return the converter used for Responses API <-> Chat Completions mapping.
 
@@ -338,6 +343,30 @@ class VLLMModel(SimpleResponsesAPIModel):
         return self._converter.chat_completion_to_response(
             responses_create_params=body, chat_completion=chat_completion_response
         )
+
+    async def tokenize(
+        self,
+        request: Request,
+        body: NeMoGymResponseCreateParamsNonStreaming = Body(),
+    ) -> Dict[str, List[int]]:
+        """Tokenize an admitted request for context-limit guard evaluation.
+
+        The returned IDs are diagnostic preflight information. Generation
+        evidence continues to come from the IDs returned by the generation
+        request itself.
+        """
+
+        chat_params = self._converter.responses_to_chat_completion_create_params(body)
+        body_dict = chat_params.model_dump(exclude_unset=True)
+        body_dict = self._preprocess_chat_completion_create_params(request, body_dict)
+        tokenize_body = self._get_tokenize_chat_body(body_dict)
+        result = await self._resolve_client(request).create_tokenize(**tokenize_body)
+        return {
+            "tokens": self._require_token_id_list(
+                result.get("tokens"),
+                f"{self.config.name}.tokenize.tokens",
+            )
+        }
 
     def _apply_sampling_overrides(self, body_dict: Dict[str, Any]) -> Dict[str, Any]:
         """Force ``config.sampling_overrides`` onto an outbound body, in place.
