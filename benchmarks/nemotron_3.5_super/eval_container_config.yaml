@@ -35,6 +35,8 @@ sandbox:
       domain: dummy
       api_key: dummy  # pragma: allowlist secret
 
+# Create your own key https://artificialanalysis.ai/login -> "API Access" -> "Your API keys"
+# Each key has its own rate limit for Crit PT benchmarks.
 critpt_benchmark_resources_server:
   resources_servers:
     critpt:
@@ -93,13 +95,6 @@ hle_benchmark_equivalence_judge_model:
       openai_base_url: https://inference-api.nvidia.com/v1
       openai_api_key: ${nv_inference_api_key}
       openai_model: azure/openai/gpt-4o
-
-# Create your own key https://artificialanalysis.ai/login -> "API Access" -> "Your API keys"
-# Each key has its own rate limit for Crit PT benchmarks.
-critpt_benchmark_resources_server:
-  resources_servers:
-    critpt:
-      api_key: dummy  # pragma: allowlist secret
 
 policy_model:
   responses_api_models:
