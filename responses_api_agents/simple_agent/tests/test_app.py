@@ -35,7 +35,7 @@ from nemo_gym.openai_utils import (
 from nemo_gym.rollout_collection import _attach_trajectory_record
 from nemo_gym.rollout_observability import TrajectoryRecord
 from nemo_gym.server_utils import ServerClient
-from nemo_gym.visual_history import VisualHistoryConfig
+from nemo_gym.context_history import ContextHistoryConfig
 from responses_api_agents.simple_agent.app import (
     _CONTEXT_COMPACTION_ROLLOUT_ID_COOKIE,
     ModelServerRef,
@@ -233,7 +233,7 @@ class TestApp:
             name="",
             model_server=ModelServerRef(type="responses_api_models", name="model"),
             resources_server=ResourcesServerRef(type="resources_servers", name="resources"),
-            visual_history={"enabled": True, "shadow_only": True},
+            context_history={"enabled": True, "shadow_only": True},
         )
         server = SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
         client = TestClient(server.setup_webserver())
@@ -320,7 +320,7 @@ class TestApp:
             name="",
             model_server=ModelServerRef(type="responses_api_models", name="model"),
             resources_server=ResourcesServerRef(type="resources_servers", name="resources"),
-            visual_history={"enabled": True, "shadow_only": False},
+            context_history={"enabled": True, "shadow_only": False},
         )
         server = SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
         client = TestClient(server.setup_webserver())
@@ -368,7 +368,7 @@ class TestApp:
             name="",
             model_server=ModelServerRef(type="responses_api_models", name="model"),
             resources_server=ResourcesServerRef(type="resources_servers", name="resources"),
-            visual_history={
+            context_history={
                 "enabled": True,
                 "shadow_only": False,
                 "policy": {
@@ -510,7 +510,7 @@ class TestApp:
         assert len(payload["boundary_events"]) == 1
 
     async def test_run_preserves_authority_contract_across_resource_verification(self) -> None:
-        visual_history = VisualHistoryConfig(enabled=True, shadow_only=False)
+        context_history = ContextHistoryConfig(enabled=True, shadow_only=False)
         config = SimpleAgentConfig(
             host="0.0.0.0",
             port=8080,
@@ -518,16 +518,16 @@ class TestApp:
             name="simple_agent",
             model_server=ModelServerRef(type="responses_api_models", name="model"),
             resources_server=ResourcesServerRef(type="resources_servers", name="resources"),
-            visual_history=visual_history,
+            context_history=context_history,
         )
         responses_create_params = NeMoGymResponseCreateParamsNonStreaming(input="task")
         session = ContextCompactionSession(
-            config=visual_history,
+            config=context_history,
             rollout_id="rollout-run",
             generation_contract=build_generation_contract(
                 body=responses_create_params,
                 model_server=config.model_server,
-                visual_history=visual_history,
+                context_history=context_history,
             ),
             initial_context=[NeMoGymEasyInputMessage(role="user", content="task")],
         )

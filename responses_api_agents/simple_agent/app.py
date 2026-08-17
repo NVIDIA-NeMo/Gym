@@ -59,7 +59,7 @@ from nemo_gym.rollout_observability import (
     TrajectoryTurn,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, raise_for_status
-from nemo_gym.visual_history import ContextMeasurements, VisualHistoryConfig
+from nemo_gym.context_history import ContextHistoryConfig, ContextMeasurements
 
 
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
@@ -71,7 +71,7 @@ class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
     max_steps: int = None
-    visual_history: VisualHistoryConfig = Field(default_factory=VisualHistoryConfig)
+    context_history: ContextHistoryConfig = Field(default_factory=ContextHistoryConfig)
 
 
 class SimpleAgentRunRequest(BaseRunRequest):
@@ -151,14 +151,14 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             seed_observations = []
 
         context_session = None
-        if self.config.visual_history.enabled:
+        if self.config.context_history.enabled:
             context_session = ContextCompactionSession(
-                config=self.config.visual_history,
+                config=self.config.context_history,
                 rollout_id=context_compaction_rollout_id or rollout_id,
                 generation_contract=build_generation_contract(
                     body=body,
                     model_server=self.config.model_server,
-                    visual_history=self.config.visual_history,
+                    context_history=self.config.context_history,
                 ),
                 initial_context=agent_input,
                 seed_observations=seed_observations,
@@ -182,7 +182,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 ) -> ContextMeasurements:
                     nonlocal model_server_cookies
                     prompt_token_count = 0
-                    guard_config = self.config.visual_history.guards
+                    guard_config = self.config.context_history.guards
                     if guard_config.max_total_tokens is not None:
                         tokenize_body = body.model_copy(
                             update={
