@@ -13,6 +13,8 @@ finance_sec_search_resources_server:
       # standalone (`gym env start` / `+dry_run`); override via env / NVFlow overlay.
       # null default => web search disabled unless a key is supplied.
       tavily_api_key: ${oc.select:tavily_api_key,null}
+      local_edgar_index_path: ${oc.select:local_edgar_index_path,null}
+      local_edgar_metrics_dir: ${oc.select:local_edgar_metrics_dir,null}
       retrieval_model_server:
         type: responses_api_models
         name: policy_model

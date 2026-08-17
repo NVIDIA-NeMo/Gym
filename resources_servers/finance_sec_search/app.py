@@ -58,6 +58,8 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json
 
+from .local_edgar_search import LocalEdgarSearch
+
 
 logger = logging.getLogger(__name__)
 
@@ -138,9 +140,17 @@ class FinanceAgentResourcesServerConfig(BaseResourcesServerConfig):
         description="Per-rollout wall-clock time budget in seconds. When exceeded, tool calls return an error "
         "asking the model to submit immediately. Set to None to disable.",
     )
+    local_edgar_index_path: Optional[str] = Field(
+        default=None,
+        description="Read-only SQLite FTS5 index used by edgar_search.",
+    )
+    local_edgar_metrics_dir: Optional[str] = Field(
+        default=None,
+        description="Optional directory for per-search latency records.",
+    )
     max_end_date: Optional[str] = Field(
         default=None,
-        description="Maximum allowed end_date for all date-filtered tools (web_search, etc.). "
+        description="Maximum allowed end_date for all date-filtered tools (web_search, edgar_search, etc.). "
         "When set, dates beyond this are clamped and omitted end_dates default to this value. "
         "Set to null (default) to disable clamping.",
     )
@@ -209,6 +219,29 @@ class FinanceAgentSearchResponse(BaseModel):
     """Response model for SEC filing search."""
 
     results: str = Field(description="JSON string of filing results")
+
+
+class EdgarSearchRequest(BaseModel):
+    """Request model for local full-text EDGAR search."""
+
+    search_query: str = Field(description="Case-insensitive search term or phrase")
+    form_types: Optional[List[str]] = Field(default=None, description="Optional EDGAR form types")
+    ciks: Optional[List[str]] = Field(default=None, description="Optional CIK filters")
+    start_date: Optional[str] = Field(default="1900-01-01", description="Start date (YYYY-MM-DD)")
+    end_date: Optional[str] = Field(default=None, description="End date (YYYY-MM-DD)")
+    page: int = Field(default=1, ge=1, description="Result page number")
+    top_n_results: int = Field(default=100, ge=1, le=100, description="Maximum results to return")
+
+    @field_validator("form_types", "ciks", mode="before")
+    @classmethod
+    def _coerce_filters(cls, v: Any) -> Any:
+        return _coerce_stringified_collection(v)
+
+
+class EdgarSearchResponse(BaseModel):
+    """Response model for local full-text EDGAR search."""
+
+    results: str = Field(description="JSON string of sec-api-compatible search results")
 
 
 class RetrieveInformationRequest(BaseModel):
@@ -338,6 +371,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
     """
     SEC EDGAR Filing Search Resource Server.
     - /sec_filing_search: Search for SEC filings by ticker or company name
+    - /edgar_search: Search the local EDGAR full-text index
     - /parse_html_page: Fetch, parse, and store any HTML page (SEC URLs use XBRL-aware parsing + disk cache)
     - /retrieve_information: Query stored documents via LLM prompt with {{key}} syntax
     - /web_search: Tavily web search
@@ -415,6 +449,20 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         else:
             logger.info("No tavily_api_key configured — web_search will be unavailable")
 
+        self._local_edgar_search: Optional[LocalEdgarSearch] = None
+        if self.config.local_edgar_index_path:
+            self._local_edgar_search = LocalEdgarSearch(
+                self.config.local_edgar_index_path,
+                max_end_date=self.config.max_end_date or "2025-04-07",
+                metrics_dir=self.config.local_edgar_metrics_dir,
+            )
+            logger.info(
+                "Local EDGAR search initialized from %s",
+                self.config.local_edgar_index_path,
+            )
+        else:
+            logger.info("local_edgar_index_path is not configured — edgar_search will be unavailable")
+
     def _get_session_storage(self, session_id: str) -> Dict[str, str]:
         """Get or create the data storage dict for a session."""
         if session_id not in self._data_storage:
@@ -464,6 +512,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         self._load_tickers_or_fail()
 
         app.post("/sec_filing_search")(self.sec_filing_search)
+        app.post("/edgar_search")(self.edgar_search)
         app.post("/parse_html_page")(self.parse_html_page)
         app.post("/retrieve_information")(self.retrieve_information)
         app.post("/submit_final_result")(self.submit_final_result)
@@ -475,7 +524,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                 "results": json.dumps(
                     {
                         "error": f"Tool '{tool_name}' does not exist. Available tools: "
-                        "sec_filing_search, parse_html_page, "
+                        "sec_filing_search, edgar_search, parse_html_page, "
                         "retrieve_information, submit_final_result, web_search"
                     }
                 )
@@ -867,6 +916,40 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
             )
 
         return FinanceAgentSearchResponse(results=json.dumps(all_results, indent=2))
+
+    # ========================================================================
+    # edgar_search Endpoint
+    # ========================================================================
+
+    async def edgar_search(self, request: Request, body: EdgarSearchRequest) -> EdgarSearchResponse:
+        """Search the local SQLite EDGAR full-text index."""
+        if timeout_msg := self._check_time_budget(request.session.get(SESSION_ID_KEY, "")):
+            return EdgarSearchResponse(results=timeout_msg)
+
+        if self._local_edgar_search is None:
+            return EdgarSearchResponse(
+                results=json.dumps(
+                    {
+                        "error": "edgar_search is not available. "
+                        "local_edgar_index_path is not configured."
+                    }
+                )
+            )
+
+        try:
+            results = await self._local_edgar_search.search_async(
+                search_query=body.search_query,
+                start_date=body.start_date or "1900-01-01",
+                end_date=body.end_date or self.config.max_end_date or "2025-04-07",
+                top_n_results=body.top_n_results,
+                page=body.page,
+                form_types=body.form_types,
+                ciks=body.ciks,
+            )
+            return EdgarSearchResponse(results=json.dumps(results, default=str))
+        except Exception as error:
+            logger.warning("edgar_search failed: %s", error)
+            return EdgarSearchResponse(results=json.dumps({"error": str(error)}))
 
     # ========================================================================
     # parse_html_page Endpoint

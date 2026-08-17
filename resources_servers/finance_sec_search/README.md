@@ -9,6 +9,7 @@ Financial information retrieval using SEC EDGAR filings with optional web search
 | Tool | Description |
 |------|-------------|
 | `sec_filing_search` | Search SEC EDGAR for filing metadata by stock ticker symbol |
+| `edgar_search` | Full-text search a read-only local SQLite FTS5 index |
 | `parse_html_page` | Fetch and parse an HTML page, optionally cache SEC content, and store it under a key |
 | `retrieve_information` | Query stored documents via LLM prompt with `{{key}}` placeholders |
 | `submit_final_result` | Submit the final answer (keeps model in tool-calling mode until ready) |
@@ -33,6 +34,12 @@ search_judge_model_name: gpt-5-mini
 
 # Optional: set TAVILY_API_KEY to enable web_search.
 tavily_api_key: ${oc.env:TAVILY_API_KEY,null}
+
+# Required when the dataset exposes edgar_search.
+local_edgar_index_path: /path/to/sap500_sec_fts.sqlite
+
+# Optional per-process JSONL latency records.
+local_edgar_metrics_dir: /path/to/search_metrics
 ```
 
 The config uses `${oc.select:tavily_api_key,null}`, so `web_search` is disabled
@@ -148,6 +155,22 @@ python resources_servers/finance_sec_search/scripts/convert_questions.py \
   --output resources_servers/finance_sec_search/data/example.jsonl \
   --include-web-search
 ```
+
+Select the local full-text search contract with `--search-tool edgar_search`:
+
+```bash
+python resources_servers/finance_sec_search/scripts/convert_questions.py \
+  --input resources_servers/finance_sec_search/data/example_questions.jsonl \
+  --output resources_servers/finance_sec_search/data/example_edgar_search.jsonl \
+  --search-tool edgar_search
+```
+
+This keeps the same user prompt and companion tools while replacing
+`sec_filing_search` with the agent-facing `edgar_search` schema. The
+`/edgar_search` route reads `local_edgar_index_path` in read-only immutable mode
+and returns sec-api-compatible filing metadata. It does not call sec-api.io.
+`parse_html_page` remains separate and may read the filing cache, filing dump,
+or SEC.gov.
 
 A pre-converted `example.jsonl` (without web search) is checked in and ready to
 use — you only need to re-run `convert_questions.py` if you modify the raw
