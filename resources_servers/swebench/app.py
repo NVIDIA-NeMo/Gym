@@ -52,6 +52,10 @@ class SwebenchResourcesServerConfig(BaseResourcesServerConfig):
     is_verifying_golden_patch: bool = False
     apply_anti_cheating: bool = True
 
+    # Image source for eval containers; defaults preserve the official dockerhub x86_64 images.
+    image_namespace: str = "swebench"
+    image_arch: str = "x86_64"
+
     evaluation_timeout: Optional[int] = None
 
     # Sandbox config
@@ -226,7 +230,8 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         return make_test_spec(
             # This accepts a SWEbenchInstance which is identically our body.
             body.model_dump(),
-            namespace="swebench",  # Dockerhub namespace
+            namespace=self.config.image_namespace,
+            arch=self.config.image_arch,
             instance_image_tag=LATEST,
             env_image_tag=LATEST,
         )
