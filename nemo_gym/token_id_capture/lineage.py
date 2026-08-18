@@ -349,7 +349,9 @@ class RolloutLineage:
         )
         previous = self.by_call_id.get(call_id)
         if previous is not None:
-            self.total_tokens -= previous.cum_len
+            if previous != node:
+                raise ValueError(f"conflicting lineage record for model call {call_id}")
+            return
         self.total_tokens += node.cum_len
         self.by_call_id[call_id] = node
         fingerprint = assistant_fingerprint(messages)

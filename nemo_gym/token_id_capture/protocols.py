@@ -55,10 +55,21 @@ class LineageMatch:
 
 @runtime_checkable
 class LineageStore(Protocol):
-    """Request-time lineage shared by every worker serving a rollout."""
+    """Request-time lineage shared by every worker serving a rollout.
+
+    External implementations must provide read-after-write consistency across
+    workers: after ``record`` returns, a later ``resolve`` must be able to see it.
+    A miss or ambiguous identity returns ``None``. It is never valid to guess one
+    of several candidates, because the returned tokens can change generation.
+    """
 
     async def resolve(self, rollout_id: str, request_items: list[dict]) -> LineageMatch | None:
-        """Return one verified parent, or ``None`` for a root or ambiguity."""
+        """Return one verified parent, or ``None`` for a root or ambiguity.
+
+        ``request_items`` are the unmodified items received from the harness.
+        The implementation must verify that they continue the recorded request
+        context, not merely match model-authored output.
+        """
         ...
 
     async def record(
@@ -70,7 +81,13 @@ class LineageStore(Protocol):
         cumulative_token_ids: list[int],
         digest: str,
     ) -> None:
-        """Publish a completed call for later request-time resolution."""
+        """Publish a completed call for later request-time resolution.
+
+        The request and response items are the unmodified wire representations.
+        Repeating a model_call_id with the same payload is a no-op. Reusing it
+        with different data must fail. The method returns only once the record is
+        visible to every worker that can serve this rollout.
+        """
         ...
 
     async def close(self) -> None:
