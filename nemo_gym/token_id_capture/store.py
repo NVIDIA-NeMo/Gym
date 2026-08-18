@@ -263,7 +263,10 @@ class TokenCaptureStore:
             )
 
     async def tokens_for(self, rollout_id: str) -> list[TokenEntry]:
-        """Compatibility read for diagnostics. Consumers should use ``freeze``."""
+        """Read records for compatibility diagnostics.
+
+        Consumers should use ``freeze``.
+        """
         return await asyncio.to_thread(self.read_entries, rollout_id)
 
     async def drop(self, rollout_id: str, *, snapshot_id: str, version: int) -> bool:
