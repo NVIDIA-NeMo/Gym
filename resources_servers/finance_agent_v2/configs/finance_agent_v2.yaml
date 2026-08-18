@@ -69,14 +69,18 @@ search_judge_model:
       openai_api_key: ${oc.select:search_judge_model_api_key,unset}
       openai_model: ${oc.select:search_judge_model_name,gpt-5-mini}
 
-# Uses responses_api_agents/finance_agent_v2, not the v1 finance_agent loop:
-# upstream's v1 and v2 hooks have diverged (nudge text, turn-vs-time bound,
-# abort on retry exhaustion), and the v1 loop is on the training path so it is
-# left untouched. See that component's README for the full comparison.
+# The three policy fields below mirror vals-ai/finance-agent-v2 and are checked
+# against the installed package by tests/test_upstream_parity.py, so a pin bump
+# that changes them fails there.
 finance_agent_v2:
   responses_api_agents:
-    finance_agent_v2:
+    finance_agent:
       entrypoint: app.py
+      no_tool_call_nudge: >-
+        Your last response produced no tool call. Call `submit_final_result` if
+        you have a final result, otherwise continue with the next tool call.
+      max_time_seconds: 3600
+      abort_on_tool_error_types: [RetryExhaustedError]
       # Upstream v2 bounds the run by time, not turns; max_steps stays a
       # belt-and-braces cap so a looping model cannot burn the full hour.
       max_steps: 50

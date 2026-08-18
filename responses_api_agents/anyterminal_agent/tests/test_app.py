@@ -354,7 +354,7 @@ class TestBuildProvider:
     @pytest.fixture(autouse=True)
     def _fake_apptainer_binary(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Constructing ApptainerProvider hard-errors if the real binary isn't on PATH.
-        monkeypatch.setattr(apptainer_provider, "_require_apptainer", lambda: "/usr/bin/apptainer")
+        monkeypatch.setattr(apptainer_provider, "_require_apptainer", lambda _bin_path=None: "/usr/bin/apptainer")
 
     def test_default_is_docker(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(tmp_path)
