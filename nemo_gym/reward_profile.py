@@ -802,6 +802,11 @@ def compute_aggregate_metrics(
             if k != "agent_ref":
                 agent_metrics[k] = v
 
+    # Same as agent_level_metrics above — callers nest this list under the real agent_ref.
+    serialized_repeat_level_metrics = [
+        {k: v for k, v in entry.items() if k != "agent_ref"} for entry in repeat_level_metrics
+    ]
+
     serialized_group = rp.prepare_for_serialization(group_level_metrics)
 
     # Keep task index explicit in aggregate metrics for downstream per-task joins.
@@ -839,7 +844,7 @@ def compute_aggregate_metrics(
         group_level_metrics=serialized_group,
         agent_metrics=serialized_agent,
         key_metrics=key_metrics,
-        repeat_level_metrics=repeat_level_metrics,
+        repeat_level_metrics=serialized_repeat_level_metrics,
     )
 
 
