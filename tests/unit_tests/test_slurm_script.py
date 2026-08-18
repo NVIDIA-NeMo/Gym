@@ -830,8 +830,10 @@ def test_build_sbatch_script_ray_backend_adds_head_node_prelude(bench_dir):
     compute = next(iter(config.compute.values()))
     script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
     assert "scontrol show hostnames" in script
-    assert "RAY_HEAD_NODE_IP" in script
     assert "ray symmetric-run" in script
+    # Must be exported: it's read inside a separate `srun ... bash -lc` subprocess, which only
+    # inherits *exported* environment variables, not plain shell variables from the parent script.
+    assert 'export RAY_HEAD_NODE_IP="$head_node_ip:6379"' in script
 
 
 def test_build_sbatch_script_vllm_service_backend_omits_ray_prelude(submit_config, bench_dir):

@@ -58,7 +58,7 @@ nodes=$(scontrol show hostnames "$SLURM_JOB_NODELIST")
 nodes_array=($nodes)
 head_node_hostname=${nodes_array[0]}
 head_node_ip=$(getent hosts "$head_node_hostname" | awk '{print $1}')
-RAY_HEAD_NODE_IP="$head_node_ip:6379"
+export RAY_HEAD_NODE_IP="$head_node_ip:6379"
 echo "Ray head node IP address: $RAY_HEAD_NODE_IP\""""
 
 
