@@ -78,7 +78,7 @@ from nemo_gym.token_id_capture.lineage import (
     assistant_fingerprint,
     conversation_digest,
 )
-from nemo_gym.token_id_capture.protocols import TokenSource
+from nemo_gym.token_id_capture.protocols import TokenCaptureSnapshot, TokenSource
 from nemo_gym.token_id_capture.store import make_token_store
 
 
@@ -1126,6 +1126,22 @@ async def test_file_lineage_appends_without_rewriting_prior_records(tmp_path):
     assert len(payload.splitlines()) == 2
 
 
+async def test_file_lineage_concurrent_idempotent_publication_stays_unique(tmp_path):
+    request = [{"role": "user", "content": "hello"}]
+    response = [{"role": "assistant", "content": "hi"}]
+    writers = [FileLineageStore(tmp_path) for _ in range(4)]
+
+    await asyncio.gather(
+        *(writer.record("shared-race", "call-1", request, response, [1, 2, 3], "digest-1") for writer in writers)
+    )
+
+    parent = await FileLineageStore(tmp_path).resolve(
+        "shared-race", request + response + [{"role": "user", "content": "next"}]
+    )
+    assert parent is not None
+    assert parent.model_call_id == "call-1"
+
+
 async def test_file_lineage_resolves_across_spawned_worker_processes(tmp_path):
     context = multiprocessing.get_context("spawn")
     process = context.Process(target=_record_shared_file_lineage, args=(str(tmp_path),))
@@ -1382,6 +1398,43 @@ class _ConfiguredSink:
         pass
 
 
+class _ConfiguredEndpoint:
+    """A transport-shaped adapter implementing both sides of the capture contract."""
+
+    entries: dict[str, dict[str, TokenEntry]] = {}
+    incomplete: set[str] = set()
+
+    async def put(self, entry: TokenEntry) -> None:
+        rollout = type(self).entries.setdefault(entry.rollout_id, {})
+        previous = rollout.get(entry.model_call_id)
+        if previous is not None and previous != entry:
+            raise ValueError("conflicting entry")
+        rollout[entry.model_call_id] = entry
+
+    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None:
+        type(self).incomplete.add(rollout_id)
+
+    async def seal(self, rollout_id: str) -> TokenCaptureSnapshot:
+        entries = tuple(type(self).entries.get(rollout_id, {}).values())
+        return TokenCaptureSnapshot(
+            rollout_id=rollout_id,
+            entries=entries,
+            incomplete=rollout_id in type(self).incomplete,
+            seal_id=f"sealed-{rollout_id}",
+            version=len(entries),
+        )
+
+    async def drop(self, rollout_id: str, *, seal_id: str, version: int) -> bool:
+        if seal_id != f"sealed-{rollout_id}" or version != len(type(self).entries.get(rollout_id, {})):
+            return False
+        type(self).entries.pop(rollout_id, None)
+        type(self).incomplete.discard(rollout_id)
+        return True
+
+    async def close(self) -> None:
+        pass
+
+
 class _ConfiguredLineage:
     def __init__(self, namespace: str = "") -> None:
         self.namespace = namespace
@@ -1454,6 +1507,31 @@ def test_a_configured_sink_receives_entries(tmp_path):
 
     assert [e.rollout_id for e in _ConfiguredSink.entries] == ["task0-cfg0"]
     assert _ConfiguredSink.entries[0].generation_token_ids == GTOKS
+
+
+async def test_an_external_endpoint_round_trips_the_sink_and_source_protocols():
+    _ConfiguredEndpoint.entries = {}
+    _ConfiguredEndpoint.incomplete = set()
+    target = f"{__name__}:_ConfiguredEndpoint"
+    config = {
+        "token_id_capture": {
+            "enabled": True,
+            "rebuild_response": True,
+            "sink": target,
+            "source": target,
+        }
+    }
+    client = TestClient(_server(config).setup_webserver())
+
+    response = client.post("/ng-rollout/task0-adapter/token-capture/v1/responses", json={"input": "hi"})
+    source = TokenIdCaptureConfig.model_validate(config).build_source()
+    snapshot = await source.seal("task0-adapter")
+
+    assert response.status_code == 200
+    assert [entry.rollout_id for entry in snapshot.entries] == ["task0-adapter"]
+    assert snapshot.entries[0].generation_token_ids == GTOKS
+    assert await source.drop("task0-adapter", seal_id=snapshot.seal_id, version=snapshot.version)
+    assert (await source.seal("task0-adapter")).entries == ()
 
 
 def test_a_configured_sink_wins_over_an_installed_one(installed_sink):
