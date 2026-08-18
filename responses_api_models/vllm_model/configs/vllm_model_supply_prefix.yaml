@@ -1,16 +1,14 @@
-# Enables prefix supply on the Gym model server.
+# Opt in to prefix supply on the Gym model server.
 #
-# The server sends the engine the exact tokens of the call this request continues
-# (required_prefix_token_ids), so the new prompt extends the previous prompt plus generation
-# by construction rather than being re-rendered from the conversation text. Re-rendering can
-# split an assistant turn differently than the model sampled it, and a tool-call parser drops
-# whatever the model generated after the tool call, either of which breaks the chain the
-# trainer needs.
+# The server requests the exact tokens from a verified parent through required_prefix_token_ids.
+# The backend must return generation-time prompt_token_ids that prove the prefix was applied.
+# prefix_requested records intent only.
+# prefix_supplied records proven application.
 #
-# Supply acts only when exactly one recorded call matches the incoming conversation. Without a unique
-# match the request is forwarded untouched and starts a new chain, which costs a cold cache but is
-# never wrong.
-# The backend must honour required_prefix_token_ids on both the chat and tokenize endpoints.
+# Supply requires exactly one recorded parent that matches the incoming conversation.
+# A missing or ambiguous parent leaves the request unchanged.
+# Stock vLLM does not support the required_prefix_token_ids extension.
+# Prefix supply is incompatible with use_completions_api=true.
 policy_model:
   responses_api_models:
     vllm_model:
