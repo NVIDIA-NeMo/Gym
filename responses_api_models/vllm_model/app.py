@@ -19,6 +19,7 @@ import json
 import logging
 import os
 from copy import deepcopy
+from threading import Lock
 from time import time, time_ns
 from typing import Any, ClassVar, Dict, List, Optional, Union
 
@@ -214,6 +215,8 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     def _validate_prefix_supply(self) -> "VLLMModelConfig":
         if self.supply_prefix_token_ids and not self.return_token_id_information:
             raise ValueError("supply_prefix_token_ids requires return_token_id_information=true")
+        if self.supply_prefix_token_ids and self.use_completions_api:
+            raise ValueError("supply_prefix_token_ids is not supported with use_completions_api=true")
         return self
 
     # When True, outbound calls go to vLLM's /v1/completions endpoint instead
@@ -623,8 +626,9 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         return body_dict
 
-    # [supplied, eligible]. A plain list so it is mutable without a pydantic field.
+    # ``[supplied, eligible]`` diagnostic counts.
     _prefix_supply_counts: List[int] = PrivateAttr(default_factory=lambda: [0, 0])
+    _prefix_supply_lock: Any = PrivateAttr(default_factory=Lock)
 
     def _apply_prefix_supply(self, body_dict: Dict[str, Any]) -> Dict[str, Any]:
         """Hand the engine the previous call's exact tokens, so this prompt extends them.
@@ -651,7 +655,8 @@ class VLLMModel(SimpleResponsesAPIModel):
         """
         if not self.config.supply_prefix_token_ids:
             return body_dict
-        self._prefix_supply_counts[1] += 1
+        with self._prefix_supply_lock:
+            self._prefix_supply_counts[1] += 1
         context = current_capture_context()
         if context is None:
             # Not a correlated rollout call, so there is no lineage to supply from.
@@ -687,8 +692,9 @@ class VLLMModel(SimpleResponsesAPIModel):
         context = current_capture_context()
         if context is not None:
             context.prefix_supplied = True
-        self._prefix_supply_counts[0] += 1
-        supplied, total = self._prefix_supply_counts
+        with self._prefix_supply_lock:
+            self._prefix_supply_counts[0] += 1
+            supplied, total = self._prefix_supply_counts
         if supplied % 10 == 0:
             LOG.info("prefix supply: %d/%d calls supplied (%.0f%%)", supplied, total, 100.0 * supplied / total)
         return tokens
