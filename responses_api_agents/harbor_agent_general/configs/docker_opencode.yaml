@@ -1,0 +1,38 @@
+harbor_agent_general:
+  responses_api_agents:
+    harbor_agent_general:
+      entrypoint: app.py
+      domain: agent
+      description: Harbor integration for agent harnesses with Docker environments.
+
+      ## Optional fallback to co-locate jobs directory with the output_jsonl_fpath.
+      harbor_jobs_dir: ${oc.select:harbor_jobs_dir,${output_jsonl_fpath}}
+
+      ##
+      # Follows harbor.models.job.config:DatasetConfig spec.
+      #
+      harbor_dataset:
+        path: ${harbor_dataset_path}
+
+      ##
+      # Follows harbor.models.trial.config:EnvironmentConfig spec.
+      #
+      harbor_environment:
+        type: docker
+
+      ##
+      # Follows harbor.models.trial.config:AgentConfig spec.
+      #
+      harbor_agent:
+        name: opencode
+        ## TIP: Directly use Gym's native expected variable name.
+        model_name: ${policy_model_name}
+        # env:
+          # NVINF_API_KEY: \${NVINF_API_KEY}
+          # VLLM_API_BASE: \${VLLM_API_BASE}
+
+      ##
+      # Follows harbor.models.trial.config:VerifierConfig spec.
+      #
+      # harbor_verifier:
+      #   disable: false
