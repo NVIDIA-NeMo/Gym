@@ -200,7 +200,7 @@ def prefix_merging(entries: list[TokenEntry]) -> BuildOutput:
         for retry_group in by_prompt.values():
             if len(retry_group) < 2:
                 continue
-            extended = [n for n in retry_group if n.children]
+            extended = [n for n in retry_group if any(not child.quarantined for child in n.children)]
             if extended:
                 keep = set(extended)
             else:
@@ -358,8 +358,14 @@ def project_main_chain_response(rollout_id: str, out: BuildOutput, model: str = 
     unbroken sequence across the whole rollout, because the items come from several model
     calls stitched together rather than one.
     """
+    if not out.chains:
+        raise ValueError("capture produced no safe trainable chain")
+    if out.notes.builder == "per_request" and len(out.chains) != 1:
+        raise ValueError("per_request produced multiple trajectories for a single-response delivery")
     mains = [c for c in out.chains if c.chain_id == "main"] or out.chains[:1]
-    output = project_chain_to_output_items(mains[0]) if mains else []
+    output = project_chain_to_output_items(mains[0])
+    if not any(item.get("generation_token_ids") for item in output):
+        raise ValueError("capture produced no trainable generated tokens")
     # Token fields ride only on generated items; a content-only leading item (e.g. assistant
     # text emitted before a tool call) carries none. Read the usage counts from the items that
     # actually have token fields so a leading content item does not KeyError or skew the totals.
