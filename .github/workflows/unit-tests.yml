@@ -145,6 +145,7 @@ jobs:
             uv-${{ runner.os }}-
 
       - name: Install system test dependencies
+        timeout-minutes: 5
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends git curl ca-certificates
@@ -228,6 +229,7 @@ jobs:
             uv-${{ runner.os }}-
 
       - name: Install system test dependencies
+        timeout-minutes: 5
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends git curl ca-certificates
