@@ -1,0 +1,41 @@
+config_paths:
+  - responses_api_agents/nemo_fabric_agent/configs/nemo_fabric_agent.yaml
+
+math_with_judge:
+  resources_servers:
+    math_with_judge:
+      entrypoint: app.py
+      judge_model_server:
+        type: responses_api_models
+        name: policy_model
+      judge_responses_create_params: {input: []}
+      should_use_judge: false
+      domain: math
+      verified: false
+      description: OpenMathReasoning evaluated with math-verify through NeMo Fabric and Hermes Agent.
+      value: Evaluate a Fabric-selected harness on mathematical reasoning.
+
+math_with_judge_nemo_fabric_hermes:
+  _inherit_from: nemo_fabric_agent
+  responses_api_agents:
+    nemo_fabric_agent:
+      resources_server:
+        type: resources_servers
+        name: math_with_judge
+      adapter_id: nvidia.fabric.hermes
+      model_provider: openai
+      timeout: 1800
+      system_prompt: |
+        You are a precise math assistant. Use Python when it helps and put only the final answer in \boxed{}.
+      harness_settings:
+        reasoning_config: {enabled: true, effort: medium}
+        max_tokens: 32000
+        terminal_timeout: 30
+      fabric_config:
+        runtime: {max_turns: 30}
+        tools:
+          enabled: [terminal, file, code_execution, skills, todo]
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/math_with_judge/data/example.jsonl

@@ -512,6 +512,8 @@ def _tool_calls_and_reasoning(response: dict[str, Any]) -> tuple[list[dict[str, 
             reasoning_text = message.get("reasoning_content") or message.get("reasoning")
             if isinstance(reasoning_text, str) and reasoning_text:
                 reasoning.append(reasoning_text)
+            elif isinstance(message.get("content"), str):
+                reasoning.extend(re.findall(r"<think>(.*?)</think>", message["content"], flags=re.DOTALL))
         return tool_calls, ("\n".join(reasoning) or None)
 
     content = response.get("content")

@@ -1,0 +1,11 @@
+-e nemo-gym[dev] @ ../../
+nemo-fabric[claude,codex,deepagents,hermes-agent,mini-swe-agent]==0.2.0rc3
+nemo-fabric-runtime==0.2.0rc3
+nemo-fabric-adapter-contract==0.2.0rc3
+nemo-fabric-adapters-common==0.2.0rc3
+nemo-fabric-adapters-claude==0.2.0rc3
+nemo-fabric-adapters-codex==0.2.0rc3
+nemo-fabric-adapters-deepagents==0.2.0rc3
+nemo-fabric-adapters-hermes==0.2.0rc3
+nemo-fabric-adapters-mini-swe-agent==0.2.0rc3
+hermes-agent @ git+https://github.com/NousResearch/hermes-agent@0ee05d72f2b30385d4861fd8e30511c6d51100e4

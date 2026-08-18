@@ -1,0 +1,2 @@
+# Hermes Agent 0.20.1 requires this version; the override is isolated to this agent server venv.
+openai==2.24.0
