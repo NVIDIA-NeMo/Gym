@@ -112,6 +112,7 @@ class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
     max_concurrent: int = 4
     max_tokens: int = 16384
     context_window: int = 131072
+    provider_headers: Optional[dict[str, str]] = None
     work_root: str = "/tmp/pinchbench_gym"
     # Where per-task transcripts are archived (kept on disk for inspection, like
     # swe_agents' persistent_dir). `raw_rollout` keeps a pointer to this archive.
@@ -184,6 +185,8 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             "TIMEOUT_MULT": str(self.config.timeout_multiplier),
             "PINCHBENCH_WORK_BASE": self.config.sandbox_work_base,
         }
+        if self.config.provider_headers is not None:
+            env["PINCHBENCH_PROVIDER_HEADERS"] = json.dumps(self.config.provider_headers)
         # Each per-task container starts its OWN OpenClaw gateway daemon (per-task, so
         # it never hits the shared-workspace WorkspaceVanishedError cliff). The client
         # in-container picks up the token from this env var.
@@ -258,6 +261,11 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             api_key = os.environ.get("MODEL_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
             max_tokens = int(os.environ.get("PINCHBENCH_MAX_TOKENS", "65536"))
             context_window = int(os.environ.get("PINCHBENCH_CONTEXT_WINDOW", "131072"))
+            provider_headers = (
+                json.loads(os.environ["PINCHBENCH_PROVIDER_HEADERS"])
+                if os.environ.get("PINCHBENCH_PROVIDER_HEADERS")
+                else None
+            )
             runtime_params = {
                 "temperature": 1,
                 "top_p": 0.95,
@@ -291,6 +299,8 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
                     }
                 ],
             }
+            if provider_headers is not None:
+                custom_provider["headers"] = provider_headers
             models = cfg.setdefault("models", {})
             models["mode"] = "merge"
             models.setdefault("providers", {})["custom"] = custom_provider
