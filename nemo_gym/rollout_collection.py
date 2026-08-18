@@ -814,11 +814,10 @@ class RolloutCollectionHelper(BaseModel):
         owned_token_source = None
         token_capture_config = TokenIdCaptureConfig.model_validate(global_config)
         if token_capture_config.enabled and token_capture_config.token_id_capture.rebuild_response:
-            configured_source = token_capture_config.build_source()
-            token_source = configured_source or installed_token_source()
+            token_source = installed_token_source()
             if token_source is None and token_capture_dirs:
                 token_source = TokenCaptureStore(token_capture_dirs[0])
-            if configured_source is not None or isinstance(token_source, TokenCaptureStore):
+            if isinstance(token_source, TokenCaptureStore):
                 owned_token_source = token_source
 
         # Clear only rows about to be dispatched, after resume has assigned retry suffixes. This also
@@ -831,6 +830,11 @@ class RolloutCollectionHelper(BaseModel):
             for row in input_rows
             if token_id_capture_enabled_for_agent(global_config, (row.get(AGENT_REF_KEY_NAME) or {}).get("name"))
         ]
+        if token_capture_config.token_id_capture.rebuild_response and token_capture_rows and token_source is None:
+            raise ValueError(
+                "Token capture response rebuilding requires a TokenSource in the rollout-collector process. "
+                "Call install_token_source before starting collection or configure token_id_capture.dir."
+            )
         if token_capture_dirs and token_capture_rows:
             # Token stores append under deterministic rollout ids.
             # Clear stale records to avoid merging different attempts.
