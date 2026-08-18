@@ -1711,12 +1711,12 @@ class TestRolloutAggregationHelper:
 
 
 class TestTokenCaptureRetention:
-    """Delete-on-consume and stale-record clearing.
+    """Test retirement after handoff and stale-record clearing.
 
-    Both directions matter because ``TokenCaptureStore.append`` opens in "ab"
-    mode and rollout ids are deterministic: without clearing, a rerun stitches
-    the previous attempt's calls together with this one's; without deleting,
-    the capture directory grows without bound across a run.
+    ``TokenCaptureStore.append`` uses append mode.
+    Rollout ids are deterministic.
+    Clearing prevents a rerun from merging different attempts.
+    Retirement prevents unbounded growth after durable handoff.
     """
 
     @staticmethod
@@ -1754,10 +1754,10 @@ class TestTokenCaptureRetention:
 
 
 class TestFinalizeRolloutTokenCapture:
-    """The per-record step that turns a finished rollout into a token-bearing one.
+    """Test the per-record token-capture finalizer.
 
-    It takes the record and a ``TokenSource``, so a caller staging records through its own
-    transport uses it without Gym's config being involved anywhere.
+    The finalizer accepts a record and a ``TokenSource``.
+    A framework can provide a source without using Gym configuration.
     """
 
     @staticmethod
@@ -1792,10 +1792,10 @@ class TestFinalizeRolloutTokenCapture:
 
         [item] = result["response"]["output"]
         assert item["generation_token_ids"] == [4, 5]
-        assert result["reward"] == 1.0  # the harness and verifier output is left alone
+        assert result["reward"] == 1.0  # Preserve harness and verifier output.
         assert result[TOKEN_CAPTURE_KEY]["delivered_fraction"] == 1.0
         assert built is not None and built["rebuilt_response"] is not None
-        assert len(store.read_entries("0-0")) == 1  # retained until the downstream handoff is durable
+        assert len(store.read_entries("0-0")) == 1  # Retain evidence until durable handoff.
         assert await retire_rollout_token_capture("0-0", store, built) is True
         assert store.read_entries("0-0") == []
 
@@ -1818,23 +1818,26 @@ class TestFinalizeRolloutTokenCapture:
         assert [entry.model_call_id for entry in store.read_entries("0-0")] == ["new"]
 
     async def test_a_rollout_that_already_has_token_ids_is_left_alone(self, tmp_path: Path) -> None:
-        """A native agent's ids are what the policy sampled. A rebuild could differ, and
-        overwriting them would train on the difference silently."""
+        """Keep the token ids sampled by a native agent.
+
+        A reconstruction may differ from the sampled ids.
+        Overwriting them would silently train on that difference.
+        """
         store = TokenCaptureStore(tmp_path)
         self._capture(store)
         native = [{"type": "message", "role": "assistant", "generation_token_ids": [9, 9], "content": []}]
         result = self._record(output=native)
 
         with warnings.catch_warnings():
-            warnings.simplefilter("error")  # and it must not be reported as a problem
+            warnings.simplefilter("error")  # Existing ids are not an error.
             assert await finalize_rollout_token_capture(result, store) is None
 
         assert result["response"]["output"] == native
         assert TOKEN_CAPTURE_KEY not in result
-        assert len(store.read_entries("0-0")) == 1  # not consumed: they were not this rollout's
+        assert len(store.read_entries("0-0")) == 1  # These captures were not consumed.
 
     async def test_native_and_external_rollouts_are_handled_in_one_batch(self, tmp_path: Path) -> None:
-        """Mixed training: both kinds go through the same call and each gets what it needs."""
+        """Finalize native and external rollouts through the same call."""
         store = TokenCaptureStore(tmp_path)
         self._capture(store)
         native = self._record(
@@ -1852,7 +1855,7 @@ class TestFinalizeRolloutTokenCapture:
         assert built is not None
 
     async def test_a_second_call_is_a_no_op(self, tmp_path: Path) -> None:
-        """Idempotent: the first call leaves ids on the rollout, which the second one reads."""
+        """Leave a finalized rollout unchanged on a second call."""
         store = TokenCaptureStore(tmp_path)
         self._capture(store)
         result = self._record()
@@ -1879,7 +1882,7 @@ class TestFinalizeRolloutTokenCapture:
         with pytest.warns(UserWarning, match="marked for masking"):
             await finalize_rollout_token_capture(result, store)
 
-        # Top level only, so a consumer reads exactly one field to decide.
+        # Keep the masking decision in one top-level field.
         assert result[MASK_SAMPLE_KEY] is True
         assert MASK_SAMPLE_KEY not in result[TOKEN_CAPTURE_KEY]
         assert result[TOKEN_CAPTURE_KEY]["capture_incomplete"] is True
@@ -1891,7 +1894,7 @@ class TestFinalizeRolloutTokenCapture:
 
         await finalize_rollout_token_capture(result, store)
 
-        # Absent rather than False: a consumer that masks on presence must not mask everything.
+        # Omit the field so presence-based consumers keep healthy samples.
         assert MASK_SAMPLE_KEY not in result
 
     async def test_a_failed_build_keeps_its_records_and_reports_why(self, tmp_path: Path) -> None:
@@ -1914,7 +1917,7 @@ class TestFinalizeRolloutTokenCapture:
 
         assert result[MASK_SAMPLE_KEY] is True
         assert "ValidationError" in result[TOKEN_CAPTURE_KEY]["error"]
-        # Kept: a failed build's records are the only evidence of why it failed.
+        # Retain failed-build records as diagnostic evidence.
         assert store.path_for("0-0").stat().st_size > 0
 
     async def test_a_rollout_with_no_capture_key_is_masked(self, tmp_path: Path) -> None:
@@ -1925,7 +1928,7 @@ class TestFinalizeRolloutTokenCapture:
         with pytest.warns(UserWarning, match="carries no id"):
             built = await finalize_rollout_token_capture(result, TokenCaptureStore(tmp_path))
 
-        # Masked, not just reported: unmasked it reaches the trainer with no ids and fails there.
+        # Mask the rollout before it reaches the trainer without ids.
         assert result[MASK_SAMPLE_KEY] is True
         assert result[TOKEN_CAPTURE_KEY]["error"] == "no capture key"
         assert built is not None and built["rebuilt_response"] is None
@@ -1938,7 +1941,7 @@ class TestFinalizeRolloutTokenCapture:
 
         assert result[MASK_SAMPLE_KEY] is True
         assert result[TOKEN_CAPTURE_KEY]["error"] == "capture contains no token records"
-        # A caller tallying a batch counts this as masked and unbuilt.
+        # Report the rollout as both masked and unbuilt.
         assert built is not None and built[MASK_SAMPLE_KEY] is True and built["rebuilt_response"] is None
 
     async def test_a_source_that_raises_loses_one_rollout_not_the_batch(self, tmp_path: Path) -> None:
@@ -1973,7 +1976,7 @@ class TestRolloutCarriesTokenIds:
         [
             {"output": []},
             {"output": [{"type": "message", "content": []}]},
-            {"output": [{"generation_token_ids": []}]},  # present but empty: nothing was sampled
+            {"output": [{"generation_token_ids": []}]},  # An empty list contains no sampled ids.
             {},
             None,
         ],

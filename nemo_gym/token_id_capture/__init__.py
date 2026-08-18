@@ -29,7 +29,11 @@ The rollout-record finalizer needs Gym's server stack.
 It is deliberately not re-exported here.
 Import ``nemo_gym.token_id_capture.delivery`` from server-side code.
 The incomplete state prevents training on a rollout that lost a model call.
-The caller conditionally retires the snapshot only after durable delivery.
+Finalization freezes and rebuilds the rollout.
+Finalization does not retire the snapshot.
+The caller retires it only after durable handoff.
+Retirement uses the frozen ``snapshot_id`` and version.
+Failed or masked builds retain their capture evidence.
 """
 
 from nemo_gym.token_id_capture.builder import (

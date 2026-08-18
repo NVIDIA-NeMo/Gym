@@ -800,14 +800,15 @@ class RolloutCollectionHelper(BaseModel):
         # into its record below (uniform across agents; no-op when capture is off / dirs absent).
         global_config = get_global_config_dict()
         capture_dirs = model_call_capture_dirs_from_config(global_config)
-        # Resolve the training-token store dir once, so each rollout's captured tokens can be built
-        # into a trajectory below. Independent of eval capture; empty (and a no-op) when token
-        # capture is off.
+        # Resolve the training-token store directory once.
+        # Training capture is independent of evaluation capture.
+        # An empty result disables training-token capture.
         token_capture_dirs = token_id_capture_dirs_from_config(global_config)
-        # Where the rebuild below reads records from and retires them. None when this run is not
-        # reading them back: capture off, no directory, or rebuild_response off because the caller
-        # reads through its own transport. The store is still written and still cleared in that last
-        # case, since clearing is about a rerun reusing a deterministic id, not about readback.
+        # The finalizer reads and freezes records through this source.
+        # The source is absent when capture or response rebuilding is disabled.
+        # A framework-owned transport may rebuild through its own source.
+        # The sink still records captures when Gym does not rebuild.
+        # Reruns still clear deterministic rollout ids before dispatch.
         token_source = None
         owned_token_source = None
         token_capture_config = TokenIdCaptureConfig.model_validate(global_config)
@@ -825,9 +826,8 @@ class RolloutCollectionHelper(BaseModel):
             print("Clearing existing model-call captures for rollouts being dispatched")
             clear_model_call_captures_for_rollouts(input_rows, capture_dirs)
         if token_capture_dirs:
-            # Same reason, for the token store: rollout ids are deterministic and the store appends,
-            # so without this a fresh run would build a trajectory that merges a previous attempt's
-            # calls with this one's.
+            # Token stores append under deterministic rollout ids.
+            # Clear stale records to avoid merging different attempts.
             print("Clearing existing token captures for rollouts being dispatched")
             clear_token_captures_for_rollouts(input_rows, token_capture_dirs)
 
@@ -867,9 +867,10 @@ class RolloutCollectionHelper(BaseModel):
             if "ng_model_call_capture" in result or "ng_agent_observations" in result or NG_TRAJECTORY_KEY in result:
                 _attach_trajectory_record(row, result)
 
-            # Build this rollout's captured tokens into a trajectory and attach it (no-op when token
-            # capture is off or no tokens were captured for the rollout). Never alters output/reward.
-            # A caller that drives run_examples itself calls the same function on each record.
+            # Freeze and rebuild this rollout's captured tokens.
+            # This step does not retire the frozen snapshot.
+            # It leaves harness output and reward unchanged.
+            # Direct callers of run_examples finalize each record themselves.
             token_capture_build = await finalize_rollout_token_capture(result, token_source)
 
             no_persist = bool(result.get(NG_NO_PERSIST_KEY))
