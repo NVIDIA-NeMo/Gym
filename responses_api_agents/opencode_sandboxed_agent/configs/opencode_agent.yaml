@@ -151,7 +151,7 @@ opencode_sandboxed_agent:
         ttl_s: 18000
         ready_timeout_s: 1200
         env:
-          OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX: null
+          OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX: "262144"
         resources:
           cpu: 2
           memory_mib: 8192
