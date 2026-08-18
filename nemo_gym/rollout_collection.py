@@ -877,7 +877,7 @@ class RolloutCollectionHelper(BaseModel):
 """
                 for agent_name in sorted(agent_name_to_metrics):
                     metrics = agent_name_to_metrics[agent_name]
-                    agent_total_samples = top_left[agent_name] + agent_name_to_counts[agent_name]
+                    agent_total_samples = counts_left[agent_name] + agent_name_to_counts[agent_name]
                     agent_sample_pct = 100 * agent_name_to_counts[agent_name] / agent_total_samples
                     avg_metrics = {k: v / agent_name_to_counts[agent_name] for k, v in metrics.items()}
                     print_str += f"""Found {agent_name_to_counts[agent_name]} / {agent_total_samples} ({agent_sample_pct:.2f}%) rollouts for `{agent_name}`.
