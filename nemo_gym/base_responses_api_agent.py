@@ -25,7 +25,7 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyResponse,
 )
-from nemo_gym.config_types import ROLLOUT_PATH_PREFIX
+from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
 from nemo_gym.global_config import (
     OBSERVABILITY_ENABLED_KEY_NAME,
     TOKEN_ID_CAPTURE_BLOCK,
@@ -73,6 +73,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         # responses() recovers the rollout id from the path (see url_path_for_request) to correlate
         # its model calls. Same handler, so unprefixed calls are unaffected.
         app.post(f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/v1/responses")(self.responses)
+        app.post(f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/{TOKEN_CAPTURE_PATH_SEGMENT}/v1/responses")(self.responses)
 
         run = self.run
 
@@ -101,14 +102,24 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         Fail closed: an agent whose client carries no usable global config runs uncorrelated
         rather than erroring on every model call.
         """
+        return self._model_call_capture_enabled() or self._token_id_capture_enabled()
+
+    def _model_call_capture_enabled(self) -> bool:
+        """Whether evaluation model-call observability is enabled."""
+        global_config = getattr(self.server_client, "global_config_dict", None)
+        if not isinstance(global_config, Mapping):
+            return False
+        return bool(global_config.get(OBSERVABILITY_ENABLED_KEY_NAME, False))
+
+    def _token_id_capture_enabled(self) -> bool:
+        """Whether this agent explicitly opted into training-token capture."""
         global_config = getattr(self.server_client, "global_config_dict", None)
         if not isinstance(global_config, Mapping):
             return False
         block = global_config.get(TOKEN_ID_CAPTURE_BLOCK) or {}
-        token_capture = bool(isinstance(block, Mapping) and block.get("enabled", False)) and bool(
-            getattr(self.config, "token_id_capture", False)
+        return bool(isinstance(block, Mapping) and block.get("enabled", False)) and bool(
+            getattr(getattr(self, "config", None), "token_id_capture", False)
         )
-        return bool(global_config.get(OBSERVABILITY_ENABLED_KEY_NAME, False) or token_capture)
 
     def rollout_id_from_run(self, body: Any) -> Optional[str]:
         """Per-rollout capture id for a run-request (its task/rollout indices).
@@ -128,7 +139,10 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         handling ``/run`` — both direct model-server calls and self-calls to ``/v1/responses``
         (the prefixed self-call route carries the id into ``responses()``).
         """
-        return f"{rollout_path_prefix(self.rollout_id_from_run(body))}{url_path}"
+        return (
+            f"{rollout_path_prefix(self.rollout_id_from_run(body), token_capture=self._token_id_capture_enabled())}"
+            f"{url_path}"
+        )
 
     def base_url_for_run(self, base_url: str, body: Any) -> str:
         """A model-server base URL with the per-rollout capture-correlation prefix applied.
@@ -137,7 +151,11 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         harnesses that configure a client once instead of prefixing each call: same gating, applied
         to a server root URL (append the API-version suffix afterwards).
         """
-        return apply_rollout_prefix(base_url, self.rollout_id_from_run(body))
+        return apply_rollout_prefix(
+            base_url,
+            self.rollout_id_from_run(body),
+            token_capture=self._token_id_capture_enabled(),
+        )
 
     def url_path_for_request(self, url_path: str, request: Optional[Request]) -> str:
         """Carry an inbound ``/ng-rollout/<id>`` self-call prefix onto a downstream url_path.
@@ -148,13 +166,15 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         """
         path_params = getattr(request, "path_params", None)
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
-        return f"{rollout_path_prefix(rollout_id)}{url_path}"
+        request_path = getattr(getattr(request, "url", None), "path", "")
+        token_capture = f"/{TOKEN_CAPTURE_PATH_SEGMENT}/" in request_path
+        return f"{rollout_path_prefix(rollout_id, token_capture=token_capture)}{url_path}"
 
     def resolve_model_base_url(self, model_server_name: str, rollout_id: Optional[str] = None) -> str:
         """Resolve a model-server URL with an optional rollout prefix."""
         server_config = get_first_server_config_dict(self.server_client.global_config_dict, model_server_name)
         base_url = self.server_client._build_server_base_url(server_config)
-        return f"{apply_rollout_prefix(base_url, rollout_id)}/v1"
+        return f"{apply_rollout_prefix(base_url, rollout_id, token_capture=SimpleResponsesAPIAgent._token_id_capture_enabled(self))}/v1"
 
     # TODO: right now there is no validation on the TypedDict NeMoGymResponseCreateParamsNonStreaming
     # We should explicitly add validation at this server level or we should explicitly not validate so that there is flexibility in this API.

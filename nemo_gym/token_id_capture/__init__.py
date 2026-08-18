@@ -35,10 +35,13 @@ trains on an incomplete rollout without knowing.
 
 from nemo_gym.token_id_capture.config import TokenIdCaptureConfig
 from nemo_gym.token_id_capture.protocols import (
+    TokenCaptureSnapshot,
     TokenSink,
     TokenSource,
     install_token_sink,
+    install_token_source,
     installed_token_sink,
+    installed_token_source,
 )
 from nemo_gym.token_id_capture.records import (
     TOKEN_ENTRY_RECORD_SCHEMA_VERSION,
@@ -50,6 +53,7 @@ from nemo_gym.token_id_capture.sink import (
     CaptureContext,
     capture_tokens,
     commit_entry,
+    current_capture_context,
     reset_token_sink,
     set_token_sink,
 )
@@ -67,11 +71,15 @@ __all__ = [
     "make_token_store",
     "TokenSink",
     "TokenSource",
+    "TokenCaptureSnapshot",
     "install_token_sink",
+    "install_token_source",
     "installed_token_sink",
+    "installed_token_source",
     "CaptureContext",
     "set_token_sink",
     "reset_token_sink",
     "capture_tokens",
     "commit_entry",
+    "current_capture_context",
 ]

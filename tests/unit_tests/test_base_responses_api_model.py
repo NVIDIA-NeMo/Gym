@@ -808,7 +808,7 @@ def test_base_agent_resolve_model_base_url(monkeypatch):
     assert SimpleResponsesAPIAgent.resolve_model_base_url(agent, "model", None) == "http://h:1/v1"
 
 
-def _make_base_agent(global_config):
+def _make_base_agent(global_config, *, token_id_capture=False):
     from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig
 
     class _Agent(SimpleResponsesAPIAgent):
@@ -820,7 +820,13 @@ def _make_base_agent(global_config):
 
     server_client = MagicMock(spec=ServerClient)
     server_client.global_config_dict = global_config
-    config = BaseResponsesAPIAgentConfig(host="", port=0, entrypoint="", name="agent")
+    config = BaseResponsesAPIAgentConfig(
+        host="",
+        port=0,
+        entrypoint="",
+        name="agent",
+        token_id_capture=token_id_capture,
+    )
     return _Agent(config=config, server_client=server_client)
 
 
@@ -842,6 +848,20 @@ def test_base_agent_url_path_for_run_gates_on_observability_and_indices():
     assert _make_base_agent(MagicMock()).url_path_for_run("/v1/responses", body) == "/v1/responses"
 
 
+def test_base_agent_propagates_explicit_token_capture_intent():
+    body = {TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 1}
+    global_config = {
+        "observability_enabled": True,
+        "token_id_capture": {"enabled": True},
+    }
+    opted_in = _make_base_agent(global_config, token_id_capture=True)
+    assert opted_in.url_path_for_run("/v1/responses", body) == "/ng-rollout/3-1/token-capture/v1/responses"
+    assert opted_in.base_url_for_run("http://h:1", body) == "http://h:1/ng-rollout/3-1/token-capture"
+
+    opted_out = _make_base_agent(global_config, token_id_capture=False)
+    assert opted_out.url_path_for_run("/v1/responses", body) == "/ng-rollout/3-1/v1/responses"
+
+
 def test_base_agent_url_path_for_request_propagates_inbound_prefix():
     agent = _make_base_agent({})
 
@@ -851,12 +871,21 @@ def test_base_agent_url_path_for_request_propagates_inbound_prefix():
     assert agent.url_path_for_request("/v1/responses", SimpleNamespace()) == "/v1/responses"
     assert agent.url_path_for_request("/v1/responses", None) == "/v1/responses"
 
+    capture_prefixed = SimpleNamespace(
+        path_params={"rollout_id": "7-0"},
+        url=SimpleNamespace(path="/ng-rollout/7-0/token-capture/v1/responses"),
+    )
+    assert (
+        agent.url_path_for_request("/v1/responses", capture_prefixed) == "/ng-rollout/7-0/token-capture/v1/responses"
+    )
+
 
 def test_base_agent_registers_prefixed_self_call_route():
     from nemo_gym.server_utils import ROLLOUT_PATH_PREFIX
 
     routes = {route.path for route in _make_base_agent({}).setup_webserver().routes}
     assert f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/v1/responses" in routes
+    assert f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/token-capture/v1/responses" in routes
     assert "/v1/responses" in routes
 
 

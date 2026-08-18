@@ -47,7 +47,7 @@ from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.chat_streaming import sanitize_streaming_chat_body, synthesize_chat_completion_sse
-from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, ModelServerRef
+from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT, ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -86,26 +86,6 @@ logger = logging.getLogger(__name__)
 
 # Stateless; shared by every model server's default /v1/messages handler.
 _ANTHROPIC_CONVERTER = AnthropicConverter()
-
-
-def _request_messages(body: Any) -> list[dict]:
-    """The conversation a request carries, across the three dialects.
-
-    Used only to identify which recorded call this request continues (see
-    ``token_id_capture.lineage``): the assistant turns in it are the ones we
-    produced. Chat and Anthropic both use ``messages``; Responses carries
-    ``input``, which is a string for a first turn and a list of items after that.
-    """
-    if body is None:
-        return []
-    getter = body.get if isinstance(body, dict) else lambda key, default=None: getattr(body, key, default)
-    messages = getter("messages", None)
-    if isinstance(messages, list):
-        return [m if isinstance(m, dict) else m.model_dump() for m in messages if m is not None]
-    items = getter("input", None)
-    if isinstance(items, list):
-        return [i if isinstance(i, dict) else i.model_dump() for i in items if i is not None]
-    return []
 
 
 class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
@@ -779,7 +759,11 @@ def _consume_terminal_sse_event(buffer: bytearray, dialect: str) -> Optional[str
 
 # Consumer side of the URL-prefix protocol: strip /ng-rollout/<id> before routing, key capture by
 # <id>. The constant + producer (apply_rollout_prefix) are in server_utils.
-_ROLLOUT_PATH_RE = re.compile(rf"^/{re.escape(ROLLOUT_PATH_PREFIX)}/(?P<rollout_id>[^/]+)(?P<rest>/.*)$")
+_ROLLOUT_PATH_RE = re.compile(
+    rf"^/{re.escape(ROLLOUT_PATH_PREFIX)}/(?P<rollout_id>[^/]+)"
+    rf"(?:/(?P<token_capture>{re.escape(TOKEN_CAPTURE_PATH_SEGMENT)}))?"
+    rf"(?P<rest>/.*)$"
+)
 
 
 def make_capture_store(config: ModelCallCaptureConfig) -> Optional[CaptureStore]:
@@ -1080,6 +1064,7 @@ class _CaptureMiddleware:
         model_server_name: str | None,
         token_store: Any = None,
         configured_sink: Any = None,
+        token_capture_enabled: bool = False,
     ) -> None:
         self._app = app
         self._store = store
@@ -1088,6 +1073,10 @@ class _CaptureMiddleware:
         self._token_store = token_store
         # Built from token_id_capture.sink, once, in this process.
         self._configured_sink = configured_sink
+        # Capture can be on with no destination in this process, when a framework stages records
+        # from the inference worker instead. The identity and the parent resolution still have to
+        # happen here, so enablement rather than a destination decides whether this runs.
+        self._token_capture_enabled = token_capture_enabled
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope.get("type") != "http":
@@ -1096,9 +1085,11 @@ class _CaptureMiddleware:
 
         path = scope.get("path", "")
         rollout_from_path: Optional[str] = None
+        token_capture_requested = False
         prefix_match = _ROLLOUT_PATH_RE.match(path)
         if prefix_match:
             rollout_from_path = prefix_match.group("rollout_id")
+            token_capture_requested = prefix_match.group("token_capture") is not None
             path = prefix_match.group("rest")
             scope = {**scope, "path": path, "raw_path": path.encode("utf-8")}
 
@@ -1115,7 +1106,8 @@ class _CaptureMiddleware:
         # installed sink is still resolved per request, so one installed after the app is built
         # still takes effect.
         token_sink = self._configured_sink or installed_token_sink() or self._token_store
-        if (self._store is None and token_sink is None) or rollout_from_path is None or dialect is None:
+        capture_wanted = token_capture_requested and (token_sink is not None or self._token_capture_enabled)
+        if (self._store is None and not capture_wanted) or rollout_from_path is None or dialect is None:
             await self._app(scope, receive, send)
             return
 
@@ -1124,8 +1116,11 @@ class _CaptureMiddleware:
 
         # Hand the model server a per-request token sink keyed to this call. It records token ids
         # from its complete response. The middleware cannot: token ids are dropped on the SSE wire.
+        # Set whenever capture is on, even with no destination here. The context carries the
+        # identity a staged record is keyed by and the parent a request continues, and both are
+        # resolved in this process whether or not it is the one that writes.
         sink_token = None
-        if token_sink is not None:
+        if capture_wanted:
             sink_token = set_token_sink(
                 CaptureContext(rollout_id=rollout_id, model_call_id=model_call_id, sink=token_sink)
             )
@@ -1318,12 +1313,23 @@ def install_model_call_capture(
     configured_sink = (
         token_id_capture_config(global_config_dict).build_sink() if global_config_dict is not None else None
     )
+    owned_sinks = [sink for sink in (configured_sink, token_store) if sink is not None]
+
+    async def _close_token_sinks() -> None:
+        for sink in owned_sinks:
+            await sink.close()
+
+    if owned_sinks:
+        app.add_event_handler("shutdown", _close_token_sinks)
     app.add_middleware(
         _CaptureMiddleware,
         store=make_capture_store(config),
         model_server_name=model_server_name,
         token_store=token_store,
         configured_sink=configured_sink,
+        token_capture_enabled=(
+            token_id_capture_config(global_config_dict).enabled if global_config_dict is not None else False
+        ),
     )
 
 
