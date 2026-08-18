@@ -46,35 +46,6 @@ cd /opt/Gym
 export NEMO_GYM_RUN_ID="\$SLURM_JOB_ID"
 export NEMO_GYM_USER="\${NEMO_GYM_USER:-\$SLURM_JOB_USER}"
 
-# The cleanup epilogue needs aiohttp in this python; surface that at job
-# start instead of discovering it during cancellation.
-python -c "import aiohttp" 2>/dev/null \
-    || echo "WARNING: aiohttp missing; the OpenSandbox cleanup epilogue will fail" >&2
-
-# These traps only fire if Slurm signals this shell directly, which holds
-# here because the eval runs as its own srun task. Do not move them into a
-# command wrapped by ray symmetric-run (or any supervisor that hard-kills
-# its children): cancellation tears such shells down before traps run.
-cleanup_sandboxes() {
-    eval_status=\$?
-    trap - EXIT INT TERM
-    set +e
-
-    python nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py \
-        $eval_args \
-        --run-id "\$NEMO_GYM_RUN_ID" \
-        --user "\$NEMO_GYM_USER" \
-        --reap
-    cleanup_status=\$?
-    if (( cleanup_status != 0 )); then
-        echo "OpenSandbox cleanup failed with status \$cleanup_status" >&2
-    fi
-    exit "\$eval_status"
-}
-trap cleanup_sandboxes EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-
 gym eval prepare$eval_args +use_cached_prepared_benchmarks=true
 
 experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%d_%H%M%S)
@@ -207,6 +178,16 @@ set -euo pipefail
 
 nodes=(\$(scontrol show hostnames "\$SLURM_JOB_NODELIST"))
 
+if (( $should_run_eval )); then
+    cleanup_script="\$SLURM_SUBMIT_DIR/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py"
+    cleanup_config="\$SLURM_SUBMIT_DIR/env.yaml"
+    cleanup_user="\${NEMO_GYM_USER:-\$SLURM_JOB_USER}"
+    python3 "\$cleanup_script" \
+        --connection-config "\$cleanup_config" \
+        --run-id "\$SLURM_JOB_ID" \
+        --user "\$cleanup_user"
+fi
+
 ALL_NODES="\${nodes[*]}" \
 srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 \
     --container-image=$CONTAINER \
@@ -225,8 +206,19 @@ cleanup_job() {
     job_status=\$?
     trap - EXIT INT TERM
     set +e
+    if (( $should_run_eval )); then
+        echo "Starting OpenSandbox cleanup"
+        python3 "\$cleanup_script" \
+            --connection-config "\$cleanup_config" \
+            --run-id "\$SLURM_JOB_ID" \
+            --user "\$cleanup_user" \
+            --reap
+        cleanup_status=\$?
+        if (( cleanup_status != 0 )); then
+            echo "OpenSandbox cleanup failed with status \$cleanup_status" >&2
+        fi
+    fi
     kill "\$server_step" 2>/dev/null || true
-    wait "\$server_step" 2>/dev/null || true
     exit "\$job_status"
 }
 trap cleanup_job EXIT
