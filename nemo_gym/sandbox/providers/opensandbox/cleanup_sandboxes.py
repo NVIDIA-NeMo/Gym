@@ -13,6 +13,7 @@ from collections.abc import Mapping
 from typing import Any
 
 import aiohttp
+import yaml
 
 
 RUN_METADATA_KEY = "nemo-gym.nvidia.com/run"
@@ -135,62 +136,42 @@ async def cleanup_sandboxes(
 
 
 def main(argv: list[str] | None = None) -> int:
-    from nemo_gym.cli.main import COMMANDS, _extra_roots_from_search_dir, _merge_config_paths
-
-    # The sbatch forwards the same config selectors to eval prepare and run.
-    config_flags = COMMANDS["eval prepare"].flags
     parser = argparse.ArgumentParser(description=__doc__)
-    for flag in config_flags:
-        flag.register(parser)
-    parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument(
+        "--connection-config", required=True, help="YAML file containing sandbox.opensandbox.connection."
+    )
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--user", required=True)
     parser.add_argument("--reap", action="store_true", help="Delete exact matches; otherwise only audit them.")
-    args, overrides = parser.parse_known_args(argv)
+    args = parser.parse_args(argv)
 
-    unknown_flags = [token for token in overrides if token.startswith("-")]
-    if unknown_flags:
-        parser.error(f"unrecognized arguments: {' '.join(unknown_flags)}")
     for name, value in (("run-id", args.run_id), ("user", args.user)):
         if not value.strip():
             parser.error(f"--{name} must not be empty")
 
-    from nemo_gym.config_types import ConfigError
-    from nemo_gym.global_config import GlobalConfigDictParserConfig, get_global_config_dict
-    from nemo_gym.sandbox.config import resolve_provider_config
-
     try:
-        with _extra_roots_from_search_dir(args.search_dir):
-            translated = [token for flag in config_flags for token in flag.translate_to_hydra(args)]
-            config_args = _merge_config_paths(translated + overrides)
-            if args.verbose:
-                config_args = ["+verbose=true", *config_args]
-
-            original_argv = sys.argv
-            try:
-                # Gym's resolver consumes Hydra overrides from sys.argv.
-                sys.argv = [original_argv[0], *config_args]
-                global_config = get_global_config_dict(
-                    global_config_dict_parser_config=GlobalConfigDictParserConfig(offline=True)
-                )
-            finally:
-                sys.argv = original_argv
-
-        opensandbox = resolve_provider_config("sandbox", global_config).get("opensandbox")
+        with open(args.connection_config, encoding="utf-8") as config_file:
+            config = yaml.safe_load(config_file)
+        if not isinstance(config, Mapping):
+            raise ValueError("connection config must contain a YAML object")
+        sandbox = config.get("sandbox")
+        if not isinstance(sandbox, Mapping):
+            raise ValueError("connection config 'sandbox' is required")
+        opensandbox = sandbox.get("opensandbox")
         if not isinstance(opensandbox, Mapping):
-            raise ValueError("Gym config 'sandbox' must select the OpenSandbox provider")
+            raise ValueError("connection config 'sandbox.opensandbox' is required")
         connection = opensandbox.get("connection")
         if not isinstance(connection, Mapping):
-            raise ValueError("Gym config 'sandbox.opensandbox.connection' is required")
+            raise ValueError("connection config 'sandbox.opensandbox.connection' is required")
 
         domain = connection.get("domain")
         access_key = connection.get("api_key")
         protocol = connection.get("protocol") or "http"
         for path, value in (("domain", domain), ("api_key", access_key)):
             if not isinstance(value, str) or not value.strip():
-                raise ValueError(f"Gym config 'sandbox.opensandbox.connection.{path}' is required")
+                raise ValueError(f"connection config 'sandbox.opensandbox.connection.{path}' is required")
         if not isinstance(protocol, str) or protocol.strip() not in {"http", "https"}:
-            raise ValueError("Gym config 'sandbox.opensandbox.connection.protocol' must be http or https")
+            raise ValueError("connection config 'sandbox.opensandbox.connection.protocol' must be http or https")
 
         return asyncio.run(
             cleanup_sandboxes(
@@ -202,7 +183,10 @@ def main(argv: list[str] | None = None) -> int:
                 reap=args.reap,
             )
         )
-    except (aiohttp.ClientError, ConfigError, OSError, TypeError, ValueError) as error:
+    except yaml.YAMLError:
+        print("OpenSandbox cleanup failed: invalid YAML connection config", file=sys.stderr)
+        return 1
+    except (aiohttp.ClientError, OSError, TypeError, ValueError) as error:
         print(f"OpenSandbox cleanup failed: {error}", file=sys.stderr)
         return 1
 
