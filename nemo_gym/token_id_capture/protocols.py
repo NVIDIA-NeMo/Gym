@@ -131,7 +131,10 @@ def installed_token_sink() -> TokenSink | None:
 
 
 def install_token_source(source: TokenSource | None) -> None:
-    """Set (or clear, with ``None``) the process-wide default source."""
+    """Set (or clear) the caller-owned source in this process.
+
+    Gym does not close an installed source.
+    """
     global _INSTALLED_SOURCE
     _INSTALLED_SOURCE = source
 
