@@ -1122,7 +1122,7 @@ class _CaptureMiddleware:
         sink_token = None
         if capture_wanted:
             sink_token = set_token_sink(
-                CaptureContext(rollout_id=rollout_id, model_call_id=model_call_id, sink=token_sink)
+                CaptureContext(rollout_id=rollout_id, model_call_id=model_call_id, token_sink=token_sink)
             )
 
         # Training-only capture has no evaluation record.

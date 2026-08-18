@@ -5,13 +5,6 @@ claude_code_agent:
       resources_server:
         type: resources_servers
         name: ???
-      # This harness returns output without token ids.
-      # Its static flag opts the agent into training capture.
-      # The run-level ``token_id_capture.enabled`` setting must also be enabled.
-      # Run-level ``all_agents`` can opt in every agent instead.
-      # Native agents normally leave this flag disabled.
-      # Their responses already carry token ids.
-      token_id_capture: true
       concurrency: 32
       model: claude-sonnet-4-6
       anthropic_api_key: ${anthropic_api_key}

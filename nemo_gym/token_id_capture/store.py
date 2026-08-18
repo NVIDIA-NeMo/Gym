@@ -270,7 +270,7 @@ class TokenCaptureStore:
         return await asyncio.to_thread(self.read_entries, rollout_id)
 
     async def drop(self, rollout_id: str, *, snapshot_id: str, version: int) -> bool:
-        """Conditionally delete the frozen snapshot."""
+        """Delete snapshot payloads while retaining its tombstone and lock."""
         return await asyncio.to_thread(self._drop, rollout_id, snapshot_id, version)
 
     def _drop(self, rollout_id: str, snapshot_id: str, version: int) -> bool:
@@ -299,6 +299,7 @@ class TokenCaptureStore:
 
         This compatibility helper supports administrative cleanup.
         Normal consumers use conditional ``drop``.
+        The lock file remains so concurrent callers keep using one inode.
         """
         with self._locked(rollout_id):
             self.path_for(rollout_id).unlink(missing_ok=True)
