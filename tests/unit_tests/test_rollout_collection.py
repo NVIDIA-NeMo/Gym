@@ -48,7 +48,12 @@ from nemo_gym.rollout_collection import (
     _rollout_request_debug_summary,
     loads_jsonl_line,
 )
-from nemo_gym.token_id_capture import TokenCaptureStore, TokenEntry, clear_token_captures_for_rollouts
+from nemo_gym.token_id_capture import (
+    TokenCaptureSnapshot,
+    TokenCaptureStore,
+    TokenEntry,
+    clear_token_captures_for_rollouts,
+)
 from nemo_gym.token_id_capture.delivery import (
     MASK_SAMPLE_KEY,
     TOKEN_CAPTURE_KEY,
@@ -1102,6 +1107,109 @@ class TestRolloutCollection:
 
         assert MASK_SAMPLE_KEY not in result
         assert TOKEN_CAPTURE_KEY not in result
+
+    async def test_run_from_config_requires_source_before_dispatch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "get_global_config_dict",
+            lambda: {
+                "token_id_capture": {
+                    "enabled": True,
+                    "all_agents": True,
+                    "sink": "framework.capture:Sink",
+                    "rebuild_response": True,
+                }
+            },
+        )
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes(
+            orjson.dumps(
+                {
+                    "responses_create_params": {"input": []},
+                    AGENT_REF_KEY_NAME: {"name": "agent"},
+                }
+            )
+            + b"\n"
+        )
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            resume_from_cache=False,
+            disable_aggregation=True,
+        )
+
+        class Helper(RolloutCollectionHelper):
+            def run_examples(self, examples, *args, **kwargs):
+                raise AssertionError("Dispatch must not start without a TokenSource.")
+
+        with pytest.raises(ValueError, match="rollout-collector process"):
+            await Helper().run_from_config(config)
+
+    async def test_run_from_config_does_not_close_an_installed_source(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class Source:
+            closed = False
+
+            async def freeze(self, rollout_id):
+                return TokenCaptureSnapshot(
+                    rollout_id=rollout_id,
+                    entries=(),
+                    incomplete=False,
+                    snapshot_id="snapshot",
+                    version=1,
+                )
+
+            async def drop(self, rollout_id, *, snapshot_id, version):
+                return True
+
+            async def close(self):
+                self.closed = True
+
+        source = Source()
+        monkeypatch.setattr(nemo_gym.rollout_collection, "installed_token_source", lambda: source)
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "get_global_config_dict",
+            lambda: {
+                "token_id_capture": {
+                    "enabled": True,
+                    "all_agents": True,
+                    "sink": "framework.capture:Sink",
+                    "rebuild_response": True,
+                }
+            },
+        )
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes(
+            orjson.dumps(
+                {
+                    "responses_create_params": {"input": []},
+                    AGENT_REF_KEY_NAME: {"name": "agent"},
+                }
+            )
+            + b"\n"
+        )
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            resume_from_cache=False,
+            disable_aggregation=True,
+        )
+
+        class Helper(RolloutCollectionHelper):
+            def run_examples(self, examples, *args, **kwargs):
+                [example] = examples
+                future = Future()
+                future.set_result((example, {"response": {"output": [], "usage": {}}}))
+                return [future]
+
+        with pytest.warns(UserWarning, match="capture contains no token records"):
+            await Helper().run_from_config(config)
+
+        assert source.closed is False
 
     async def test_run_from_config_sorted(self, tmp_path: Path, empty_global_config: MagicMock) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"
