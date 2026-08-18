@@ -1,7 +1,7 @@
 ---
 title: "Switchyard"
 description: "Route model calls across a fleet of models, with a proxy Gym hosts or one you run yourself"
-position: 8
+position: 9
 ---
 
 [Switchyard](https://github.com/NVIDIA-NeMo/Switchyard) is a routing proxy: it decides, per request, which model should carry the work. The `switchyard_model` server (in `responses_api_models/switchyard_model`) puts that decision behind a NeMo Gym model server, so any benchmark Gym already supports can be run against a router without changing the agent harness.
@@ -65,7 +65,7 @@ A caller-supplied `model` in the request body is always overridden with the conf
 
 ## Manage the proxy yourself
 
-Start Switchyard however you normally would — the standalone `switchyard-server` binary, a container, a shared service on another host — then set `switchyard_base_url` instead of `deployment`. Gym will use that proxy and never start one of its own.
+Start Switchyard however you normally would — the standalone `switchyard-server` binary (built from the [Switchyard repo](https://github.com/NVIDIA-NeMo/Switchyard) with `cargo build --release`; it is not part of the `nemo-switchyard` wheel), a container, a shared service on another host — then set `switchyard_base_url` instead of `deployment`. Gym will use that proxy and never start one of its own.
 
 ```bash
 switchyard-server --config routes.toml --port 4000
