@@ -186,14 +186,23 @@ RUN <<"EOF" bash -exu
 if [[ -n "${NEMO_GYM_PREFETCH_CONFIGS:-}" ]]; then
     gym env prefetch "+config_paths=[${NEMO_GYM_PREFETCH_CONFIGS}]"
 fi
+
+# Keep ownership changes for generated caches and server venvs in the layer
+# that creates them so later layers do not duplicate their contents.
+chown -R "${RUNTIME_UID}:${RUNTIME_GID}" /opt/nemo-gym/cache
+find /opt/nemo-gym -type d -name .venv -prune \
+    -exec chown -R "${RUNTIME_UID}:${RUNTIME_GID}" {} +
 EOF
 
-# Prefetched caches and venvs are built as root. Own the project tree and the
-# project environment's directories so the runtime identity can mutate them.
+# Own source and project-environment directories so the runtime identity can
+# mutate their contents without copying prefetched artifacts into this layer.
 RUN venv_site_packages="$(/opt/nemo_gym_venv/bin/python -c \
         'import site; print(site.getsitepackages()[0])')" && \
     touch "${venv_site_packages}/.nonroot-uninstall-probe" && \
-    chown -R "${RUNTIME_UID}:${RUNTIME_GID}" /opt/nemo-gym && \
+    find /opt/nemo-gym \
+        -path /opt/nemo-gym/cache -prune -o \
+        -type d -name .venv -prune -o \
+        -type d -exec chown "${RUNTIME_UID}:${RUNTIME_GID}" {} + && \
     find /opt/nemo_gym_venv -type d \
         -exec chown "${RUNTIME_UID}:${RUNTIME_GID}" {} +
 
