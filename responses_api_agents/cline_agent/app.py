@@ -82,6 +82,27 @@ def _stringify(value: Any) -> str:
         return str(value)
 
 
+def _reasoning_token_count(usage: dict[str, Any], *, running_total: bool = False) -> int:
+    """Return Cline's reasoning-token count across its supported usage shapes."""
+    direct_keys = (
+        ("totalReasoningTokens", "reasoningTokens")
+        if running_total
+        else (
+            "reasoningTokens",
+            "totalReasoningTokens",
+        )
+    )
+    for key in direct_keys:
+        value = usage.get(key)
+        if value is not None:
+            return int(value or 0)
+
+    details = usage.get("outputTokenDetails") or usage.get("outputTokensDetails") or {}
+    if isinstance(details, dict):
+        return int(details.get("reasoningTokens") or details.get("reasoning_tokens") or 0)
+    return 0
+
+
 def parse_cline_events(stdout: str) -> tuple[list[Any], dict[str, Any]]:
     """Convert ``cline --json`` stdout into (output_items, metadata).
 
@@ -103,7 +124,7 @@ def parse_cline_events(stdout: str) -> tuple[list[Any], dict[str, Any]]:
     against cline 3.0.55.
     """
     output_items: list[Any] = []
-    metadata: dict[str, Any] = {"input_tokens": 0, "output_tokens": 0}
+    metadata: dict[str, Any] = {"input_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0}
     # Text/reasoning chunks for the turn being streamed; the matching content_end supersedes them.
     text_chunks: list[str] = []
     reasoning_chunks: list[str] = []
@@ -158,6 +179,7 @@ def parse_cline_events(stdout: str) -> tuple[list[Any], dict[str, Any]]:
                 # summing per-turn events, which a truncated stream can drop.
                 metadata["input_tokens"] = int(usage.get("inputTokens") or 0) + int(usage.get("cacheReadTokens") or 0)
                 metadata["output_tokens"] = int(usage.get("outputTokens") or 0)
+                metadata["reasoning_tokens"] = _reasoning_token_count(usage)
                 saw_usage = True
             model = record.get("model")
             if isinstance(model, dict) and model.get("id"):
@@ -265,6 +287,7 @@ def parse_cline_events(stdout: str) -> tuple[list[Any], dict[str, Any]]:
                 event.get("totalCacheReadTokens") or 0
             )
             metadata["output_tokens"] = int(event.get("totalOutputTokens") or 0)
+            metadata["reasoning_tokens"] = _reasoning_token_count(event, running_total=True)
             saw_usage = True
 
         elif etype == "done":
@@ -570,6 +593,13 @@ class ClineAgent(SimpleResponsesAPIAgent):
         )
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.CancelledError:
+            # A cancelled rollout must not leave Cline's npm shim or native child running and
+            # holding the sandbox's stdout pipe. Drain the process after killing its group before
+            # preserving cancellation for the caller.
+            self._kill_process_group(proc)
+            await proc.communicate()
+            raise
         except asyncio.TimeoutError:
             self._kill_process_group(proc)
             stdout, stderr = await proc.communicate()
@@ -648,6 +678,7 @@ class ClineAgent(SimpleResponsesAPIAgent):
 
         input_tokens = metadata.get("input_tokens", 0)
         output_tokens = metadata.get("output_tokens", 0)
+        reasoning_tokens = metadata.get("reasoning_tokens", 0)
 
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
@@ -662,7 +693,7 @@ class ClineAgent(SimpleResponsesAPIAgent):
                 input_tokens=input_tokens,
                 input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
                 output_tokens=output_tokens,
-                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=reasoning_tokens),
                 total_tokens=input_tokens + output_tokens,
             ),
         )

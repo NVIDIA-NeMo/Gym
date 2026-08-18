@@ -15,6 +15,7 @@
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tarfile
@@ -26,12 +27,24 @@ from pathlib import Path
 LOG = logging.getLogger(__name__)
 
 # The Cline CLI is published to npm as `cline` and installs a `cline` binary. The version is pinned
-# in the agent config (cline_version) and passed in here; ensure_cline only installs when `cline` is
-# not already on PATH, so the pin governs a fresh install rather than forcing a reinstall.
+# in the agent config (cline_version) and must also match an existing binary: task images can carry
+# an older Cline on PATH, and silently reusing it invalidates the event-stream contract.
 _CLINE_PKG = "cline"
 _NODE_VERSION = "22.15.0"
 _NODE_DIST_URL = f"https://nodejs.org/dist/v{_NODE_VERSION}/node-v{_NODE_VERSION}-linux-x64.tar.xz"
 _LOCAL_PREFIX = Path(__file__).parent / ".cline_node"
+
+
+def _cline_version(cline_bin: str) -> str | None:
+    result = subprocess.run([cline_bin, "--version"], capture_output=True, text=True)
+    if result.returncode != 0:
+        return None
+    match = re.search(r"\b\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\b", result.stdout + result.stderr)
+    return match.group(0) if match else None
+
+
+def _version_matches(cline_bin: str, requested: str | None) -> bool:
+    return requested is None or _cline_version(cline_bin) == requested
 
 
 def _npm_install(npm_bin: str, version: str | None) -> None:
@@ -75,13 +88,19 @@ def _install_node_locally() -> Path:
 
 
 def ensure_cline(version: str | None = None) -> None:
-    """Ensure ``cline`` is on PATH, installing the `cline` npm package if necessary."""
-    if shutil.which("cline"):
+    """Ensure ``cline`` is on PATH at the requested version, installing it if necessary."""
+    existing = shutil.which("cline")
+    if existing and _version_matches(existing, version):
         return
+    if existing:
+        LOG.info(
+            "cline at %s is version %s; installing requested version %s", existing, _cline_version(existing), version
+        )
 
     # npm installs the binary here but may not have it on PATH in a fresh shell; add it and reuse.
     local_bin = Path.home() / ".local" / "bin"
-    if (local_bin / "cline").is_file():
+    local_cline = local_bin / "cline"
+    if local_cline.is_file() and _version_matches(str(local_cline), version):
         os.environ["PATH"] = str(local_bin) + os.pathsep + os.environ.get("PATH", "")
         return
 
@@ -98,15 +117,21 @@ def ensure_cline(version: str | None = None) -> None:
             raise RuntimeError(f"npm not found after local Node.js install in {bin_dir}")
         _npm_install(npm, version)
 
-    if not shutil.which("cline"):
-        npm_bin_dir = _npm_global_bin(shutil.which("npm") or "npm")
-        if npm_bin_dir and Path(npm_bin_dir).is_dir():
-            os.environ["PATH"] = npm_bin_dir + os.pathsep + os.environ.get("PATH", "")
+    # Put the install target ahead of any stale image-provided binary before validating the pin.
+    npm_bin_dir = _npm_global_bin(shutil.which("npm") or "npm")
+    if npm_bin_dir and Path(npm_bin_dir).is_dir():
+        os.environ["PATH"] = npm_bin_dir + os.pathsep + os.environ.get("PATH", "")
 
     if not shutil.which("cline") and (local_bin / "cline").is_file():
         os.environ["PATH"] = str(local_bin) + os.pathsep + os.environ.get("PATH", "")
 
-    if not shutil.which("cline"):
+    installed = shutil.which("cline")
+    if not installed:
         raise RuntimeError("cline install appeared to succeed but 'cline' is still not on PATH")
+    installed_version = _cline_version(installed)
+    if version and installed_version != version:
+        raise RuntimeError(
+            f"cline install appeared to succeed, but {installed} reports {installed_version!r}; expected {version!r}"
+        )
 
-    LOG.info("cline is ready at %s", shutil.which("cline"))
+    LOG.info("cline %s is ready at %s", installed_version or "unknown", installed)

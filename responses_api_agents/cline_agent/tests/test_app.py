@@ -21,12 +21,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import yaml
+from fastapi import Request
 from omegaconf import OmegaConf
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
+    NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
@@ -125,7 +127,7 @@ def _tool_end(name: str, call_id: str, output=None, error: str | None = None) ->
     return _agent_event(event)
 
 
-def _usage(total_in: int, total_out: int) -> dict:
+def _usage(total_in: int, total_out: int, reasoning: int = 0) -> dict:
     return _agent_event(
         {
             "type": "usage",
@@ -133,6 +135,7 @@ def _usage(total_in: int, total_out: int) -> dict:
             "outputTokens": total_out,
             "totalInputTokens": total_in,
             "totalOutputTokens": total_out,
+            "totalReasoningTokens": reasoning,
         }
     )
 
@@ -194,7 +197,7 @@ class TestParseClineEvents:
     def test_empty_stream(self) -> None:
         items, metadata = parse_cline_events("")
         assert items == []
-        assert metadata == {"input_tokens": 0, "output_tokens": 0}
+        assert metadata == {"input_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0}
 
     def test_malformed_lines_skipped(self) -> None:
         stream = "not json\n" + _lines(_text_end("answer is 4")) + "\n{ broken"
@@ -321,18 +324,41 @@ class TestParseClineEvents:
 
     def test_usage_from_run_result_aggregate(self) -> None:
         stream = _lines(
-            _usage(50, 10),
-            _run_result(aggregateUsage={"inputTokens": 100, "outputTokens": 20, "cacheReadTokens": 5}),
+            _usage(50, 10, 2),
+            _run_result(
+                aggregateUsage={
+                    "inputTokens": 100,
+                    "outputTokens": 20,
+                    "cacheReadTokens": 5,
+                    "reasoningTokens": 7,
+                }
+            ),
         )
         _, metadata = parse_cline_events(stream)
         assert metadata["input_tokens"] == 105
         assert metadata["output_tokens"] == 20
+        assert metadata["reasoning_tokens"] == 7
 
     def test_usage_falls_back_to_events_without_run_result(self) -> None:
         # A killed run never prints run_result; the per-turn totals are what remains.
-        _, metadata = parse_cline_events(_lines(_usage(50, 10)))
+        _, metadata = parse_cline_events(_lines(_usage(50, 10, 3)))
         assert metadata["input_tokens"] == 50
         assert metadata["output_tokens"] == 10
+        assert metadata["reasoning_tokens"] == 3
+
+    def test_reasoning_usage_falls_back_to_output_details(self) -> None:
+        _, metadata = parse_cline_events(
+            _lines(
+                _run_result(
+                    aggregateUsage={
+                        "inputTokens": 10,
+                        "outputTokens": 8,
+                        "outputTokenDetails": {"reasoningTokens": 5},
+                    }
+                )
+            )
+        )
+        assert metadata["reasoning_tokens"] == 5
 
     def test_run_result_metadata(self) -> None:
         _, metadata = parse_cline_events(_lines(_run_result(finishReason="aborted", iterations=3)))
@@ -541,6 +567,32 @@ class TestModelServer:
         assert killpg.called
         assert metadata["timed_out"] is True
 
+    def test_cancellation_kills_group_drains_process_and_reraises(self, tmp_path) -> None:
+        agent = _make_agent()
+        proc = MagicMock()
+        proc.pid = 4242
+        proc.communicate = AsyncMock(side_effect=[asyncio.CancelledError(), (b"", b"")])
+        with (
+            patch("responses_api_agents.cline_agent.app.asyncio.create_subprocess_exec", return_value=proc),
+            patch("responses_api_agents.cline_agent.app.os.killpg") as killpg,
+            patch("responses_api_agents.cline_agent.app.os.getpgid", return_value=4242),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            asyncio.run(agent._spawn(["cline"], tmp_path, {}, 10))
+        killpg.assert_called_once_with(4242, 9)
+        assert proc.communicate.await_count == 2
+
+    def test_response_propagates_reasoning_token_details(self) -> None:
+        agent = _make_agent()
+        agent._run_cline = AsyncMock(
+            return_value=([], {"input_tokens": 11, "output_tokens": 9, "reasoning_tokens": 6}, "model")
+        )
+        body = NeMoGymResponseCreateParamsNonStreaming(input="solve this", model="model")
+        request = Request({"type": "http", "path_params": {}})
+        response = asyncio.run(agent.responses(request=request, body=body))
+        assert response.usage.output_tokens_details.reasoning_tokens == 6
+        assert response.usage.total_tokens == 20
+
 
 class TestConfigYaml:
     def test_module_parses(self) -> None:
@@ -569,6 +621,8 @@ class TestConfigYaml:
         assert inner["agent_server_module"] == "responses_api_agents.cline_agent.app"
         assert inner["agent_server_class"] == "ClineAgent"
         assert inner["agent_config_class"] == "ClineAgentConfig"
+        assert inner["agent_kwargs"]["model"] == "${policy_model_name}"
+        assert inner["agent_runtime_source"] == "auto"
         # The repo under test must be the project dir, or the agent's edits land outside the
         # checkout anyswe takes the patch from.
         assert inner["agent_kwargs"]["repo_dir"] == "/testbed"

@@ -10,7 +10,7 @@ anyswe_cline:
       agent_server_class: ClineAgent
       agent_config_class: ClineAgentConfig
       agent_kwargs:
-        model: model
+        model: ${policy_model_name}
         cline_version: 3.0.55
         timeout: 1800
         setup_timeout: 300
@@ -22,6 +22,7 @@ anyswe_cline:
 
       container_formatter: ${oc.env:ANYSWE_CONTAINER_FORMATTER}
       sandbox_provider: sandbox
+      agent_runtime_source: auto
       sandbox_model_base_url: ${oc.env:NEMO_GYM_SANDBOX_MODEL_BASE_URL,null}
       swebench_agent_timeout: 2100
       swebench_tests_timeout: 1800
