@@ -44,6 +44,40 @@ class TokenCaptureSnapshot:
     version: int
 
 
+@dataclass(frozen=True)
+class LineageMatch:
+    """A uniquely verified parent returned by a shared lineage store."""
+
+    model_call_id: str
+    cumulative_token_ids: tuple[int, ...]
+    digest: str
+
+
+@runtime_checkable
+class LineageStore(Protocol):
+    """Request-time lineage shared by every worker serving a rollout."""
+
+    async def resolve(self, rollout_id: str, request_items: list[dict]) -> LineageMatch | None:
+        """Return one verified parent, or ``None`` for a root or ambiguity."""
+        ...
+
+    async def record(
+        self,
+        rollout_id: str,
+        model_call_id: str,
+        request_items: list[dict],
+        response_items: list[dict],
+        cumulative_token_ids: list[int],
+        digest: str,
+    ) -> None:
+        """Publish a completed call for later request-time resolution."""
+        ...
+
+    async def close(self) -> None:
+        """Flush pending work and release resources. Idempotent."""
+        ...
+
+
 @runtime_checkable
 class TokenSink(Protocol):
     """Receive captured records through Gym's file store or a framework transport."""
@@ -108,6 +142,7 @@ class TokenSource(Protocol):
 # Request-scoped sinks take precedence.
 _INSTALLED_SINK: TokenSink | None = None
 _INSTALLED_SOURCE: TokenSource | None = None
+_INSTALLED_LINEAGE_STORE: LineageStore | None = None
 
 
 def install_token_sink(sink: TokenSink | None) -> None:
@@ -131,3 +166,13 @@ def install_token_source(source: TokenSource | None) -> None:
 
 def installed_token_source() -> TokenSource | None:
     return _INSTALLED_SOURCE
+
+
+def install_lineage_store(store: LineageStore | None) -> None:
+    """Set (or clear) the process-wide request-time lineage store."""
+    global _INSTALLED_LINEAGE_STORE
+    _INSTALLED_LINEAGE_STORE = store
+
+
+def installed_lineage_store() -> LineageStore | None:
+    return _INSTALLED_LINEAGE_STORE

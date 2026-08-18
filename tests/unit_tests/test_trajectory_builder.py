@@ -738,10 +738,10 @@ def test_unresolvable_final_retry_is_flagged_not_silently_tie_broken():
     assert sorted(out.notes.unresolved_retries) == ["a", "b"]
 
 
-def test_a_stale_parent_link_fails_verification_and_falls_back():
+def test_a_stale_parent_link_fails_verification_and_is_quarantined():
     """A rerun that appended onto a previous attempt's records must not merge two
-    attempts. The digest check catches the bad edge; the builder falls back to
-    prefix matching and reports that it did."""
+    attempts. The digest check catches the bad edge and refuses to infer around
+    an explicit but invalid lineage claim."""
     root = _with_lineage(_entry("root", [1, 2], [3]))
     child = _entry("child", [1, 2, 3, 4], [5])
     stamp_lineage(child, "root")
@@ -749,10 +749,10 @@ def test_a_stale_parent_link_fails_verification_and_falls_back():
     root.digest = compute_digest([42, 42, 42])
 
     out = prefix_merging([root, child])
-    assert out.notes.parent_link_fallbacks == {"parent_digest_mismatch": 1}
-    # Prefix matching still finds the right parent, so the chain is intact.
+    assert out.notes.parent_link_failures == {"parent_digest_mismatch": 1}
     main = next(c for c in out.chains if c.chain_id == "main")
-    assert [link.entry.model_call_id for link in main.links] == ["root", "child"]
+    assert [link.entry.model_call_id for link in main.links] == ["root"]
+    assert "child" in out.quarantined
 
 
 def test_parent_link_and_prefix_matching_agree_on_a_clean_rollout():
@@ -787,7 +787,7 @@ def test_a_recorded_parent_is_verified_not_trusted():
 
     out = prefix_merging([previous_attempt, this_attempt])
 
-    assert "parent_digest_mismatch" in out.notes.parent_link_fallbacks
+    assert "parent_digest_mismatch" in out.notes.parent_link_failures
     for chain in out.chains:
         assert [link.entry.model_call_id for link in chain.links] != ["old", "new"]
 
@@ -800,7 +800,7 @@ def test_a_correct_parent_link_is_used():
 
     out = prefix_merging([parent, child])
 
-    assert out.notes.parent_link_fallbacks == {}
+    assert out.notes.parent_link_failures == {}
     assert any([link.entry.model_call_id for link in chain.links] == ["p", "c"] for chain in out.chains)
 
 
