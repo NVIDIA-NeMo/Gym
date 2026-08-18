@@ -54,7 +54,11 @@ orchestration is unit-testable without any servers.
 from __future__ import annotations
 
 import hashlib
+import os
 import random
+import secrets
+import tempfile
+import time
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -62,13 +66,21 @@ from typing import AbstractSet, Any, Awaitable, Callable, Dict, List, Mapping, O
 
 import orjson
 
-from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.global_config import (
+    AGENT_REF_KEY_NAME,
+    ATTEMPT_INDEX_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+)
 from nemo_gym.path_utils import failures_path_for
 from nemo_gym.rollout_collection import (
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
-    NG_TERMINAL_KEY,
+    DispatchLatencyTracker,
     _get_max_rollout_attempts,
+    _is_terminal_failure,
+    _migrate_invalid_judge_main_rows,
+    _observed_elapsed,
 )
 from resources_servers.gdpval.multistage_elo import (
     PerReferenceTotals,
@@ -108,17 +120,34 @@ class StageResume:
     on_plan: Callable[[int, dict], None]
     on_outcome: Callable[[int, dict], None]
     on_rows: Callable[[int, List[Dict[str, Any]]], None]
+    # Longest observed failed-attempt duration, keyed by stage then
+    # (task_index, rollout_index). This is the stage-aware equivalent of the
+    # single-pass dispatcher's resume timing map.
+    elapsed_by_stage: Mapping[int, Mapping[Tuple[Any, Any], float]] = field(default_factory=dict)
+    # Failed judging attempts whose persisted policy artifact should be reused
+    # on retry, keyed by stage then (task_index, rollout_index).
+    reuse_cached_keys: Mapping[int, AbstractSet[Tuple[Any, Any]]] = field(default_factory=dict)
+    # Number of sidecar attempts already consumed, keyed stage/task/rollout.
+    attempts_by_stage: Mapping[int, Mapping[Tuple[Any, Any], int]] = field(default_factory=dict)
 
 
 def _is_success_row(row: Mapping[str, Any]) -> bool:
     """A row is a success iff it carries neither a failure class nor no-persist."""
-    return row.get(NG_FAILURE_CLASS_KEY) is None and not row.get(NG_NO_PERSIST_KEY)
+    return (
+        row.get(NG_FAILURE_CLASS_KEY) is None
+        and not row.get(NG_NO_PERSIST_KEY)
+        and not row.get("invalid_judge_response")
+    )
 
 
 def compute_fingerprint(
     multistage_config: MultiStageRunConfig,
     reference_elos: Mapping[str, float],
     distribution: Mapping[str, Mapping[str, object]],
+    *,
+    materialized_rows: Optional[Sequence[Mapping[str, Any]]] = None,
+    rollout_collection_config: Optional[Any] = None,
+    resolved_global_config: Optional[Mapping[str, Any]] = None,
 ) -> str:
     """Stable hash of everything that affects stage planning.
 
@@ -126,6 +155,20 @@ def compute_fingerprint(
     journal stale: the plans/outcomes it records were produced under a different
     configuration or task distribution and cannot be safely replayed.
     """
+
+    def jsonable(value: Any) -> Any:
+        if hasattr(value, "model_dump"):
+            return value.model_dump(mode="json")
+        if isinstance(value, Mapping):
+            return {str(key): jsonable(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [jsonable(item) for item in value]
+        if isinstance(value, Path):
+            return str(value)
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return value
+        return repr(value)
+
     payload = {
         "stages": [(s.num_tasks, s.num_models, s.seed) for s in multistage_config.stages],
         "seed": multistage_config.seed,
@@ -141,6 +184,40 @@ def compute_fingerprint(
             for grp in sorted(distribution)
         },
     }
+    if materialized_rows is not None:
+        materialized_hasher = hashlib.sha256()
+        for row in materialized_rows:
+            materialized_hasher.update(orjson.dumps(row, option=orjson.OPT_SORT_KEYS))
+            materialized_hasher.update(b"\n")
+        payload["materialized_rows"] = {
+            "count": len(materialized_rows),
+            "sha256": materialized_hasher.hexdigest(),
+        }
+    if rollout_collection_config is not None:
+        result_affecting_fields = (
+            "agent_name",
+            "input_jsonl_fpath",
+            "limit",
+            "num_repeats",
+            "num_repeats_add_seed",
+            "responses_create_params",
+            "prompt_config",
+            "skills",
+        )
+
+        def config_value(name: str) -> Any:
+            if isinstance(rollout_collection_config, Mapping):
+                return rollout_collection_config.get(name)
+            return getattr(rollout_collection_config, name, None)
+
+        payload["rollout_collection_config"] = {name: jsonable(config_value(name)) for name in result_affecting_fields}
+    if resolved_global_config is not None:
+        component_types = {"responses_api_agents", "responses_api_models", "resources_servers"}
+        payload["runtime_components"] = {
+            str(name): jsonable(block)
+            for name, block in resolved_global_config.items()
+            if isinstance(block, Mapping) and component_types.intersection(block)
+        }
     encoded = orjson.dumps(payload, option=orjson.OPT_SORT_KEYS)
     return hashlib.sha256(encoded).hexdigest()
 
@@ -311,6 +388,8 @@ def build_stage_rows(
 def tag_results(
     pairs: Sequence[Tuple[Mapping[str, Any], Mapping[str, Any]]],
     stage_index: int,
+    expected_final_stage_index: Optional[int] = None,
+    expected_stage_row_count: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Attach rollout identity + ``stage_index`` to each stage result row.
 
@@ -318,6 +397,9 @@ def tag_results(
     result (task/rollout indices, agent ref) so the merged rollouts file and the
     standard ``_call_aggregate_metrics`` see well-formed rows, and stamps
     ``stage_index``/``task_id`` so the stage-aware aggregation can group by stage.
+    Multi-stage callers also provide ``expected_final_stage_index`` and
+    ``expected_stage_row_count`` so aggregation can distinguish a complete run
+    from a missing or partially drained final stage.
     """
     tagged: List[Dict[str, Any]] = []
     for row, result in pairs:
@@ -325,7 +407,13 @@ def tag_results(
         out[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
         out[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
         out[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
+        if ATTEMPT_INDEX_KEY_NAME in row:
+            out[ATTEMPT_INDEX_KEY_NAME] = row[ATTEMPT_INDEX_KEY_NAME]
         out["stage_index"] = stage_index
+        if expected_final_stage_index is not None:
+            out["expected_final_stage_index"] = expected_final_stage_index
+        if expected_stage_row_count is not None:
+            out["expected_stage_row_count"] = expected_stage_row_count
         if out.get("task_id") is None:
             tid = row_task_id(row)
             if tid is not None:
@@ -349,6 +437,7 @@ async def run_multistage_stages(
     rng: Optional[random.Random] = None,
     on_event: Optional[Callable[[str, dict], None]] = None,
     resume: Optional[StageResume] = None,
+    dispatch_longest_first: bool = False,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Run every stage and return ``(all_result_rows, stage_summaries)``.
 
@@ -370,8 +459,8 @@ async def run_multistage_stages(
     interrupted stages re-dispatch only the ``(task, rollout)`` rows without a
     persisted success, and recorded plans (including each stage's per-task
     reference assignment) are replayed so selection is identical even when
-    ``multistage.seed`` is ``None``. ``resume=None`` is byte-for-byte the
-    pre-resume behavior.
+    ``multistage.seed`` is ``None``. ``resume=None`` preserves the same execution
+    semantics without file-backed persistence.
     """
     base_rng = rng or (
         random.Random(multistage_config.seed) if multistage_config.seed is not None else random.Random()
@@ -401,19 +490,56 @@ async def run_multistage_stages(
     # (task_id, rollout_index) deliverables already produced by earlier stages.
     # Later stages reuse these instead of re-running the policy.
     produced: set[Tuple[str, int]] = set()
+    sidecar_produced_by_stage: Dict[int, set[Tuple[str, int]]] = {}
+    if resume is not None and resume.reuse_cached_keys:
+        task_id_by_key: Dict[Tuple[Any, Any], str] = {}
+        for row in materialized_rows:
+            task_id = row_task_id(row)
+            if task_id is not None:
+                task_id_by_key[(row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME))] = task_id
+        for stage_index, keys in resume.reuse_cached_keys.items():
+            for key in keys:
+                task_id = task_id_by_key.get(key)
+                if task_id is not None:
+                    sidecar_produced_by_stage.setdefault(stage_index, set()).add((task_id, int(key[1] or 0)))
+
+    max_attempts = _get_max_rollout_attempts()
     for index, stage in enumerate(multistage_config.stages):
+        # A sidecar reuse flag is emitted only after the policy artifact exists.
+        # Treat it as produced from this stage onward even when the judging row
+        # is terminal/max-attempt gated and therefore never enters the main file.
+        produced.update(sidecar_produced_by_stage.get(index, set()))
         if resume is not None and index in resume.outcomes:
-            eval_elo = _resume_complete_stage(
-                index,
-                total_stages,
-                resume,
-                reference_elos,
-                produced,
-                all_results,
-                stage_summaries,
-                _emit,
+            plan = resume.plans.get(index, {})
+            expected_rows = [row for task_id in plan.get("task_ids", []) for row in rows_by_task.get(str(task_id), [])]
+            expected_keys = {(row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME)) for row in expected_rows}
+            resolved_keys = set(resume.gated_keys.get(index, set()))
+            completion_is_covered = len(expected_keys) == len(expected_rows) and expected_keys <= resolved_keys
+            if completion_is_covered:
+                resumed_elo = _resume_complete_stage(
+                    index,
+                    total_stages,
+                    len(expected_rows),
+                    resume,
+                    reference_elos,
+                    produced,
+                    all_results,
+                    stage_summaries,
+                    _emit,
+                )
+                # Match uninterrupted execution: a completed stage with no
+                # usable battles does not erase the last fitted ELO. Later
+                # adaptive stages continue from the most recent valid fit.
+                if resumed_elo is not None:
+                    eval_elo = resumed_elo
+                continue
+            _emit(
+                "stage_completion_stale",
+                index=index,
+                total_stages=total_stages,
+                expected_rows=len(expected_rows),
+                resolved_rows=len(expected_keys & resolved_keys),
             )
-            continue
 
         reference_ids, task_ids, task_reference_ids, replayed = _plan_stage(
             index, stage, reference_elos, eval_elo, stage_task_sets, multistage_config, resume
@@ -431,6 +557,35 @@ async def run_multistage_stages(
         # failures from the sidecar (mirrors ``_load_from_cache``, stage-keyed).
         gated_keys = set(resume.gated_keys.get(index, set())) if resume is not None else set()
         pending_rows = [r for r in stage_rows if (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) not in gated_keys]
+        if resume is not None:
+            reuse_cached_keys = resume.reuse_cached_keys.get(index, set())
+            attempts_by_key = resume.attempts_by_stage.get(index, {})
+            for row in pending_rows:
+                key = (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
+                if key in reuse_cached_keys:
+                    row["reuse_cached_deliverable"] = True
+                prior_attempts = attempts_by_key.get(key, 0)
+                if prior_attempts > 0:
+                    row[ATTEMPT_INDEX_KEY_NAME] = prior_attempts
+
+        if dispatch_longest_first and resume is not None:
+            elapsed_by_key = resume.elapsed_by_stage.get(index, {})
+            if elapsed_by_key:
+                known = [
+                    row
+                    for row in pending_rows
+                    if (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]) in elapsed_by_key
+                ]
+                unknown = [
+                    row
+                    for row in pending_rows
+                    if (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]) not in elapsed_by_key
+                ]
+                known.sort(
+                    key=lambda row: elapsed_by_key[(row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])],
+                    reverse=True,
+                )
+                pending_rows = known + unknown
 
         num_reused = sum(1 for r in stage_rows if r.get("reuse_cached_deliverable"))
         _emit(
@@ -447,16 +602,38 @@ async def run_multistage_stages(
         )
 
         pairs = await run_rollouts(pending_rows)
-        new_tagged = tag_results(pairs, index)
+        expected_stage_row_count = len(stage_rows)
+        new_tagged = tag_results(
+            pairs,
+            index,
+            expected_final_stage_index=total_stages - 1,
+            expected_stage_row_count=expected_stage_row_count,
+        )
         if resume is not None:
             resume.on_rows(index, new_tagged)
+        # A verify-side failure can still carry a complete, reusable policy
+        # artifact. Make it available immediately to later stages in this same
+        # process; startup-only sidecar loading covers only resumed runs.
+        for row in new_tagged:
+            if not row.get("reuse_cached_deliverable"):
+                continue
+            tid = row_task_id(row)
+            if tid is not None:
+                produced.add((tid, int(row.get(ROLLOUT_INDEX_KEY_NAME, 0) or 0)))
         # Only successful rows feed pooling / aggregate.
         new_successes = [r for r in new_tagged if _is_success_row(r)]
-        tagged = list(cached_rows) + new_successes
+        tagged = [
+            dict(
+                r,
+                expected_final_stage_index=total_stages - 1,
+                expected_stage_row_count=expected_stage_row_count,
+            )
+            for r in cached_rows
+        ] + new_successes
         all_results.extend(tagged)
 
         # Record this stage's deliverables so later stages can reuse them.
-        for row in stage_rows:
+        for row in tagged:
             tid = row_task_id(row)
             if tid is not None:
                 produced.add((tid, int(row.get(ROLLOUT_INDEX_KEY_NAME, 0) or 0)))
@@ -466,8 +643,26 @@ async def run_multistage_stages(
         if stage_elo is not None:
             eval_elo = stage_elo
 
-        # Completion marker only; eval_elo is re-fit from rows on resume.
-        if resume is not None:
+        # Completion marker only; eval_elo is re-fit from rows on resume. A
+        # retryable failure or drained row deliberately leaves the stage open,
+        # even if an older implementation had already written "complete".
+        returned_keys: set[Tuple[Any, Any]] = set()
+        prior_attempts = resume.attempts_by_stage.get(index, {}) if resume is not None else {}
+        for result in new_tagged:
+            key = (result[TASK_INDEX_KEY_NAME], result[ROLLOUT_INDEX_KEY_NAME])
+            resolved = _is_success_row(result) or _is_terminal_failure(result)
+            if (
+                not resolved
+                and result.get(NG_FAILURE_CLASS_KEY) is not None
+                and not result.get(NG_NO_PERSIST_KEY)
+                and prior_attempts.get(key, 0) + 1 >= max_attempts
+            ):
+                resolved = True
+            if resolved:
+                returned_keys.add(key)
+        pending_keys = {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in pending_rows}
+        stage_complete = pending_keys <= returned_keys
+        if resume is not None and stage_complete:
             resume.on_outcome(index, {"stage_index": index, "status": "complete"})
 
         _emit(
@@ -490,6 +685,17 @@ async def run_multistage_stages(
                 "num_references": num_references,
             }
         )
+        if not stage_complete:
+            _emit(
+                "stage_incomplete",
+                index=index,
+                total_stages=total_stages,
+                num_pending=len(pending_keys - returned_keys),
+            )
+            # Later reference selection depends on this stage's complete ELO.
+            # Stop here and let resume replay the missing rows instead of
+            # creating downstream plans from a partial estimate.
+            break
 
     return all_results, stage_summaries
 
@@ -551,6 +757,7 @@ def _plan_stage(
 def _resume_complete_stage(
     index: int,
     total_stages: int,
+    expected_stage_row_count: int,
     resume: StageResume,
     reference_elos: Mapping[str, float],
     produced: set[Tuple[str, int]],
@@ -564,7 +771,14 @@ def _resume_complete_stage(
     truth) rather than trusting the recorded ``eval_elo`` field, so the value
     threaded to later stages is always consistent with the persisted rows.
     """
-    cached_rows = list(resume.rows_by_stage.get(index, []))
+    cached_rows = [
+        dict(
+            r,
+            expected_final_stage_index=total_stages - 1,
+            expected_stage_row_count=expected_stage_row_count,
+        )
+        for r in resume.rows_by_stage.get(index, [])
+    ]
     plan = resume.plans.get(index, {})
     reference_ids = list(plan.get("reference_ids", []))
     task_ids = list(plan.get("task_ids", []))
@@ -621,9 +835,35 @@ def write_rollouts(all_results: Sequence[Mapping[str, Any]], output_fpath: str |
         deduped.values(),
         key=lambda r: (r.get("stage_index", 0), r.get(TASK_INDEX_KEY_NAME, 0), r.get(ROLLOUT_INDEX_KEY_NAME, 0)),
     )
-    with output_fpath.open("wb") as handle:
-        for row in ordered:
-            handle.write(orjson.dumps(row) + b"\n")
+    prior_mode = output_fpath.stat().st_mode & 0o7777 if output_fpath.exists() else None
+    temp_path: Optional[Path] = None
+    try:
+        # NamedTemporaryFile forces 0600, which would silently make a fresh
+        # shared rollout file owner-only. Create the staging file with the same
+        # 0666+umask semantics as a normal ``open(..., 'wb')`` instead.
+        for _ in range(100):
+            candidate = output_fpath.parent / f".{output_fpath.name}.merge-{secrets.token_hex(8)}"
+            try:
+                fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+            except FileExistsError:
+                continue
+            temp_path = candidate
+            break
+        else:  # pragma: no cover - cryptographically-random collisions
+            raise FileExistsError(f"could not allocate staging file beside {output_fpath}")
+
+        with os.fdopen(fd, "wb") as handle:
+            for row in ordered:
+                handle.write(orjson.dumps(row) + b"\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        if prior_mode is not None:
+            os.chmod(temp_path, prior_mode)
+        os.replace(temp_path, output_fpath)
+        temp_path = None
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
     return output_fpath
 
 
@@ -636,6 +876,12 @@ def journal_path_for(output_fpath: str | Path) -> Path:
     """``<output_stem>_multistage_state.jsonl`` sibling of the rollouts file."""
     output_fpath = Path(output_fpath)
     return output_fpath.with_name(f"{output_fpath.stem}_multistage_state.jsonl")
+
+
+def aggregate_metrics_path_for(output_fpath: str | Path) -> Path:
+    """Standard aggregate-metrics path associated with a rollout JSONL."""
+    output_fpath = Path(output_fpath)
+    return output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
 
 
 def read_journal(journal_fpath: str | Path) -> Tuple[Dict[int, dict], Dict[int, dict], Optional[str]]:
@@ -660,11 +906,77 @@ def read_journal(journal_fpath: str | Path) -> Tuple[Dict[int, dict], Dict[int, 
             index = record.get("stage_index")
             if index is None:
                 continue
-            if record.get("status") == "planned":
+            status = record.get("status")
+            if status == "restart_from_stage":
+                restart_stage = int(index)
+                # The marker is durable before downstream files are pruned. It
+                # therefore invalidates old journal state immediately even if
+                # the process dies during cleanup; newer records later in the
+                # journal can repopulate the recomputed stages.
+                plans = {i: plan for i, plan in plans.items() if i <= restart_stage}
+                outcomes = {i: outcome for i, outcome in outcomes.items() if i < restart_stage}
+            elif status == "planned":
                 plans[int(index)] = record
-            elif record.get("status") == "complete":
+            elif status == "complete":
                 outcomes[int(index)] = record
     return plans, outcomes, fingerprint
+
+
+def _pending_restart_stage(journal_fpath: str | Path) -> Optional[int]:
+    """Return a restart marker whose downstream file cleanup was not acknowledged."""
+    pending: Optional[int] = None
+    path = Path(journal_fpath)
+    if not path.exists():
+        return None
+    with path.open("rb") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            record = orjson.loads(line)
+            status = record.get("status")
+            if status == "restart_from_stage":
+                pending = int(record["stage_index"])
+            elif status == "restart_cleanup_complete" and pending == int(record["stage_index"]):
+                pending = None
+    return pending
+
+
+def _atomic_filter_jsonl(path: Path, keep: Callable[[Mapping[str, Any]], bool]) -> None:
+    """Atomically rewrite ``path`` with only records accepted by ``keep``."""
+    if not path.exists():
+        return
+    mode = path.stat().st_mode & 0o7777
+    temp_path: Optional[Path] = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb", dir=path.parent, prefix=f".{path.name}.prune-", delete=False
+        ) as out:
+            temp_path = Path(out.name)
+            with path.open("rb") as source:
+                for line in source:
+                    stripped = line.strip()
+                    if stripped and keep(orjson.loads(stripped)):
+                        out.write(stripped + b"\n")
+            out.flush()
+            os.fsync(out.fileno())
+        os.chmod(temp_path, mode)
+        os.replace(temp_path, path)
+        temp_path = None
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+
+
+def _prune_downstream_files(output_fpath: str | Path, restart_stage: int) -> None:
+    """Remove persisted main/sidecar rows after ``restart_stage`` atomically."""
+    output_fpath = Path(output_fpath)
+
+    def keep(record: Mapping[str, Any]) -> bool:
+        return int(record.get("stage_index", 0) or 0) <= restart_stage
+
+    _atomic_filter_jsonl(output_fpath, keep)
+    _atomic_filter_jsonl(failures_path_for(output_fpath), keep)
 
 
 def load_persisted_rows(output_fpath: str | Path) -> Dict[int, List[Dict[str, Any]]]:
@@ -723,7 +1035,7 @@ def load_gated_keys(
                 continue
             key = (int(fr.get("stage_index", 0) or 0), fr[TASK_INDEX_KEY_NAME], fr[ROLLOUT_INDEX_KEY_NAME])
             attempts[key] = attempts.get(key, 0) + 1
-            if fr.get(NG_TERMINAL_KEY):
+            if _is_terminal_failure(fr):
                 terminal.add(key)
 
     for key in attempts:
@@ -731,6 +1043,109 @@ def load_gated_keys(
         if key in terminal or attempts[key] >= max_attempts:
             gated.setdefault(stage_index, set()).add((task_index, rollout_index))
     return gated
+
+
+def load_failure_timings(output_fpath: str | Path) -> Dict[int, Dict[Tuple[Any, Any], float]]:
+    """Load longest failed-attempt duration per stage/task/rollout key."""
+    elapsed_by_stage: Dict[int, Dict[Tuple[Any, Any], float]] = {}
+    failures_fpath = failures_path_for(Path(output_fpath))
+    if not failures_fpath.exists():
+        return elapsed_by_stage
+
+    with failures_fpath.open("rb") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            row = orjson.loads(line)
+            if TASK_INDEX_KEY_NAME not in row or ROLLOUT_INDEX_KEY_NAME not in row:
+                continue
+            elapsed = _observed_elapsed(row)
+            if elapsed is None:
+                continue
+            stage_index = int(row.get("stage_index", 0) or 0)
+            key = (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
+            stage_timings = elapsed_by_stage.setdefault(stage_index, {})
+            stage_timings[key] = max(stage_timings.get(key, 0.0), elapsed)
+    return elapsed_by_stage
+
+
+def load_failure_attempts(output_fpath: str | Path) -> Dict[int, Dict[Tuple[Any, Any], int]]:
+    """Load prior sidecar attempt counts per stage/task/rollout key."""
+    attempts_by_stage: Dict[int, Dict[Tuple[Any, Any], int]] = {}
+    failures_fpath = failures_path_for(Path(output_fpath))
+    if not failures_fpath.exists():
+        return attempts_by_stage
+
+    with failures_fpath.open("rb") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            row = orjson.loads(line)
+            if TASK_INDEX_KEY_NAME not in row or ROLLOUT_INDEX_KEY_NAME not in row:
+                continue
+            stage_index = int(row.get("stage_index", 0) or 0)
+            key = (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
+            stage_attempts = attempts_by_stage.setdefault(stage_index, {})
+            stage_attempts[key] = stage_attempts.get(key, 0) + 1
+    return attempts_by_stage
+
+
+def load_retryable_failure_stages(
+    output_fpath: str | Path,
+    gated_keys: Mapping[int, AbstractSet[Tuple[Any, Any]]],
+    rows_by_stage: Mapping[int, Sequence[Mapping[str, Any]]],
+) -> set[int]:
+    """Stages with a persisted failure that still needs another attempt."""
+    retryable: set[int] = set()
+    failures_fpath = failures_path_for(Path(output_fpath))
+    if not failures_fpath.exists():
+        return retryable
+
+    completed_keys = {
+        stage_index: {(row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME)) for row in rows}
+        for stage_index, rows in rows_by_stage.items()
+    }
+
+    with failures_fpath.open("rb") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            row = orjson.loads(line)
+            if TASK_INDEX_KEY_NAME not in row or ROLLOUT_INDEX_KEY_NAME not in row:
+                continue
+            stage_index = int(row.get("stage_index", 0) or 0)
+            key = (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
+            # Historical failures remain in the append-only sidecar after a
+            # later attempt succeeds. Such a key is resolved, not retryable.
+            if key not in completed_keys.get(stage_index, set()) and key not in gated_keys.get(stage_index, set()):
+                retryable.add(stage_index)
+    return retryable
+
+
+def load_reuse_cached_keys(output_fpath: str | Path) -> Dict[int, set[Tuple[Any, Any]]]:
+    """Load stage-aware retry keys that should reuse a persisted deliverable."""
+    reuse_cached_keys: Dict[int, set[Tuple[Any, Any]]] = {}
+    failures_fpath = failures_path_for(Path(output_fpath))
+    if not failures_fpath.exists():
+        return reuse_cached_keys
+
+    with failures_fpath.open("rb") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            row = orjson.loads(line)
+            if not row.get("reuse_cached_deliverable"):
+                continue
+            if TASK_INDEX_KEY_NAME not in row or ROLLOUT_INDEX_KEY_NAME not in row:
+                continue
+            stage_index = int(row.get("stage_index", 0) or 0)
+            key = (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
+            reuse_cached_keys.setdefault(stage_index, set()).add(key)
+    return reuse_cached_keys
 
 
 def append_journal_record(journal_fpath: str | Path, record: Mapping[str, Any], fingerprint: str) -> None:
@@ -741,6 +1156,8 @@ def append_journal_record(journal_fpath: str | Path, record: Mapping[str, Any], 
     out["fingerprint"] = fingerprint
     with path.open("ab") as handle:
         handle.write(orjson.dumps(out) + b"\n")
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def route_stage_rows(output_fpath: str | Path, rows: Sequence[Mapping[str, Any]]) -> None:
@@ -767,9 +1184,54 @@ def route_stage_rows(output_fpath: str | Path, rows: Sequence[Mapping[str, Any]]
 
 def build_file_resume(output_fpath: str | Path, journal_fpath: str | Path, fingerprint: str) -> StageResume:
     """Build a file-backed :class:`StageResume` from the journal + rollout files."""
+    output_fpath = Path(output_fpath)
+    journal_fpath = Path(journal_fpath)
+    _migrate_invalid_judge_main_rows(output_fpath)
+
+    # Finish an interrupted cleanup before reading any reusable stage state.
+    recovered_restart = _pending_restart_stage(journal_fpath)
+    if recovered_restart is not None:
+        aggregate_metrics_path_for(output_fpath).unlink(missing_ok=True)
+        _prune_downstream_files(output_fpath, recovered_restart)
+        append_journal_record(
+            journal_fpath,
+            {"stage_index": recovered_restart, "status": "restart_cleanup_complete"},
+            fingerprint,
+        )
+
     plans, outcomes, _ = read_journal(journal_fpath)
     rows_by_stage = load_persisted_rows(output_fpath)
     gated_keys = load_gated_keys(output_fpath, rows_by_stage)
+    elapsed_by_stage = load_failure_timings(output_fpath)
+    reuse_cached_keys = load_reuse_cached_keys(output_fpath)
+    attempts_by_stage = load_failure_attempts(output_fpath)
+    # Older multistage runs wrote a completion marker even when a retryable
+    # sidecar failure remained. The sidecar is authoritative for retry state;
+    # discard only those stale outcomes so the recorded plan is replayed.
+    retryable_failure_stages = load_retryable_failure_stages(output_fpath, gated_keys, rows_by_stage)
+    if retryable_failure_stages and recovered_restart is None:
+        restart_stage = min(retryable_failure_stages)
+        # Persist the logical invalidation first. If cleanup is interrupted, the
+        # next process sees this marker, refuses stale downstream journal state,
+        # and idempotently finishes pruning the data files.
+        append_journal_record(
+            journal_fpath,
+            {"stage_index": restart_stage, "status": "restart_from_stage"},
+            fingerprint,
+        )
+        aggregate_metrics_path_for(output_fpath).unlink(missing_ok=True)
+        _prune_downstream_files(output_fpath, restart_stage)
+        append_journal_record(
+            journal_fpath,
+            {"stage_index": restart_stage, "status": "restart_cleanup_complete"},
+            fingerprint,
+        )
+        plans, outcomes, _ = read_journal(journal_fpath)
+        rows_by_stage = load_persisted_rows(output_fpath)
+        gated_keys = load_gated_keys(output_fpath, rows_by_stage)
+        elapsed_by_stage = load_failure_timings(output_fpath)
+        reuse_cached_keys = load_reuse_cached_keys(output_fpath)
+        attempts_by_stage = load_failure_attempts(output_fpath)
 
     def on_plan(index: int, plan: dict) -> None:
         append_journal_record(journal_fpath, plan, fingerprint)
@@ -788,6 +1250,9 @@ def build_file_resume(output_fpath: str | Path, journal_fpath: str | Path, finge
         on_plan=on_plan,
         on_outcome=on_outcome,
         on_rows=on_rows,
+        elapsed_by_stage=elapsed_by_stage,
+        reuse_cached_keys=reuse_cached_keys,
+        attempts_by_stage=attempts_by_stage,
     )
 
 
@@ -849,6 +1314,16 @@ async def run_e2e_multistage(
     )
 
     semaphore_size = getattr(rollout_collection_config, "num_samples_in_parallel", None)
+    dispatch_budget_s = getattr(rollout_collection_config, "dispatch_budget_s", None)
+    drain_margin_s = getattr(rollout_collection_config, "drain_margin_s", None)
+    if dispatch_budget_s is not None and (semaphore_size is None or semaphore_size <= 0):
+        raise ValueError(
+            "dispatch_budget_s requires a finite positive num_samples_in_parallel; "
+            "unbounded dispatch can POST the entire queue before the budget is re-checked"
+        )
+
+    latency_tracker = DispatchLatencyTracker()
+    dispatch_started_at = time.monotonic()
 
     async def run_rollouts(rows: List[Dict[str, Any]]) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
         semaphore = None
@@ -857,14 +1332,32 @@ async def run_e2e_multistage(
 
             semaphore = Semaphore(semaphore_size)
         results: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
-        for future in helper.run_examples(rows, semaphore=semaphore or nullcontext()):
+        remaining_budget_s = None
+        if dispatch_budget_s is not None:
+            remaining_budget_s = max(0.0, dispatch_budget_s - (time.monotonic() - dispatch_started_at))
+        for future in helper.run_examples(
+            rows,
+            semaphore=semaphore or nullcontext(),
+            dispatch_budget_s=remaining_budget_s,
+            drain_margin_s=drain_margin_s,
+            latency_tracker=latency_tracker,
+        ):
             row, result = await future
             results.append((row, result))
         return results
 
     output_fpath = Path(rollout_collection_config.output_jsonl_fpath)
     journal_fpath = journal_path_for(output_fpath)
-    fingerprint = compute_fingerprint(multistage_config, reference_elos, distribution)
+    fingerprint = compute_fingerprint(
+        multistage_config,
+        reference_elos,
+        distribution,
+        materialized_rows=materialized_rows,
+        rollout_collection_config=rollout_collection_config,
+        resolved_global_config=global_config_dict,
+    )
+    for row in materialized_rows:
+        row["verify_cache_namespace"] = fingerprint
     resume = _prepare_resume(rollout_collection_config, output_fpath, journal_fpath, fingerprint)
 
     all_results, stage_summaries = await run_multistage_stages(
@@ -875,7 +1368,10 @@ async def run_e2e_multistage(
         run_rollouts,
         on_event=_log_event,
         resume=resume,
+        dispatch_longest_first=bool(getattr(rollout_collection_config, "dispatch_longest_first", False)),
     )
+
+    print(latency_tracker.summary())
 
     write_rollouts(all_results, output_fpath)
 
@@ -918,6 +1414,7 @@ def _prepare_resume(
         output_fpath.unlink(missing_ok=True)
         failures_path_for(output_fpath).unlink(missing_ok=True)
         journal_fpath.unlink(missing_ok=True)
+        aggregate_metrics_path_for(output_fpath).unlink(missing_ok=True)
     else:
         print("[multistage-elo] resuming multi-stage run from cache (fingerprint match)", file=sys.stderr, flush=True)
     return build_file_resume(output_fpath, journal_fpath, fingerprint)
@@ -961,6 +1458,13 @@ def _log_event(name: str, data: dict) -> None:  # pragma: no cover
         print(
             f"[multistage-elo] stage {data['index'] + 1}/{data['total_stages']} reused from cache: "
             f"eval ELO = {elo_str} ({data.get('num_rollouts')} cached rollout(s))",
+            file=sys.stderr,
+            flush=True,
+        )
+    elif name == "stage_incomplete":
+        print(
+            f"[multistage-elo] stage {data['index'] + 1}/{data['total_stages']} remains incomplete "
+            f"({data.get('num_pending')} rollout(s) retryable or undispatched); stopping before downstream stages",
             file=sys.stderr,
             flush=True,
         )

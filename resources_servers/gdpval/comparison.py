@@ -21,22 +21,32 @@ between the eval model and a reference model's deliverables) and
 from __future__ import annotations
 
 import base64
+import hashlib
 import logging
 import math
 import os
 import random
 import re
 import shutil
+import stat
 import tempfile
 import time
 import zipfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Optional
 
 from openai import APITimeoutError
 
 from resources_servers.gdpval.judge_panel import AUDIO_EXTS, VIDEO_EXTS, merge_create_kwargs, sample_judge
+from resources_servers.gdpval.preconvert import (
+    OFFICE_EXTENSIONS,
+    AttachmentBudget,
+    extract_xlsx_structured_text,
+    resolve_pdf_provenance,
+    sidecar_pdf,
+)
+from resources_servers.gdpval.scoring import is_permanent_judge_error
 
 
 LOGGER = logging.getLogger(__name__)
@@ -95,6 +105,32 @@ JUDGE_REQUEST_TIMEOUT_SECONDS = float(os.environ.get("GDPVAL_JUDGE_REQUEST_TIMEO
 # videos in the GDPVal task set still go through; only catches the truly
 # pathological cases (e.g. ``task_a941b6d8`` 657 MB overlay clip).
 MAX_FILE_BYTES_FOR_JUDGE = 250 * 1024 * 1024
+# Aggregate encoded payload is what the HTTP server sees. Keeping it below
+# 400 MiB leaves roughly 80 MB even if the model server's advertised 500 MB
+# ceiling is decimal, for JSON, prompts, spreadsheet text, and framing. The raw
+# ceiling separately prevents pathological media accumulation before base64.
+MAX_TOTAL_RAW_ATTACHMENT_BYTES_FOR_JUDGE = 300 * 1024 * 1024
+MAX_TOTAL_ENCODED_ATTACHMENT_CHARS_FOR_JUDGE = 400 * 1024 * 1024
+# Each directory is built independently. Keeping every section below an equal,
+# conservative share means references can never consume the bytes needed to
+# show both submissions, and limits peak memory before message assembly.
+MAX_SECTION_RAW_ATTACHMENT_BYTES_FOR_JUDGE = 96 * 1024 * 1024
+MAX_SECTION_ENCODED_ATTACHMENT_CHARS_FOR_JUDGE = 128 * 1024 * 1024
+MAX_TEXT_FILE_CHARS_FOR_JUDGE = 200_000
+MAX_SECTION_TEXT_CHARS_FOR_JUDGE = 1_000_000
+MAX_XLSX_TEXT_CHARS_FOR_JUDGE = 120_000
+# Includes base64, all text, data-URL prefixes, and conservative JSON framing.
+# This stays below endpoints configured with a 500 MB request-body ceiling.
+MAX_TOTAL_SERIALIZED_REQUEST_BYTES_FOR_JUDGE = 420 * 1024 * 1024
+MAX_TASK_PROMPT_CHARS_FOR_JUDGE = 1_000_000
+# Archives expand before their members enter the normal payload builders, so
+# bound that work independently. Extracting more than one section's raw budget
+# cannot make more binary evidence visible to the judge.
+MAX_ZIP_ARCHIVE_BYTES_FOR_JUDGE = MAX_FILE_BYTES_FOR_JUDGE
+MAX_ZIP_MEMBERS_FOR_JUDGE = 1_000
+MAX_ZIP_MEMBER_BYTES_FOR_JUDGE = MAX_SECTION_RAW_ATTACHMENT_BYTES_FOR_JUDGE
+MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES_FOR_JUDGE = MAX_SECTION_RAW_ATTACHMENT_BYTES_FOR_JUDGE
+ZIP_COPY_CHUNK_BYTES = 1024 * 1024
 RETRYABLE_ERROR_MARKERS = (
     "429",
     "502",
@@ -113,7 +149,6 @@ RETRYABLE_ERROR_MARKERS = (
     "temporarily unavailable",
     "connection error",
 )
-
 # ---------------------------------------------------------------------------
 # File handling
 # ---------------------------------------------------------------------------
@@ -124,9 +159,24 @@ def _data_url(mime_type: str, data: bytes) -> str:
     return f"data:{mime_type};base64,{b64}"
 
 
-def _load_raw_text(path: str | Path) -> str:
+def _bounded_text(text: str, cap: int, marker: str = "\n[...truncated]") -> str:
+    if cap <= 0:
+        return ""
+    if len(text) <= cap:
+        return text
+    if cap <= len(marker):
+        return marker[-cap:]
+    return text[: cap - len(marker)] + marker
+
+
+def _load_raw_text(path: str | Path, max_chars: int = MAX_TEXT_FILE_CHARS_FOR_JUDGE) -> str:
+    """Read only the prefix that can be emitted to the judge."""
+
+    if max_chars <= 0:
+        return ""
     with open(path, "r", encoding="utf-8") as f:
-        return f.read()
+        text = f.read(max_chars + 1)
+    return _bounded_text(text, max_chars)
 
 
 def _load_media(path: str | Path) -> bytes:
@@ -134,33 +184,160 @@ def _load_media(path: str | Path) -> bytes:
         return f.read()
 
 
-def _convert_to_pdf(path: str | Path) -> bytes | None:
-    """Load a pre-converted PDF (same name, .pdf extension). Returns None if missing."""
+def _resolve_office_pdf_path(
+    path: str | Path,
+    *,
+    cached_pdf_path: Path | None = None,
+    provenance_resolved: bool = False,
+) -> Path | None:
+    """Return a provenance-safe Office render without rereading known listings."""
+
     input_path = Path(path).resolve()
-    output_path = input_path.with_suffix(".pdf")
-    if output_path.exists():
-        return _load_media(output_path)
-    return None
+    if provenance_resolved:
+        return cached_pdf_path.resolve() if cached_pdf_path is not None else None
+    try:
+        entries = [entry.resolve() for entry in input_path.parent.iterdir() if entry.is_file()]
+    except OSError:
+        return None
+    output_path = resolve_pdf_provenance(entries).office_pdfs.get(input_path)
+    if output_path is None and input_path.suffix.lower() not in OFFICE_EXTENSIONS:
+        # Preserve the historical fallback for less-common document formats
+        # that are not preconverted by GDPVal but may already have a render.
+        injective = sidecar_pdf(input_path)
+        plain = input_path.with_suffix(".pdf")
+        output_path = injective if injective.is_file() else plain if plain.is_file() else None
+    return output_path
+
+
+def _convert_to_pdf(path: str | Path) -> bytes | None:
+    """Load the provenance-safe pre-converted PDF for an Office source."""
+
+    output_path = _resolve_office_pdf_path(path)
+    return _load_media(output_path) if output_path is not None else None
+
+
+def _attachment_omission(file_name: str, size_bytes: int, reason: str) -> dict[str, str]:
+    return {
+        "type": "text",
+        "text": f"[attachment omitted for {file_name}: {_human_attachment_size(size_bytes)} raw; {reason}]",
+    }
+
+
+def _reserve_attachment_path(
+    path: Path,
+    file_name: str,
+    budget: AttachmentBudget | None,
+) -> tuple[int, dict[str, str] | None]:
+    """Stat and reserve an attachment before any read or base64 allocation."""
+
+    try:
+        size_bytes = path.stat().st_size
+    except OSError:
+        return 0, {"type": "text", "text": f"[attachment unavailable for {file_name}]"}
+    if size_bytes > MAX_FILE_BYTES_FOR_JUDGE:
+        return size_bytes, _attachment_omission(file_name, size_bytes, "per-file judge payload limit")
+    if budget is not None and not budget.reserve(size_bytes):
+        return size_bytes, _attachment_omission(file_name, size_bytes, "section judge payload budget")
+    return size_bytes, None
 
 
 def _maybe_unzip(path: str | Path) -> tuple[Path | None, list[Path]]:
-    """Extract a zip into a per-call tempdir; never write into ``path.parent``.
+    """Extract a bounded zip into a per-call tempdir.
 
     The reference deliverables tree is mounted read-only in production, so the
     previous behaviour of ``extractall(path.parent)`` raised ``PermissionError``
-    and failed /verify outright. Returns ``(extract_dir, member_paths)`` —
-    callers are responsible for ``shutil.rmtree(extract_dir)`` after they're
-    done reading the members.
+    and failed /verify outright. Member count, individual expanded size, and
+    total expanded size are checked before opening a member; the streaming copy
+    enforces the declared size as a second line of defence. Absolute, parent-
+    traversing, duplicate, and symlink entries are ignored.
+
+    Returns ``(extract_dir, member_paths)``. Callers are responsible for
+    ``shutil.rmtree(extract_dir)`` after reading the members.
     """
     path = Path(path)
+    extract_dir: Path | None = None
     try:
+        if path.stat().st_size > MAX_ZIP_ARCHIVE_BYTES_FOR_JUDGE:
+            LOGGER.warning("zip %s exceeds the compressed archive limit; ignoring it", path)
+            return None, []
         with zipfile.ZipFile(path, "r") as zip_ref:
             extract_dir = Path(tempfile.mkdtemp(prefix="gdpval_unzip_"))
-            zip_ref.extractall(extract_dir)
-            members = zip_ref.namelist()
-            extracted_paths = [extract_dir / Path(member) for member in members if member]
+            extract_root = extract_dir.resolve()
+            extracted_paths: list[Path] = []
+            extracted_targets: set[Path] = set()
+            total_uncompressed = 0
+            examined_files = 0
+
+            for info in zip_ref.infolist():
+                if info.is_dir():
+                    continue
+                examined_files += 1
+                if examined_files > MAX_ZIP_MEMBERS_FOR_JUDGE:
+                    LOGGER.warning(
+                        "zip %s exceeds the %d-member extraction limit; ignoring remaining members",
+                        path,
+                        MAX_ZIP_MEMBERS_FOR_JUDGE,
+                    )
+                    break
+
+                # ZIP member names are POSIX paths regardless of host OS. Treat
+                # backslashes as separators too so a Windows consumer cannot turn
+                # a benign-looking name into traversal later.
+                member_path = PurePosixPath(info.filename.replace("\\", "/"))
+                parts = member_path.parts
+                mode = info.external_attr >> 16
+                if (
+                    member_path.is_absolute()
+                    or not parts
+                    or any(part in {"", ".", ".."} for part in parts)
+                    or re.match(r"^[A-Za-z]:", parts[0])
+                    or stat.S_ISLNK(mode)
+                ):
+                    LOGGER.warning("ignoring unsafe zip member %r in %s", info.filename, path)
+                    continue
+
+                member_size = max(0, info.file_size)
+                if member_size > MAX_ZIP_MEMBER_BYTES_FOR_JUDGE:
+                    LOGGER.warning("ignoring oversize zip member %r in %s", info.filename, path)
+                    continue
+                if total_uncompressed + member_size > MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES_FOR_JUDGE:
+                    LOGGER.warning("ignoring zip member %r after aggregate expansion limit", info.filename)
+                    continue
+
+                target = (extract_root / Path(*parts)).resolve()
+                if not target.is_relative_to(extract_root) or target in extracted_targets or target.exists():
+                    LOGGER.warning("ignoring duplicate or escaping zip member %r in %s", info.filename, path)
+                    continue
+
+                try:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                except OSError:
+                    LOGGER.warning("ignoring conflicting zip member %r in %s", info.filename, path)
+                    continue
+                written = 0
+                try:
+                    with zip_ref.open(info, "r") as source, target.open("xb") as destination:
+                        while written < member_size:
+                            chunk = source.read(min(ZIP_COPY_CHUNK_BYTES, member_size - written))
+                            if not chunk:
+                                break
+                            destination.write(chunk)
+                            written += len(chunk)
+                        if written != member_size or source.read(1):
+                            raise ValueError("expanded size does not match ZIP metadata")
+                except (OSError, RuntimeError, ValueError, zipfile.BadZipFile):
+                    if target.is_file() or target.is_symlink():
+                        target.unlink(missing_ok=True)
+                    LOGGER.warning("failed bounded extraction of zip member %r in %s", info.filename, path)
+                    continue
+
+                total_uncompressed += written
+                extracted_targets.add(target)
+                extracted_paths.append(target)
         return extract_dir, extracted_paths
     except (zipfile.BadZipFile, zipfile.LargeZipFile, FileNotFoundError, OSError):
+        if extract_dir is not None:
+            shutil.rmtree(extract_dir, ignore_errors=True)
         return None, []
 
 
@@ -243,23 +420,29 @@ FILE_TYPE_MAP: dict[str, dict[str, Any]] = {
 }
 
 
-def get_file_content_block(file_dir: str, file_name: str) -> dict | None:
+def get_file_content_block(
+    file_dir: str,
+    file_name: str,
+    *,
+    attachment_budget: AttachmentBudget | None = None,
+    cached_office_pdf: Path | None = None,
+    provenance_resolved: bool = False,
+    max_text_chars: int = MAX_TEXT_FILE_CHARS_FOR_JUDGE,
+) -> dict | None:
     """Return a single OpenAI content block (dict) for a file, or ``None``."""
     file_extension = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
 
     if file_extension not in FILE_TYPE_MAP:
         file_type = "DOC"
-        file_converter = _convert_to_pdf
         file_mime_type = "application/pdf"
     else:
         file_type = FILE_TYPE_MAP[file_extension]["type"]
-        file_converter = FILE_TYPE_MAP[file_extension]["converter"]
         file_mime_type = FILE_TYPE_MAP[file_extension]["mime_type"]
 
-    full_path = os.path.join(file_dir, file_name)
+    full_path = Path(file_dir) / file_name
 
     try:
-        size_bytes = os.path.getsize(full_path)
+        size_bytes = full_path.stat().st_size
     except OSError:
         return None
     if size_bytes > MAX_FILE_BYTES_FOR_JUDGE:
@@ -271,27 +454,129 @@ def get_file_content_block(file_dir: str, file_name: str) -> dict | None:
 
     try:
         if file_type == "TXT":
-            raw_text = file_converter(full_path)
+            raw_text = _load_raw_text(full_path, max_text_chars)
             return {"type": "text", "text": raw_text}
 
         if file_type == "DOC":
-            doc_bytes = file_converter(full_path)
-            if doc_bytes is None:
+            pdf_path = _resolve_office_pdf_path(
+                full_path,
+                cached_pdf_path=cached_office_pdf,
+                provenance_resolved=provenance_resolved,
+            )
+            if pdf_path is None:
                 return None
-            return {"type": "image_url", "image_url": {"url": _data_url(file_mime_type, doc_bytes)}}
+            _size, omitted = _reserve_attachment_path(pdf_path, file_name, attachment_budget)
+            if omitted is not None:
+                return omitted
+            data = _load_media(pdf_path)
+            return {"type": "image_url", "image_url": {"url": _data_url(file_mime_type, data)}}
 
         if file_type == "PDF":
-            data = Path(full_path).read_bytes()
+            _size, omitted = _reserve_attachment_path(full_path, file_name, attachment_budget)
+            if omitted is not None:
+                return omitted
+            data = _load_media(full_path)
             return {"type": "image_url", "image_url": {"url": _data_url(file_mime_type, data)}}
 
         if file_type in ("IMG", "AUDIO", "VIDEO"):
-            media_bytes = file_converter(full_path)
+            _size, omitted = _reserve_attachment_path(full_path, file_name, attachment_budget)
+            if omitted is not None:
+                return omitted
+            media_bytes = _load_media(full_path)
             return {"type": "image_url", "image_url": {"url": _data_url(file_mime_type, media_bytes)}}
 
     except Exception as e:
         raise RuntimeError(f"Error getting file: {file_name} in directory: {file_dir}: {e}") from e
 
     return None
+
+
+MAX_RASTER_PAGE_PIXELS_FOR_JUDGE = 40_000_000
+
+
+def _pdf_path_to_image_text_blocks(
+    pdf_path: Path,
+    *,
+    render_dpi: int,
+    max_pages: int,
+    include_text: bool,
+    attachment_budget: AttachmentBudget,
+    max_text_chars: int,
+    file_name: str,
+) -> list[dict]:
+    """Render one PDF page at a time, reserving PNG bytes before base64."""
+
+    try:
+        import fitz
+    except ImportError:
+        LOGGER.warning("PyMuPDF (fitz) not installed; cannot rasterize PDF for image-only judge")
+        return []
+
+    try:
+        document = fitz.open(str(pdf_path))
+    except Exception as exc:
+        LOGGER.warning("failed to open PDF %s for rasterization: %r", file_name, exc)
+        return []
+
+    images: list[dict] = []
+    text_parts: list[str] = []
+    text_remaining = max(0, max_text_chars)
+    text_truncated = False
+    try:
+        total_pages = document.page_count
+        page_limit = min(total_pages, max(0, max_pages))
+        zoom = render_dpi / 72.0
+        matrix = fitz.Matrix(zoom, zoom)
+        for page_index in range(page_limit):
+            try:
+                page = document.load_page(page_index)
+                if include_text and text_remaining > 0:
+                    page_text = (page.get_text("text") or "").strip()
+                    if page_text:
+                        separator = 2 if text_parts else 0
+                        if separator < text_remaining:
+                            take = min(len(page_text), text_remaining - separator)
+                            text_parts.append(page_text[:take])
+                            text_remaining -= separator + take
+                            if take < len(page_text):
+                                text_truncated = True
+                elif include_text and text_parts:
+                    text_truncated = True
+
+                rect = page.rect
+                width = math.ceil(rect.width * zoom)
+                height = math.ceil(rect.height * zoom)
+                if width * height > MAX_RASTER_PAGE_PIXELS_FOR_JUDGE:
+                    images.append(
+                        {
+                            "type": "text",
+                            "text": f"[page {page_index + 1} omitted for {file_name}: raster dimensions too large]",
+                        }
+                    )
+                    continue
+                pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+                png = pixmap.tobytes("png")
+            except Exception as exc:
+                LOGGER.warning("failed to render PDF page %d for %s: %r", page_index, file_name, exc)
+                continue
+            if not attachment_budget.reserve(len(png)):
+                images.append(_attachment_omission(file_name, len(png), "section judge payload budget"))
+                break
+            images.append({"type": "image_url", "image_url": {"url": _data_url("image/png", png)}})
+
+        if total_pages > page_limit:
+            images.append({"type": "text", "text": f"[truncated: rendered {page_limit} of {total_pages} pages]"})
+    finally:
+        document.close()
+
+    blocks: list[dict] = []
+    if text_parts:
+        extracted = "\n\n".join(text_parts)
+        if text_truncated:
+            extracted = _bounded_text(extracted + "x", max_text_chars, "\n[...text truncated]")
+        blocks.append({"type": "text", "text": f"[extracted text]\n{extracted}"})
+    blocks.extend(images)
+    return blocks
 
 
 def get_file_image_text_blocks(
@@ -303,6 +588,10 @@ def get_file_image_text_blocks(
     include_text: bool,
     audio_capable: bool = False,
     video_capable: bool = False,
+    attachment_budget: AttachmentBudget | None = None,
+    cached_office_pdf: Path | None = None,
+    provenance_resolved: bool = False,
+    max_text_chars: int = MAX_TEXT_FILE_CHARS_FOR_JUDGE,
 ) -> list[dict]:
     """``images_and_text`` variant of :func:`get_file_content_block`.
 
@@ -320,15 +609,19 @@ def get_file_image_text_blocks(
     judges, which vLLM won't route to the video/audio tower). An unreadable
     modality is replaced with a one-line marker. Returns a list of 0+ blocks.
     """
-    from resources_servers.gdpval.media_conversion import audio_video_block, pdf_bytes_to_blocks
+    from resources_servers.gdpval.media_conversion import audio_video_block
 
     file_extension = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
     info = FILE_TYPE_MAP.get(file_extension)
     file_type = info["type"] if info else "DOC"
-    full_path = os.path.join(file_dir, file_name)
+    full_path = Path(file_dir) / file_name
+    budget = attachment_budget or AttachmentBudget(
+        raw_limit=MAX_SECTION_RAW_ATTACHMENT_BYTES_FOR_JUDGE,
+        encoded_limit=MAX_SECTION_ENCODED_ATTACHMENT_CHARS_FOR_JUDGE,
+    )
 
     try:
-        size_bytes = os.path.getsize(full_path)
+        size_bytes = full_path.stat().st_size
     except OSError:
         return []
     if size_bytes > MAX_FILE_BYTES_FOR_JUDGE:
@@ -338,10 +631,14 @@ def get_file_image_text_blocks(
     try:
         # PDFs and Office docs (preconverted to a sibling .pdf) → page images + text.
         if file_type == "PDF":
-            pdf_bytes: bytes | None = Path(full_path).read_bytes()
+            pdf_path: Path | None = full_path
         elif file_type == "DOC":
-            pdf_bytes = _convert_to_pdf(full_path)
-            if pdf_bytes is None:
+            pdf_path = _resolve_office_pdf_path(
+                full_path,
+                cached_pdf_path=cached_office_pdf,
+                provenance_resolved=provenance_resolved,
+            )
+            if pdf_path is None:
                 # No sibling .pdf render exists, so this Office deliverable's content
                 # is invisible to an image-only judge (only the filename is shown).
                 # Warn so an incomplete-preconvert reference cache surfaces instead of
@@ -352,14 +649,28 @@ def get_file_image_text_blocks(
                     file_name,
                 )
         else:
-            pdf_bytes = None
+            pdf_path = None
 
-        if pdf_bytes is not None:
-            blocks = pdf_bytes_to_blocks(
-                pdf_bytes,
-                dpi=render_dpi,
+        if pdf_path is not None:
+            try:
+                pdf_size = pdf_path.stat().st_size
+            except OSError:
+                return [{"type": "text", "text": f"[attachment unavailable for {file_name}]"}]
+            if pdf_size > MAX_FILE_BYTES_FOR_JUDGE:
+                return [_attachment_omission(file_name, pdf_size, "per-file judge payload limit")]
+            # The PDF is only an input to rasterization; it is not part of the
+            # request. Its compressed source size says nothing about whether a
+            # rendered PNG page fits the remaining attachment-output budget.
+            if not budget.can_fit(1):
+                return [_attachment_omission(file_name, pdf_size, "section judge payload budget")]
+            blocks = _pdf_path_to_image_text_blocks(
+                pdf_path,
+                render_dpi=render_dpi,
                 max_pages=max_pages,
                 include_text=include_text,
+                attachment_budget=budget,
+                max_text_chars=max_text_chars,
+                file_name=file_name,
             )
             if blocks:
                 return blocks
@@ -384,11 +695,21 @@ def get_file_image_text_blocks(
                 ]
             info = FILE_TYPE_MAP.get(file_extension) or {}
             mime = info.get("mime_type") or "application/octet-stream"
+            _size, omitted = _reserve_attachment_path(full_path, file_name, budget)
+            if omitted is not None:
+                return [omitted]
             data = _load_media(full_path)
             return [audio_video_block(mime, data, ext=file_extension, file_type=file_type, openai_native=True)]
 
         # Text and native images pass through exactly as in native mode.
-        block = get_file_content_block(file_dir, file_name)
+        block = get_file_content_block(
+            file_dir,
+            file_name,
+            attachment_budget=budget,
+            cached_office_pdf=cached_office_pdf,
+            provenance_resolved=provenance_resolved,
+            max_text_chars=max_text_chars,
+        )
         return [block] if block is not None else []
     except Exception as e:
         raise RuntimeError(f"Error getting file: {file_name} in directory: {file_dir}: {e}") from e
@@ -426,6 +747,37 @@ def build_file_section(
 
     section: list[dict] = []
     no_files = True
+    attachment_budget = AttachmentBudget(
+        raw_limit=MAX_SECTION_RAW_ATTACHMENT_BYTES_FOR_JUDGE,
+        encoded_limit=MAX_SECTION_ENCODED_ATTACHMENT_CHARS_FOR_JUDGE,
+    )
+    text_used = 0
+    text_omitted = False
+    text_marker = "\n[...additional text omitted: section judge text budget exhausted]"
+
+    def _append_block(block: dict) -> None:
+        nonlocal text_used, text_omitted
+        if block.get("type") != "text":
+            section.append(block)
+            return
+        value = str(block.get("text", ""))
+        remaining = max(0, MAX_SECTION_TEXT_CHARS_FOR_JUDGE - text_used)
+        if not value:
+            return
+        if remaining <= 0:
+            text_omitted = True
+            return
+        shown = _bounded_text(value, remaining, text_marker)
+        if len(shown) < len(value):
+            text_omitted = True
+        copied = dict(block)
+        copied["text"] = shown
+        section.append(copied)
+        text_used += len(shown)
+
+    def _append_blocks(blocks: list[dict]) -> None:
+        for block in blocks:
+            _append_block(block)
 
     extracted_dirs: list[Path] = []
     if file_dir is not None and os.path.exists(file_dir):
@@ -437,12 +789,71 @@ def build_file_section(
                     extracted_dirs.append(extract_dir)
 
     ignore_files = _ignore_files()
+    provenance_by_dir: dict[Path, Any] = {}
+    fallback_pdfs_by_dir: dict[Path, dict[Path, Path]] = {}
+    fallback_suppressed_by_dir: dict[Path, frozenset[Path]] = {}
+
+    def _provenance(directory: str):
+        parent = Path(directory)
+        if parent not in provenance_by_dir:
+            entries = [entry for entry in parent.iterdir() if entry.is_file() and entry.name not in ignore_files]
+            provenance_by_dir[parent] = resolve_pdf_provenance(entries)
+            entry_set = set(entries)
+            fallback_sources = [
+                entry
+                for entry in entries
+                if entry.suffix.lower() != ".zip" and (entry.suffix.lower().lstrip(".") not in FILE_TYPE_MAP)
+            ]
+            stem_counts: dict[str, int] = {}
+            for source in fallback_sources:
+                stem_counts[source.stem] = stem_counts.get(source.stem, 0) + 1
+            fallback_pdfs: dict[Path, Path] = {}
+            fallback_suppressed: set[Path] = set()
+            for source in fallback_sources:
+                injective = sidecar_pdf(source)
+                plain = source.with_suffix(".pdf")
+                if injective in entry_set:
+                    fallback_pdfs[source] = injective
+                    fallback_suppressed.add(injective)
+                elif plain in entry_set and stem_counts[source.stem] == 1:
+                    fallback_pdfs[source] = plain
+                    fallback_suppressed.add(plain)
+                elif plain in entry_set:
+                    # Same ambiguity rule as recognized Office sources: never
+                    # emit a stale collided render as independent evidence.
+                    fallback_suppressed.add(plain)
+            fallback_pdfs_by_dir[parent] = fallback_pdfs
+            fallback_suppressed_by_dir[parent] = frozenset(fallback_suppressed)
+        return provenance_by_dir[parent]
+
+    def _structured_xlsx_text(full_path: Path) -> str | None:
+        if full_path.suffix.lower() != ".xlsx":
+            return None
+        try:
+            if full_path.stat().st_size > MAX_FILE_BYTES_FOR_JUDGE:
+                return None
+            remaining = max(0, MAX_SECTION_TEXT_CHARS_FOR_JUDGE - text_used)
+            if remaining <= 0:
+                return None
+            return extract_xlsx_structured_text(
+                full_path,
+                max_chars=min(MAX_XLSX_TEXT_CHARS_FOR_JUDGE, remaining),
+            )
+        except Exception as exc:
+            return f"[structured spreadsheet extraction failed: {exc}]"
 
     def _emit(directory: str, file_name: str) -> None:
         nonlocal no_files
         if file_name in ignore_files:
             return
-        section.append({"type": "text", "text": f"\n{file_name}:\n"})
+        full_path = Path(directory) / file_name
+        provenance = _provenance(directory)
+        parent = Path(directory)
+        if full_path in provenance.suppressed_pdfs or full_path in fallback_suppressed_by_dir[parent]:
+            return
+        _append_block({"type": "text", "text": f"\n{file_name}:\n"})
+        cached_office_pdf = provenance.office_pdfs.get(full_path) or fallback_pdfs_by_dir[parent].get(full_path)
+        remaining_text = max(0, MAX_SECTION_TEXT_CHARS_FOR_JUDGE - text_used)
         if media_mode == "images_and_text":
             blocks = get_file_image_text_blocks(
                 directory,
@@ -452,14 +863,38 @@ def build_file_section(
                 include_text=include_text,
                 audio_capable=audio_capable,
                 video_capable=video_capable,
+                attachment_budget=attachment_budget,
+                cached_office_pdf=cached_office_pdf,
+                provenance_resolved=True,
+                max_text_chars=min(MAX_TEXT_FILE_CHARS_FOR_JUDGE, remaining_text),
             )
             if blocks:
-                section.extend(blocks)
+                _append_blocks(blocks)
+                no_files = False
+            sheet_text = _structured_xlsx_text(full_path)
+            if sheet_text:
+                _append_block(
+                    {
+                        "type": "text",
+                        "text": f"\n{file_name} (structured spreadsheet cells):\n{sheet_text}",
+                    }
+                )
                 no_files = False
             return
-        block = get_file_content_block(directory, file_name)
+        block = get_file_content_block(
+            directory,
+            file_name,
+            attachment_budget=attachment_budget,
+            cached_office_pdf=cached_office_pdf,
+            provenance_resolved=True,
+            max_text_chars=min(MAX_TEXT_FILE_CHARS_FOR_JUDGE, remaining_text),
+        )
         if block is not None:
-            section.append(block)
+            _append_block(block)
+            no_files = False
+        sheet_text = _structured_xlsx_text(full_path)
+        if sheet_text:
+            _append_block({"type": "text", "text": f"\n{file_name} (structured spreadsheet cells):\n{sheet_text}"})
             no_files = False
 
     if file_dir is not None and os.path.exists(file_dir):
@@ -476,7 +911,16 @@ def build_file_section(
             _emit(str(member.parent), member.name)
 
     if no_files:
-        section.append({"type": "text", "text": "None"})
+        _append_block({"type": "text", "text": "None"})
+
+    if text_omitted and text_marker not in "".join(
+        str(block.get("text", "")) for block in section if block.get("type") == "text"
+    ):
+        for block in reversed(section):
+            if block.get("type") == "text":
+                previous = str(block.get("text", ""))
+                block["text"] = _bounded_text(previous + "x", len(previous), text_marker)
+                break
 
     return section
 
@@ -486,6 +930,275 @@ def build_file_section(
 # ---------------------------------------------------------------------------
 
 
+def _attachment_payload(block: dict) -> tuple[str, int]:
+    """Return the backing string and base64 start offset without copying it."""
+
+    block_type = block.get("type")
+    if block_type in {"image_url", "video_url"}:
+        value = block.get(block_type, {})
+        url = value.get("url", "") if isinstance(value, dict) else ""
+        if isinstance(url, str) and url.startswith("data:"):
+            comma = url.find(",")
+            if comma >= 0:
+                return url, comma + 1
+    elif block_type == "input_audio":
+        value = block.get("input_audio", {})
+        data = value.get("data", "") if isinstance(value, dict) else ""
+        if isinstance(data, str):
+            return data, 0
+    return "", 0
+
+
+def _attachment_cost(block: dict) -> tuple[int, int]:
+    """Return estimated raw bytes and encoded characters for a data attachment."""
+
+    payload, start = _attachment_payload(block)
+    encoded_chars = len(payload) - start
+    if encoded_chars <= 0:
+        return 0, 0
+
+    padding = 0
+    if payload[-1] == "=":
+        padding = 1
+        if encoded_chars > 1 and payload[-2] == "=":
+            padding = 2
+    raw_bytes = (encoded_chars // 4) * 3 - padding
+    return max(0, raw_bytes), encoded_chars
+
+
+def _attachment_fingerprint(block: dict) -> str:
+    """Hash the complete payload in bounded chunks for A/B-stable tie breaks."""
+
+    payload, start = _attachment_payload(block)
+    digest = hashlib.sha256()
+    chunk_size = 1024 * 1024
+    for offset in range(start, len(payload), chunk_size):
+        digest.update(payload[offset : offset + chunk_size].encode("ascii", errors="ignore"))
+    return digest.hexdigest()
+
+
+def _block_serialized_upper_bound(block: dict) -> int:
+    """Conservative JSON byte bound without copying large base64 strings."""
+
+    _raw_bytes, encoded_chars = _attachment_cost(block)
+    if encoded_chars:
+        payload, start = _attachment_payload(block)
+        # Base64 is JSON-safe ASCII. Account exactly for the data URL prefix and
+        # generously for keys, quotes, optional audio format, and punctuation.
+        return encoded_chars + start + 512
+    if block.get("type") == "text":
+        # Six bytes per character covers JSON escaping (including ensure_ascii)
+        # for BMP text; non-BMP can require two \uXXXX escapes, hence twelve.
+        value = str(block.get("text", ""))
+        non_bmp = sum(ord(character) > 0xFFFF for character in value)
+        return len(value) * 6 + non_bmp * 6 + 256
+    return 4096
+
+
+def _content_serialized_upper_bound(content: list[dict]) -> int:
+    """Conservative serialized request size including outer JSON framing."""
+
+    return 4096 + sum(_block_serialized_upper_bound(block) for block in content)
+
+
+def _bound_section_text(section: list[dict], cap: int) -> list[dict]:
+    result: list[dict] = []
+    remaining = max(0, cap)
+    marker = "\n[...additional text omitted: section judge text budget exhausted]"
+    omitted = False
+    last_text: int | None = None
+    for block in section:
+        if block.get("type") != "text":
+            result.append(block)
+            continue
+        value = str(block.get("text", ""))
+        if remaining <= 0:
+            omitted = omitted or bool(value)
+            continue
+        shown = _bounded_text(value, remaining, marker)
+        omitted = omitted or len(shown) < len(value)
+        copied = dict(block)
+        copied["text"] = shown
+        result.append(copied)
+        last_text = len(result) - 1
+        remaining -= len(shown)
+    if omitted and last_text is not None and marker not in str(result[last_text].get("text", "")):
+        previous = str(result[last_text].get("text", ""))
+        result[last_text]["text"] = _bounded_text(previous + "x", len(previous), marker)
+    return result
+
+
+def _enforce_attachment_budget(
+    sections: list[list[dict]],
+    *,
+    raw_limit: int,
+    encoded_limit: int,
+    serialized_limit: int | None = None,
+) -> list[list[dict]]:
+    """Keep the request's aggregate binary payload below both hard ceilings.
+
+    Attachments are selected smallest-first, maximizing the number of visible
+    artifacts and preventing one huge reference from starving both submissions.
+    Complete payload hashes break equal-size ties independently of A/B position,
+    so swapping the trial does not change which underlying artifact is kept.
+    Omitted blocks are replaced by explicit text evidence.
+    """
+
+    candidates: list[dict[str, Any]] = []
+    costs: dict[tuple[int, int], tuple[int, int]] = {}
+    for section_index, section in enumerate(sections):
+        for block_index, block in enumerate(section):
+            raw_bytes, encoded_chars = _attachment_cost(block)
+            if encoded_chars == 0:
+                continue
+            key = (section_index, block_index)
+            costs[key] = (raw_bytes, encoded_chars)
+            candidates.append(
+                {
+                    "raw": raw_bytes,
+                    "encoded": encoded_chars,
+                    "serialized": _block_serialized_upper_bound(block),
+                    "section": section_index,
+                    "block": block_index,
+                }
+            )
+
+    serialized_ceiling = encoded_limit + 1024 * len(candidates) if serialized_limit is None else serialized_limit
+    if (
+        sum(int(candidate["raw"]) for candidate in candidates) <= raw_limit
+        and sum(int(candidate["encoded"]) for candidate in candidates) <= encoded_limit
+        and sum(int(candidate["serialized"]) for candidate in candidates) <= serialized_ceiling
+    ):
+        # Normal requests are already bounded per section and fit the aggregate
+        # ceilings. Avoid hashing hundreds of MiB of base64 on every repeated
+        # judge trial when no selection decision is required.
+        return [list(section) for section in sections]
+
+    for candidate in candidates:
+        section_index = int(candidate["section"])
+        block_index = int(candidate["block"])
+        candidate["fingerprint"] = _attachment_fingerprint(sections[section_index][block_index])
+
+    def _sort_key(candidate: dict[str, Any]) -> tuple[int, int, int, str]:
+        return (
+            int(candidate["serialized"]),
+            int(candidate["encoded"]),
+            int(candidate["raw"]),
+            str(candidate["fingerprint"]),
+        )
+
+    selected: set[tuple[int, int]] = set()
+    used_raw = 0
+    used_encoded = 0
+    used_serialized = 0
+
+    def _select(candidate: dict[str, Any], local: AttachmentBudget | None = None, local_serialized: int = 0) -> bool:
+        nonlocal used_raw, used_encoded, used_serialized
+        key = (int(candidate["section"]), int(candidate["block"]))
+        if key in selected:
+            return True
+        raw_bytes = int(candidate["raw"])
+        encoded_chars = int(candidate["encoded"])
+        serialized_bytes = int(candidate["serialized"])
+        if (
+            used_raw + raw_bytes > raw_limit
+            or used_encoded + encoded_chars > encoded_limit
+            or used_serialized + serialized_bytes > serialized_ceiling
+        ):
+            return False
+        if local is not None:
+            if local_serialized + serialized_bytes > serialized_ceiling // max(1, len(sections)):
+                return False
+            if not local.reserve(raw_bytes, encoded_chars):
+                return False
+        selected.add(key)
+        used_raw += raw_bytes
+        used_encoded += encoded_chars
+        used_serialized += serialized_bytes
+        return True
+
+    # Reserve equal shares for A and B before references. Both passes use the
+    # same limits and payload-derived ordering, so swapping A/B is invariant.
+    section_raw = raw_limit // max(1, len(sections))
+    section_encoded = encoded_limit // max(1, len(sections))
+    local_budgets = [AttachmentBudget(section_raw, section_encoded) for _ in sections]
+    local_serialized_used = [0 for _ in sections]
+    section_order = list(range(1, len(sections))) + ([0] if sections else [])
+    for section_index in section_order:
+        for candidate in sorted(
+            (item for item in candidates if item["section"] == section_index),
+            key=_sort_key,
+        ):
+            before = used_serialized
+            if _select(candidate, local_budgets[section_index], local_serialized_used[section_index]):
+                local_serialized_used[section_index] += used_serialized - before
+
+    # If an attachment was larger than its equal share, give each nonempty
+    # submission one deterministic chance before references use spare capacity.
+    submission_seeds: list[dict[str, Any]] = []
+    for section_index in range(1, len(sections)):
+        if any(key[0] == section_index for key in selected):
+            continue
+        choices = [item for item in candidates if item["section"] == section_index]
+        if choices:
+            submission_seeds.append(min(choices, key=_sort_key))
+    for candidate in sorted(submission_seeds, key=_sort_key):
+        _select(candidate)
+
+    # Redistribute every unused byte globally, with complete-payload hashes as
+    # the final tie-break rather than section position.
+    for candidate in sorted(candidates, key=_sort_key):
+        _select(candidate)
+
+    bounded: list[list[dict]] = []
+    for section_index, section in enumerate(sections):
+        output: list[dict] = []
+        last_header = "attachment"
+        omitted_count = 0
+        omitted_raw = 0
+        omitted_encoded = 0
+        omitted_names: list[str] = []
+        for block_index, block in enumerate(section):
+            if block.get("type") == "text":
+                candidate_header = str(block.get("text", "")).strip().splitlines()
+                if candidate_header:
+                    last_header = candidate_header[0].rstrip(":")
+            raw_bytes, encoded_chars = costs.get((section_index, block_index), (0, 0))
+            if encoded_chars and (section_index, block_index) not in selected:
+                omitted_count += 1
+                omitted_raw += raw_bytes
+                omitted_encoded += encoded_chars
+                if len(omitted_names) < 10:
+                    omitted_names.append(last_header)
+            else:
+                output.append(block)
+        if omitted_count:
+            names = ", ".join(omitted_names)
+            if omitted_count > len(omitted_names):
+                names += f", and {omitted_count - len(omitted_names)} more"
+            output.append(
+                {
+                    "type": "text",
+                    "text": (
+                        f"[attachment omitted: {omitted_count} file(s) ({names}), "
+                        f"{_human_attachment_size(omitted_raw)} raw, "
+                        f"{_human_attachment_size(omitted_encoded)} base64; aggregate judge payload budget]"
+                    ),
+                }
+            )
+        bounded.append(output)
+    return bounded
+
+
+def _human_attachment_size(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if value < 1024 or unit == "GiB":
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} GiB"
+
+
 def construct_judge_messages(
     task_prompt: str,
     refs: list[dict],
@@ -493,8 +1206,44 @@ def construct_judge_messages(
     submission_b: list[dict],
 ) -> list[dict]:
     """Assemble OpenAI messages for the judge: prompt + task + refs + submissions."""
+    # Text can require up to twelve JSON bytes per Unicode code point. Give the
+    # task and three sections equal worst-case shares after reserving framing.
+    available_text_chars = max(0, MAX_TOTAL_SERIALIZED_REQUEST_BYTES_FOR_JUDGE - 16 * 1024) // 12
+    fair_text_cap = available_text_chars // 4
+    section_text_cap = min(MAX_SECTION_TEXT_CHARS_FOR_JUDGE, fair_text_cap)
+    refs = _bound_section_text(refs, section_text_cap)
+    submission_a = _bound_section_text(submission_a, section_text_cap)
+    submission_b = _bound_section_text(submission_b, section_text_cap)
+    bounded_task = _bounded_text(task_prompt, min(MAX_TASK_PROMPT_CHARS_FOR_JUDGE, fair_text_cap))
+    prompt_block = {"type": "text", "text": JUDGE_PROMPT + TASK_TEMPLATE.format(task=bounded_task)}
+    framing = [
+        prompt_block,
+        {"type": "text", "text": REFERENCES_OPEN},
+        {"type": "text", "text": REFERENCES_CLOSE},
+        {"type": "text", "text": SUBMISSION_A_OPEN},
+        {"type": "text", "text": SUBMISSION_A_CLOSE},
+        {"type": "text", "text": SUBMISSION_B_OPEN},
+        {"type": "text", "text": SUBMISSION_B_CLOSE},
+    ]
+    sections = [refs, submission_a, submission_b]
+    fixed_blocks = framing + [block for section in sections for block in section if _attachment_cost(block)[1] == 0]
+    # Reserve one small aggregate omission notice per section. Everything else
+    # is bounded conservatively at the JSON-string level, including escaped text.
+    fixed_serialized = (
+        4096 + 4096 * len(sections) + sum(_block_serialized_upper_bound(block) for block in fixed_blocks)
+    )
+    attachment_serialized_limit = max(
+        0,
+        MAX_TOTAL_SERIALIZED_REQUEST_BYTES_FOR_JUDGE - fixed_serialized,
+    )
+    refs, submission_a, submission_b = _enforce_attachment_budget(
+        sections,
+        raw_limit=MAX_TOTAL_RAW_ATTACHMENT_BYTES_FOR_JUDGE,
+        encoded_limit=MAX_TOTAL_ENCODED_ATTACHMENT_CHARS_FOR_JUDGE,
+        serialized_limit=attachment_serialized_limit,
+    )
     content: list[dict] = []
-    content.append({"type": "text", "text": JUDGE_PROMPT + TASK_TEMPLATE.format(task=task_prompt)})
+    content.append(prompt_block)
     content.append({"type": "text", "text": REFERENCES_OPEN})
     content.extend(refs)
     content.append({"type": "text", "text": REFERENCES_CLOSE})
@@ -504,6 +1253,13 @@ def construct_judge_messages(
     content.append({"type": "text", "text": SUBMISSION_B_OPEN})
     content.extend(submission_b)
     content.append({"type": "text", "text": SUBMISSION_B_CLOSE})
+
+    serialized_bound = _content_serialized_upper_bound(content)
+    if serialized_bound > MAX_TOTAL_SERIALIZED_REQUEST_BYTES_FOR_JUDGE:
+        raise ValueError(
+            "GDPVal judge request size budget exhausted before dispatch: "
+            f"{serialized_bound} > {MAX_TOTAL_SERIALIZED_REQUEST_BYTES_FOR_JUDGE} bytes"
+        )
 
     return [{"role": "user", "content": content}]
 
@@ -518,6 +1274,8 @@ def _is_retryable(error: Exception) -> bool:
     # large for the judge endpoint to digest in time, and retrying just burns
     # another full timeout window per attempt. Fail the trial fast instead.
     if isinstance(error, APITimeoutError):
+        return False
+    if is_permanent_judge_error(error):
         return False
     error_text = str(error).lower()
     return any(marker in error_text for marker in RETRYABLE_ERROR_MARKERS)

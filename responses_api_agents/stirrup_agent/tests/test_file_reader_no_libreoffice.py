@@ -95,3 +95,40 @@ def test_unavailability_is_announced_once(monkeypatch, capsys, tmp_path: Path):
 
     warnings = [ln for ln in capsys.readouterr().out.splitlines() if "LibreOffice is unavailable" in ln]
     assert len(warnings) == 1, f"expected exactly one warning for three files, got {len(warnings)}"
+
+
+def test_conversion_failure_retries_roundtripped_copy_without_mutating_original(monkeypatch, tmp_path: Path):
+    source = tmp_path / "report.docx"
+    original = b"original OOXML package"
+    source.write_bytes(original)
+    destination = tmp_path / "render"
+    destination.mkdir()
+    calls: list[Path] = []
+
+    class _Completed:
+        returncode = 0
+        stdout = ""
+        stderr = "Error: source file could not be loaded"
+
+    def _roundtrip(src: Path, dst: Path) -> None:
+        assert src == source
+        dst.write_bytes(b"roundtripped package")
+
+    def _run(command, *args, **kwargs):
+        input_path = Path(command[-1])
+        calls.append(input_path)
+        if len(calls) == 2:
+            outdir = Path(command[command.index("--outdir") + 1])
+            (outdir / f"{input_path.stem}.pdf").write_bytes(b"%PDF retry")
+        return _Completed()
+
+    monkeypatch.setattr(file_reader, "roundtrip_ooxml_copy", _roundtrip)
+    monkeypatch.setattr(subprocess, "run", _run)
+
+    result = file_reader._convert_office_to_pdf(source, out_dir=destination)
+
+    assert result == destination / "report.pdf"
+    assert result.read_bytes() == b"%PDF retry"
+    assert len(calls) == 2
+    assert "gdpval-roundtrip-" in str(calls[1])
+    assert source.read_bytes() == original

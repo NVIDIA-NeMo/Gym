@@ -28,6 +28,7 @@ from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, S
 from nemo_gym.rollout_reverification import (
     _RECOVERY_TWO_SOURCES_WARNING,
     JUDGE_FAILED_FAILURE_CLASS,
+    JUDGE_INVALID_FAILURE_CLASS,
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
     NG_TERMINAL_KEY,
@@ -48,6 +49,7 @@ from nemo_gym.rollout_reverification import (
     _is_judge_failure,
     _load_cache_keys_by_status,
     _load_reverified_results,
+    _normalize_invalid_judge_result,
     _parse_output_line_key,
     _prepare_output_fpaths,
     _prepare_payloads,
@@ -446,6 +448,24 @@ class TestBuildVerifyPayload:
 
         assert set(result.keys()) == {"task", "response"}
 
+    def test_preserves_file_and_reference_context_required_by_verifier(self) -> None:
+        pair = InputRolloutPair(
+            input={"task": "q1", "deliverables_dir": "/stale"},
+            rollout={
+                "response": {"output": "x"},
+                "deliverables_dir": "/artifacts/task-1/repeat_0",
+                "reference_ids": ["ref-b"],
+                "reward": 0.0,
+                NG_FAILURE_CLASS_KEY: JUDGE_INVALID_FAILURE_CLASS,
+            },
+        )
+
+        result = _build_verify_payload(pair)
+
+        assert result["deliverables_dir"] == "/artifacts/task-1/repeat_0"
+        assert result["reference_ids"] == ["ref-b"]
+        assert "reward" not in result and NG_FAILURE_CLASS_KEY not in result
+
 
 # ---------------------------------------------------------------------------
 # Judge-failure recovery helpers (--judge-failed-only)
@@ -455,6 +475,7 @@ class TestBuildVerifyPayload:
 class TestIsJudgeFailure:
     def test_true_only_for_judge_failed_class(self) -> None:
         assert _is_judge_failure({NG_FAILURE_CLASS_KEY: JUDGE_FAILED_FAILURE_CLASS}) is True
+        assert _is_judge_failure({NG_FAILURE_CLASS_KEY: JUDGE_INVALID_FAILURE_CLASS}) is True
 
     def test_false_for_other_failure_classes(self) -> None:
         assert _is_judge_failure({NG_FAILURE_CLASS_KEY: "timeout_exceeded"}) is False
@@ -465,6 +486,15 @@ class TestIsJudgeFailure:
     def test_legacy_judge_failed_boolean_is_not_honored(self) -> None:
         """v2 marks judge failures only via _ng_failure_class; the older boolean is ignored."""
         assert _is_judge_failure({"_ng_failure_judge_failed": True}) is False
+
+    def test_invalid_judge_result_is_retryable_unless_verifier_marks_it_permanent(self) -> None:
+        retryable = _normalize_invalid_judge_result({"invalid_judge_response": True})
+        assert retryable[NG_FAILURE_CLASS_KEY] == JUDGE_INVALID_FAILURE_CLASS
+        assert NG_TERMINAL_KEY not in retryable
+
+        permanent = _normalize_invalid_judge_result({"invalid_judge_response": True, "invalid_judge_retryable": False})
+        assert permanent[NG_FAILURE_CLASS_KEY] == "permanent"
+        assert permanent[NG_TERMINAL_KEY] is True
 
 
 class TestRecoveryRolloutPredicate:
@@ -483,6 +513,14 @@ class TestRecoveryRolloutPredicate:
         predicate = _recovery_rollout_predicate()
         assert predicate(self._row(0, failure_class="timeout_exceeded")) is False
         assert predicate(self._row(1)) is True
+
+    def test_rejects_multistage_sidecar_rows(self) -> None:
+        predicate = _recovery_rollout_predicate()
+        row = self._row(0)
+        row["stage_index"] = 1
+
+        with pytest.raises(ConfigError, match="does not support multi-stage rows"):
+            predicate(row)
 
     def test_dropped_non_judge_row_does_not_pollute_seen(self) -> None:
         """A row filtered out by the judge filter must not consume its key from the dedup set."""
@@ -609,6 +647,30 @@ class TestLoadCacheKeysByStatus:
         )
         cache = _load_cache_keys_by_status(paths)
         assert cache.terminal_keys == {(5, 0)}
+
+    def test_legacy_terminal_timeout_is_retryable(self, tmp_path: Path) -> None:
+        paths = self._paths(tmp_path)
+        self._write(
+            paths.failures,
+            [
+                {
+                    TASK_INDEX_KEY_NAME: 5,
+                    ROLLOUT_INDEX_KEY_NAME: 0,
+                    NG_FAILURE_CLASS_KEY: "timeout_exceeded",
+                    NG_TERMINAL_KEY: True,
+                },
+                {
+                    TASK_INDEX_KEY_NAME: 6,
+                    ROLLOUT_INDEX_KEY_NAME: 0,
+                    NG_FAILURE_CLASS_KEY: "skipped",
+                    NG_TERMINAL_KEY: True,
+                },
+            ],
+        )
+
+        cache = _load_cache_keys_by_status(paths)
+
+        assert cache.terminal_keys == {(6, 0)}
 
     def test_maxed_out_keys_when_attempts_reach_configured_max(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2183,6 +2245,28 @@ class TestRunFromConfigJudgeFailedOnly:
         assert (tmp_path / "recovered.jsonl").exists()
         assert not (tmp_path / "unsafe_recovered.jsonl").exists()
 
+    async def test_migrates_legacy_invalid_main_row_before_seeding(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        legacy_invalid = self._success(0, reward=0.0)
+        legacy_invalid["invalid_judge_response"] = True
+        self._setup_fixture(
+            tmp_path,
+            materialized=[self._mat(0)],
+            successes=[legacy_invalid],
+            failures=[],
+        )
+        dispatched: list = []
+        self._patch(monkeypatch, dispatched, recovered_reward=0.8)
+
+        returned = await RolloutReverificationHelper().run_from_config(self._make_config(tmp_path))
+
+        assert [row[TASK_INDEX_KEY_NAME] for row in dispatched] == [0]
+        assert [row["reward"] for row in returned] == [0.8]
+        assert self._read_jsonl(tmp_path / "rollouts.jsonl") == []
+        migrated = self._read_jsonl(tmp_path / "rollouts_failures.jsonl")
+        assert migrated[0][NG_FAILURE_CLASS_KEY] == JUDGE_INVALID_FAILURE_CLASS
+
     async def test_prints_two_sources_warning(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture
     ) -> None:
@@ -2430,7 +2514,9 @@ class TestRunFromConfigJudgeFailedOnly:
         def first_pass(payload: dict) -> dict:
             if payload[TASK_INDEX_KEY_NAME] == 1:
                 return {"reward": 1.0, "verdict": "correct"}
-            return {"reward": 0.0, NG_FAILURE_CLASS_KEY: "judge_failed"}
+            # Resource servers return this semantic invalid marker directly;
+            # reverify must normalize it into the retry sidecar itself.
+            return {"reward": 0.0, "invalid_judge_response": True}
 
         dispatched1: list = []
         self._patch_with_result(monkeypatch, dispatched1, first_pass)
@@ -2439,10 +2525,9 @@ class TestRunFromConfigJudgeFailedOnly:
         # all three judge failures were attempted; output has seeded 0 + recovered 1; 2,3 in the sidecar
         assert sorted(p[TASK_INDEX_KEY_NAME] for p in dispatched1) == [1, 2, 3]
         assert sorted(r[TASK_INDEX_KEY_NAME] for r in self._read_jsonl(tmp_path / "recovered.jsonl")) == [0, 1]
-        assert sorted(r[TASK_INDEX_KEY_NAME] for r in self._read_jsonl(tmp_path / "recovered_failures.jsonl")) == [
-            2,
-            3,
-        ]
+        first_failures = self._read_jsonl(tmp_path / "recovered_failures.jsonl")
+        assert sorted(r[TASK_INDEX_KEY_NAME] for r in first_failures) == [2, 3]
+        assert {r[NG_FAILURE_CLASS_KEY] for r in first_failures} == {JUDGE_INVALID_FAILURE_CLASS}
 
         # Second pass (--resume): only the still-failing 2,3 are retried (0,1 are cached in the output),
         # and now succeed.

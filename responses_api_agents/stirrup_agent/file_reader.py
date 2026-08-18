@@ -24,6 +24,7 @@ with multimodal models (e.g., Gemini 3 Pro).
 from __future__ import annotations
 
 import base64
+import math
 import os
 import re
 import shutil
@@ -38,9 +39,28 @@ from typing import Any
 # an extension would send a routed deliverable to a capable judge and then drop
 # it here with no warning. judge_panel is stdlib-only, so this costs nothing.
 from resources_servers.gdpval.judge_panel import AUDIO_EXTS, VIDEO_EXTS
+from resources_servers.gdpval.preconvert import (
+    AttachmentBudget,
+    extract_xlsx_structured_text,
+    resolve_pdf_provenance,
+    roundtrip_ooxml_copy,
+)
 
 
 MAX_TOTAL_CHARS = 20_000
+
+
+def _bounded_text(text: str, cap: int, marker: str = "\n[...truncated]") -> str:
+    """Trim *text* including its marker so the returned string is at most *cap*."""
+
+    if cap <= 0:
+        return ""
+    if len(text) <= cap:
+        return text
+    if cap <= len(marker):
+        return marker[-cap:]
+    return text[: cap - len(marker)] + marker
+
 
 # Run state the agent writes into the SAME directory as its deliverables. These
 # are not model output, and `.json` is in TEXT_EXTS, so without this the judge is
@@ -86,94 +106,126 @@ def read_deliverable_files(output_dir: str) -> str:
         return ""
 
     parts: list[str] = []
-    total_len = 0
+    used = 0
 
     for fpath in files:
         if not is_deliverable(fpath):
             continue
 
         ext = fpath.suffix.lower()
+        prefix = "\n\n" if parts else ""
+        header = f"=== {fpath.name} ===\n"
+        remaining = MAX_TOTAL_CHARS - used - len(prefix) - len(header)
+        if remaining <= 0:
+            if parts:
+                parts[-1] = _bounded_text(parts[-1] + "x", len(parts[-1]))
+            break
         try:
-            text = _extract_text(fpath, ext)
+            text = _extract_text(fpath, ext, max_chars=remaining)
         except Exception as exc:
-            text = f"[Error reading {fpath.name}: {exc}]"
+            text = _bounded_text(f"[Error reading {fpath.name}: {exc}]", remaining)
 
         if not text:
             continue
 
-        section = f"=== {fpath.name} ===\n{text}"
-        if total_len + len(section) > MAX_TOTAL_CHARS:
-            remaining = MAX_TOTAL_CHARS - total_len
-            if remaining > 200:
-                section = section[:remaining] + "\n[...truncated]"
-                parts.append(section)
+        section = header + _bounded_text(text, remaining)
+        parts.append(section)
+        used += len(prefix) + len(section)
+        if used >= MAX_TOTAL_CHARS:
             break
 
-        parts.append(section)
-        total_len += len(section)
-
-    return "\n\n".join(parts)
+    return _bounded_text("\n\n".join(parts), MAX_TOTAL_CHARS)
 
 
-def _extract_text(fpath: Path, ext: str) -> str:
+def _extract_text(fpath: Path, ext: str, max_chars: int = MAX_TOTAL_CHARS) -> str:
     """Dispatch to the right extractor based on file extension."""
     # TEXT_EXTS, not a second shorter list: a .ts/.py/.yaml deliverable was source
     # on the block path and "[Binary file: ...]" here.
     if ext in TEXT_EXTS:
-        return _read_text(fpath)
+        return _read_text(fpath, max_chars)
     elif ext == ".docx":
-        return _read_docx(fpath)
+        return _read_docx(fpath, max_chars)
     elif ext == ".pdf":
-        return _read_pdf(fpath)
+        return _read_pdf(fpath, max_chars)
     elif ext == ".xlsx":
-        return _read_xlsx(fpath)
+        return _read_xlsx(fpath, max_chars)
     elif ext == ".pptx":
-        return _read_pptx(fpath)
+        return _read_pptx(fpath, max_chars)
     else:
         size = os.path.getsize(fpath)
         return f"[Binary file: {fpath.name}, {size} bytes]"
 
 
-def _read_text(fpath: Path) -> str:
-    return fpath.read_text(encoding="utf-8", errors="replace").strip()
+def _read_text(fpath: Path, max_chars: int = MAX_TOTAL_CHARS) -> str:
+    if max_chars <= 0:
+        return ""
+    with fpath.open("r", encoding="utf-8", errors="replace") as stream:
+        text = stream.read(max_chars + 1)
+    return _bounded_text(text, max_chars).strip()
 
 
-def _read_docx(fpath: Path) -> str:
+def _read_docx(fpath: Path, max_chars: int = MAX_TOTAL_CHARS) -> str:
     from docx import Document
 
     doc = Document(str(fpath))
-    return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+    parts: list[str] = []
+    used = 0
+    truncated = False
+    for paragraph in doc.paragraphs:
+        value = paragraph.text
+        if not value.strip():
+            continue
+        separator = 1 if parts else 0
+        remaining = max_chars - used - separator
+        if remaining <= 0:
+            truncated = True
+            break
+        parts.append(value[:remaining])
+        used += separator + min(len(value), remaining)
+        if len(value) > remaining:
+            truncated = True
+            break
+    return _bounded_text("\n".join(parts) + ("x" if truncated else ""), max_chars)
 
 
-def _read_pdf(fpath: Path) -> str:
-    from pdfminer.high_level import extract_text
+def _read_pdf(fpath: Path, max_chars: int = MAX_TOTAL_CHARS) -> str:
+    from pdfminer.high_level import extract_pages
+    from pdfminer.layout import LTTextContainer
 
-    return extract_text(str(fpath)).strip()
+    parts: list[str] = []
+    used = 0
+    truncated = False
+    for page in extract_pages(str(fpath)):
+        for element in page:
+            if not isinstance(element, LTTextContainer):
+                continue
+            value = element.get_text()
+            remaining = max_chars - used
+            if remaining <= 0:
+                truncated = True
+                break
+            parts.append(value[:remaining])
+            used += min(len(value), remaining)
+            if len(value) > remaining:
+                truncated = True
+                break
+        if truncated:
+            break
+    text = "".join(parts).strip()
+    return _bounded_text(text + ("x" if truncated else ""), max_chars)
 
 
-def _read_xlsx(fpath: Path) -> str:
-    from openpyxl import load_workbook
-
-    wb = load_workbook(str(fpath), read_only=True, data_only=True)
-    parts = []
-    for sheet_name in wb.sheetnames:
-        ws = wb[sheet_name]
-        rows = []
-        for row in ws.iter_rows(values_only=True):
-            cells = [str(c) if c is not None else "" for c in row]
-            if any(cells):
-                rows.append(", ".join(cells))
-        if rows:
-            parts.append(f"Sheet: {sheet_name}\n" + "\n".join(rows))
-    wb.close()
-    return "\n\n".join(parts)
+def _read_xlsx(fpath: Path, max_chars: int = MAX_TOTAL_CHARS) -> str:
+    return extract_xlsx_structured_text(fpath, max_chars=max_chars)
 
 
-def _read_pptx(fpath: Path) -> str:
+def _read_pptx(fpath: Path, max_chars: int = MAX_TOTAL_CHARS) -> str:
     from pptx import Presentation
 
     prs = Presentation(str(fpath))
-    parts = []
+    parts: list[str] = []
+    used = 0
+    truncated = False
     for i, slide in enumerate(prs.slides, 1):
         texts = []
         for shape in slide.shapes:
@@ -182,8 +234,18 @@ def _read_pptx(fpath: Path) -> str:
                     if para.text.strip():
                         texts.append(para.text)
         if texts:
-            parts.append(f"Slide {i}:\n" + "\n".join(texts))
-    return "\n\n".join(parts)
+            value = f"Slide {i}:\n" + "\n".join(texts)
+            separator = 2 if parts else 0
+            remaining = max_chars - used - separator
+            if remaining <= 0:
+                truncated = True
+                break
+            parts.append(value[:remaining])
+            used += separator + min(len(value), remaining)
+            if len(value) > remaining:
+                truncated = True
+                break
+    return _bounded_text("\n\n".join(parts) + ("x" if truncated else ""), max_chars)
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +275,13 @@ TEXT_SNIFF_BYTES = 8192
 # that the judge rejected outright, leaving the task silently unjudged.
 MAX_TEXT_BLOCK_CHARS = 200_000
 MAX_TOTAL_TEXT_BLOCK_CHARS = 400_000
+# Binary payload ceilings for the rubric visual request. The encoded limit is
+# the dominant wire-size term and leaves ample room below a 500 MB body ceiling
+# for the bounded text above plus JSON framing.
+MAX_FILE_ATTACHMENT_BYTES = 250 * 1024 * 1024
+MAX_TOTAL_RAW_ATTACHMENT_BYTES = 300 * 1024 * 1024
+MAX_TOTAL_ENCODED_ATTACHMENT_CHARS = 400 * 1024 * 1024
+MAX_RASTER_PAGE_PIXELS = 40_000_000
 # Header and truncation notice per block; reserved before allotting because
 # it is tokens too.
 TEXT_BLOCK_OVERHEAD_CHARS = 120
@@ -281,6 +350,39 @@ def _human_size(n: float) -> str:
             return f"{n:.0f} B" if unit == "B" else f"{n:.1f} {unit}"
         n /= 1024.0
     return f"{n:.1f} GB"
+
+
+def _attachment_omission(name: str, size: int, reason: str) -> dict[str, Any]:
+    return {
+        "type": "text",
+        "text": f"\n{name}: [attachment omitted, {_human_size(size)} ({size:,} bytes): {reason}]",
+    }
+
+
+def _reserve_attachment(path: Path, budget: AttachmentBudget) -> tuple[int, dict[str, Any] | None]:
+    """Reserve an attachment from metadata before reading or encoding it."""
+
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return 0, {"type": "text", "text": f"\n{path.name}: [attachment unavailable]"}
+    if size > MAX_FILE_ATTACHMENT_BYTES:
+        return size, _attachment_omission(path.name, size, "per-file judge payload limit")
+    if not budget.reserve(size):
+        return size, _attachment_omission(path.name, size, "aggregate judge payload budget")
+    return size, None
+
+
+def _check_render_source(path: Path) -> tuple[int, dict[str, Any] | None]:
+    """Reject a PDF source before loading it; rendered PNGs reserve separately."""
+
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return 0, {"type": "text", "text": f"\n{path.name}: [attachment unavailable]"}
+    if size > MAX_FILE_ATTACHMENT_BYTES:
+        return size, _attachment_omission(path.name, size, "per-file judge payload limit")
+    return size, None
 
 
 def _sniffs_as_text(fpath: Path) -> bool:
@@ -410,47 +512,79 @@ def _convert_office_to_pdf(fpath: Path, out_dir: Path | None = None) -> Path | N
     stage the input to a tempdir with a sanitized basename and move the PDF
     back to the original location.
     """
-    profile_dir = Path(tempfile.mkdtemp(prefix="lo-profile-"))
-    user_install = f"file://{profile_dir.as_posix()}"
     dest_dir = out_dir if out_dir is not None else fpath.parent
     out_pdf = dest_dir / (fpath.stem + ".pdf")
-    stage_dir: Path | None = None
-    input_path = fpath
-    has_whitespace = any(c.isspace() for c in fpath.name)
+    temp_dirs: list[Path] = []
+    profile_dirs: list[Path] = []
 
     try:
+        stage_dir: Path | None = None
+        input_path = fpath
+        has_whitespace = any(c.isspace() for c in fpath.name)
         if has_whitespace:
             stage_dir = Path(tempfile.mkdtemp(prefix="lo-stage-"))
+            temp_dirs.append(stage_dir)
             safe_name = re.sub(r"\s+", "_", fpath.stem) + fpath.suffix
             input_path = stage_dir / safe_name
             shutil.copy2(fpath, input_path)
-            lo_outdir = str(stage_dir)
+            first_outdir = stage_dir
         else:
-            lo_outdir = str(dest_dir)
+            first_outdir = dest_dir
 
-        cmd = [
-            "libreoffice",
-            "--headless",
-            "--nologo",
-            "--nolockcheck",
-            "--nodefault",
-            "--norestore",
-            f"-env:UserInstallation={user_install}",
-            "--convert-to",
-            "pdf",
-            "--outdir",
-            lo_outdir,
-            str(input_path),
-        ]
-        p = subprocess.run(cmd, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
-        if stage_dir is not None:
-            staged_pdf = stage_dir / (input_path.stem + ".pdf")
-            if staged_pdf.exists():
-                shutil.move(str(staged_pdf), str(out_pdf))
-        if p.returncode != 0 or not out_pdf.exists():
-            print(f"[file_reader] LibreOffice conversion failed for {fpath.name}: {p.stderr[:200]}", flush=True)
-            return None
-        return out_pdf
+        def _invoke(source: Path, output: Path) -> tuple[subprocess.CompletedProcess[str], Path]:
+            profile = Path(tempfile.mkdtemp(prefix="lo-profile-"))
+            profile_dirs.append(profile)
+            command = [
+                "libreoffice",
+                "--headless",
+                "--nologo",
+                "--nolockcheck",
+                "--nodefault",
+                "--norestore",
+                f"-env:UserInstallation=file://{profile.as_posix()}",
+                "--convert-to",
+                "pdf",
+                "--outdir",
+                str(output),
+                str(source),
+            ]
+            completed = subprocess.run(
+                command,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=120,
+            )
+            return completed, output / (source.stem + ".pdf")
+
+        first_result, first_pdf = _invoke(input_path, first_outdir)
+        if first_pdf.exists():
+            if first_pdf != out_pdf:
+                shutil.move(str(first_pdf), str(out_pdf))
+            return out_pdf
+
+        retry_detail = ""
+        if fpath.suffix.lower() in OOXML_EXTS:
+            retry_dir = Path(tempfile.mkdtemp(prefix="gdpval-roundtrip-"))
+            temp_dirs.append(retry_dir)
+            retry_input = retry_dir / (re.sub(r"\s+", "_", fpath.stem) + fpath.suffix)
+            try:
+                roundtrip_ooxml_copy(fpath, retry_input)
+                retry_result, retry_pdf = _invoke(retry_input, retry_dir)
+                if retry_pdf.exists():
+                    shutil.move(str(retry_pdf), str(out_pdf))
+                    return out_pdf
+                retry_detail = f"; round-trip retry rc={retry_result.returncode}: {retry_result.stderr[:200]}"
+            except Exception as exc:
+                retry_detail = f"; round-trip retry failed: {exc!r}"
+
+        print(
+            f"[file_reader] LibreOffice conversion failed for {fpath.name} "
+            f"(rc={first_result.returncode}): {first_result.stderr[:200]}{retry_detail}",
+            flush=True,
+        )
+        return None
     except subprocess.TimeoutExpired:
         print(f"[file_reader] LibreOffice conversion timed out for {fpath.name}", flush=True)
         return None
@@ -463,9 +597,8 @@ def _convert_office_to_pdf(fpath: Path, out_dir: Path | None = None) -> Path | N
         _warn_libreoffice_unavailable(exc)
         return None
     finally:
-        shutil.rmtree(profile_dir, ignore_errors=True)
-        if stage_dir is not None:
-            shutil.rmtree(stage_dir, ignore_errors=True)
+        for directory in profile_dirs + temp_dirs:
+            shutil.rmtree(directory, ignore_errors=True)
 
 
 def _pdf_bytes_to_image_text_blocks(
@@ -474,24 +607,86 @@ def _pdf_bytes_to_image_text_blocks(
     render_dpi: int,
     max_pages: int,
     include_text: bool,
+    attachment_budget: AttachmentBudget | None = None,
 ) -> list[dict[str, Any]] | None:
-    """Rasterize PDF bytes to page-image + text blocks for image-only judges.
+    """Rasterize one page at a time and reserve each PNG before base64."""
 
-    Delegates to :mod:`resources_servers.gdpval.media_conversion` (imported
-    lazily so this module stays importable even where that package isn't on the
-    path). Returns ``None`` when the helper is unavailable or yields nothing, so
-    the caller can fall back to the native ``application/pdf`` data URL.
-    """
     try:
-        from resources_servers.gdpval.media_conversion import pdf_bytes_to_blocks
+        import fitz
     except ImportError:
         return None
-    blocks = pdf_bytes_to_blocks(
-        pdf_bytes,
-        dpi=render_dpi,
-        max_pages=max_pages,
-        include_text=include_text,
+
+    budget = attachment_budget or AttachmentBudget(
+        MAX_TOTAL_RAW_ATTACHMENT_BYTES,
+        MAX_TOTAL_ENCODED_ATTACHMENT_CHARS,
     )
+    try:
+        document = fitz.open(stream=pdf_bytes, filetype="pdf")
+    except Exception:
+        return None
+
+    images: list[dict[str, Any]] = []
+    text_parts: list[str] = []
+    text_remaining = 20_000
+    text_truncated = False
+    try:
+        total_pages = document.page_count
+        page_limit = min(total_pages, max(0, max_pages))
+        zoom = render_dpi / 72.0
+        matrix = fitz.Matrix(zoom, zoom)
+        for page_index in range(page_limit):
+            try:
+                page = document.load_page(page_index)
+                if include_text and text_remaining > 0:
+                    page_text = (page.get_text("text") or "").strip()
+                    if page_text:
+                        separator = 2 if text_parts else 0
+                        available = max(0, text_remaining - separator)
+                        take = min(len(page_text), available)
+                        if take:
+                            text_parts.append(page_text[:take])
+                            text_remaining -= separator + take
+                        if take < len(page_text):
+                            text_truncated = True
+
+                rect = page.rect
+                width = math.ceil(rect.width * zoom)
+                height = math.ceil(rect.height * zoom)
+                if width * height > MAX_RASTER_PAGE_PIXELS:
+                    images.append(
+                        {
+                            "type": "text",
+                            "text": f"[page {page_index + 1} omitted: raster dimensions too large]",
+                        }
+                    )
+                    continue
+                pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+                png = pixmap.tobytes("png")
+            except Exception:
+                continue
+            if not budget.reserve(len(png)):
+                images.append(
+                    {
+                        "type": "text",
+                        "text": "[remaining rendered pages omitted: aggregate judge payload budget]",
+                    }
+                )
+                break
+            b64 = base64.b64encode(png).decode("ascii")
+            images.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}})
+
+        if total_pages > page_limit:
+            images.append({"type": "text", "text": f"[truncated: rendered {page_limit} of {total_pages} pages]"})
+    finally:
+        document.close()
+
+    blocks: list[dict[str, Any]] = []
+    if text_parts:
+        text = "\n\n".join(text_parts)
+        if text_truncated:
+            text = _bounded_text(text + "x", 20_000, "\n[...text truncated]")
+        blocks.append({"type": "text", "text": f"[extracted text]\n{text}"})
+    blocks.extend(images)
     return blocks or None
 
 
@@ -512,6 +707,44 @@ def _av_block(mime: str, data: bytes, *, ext: str, file_type: str, openai_native
     except ImportError:
         b64 = base64.b64encode(data).decode("ascii")
         return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
+
+
+def _enforce_text_block_budget(blocks: list[dict[str, Any]], cap: int) -> list[dict[str, Any]]:
+    """Apply one hard character ceiling to every text producer in a request.
+
+    The upstream builders include text that does not flow through ``_text_block``
+    (PDF extraction, Office headers, AV stubs, archive manifests, and exception
+    messages). This final pass is therefore the source of truth for the cap.
+    Binary/media blocks are retained unchanged.
+    """
+
+    result: list[dict[str, Any]] = []
+    remaining = max(0, cap)
+    omitted = False
+    last_text_index: int | None = None
+    marker = "\n[...additional text blocks omitted: aggregate text budget exhausted]"
+
+    for block in blocks:
+        if block.get("type") != "text":
+            result.append(block)
+            continue
+        text = str(block.get("text", ""))
+        if omitted or remaining <= 0:
+            omitted = omitted or bool(text)
+            continue
+        if len(text) > remaining:
+            text = _bounded_text(text, remaining, marker)
+            omitted = True
+        copied = dict(block)
+        copied["text"] = text
+        result.append(copied)
+        last_text_index = len(result) - 1
+        remaining -= len(text)
+
+    if omitted and last_text_index is not None and marker not in result[last_text_index]["text"]:
+        previous = result[last_text_index]["text"]
+        result[last_text_index]["text"] = _bounded_text(previous + marker, len(previous), marker)
+    return result
 
 
 def convert_deliverables_to_content_blocks(
@@ -559,28 +792,17 @@ def convert_deliverables_to_content_blocks(
 
     blocks: list[dict[str, Any]] = []
     scratch_dirs: list[Path] = []  # tempdirs holding PDFs this pass converted
+    attachment_budget = AttachmentBudget(
+        MAX_TOTAL_RAW_ATTACHMENT_BYTES,
+        MAX_TOTAL_ENCODED_ATTACHMENT_CHARS,
+    )
 
     entries = sorted(output_path.iterdir())
-    # A PDF an Office file renders from must not also be emitted standalone, or
-    # the judge sees the same pages twice. Both spellings count: the same-stem
-    # sidecar Plan.pptx.pdf, and the ordinary sibling Plan.pdf.
-    # How many Office files share each stem. `Report.docx` and `Report.pptx` both
-    # point at `Report.pdf`, which cannot say which of them it renders, so the
-    # plain sibling is only trustworthy when the stem is unambiguous. preconvert
-    # writes an injective `Report.docx.pdf` sidecar for the ambiguous case.
-    office_stem_counts: dict[str, int] = {}
-    for entry in entries:
-        if is_deliverable(entry) and entry.suffix.lower() in OFFICE_EXTS:
-            office_stem_counts[entry.stem] = office_stem_counts.get(entry.stem, 0) + 1
-
-    consumed_pdfs: set[Path] = set()
-    for entry in entries:
-        if is_deliverable(entry) and entry.suffix.lower() in OFFICE_EXTS:
-            sidecar = entry.with_name(entry.name + ".pdf")
-            if sidecar.is_file():
-                consumed_pdfs.add(sidecar)
-            elif office_stem_counts.get(entry.stem, 0) == 1:
-                consumed_pdfs.add(entry.with_suffix(".pdf"))
+    # Shared provenance rules keep the comparison and rubric paths in lockstep:
+    # prefer source.ext.pdf, consume derived renders, and quarantine an old
+    # source.pdf when multiple Office files share the stem.
+    provenance = resolve_pdf_provenance(entry for entry in entries if is_deliverable(entry))
+    consumed_pdfs = provenance.suppressed_pdfs
 
     # Which files the judge receives AS TEXT. Decided once and reused by both the
     # allotment and the dispatch loop: deciding it twice lets a file be emitted as
@@ -623,6 +845,44 @@ def convert_deliverables_to_content_blocks(
         emitted_chars += len(block["text"])
         return block
 
+    def _pdf_blocks(pdf_path: Path, header: str) -> list[dict[str, Any]]:
+        """Emit a PDF natively or page-by-page under the shared binary budget."""
+
+        size, source_omitted = _check_render_source(pdf_path)
+        if source_omitted is not None:
+            return [source_omitted]
+
+        data: bytes | None = None
+        if images_and_text:
+            # The PDF is a bounded rasterization input, not request payload. Its
+            # compressed source size does not predict whether a rendered PNG page
+            # fits; the renderer reserves every actual page below.
+            if not attachment_budget.can_fit(1):
+                return [_attachment_omission(pdf_path.name, size, "aggregate judge payload budget")]
+            data = pdf_path.read_bytes()
+            rendered = _pdf_bytes_to_image_text_blocks(
+                data,
+                render_dpi=render_dpi,
+                max_pages=max_pages,
+                include_text=include_text,
+                attachment_budget=attachment_budget,
+            )
+            if rendered is not None:
+                return [{"type": "text", "text": header}, *rendered]
+
+        if not attachment_budget.reserve(size):
+            return [_attachment_omission(pdf_path.name, size, "aggregate judge payload budget")]
+        if data is None:
+            data = pdf_path.read_bytes()
+        b64 = base64.b64encode(data).decode("ascii")
+        return [
+            {"type": "text", "text": header},
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:application/pdf;base64,{b64}"},
+            },
+        ]
+
     for fpath in entries:
         if not is_deliverable(fpath) or fpath in consumed_pdfs:
             continue
@@ -631,77 +891,61 @@ def convert_deliverables_to_content_blocks(
 
         try:
             if fpath in texty:
-                text = fpath.read_text(encoding="utf-8", errors="replace").strip()
+                allowance = allowance_by_name.get(fpath.name, 0)
+                if fpath.stat().st_size == 0:
+                    block = _text_block(f"{fpath.name}:", "[present but EMPTY (0 bytes of content)]", 200)
+                    blocks.append(block) if block else omitted_names.append(fpath.name)
+                    continue
+                if allowance <= 0:
+                    omitted_names.append(fpath.name)
+                    continue
+                text = _read_text(fpath, allowance)
                 if text:
-                    block = _text_block(f"{fpath.name}:", text, allowance_by_name.get(fpath.name, 0))
+                    block = _text_block(f"{fpath.name}:", text, allowance)
                 else:
                     block = _text_block(f"{fpath.name}:", "[present but EMPTY (0 bytes of content)]", 200)
                 blocks.append(block) if block else omitted_names.append(fpath.name)
 
             elif ext in OFFICE_EXTS:
+                source_size = fpath.stat().st_size
+                if source_size > MAX_FILE_ATTACHMENT_BYTES:
+                    blocks.append(_attachment_omission(fpath.name, source_size, "per-file judge payload limit"))
+                    continue
                 # Prefer a PDF preconvert already rendered. Reconverting is
                 # wasteful, needs LibreOffice on the judge host, and the cleanup
                 # below would delete someone else's artifact.
-                sidecar = fpath.with_name(fpath.name + ".pdf")
-                sibling = fpath.with_suffix(".pdf")
-                if sidecar.is_file():
-                    pdf_path = sidecar
-                elif sibling.is_file() and office_stem_counts.get(fpath.stem, 0) == 1:
-                    pdf_path = sibling
-                else:
-                    # Ambiguous stem with no sidecar: rendering it ourselves is the
-                    # only way to know which file the PDF belongs to.
-                    pdf_path = None
+                pdf_path = provenance.office_pdfs.get(fpath)
                 if pdf_path is None:
                     scratch = Path(tempfile.mkdtemp(prefix="gdpval-render-"))
                     scratch_dirs.append(scratch)
                     pdf_path = _convert_office_to_pdf(fpath, out_dir=scratch)
                 if pdf_path and pdf_path.exists():
-                    data = pdf_path.read_bytes()
-                    if images_and_text:
-                        rendered = _pdf_bytes_to_image_text_blocks(
-                            data, render_dpi=render_dpi, max_pages=max_pages, include_text=include_text
+                    header_kind = "rendered from PDF" if images_and_text else "converted to PDF"
+                    blocks.extend(_pdf_blocks(pdf_path, f"\n{fpath.name} ({header_kind}):"))
+                    if ext == ".xlsx":
+                        sheet_text = extract_xlsx_structured_text(fpath, max_chars=MAX_TEXT_BLOCK_CHARS)
+                        block = _text_block(
+                            f"{fpath.name} (structured spreadsheet cells):",
+                            sheet_text,
+                            MAX_TEXT_BLOCK_CHARS,
                         )
-                        if rendered is not None:
-                            blocks.append({"type": "text", "text": f"\n{fpath.name} (rendered from PDF):"})
-                            blocks.extend(rendered)
-                            continue
-                    b64 = base64.b64encode(data).decode("ascii")
-                    blocks.append({"type": "text", "text": f"\n{fpath.name} (converted to PDF):"})
-                    blocks.append(
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:application/pdf;base64,{b64}"},
-                        }
-                    )
+                        blocks.append(block) if block else omitted_names.append(fpath.name)
                 else:
                     # Fallback to text extraction
-                    text = _extract_text(fpath, ext)
+                    text = _extract_text(fpath, ext, max_chars=MAX_TEXT_BLOCK_CHARS)
                     if text:
                         block = _text_block(f"{fpath.name} (text fallback):", text, MAX_TEXT_BLOCK_CHARS)
                         blocks.append(block) if block else omitted_names.append(fpath.name)
 
             elif ext == ".pdf":
-                data = fpath.read_bytes()
-                if images_and_text:
-                    rendered = _pdf_bytes_to_image_text_blocks(
-                        data, render_dpi=render_dpi, max_pages=max_pages, include_text=include_text
-                    )
-                    if rendered is not None:
-                        blocks.append({"type": "text", "text": f"\n{fpath.name}:"})
-                        blocks.extend(rendered)
-                        continue
-                b64 = base64.b64encode(data).decode("ascii")
-                blocks.append({"type": "text", "text": f"\n{fpath.name}:"})
-                blocks.append(
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:application/pdf;base64,{b64}"},
-                    }
-                )
+                blocks.extend(_pdf_blocks(fpath, f"\n{fpath.name}:"))
 
             elif ext in IMAGE_EXTS:
                 mime = MIME_TYPES.get(ext, "image/png")
+                _size, omitted = _reserve_attachment(fpath, attachment_budget)
+                if omitted is not None:
+                    blocks.append(omitted)
+                    continue
                 data = fpath.read_bytes()
                 b64 = base64.b64encode(data).decode("ascii")
                 blocks.append({"type": "text", "text": f"\n{fpath.name}:"})
@@ -724,6 +968,10 @@ def convert_deliverables_to_content_blocks(
                 file_type = "VIDEO" if is_video else "AUDIO"
                 if video_capable if is_video else audio_capable:
                     mime = MIME_TYPES.get(ext, "application/octet-stream")
+                    _size, omitted = _reserve_attachment(fpath, attachment_budget)
+                    if omitted is not None:
+                        blocks.append(omitted)
+                        continue
                     data = fpath.read_bytes()
                     blocks.append({"type": "text", "text": f"\n{fpath.name}:"})
                     blocks.append(_av_block(mime, data, ext=ext, file_type=file_type, openai_native=images_and_text))
@@ -754,7 +1002,7 @@ def convert_deliverables_to_content_blocks(
                 if size == 0:
                     body = "[present but EMPTY (0 bytes)]"
                 elif _sniffs_as_text(fpath):
-                    text = fpath.read_text(encoding="utf-8", errors="replace").strip()
+                    text = _read_text(fpath, MAX_TEXT_BLOCK_CHARS)
                     body = text if text else "[present but EMPTY (0 bytes of content)]"
                 else:
                     manifest = _archive_manifest(fpath)
@@ -786,4 +1034,4 @@ def convert_deliverables_to_content_blocks(
     for scratch in scratch_dirs:
         shutil.rmtree(scratch, ignore_errors=True)
 
-    return blocks
+    return _enforce_text_block_budget(blocks, MAX_TOTAL_TEXT_BLOCK_CHARS)

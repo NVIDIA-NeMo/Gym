@@ -82,3 +82,24 @@ def test_interleaved_tools_pair_independently():
         "search-a": "search-out-a",
         "search-b": "search-out-b",
     }
+
+
+def test_suffix_shaped_raw_ids_cannot_collide_with_generated_suffixes():
+    """A real raw ``x#2`` must not collide with the suffix minted for repeated ``x``."""
+    history = [
+        _turn("x", "first", "out-first"),
+        _turn("x", "second", "out-second"),
+        _turn("x#2", "literal-suffix", "out-literal-suffix"),
+    ]
+
+    _, items = convert_stirrup_history_to_output_items(history)
+    calls, outputs = _calls_and_outputs(items)
+
+    ids = [call.call_id for call in calls]
+    assert len(ids) == len(set(ids)) == 3
+    by_id = {output.call_id: output.output for output in outputs}
+    assert {call.arguments: by_id[call.call_id] for call in calls} == {
+        "first": "out-first",
+        "second": "out-second",
+        "literal-suffix": "out-literal-suffix",
+    }

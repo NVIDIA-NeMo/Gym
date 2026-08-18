@@ -1,9 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Run state the agent writes beside its deliverables must never reach the judge."""
+"""Run state and derived artifacts must never be mistaken for deliverables."""
 
+import base64
 from pathlib import Path
 
+import pytest
+
+import responses_api_agents.stirrup_agent.file_reader as file_reader
 from responses_api_agents.stirrup_agent.file_reader import (
     IGNORE_FILES,
     convert_deliverables_to_content_blocks,
@@ -95,3 +99,74 @@ def test_ignore_list_covers_every_file_the_agent_writes(tmp_path: Path):
     """Guard against the set drifting from what the agent actually produces."""
     for name in ("finish_params.json", "history.json", "history.pkl", "metadata.json", "log.txt"):
         assert name in IGNORE_FILES
+
+
+def test_same_stem_office_sidecars_are_emitted_once_and_stale_pdf_is_quarantined(tmp_path: Path):
+    (tmp_path / "Plan.docx").write_bytes(b"docx source")
+    (tmp_path / "Plan.pptx").write_bytes(b"pptx source")
+    (tmp_path / "Plan.docx.pdf").write_bytes(b"DOCX RENDER")
+    (tmp_path / "Plan.pptx.pdf").write_bytes(b"PPTX RENDER")
+    (tmp_path / "Plan.pdf").write_bytes(b"STALE COLLIDED RENDER")
+    (tmp_path / "Appendix.pdf").write_bytes(b"INDEPENDENT PDF")
+
+    blocks = convert_deliverables_to_content_blocks(str(tmp_path))
+    attachments = [
+        base64.b64decode(block["image_url"]["url"].split(",", 1)[1])
+        for block in blocks
+        if block.get("type") == "image_url"
+    ]
+
+    assert attachments == [b"INDEPENDENT PDF", b"DOCX RENDER", b"PPTX RENDER"]
+    text = _text_of(blocks)
+    assert "Plan.docx" in text
+    assert "Plan.pptx" in text
+    assert "Plan.pdf:" not in text
+    assert "Plan.docx.pdf" not in text
+    assert "Plan.pptx.pdf" not in text
+
+
+def test_ambiguous_plain_pdf_is_ignored_while_each_office_source_is_rendered(monkeypatch, tmp_path: Path):
+    (tmp_path / "Plan.docx").write_bytes(b"docx source")
+    (tmp_path / "Plan.pptx").write_bytes(b"pptx source")
+    (tmp_path / "Plan.pdf").write_bytes(b"STALE COLLIDED RENDER")
+
+    def _render(source: Path, out_dir: Path | None = None) -> Path:
+        assert out_dir is not None
+        rendered = out_dir / f"{source.stem}.pdf"
+        rendered.write_bytes(source.suffix.upper().encode())
+        return rendered
+
+    monkeypatch.setattr(file_reader, "_convert_office_to_pdf", _render)
+
+    blocks = convert_deliverables_to_content_blocks(str(tmp_path))
+    attachments = [
+        base64.b64decode(block["image_url"]["url"].split(",", 1)[1])
+        for block in blocks
+        if block.get("type") == "image_url"
+    ]
+
+    assert attachments == [b".DOCX", b".PPTX"]
+    assert b"STALE COLLIDED RENDER" not in attachments
+    assert "Plan.pdf:" not in _text_of(blocks)
+
+
+def test_xlsx_emits_formula_text_alongside_rendered_pdf(tmp_path: Path):
+    openpyxl = pytest.importorskip("openpyxl")
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Forecast"
+    sheet["A1"] = 4
+    sheet["A2"] = 8
+    sheet["A3"] = "=SUM(A1:A2)"
+    xlsx = tmp_path / "Budget.xlsx"
+    workbook.save(xlsx)
+    workbook.close()
+    (tmp_path / "Budget.xlsx.pdf").write_bytes(b"PDF RENDER")
+
+    blocks = convert_deliverables_to_content_blocks(str(tmp_path))
+
+    assert any(block.get("type") == "image_url" for block in blocks)
+    text = _text_of(blocks)
+    assert "structured spreadsheet cells" in text
+    assert "Sheet: Forecast" in text
+    assert "A3: formula: =SUM(A1:A2)" in text

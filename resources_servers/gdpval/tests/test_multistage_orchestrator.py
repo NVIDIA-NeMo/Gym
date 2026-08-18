@@ -16,13 +16,21 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Tuple
 
 import pytest
 
-from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+import nemo_gym.rollout_collection as rollout_collection_module
+import resources_servers.gdpval.multistage_orchestrator as multistage_module
+from nemo_gym.global_config import (
+    AGENT_REF_KEY_NAME,
+    ATTEMPT_INDEX_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+)
 from nemo_gym.path_utils import failures_path_for
 from nemo_gym.rollout_collection import (
     NG_FAILURE_CLASS_KEY,
@@ -39,12 +47,16 @@ from resources_servers.gdpval.multistage_orchestrator import (
     find_gdpval_reference_elos,
     index_rows_by_task,
     journal_path_for,
+    load_failure_attempts,
+    load_failure_timings,
     load_gated_keys,
     load_persisted_rows,
+    load_reuse_cached_keys,
     parse_multistage_config,
     read_journal,
     route_stage_rows,
     row_task_id,
+    run_e2e_multistage,
     run_multistage_stages,
     tag_results,
     write_rollouts,
@@ -195,10 +207,17 @@ class TestRowHelpers:
             "task_id": "t3",
         }
         result = {"per_reference": {}, "reward": 1.0}
-        tagged = tag_results([(row, result)], stage_index=1)
+        tagged = tag_results(
+            [(row, result)],
+            stage_index=1,
+            expected_final_stage_index=2,
+            expected_stage_row_count=17,
+        )
         assert tagged[0][TASK_INDEX_KEY_NAME] == 3
         assert tagged[0][ROLLOUT_INDEX_KEY_NAME] == 7
         assert tagged[0]["stage_index"] == 1
+        assert tagged[0]["expected_final_stage_index"] == 2
+        assert tagged[0]["expected_stage_row_count"] == 17
         assert tagged[0]["task_id"] == "t3"
 
 
@@ -255,6 +274,9 @@ class TestRunStages:
             rows,
             _fake_run_rollouts_factory(),
         )
+
+        assert all(row["expected_final_stage_index"] == 1 for row in all_results)
+        assert all(row["expected_stage_row_count"] == 20 for row in all_results)
 
         # Stage 0 uses all references; stage 1 shrinks to the 2 closest to the
         # stage-0 estimate (~1300 ⇒ b=1200, c=1400).
@@ -412,6 +434,17 @@ class TestWriteRollouts:
         lines = [json.loads(line) for line in out.read_text().splitlines()]
         assert [line["task_id"] for line in lines] == ["t0", "t1"]
 
+    def test_fresh_file_uses_normal_umask_permissions(self, tmp_path: Path) -> None:
+        control = tmp_path / "normal.jsonl"
+        control.write_bytes(b"normal\n")
+
+        out = write_rollouts(
+            [{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}],
+            tmp_path / "rollouts.jsonl",
+        )
+
+        assert out.stat().st_mode & 0o777 == control.stat().st_mode & 0o777
+
     def test_dedupes_by_stage_task_rollout(self, tmp_path: Path) -> None:
         results = [
             {"stage_index": 0, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "task_id": "old"},
@@ -422,6 +455,32 @@ class TestWriteRollouts:
         lines = [json.loads(line) for line in out.read_text().splitlines()]
         # Dedup keeps the last write per (stage, task, rollout); stage 1 is distinct.
         assert [line["task_id"] for line in lines] == ["new", "other"]
+
+    def test_failed_rewrite_preserves_previous_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        out = tmp_path / "rollouts.jsonl"
+        original = b'{"previous":true}\n'
+        out.write_bytes(original)
+        real_dumps = multistage_module.orjson.dumps
+        calls = 0
+
+        def fail_on_second_row(value, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("injected serialization failure")
+            return real_dumps(value, *args, **kwargs)
+
+        monkeypatch.setattr(multistage_module.orjson, "dumps", fail_on_second_row)
+        rows = [
+            {"stage_index": 0, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0},
+            {"stage_index": 0, TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0},
+        ]
+
+        with pytest.raises(RuntimeError, match="injected serialization failure"):
+            write_rollouts(rows, out)
+
+        assert out.read_bytes() == original
+        assert list(tmp_path.glob(".rollouts.jsonl.merge-*")) == []
 
 
 # ---------------------------------------------------------------------------
@@ -436,7 +495,16 @@ class RecordingResume(StageResume):
     explicitly to model terminal / max-attempt gating from the sidecar.
     """
 
-    def __init__(self, plans=None, outcomes=None, rows_by_stage=None, gated_keys=None) -> None:
+    def __init__(
+        self,
+        plans=None,
+        outcomes=None,
+        rows_by_stage=None,
+        gated_keys=None,
+        elapsed_by_stage=None,
+        reuse_cached_keys=None,
+        attempts_by_stage=None,
+    ) -> None:
         self.planned: List[Tuple[int, dict]] = []
         self.completed: List[Tuple[int, dict]] = []
         self.appended: Dict[int, List[Dict[str, Any]]] = {}
@@ -454,6 +522,9 @@ class RecordingResume(StageResume):
             on_plan=lambda i, p: self.planned.append((i, p)),
             on_outcome=lambda i, o: self.completed.append((i, o)),
             on_rows=lambda i, r: self.appended.setdefault(i, []).extend(r),
+            elapsed_by_stage=dict(elapsed_by_stage or {}),
+            reuse_cached_keys=dict(reuse_cached_keys or {}),
+            attempts_by_stage=dict(attempts_by_stage or {}),
         )
 
 
@@ -492,7 +563,7 @@ class TestResumeSeam:
         stage0_plan = {
             "stage_index": 0,
             "reference_ids": base_summaries[0]["reference_ids"],
-            "task_ids": [f"t{i}" for i in range(3)],
+            "task_ids": list(dict.fromkeys(row["task_id"] for row in stage0_rows)),
         }
         resume = RecordingResume(
             plans={0: stage0_plan},
@@ -562,6 +633,147 @@ class TestResumeSeam:
         # Final stage-0 result count equals the full run (cached + re-dispatched).
         assert summaries[0]["num_rollouts"] == base_summaries[0]["num_rollouts"]
 
+    async def test_completed_cached_stage_stamps_full_expected_row_count(self) -> None:
+        task_ids = ["t0", "t1"]
+        rows = _materialized_rows(task_ids, repeats=2)
+        cfg = MultiStageRunConfig(
+            enabled=True,
+            stages=parse_multistage_config({"enabled": True, "stages": ["2"]}).stages,
+            seed=0,
+        )
+        full_results, summaries = await run_multistage_stages(
+            cfg, REF_ELOS, _distribution(task_ids), rows, _fake_run_rollouts_factory()
+        )
+        # Model a completed stage with one persisted success and the other rows
+        # accounted for by terminal/max-attempt sidecars. The success must still
+        # declare the full planned cardinality, not the cached success count.
+        resume = RecordingResume(
+            plans={
+                0: {
+                    "stage_index": 0,
+                    "reference_ids": summaries[0]["reference_ids"],
+                    "task_ids": task_ids,
+                }
+            },
+            outcomes={0: {"stage_index": 0, "status": "complete"}},
+            rows_by_stage={0: [full_results[0]]},
+            gated_keys={0: {(row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]) for row in full_results}},
+        )
+
+        async def no_dispatch(rows_in: List[Dict[str, Any]]):
+            raise AssertionError("completed cached stage must not dispatch")
+
+        cached_results, _ = await run_multistage_stages(
+            cfg, REF_ELOS, _distribution(task_ids), rows, no_dispatch, resume=resume
+        )
+
+        assert len(cached_results) == 1
+        assert cached_results[0]["expected_stage_row_count"] == 4
+        assert cached_results[0]["expected_final_stage_index"] == 0
+
+    async def test_completed_stage_with_missing_cached_key_is_reopened(self) -> None:
+        task_ids = ["t0", "t1"]
+        rows = _materialized_rows(task_ids)
+        cfg = MultiStageRunConfig(
+            enabled=True,
+            stages=parse_multistage_config({"enabled": True, "stages": ["2"]}).stages,
+            seed=0,
+        )
+        full_run = _fake_run_rollouts_factory()
+        full_results, summaries = await run_multistage_stages(cfg, REF_ELOS, _distribution(task_ids), rows, full_run)
+        missing = full_results[-1]
+        missing_key = (missing[TASK_INDEX_KEY_NAME], missing[ROLLOUT_INDEX_KEY_NAME])
+        cached = full_results[:-1]
+        resume = RecordingResume(
+            plans={
+                0: {
+                    "stage_index": 0,
+                    "reference_ids": summaries[0]["reference_ids"],
+                    "task_ids": task_ids,
+                }
+            },
+            outcomes={0: {"stage_index": 0, "status": "complete"}},
+            rows_by_stage={0: cached},
+        )
+        dispatched: List[Tuple[int, int]] = []
+
+        async def capture(rows_in: List[Dict[str, Any]]):
+            dispatched.extend((row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]) for row in rows_in)
+            return await full_run(rows_in)
+
+        results, result_summaries = await run_multistage_stages(
+            cfg, REF_ELOS, _distribution(task_ids), rows, capture, resume=resume
+        )
+
+        assert dispatched == [missing_key]
+        assert len(results) == len(full_results)
+        assert result_summaries[0].get("cached") is not True
+
+    async def test_resumed_empty_fit_preserves_prior_elo_for_next_stage(self) -> None:
+        task_ids = [f"t{i}" for i in range(6)]
+        rows = _materialized_rows(task_ids)
+        cfg = MultiStageRunConfig(
+            enabled=True,
+            stages=parse_multistage_config({"enabled": True, "stages": ["2:4", "2:2", "2:1"]}).stages,
+            seed=0,
+            reuse_cached_deliverables=False,
+        )
+        baseline_resume = RecordingResume()
+        successful_run = _fake_run_rollouts_factory()
+
+        async def terminal_middle_stage(rows_in: List[Dict[str, Any]]):
+            if rows_in and rows_in[0]["stage_index"] == 1:
+                return [
+                    (
+                        row,
+                        {
+                            NG_FAILURE_CLASS_KEY: "skipped",
+                            NG_TERMINAL_KEY: True,
+                        },
+                    )
+                    for row in rows_in
+                ]
+            return await successful_run(rows_in)
+
+        baseline_results, baseline_summaries = await run_multistage_stages(
+            cfg,
+            REF_ELOS,
+            _distribution(task_ids),
+            rows,
+            terminal_middle_stage,
+            resume=baseline_resume,
+        )
+        assert baseline_summaries[0]["eval_elo"] is not None
+        assert baseline_summaries[1]["eval_elo"] is None
+
+        stage0_rows = [row for row in baseline_results if row["stage_index"] == 0]
+        stage0_keys = {(row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]) for row in stage0_rows}
+        stage1_keys = {(row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]) for row in baseline_resume.appended[1]}
+        resumed = RecordingResume(
+            plans=dict(baseline_resume.planned[:2]),
+            outcomes=dict(baseline_resume.completed[:2]),
+            rows_by_stage={0: stage0_rows},
+            gated_keys={0: stage0_keys, 1: stage1_keys},
+        )
+
+        dispatched_stages: List[int] = []
+
+        async def capture_stage(rows_in: List[Dict[str, Any]]):
+            dispatched_stages.extend(row["stage_index"] for row in rows_in)
+            return await successful_run(rows_in)
+
+        _, resumed_summaries = await run_multistage_stages(
+            cfg,
+            REF_ELOS,
+            _distribution(task_ids),
+            _materialized_rows(task_ids),
+            capture_stage,
+            resume=resumed,
+        )
+
+        assert set(dispatched_stages) == {2}
+        assert resumed_summaries[2]["reference_ids"] == baseline_summaries[2]["reference_ids"]
+
     async def test_plan_replay_is_deterministic_without_seed(self) -> None:
         task_ids = [f"t{i}" for i in range(10)]
         rows = _materialized_rows(task_ids)
@@ -630,6 +842,217 @@ class TestResumeSeam:
         await run_multistage_stages(cfg, REF_ELOS, _distribution(task_ids), rows, capturing_run, resume=resume)
         assert dispatched_keys == [failed_key]
 
+    async def test_resume_longest_first_uses_stage_aware_failure_timings(self) -> None:
+        task_ids = [f"t{i}" for i in range(4)]
+        rows = _materialized_rows(task_ids)
+        cfg = MultiStageRunConfig(
+            enabled=True,
+            stages=parse_multistage_config({"enabled": True, "stages": ["4"]}).stages,
+            seed=0,
+        )
+        resume = RecordingResume(
+            plans={
+                0: {
+                    "stage_index": 0,
+                    "reference_ids": ["a"],
+                    "task_ids": task_ids,
+                    "task_reference_ids": {task_id: "a" for task_id in task_ids},
+                }
+            },
+            elapsed_by_stage={0: {(0, 0): 60.0, (2, 0): 9000.0}},
+        )
+        dispatched: List[int] = []
+        run = _fake_run_rollouts_factory()
+
+        async def capturing_run(rows_in: List[Dict[str, Any]]):
+            dispatched.extend(row[TASK_INDEX_KEY_NAME] for row in rows_in)
+            return await run(rows_in)
+
+        await run_multistage_stages(
+            cfg,
+            REF_ELOS,
+            _distribution(task_ids),
+            rows,
+            capturing_run,
+            resume=resume,
+            dispatch_longest_first=True,
+        )
+
+        assert dispatched == [2, 0, 1, 3]
+
+    async def test_resume_reuses_failed_judge_deliverable_for_matching_stage_only(self) -> None:
+        task_ids = ["t0"]
+        rows = _materialized_rows(task_ids)
+        cfg = MultiStageRunConfig(
+            enabled=True,
+            stages=parse_multistage_config({"enabled": True, "stages": ["1", "1"]}).stages,
+            seed=0,
+            # Isolate sidecar propagation from normal cross-stage reuse.
+            reuse_cached_deliverables=False,
+        )
+        resume = RecordingResume(reuse_cached_keys={1: {(0, 0)}})
+        seen: List[Tuple[int, bool]] = []
+        run = _fake_run_rollouts_factory()
+
+        async def capturing_run(rows_in: List[Dict[str, Any]]):
+            seen.extend((row["stage_index"], bool(row.get("reuse_cached_deliverable"))) for row in rows_in)
+            return await run(rows_in)
+
+        await run_multistage_stages(cfg, REF_ELOS, _distribution(task_ids), rows, capturing_run, resume=resume)
+
+        assert seen == [(0, False), (1, True)]
+
+    async def test_gated_sidecar_artifact_is_produced_for_later_stages(self) -> None:
+        task_ids = ["t0"]
+        rows = _materialized_rows(task_ids)
+        cfg = MultiStageRunConfig(
+            enabled=True,
+            stages=parse_multistage_config({"enabled": True, "stages": ["1", "1"]}).stages,
+            seed=0,
+        )
+        # Stage 0's judge-invalid row exhausted its attempts, but its sidecar
+        # flag proves that the reference-independent policy artifact exists.
+        resume = RecordingResume(
+            gated_keys={0: {(0, 0)}},
+            reuse_cached_keys={0: {(0, 0)}},
+            attempts_by_stage={0: {(0, 0): 3}},
+        )
+        seen: List[Tuple[int, bool]] = []
+        run = _fake_run_rollouts_factory()
+
+        async def capturing_run(rows_in: List[Dict[str, Any]]):
+            seen.extend((row["stage_index"], bool(row.get("reuse_cached_deliverable"))) for row in rows_in)
+            return await run(rows_in)
+
+        await run_multistage_stages(cfg, REF_ELOS, _distribution(task_ids), rows, capturing_run, resume=resume)
+
+        assert seen == [(1, True)]
+
+    async def test_new_terminal_judge_failure_reuses_artifact_in_next_stage(self) -> None:
+        task_ids = ["t0"]
+        rows = _materialized_rows(task_ids)
+        cfg = MultiStageRunConfig(
+            enabled=True,
+            stages=parse_multistage_config({"enabled": True, "stages": ["1", "1"]}).stages,
+            seed=0,
+        )
+        seen: List[Tuple[int, bool]] = []
+        success_run = _fake_run_rollouts_factory()
+
+        async def terminal_then_success(rows_in: List[Dict[str, Any]]):
+            seen.extend((row["stage_index"], bool(row.get("reuse_cached_deliverable"))) for row in rows_in)
+            if rows_in and rows_in[0]["stage_index"] == 0:
+                return [
+                    (
+                        row,
+                        {
+                            NG_FAILURE_CLASS_KEY: "permanent",
+                            NG_TERMINAL_KEY: True,
+                            "reuse_cached_deliverable": True,
+                            "deliverables_dir": "/cached/task_t0/repeat_0",
+                        },
+                    )
+                    for row in rows_in
+                ]
+            return await success_run(rows_in)
+
+        await run_multistage_stages(
+            cfg,
+            REF_ELOS,
+            _distribution(task_ids),
+            rows,
+            terminal_then_success,
+        )
+
+        assert seen == [(0, False), (1, True)]
+
+    async def test_third_failure_is_resolved_without_fourth_invocation(self) -> None:
+        task_ids = ["t0"]
+        rows = _materialized_rows(task_ids)
+        cfg = MultiStageRunConfig(
+            enabled=True,
+            stages=parse_multistage_config({"enabled": True, "stages": ["1", "1"]}).stages,
+            seed=0,
+            reuse_cached_deliverables=False,
+        )
+        resume = RecordingResume(attempts_by_stage={0: {(0, 0): 2}})
+        seen_attempts: List[Tuple[int, Any]] = []
+        run = _fake_run_rollouts_factory()
+
+        async def fail_third_then_succeed(rows_in: List[Dict[str, Any]]):
+            stage_index = rows_in[0]["stage_index"]
+            seen_attempts.append((stage_index, rows_in[0].get(ATTEMPT_INDEX_KEY_NAME)))
+            if stage_index == 0:
+                return [(rows_in[0], {NG_FAILURE_CLASS_KEY: "judge_invalid"})]
+            return await run(rows_in)
+
+        await run_multistage_stages(
+            cfg, REF_ELOS, _distribution(task_ids), rows, fail_third_then_succeed, resume=resume
+        )
+
+        assert seen_attempts == [(0, 2), (1, None)]
+        assert [index for index, _ in resume.completed] == [0, 1]
+        assert resume.appended[0][0][ATTEMPT_INDEX_KEY_NAME] == 2
+
+    async def test_drained_stage_is_not_marked_complete(self) -> None:
+        task_ids = ["t0"]
+        rows = _materialized_rows(task_ids)
+        cfg = MultiStageRunConfig(
+            enabled=True,
+            stages=parse_multistage_config({"enabled": True, "stages": ["1", "1"]}).stages,
+            seed=0,
+        )
+        resume = RecordingResume()
+        dispatches = 0
+
+        async def drain(rows_in: List[Dict[str, Any]]):
+            nonlocal dispatches
+            dispatches += 1
+            return [
+                (
+                    row,
+                    {NG_FAILURE_CLASS_KEY: "kill_shaped", NG_NO_PERSIST_KEY: True},
+                )
+                for row in rows_in
+            ]
+
+        results, _ = await run_multistage_stages(cfg, REF_ELOS, _distribution(task_ids), rows, drain, resume=resume)
+
+        assert results == []
+        assert resume.completed == []
+        assert dispatches == 1
+
+    async def test_partial_final_stage_declares_full_expected_row_count(self) -> None:
+        task_ids = ["t0", "t1"]
+        rows = _materialized_rows(task_ids)
+        cfg = MultiStageRunConfig(
+            enabled=True,
+            stages=parse_multistage_config({"enabled": True, "stages": ["2", "2"]}).stages,
+            seed=0,
+        )
+        resume = RecordingResume()
+        base_run = _fake_run_rollouts_factory()
+        calls = 0
+
+        async def partial_final(rows_in: List[Dict[str, Any]]):
+            nonlocal calls
+            calls += 1
+            pairs = await base_run(rows_in)
+            if calls == 2:
+                row, _ = pairs[-1]
+                pairs[-1] = (row, {NG_FAILURE_CLASS_KEY: "kill_shaped", NG_NO_PERSIST_KEY: True})
+            return pairs
+
+        results, _ = await run_multistage_stages(
+            cfg, REF_ELOS, _distribution(task_ids), rows, partial_final, resume=resume
+        )
+
+        final_rows = [row for row in results if row["stage_index"] == 1]
+        assert len(final_rows) == 1
+        assert final_rows[0]["expected_final_stage_index"] == 1
+        assert final_rows[0]["expected_stage_row_count"] == 2
+        assert [index for index, _ in resume.completed] == [0]
+
 
 class TestFingerprint:
     def test_stable_and_config_sensitive(self) -> None:
@@ -665,6 +1088,127 @@ class TestFingerprint:
             "g1": {"percentage": 0.1, "task_ids": ["t2", "t3"]},
         }
         assert compute_fingerprint(cfg, REF_ELOS, dist_a) != compute_fingerprint(cfg, REF_ELOS, dist_b)
+
+    def test_materialized_rows_and_result_affecting_run_config_invalidate(self) -> None:
+        cfg = _two_stage_cfg()
+        dist = _distribution(["t0"])
+        rows = _materialized_rows(["t0"])
+        run_config = SimpleNamespace(
+            agent_name="gdpval_stirrup_agent",
+            input_jsonl_fpath="tasks.jsonl",
+            limit=None,
+            num_repeats=1,
+            num_repeats_add_seed=False,
+            responses_create_params={"temperature": 0.6},
+            prompt_config="prompt.yaml",
+            skills=None,
+        )
+        baseline = compute_fingerprint(
+            cfg,
+            REF_ELOS,
+            dist,
+            materialized_rows=rows,
+            rollout_collection_config=run_config,
+        )
+
+        changed_prompt_row = [dict(rows[0], responses_create_params={"input": [{"role": "user", "content": "new"}]})]
+        assert (
+            compute_fingerprint(
+                cfg,
+                REF_ELOS,
+                dist,
+                materialized_rows=changed_prompt_row,
+                rollout_collection_config=run_config,
+            )
+            != baseline
+        )
+
+        changed_repeats = SimpleNamespace(**vars(run_config))
+        changed_repeats.num_repeats = 2
+        assert (
+            compute_fingerprint(
+                cfg,
+                REF_ELOS,
+                dist,
+                materialized_rows=rows,
+                rollout_collection_config=changed_repeats,
+            )
+            != baseline
+        )
+
+        remapped = [dict(rows[0], **{TASK_INDEX_KEY_NAME: 99})]
+        assert (
+            compute_fingerprint(
+                cfg,
+                REF_ELOS,
+                dist,
+                materialized_rows=remapped,
+                rollout_collection_config=run_config,
+            )
+            != baseline
+        )
+
+    def test_fixed_policy_and_judge_config_invalidate_fingerprint(self) -> None:
+        cfg = _two_stage_cfg()
+        dist = _distribution(["t0"])
+        rows = _materialized_rows(["t0"])
+        runtime = {
+            "policy_model": {"responses_api_models": {"vllm": {"model": "/checkpoints/policy-a"}}},
+            "gdpval_resources_server": {
+                "resources_servers": {
+                    "gdpval": {
+                        "num_comparison_trials": 2,
+                        "judge_responses_create_params_overrides": {"model": "judge-a"},
+                    }
+                }
+            },
+            "operational_logging": {"level": "INFO"},
+        }
+        baseline = compute_fingerprint(
+            cfg,
+            REF_ELOS,
+            dist,
+            materialized_rows=rows,
+            resolved_global_config=runtime,
+        )
+
+        changed_policy = deepcopy(runtime)
+        changed_policy["policy_model"]["responses_api_models"]["vllm"]["model"] = "/checkpoints/policy-b"
+        changed_judge = deepcopy(runtime)
+        changed_judge["gdpval_resources_server"]["resources_servers"]["gdpval"]["num_comparison_trials"] = 4
+        changed_logging = deepcopy(runtime)
+        changed_logging["operational_logging"]["level"] = "DEBUG"
+
+        assert (
+            compute_fingerprint(
+                cfg,
+                REF_ELOS,
+                dist,
+                materialized_rows=rows,
+                resolved_global_config=changed_policy,
+            )
+            != baseline
+        )
+        assert (
+            compute_fingerprint(
+                cfg,
+                REF_ELOS,
+                dist,
+                materialized_rows=rows,
+                resolved_global_config=changed_judge,
+            )
+            != baseline
+        )
+        assert (
+            compute_fingerprint(
+                cfg,
+                REF_ELOS,
+                dist,
+                materialized_rows=rows,
+                resolved_global_config=changed_logging,
+            )
+            == baseline
+        )
 
 
 class TestJournalIO:
@@ -813,6 +1357,209 @@ class TestFailureRouting:
         assert (2, 0) in gated[0]
         assert (3, 0) not in gated[0]
 
+    def test_reopening_stage_prunes_all_downstream_persisted_state(self, tmp_path: Path) -> None:
+        out = tmp_path / "rollouts.jsonl"
+        journal = journal_path_for(out)
+        from resources_servers.gdpval.multistage_orchestrator import append_journal_record
+
+        main_rows = [
+            {"stage_index": 0, TASK_INDEX_KEY_NAME: 9, ROLLOUT_INDEX_KEY_NAME: 0, "task_id": "keep"},
+            {"stage_index": 1, TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "task_id": "stale-1"},
+            {"stage_index": 2, TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0, "task_id": "stale-2"},
+        ]
+        out.write_text("".join(json.dumps(row) + "\n" for row in main_rows))
+        failures = [
+            {
+                "stage_index": 0,
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                NG_FAILURE_CLASS_KEY: "judge_invalid",
+                "elapsed_seconds": 10,
+                "reuse_cached_deliverable": True,
+            },
+            {
+                "stage_index": 1,
+                TASK_INDEX_KEY_NAME: 1,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                NG_FAILURE_CLASS_KEY: "judge_invalid",
+                "elapsed_seconds": 20,
+                "reuse_cached_deliverable": True,
+            },
+        ]
+        failures_path_for(out).write_text("".join(json.dumps(row) + "\n" for row in failures))
+        for stage_index in range(3):
+            append_journal_record(
+                journal,
+                {
+                    "stage_index": stage_index,
+                    "status": "planned",
+                    "reference_ids": ["a"],
+                    "task_ids": [f"t{stage_index}"],
+                },
+                "FP",
+            )
+            append_journal_record(journal, {"stage_index": stage_index, "status": "complete"}, "FP")
+
+        resume = build_file_resume(out, journal, "FP")
+
+        assert set(resume.plans) == {0}
+        assert resume.outcomes == {}
+        assert set(resume.rows_by_stage) == {0}
+        assert set(resume.gated_keys) <= {0}
+        assert set(resume.elapsed_by_stage) == {0}
+        assert set(resume.reuse_cached_keys) == {0}
+        assert set(resume.attempts_by_stage) == {0}
+        assert {json.loads(line)["stage_index"] for line in out.read_text().splitlines()} == {0}
+        assert {json.loads(line)["stage_index"] for line in failures_path_for(out).read_text().splitlines()} == {0}
+        journal_records = [json.loads(line) for line in journal.read_text().splitlines()]
+        assert any(row.get("status") == "restart_from_stage" and row["stage_index"] == 0 for row in journal_records)
+        assert journal_records[-1]["status"] == "restart_cleanup_complete"
+
+    def test_historical_failure_does_not_reopen_stage_after_later_success(self, tmp_path: Path) -> None:
+        out = tmp_path / "rollouts.jsonl"
+        journal = journal_path_for(out)
+        from resources_servers.gdpval.multistage_orchestrator import append_journal_record
+
+        main_rows = [
+            {"stage_index": 0, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "task_id": "resolved"},
+            {"stage_index": 1, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "task_id": "downstream"},
+        ]
+        out.write_text("".join(json.dumps(row) + "\n" for row in main_rows))
+        failures_path_for(out).write_text(
+            json.dumps(
+                {
+                    "stage_index": 0,
+                    TASK_INDEX_KEY_NAME: 0,
+                    ROLLOUT_INDEX_KEY_NAME: 0,
+                    NG_FAILURE_CLASS_KEY: "judge_invalid",
+                }
+            )
+            + "\n"
+        )
+        for stage_index in range(2):
+            append_journal_record(
+                journal,
+                {"stage_index": stage_index, "status": "planned", "reference_ids": ["a"], "task_ids": ["t0"]},
+                "FP",
+            )
+            append_journal_record(journal, {"stage_index": stage_index, "status": "complete"}, "FP")
+
+        resume = build_file_resume(out, journal, "FP")
+
+        assert set(resume.outcomes) == {0, 1}
+        assert set(resume.rows_by_stage) == {0, 1}
+        assert not any(
+            json.loads(line).get("status") == "restart_from_stage" for line in journal.read_text().splitlines()
+        )
+
+    def test_legacy_terminal_timeout_reopens_stage_and_preserves_timing(self, tmp_path: Path) -> None:
+        out = tmp_path / "rollouts.jsonl"
+        out.write_bytes(b"")
+        journal = journal_path_for(out)
+        from resources_servers.gdpval.multistage_orchestrator import append_journal_record
+
+        append_journal_record(
+            journal,
+            {
+                "stage_index": 1,
+                "status": "planned",
+                "reference_ids": ["a"],
+                "task_ids": ["t0"],
+            },
+            "FP",
+        )
+        append_journal_record(journal, {"stage_index": 1, "status": "complete"}, "FP")
+        failures_path_for(out).write_text(
+            json.dumps(
+                {
+                    "stage_index": 1,
+                    TASK_INDEX_KEY_NAME: 7,
+                    ROLLOUT_INDEX_KEY_NAME: 0,
+                    NG_FAILURE_CLASS_KEY: "timeout_exceeded",
+                    NG_TERMINAL_KEY: True,
+                    "elapsed_seconds": 123.0,
+                    "reuse_cached_deliverable": True,
+                }
+            )
+            + "\n"
+        )
+
+        resume = build_file_resume(out, journal, "FP")
+
+        assert 1 not in resume.outcomes
+        assert (7, 0) not in resume.gated_keys.get(1, set())
+        assert load_failure_timings(out)[1][(7, 0)] == 123.0
+        assert load_failure_attempts(out)[1][(7, 0)] == 1
+        assert load_reuse_cached_keys(out)[1] == {(7, 0)}
+        assert resume.reuse_cached_keys[1] == {(7, 0)}
+        assert resume.attempts_by_stage[1][(7, 0)] == 1
+
+    def test_legacy_invalid_judge_main_row_migrates_before_resume(self, tmp_path: Path) -> None:
+        out = tmp_path / "rollouts.jsonl"
+        deliverables_dir = tmp_path / "deliverables" / "task-4"
+        deliverables_dir.mkdir(parents=True)
+        (deliverables_dir / "answer.txt").write_text("answer")
+        out.write_text(
+            json.dumps(
+                {
+                    "stage_index": 0,
+                    TASK_INDEX_KEY_NAME: 4,
+                    ROLLOUT_INDEX_KEY_NAME: 0,
+                    "task_id": "t4",
+                    "invalid_judge_response": True,
+                    "reward": 0.0,
+                    "deliverables_dir": str(deliverables_dir),
+                }
+            )
+            + "\n"
+        )
+        journal = journal_path_for(out)
+        from resources_servers.gdpval.multistage_orchestrator import append_journal_record
+
+        append_journal_record(
+            journal,
+            {"stage_index": 0, "status": "planned", "reference_ids": ["a"], "task_ids": ["t4"]},
+            "FP",
+        )
+        append_journal_record(journal, {"stage_index": 0, "status": "complete"}, "FP")
+
+        resume = build_file_resume(out, journal, "FP")
+
+        assert out.read_bytes() == b""
+        assert resume.rows_by_stage == {}
+        assert resume.outcomes == {}
+        assert resume.reuse_cached_keys[0] == {(4, 0)}
+        assert resume.attempts_by_stage[0][(4, 0)] == 1
+        migrated = [json.loads(line) for line in failures_path_for(out).read_text().splitlines()]
+        assert len(migrated) == 1
+        assert migrated[0][NG_FAILURE_CLASS_KEY] == "judge_invalid"
+        assert migrated[0]["reuse_cached_deliverable"] is True
+
+    def test_skipped_failure_keeps_stage_complete(self, tmp_path: Path) -> None:
+        out = tmp_path / "rollouts.jsonl"
+        out.write_bytes(b"")
+        journal = journal_path_for(out)
+        from resources_servers.gdpval.multistage_orchestrator import append_journal_record
+
+        append_journal_record(journal, {"stage_index": 0, "status": "complete"}, "FP")
+        failures_path_for(out).write_text(
+            json.dumps(
+                {
+                    "stage_index": 0,
+                    TASK_INDEX_KEY_NAME: 7,
+                    ROLLOUT_INDEX_KEY_NAME: 0,
+                    NG_FAILURE_CLASS_KEY: "skipped",
+                    NG_TERMINAL_KEY: True,
+                }
+            )
+            + "\n"
+        )
+
+        resume = build_file_resume(out, journal, "FP")
+
+        assert 0 in resume.outcomes
+        assert (7, 0) in resume.gated_keys[0]
+
     async def test_failure_row_redispatched_but_terminal_not(self) -> None:
         # A failed (non-terminal, below max) row is re-dispatched; a terminal one is not.
         task_ids = [f"t{i}" for i in range(10)]
@@ -939,12 +1686,14 @@ class TestPrepareResume:
     def test_resume_disabled_clears_existing_and_empties_state(self, tmp_path: Path) -> None:
         out = tmp_path / "rollouts.jsonl"
         journal = journal_path_for(out)
+        metrics = tmp_path / "rollouts_aggregate_metrics.json"
         out.write_text('{"x": 1}\n')
         journal.write_text('{"stage_index": 0, "status": "complete"}\n')
+        metrics.write_text('{"stale": true}\n')
         fp = compute_fingerprint(_two_stage_cfg(), REF_ELOS, _distribution(["t0"]))
         resume = _prepare_resume(self._cfg(False), out, journal, fp)
         assert isinstance(resume, StageResume)
-        assert not out.exists() and not journal.exists()
+        assert not out.exists() and not journal.exists() and not metrics.exists()
         assert resume.outcomes == {}
 
     def test_stale_fingerprint_clears_and_starts_fresh(self, tmp_path: Path) -> None:
@@ -988,3 +1737,73 @@ class TestPrepareResume:
         assert all(s["cached"] for s in again)
         assert [s["reference_ids"] for s in again] == [s["reference_ids"] for s in base]
         assert [s["eval_elo"] for s in again] == [s["eval_elo"] for s in base]
+
+
+class TestIntegrationWiring:
+    async def test_multistage_forwards_one_budget_and_shared_tracker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: List[Dict[str, Any]] = []
+        cache_namespaces: List[str] = []
+
+        class FakeHelper:
+            def _preprocess_rows_from_config(self, config):
+                return _materialized_rows(["t0"])
+
+            def run_examples(self, rows, **kwargs):
+                calls.append(kwargs)
+                cache_namespaces.extend(row["verify_cache_namespace"] for row in rows)
+
+                async def done(row):
+                    reference_id = row["reference_ids"][0]
+                    return row, {
+                        "task_id": row["task_id"],
+                        "per_reference": {
+                            reference_id: {
+                                "wins": 1,
+                                "losses": 0,
+                                "ties": 0,
+                                "reference_elo": REF_ELOS[reference_id],
+                            }
+                        },
+                    }
+
+                return [done(row) for row in rows]
+
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+                return tmp_path / "aggregate.json"
+
+        monkeypatch.setattr(rollout_collection_module, "RolloutCollectionHelper", FakeHelper)
+        monkeypatch.setattr(
+            "resources_servers.gdpval.multistage_orchestrator.ensure_distribution",
+            lambda *args, **kwargs: (_distribution(["t0"]), None),
+        )
+        config = SimpleNamespace(
+            input_jsonl_fpath=str(tmp_path / "input.jsonl"),
+            output_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
+            num_samples_in_parallel=2,
+            dispatch_budget_s=120.0,
+            drain_margin_s=15.0,
+            dispatch_longest_first=True,
+            resume_from_cache=False,
+        )
+        global_config = {
+            "multistage": {"enabled": True, "stages": ["1", "1"], "seed": 0},
+            "gdpval": {
+                "resources_servers": {
+                    "gdpval": {"reference_models": {key: {"elo": elo} for key, elo in REF_ELOS.items()}}
+                }
+            },
+        }
+
+        await run_e2e_multistage(config, global_config)
+
+        assert len(calls) == 2
+        assert calls[0]["latency_tracker"] is calls[1]["latency_tracker"]
+        assert 0 <= calls[1]["dispatch_budget_s"] <= calls[0]["dispatch_budget_s"] <= 120.0
+        assert [call["drain_margin_s"] for call in calls] == [15.0, 15.0]
+        persisted = [json.loads(line) for line in (tmp_path / "rollouts.jsonl").read_text().splitlines()]
+        assert {row["expected_final_stage_index"] for row in persisted} == {1}
+        assert {row["expected_stage_row_count"] for row in persisted} == {1}
+        assert len(set(cache_namespaces)) == 1
+        assert len(cache_namespaces[0]) == 64

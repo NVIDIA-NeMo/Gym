@@ -95,6 +95,44 @@ class TestConvertToPdfErrors:
         # The path should be a unique tempdir (one per call); just sanity-check it points to a path.
         assert "/lo-profile-" in env_flags[0]
 
+    def test_failed_conversion_retries_roundtripped_copy_without_mutating_source(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        source = tmp_path / "report.docx"
+        original = b"original OOXML package"
+        source.write_bytes(original)
+        calls: list[Path] = []
+
+        class _Completed:
+            returncode = 0
+            stdout = ""
+            stderr = "Error: source file could not be loaded"
+
+        def _roundtrip(src: Path, dst: Path) -> None:
+            assert src == source
+            dst.write_bytes(b"roundtripped package")
+
+        def _run(command, *_args, **_kwargs):
+            input_path = Path(command[-1])
+            calls.append(input_path)
+            if len(calls) == 2:
+                outdir = Path(command[command.index("--outdir") + 1])
+                (outdir / f"{input_path.stem}.pdf").write_bytes(b"%PDF retry")
+            return _Completed()
+
+        monkeypatch.setattr(pcv, "roundtrip_ooxml_copy", _roundtrip)
+        monkeypatch.setattr(subprocess, "run", _run)
+
+        _path, ok, message = pcv.convert_to_pdf(source)
+
+        assert ok is True
+        assert "round-trip retry" in message
+        assert len(calls) == 2
+        assert calls[0] == source
+        assert "gdpval-roundtrip-" in str(calls[1])
+        assert source.read_bytes() == original
+        assert source.with_suffix(".pdf").read_bytes() == b"%PDF retry"
+
 
 class TestPreconvertDirSurfacesFailures:
     def test_returns_error_messages(self, tmp_path: Path, monkeypatch) -> None:
@@ -126,6 +164,138 @@ class TestPreconvertDirSurfacesFailures:
 
         ok, fail, errors = pcv.preconvert_dir(str(tmp_path))
         assert (ok, fail, errors) == (1, 0, [])
+
+
+class TestStructuredXlsxText:
+    def test_sparse_extreme_coordinate_does_not_scan_empty_rectangle(self, tmp_path: Path) -> None:
+        openpyxl = pytest.importorskip("openpyxl")
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        sheet.title = "Sparse"
+        sheet["A1"] = "start"
+        sheet["XFD1048576"] = "far corner"
+        path = tmp_path / "sparse.xlsx"
+        workbook.save(path)
+        workbook.close()
+
+        text = pcv.extract_xlsx_structured_text(path, max_chars=500)
+
+        assert "A1: value=start" in text
+        assert "XFD1048576: value=far corner" in text
+        assert len(text) <= 500
+
+    def test_formula_and_truncation_marker_fit_within_bound(self, tmp_path: Path) -> None:
+        openpyxl = pytest.importorskip("openpyxl")
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        sheet["A1"] = 2
+        sheet["A2"] = 3
+        sheet["A3"] = "=SUM(A1:A2)"
+        sheet["A4"] = "X" * 500
+        path = tmp_path / "bounded.xlsx"
+        workbook.save(path)
+        workbook.close()
+
+        text = pcv.extract_xlsx_structured_text(path, max_chars=100)
+
+        assert "A3: formula: =SUM(A1:A2)" in text
+        assert text.endswith("[...spreadsheet text truncated]")
+        assert len(text) <= 100
+
+    def test_formula_includes_cached_value_when_package_provides_one(self, tmp_path: Path) -> None:
+        import zipfile
+
+        openpyxl = pytest.importorskip("openpyxl")
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        sheet["A1"] = 2
+        sheet["A2"] = 3
+        sheet["A3"] = "=SUM(A1:A2)"
+        original = tmp_path / "formula.xlsx"
+        cached = tmp_path / "formula_cached.xlsx"
+        workbook.save(original)
+        workbook.close()
+
+        replaced = False
+        with zipfile.ZipFile(original) as source, zipfile.ZipFile(cached, "w", zipfile.ZIP_DEFLATED) as target:
+            for item in source.infolist():
+                data = source.read(item.filename)
+                if item.filename == "xl/worksheets/sheet1.xml":
+                    updated = data.replace(
+                        b"<f>SUM(A1:A2)</f><v></v>",
+                        b"<f>SUM(A1:A2)</f><v>5</v>",
+                    )
+                    replaced = updated != data
+                    data = updated
+                target.writestr(item, data)
+        assert replaced, "test fixture did not install a formula cache"
+
+        text = pcv.extract_xlsx_structured_text(cached)
+
+        assert "A3: formula: =SUM(A1:A2); cached/display value: 5" in text
+
+    def test_first_oversize_shared_string_keeps_cell_evidence(self, tmp_path: Path) -> None:
+        import zipfile
+
+        openpyxl = pytest.importorskip("openpyxl")
+        workbook = openpyxl.Workbook()
+        workbook.active["A1"] = "seed"
+        original = tmp_path / "inline.xlsx"
+        shared = tmp_path / "shared.xlsx"
+        workbook.save(original)
+        workbook.close()
+
+        spreadsheet_ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+        sheet_xml = (
+            f'<worksheet xmlns="{spreadsheet_ns}"><sheetData><row r="1">'
+            '<c r="A1" t="s"><v>0</v></c></row></sheetData></worksheet>'
+        ).encode()
+        shared_xml = (
+            f'<sst xmlns="{spreadsheet_ns}" count="1" uniqueCount="1"><si><t>' + "X" * 10_000 + "</t></si></sst>"
+        ).encode()
+        with zipfile.ZipFile(original) as source, zipfile.ZipFile(shared, "w", zipfile.ZIP_DEFLATED) as target:
+            for item in source.infolist():
+                data = source.read(item.filename)
+                if item.filename == "xl/worksheets/sheet1.xml":
+                    data = sheet_xml
+                target.writestr(item, data)
+            target.writestr("xl/sharedStrings.xml", shared_xml)
+
+        text = pcv.extract_xlsx_structured_text(shared, max_chars=100)
+
+        assert "A1: value=" in text
+        assert text.endswith("[...spreadsheet text truncated]")
+        assert len(text) <= 100
+
+
+@pytest.mark.parametrize("extension", [".docx", ".pptx", ".xlsx"])
+def test_roundtrip_ooxml_copy_uses_format_library_and_preserves_source(tmp_path: Path, extension: str) -> None:
+    source = tmp_path / f"source{extension}"
+    destination = tmp_path / f"roundtripped{extension}"
+
+    if extension == ".docx":
+        docx = pytest.importorskip("docx")
+        document = docx.Document()
+        document.add_paragraph("GDPVal document")
+        document.save(source)
+    elif extension == ".pptx":
+        pptx = pytest.importorskip("pptx")
+        presentation = pptx.Presentation()
+        presentation.slides.add_slide(presentation.slide_layouts[6])
+        presentation.save(source)
+    else:
+        openpyxl = pytest.importorskip("openpyxl")
+        workbook = openpyxl.Workbook()
+        workbook.active["A1"] = "GDPVal workbook"
+        workbook.save(source)
+        workbook.close()
+
+    original = source.read_bytes()
+    pcv.roundtrip_ooxml_copy(source, destination)
+
+    assert source.read_bytes() == original
+    assert destination.is_file()
+    assert destination.read_bytes().startswith(b"PK")
 
 
 @pytest.mark.asyncio
