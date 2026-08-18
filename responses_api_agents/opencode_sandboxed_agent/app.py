@@ -65,6 +65,7 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     remote_opencode_install_script_path: Optional[str] = None
     remote_opencode_binary_path: Optional[str] = None
     opencode_config: Dict[str, Any] = Field(default_factory=dict)
+    opencode_max_context_window: int
 
     # Sandbox config
     sandbox_provider: str
@@ -158,10 +159,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     "models": {
                         "dummy_model": {
                             "limit": {
-                                "context": 262144,
-                                "input": 262144,
+                                "context": self.config.opencode_max_context_window,
+                                "input": self.config.opencode_max_context_window,
                                 # See the OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX flag below for more information.
-                                "output": 262144,
+                                "output": self.config.opencode_max_context_window,
                             },
                         },
                     },
