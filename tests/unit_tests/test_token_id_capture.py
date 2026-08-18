@@ -30,6 +30,7 @@ from time import time
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
+import orjson
 import pytest
 from fastapi import Body, Request
 from fastapi.testclient import TestClient
@@ -119,6 +120,16 @@ def test_extract_token_fields_rejects_partial_metadata():
         )
 
 
+def test_extract_token_fields_rejects_multiple_carriers():
+    carrier = {
+        "prompt_token_ids": PTOKS,
+        "generation_token_ids": GTOKS,
+        "generation_log_probs": LPS,
+    }
+    with pytest.raises(ValueError, match="multiple response items"):
+        extract_token_fields({"output": [carrier, carrier]})
+
+
 def test_token_entry_rejects_mismatched_generation_arrays():
     with pytest.raises(ValidationError, match="same length"):
         TokenEntry(
@@ -170,7 +181,46 @@ def test_token_store_put_is_idempotent_and_conflicts_fail_closed(tmp_path):
     assert store.read_entries("r0") == [entry]
 
 
-def test_token_store_seal_is_atomic_and_conditional_drop_is_race_safe(tmp_path):
+def test_token_store_append_uses_the_compact_entry_index(tmp_path, monkeypatch):
+    store = TokenCaptureStore(tmp_path)
+    entry = TokenEntry(
+        rollout_id="r0",
+        model_call_id="c0",
+        prompt_token_ids=PTOKS,
+        generation_token_ids=GTOKS,
+        generation_log_probs=LPS,
+    )
+    store.append(entry)
+
+    def fail_if_rescanned(_rollout_id):
+        raise AssertionError("append rescanned prior token records")
+
+    monkeypatch.setattr(store, "_read_entries_unlocked", fail_if_rescanned)
+    store.append(entry.model_copy(update={"model_call_id": "c1"}))
+    store.append(entry)
+
+
+def test_token_store_recovers_an_unindexed_durable_tail(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    entry = TokenEntry(
+        rollout_id="r0",
+        model_call_id="c0",
+        prompt_token_ids=PTOKS,
+        generation_token_ids=GTOKS,
+        generation_log_probs=LPS,
+    )
+    payload = orjson.dumps(entry.model_dump(mode="json"), option=orjson.OPT_SORT_KEYS) + b"\n"
+    store.path_for("r0").write_bytes(payload)
+
+    store.append(entry)
+
+    assert store.read_entries("r0") == [entry]
+    state = orjson.loads(store.state_path_for("r0").read_bytes())
+    assert state["indexed_size"] == len(payload)
+    assert set(state["entry_digests"]) == {"c0"}
+
+
+def test_token_store_freeze_is_atomic_and_conditional_drop_is_race_safe(tmp_path):
     store = TokenCaptureStore(tmp_path)
     entry = TokenEntry(
         rollout_id="r0",
@@ -180,17 +230,17 @@ def test_token_store_seal_is_atomic_and_conditional_drop_is_race_safe(tmp_path):
         generation_log_probs=LPS,
     )
     asyncio.run(store.put(entry))
-    snapshot = asyncio.run(store.seal("r0"))
+    snapshot = asyncio.run(store.freeze("r0"))
     assert snapshot.entries == (entry,)
-    assert asyncio.run(store.seal("r0")) == snapshot
+    assert asyncio.run(store.freeze("r0")) == snapshot
 
-    with pytest.raises(RuntimeError, match="already sealed"):
+    with pytest.raises(RuntimeError, match="already frozen"):
         asyncio.run(store.put(entry.model_copy(update={"model_call_id": "late"})))
     asyncio.run(store.mark_incomplete("r0", "late"))
-    assert not asyncio.run(store.drop("r0", seal_id=snapshot.seal_id, version=snapshot.version))
-    updated = asyncio.run(store.seal("r0"))
+    assert not asyncio.run(store.drop("r0", snapshot_id=snapshot.snapshot_id, version=snapshot.version))
+    updated = asyncio.run(store.freeze("r0"))
     assert updated.incomplete
-    assert asyncio.run(store.drop("r0", seal_id=updated.seal_id, version=updated.version))
+    assert asyncio.run(store.drop("r0", snapshot_id=updated.snapshot_id, version=updated.version))
     assert store.read_entries("r0") == []
 
 
@@ -334,7 +384,7 @@ def _both_enabled(tmp_path) -> dict:
 
 def test_responses_call_captures_tokens_joined_to_eval_record(tmp_path):
     client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
-    resp = client.post("/ng-rollout/task0-roll0/token-capture/v1/responses", json={"input": "hi"})
+    resp = client.post("/ng-rollout/task0-roll0/training-token-capture/v1/responses", json={"input": "hi"})
     assert resp.status_code == 200
 
     tokens = TokenCaptureStore(tmp_path).read_entries("task0-roll0")
@@ -349,7 +399,7 @@ def test_responses_call_captures_tokens_joined_to_eval_record(tmp_path):
 
 def test_captured_entry_carries_content(tmp_path):
     client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
-    client.post("/ng-rollout/task0-rollC/token-capture/v1/responses", json={"input": "hi"})
+    client.post("/ng-rollout/task0-rollC/training-token-capture/v1/responses", json={"input": "hi"})
     tokens = TokenCaptureStore(tmp_path).read_entries("task0-rollC")
     assert len(tokens) == 1
     # Not token-only: the captured record carries the content-bearing output items.
@@ -365,7 +415,7 @@ def test_token_arrays_are_stored_once(tmp_path):
     value a trainer reads: an item's prompt in a chained trajectory is the running sequence.
     """
     client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
-    client.post("/ng-rollout/task0-rollDedup/token-capture/v1/responses", json={"input": "hi"})
+    client.post("/ng-rollout/task0-rollDedup/training-token-capture/v1/responses", json={"input": "hi"})
     entry = TokenCaptureStore(tmp_path).read_entries("task0-rollDedup")[0]
     assert entry.generation_token_ids == GTOKS
     for item in entry.output_items:
@@ -379,7 +429,7 @@ def test_token_arrays_are_stored_once(tmp_path):
 def test_messages_call_captures_tokens(tmp_path):
     client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
     resp = client.post(
-        "/ng-rollout/task0-roll1/token-capture/v1/messages",
+        "/ng-rollout/task0-roll1/training-token-capture/v1/messages",
         json={"model": "claude-x", "max_tokens": 16, "messages": [{"role": "user", "content": "hello"}]},
     )
     assert resp.status_code == 200
@@ -392,7 +442,7 @@ def test_messages_call_captures_tokens(tmp_path):
 def test_chat_completions_call_captures_tokens(tmp_path):
     client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
     resp = client.post(
-        "/ng-rollout/task0-roll2/token-capture/v1/chat/completions",
+        "/ng-rollout/task0-roll2/training-token-capture/v1/chat/completions",
         json={"messages": [{"role": "user", "content": "hi"}]},
     )
     assert resp.status_code == 200
@@ -403,7 +453,7 @@ def test_chat_completions_call_captures_tokens(tmp_path):
 def test_tokens_captured_even_when_eval_capture_disabled(tmp_path):
     config = {"token_id_capture": {"enabled": True, "dir": str(tmp_path)}}
     client = TestClient(_server(config).setup_webserver())
-    resp = client.post("/ng-rollout/task1-roll0/token-capture/v1/responses", json={"input": "hi"})
+    resp = client.post("/ng-rollout/task1-roll0/training-token-capture/v1/responses", json={"input": "hi"})
     assert resp.status_code == 200
     assert len(TokenCaptureStore(tmp_path).read_entries("task1-roll0")) == 1
     # No eval capture file was written.
@@ -455,7 +505,7 @@ def test_streamed_messages_capture_tokens_absent_from_the_stream(tmp_path):
     client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
     with client.stream(
         "POST",
-        "/ng-rollout/stream0-roll0/token-capture/v1/messages",
+        "/ng-rollout/stream0-roll0/training-token-capture/v1/messages",
         json={
             "model": "claude-x",
             "max_tokens": 16,
@@ -490,7 +540,7 @@ def test_capture_failure_marks_the_rollout_incomplete(tmp_path, monkeypatch):
     monkeypatch.setattr(TokenCaptureStore, "put", boom)
     client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
     # The model call still succeeds.
-    resp = client.post("/ng-rollout/fail0-roll0/token-capture/v1/responses", json={"input": "hi"})
+    resp = client.post("/ng-rollout/fail0-roll0/training-token-capture/v1/responses", json={"input": "hi"})
     assert resp.status_code == 200
     assert store.read_entries("fail0-roll0") == []
     assert store.is_incomplete("fail0-roll0")
@@ -523,7 +573,7 @@ def test_a_response_without_token_ids_marks_the_rollout_incomplete(tmp_path):
     as if the environment had written them.
     """
     client = TestClient(_silent_server(_both_enabled(tmp_path)).setup_webserver())
-    resp = client.post("/ng-rollout/silent0-roll0/token-capture/v1/responses", json={"input": "hi"})
+    resp = client.post("/ng-rollout/silent0-roll0/training-token-capture/v1/responses", json={"input": "hi"})
     # The model call itself still succeeds; capture never breaks the harness's run.
     assert resp.status_code == 200
 
@@ -561,7 +611,7 @@ def test_external_mode_still_mints_identity_for_a_correlated_call(tmp_path):
     )
     assert (
         TestClient(model.setup_webserver())
-        .post("/ng-rollout/ext0-r0/token-capture/v1/responses", json={"input": "hi"})
+        .post("/ng-rollout/ext0-r0/training-token-capture/v1/responses", json={"input": "hi"})
         .status_code
         == 200
     )
@@ -578,7 +628,9 @@ def test_external_mode_does_not_mark_a_token_less_response_incomplete(tmp_path):
     marking here would mask every rollout of the run.
     """
     client = TestClient(_silent_server(_external_mode(tmp_path)).setup_webserver())
-    assert client.post("/ng-rollout/ext1-r0/token-capture/v1/responses", json={"input": "hi"}).status_code == 200
+    assert (
+        client.post("/ng-rollout/ext1-r0/training-token-capture/v1/responses", json={"input": "hi"}).status_code == 200
+    )
     assert list(tmp_path.glob("**/*.incomplete")) == []
 
 
@@ -701,7 +753,7 @@ def test_installed_sink_receives_entries_without_a_capture_dir(installed_sink):
     """The framework path: capture on, no directory anywhere, records still arrive."""
     config = {"token_id_capture": {"enabled": True, "rebuild_response": False}}
     client = TestClient(_server(config).setup_webserver())
-    resp = client.post("/ng-rollout/task0-sink0/token-capture/v1/responses", json={"input": "hi"})
+    resp = client.post("/ng-rollout/task0-sink0/training-token-capture/v1/responses", json={"input": "hi"})
     assert resp.status_code == 200
     assert len(installed_sink.entries) == 1
     assert installed_sink.entries[0].generation_token_ids == GTOKS
@@ -737,7 +789,7 @@ def test_installed_sink_is_marked_incomplete_through_the_protocol(installed_sink
 
     monkeypatch.setattr(installed_sink, "put", boom)
     client = TestClient(_server({"token_id_capture": {"enabled": True, "rebuild_response": False}}).setup_webserver())
-    resp = client.post("/ng-rollout/task0-sink1/token-capture/v1/responses", json={"input": "hi"})
+    resp = client.post("/ng-rollout/task0-sink1/training-token-capture/v1/responses", json={"input": "hi"})
     assert resp.status_code == 200  # capture never fails the model call
     assert installed_sink.incomplete == [("task0-sink1", installed_sink.incomplete[0][1])]
 
@@ -755,7 +807,7 @@ def test_a_sink_without_mark_incomplete_is_logged_not_swallowed(caplog):
             _server({"token_id_capture": {"enabled": True, "rebuild_response": False}}).setup_webserver()
         )
         with caplog.at_level(logging.ERROR):
-            resp = client.post("/ng-rollout/task0-sink2/token-capture/v1/responses", json={"input": "hi"})
+            resp = client.post("/ng-rollout/task0-sink2/training-token-capture/v1/responses", json={"input": "hi"})
         assert resp.status_code == 200
         assert any("does not implement mark_incomplete" in r.message for r in caplog.records)
     finally:
@@ -814,7 +866,7 @@ def test_a_malformed_token_payload_does_not_fail_the_model_call(installed_sink):
         client = TestClient(
             _server({"token_id_capture": {"enabled": True, "rebuild_response": False}}).setup_webserver()
         )
-        resp = client.post("/ng-rollout/task0-bad0/token-capture/v1/responses", json={"input": "hi"})
+        resp = client.post("/ng-rollout/task0-bad0/training-token-capture/v1/responses", json={"input": "hi"})
 
     assert resp.status_code == 200, "a malformed token payload must not fail the model call"
     assert installed_sink.entries == [], "nothing should have been written"
@@ -926,7 +978,10 @@ def test_a_configured_sink_receives_entries(tmp_path):
     }
     client = TestClient(_server(config).setup_webserver())
 
-    assert client.post("/ng-rollout/task0-cfg0/token-capture/v1/responses", json={"input": "hi"}).status_code == 200
+    assert (
+        client.post("/ng-rollout/task0-cfg0/training-token-capture/v1/responses", json={"input": "hi"}).status_code
+        == 200
+    )
 
     assert [e.rollout_id for e in _ConfiguredSink.entries] == ["task0-cfg0"]
     assert _ConfiguredSink.entries[0].generation_token_ids == GTOKS
@@ -944,7 +999,10 @@ def test_a_configured_sink_wins_over_an_installed_one(installed_sink):
     }
     client = TestClient(_server(config).setup_webserver())
 
-    assert client.post("/ng-rollout/task0-cfg1/token-capture/v1/responses", json={"input": "hi"}).status_code == 200
+    assert (
+        client.post("/ng-rollout/task0-cfg1/training-token-capture/v1/responses", json={"input": "hi"}).status_code
+        == 200
+    )
 
     assert len(_ConfiguredSink.entries) == 1
     assert installed_sink.entries == []

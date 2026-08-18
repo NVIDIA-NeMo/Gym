@@ -855,11 +855,24 @@ def test_base_agent_propagates_explicit_token_capture_intent():
         "token_id_capture": {"enabled": True},
     }
     opted_in = _make_base_agent(global_config, token_id_capture=True)
-    assert opted_in.url_path_for_run("/v1/responses", body) == "/ng-rollout/3-1/token-capture/v1/responses"
-    assert opted_in.base_url_for_run("http://h:1", body) == "http://h:1/ng-rollout/3-1/token-capture"
+    assert opted_in.url_path_for_run("/v1/responses", body) == "/ng-rollout/3-1/training-token-capture/v1/responses"
+    assert opted_in.base_url_for_run("http://h:1", body) == "http://h:1/ng-rollout/3-1/training-token-capture"
 
     opted_out = _make_base_agent(global_config, token_id_capture=False)
     assert opted_out.url_path_for_run("/v1/responses", body) == "/ng-rollout/3-1/v1/responses"
+
+
+def test_base_agent_all_agents_overrides_the_agent_opt_in():
+    body = {TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 1}
+    global_config = {
+        "token_id_capture": {
+            "enabled": True,
+            "all_agents": True,
+        }
+    }
+    agent = _make_base_agent(global_config, token_id_capture=False)
+
+    assert agent.url_path_for_run("/v1/responses", body) == ("/ng-rollout/3-1/training-token-capture/v1/responses")
 
 
 def test_base_agent_url_path_for_request_propagates_inbound_prefix():
@@ -873,10 +886,11 @@ def test_base_agent_url_path_for_request_propagates_inbound_prefix():
 
     capture_prefixed = SimpleNamespace(
         path_params={"rollout_id": "7-0"},
-        url=SimpleNamespace(path="/ng-rollout/7-0/token-capture/v1/responses"),
+        url=SimpleNamespace(path="/ng-rollout/7-0/training-token-capture/v1/responses"),
     )
     assert (
-        agent.url_path_for_request("/v1/responses", capture_prefixed) == "/ng-rollout/7-0/token-capture/v1/responses"
+        agent.url_path_for_request("/v1/responses", capture_prefixed)
+        == "/ng-rollout/7-0/training-token-capture/v1/responses"
     )
 
 
@@ -885,7 +899,7 @@ def test_base_agent_registers_prefixed_self_call_route():
 
     routes = {route.path for route in _make_base_agent({}).setup_webserver().routes}
     assert f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/v1/responses" in routes
-    assert f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/token-capture/v1/responses" in routes
+    assert f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/training-token-capture/v1/responses" in routes
     assert "/v1/responses" in routes
 
 

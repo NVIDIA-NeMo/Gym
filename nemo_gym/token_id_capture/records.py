@@ -142,28 +142,28 @@ def response_to_output_items(payload: dict) -> list[dict]:
 def strip_token_fields(items: list[dict]) -> tuple[list[dict], int | None]:
     """Drop the token arrays from output items, keeping the content.
 
-    Returns the stripped items and the index of the item the arrays came off, which
-    is the last one carrying them, matching what ``extract_token_fields`` reads. The
-    arrays are held once on the entry instead: storing them again per item roughly
-    doubles a record, and the per-item values are not the ones a trainer sees, since
-    the builder replaces an item's prompt with the chain's running sequence.
+    Return the stripped items and the index of their token-bearing item.
+    Capture requires exactly one token-bearing item.
+    The arrays are held once on the entry.
+    Storing them again per item would roughly double the record size.
     """
-    index: int | None = None
+    indices: list[int] = []
     stripped: list[dict] = []
     for position, item in enumerate(items):
         if item.get("generation_token_ids") is not None:
-            index = position
+            indices.append(position)
         stripped.append({key: value for key, value in item.items() if key not in TOKEN_FIELDS})
-    return stripped, index
+    if len(indices) > 1:
+        raise ValueError("multiple output items carry token metadata")
+    return stripped, indices[0] if indices else None
 
 
 def extract_token_fields(response_json: dict) -> dict | None:
     """Pull the token-id fields off a served response, or ``None`` if absent.
 
-    Handles both shapes a Gym model server can return: a Responses-style
-    ``output`` list (the fields ride the last output item that carries them) and
-    a chat-completions ``choices[*].message``. Returns ``None`` when no item
-    carries token ids (e.g. token-id return is off, or an empty completion).
+    Handle Responses output items and Chat Completions messages.
+    Exactly one item may carry token metadata.
+    Return ``None`` when no item carries token ids.
     """
     candidates: list[dict] = []
     required = ("prompt_token_ids", "generation_token_ids", "generation_log_probs")
@@ -176,7 +176,9 @@ def extract_token_fields(response_json: dict) -> dict | None:
             candidates.append(message)
     if not candidates:
         return None
-    source = candidates[-1]
+    if len(candidates) > 1:
+        raise ValueError("multiple response items carry token metadata")
+    source = candidates[0]
     missing = [field for field in required if source.get(field) is None]
     if missing:
         raise ValueError(f"partial token metadata is missing: {', '.join(missing)}")

@@ -50,12 +50,11 @@ from nemo_gym.server_utils import (
 class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
     skip_verification: bool = False
     skip_verification_reward: float = 0.0
-    # Whether this agent's rollouts participate in training token capture. Native agents receive
-    # token ids inline on the model response and leave this off; opaque external harnesses (whose
-    # returned output carries no token ids) set it true so their model calls are correlated and
-    # captured into the token store, then rebuilt into a token-bearing response.output. The run-level
-    # token_id_capture.enabled switch still gates the capture infrastructure; this scopes which
-    # agents use it.
+    # Whether this agent's rollouts participate in training token capture.
+    # Native agents already receive token ids inline and normally leave this disabled.
+    # Opaque external harnesses enable it because their returned output has no token ids.
+    # The run-level ``token_id_capture.enabled`` setting gates the capture infrastructure.
+    # The run-level ``token_id_capture.all_agents`` setting overrides this agent-level choice.
     token_id_capture: bool = False
 
 
@@ -72,9 +71,9 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         self.setup_session_middleware(app)
 
         app.post("/v1/responses")(self.responses)
-        # Prefixed twin of /v1/responses: a self-call made with url_path_for_run() lands here, and
-        # responses() recovers the rollout id from the path (see url_path_for_request) to correlate
-        # its model calls. Same handler, so unprefixed calls are unaffected.
+        # A self-call made with ``url_path_for_run`` lands on a prefixed twin.
+        # ``responses`` recovers the rollout id from the path.
+        # The same handler serves prefixed and unprefixed calls.
         app.post(f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/v1/responses")(self.responses)
         app.post(f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/{TOKEN_CAPTURE_PATH_SEGMENT}/v1/responses")(self.responses)
 
@@ -120,7 +119,9 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         if not isinstance(global_config, Mapping):
             return False
         block = global_config.get(TOKEN_ID_CAPTURE_BLOCK) or {}
-        return bool(isinstance(block, Mapping) and block.get("enabled", False)) and bool(
+        if not isinstance(block, Mapping) or not block.get("enabled", False):
+            return False
+        return bool(block.get("all_agents", False)) or bool(
             getattr(getattr(self, "config", None), "token_id_capture", False)
         )
 
