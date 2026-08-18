@@ -23,8 +23,7 @@ The PR also contains this narrow supporting surface:
 - the OpenAir server's explicit-close route;
 - Gymnasium-agent cookie continuity and opt-in explicit-close cleanup;
 - corresponding Gymnasium-agent tests;
-- the root environment index; and
-- the Fern tutorial and navigation entry.
+- the root environment index.
 
 These files are review scope, not evidence of upstream acceptance.
 
@@ -67,9 +66,8 @@ This branch does not claim:
 - upstream maintainer acceptance.
 
 Hosted-policy evaluation, reward profiling, and NeMo RL training use the
-standard Gym workflows documented in the README and Fern tutorial. They are
-optional empirical work, separate from the reproducible code-correctness
-evidence above.
+standard Gym workflows documented in the README. They are optional empirical
+work, separate from the reproducible code-correctness evidence above.
 
 ## Reproduction commands
 

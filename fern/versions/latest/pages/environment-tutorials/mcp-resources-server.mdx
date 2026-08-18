@@ -1,13 +1,13 @@
 ---
 title: "MCP Resources Server"
 description: "Serve a Resources Server's tools over the Model Context Protocol (MCP) with one config flag, and verify their use — with a runnable Claude Code example"
-position: 7
+position: 6
 ---
 import { NavButton } from "../../../../components/NavButton";
 
 This tutorial shows how to expose environment tools over the **Model Context Protocol (MCP)** so that an MCP-native agent — such as Claude Code — can discover and call them, while the Resources Server still owns verification. Tools are the plain HTTP `POST` routes you already write; MCP is a transport you switch on in the server's YAML config. The pattern is: **HTTP tool routes + a `verify()` function = a Resources Server.**
 
-<NavButton href="/environment-tutorials/openair-congestion" label="5G Congestion Control" direction="prev" />
+<NavButton href="/environment-tutorials/stateful-environment" label="Stateful Environment" direction="prev" />
 
 ---
 

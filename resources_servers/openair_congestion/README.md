@@ -11,8 +11,6 @@ The default `replay` path is self-contained: it needs neither a 5G lab nor a
 GPU. It is a controlled training and evaluation environment, not a live
 OpenAirInterface or FlexRIC deployment.
 
-For a guided walkthrough, see the
-[5G congestion-control environment tutorial](https://docs.nvidia.com/nemo/gym/main/environment-tutorials/openair-congestion).
 For the code-level verification map, see
 [REVIEWER-EVIDENCE.md](REVIEWER-EVIDENCE.md).
 
@@ -227,10 +225,11 @@ control the prerecorded next state. Stored scalar rewards are ignored. The
 backend recomputes reward from the served before/after observations, the
 current evaluation action, guardrail result, and configured reward contract.
 
-For the exact checked-in and custom-JSONL YAML and run commands, follow the
-[recorded-data section of the Fern tutorial](https://docs.nvidia.com/nemo/gym/main/environment-tutorials/openair-congestion#5-choose-the-right-replay-backend).
-The workflow validates ingestion and reward diagnostics; it cannot supply the
-counterfactual next state for a different action and remains diagnostic-only.
+To use checked-in or custom JSONL, set `backend: dataset_replay` and
+`dataset_path` in `configs/openair_congestion.yaml`, then use the same
+validation, start, and evaluation commands shown above. The workflow validates
+ingestion and reward diagnostics; it cannot supply the counterfactual next
+state for a different action and remains diagnostic-only.
 
 ## Extend the environment
 
@@ -260,11 +259,11 @@ disjoint training and evaluation manifests. This package does not ship a
 validated OpenAir-specific NeMo RL job YAML; use the current NeMo RL GRPO
 tutorial as the schema authority.
 
-The [Fern tutorial](https://docs.nvidia.com/nemo/gym/main/environment-tutorials/openair-congestion)
-provides the exact NeMo RL Gym configuration and local-vLLM checkpoint
-evaluation commands. Some checkpoints need a model-specific chat template or
-tool-call parser. Keep the task rows, backend, reward version, horizon,
-decoding settings, and repeat count fixed when comparing policies.
+Evaluate a trained checkpoint by serving it through an OpenAI-compatible model
+endpoint and rerunning the `gym env start`, `gym eval run`, and
+`gym eval profile` workflow above. Some checkpoints need a model-specific chat
+template or tool-call parser. Keep the task rows, backend, reward version,
+horizon, decoding settings, and repeat count fixed when comparing policies.
 
 ## Tests
 

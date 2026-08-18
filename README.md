@@ -196,7 +196,6 @@ Learn how to build custom environments through hands-on tutorials. Here are popu
 | [Single Step](https://docs.nvidia.com/nemo/gym/main/environment-tutorials/single-step-environment) | Basic single-step tool calling |
 | [Multi Step](https://docs.nvidia.com/nemo/gym/main/environment-tutorials/multi-step-environment) | Multi-step tool calling |
 | [Session State](https://docs.nvidia.com/nemo/gym/main/environment-tutorials/stateful-environment) | Session state management (in-memory) |
-| [5G Congestion Control](https://docs.nvidia.com/nemo/gym/main/environment-tutorials/openair-congestion) | Stateful multi-turn control, deterministic dynamics, and auditable rewards |
 | [Multi Reward](https://docs.nvidia.com/nemo/gym/main/build-verifiers/multi-reward-verification) | Multiple reward components for evaluation and multi-objective RL (e.g. GDPO) |
 
 See all [environment tutorials](https://docs.nvidia.com/nemo/gym/main/environment-tutorials) for additional patterns and advanced topics.
