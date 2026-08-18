@@ -32,7 +32,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # The fields the model server attaches to a served response when token-id return
@@ -78,7 +78,7 @@ class TokenEntry(BaseModel):
     routed_experts: Any | None = None
     # The served response's output items (Responses shape), content preserved, token
     # arrays removed.
-    output_items: list[dict] = []
+    output_items: list[dict] = Field(default_factory=list)
     # Index into ``output_items`` of the item the token arrays were taken off, or null
     # when no item carried them. Records written before the arrays were de-duplicated
     # leave this unset and still carry the arrays inline, which the builder handles.
@@ -104,6 +104,15 @@ class TokenEntry(BaseModel):
                 f"token record is schema_version {self.schema_version}, but this reader understands "
                 f"up to {TOKEN_ENTRY_RECORD_SCHEMA_VERSION}. Upgrade the reader, or point it at "
                 "records written by a writer it matches."
+            )
+        if len(self.generation_token_ids) != len(self.generation_log_probs):
+            raise ValueError(
+                "generation_token_ids and generation_log_probs must have the same length "
+                f"(got {len(self.generation_token_ids)} and {len(self.generation_log_probs)})"
+            )
+        if self.token_item_index is not None and not 0 <= self.token_item_index < len(self.output_items):
+            raise ValueError(
+                f"token_item_index {self.token_item_index} is outside output_items of length {len(self.output_items)}"
             )
         return self
 
@@ -157,14 +166,18 @@ def extract_token_fields(response_json: dict) -> dict | None:
     carries token ids (e.g. token-id return is off, or an empty completion).
     """
     candidates: list[dict] = []
+    required = ("prompt_token_ids", "generation_token_ids", "generation_log_probs")
     for item in response_json.get("output") or []:
-        if isinstance(item, dict) and item.get("generation_token_ids") is not None:
+        if isinstance(item, dict) and any(item.get(field) is not None for field in required):
             candidates.append(item)
     for choice in response_json.get("choices") or []:
         message = (choice or {}).get("message") or {}
-        if isinstance(message, dict) and message.get("generation_token_ids") is not None:
+        if isinstance(message, dict) and any(message.get(field) is not None for field in required):
             candidates.append(message)
     if not candidates:
         return None
     source = candidates[-1]
+    missing = [field for field in required if source.get(field) is None]
+    if missing:
+        raise ValueError(f"partial token metadata is missing: {', '.join(missing)}")
     return {field: source.get(field) for field in TOKEN_FIELDS}

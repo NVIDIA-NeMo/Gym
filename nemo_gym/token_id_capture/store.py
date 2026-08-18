@@ -34,11 +34,15 @@ from __future__ import annotations
 import asyncio
 import fcntl
 import os
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import orjson
 
+from nemo_gym.token_id_capture.protocols import TokenCaptureSnapshot
 from nemo_gym.token_id_capture.records import TokenEntry
 
 
@@ -67,38 +71,102 @@ class TokenCaptureStore:
         """Sentinel marking that at least one call of this rollout failed to capture."""
         return self._root / f"{validate_rollout_id(rollout_id)}.tokens.incomplete"
 
-    def mark_incomplete(self, rollout_id: str, reason: str = "") -> None:
-        """Record that a call was lost.
+    def state_path_for(self, rollout_id: str) -> Path:
+        return self._root / f"{validate_rollout_id(rollout_id)}.tokens.state.json"
 
-        Capture is best effort per call, because a bad payload must never break the
-        harness, but a rollout that captured 9 of 10 calls must not be
-        indistinguishable from a complete one. The marker is a file rather than
-        an in-process counter because the writer (model server) and the reader
-        (rollout collection, or the trainer) are different processes.
-        """
+    def lock_path_for(self, rollout_id: str) -> Path:
+        return self._root / f"{validate_rollout_id(rollout_id)}.tokens.lock"
+
+    @contextmanager
+    def _locked(self, rollout_id: str, *, shared: bool = False):
+        with self.lock_path_for(rollout_id).open("a+b") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    def _read_state(self, rollout_id: str) -> dict[str, Any]:
+        path = self.state_path_for(rollout_id)
+        if not path.exists():
+            return {"sealed": False, "incomplete": False, "seal_id": "", "version": 0}
+        state = orjson.loads(path.read_bytes())
+        if not isinstance(state, dict):
+            raise ValueError(f"Invalid token-capture state for rollout {rollout_id}")
+        return state
+
+    def _write_state(self, rollout_id: str, state: dict[str, Any]) -> None:
+        payload = orjson.dumps(state, option=orjson.OPT_SORT_KEYS | orjson.OPT_APPEND_NEWLINE)
+        with tempfile.NamedTemporaryFile(dir=self._root, prefix=".tokens-state-", delete=False) as handle:
+            temporary_path = Path(handle.name)
+            try:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            except BaseException:
+                temporary_path.unlink(missing_ok=True)
+                raise
         try:
-            with self.incomplete_path_for(rollout_id).open("a") as handle:
-                handle.write(f"{reason}\n")
-        except OSError:
-            # Never let bookkeeping about a failed capture cause another failure.
-            pass
+            os.replace(temporary_path, self.state_path_for(rollout_id))
+            self._fsync_root()
+        finally:
+            temporary_path.unlink(missing_ok=True)
+
+    def _fsync_root(self) -> None:
+        descriptor = os.open(self._root, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def _mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None:
+        with self._locked(rollout_id):
+            state = self._read_state(rollout_id)
+            state["incomplete"] = True
+            state["version"] = int(state.get("version", 0)) + 1
+            self._write_state(rollout_id, state)
+            with self.incomplete_path_for(rollout_id).open("a", encoding="utf-8") as handle:
+                handle.write(f"{model_call_id}\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            self._fsync_root()
+
+    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None:
+        """Durably record that a call was lost."""
+        await asyncio.to_thread(self._mark_incomplete, rollout_id, model_call_id)
 
     def is_incomplete(self, rollout_id: str) -> bool:
-        return self.incomplete_path_for(rollout_id).exists()
+        with self._locked(rollout_id, shared=True):
+            return bool(self._read_state(rollout_id).get("incomplete", False))
 
     def append(self, entry: TokenEntry) -> None:
-        """Append one entry and fsync. Blocking file IO, so callers on the event
-        loop must offload it (e.g. ``asyncio.to_thread``)."""
-        line = orjson.dumps(entry.model_dump(), option=orjson.OPT_APPEND_NEWLINE)
-        path = self.path_for(entry.rollout_id)
-        with path.open("ab") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
+        """Idempotently append one entry and fsync."""
+        canonical = orjson.dumps(entry.model_dump(mode="json"), option=orjson.OPT_SORT_KEYS)
+        line = canonical + b"\n"
+        rollout_id = entry.rollout_id
+        with self._locked(rollout_id):
+            state = self._read_state(rollout_id)
+            if state.get("sealed", False):
+                raise RuntimeError(f"Token capture for rollout {rollout_id} is already sealed")
+            for existing in self._read_entries_unlocked(rollout_id):
+                if existing.model_call_id != entry.model_call_id:
+                    continue
+                existing_bytes = orjson.dumps(existing.model_dump(mode="json"), option=orjson.OPT_SORT_KEYS)
+                if existing_bytes == canonical:
+                    return
+                state["incomplete"] = True
+                state["version"] = int(state.get("version", 0)) + 1
+                self._write_state(rollout_id, state)
+                raise ValueError(
+                    f"Model call id {entry.model_call_id!r} was reused with a different payload "
+                    f"for rollout {rollout_id!r}"
+                )
+            with self.path_for(rollout_id).open("ab") as handle:
                 handle.write(line)
                 handle.flush()
                 os.fsync(handle.fileno())
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            state["version"] = int(state.get("version", 0)) + 1
+            self._write_state(rollout_id, state)
 
     # --- TokenSink / TokenSource. The file store is Gym's default implementation of both;
     # a framework swaps in its own without touching the capture path.
@@ -113,39 +181,78 @@ class TokenCaptureStore:
         rollout never races a partial file."""
         await asyncio.to_thread(self.append, entry)
 
+    async def seal(self, rollout_id: str) -> TokenCaptureSnapshot:
+        return await asyncio.to_thread(self._seal, rollout_id)
+
+    def _seal(self, rollout_id: str) -> TokenCaptureSnapshot:
+        with self._locked(rollout_id):
+            state = self._read_state(rollout_id)
+            if not state.get("sealed", False):
+                state["sealed"] = True
+                state["seal_id"] = uuid4().hex
+                state["version"] = int(state.get("version", 0)) + 1
+                self._write_state(rollout_id, state)
+            entries = tuple(self._read_entries_unlocked(rollout_id))
+            return TokenCaptureSnapshot(
+                rollout_id=rollout_id,
+                entries=entries,
+                incomplete=bool(state.get("incomplete", False)),
+                seal_id=str(state["seal_id"]),
+                version=int(state["version"]),
+            )
+
     async def tokens_for(self, rollout_id: str) -> list[TokenEntry]:
-        """``TokenSource``."""
+        """Compatibility read for diagnostics. Consumers should use ``seal``."""
         return await asyncio.to_thread(self.read_entries, rollout_id)
 
-    async def drop(self, rollout_id: str) -> None:
-        """``TokenSource``: delete-on-consume."""
-        await asyncio.to_thread(self.delete, rollout_id)
+    async def drop(self, rollout_id: str, *, seal_id: str, version: int) -> bool:
+        """Conditionally delete the sealed snapshot."""
+        return await asyncio.to_thread(self._drop, rollout_id, seal_id, version)
+
+    def _drop(self, rollout_id: str, seal_id: str, version: int) -> bool:
+        with self._locked(rollout_id):
+            state = self._read_state(rollout_id)
+            if (
+                not state.get("sealed", False)
+                or state.get("seal_id") != seal_id
+                or int(state.get("version", 0)) != version
+            ):
+                return False
+            self.path_for(rollout_id).unlink(missing_ok=True)
+            self.incomplete_path_for(rollout_id).unlink(missing_ok=True)
+            self.state_path_for(rollout_id).unlink(missing_ok=True)
+            self._fsync_root()
+            return True
+
+    async def close(self) -> None:
+        """The file store owns no persistent handles."""
 
     def delete(self, rollout_id: str) -> None:
-        """Remove a rollout's records and its incomplete marker.
+        """Unconditionally remove a rollout's records.
 
-        Records are large (hundreds of KB per rollout) and the append opens in
-        "ab" mode, so leaving a consumed file behind both grows the directory
-        without bound and lets a rerun that reuses the id append onto stale
-        records.
+        This compatibility helper is for administrative cleanup. Normal
+        consumers use conditional ``drop``.
         """
-        self.path_for(rollout_id).unlink(missing_ok=True)
-        self.incomplete_path_for(rollout_id).unlink(missing_ok=True)
+        with self._locked(rollout_id):
+            self.path_for(rollout_id).unlink(missing_ok=True)
+            self.incomplete_path_for(rollout_id).unlink(missing_ok=True)
+            self.state_path_for(rollout_id).unlink(missing_ok=True)
+            self._fsync_root()
 
     def read_entries(self, rollout_id: str) -> list[TokenEntry]:
+        with self._locked(rollout_id, shared=True):
+            return self._read_entries_unlocked(rollout_id)
+
+    def _read_entries_unlocked(self, rollout_id: str) -> list[TokenEntry]:
         path = self.path_for(rollout_id)
         if not path.exists():
             return []
         entries: list[TokenEntry] = []
         with path.open("rb") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
-            try:
-                for line in handle:
-                    stripped = line.strip()
-                    if stripped:
-                        entries.append(TokenEntry.model_validate(orjson.loads(stripped)))
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            for line in handle:
+                stripped = line.strip()
+                if stripped:
+                    entries.append(TokenEntry.model_validate(orjson.loads(stripped)))
         return entries
 
 

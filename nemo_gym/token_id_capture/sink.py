@@ -62,8 +62,14 @@ class CaptureContext:
 
     rollout_id: str
     model_call_id: str
-    sink: TokenSink
+    # None when capture is enabled but nothing in this process writes records. A framework that
+    # stages engine-side still needs the identity and the parent resolution this context carries,
+    # and there is no destination here to hand them to.
+    sink: TokenSink | None
     model: str = ""
+    # Set by ``commit_entry`` so the no-token-ids path can tell a call that was recorded by
+    # somebody else from one that was lost.
+    committed: bool = False
 
 
 _TOKEN_SINK: ContextVar[CaptureContext | None] = ContextVar("nemo_gym_token_sink", default=None)
@@ -71,6 +77,16 @@ _TOKEN_SINK: ContextVar[CaptureContext | None] = ContextVar("nemo_gym_token_sink
 
 def set_token_sink(sink: CaptureContext) -> Token:
     return _TOKEN_SINK.set(sink)
+
+
+def current_capture_context() -> CaptureContext | None:
+    """The capture context for the in-flight call, or None for untagged traffic.
+
+    The supported way to read the identity this call was minted with.
+    A framework that stages records from its inference worker keys them on that identity,
+    and this process is the only one that has it.
+    """
+    return _TOKEN_SINK.get()
 
 
 def reset_token_sink(token: Token) -> None:
@@ -99,11 +115,11 @@ async def capture_tokens(response: Any) -> None:
         elif isinstance(response, dict):
             payload = response
         else:
-            _capture_missing(sink, f"the response is a {type(response).__name__}")
+            await _capture_missing(sink, f"the response is a {type(response).__name__}")
             return
         info = extract_token_fields(payload)
         if info is None:
-            _capture_missing(sink, "the response carries no token ids")
+            await _capture_missing(sink, "the response carries no token ids")
             return
         # Content only: the arrays live on the entry, not on the items as well.
         content_items, token_item_index = strip_token_fields(response_to_output_items(payload))
@@ -112,9 +128,9 @@ async def capture_tokens(response: Any) -> None:
             rollout_id=sink.rollout_id,
             model_call_id=sink.model_call_id,
             model=sink.model or str(payload.get("model") or ""),
-            prompt_token_ids=info.get("prompt_token_ids") or [],
-            generation_token_ids=info.get("generation_token_ids") or [],
-            generation_log_probs=info.get("generation_log_probs") or [],
+            prompt_token_ids=info["prompt_token_ids"],
+            generation_token_ids=info["generation_token_ids"],
+            generation_log_probs=info["generation_log_probs"],
             routed_experts=info.get("routed_experts"),
             # Keep the content (assistant text, tool calls) so the trajectory the trainer
             # reads is not token-only, since text-based penalties need it.
@@ -123,7 +139,7 @@ async def capture_tokens(response: Any) -> None:
             created_at=time.time(),
         )
     except Exception:
-        _capture_failed(sink, "build")
+        await _capture_failed(sink, "build")
         return
     await commit_entry(entry)
 
@@ -144,13 +160,25 @@ async def commit_entry(entry: TokenEntry) -> None:
     sink = _TOKEN_SINK.get()
     if sink is None:
         return
+    if entry.rollout_id != sink.rollout_id or entry.model_call_id != sink.model_call_id:
+        logger.warning(
+            "Training-token capture identity mismatch for model call %s of rollout %s.",
+            sink.model_call_id,
+            sink.rollout_id,
+        )
+        await _mark_incomplete(sink)
+        return
+    if sink.sink is None:
+        sink.committed = True
+        return
     try:
         await sink.sink.put(entry)
+        sink.committed = True
     except Exception:
-        _capture_failed(sink, "write")
+        await _capture_failed(sink, "write")
 
 
-def _capture_failed(sink: CaptureContext, stage: str) -> None:
+async def _capture_failed(sink: CaptureContext, stage: str) -> None:
     """Report a capture failure without letting it reach the model call.
 
     Capture is best effort per call: a bad token payload must never fail the model call and
@@ -166,28 +194,35 @@ def _capture_failed(sink: CaptureContext, stage: str) -> None:
         sink.rollout_id,
         exc_info=True,
     )
-    _mark_incomplete(sink)
+    await _mark_incomplete(sink)
 
 
-def _capture_missing(sink: CaptureContext, reason: str) -> None:
-    """Mark the rollout when a call produced no record and nothing raised.
+async def _capture_missing(sink: CaptureContext, reason: str) -> None:
+    """Mark the rollout when a call this process should have recorded produced nothing.
 
-    An active sink means this call belongs to a rollout being captured, so a response with no
-    token ids is a hole in the chain rather than traffic to skip. The builder reads the gap
-    between one call's tokens and the next call's prompt as tool output, so a skipped call's
-    generated tokens arrive inside the next prompt at mask 0, and tokens the policy sampled
-    train as if the environment had written them.
+    A response with no token ids is a hole in the chain rather than traffic to skip.
+    The builder reads the gap between one call's tokens and the next call's prompt as tool output.
+    So a skipped call's generated tokens arrive inside the next prompt at mask 0,
+    and tokens the policy sampled train as if the environment had written them.
+
+    Two cases are not holes and are left alone.
+    A call already committed through ``commit_entry`` was recorded by a caller that had the arrays
+    when this process did not.
+    A context with no sink means nothing here writes records at all,
+    so this process cannot tell a lost call from ordinary operation and the staging side owns that.
     """
+    if sink.committed or sink.sink is None:
+        return
     logger.warning(
         "Training-token capture has no token ids for model call %s of rollout %s: %s.",
         sink.model_call_id,
         sink.rollout_id,
         reason,
     )
-    _mark_incomplete(sink)
+    await _mark_incomplete(sink)
 
 
-def _mark_incomplete(sink: CaptureContext) -> None:
+async def _mark_incomplete(sink: CaptureContext) -> None:
     """Mark the rollout, or say loudly why it could not be marked.
 
     A sink that does not implement ``mark_incomplete`` would otherwise raise inside the
@@ -205,6 +240,6 @@ def _mark_incomplete(sink: CaptureContext) -> None:
         )
         return
     try:
-        mark(sink.rollout_id, sink.model_call_id)
+        await mark(sink.rollout_id, sink.model_call_id)
     except Exception:
         logger.warning("Could not mark rollout %s incomplete.", sink.rollout_id, exc_info=True)

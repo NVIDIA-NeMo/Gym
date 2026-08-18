@@ -59,9 +59,14 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from nemo_gym.token_id_capture.protocols import TokenSink, installed_token_sink
+from nemo_gym.token_id_capture.protocols import (
+    TokenSink,
+    TokenSource,
+    installed_token_sink,
+    installed_token_source,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -82,7 +87,12 @@ class TokenIdCaptureSettings(BaseModel):
     # Keyword arguments for that constructor: an endpoint, a client, credentials. A sink for a real
     # transport needs wiring, and a zero-argument one could only get it from ambient state. Use
     # ``${oc.env:VAR}`` for anything secret rather than writing it here.
-    sink_kwargs: dict[str, Any] = {}
+    sink_kwargs: dict[str, Any] = Field(default_factory=dict)
+    # Optional paired reader for framework-owned transports.
+    source: str | None = None
+    source_kwargs: dict[str, Any] = Field(default_factory=dict)
+    # Rebuild opaque-harness responses from captured records after the run.
+    rebuild_response: bool = True
 
 
 class TokenIdCaptureConfig(BaseModel):
@@ -110,17 +120,24 @@ class TokenIdCaptureConfig(BaseModel):
                     "the file store, so %s will not be written to.",
                     block.dir,
                 )
+            if block.rebuild_response and block.source is None and installed_token_source() is None:
+                raise ValueError(
+                    "token_id_capture.source is required when a custom sink is used with rebuild_response=true"
+                )
             return self
         directory = self.resolved_dir()
         if directory is None:
             # A process that installed a sink programmatically writes through that transport and
             # never constructs the file store, so it has no directory to give.
-            if installed_token_sink() is not None:
+            if installed_token_sink() is not None and (
+                not block.rebuild_response or installed_token_source() is not None
+            ):
                 return self
-            raise ValueError(
-                "token_id_capture.dir (or model_call_capture_dir) is required when "
-                "token_id_capture.enabled is true and no sink is configured or installed"
-            )
+            if block.source is not None:
+                return self
+            if not block.rebuild_response:
+                return self
+            raise ValueError("token_id_capture requires a directory or paired source when rebuild_response=true")
         if not directory.is_absolute():
             raise ValueError("training-token capture directory must be an absolute path")
         return self
@@ -141,34 +158,39 @@ class TokenIdCaptureConfig(BaseModel):
         target = self.token_id_capture.sink
         if not self.token_id_capture.enabled or target is None:
             return None
+        return self._build_endpoint(target, self.token_id_capture.sink_kwargs, TokenSink, "sink")
+
+    def build_source(self) -> TokenSource | None:
+        """Construct a configured framework-owned source."""
+        target = self.token_id_capture.source
+        if not self.token_id_capture.enabled or target is None:
+            return None
+        return self._build_endpoint(target, self.token_id_capture.source_kwargs, TokenSource, "source")
+
+    @staticmethod
+    def _build_endpoint(target: str, kwargs: dict[str, Any], protocol: type, kind: str):
         if ":" not in target:
-            raise ValueError(f"token_id_capture.sink must be 'module.path:ClassName' (got {target!r})")
+            raise ValueError(f"token_id_capture.{kind} must be 'module.path:ClassName' (got {target!r})")
         module_path, _, class_name = target.partition(":")
         try:
             factory = getattr(import_module(module_path), class_name)
         except (ImportError, AttributeError) as error:
-            raise ValueError(f"could not load token_id_capture.sink {target!r}: {error}") from error
+            raise ValueError(f"could not load token_id_capture.{kind} {target!r}: {error}") from error
         try:
-            sink = factory(**self.token_id_capture.sink_kwargs)
+            endpoint = factory(**kwargs)
         except TypeError as error:
             raise ValueError(
-                f"could not construct token_id_capture.sink {target!r} with "
-                f"sink_kwargs={sorted(self.token_id_capture.sink_kwargs)}: {error}"
+                f"could not construct token_id_capture.{kind} {target!r} with {kind}_kwargs={sorted(kwargs)}: {error}"
             ) from error
-        # Checked here rather than at first use: a sink that cannot record a failure makes an
+        # Checked here rather than at first use: an endpoint missing a lifecycle method makes an
         # incomplete rollout look complete, and a startup error is better than that at step 400.
-        #
-        # isinstance against the protocol rather than a list of names written out here, so this
-        # keeps up when TokenSink gains a method. It only checks that the attributes exist, so the
-        # loop below adds the part it does not do. Neither checks signatures; nothing at runtime
-        # can, short of calling the methods.
-        missing = [name for name in sorted(TokenSink.__protocol_attrs__) if not callable(getattr(sink, name, None))]
-        if missing or not isinstance(sink, TokenSink):
+        missing = [name for name in sorted(protocol.__protocol_attrs__) if not callable(getattr(endpoint, name, None))]
+        if missing or not isinstance(endpoint, protocol):
             raise ValueError(
-                f"token_id_capture.sink {target!r} does not satisfy TokenSink: "
+                f"token_id_capture.{kind} {target!r} does not satisfy {protocol.__name__}: "
                 f"{', '.join(missing) or 'attribute check failed'}"
             )
-        return sink
+        return endpoint
 
 
 def token_id_capture_config(global_config_dict: Any) -> TokenIdCaptureConfig:

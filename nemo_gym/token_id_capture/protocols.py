@@ -34,9 +34,21 @@ without pulling in Gym's server stack. A unit test enforces that.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from nemo_gym.token_id_capture.records import TokenEntry
+
+
+@dataclass(frozen=True)
+class TokenCaptureSnapshot:
+    """An immutable, sealed view of one rollout's capture records."""
+
+    rollout_id: str
+    entries: tuple[TokenEntry, ...]
+    incomplete: bool
+    seal_id: str
+    version: int
 
 
 @runtime_checkable
@@ -45,71 +57,61 @@ class TokenSink(Protocol):
     framework over its own transport."""
 
     async def put(self, entry: TokenEntry) -> None:
-        """Append one record.
+        """Durably store one record.
 
-        The record must be durable before this returns: a later ``tokens_for``
-        for the same rollout has to see it. Delete-on-consume and post-rollout reads are only correct
-        because of this.
+        Repeating the same call id with the same payload is a no-op. Reusing a
+        call id with a different payload or writing after seal must fail.
 
-        May raise. The caller counts the failure and marks the rollout, and
-        never fails the model call because of it.
+        May raise. The caller marks the rollout incomplete and never fails the
+        model call because of a capture error.
         """
         ...
 
-    def mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None:
-        """Record that a call of this rollout failed to capture.
+    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None:
+        """Durably record that a call of this rollout failed to capture.
 
         The rollout is now missing a turn, and a consumer must mask the sample rather
         than train on a chain with a hole in it. The model call itself still succeeds,
         so this is the only signal that anything went wrong: a sink that drops it makes
         an incomplete rollout indistinguishable from a complete one.
-
-        Synchronous, because the caller is a failure path that cannot await. A transport
-        that needs to send should queue here and flush elsewhere.
         """
+        ...
+
+    async def close(self) -> None:
+        """Flush pending work and release resources. Idempotent."""
         ...
 
 
 @runtime_checkable
 class TokenSource(Protocol):
-    """Where a trajectory builder reads records from, and retires them afterwards."""
+    """Where a trajectory builder seals, reads, and retires records."""
 
-    async def tokens_for(self, rollout_id: str) -> list[TokenEntry]:
-        """All records for a rollout, in any order.
+    async def seal(self, rollout_id: str) -> TokenCaptureSnapshot:
+        """Seal a rollout and return one atomic snapshot.
 
-        Order carries no meaning: calls run concurrently and may be served by
-        different workers. The builder recovers structure from the records
-        themselves, using parent links or token-prefix relationships.
+        Sealing is idempotent. No successful writes may occur after it returns.
+        Entry order carries no meaning.
         """
         ...
 
-    async def drop(self, rollout_id: str) -> None:
-        """Retire a rollout's records once they have been consumed.
+    async def drop(self, rollout_id: str, *, seal_id: str, version: int) -> bool:
+        """Conditionally retire the exact sealed snapshot that was consumed.
 
-        A transport that cannot delete implements this as a no-op and leaves
-        retirement to whoever owns the storage.
+        Returns ``False`` if state changed after the snapshot. Implementations
+        that cannot delete return ``True`` and leave retention to their owner.
         """
         ...
 
-    def is_incomplete(self, rollout_id: str) -> bool:
-        """Whether a call of this rollout failed to capture, as reported by
-        ``TokenSink.mark_incomplete``.
-
-        The records that did arrive can stitch into a chain that looks perfectly
-        contiguous while missing a turn, so this is the only way to tell. A
-        transport that cannot tell returns False, the same way a transport that
-        cannot delete makes ``drop`` a no-op; the cost is that an incomplete
-        rollout of its is trained on rather than masked.
-
-        Synchronous, to match ``mark_incomplete`` on the sink side.
-        """
-        return False
+    async def close(self) -> None:
+        """Release resources. Idempotent."""
+        ...
 
 
 # Installed once at process startup by whoever owns the process: Gym's model
 # server, or a framework's inference worker. The capture path reads it when a
 # request-scoped context does not carry an explicit sink.
 _INSTALLED_SINK: TokenSink | None = None
+_INSTALLED_SOURCE: TokenSource | None = None
 
 
 def install_token_sink(sink: TokenSink | None) -> None:
@@ -120,3 +122,13 @@ def install_token_sink(sink: TokenSink | None) -> None:
 
 def installed_token_sink() -> TokenSink | None:
     return _INSTALLED_SINK
+
+
+def install_token_source(source: TokenSource | None) -> None:
+    """Set (or clear, with ``None``) the process-wide default source."""
+    global _INSTALLED_SOURCE
+    _INSTALLED_SOURCE = source
+
+
+def installed_token_source() -> TokenSource | None:
+    return _INSTALLED_SOURCE
