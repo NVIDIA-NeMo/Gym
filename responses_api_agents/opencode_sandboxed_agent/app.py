@@ -65,7 +65,6 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     remote_opencode_install_script_path: Optional[str] = None
     remote_opencode_binary_path: Optional[str] = None
     opencode_config: Dict[str, Any] = Field(default_factory=dict)
-    max_context_window: int
 
     # Sandbox config
     sandbox_provider: str
@@ -153,14 +152,18 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     "options": {
                         "baseURL": f"{get_server_url(self.config.model_server.name)}/v1",
                         "apiKey": "dummy_key",  # pragma: allowlist secret
-                        "timeout": 600000,
+                        "timeout": False,
+                        "chunkTimeout": 600000,  # in milliseconds, 10 min
                     },
                     "models": {
                         "dummy_model": {
                             "limit": {
                                 "context": 0,
                                 "input": 0,
-                                "output": self.config.max_context_window,
+                                # @bxyu-nvidia: OpenCode defaults to 32k here https://github.com/anomalyco/opencode/blob/58a99916bb96edf5cf605dc03e1be1e4bacf9ff7/packages/opencode/src/provider/transform.ts#L21
+                                # and there is no way to set it to null.
+                                # We set it here to explicitly acknowledge that this parameter is set.
+                                "output": 32_000,
                             },
                         },
                     },
@@ -311,10 +314,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             result = await sandbox.exec(
                 command=command,
                 timeout_s=self.config.sandbox_timeout,
-                env={
-                    "OPENCODE_CONFIG_CONTENT": opencode_config_content,
-                    "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": str(self.config.max_context_window),
-                },
+                env={"OPENCODE_CONFIG_CONTENT": opencode_config_content},
             )
         except:
             result = None
