@@ -1,0 +1,25 @@
+[project]
+name = "harbor-agent-agent"
+version = "0.1.0"
+requires-python = ">=3.13.14"
+dependencies = [
+    "nemo-gym",
+    "harbor>=0.20.0",
+]
+
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = ["setuptools"]
+
+[tool.setuptools.packages.find]
+where = [".."]
+include = ["harbor_agent_general"]
+
+[tool.uv]
+sources.nemo-gym = { path = "../..", editable = true }
+
+##
+# WARNING: Required to resolve conflict between Harbor and NeMo-Gym.
+# This package is never used because the Harbor's agent uses its own implementation.
+#
+override-dependencies = ["litellm"]
