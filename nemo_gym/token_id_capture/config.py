@@ -38,8 +38,9 @@ Choosing where records go
 -------------------------
 ``sink`` names a class implementing ``TokenSink``, as ``module.path:ClassName``.
 Each server process constructs its sink at app startup.
+A framework must make that class importable in the server process.
 A configured sink replaces the file store.
-The paired ``source`` implements ``TokenSource`` for consumers.
+Consumers construct and inject their ``TokenSource`` in their own process.
 Consumers call ``TokenSource.freeze`` to obtain an atomic snapshot.
 Consumers retire that exact snapshot with its ``snapshot_id`` and version.
 There is no HTTP token reader.
@@ -60,9 +61,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from nemo_gym.token_id_capture.protocols import (
     TokenSink,
-    TokenSource,
     installed_token_sink,
-    installed_token_source,
 )
 
 
@@ -89,9 +88,6 @@ class TokenIdCaptureSettings(BaseModel):
     # A real transport needs explicit endpoint, client, or credential wiring.
     # Use ``${oc.env:VAR}`` for secrets instead of writing them here.
     sink_kwargs: dict[str, Any] = Field(default_factory=dict)
-    # Optional paired reader for framework-owned transports.
-    source: str | None = None
-    source_kwargs: dict[str, Any] = Field(default_factory=dict)
     # Rebuild opaque-harness responses from captured records after the run.
     rebuild_response: bool = True
 
@@ -121,24 +117,16 @@ class TokenIdCaptureConfig(BaseModel):
                     "the file store, so %s will not be written to.",
                     block.dir,
                 )
-            if block.rebuild_response and block.source is None and installed_token_source() is None:
-                raise ValueError(
-                    "token_id_capture.source is required when a custom sink is used with rebuild_response=true"
-                )
             return self
         directory = self.resolved_dir()
         if directory is None:
             # A programmatic sink replaces the file store.
             # That process does not need a directory.
-            if installed_token_sink() is not None and (
-                not block.rebuild_response or installed_token_source() is not None
-            ):
-                return self
-            if block.source is not None:
+            if installed_token_sink() is not None:
                 return self
             if not block.rebuild_response:
                 return self
-            raise ValueError("token_id_capture requires a directory or paired source when rebuild_response=true")
+            raise ValueError("token_id_capture requires a directory or sink")
         if not directory.is_absolute():
             raise ValueError("training-token capture directory must be an absolute path")
         return self
@@ -161,13 +149,6 @@ class TokenIdCaptureConfig(BaseModel):
         if not self.token_id_capture.enabled or target is None:
             return None
         return self._build_endpoint(target, self.token_id_capture.sink_kwargs, TokenSink, "sink")
-
-    def build_source(self) -> TokenSource | None:
-        """Construct a configured framework-owned source."""
-        target = self.token_id_capture.source
-        if not self.token_id_capture.enabled or target is None:
-            return None
-        return self._build_endpoint(target, self.token_id_capture.source_kwargs, TokenSource, "source")
 
     @staticmethod
     def _build_endpoint(target: str, kwargs: dict[str, Any], protocol: type, kind: str):

@@ -307,10 +307,24 @@ def test_config_rejects_an_unknown_key():
         TokenIdCaptureConfig.model_validate({"token_id_capture": {"enabled": True, "dirr": "/tmp/x"}})
 
 
-def test_config_rejects_write_only_custom_capture():
-    with pytest.raises(ValueError, match="source is required"):
+def test_config_accepts_a_sink_without_constructing_the_consumer_source():
+    config = TokenIdCaptureConfig.model_validate(
+        {"token_id_capture": {"enabled": True, "sink": f"{__name__}:_ConfiguredSink"}}
+    )
+    assert config.token_id_capture.sink == f"{__name__}:_ConfiguredSink"
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("source", "framework.capture:Source"),
+        ("source_kwargs", {"endpoint": "transport://tokens"}),
+    ],
+)
+def test_config_rejects_framework_source_construction(key, value):
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
         TokenIdCaptureConfig.model_validate(
-            {"token_id_capture": {"enabled": True, "sink": f"{__name__}:_ConfiguredSink"}}
+            {"token_id_capture": {"enabled": True, "rebuild_response": False, key: value}}
         )
 
 
