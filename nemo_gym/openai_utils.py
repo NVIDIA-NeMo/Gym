@@ -513,11 +513,11 @@ NeMoGymResponseOutputItem = Annotated[
 
 
 class NeMoGymResponseInputTokensDetails(ResponseInputTokensDetails):
-    pass
+    cached_tokens: Optional[int]
 
 
 class NeMoGymResponseOutputTokensDetails(ResponseOutputTokensDetails):
-    pass
+    reasoning_tokens: Optional[int]
 
 
 class NeMoGymResponseUsage(ResponseUsage):
@@ -535,12 +535,25 @@ class NeMoGymResponseUsage(ResponseUsage):
         )
         for usage in usages:
             final_usage.input_tokens += usage.input_tokens
-            final_usage.input_tokens_details.cached_tokens += usage.input_tokens_details.cached_tokens
+            final_usage.input_tokens_details.cached_tokens = _add_optional_token_counts(
+                final_usage.input_tokens_details.cached_tokens,
+                usage.input_tokens_details.cached_tokens,
+            )
             final_usage.output_tokens += usage.output_tokens
-            final_usage.output_tokens_details.reasoning_tokens += usage.output_tokens_details.reasoning_tokens
+            final_usage.output_tokens_details.reasoning_tokens = _add_optional_token_counts(
+                final_usage.output_tokens_details.reasoning_tokens,
+                usage.output_tokens_details.reasoning_tokens,
+            )
             final_usage.total_tokens += usage.total_tokens
 
         return final_usage
+
+
+def _add_optional_token_counts(left: Optional[int], right: Optional[int]) -> Optional[int]:
+    """Add reported token counts without turning an unknown count into a measurement."""
+    if left is None or right is None:
+        return None
+    return left + right
 
 
 def accumulate_response_usage(
@@ -557,9 +570,15 @@ def accumulate_response_usage(
     result.output_tokens += additional.output_tokens
     result.total_tokens += additional.total_tokens
     if result.input_tokens_details is not None and additional.input_tokens_details is not None:
-        result.input_tokens_details.cached_tokens += additional.input_tokens_details.cached_tokens
+        result.input_tokens_details.cached_tokens = _add_optional_token_counts(
+            result.input_tokens_details.cached_tokens,
+            additional.input_tokens_details.cached_tokens,
+        )
     if result.output_tokens_details is not None and additional.output_tokens_details is not None:
-        result.output_tokens_details.reasoning_tokens += additional.output_tokens_details.reasoning_tokens
+        result.output_tokens_details.reasoning_tokens = _add_optional_token_counts(
+            result.output_tokens_details.reasoning_tokens,
+            additional.output_tokens_details.reasoning_tokens,
+        )
     return result
 
 
