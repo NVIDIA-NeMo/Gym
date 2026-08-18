@@ -826,7 +826,7 @@ async def test_exec_background_reports_oom_status_after_502(monkeypatch: pytest.
 
     message = str(exc_info.value)
     assert "OOM-killed" in message
-    assert "SandboxResources.memory_mib" in message
+    assert "SandboxResources.memory_mib" not in message
     assert "reason='FAILED'" in message
     assert len(message) < 800
     assert isinstance(exc_info.value.__cause__, Backend502Error)

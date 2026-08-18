@@ -1277,7 +1277,7 @@ class OpenSandboxProvider:
             message = getattr(oom_status, "message", None)
             message = str(message or "")[:500]
             raise SandboxBackendUnreachableError(
-                "Sandbox was OOM-killed; increase SandboxResources.memory_mib or reduce memory use. "
+                "Sandbox was OOM-killed. "
                 f"OpenSandbox status: state={state!r}, reason={reason!r}, message={message!r}; "
                 f"sandbox_id={handle.sandbox_id!r}"
             ) from error
