@@ -115,11 +115,7 @@ A transport without a delete operation implements `drop` as a successful no-op. 
 
 ### Connecting a framework-owned transport
 
-<<<<<<< ours
-Configure a class that implements `TokenSink`, and Gym constructs it instead of the file store. The capture path does not change. The model server still assembles the record, but the token arrays go to the configured transport instead of disk. They do not return through an HTTP response.
-=======
-The training framework owns the transport and its client configuration. Gym owns the model-server processes, so each server worker must construct a framework-provided `TokenSink` and `LineageStore` proxy inside that worker. The configured class paths are worker factory descriptors, not shared Python objects and not transport implementations owned by Gym.
->>>>>>> theirs
+The training framework owns the transport and its client configuration. Gym owns the model-server processes, so each server worker constructs a framework-provided `TokenSink` proxy from the configured class path. The configured class is a worker factory descriptor, not a shared Python object or a transport implementation owned by Gym.
 
 ```yaml
 env:
