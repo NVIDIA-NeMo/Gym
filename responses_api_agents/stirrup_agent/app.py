@@ -167,6 +167,25 @@ def _task_finished(deliverables_dir: Optional[str]) -> bool:
     return (root / _FINISH_MARKER_FILE).is_file()
 
 
+def _has_real_deliverable(deliverables_dir: Optional[str]) -> bool:
+    """Return whether *deliverables_dir* contains agent-produced output."""
+    if not deliverables_dir:
+        return False
+    root = Path(deliverables_dir)
+    if not root.is_dir():
+        return False
+
+    # Keep the definition of a deliverable aligned with the judge's reader so
+    # run-state files such as finish_params.json and history.json never turn a
+    # judge failure into a policy-reuse request.
+    from responses_api_agents.stirrup_agent.file_reader import is_deliverable
+
+    try:
+        return any(is_deliverable(path) for path in root.iterdir())
+    except OSError:
+        return False
+
+
 def _reference_set_key(
     reference_ids: Optional[Sequence[str]], verify_cache_namespace: Optional[str] = None
 ) -> Optional[str]:
@@ -360,12 +379,10 @@ def _attach_cached_deliverable_context(failure: Dict[str, Any], deliverables_dir
     if deliverables_dir is None:
         return failure
     failure["deliverables_dir"] = deliverables_dir
-    try:
-        artifact_exists = Path(deliverables_dir).is_dir() and any(Path(deliverables_dir).iterdir())
-    except OSError:
-        artifact_exists = False
-    if artifact_exists:
+    if _has_real_deliverable(deliverables_dir):
         failure["reuse_cached_deliverable"] = True
+    else:
+        failure.pop("reuse_cached_deliverable", None)
     return failure
 
 
@@ -1330,11 +1347,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             # re-running the policy. Unlike server-wide judge_only, it falls back
             # to a normal rollout when no deliverable is cached yet.
             reuse_requested = bool(body_dict.get("reuse_cached_deliverable"))
-            deliverable_cached = (
-                deliverables_dir is not None
-                and Path(deliverables_dir).is_dir()
-                and any(Path(deliverables_dir).iterdir())
-            )
+            deliverable_cached = _has_real_deliverable(deliverables_dir)
             # The reference subset this request is judged against (multi-stage ELO
             # tags each row with the stage's references; empty for rubric / fixed-
             # reference comparison). A cached judgement is only valid for the exact
@@ -1485,6 +1498,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                         reason=reason,
                         skipped=False,
                         error_class="incomplete",
+                        completed_response=response_clean,
                     )
 
             # Task-only execution mode: the deliverables are already cached to
@@ -1536,6 +1550,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                         reason=reason,
                         skipped=False,
                         error_class=error_class,
+                        completed_response=response_clean,
                     )
                     failure["invalid_judge_response"] = True
                     failure["invalid_judge_retryable"] = invalid_retryable
@@ -1565,6 +1580,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                     reason=f"verify failed: {type(exc).__name__}: {exc}",
                     skipped=False,
                     error_class=failure_class,
+                    completed_response=response_clean,
                 )
                 return _attach_cached_deliverable_context(failure, deliverables_dir)
 
@@ -1680,8 +1696,13 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
         skipped: bool,
         error_class: Optional[str] = None,
         attempt_started: Optional[float] = None,
+        completed_response: Optional[NeMoGymResponse] = None,
     ) -> Dict[str, Any]:
-        """Return a verify-response-shaped dict for runs that never produced a deliverable.
+        """Return a verify-response-shaped failure payload.
+
+        ``completed_response`` preserves genuine policy output when failure
+        happens after execution (for example in ``/verify``). A synthetic
+        response is used only when no policy response exists.
 
         The returned payload carries routing flags read by the rollout
         dispatcher (``nemo_gym.rollout_collection``):
@@ -1714,32 +1735,34 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
         else:
             suffix = "failed"
             status_word = "Failed"
-        placeholder = NeMoGymResponse(
-            id=f"{self.task_strategy.response_id(task_info)}-{suffix}",
-            created_at=int(time.time()),
-            model=fixed_params.model or "unknown",
-            object="response",
-            output=[
-                NeMoGymResponseOutputMessage(
-                    id=self.task_strategy.fallback_message_id(task_info),
-                    content=[
-                        NeMoGymResponseOutputText(
-                            type="output_text",
-                            text=f"{status_word}: {reason}",
-                            annotations=[],
-                        )
-                    ],
-                    role="assistant",
-                    status="completed",
-                    type="message",
-                )
-            ],
-            parallel_tool_calls=False,
-            tool_choice="none",
-            tools=[],
-        )
+        response = completed_response
+        if response is None:
+            response = NeMoGymResponse(
+                id=f"{self.task_strategy.response_id(task_info)}-{suffix}",
+                created_at=int(time.time()),
+                model=fixed_params.model or "unknown",
+                object="response",
+                output=[
+                    NeMoGymResponseOutputMessage(
+                        id=self.task_strategy.fallback_message_id(task_info),
+                        content=[
+                            NeMoGymResponseOutputText(
+                                type="output_text",
+                                text=f"{status_word}: {reason}",
+                                annotations=[],
+                            )
+                        ],
+                        role="assistant",
+                        status="completed",
+                        type="message",
+                    )
+                ],
+                parallel_tool_calls=False,
+                tool_choice="none",
+                tools=[],
+            )
         payload = dict(body_dict)
-        payload["response"] = placeholder.model_dump(mode="json")
+        payload["response"] = response.model_dump(mode="json")
         payload["reward"] = 0.0
         payload["skipped"] = skipped
         payload["error_message"] = reason

@@ -282,8 +282,9 @@ def _migrate_invalid_judge_main_rows(output_fpath: Path) -> int:
 
     Old builds persisted ``invalid_judge_response=True`` as a zero-reward main
     success, which both contaminated aggregation and gated resume. Sidecar-first
-    migration is idempotent via a marker keyed by stage/task/rollout; the main
-    file is then atomically rewritten so a crash cannot lose retry state.
+    migration is idempotent via a marker keyed by
+    stage/task/rollout/attempt; the main file is then atomically rewritten so
+    a crash cannot lose retry state.
     """
     if not output_fpath.exists():
         return 0
@@ -299,16 +300,22 @@ def _migrate_invalid_judge_main_rows(output_fpath: Path) -> int:
     if not invalid_count:
         return 0
 
-    def migration_key(row: Mapping[str, Any]) -> Tuple[Any, Any, Any]:
+    def migration_key(row: Mapping[str, Any]) -> Tuple[Any, Any, Any, Any]:
         return (
             int(row.get("stage_index", 0) or 0),
             row.get(TASK_INDEX_KEY_NAME),
             row.get(ROLLOUT_INDEX_KEY_NAME),
+            int(row.get(ATTEMPT_INDEX_KEY_NAME, 0) or 0),
         )
+
+    # Keep this dependency local to the legacy GDPVal migration path. Importing
+    # a responses API agent from the core rollout module at import time creates
+    # an unnecessary core/agent dependency for every Gym command.
+    from responses_api_agents.stirrup_agent.file_reader import is_deliverable
 
     failures_fpath = failures_path_for(output_fpath)
     failures_fpath.parent.mkdir(parents=True, exist_ok=True)
-    already_migrated: set[Tuple[Any, Any, Any]] = set()
+    already_migrated: set[Tuple[Any, Any, Any, Any]] = set()
     if failures_fpath.exists():
         with failures_fpath.open("rb") as handle:
             for line in handle:
@@ -348,7 +355,9 @@ def _migrate_invalid_judge_main_rows(output_fpath: Path) -> int:
                 deliverables_dir = migrated.get("deliverables_dir")
                 try:
                     has_cached_deliverable = bool(
-                        deliverables_dir and Path(deliverables_dir).is_dir() and any(Path(deliverables_dir).iterdir())
+                        deliverables_dir
+                        and Path(deliverables_dir).is_dir()
+                        and any(is_deliverable(path) for path in Path(deliverables_dir).iterdir())
                     )
                 except (OSError, TypeError):
                     has_cached_deliverable = False

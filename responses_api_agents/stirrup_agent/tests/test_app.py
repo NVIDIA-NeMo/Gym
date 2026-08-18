@@ -36,6 +36,7 @@ from responses_api_agents.stirrup_agent.app import (
     StirrupRunRequest,
     TaskPerAttemptTimeoutError,
     _classify_verify_failure,
+    _has_real_deliverable,
     _load_task_registry,
     _task_finished,
     _verify_cache_path,
@@ -333,6 +334,20 @@ class TestTaskFinished:
         assert _task_finished(str(tmp_path)) is False
 
 
+class TestHasRealDeliverable:
+    def test_metadata_only_directory_has_no_deliverable(self, tmp_path) -> None:
+        for name in ("finish_params.json", "history.json", "metadata.json", "log.txt"):
+            (tmp_path / name).write_text("{}")
+
+        assert _has_real_deliverable(str(tmp_path)) is False
+
+    def test_answer_artifact_is_a_deliverable(self, tmp_path) -> None:
+        (tmp_path / "finish_params.json").write_text("{}")
+        (tmp_path / "answer.txt").write_text("the answer")
+
+        assert _has_real_deliverable(str(tmp_path)) is True
+
+
 class TestRerunIncompleteMode:
     def test_rerun_incomplete_requires_persist_dir(self) -> None:
         config = _make_config(rerun_incomplete=True, persist_deliverables_dir=None)
@@ -442,6 +457,9 @@ class TestRerunIncompleteMode:
         assert result["error_class"] == "incomplete"
         assert result["reward"] == 0.0
         assert result["skipped"] is False
+        assert result["response"]["id"] == "gdpval-task-1"
+        assert result["response"]["metadata"] is None
+        assert result["response"]["output"][0]["content"][0]["text"] == "done"
         assert NG_TERMINAL_KEY not in result
         assert NG_NO_PERSIST_KEY not in result
 
@@ -792,6 +810,44 @@ class TestReuseCachedDeliverable:
         assert result == {"reward": 0.5}
 
     @pytest.mark.asyncio
+    async def test_reuse_falls_back_to_policy_for_metadata_only_directory(self, tmp_path) -> None:
+        deliverables_root = tmp_path / "task_task-1" / "repeat_0"
+        deliverables_root.mkdir(parents=True)
+        (deliverables_root / "finish_params.json").write_text("{}")
+        (deliverables_root / "history.json").write_text("[]")
+        (deliverables_root / "metadata.json").write_text("{}")
+
+        config = _make_config(persist_deliverables_dir=str(tmp_path))
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(return_value=MagicMock())
+        wrapper = StirrupAgentWrapper(config=config, server_client=server_client)
+        params = NeMoGymResponseCreateParamsNonStreaming(
+            input="ignored",
+            metadata={"task_id": "task-1", "prompt": "do the thing", "_ng_rollout_index": "0"},
+        )
+        body = StirrupRunRequest(
+            responses_create_params=params,
+            task_id="task-1",
+            prompt="do the thing",
+            reuse_cached_deliverable=True,
+        )
+        request = MagicMock(cookies={})
+        responses_mock = AsyncMock(return_value=_fake_response())
+
+        with (
+            patch.object(StirrupAgentWrapper, "responses", responses_mock),
+            patch("responses_api_agents.stirrup_agent.app.raise_for_status", AsyncMock()),
+            patch(
+                "responses_api_agents.stirrup_agent.app.get_response_json",
+                AsyncMock(return_value={"reward": 0.5}),
+            ),
+        ):
+            result = await wrapper.run(request, body)
+
+        responses_mock.assert_awaited_once()
+        assert result == {"reward": 0.5}
+
+    @pytest.mark.asyncio
     async def test_invalid_judgement_is_retryable_and_not_cached(self, tmp_path) -> None:
         deliverables_root = tmp_path / "task_task-1" / "repeat_0"
         deliverables_root.mkdir(parents=True)
@@ -838,6 +894,49 @@ class TestReuseCachedDeliverable:
         assert result["reuse_cached_deliverable"] is True
         assert result["deliverables_dir"] == str(deliverables_root)
         assert not _verify_cache_path(str(deliverables_root)).exists()
+
+    @pytest.mark.asyncio
+    async def test_invalid_judgement_preserves_completed_policy_response(self, tmp_path) -> None:
+        deliverables_root = tmp_path / "task_task-1" / "repeat_0"
+        deliverables_root.mkdir(parents=True)
+        (deliverables_root / "finish_params.json").write_text("{}")
+        (deliverables_root / "history.json").write_text("[]")
+
+        wrapper = StirrupAgentWrapper(
+            config=_make_config(persist_deliverables_dir=str(tmp_path)),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        wrapper.server_client.post = AsyncMock(return_value=MagicMock())
+        params = NeMoGymResponseCreateParamsNonStreaming(
+            input="ignored",
+            metadata={"task_id": "task-1", "prompt": "do the thing", "_ng_rollout_index": "0"},
+        )
+        body = StirrupRunRequest(responses_create_params=params, task_id="task-1", prompt="do the thing")
+        request = MagicMock(cookies={})
+
+        with (
+            patch.object(StirrupAgentWrapper, "responses", AsyncMock(return_value=_fake_response())),
+            patch("responses_api_agents.stirrup_agent.app.raise_for_status", AsyncMock()),
+            patch(
+                "responses_api_agents.stirrup_agent.app.get_response_json",
+                AsyncMock(
+                    return_value={
+                        "reward": 0.0,
+                        "invalid_judge_response": True,
+                        "judge_response": {"scoring_error": "no_score_in_response"},
+                    }
+                ),
+            ),
+        ):
+            result = await wrapper.run(request, body)
+
+        assert result[NG_FAILURE_CLASS_KEY] == "judge_invalid"
+        assert result["response"]["id"] == "gdpval-task-1"
+        assert result["response"]["metadata"] is None
+        assert result["response"]["output"][0]["content"][0]["text"] == "done"
+        # Bookkeeping files alone must not advertise a cached policy artifact.
+        assert "reuse_cached_deliverable" not in result
+        assert result["deliverables_dir"] == str(deliverables_root)
 
     @pytest.mark.asyncio
     async def test_nonretryable_invalid_judgement_is_terminal(self, tmp_path) -> None:
@@ -934,6 +1033,9 @@ class TestReuseCachedDeliverable:
         assert bool(result.get(NG_TERMINAL_KEY)) is terminal
         assert result["deliverables_dir"] == str(deliverables_root)
         assert result["reuse_cached_deliverable"] is True
+        assert result["response"]["id"] == "gdpval-task-1"
+        assert result["response"]["metadata"] is None
+        assert result["response"]["output"][0]["content"][0]["text"] == "done"
 
 
 class TestVerifyFailureClassification:

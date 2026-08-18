@@ -1495,18 +1495,14 @@ class TestLongestFirstDispatch:
         deliverables_dir = tmp_path / "deliverables" / "task-2"
         deliverables_dir.mkdir(parents=True)
         (deliverables_dir / "answer.txt").write_text("answer")
-        output.write_bytes(
-            orjson.dumps(
-                {
-                    TASK_INDEX_KEY_NAME: 2,
-                    ROLLOUT_INDEX_KEY_NAME: 0,
-                    "invalid_judge_response": True,
-                    "reward": 0.0,
-                    "deliverables_dir": str(deliverables_dir),
-                }
-            )
-            + b"\n"
-        )
+        legacy_row = {
+            TASK_INDEX_KEY_NAME: 2,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            "invalid_judge_response": True,
+            "reward": 0.0,
+            "deliverables_dir": str(deliverables_dir),
+        }
+        output.write_bytes(orjson.dumps(legacy_row) + b"\n")
 
         input_rows, cached_rows, cached_results, _ = RolloutCollectionHelper()._load_from_cache(config)
 
@@ -1521,8 +1517,52 @@ class TestLongestFirstDispatch:
         assert migrated[0][NG_FAILURE_CLASS_KEY] == "judge_invalid"
         assert migrated[0]["reuse_cached_deliverable"] is True
 
+        # Simulate a crash after the sidecar append but before the main-file
+        # replacement: replaying the same attempt must not append it twice.
+        replayed_row = dict(legacy_row)
+        replayed_row[ATTEMPT_INDEX_KEY_NAME] = 0
+        output.write_bytes(orjson.dumps(replayed_row) + b"\n")
         RolloutCollectionHelper()._load_from_cache(config)
         assert len(_failures_path_for(output).read_bytes().splitlines()) == 1
+
+    def test_legacy_invalid_judge_distinct_attempts_accumulate_and_gate(self, tmp_path: Path) -> None:
+        config = self._write_resume_state(tmp_path, [])
+        output = Path(config.output_jsonl_fpath)
+        legacy_rows = [
+            {
+                TASK_INDEX_KEY_NAME: 2,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                ATTEMPT_INDEX_KEY_NAME: attempt,
+                "invalid_judge_response": True,
+            }
+            for attempt in range(_DEFAULT_MAX_ROLLOUT_ATTEMPTS)
+        ]
+        output.write_bytes(b"\n".join(map(orjson.dumps, legacy_rows)) + b"\n")
+
+        input_rows, *_ = RolloutCollectionHelper()._load_from_cache(config)
+
+        assert 2 not in [row[TASK_INDEX_KEY_NAME] for row in input_rows]
+        migrated = [orjson.loads(line) for line in _failures_path_for(output).read_bytes().splitlines()]
+        assert [row[ATTEMPT_INDEX_KEY_NAME] for row in migrated] == list(range(_DEFAULT_MAX_ROLLOUT_ATTEMPTS))
+
+    def test_legacy_invalid_judge_same_attempt_in_different_stages_stays_distinct(self, tmp_path: Path) -> None:
+        config = self._write_resume_state(tmp_path, [])
+        output = Path(config.output_jsonl_fpath)
+        legacy_rows = [
+            {
+                TASK_INDEX_KEY_NAME: 2,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                "stage_index": stage,
+                "invalid_judge_response": True,
+            }
+            for stage in (0, 1)
+        ]
+        output.write_bytes(b"\n".join(map(orjson.dumps, legacy_rows)) + b"\n")
+
+        RolloutCollectionHelper()._load_from_cache(config)
+
+        migrated = [orjson.loads(line) for line in _failures_path_for(output).read_bytes().splitlines()]
+        assert [row["stage_index"] for row in migrated] == [0, 1]
 
     def test_legacy_invalid_judge_without_artifact_does_not_request_reuse(self, tmp_path: Path) -> None:
         config = self._write_resume_state(tmp_path, [])
@@ -1535,6 +1575,34 @@ class TestLongestFirstDispatch:
                     "invalid_judge_response": True,
                     "reuse_cached_deliverable": True,
                     "deliverables_dir": str(tmp_path / "missing-deliverables"),
+                }
+            )
+            + b"\n"
+        )
+
+        input_rows, *_ = RolloutCollectionHelper()._load_from_cache(config)
+
+        by_task = {row[TASK_INDEX_KEY_NAME]: row for row in input_rows}
+        assert "reuse_cached_deliverable" not in by_task[2]
+        migrated = [orjson.loads(line) for line in _failures_path_for(output).read_bytes().splitlines()]
+        assert "reuse_cached_deliverable" not in migrated[0]
+
+    def test_legacy_invalid_judge_with_only_run_state_does_not_request_reuse(self, tmp_path: Path) -> None:
+        config = self._write_resume_state(tmp_path, [])
+        output = Path(config.output_jsonl_fpath)
+        deliverables_dir = tmp_path / "deliverables" / "task-2"
+        deliverables_dir.mkdir(parents=True)
+        (deliverables_dir / "finish_params.json").write_text("{}")
+        (deliverables_dir / "history.json").write_text("[]")
+        (deliverables_dir / "reference_files").mkdir()
+        output.write_bytes(
+            orjson.dumps(
+                {
+                    TASK_INDEX_KEY_NAME: 2,
+                    ROLLOUT_INDEX_KEY_NAME: 0,
+                    "invalid_judge_response": True,
+                    "reuse_cached_deliverable": True,
+                    "deliverables_dir": str(deliverables_dir),
                 }
             )
             + b"\n"

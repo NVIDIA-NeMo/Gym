@@ -169,6 +169,36 @@ def compute_fingerprint(
             return value
         return repr(value)
 
+    component_types = {"responses_api_agents", "responses_api_models", "resources_servers"}
+
+    def jsonable_runtime_block(block: Mapping[str, Any]) -> Dict[str, Any]:
+        """Serialize a component block without process-local bind addresses."""
+        result: Dict[str, Any] = {}
+        for key, value in block.items():
+            key = str(key)
+            if key not in component_types:
+                result[key] = jsonable(value)
+                continue
+
+            servers = jsonable(value)
+            if not isinstance(servers, Mapping):
+                result[key] = servers
+                continue
+
+            result[key] = {
+                str(server_name): (
+                    {
+                        str(field): field_value
+                        for field, field_value in server_config.items()
+                        if str(field) not in {"host", "port"}
+                    }
+                    if isinstance(server_config, Mapping)
+                    else server_config
+                )
+                for server_name, server_config in servers.items()
+            }
+        return result
+
     payload = {
         "stages": [(s.num_tasks, s.num_models, s.seed) for s in multistage_config.stages],
         "seed": multistage_config.seed,
@@ -212,9 +242,8 @@ def compute_fingerprint(
 
         payload["rollout_collection_config"] = {name: jsonable(config_value(name)) for name in result_affecting_fields}
     if resolved_global_config is not None:
-        component_types = {"responses_api_agents", "responses_api_models", "resources_servers"}
         payload["runtime_components"] = {
-            str(name): jsonable(block)
+            str(name): jsonable_runtime_block(block)
             for name, block in resolved_global_config.items()
             if isinstance(block, Mapping) and component_types.intersection(block)
         }

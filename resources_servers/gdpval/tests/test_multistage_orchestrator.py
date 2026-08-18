@@ -66,6 +66,39 @@ from resources_servers.gdpval.multistage_orchestrator import (
 REF_ELOS = {"a": 1000.0, "b": 1200.0, "c": 1400.0, "d": 1600.0}
 
 
+def _runtime_components_with_bind_addresses(host_prefix: str, port_offset: int) -> Dict[str, Any]:
+    return {
+        "agent": {
+            "responses_api_agents": {
+                "stirrup": {
+                    "host": f"{host_prefix}-agent",
+                    "port": 8001 + port_offset,
+                    "task": "gdpval",
+                    "worker_target": {"host": "sandbox.internal", "port": 9000},
+                }
+            }
+        },
+        "policy": {
+            "responses_api_models": {
+                "vllm": {
+                    "host": f"{host_prefix}-policy",
+                    "port": 8002 + port_offset,
+                    "model": "/checkpoints/policy-a",
+                }
+            }
+        },
+        "resources": {
+            "resources_servers": {
+                "gdpval": {
+                    "host": f"{host_prefix}-resources",
+                    "port": 8003 + port_offset,
+                    "num_comparison_trials": 2,
+                }
+            }
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # Config parsing
 # ---------------------------------------------------------------------------
@@ -1210,6 +1243,29 @@ class TestFingerprint:
             == baseline
         )
 
+    def test_runtime_bind_addresses_do_not_invalidate_fingerprint(self) -> None:
+        cfg = _two_stage_cfg()
+        dist = _distribution(["t0"])
+        runtime = _runtime_components_with_bind_addresses("node-a", 0)
+        rebound_runtime = _runtime_components_with_bind_addresses("node-b", 100)
+
+        baseline = compute_fingerprint(cfg, REF_ELOS, dist, resolved_global_config=runtime)
+        assert compute_fingerprint(cfg, REF_ELOS, dist, resolved_global_config=rebound_runtime) == baseline
+
+        changed_nested_host = deepcopy(rebound_runtime)
+        changed_nested_host["agent"]["responses_api_agents"]["stirrup"]["worker_target"]["host"] = (
+            "other-sandbox.internal"
+        )
+        assert compute_fingerprint(cfg, REF_ELOS, dist, resolved_global_config=changed_nested_host) != baseline
+
+        changed_nested_port = deepcopy(rebound_runtime)
+        changed_nested_port["agent"]["responses_api_agents"]["stirrup"]["worker_target"]["port"] = 9001
+        assert compute_fingerprint(cfg, REF_ELOS, dist, resolved_global_config=changed_nested_port) != baseline
+
+        changed_model = deepcopy(rebound_runtime)
+        changed_model["policy"]["responses_api_models"]["vllm"]["model"] = "/checkpoints/policy-b"
+        assert compute_fingerprint(cfg, REF_ELOS, dist, resolved_global_config=changed_model) != baseline
+
 
 class TestJournalIO:
     def test_journal_round_trip_latest_wins(self, tmp_path: Path) -> None:
@@ -1708,6 +1764,32 @@ class TestPrepareResume:
         resume = _prepare_resume(self._cfg(True), out, journal, fp)
         assert not out.exists() and not journal.exists()
         assert resume.outcomes == {}
+
+    def test_runtime_bind_address_change_preserves_resume_state(self, tmp_path: Path) -> None:
+        from resources_servers.gdpval.multistage_orchestrator import append_journal_record
+
+        out = tmp_path / "rollouts.jsonl"
+        journal = journal_path_for(out)
+        out.write_text("")
+        dist = _distribution(["t0"])
+        old_fingerprint = compute_fingerprint(
+            _two_stage_cfg(),
+            REF_ELOS,
+            dist,
+            resolved_global_config=_runtime_components_with_bind_addresses("node-a", 0),
+        )
+        append_journal_record(journal, {"stage_index": 0, "status": "complete"}, old_fingerprint)
+        rebound_fingerprint = compute_fingerprint(
+            _two_stage_cfg(),
+            REF_ELOS,
+            dist,
+            resolved_global_config=_runtime_components_with_bind_addresses("node-b", 100),
+        )
+
+        resume = _prepare_resume(self._cfg(True), out, journal, rebound_fingerprint)
+
+        assert out.exists() and journal.exists()
+        assert set(resume.outcomes) == {0}
 
     async def test_fresh_run_persists_journal_then_resume_reuses_all(self, tmp_path: Path) -> None:
         # Regression: a fresh run through _prepare_resume must write the journal +
