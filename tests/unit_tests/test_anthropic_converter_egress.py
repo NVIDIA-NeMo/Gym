@@ -83,11 +83,11 @@ class TestAnthropicConverter:
             max_tokens=4096,
             thinking=None,
             thinking_budget_tokens=1024,
-            extra_body={"metadata": {"request_id": "abc"}},
+            extra_body={"metadata": {"user_id": "abc"}},
         )
 
         assert actual == {
-            "metadata": {"request_id": "abc"},
+            "metadata": {"user_id": "abc"},
             "model": "claude-sonnet-4-20250514",
             "max_tokens": 512,
             "messages": [
@@ -136,6 +136,7 @@ class TestAnthropicConverter:
                         "properties": {"city": {"type": "string"}},
                         "required": ["city"],
                     },
+                    "strict": True,
                 }
             ],
             "tool_choice": {"type": "tool", "name": "get_weather"},
@@ -183,10 +184,16 @@ class TestAnthropicConverter:
         assert response.output[2].call_id == "toolu_123"
         assert response.output[2].name == "get_weather"
         assert json.loads(response.output[2].arguments) == {"city": "San Francisco"}
-        assert response.usage.input_tokens == 10
+        assert response.usage.input_tokens == 13
         assert response.usage.output_tokens == 20
-        assert response.usage.total_tokens == 30
+        assert response.usage.total_tokens == 33
         assert response.usage.input_tokens_details.cached_tokens == 3
+        rebuilt = converter.responses_to_anthropic_response(response, "claude-sonnet-4-20250514")
+        assert rebuilt["usage"] == {
+            "cache_read_input_tokens": 3,
+            "input_tokens": 10,
+            "output_tokens": 20,
+        }
 
     def test_anthropic_to_responses_maps_stop_reasons_to_incomplete_details(self) -> None:
         converter = AnthropicConverter()
@@ -207,13 +214,6 @@ class TestAnthropicConverter:
         )
         assert max_tokens_response.incomplete_details.reason == "max_output_tokens"
 
-        context_response = converter.anthropic_to_responses(
-            anthropic_response=base_response | {"stop_reason": "model_context_window_exceeded"},
-            request_body=request_body,
-            model="claude-sonnet-4-20250514",
-        )
-        assert context_response.incomplete_details.reason == "max_output_tokens"
-
         refusal_response = converter.anthropic_to_responses(
             anthropic_response=base_response | {"stop_reason": "refusal"},
             request_body=request_body,
@@ -227,6 +227,14 @@ class TestAnthropicConverter:
             model="claude-sonnet-4-20250514",
         )
         assert tool_use_response.incomplete_details is None
+
+        for stop_reason in ("pause_turn", "stop_sequence", "model_context_window_exceeded"):
+            with pytest.raises(NotImplementedError, match="stop_reason"):
+                converter.anthropic_to_responses(
+                    anthropic_response=base_response | {"stop_reason": stop_reason},
+                    request_body=request_body,
+                    model="claude-sonnet-4-20250514",
+                )
 
     def test_responses_to_anthropic_maps_typed_adaptive_thinking(self) -> None:
         converter = AnthropicConverter()
@@ -255,7 +263,7 @@ class TestAnthropicConverter:
                         {
                             "type": "input_image",
                             "image_url": "data:image/png;base64,iVBORw0KGgo=",
-                            "detail": "high",
+                            "detail": "auto",
                         },
                     ],
                 }
@@ -288,7 +296,7 @@ class TestAnthropicConverter:
             }
         ]
 
-    def test_responses_to_anthropic_rejects_remote_image_url(self) -> None:
+    def test_responses_to_anthropic_maps_remote_image_url(self) -> None:
         converter = AnthropicConverter()
         body = NeMoGymResponseCreateParamsNonStreaming(
             input=[
@@ -299,22 +307,27 @@ class TestAnthropicConverter:
                         {
                             "type": "input_image",
                             "image_url": "https://example.com/image.png",
-                            "detail": "high",
+                            "detail": "auto",
                         }
                     ],
                 }
             ]
         )
 
-        with pytest.raises(ValueError, match="base64 data URLs"):
-            converter.responses_to_anthropic(
-                body=body,
-                model="claude-sonnet-4-20250514",
-                max_tokens=1024,
-                thinking=None,
-                thinking_budget_tokens=None,
-                extra_body={},
-            )
+        actual = converter.responses_to_anthropic(
+            body=body,
+            model="claude-sonnet-4-20250514",
+            max_tokens=1024,
+            thinking=None,
+            thinking_budget_tokens=None,
+            extra_body={},
+        )
+        assert actual["messages"][0]["content"] == [
+            {
+                "type": "image",
+                "source": {"type": "url", "url": "https://example.com/image.png"},
+            }
+        ]
 
     def test_responses_to_anthropic_rejects_invalid_image_data_url(self) -> None:
         converter = AnthropicConverter()
@@ -327,7 +340,7 @@ class TestAnthropicConverter:
                         {
                             "type": "input_image",
                             "image_url": "data:image/png;base64,not valid base64",
-                            "detail": "high",
+                            "detail": "auto",
                         }
                     ],
                 }
@@ -379,4 +392,199 @@ class TestAnthropicConverter:
                 thinking={"type": "adaptive"},
                 thinking_budget_tokens=None,
                 extra_body={"top_k": 5},
+            )
+
+    def test_responses_to_anthropic_preserves_structured_tool_result(self) -> None:
+        body = NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {
+                    "type": "function_call_output",
+                    "call_id": "toolu_1",
+                    "output": [
+                        {"type": "input_text", "text": "first"},
+                        {
+                            "type": "input_image",
+                            "image_url": "https://example.com/image.png",
+                            "detail": "auto",
+                        },
+                        {"type": "input_file", "file_url": "https://example.com/file.pdf"},
+                        {
+                            "type": "input_file",
+                            "file_data": "data:application/pdf;base64,aGVsbG8=",
+                        },
+                    ],
+                }
+            ]
+        )
+        actual = AnthropicConverter().responses_to_anthropic(body, "claude-sonnet-4-6", 100, None, None, {})
+        assert actual["messages"][0]["content"][0]["content"] == [
+            {"type": "text", "text": "first"},
+            {
+                "type": "image",
+                "source": {"type": "url", "url": "https://example.com/image.png"},
+            },
+            {
+                "type": "document",
+                "source": {"type": "url", "url": "https://example.com/file.pdf"},
+            },
+            {
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": "application/pdf",
+                    "data": "aGVsbG8=",
+                },
+            },
+        ]
+
+    def test_responses_to_anthropic_rejects_incomplete_tool_result(self) -> None:
+        body = NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {
+                    "type": "function_call_output",
+                    "call_id": "toolu_1",
+                    "output": "partial",
+                    "status": "in_progress",
+                }
+            ]
+        )
+
+        with pytest.raises(NotImplementedError, match="function_call_output status"):
+            AnthropicConverter().responses_to_anthropic(body, "claude-sonnet-4-6", 100, None, None, {})
+
+    def test_redacted_thinking_round_trip(self) -> None:
+        converter = AnthropicConverter()
+        response = converter.anthropic_to_responses(
+            {
+                "content": [{"type": "redacted_thinking", "data": "encrypted"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 2},
+            },
+            NeMoGymResponseCreateParamsNonStreaming(input="hi"),
+            "claude-sonnet-4-6",
+        )
+        actual = converter.responses_to_anthropic_response(response, "claude-sonnet-4-6")
+        assert actual["content"] == [{"type": "redacted_thinking", "data": "encrypted"}]
+
+    def test_request_user_service_tier_and_parallel_settings_round_trip(self) -> None:
+        converter = AnthropicConverter()
+        body = NeMoGymResponseCreateParamsNonStreaming(
+            input="hi",
+            user="user-1",
+            service_tier="auto",
+            tools=[
+                {
+                    "type": "function",
+                    "name": "f",
+                    "parameters": {"type": "object"},
+                    "strict": True,
+                }
+            ],
+            tool_choice="required",
+            parallel_tool_calls=False,
+        )
+        actual = converter.responses_to_anthropic(body, "claude-sonnet-4-6", 100, None, None, {})
+        assert actual["metadata"] == {"user_id": "user-1"}
+        assert actual["service_tier"] == "auto"
+        assert actual["tools"][0]["strict"] is True
+        assert actual["tool_choice"] == {"type": "any", "disable_parallel_tool_use": True}
+
+    def test_hosted_tools_and_media_metadata_are_rejected(self) -> None:
+        converter = AnthropicConverter()
+        with pytest.raises(NotImplementedError, match="tool type"):
+            converter._copy_tools({"tools": [{"type": "web_search_preview"}]}, {})
+        with pytest.raises(NotImplementedError, match="detail=high"):
+            converter._input_image_to_anthropic_block(
+                {
+                    "type": "input_image",
+                    "image_url": "https://example.com/image.png",
+                    "detail": "high",
+                }
+            )
+        with pytest.raises(NotImplementedError, match="filename"):
+            converter._input_file_to_anthropic_block(
+                {
+                    "type": "input_file",
+                    "file_url": "https://example.com/file.pdf",
+                    "filename": "file.pdf",
+                }
+            )
+
+    @pytest.mark.parametrize(
+        "field,value",
+        [
+            ("background", False),
+            ("include", []),
+            ("max_tool_calls", 1),
+            ("metadata", {"key": "value"}),
+            ("previous_response_id", "resp_1"),
+            ("prompt", {"id": "pmpt_1"}),
+            ("reasoning", {"effort": "high"}),
+            ("store", False),
+            ("text", {"verbosity": "low"}),
+            ("top_logprobs", 1),
+            ("truncation", "auto"),
+        ],
+    )
+    def test_unrepresentable_responses_request_fields_are_rejected(self, field: str, value: object) -> None:
+        body = NeMoGymResponseCreateParamsNonStreaming(input="hi", **{field: value})
+        with pytest.raises(NotImplementedError, match=field):
+            AnthropicConverter().responses_to_anthropic(body, "claude-sonnet-4-6", 100, None, None, {})
+
+    def test_output_annotations_logprobs_and_usage_details_are_rejected(self) -> None:
+        converter = AnthropicConverter()
+        request = NeMoGymResponseCreateParamsNonStreaming(input="hi")
+        response = converter.anthropic_to_responses(
+            {
+                "content": [{"type": "text", "text": "ok"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 2},
+            },
+            request,
+            "claude-sonnet-4-6",
+        )
+        output = response.output[0].model_dump()
+        output["content"][0]["annotations"] = [{"type": "url_citation", "url": "https://example.com"}]
+        annotated = response.model_copy(update={"output": [output]})
+        with pytest.raises(NotImplementedError, match="annotations"):
+            converter.responses_to_anthropic_response(annotated, "claude-sonnet-4-6")
+
+        output["content"][0]["annotations"] = []
+        output["content"][0]["logprobs"] = []
+        with pytest.raises(NotImplementedError, match="logprobs"):
+            converter.responses_to_anthropic_response(
+                response.model_copy(update={"output": [output]}), "claude-sonnet-4-6"
+            )
+
+        usage = response.usage.model_copy(
+            update={
+                "output_tokens_details": response.usage.output_tokens_details.model_copy(
+                    update={"reasoning_tokens": 1}
+                )
+            }
+        )
+        with pytest.raises(NotImplementedError, match="reasoning_tokens"):
+            converter.responses_to_anthropic_response(
+                response.model_copy(update={"usage": usage}), "claude-sonnet-4-6"
+            )
+
+    @pytest.mark.parametrize(
+        "usage_field,value",
+        [
+            ("cache_creation_input_tokens", 1),
+            ("inference_geo", "us"),
+            ("service_tier", "priority"),
+            ("server_tool_use", {"web_search_requests": 1}),
+        ],
+    )
+    def test_unrepresentable_anthropic_usage_is_rejected(self, usage_field: str, value: object) -> None:
+        with pytest.raises(NotImplementedError, match=usage_field):
+            AnthropicConverter().anthropic_to_responses(
+                {
+                    "content": [{"type": "text", "text": "ok"}],
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 1, "output_tokens": 2, usage_field: value},
+                },
+                NeMoGymResponseCreateParamsNonStreaming(input="hi"),
+                "claude-sonnet-4-6",
             )
