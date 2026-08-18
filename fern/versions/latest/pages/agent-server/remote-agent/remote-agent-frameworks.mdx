@@ -1,0 +1,238 @@
+---
+title: "Remote Agent Tutorial"
+description: "Evaluate a third-party agent framework against Gym benchmarks by exposing it as a Responses-compliant service — worked through with deepagents"
+position: 4
+---
+
+# Use your agent framework or harness as a remote agent
+[Drive a Remote Agent](/agent-server/remote-agent) specifies the implementation details. This is a tutorial based
+on the remote agent implementation and uses [LangChain DeepAgents](https://github.com/langchain-ai/deepagents)
+to walk through a full example in NeMo Gym. However, any agent framework or harnesscan follow this pattern. 
+
+<Note>
+**Remote agents are for evaluation only today.** `remote_agent` has no `model_server` reference and
+never calls one — your service brings its own model, so the resulting rollouts are off-policy and
+carry no token IDs to train on. If you need the policy model, write an in-tree agent server instead.
+</Note>
+
+The full example source code lives in
+[`examples/langchain_deepagent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/examples/langchain_deepagent). 
+
+- [`langchain_agent/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/examples/langchain_deepagent/langchain_agent)
+is the agent itself. 
+- Everything else in that directory is NeMo Gym wiring that uses `langchain_agent` as a local package.
+
+## Run the agent standalone
+
+If you're an agent builder, you're used to building your agent and sending requests to it. 
+So, start there with the LangChain DeepAgent. Don't even think about NeMo Gym yet!
+Remember, this can be any agent, but we are using LangChain deepagents as a tutorial. 
+
+First, set API keys in the `.env` file. OpenRouter is used for the model powering the agent.
+Tavily is used for the search tool. If you do not have API keys, get keys at
+at [OpenRouter](https://openrouter.ai/) and [Tavily](https://tavily.com/). You're also welcome
+to use models from other providers or locally.
+
+If you use [LangSmith tracing](https://smith.langchain.com/), you can set those environment variables in your `.env` file as well.
+
+```bash
+cd examples/langchain_deepagent
+cp .env.example .env   # fill in OPENROUTER_API_KEY and TAVILY_API_KEY
+```
+
+Then, run the agent standalone with a query that likely uses Tavily search:
+```bash
+cd langchain_agent
+uv run run_agent.py "When is the Valkyries next game?"
+```
+
+`run_agent.py` prints the agent's final answer:
+
+```python
+result = agent.invoke({"messages": [{"role": "user", "content": sys.argv[1]}]})
+```
+The output, `result`, is LangChain's message format. 
+
+## Define NeMo Gym Compatible APIs for your agent
+
+As specified in [Drive a Remote Agent](/agent-server/remote-agent), Gym gives your agent service task messages, 
+and every response you return is a single Responses API object. That means
+you must convert from Gym's input task messages to LangChain's message format, and then back to the
+format NeMo Gym requires.
+
+This conversion is implemented in [`service.py`](https://github.com/NVIDIA-NeMo/Gym/blob/main/examples/langchain_deepagent/service.py):
+
+- **`POST /v1/responses`** — the one HTTP endpoint Gym calls. Takes the request `params`, runs the
+  agent, and returns a Responses API object.
+- **`to_langchain(input_items)`** — converts Gym's `input` items into LangChain messages
+  (`HumanMessage`/`AIMessage`/`SystemMessage` by role), skipping any non-`message` items (paired
+  tool-call records).
+- **`to_responses(new_messages)`** — converts the agent's new LangChain messages back into a
+  Responses object, using the last `AIMessage`'s content as the final assistant `message`.
+- **`_text(content)`** — small helper both conversions share, normalizing content that's either a
+  plain string or a list of content blocks (from `use_responses_api=True`) into plain text.
+
+## Start the new agent service and send a request
+
+```bash
+# Terminal 1 — the agent service with format conversion between the APIs
+cd examples/langchain_deepagent
+uv run uvicorn service:app --host 0.0.0.0 --port 9000
+```
+
+You can send a request directly to the agent — this is basically what Gym does each time:
+
+```bash
+curl -s http://localhost:9000/v1/responses \
+    -H "Content-Type: application/json" \
+    -d '{"input": [{"role": "user", "content": "What year was the Eiffel Tower completed, and who designed it?"}]}'
+```
+
+## Wire up the environment to your agent service
+One config file wires the environment to your agent service. There are two example config
+files in the [`configs`](https://github.com/NVIDIA-NeMo/Gym/tree/main/examples/langchain_deepagent/configs) directory,
+one per benchmark, and both point at the same agent service. 
+
+Here is an example config file for the reasoning_gym benchmark. NeMo Gym, as per this config, will
+coordinate the local servers:
+- `reasoning_gym` is the resources server that provides the tasks for the reasoning_gym benchmark.
+- `remote_agent` is the agent service for the remote agent, in this case the LangChain DeepAgent. 
+  - Within `remote_agent`, the `responses_api_agents` server type is used to specify the agent service, 
+  - The `remote_agent` server type is used to specify the agent service
+    which is the LangChain DeepAgent at the `agent_base_url` http://localhost:9000 where we already spun up
+    the agent service.
+
+```yaml
+# config_reasoning_gym.yaml
+reasoning_gym:                # server_id — your name for this instance
+  resources_servers:
+    reasoning_gym:             # implementation — must match resources_servers/reasoning_gym/
+      entrypoint: app.py
+      domain: knowledge
+
+remote_agent:                 # server_id — your name for this instance
+  responses_api_agents:
+    remote_agent:                # implementation — must match responses_api_agents/remote_agent/
+      entrypoint: app.py
+      agent_base_url: http://localhost:9000
+      resources_server:
+        type: resources_servers
+        name: reasoning_gym       # references the server_id above, not the implementation
+      concurrency: 8
+      max_steps: 1        # this service answers in one call
+```
+
+
+We use the `reasoning_gym` resource server in this example, but this is configurable — swap the
+`resources_server` ref to point at a different benchmark; `service.py` doesn't change. See
+[`configs/config_reasoning_gym.yaml`](https://github.com/NVIDIA-NeMo/Gym/blob/main/examples/langchain_deepagent/configs/config_reasoning_gym.yaml)
+for the real file, and
+[`configs/config_tavily_search.yaml`](https://github.com/NVIDIA-NeMo/Gym/blob/main/examples/langchain_deepagent/configs/config_tavily_search.yaml)
+for a second worked example below.
+
+## Start the NeMo Gym environment
+
+```bash
+gym env start "+config_paths=[examples/langchain_deepagent/configs/config_reasoning_gym.yaml]"
+```
+
+## Generate rollouts and collect rewards
+Recall that the agent server in NeMo Gym does more than just call the agent service. 
+It orchestrates the entire rollout process. For each task, 
+1. The agent gets a task row from the resource server's input dataset.
+2. A session is initialized in the resources server with an isolated state
+3. The agentic loop (so in this case the DeepAgent) is run on the input in that isolated state.
+4. The response is returned to the resources server.
+5. The resources server scores the response and returns the score to the agent server.
+6. The agent server collects the rewards
+
+`--no-serve` tells it to use the `reasoning_gym` and `remote_agent`
+servers you already started in the previous step, instead of starting its own.
+
+```bash
+gym eval run --no-serve +agent_name=remote_agent \
+    +input_jsonl_fpath=resources_servers/reasoning_gym/data/example.jsonl \
+    +output_jsonl_fpath=/tmp/deepagents_rollouts.jsonl
+```
+
+The output should be something like:
+
+```bash
+Collecting rollouts: 100%|███████████████████████████████████████████████████| 5/5 [00:11<00:00,  2.26s/it]
+Sorting results to ensure consistent ordering
+Computing aggregate metrics
+
+Key metrics for remote_agent:
+{
+    "mean/reward": 1.0,
+    "mean/score": 1.0
+}
+Finished rollout collection! View results at
+```
+
+Expect 5 rows and a non-zero `mean/reward` — the run above got 1.0 (all five reasoning_gym puzzles
+solved), though the exact number depends on the model behind your agent service.
+
+Rollouts land in the file set by `+output_jsonl_fpath` — here, `/tmp/deepagents_rollouts.jsonl` —
+one row per task, with the full trajectory and its score.
+
+## Gotchas
+- **`service.py` ignores `params["tools"]` on purpose** — deepagents binds a fixed toolset once at
+  import time and never looks at what a task declares. That's a non-issue for `reasoning_gym`,
+  whose rows declare no tools at all. It would break a resources server like
+  `single_step_tool_use_with_argument_comparison`, which expects the agent to pick the correct
+  *next* tool call from a dynamic, per-task tool set declared in `responses_create_params.tools`
+  and compares the call's arguments directly. Before pointing this agent at a new resources
+  server, read its `verify()` function to see what it actually inspects — see
+  [`service.py`](https://github.com/NVIDIA-NeMo/Gym/blob/main/examples/langchain_deepagent/service.py)'s
+  docstring and [Drive a Remote Agent](/agent-server/remote-agent).
+- **Returning no assistant message hangs the rollout.** If your `output` holds only paired records,
+  or is empty, neither the finish check nor the tool branch fires, and Gym re-posts until
+  `max_steps` or `run_timeout_secs`. Always end with a `message`.
+- **Partial `usage` fails validation.** Report the full object or omit it entirely (allowed; token
+  metrics are then empty). LangChain's `usage_metadata` has the numbers — sum it across the run.
+- **`concurrency` defaults to 32**, so 32 framework runs can be in flight at once. Anything the
+  framework writes to disk needs to be per-request or in memory.
+- **One internal loop is one HTTP call**, bounded by `remote_responses_timeout_secs` (1800s) and the
+  whole rollout by `run_timeout_secs` (2100s). A framework that legitimately thinks for half an hour
+  needs both raised.
+
+## Next steps
+This example already points at a Nemotron model, but Deepagents actually has model specific profiles 
+with prompt tuning and middleware that are not used in this example. Try leveraging this harness engineering work
+by activating the [harness profile for Nemotron 3 Ultra](https://github.com/langchain-ai/deepagents/blob/main/libs/deepagents/deepagents/profiles/harness/_nvidia_nemotron_3_ultra.py)
+It has:
+- tool-grounding prompt guidance,
+- middleware for tool-call parsing, 
+- reasoning-tag cleanup, and
+- loop control. 
+
+To turn it on (tested against `deepagents==0.7.6`):
+1. `uv add langchain-openrouter` in `langchain_agent/`.
+2. In [`agent/__init__.py`](https://github.com/NVIDIA-NeMo/Gym/blob/main/examples/langchain_deepagent/langchain_agent/agent/__init__.py),
+   replace the `ChatOpenAI(base_url="https://openrouter.ai/api/v1"` model with
+   `ChatOpenRouter(model="nvidia/nemotron-3-ultra-550b-a55b", api_key=os.environ.get("OPENROUTER_API_KEY"))`
+   from `langchain_openrouter`. 
+   - `ChatOpenAI` always reports its provider as `openai` regardless of
+   `base_url`, so the profile never matches; `ChatOpenRouter` reports `openrouter`, so it does.
+3. Drop the `:free` suffix from the model slug. The profile is registered under the exact key
+   `openrouter:nvidia/nemotron-3-ultra-550b-a55b`
+4. Run `gym eval profile` on the same benchmark with and without step 2 to compare reward.
+
+<Tip>
+**A smaller idea for later:** if the harness profile does raise reward, the obvious follow-up is whether
+that gain is worth training on rather than just prompting. `remote_agent` can't do that today — as the
+note at the top of this page says, it's eval-only and produces off-policy rollouts with no token IDs. Post-training
+around a harness profile would mean first porting this agent into an in-tree agent server. Worth
+revisiting once that path exists, not something to chase yet.
+</Tip>
+
+Check out these related docs for more on the underlying contract:
+
+<Cards>
+
+<Card title="Drive a Remote Agent" href="/agent-server/remote-agent">
+The full contract: request and response shapes, failure classes, and every configuration knob.
+</Card>
+
+</Cards>

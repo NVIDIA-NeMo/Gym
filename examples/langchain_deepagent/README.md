@@ -30,7 +30,7 @@ The output, `result` is LangChain's message format.
 ## Importing into NeMo Gym
 
 As noted by the
-[remote agent documentation](../../fern/versions/latest/pages/agent-server/remote-agent.mdx), we are given input from Gym task execution
+[remote agent documentation](../../fern/versions/latest/pages/agent-server/remote-agent/index.mdx), we are given input from Gym task execution
 and then every response we return is a single Responses API object.
 
 This means we must convert from Gym's input task messages to LangChain's message format and
@@ -149,4 +149,4 @@ arguments directly — it doesn't work with this agent as-is, because deepagents
 toolset once at import time and never looks at `params["tools"]` (`service.py` ignores it on
 purpose). Before pointing this agent at a new resources server, read its `verify()` function to
 see what it actually inspects — see [`service.py`](service.py)'s docstring and the
-[remote agent documentation](../../fern/versions/latest/pages/agent-server/remote-agent.mdx).
+[remote agent documentation](../../fern/versions/latest/pages/agent-server/remote-agent/index.mdx).

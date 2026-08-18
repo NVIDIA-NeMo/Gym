@@ -4,7 +4,7 @@
 
     uv run uvicorn service:app --host 0.0.0.0 --port 9000
 
-Contract: fern/versions/latest/pages/agent-server/remote-agent-frameworks.mdx. `params["tools"]`
+Contract: fern/versions/latest/pages/agent-server/remote-agent/remote-agent-frameworks.mdx. `params["tools"]`
 is ignored on purpose — deepagents brings its own tools (TavilySearch) and runs them internally,
 so this service never asks Gym to execute anything; it always answers in one call.
 
