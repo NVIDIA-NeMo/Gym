@@ -1,0 +1,63 @@
+---
+title: "NeMo Fabric Agent"
+description: "Run interchangeable agent harnesses through NeMo Fabric inside NeMo Gym."
+position: 7
+---
+
+# NeMo Fabric Agent
+
+`nemo_fabric_agent` runs an installed [NeMo Fabric](https://github.com/NVIDIA/NeMo-Fabric) harness inside a Gym
+environment. Gym owns the task, datasets, model routing, verification, rewards, and concurrency; Fabric owns the
+selected harness lifecycle.
+
+The integration is adapter-neutral. Configure `adapter_id`, `model_provider`, `harness_settings`, and optional
+`fabric_config` fields. Included presets cover Claude Code, Codex, LangChain Deep Agents, Hermes, and mini-SWE-agent.
+See Fabric's [compatibility matrix](https://github.com/NVIDIA/NeMo-Fabric/blob/release/0.2/docs/sdk/python.mdx#normalized-configuration-compatibility)
+and [harness guides](https://github.com/NVIDIA/NeMo-Fabric/tree/release/0.2/docs/integrations/harness) for adapter-specific support.
+
+```yaml
+config_paths:
+  - responses_api_agents/nemo_fabric_agent/configs/nemo_fabric_agent.yaml
+
+my_fabric_agent:
+  _inherit_from: nemo_fabric_agent
+  responses_api_agents:
+    nemo_fabric_agent:
+      adapter_id: nvidia.fabric.hermes
+      model_provider: openai
+      harness_settings: {}
+      fabric_config: {}
+      resources_server:
+        type: resources_servers
+        name: my_environment
+```
+
+`gym env start` installs the agent requirements automatically. Each rollout receives its own Fabric runtime and
+workspace, and the Gym model URL includes the rollout correlation prefix.
+
+## Data and observability
+
+The agent server maps task MCP metadata and session headers into Fabric, expands Gym run-level skills, and returns Fabric's
+final answer in the Responses API schema. System and developer messages become Fabric instructions; multi-turn inputs
+remain structured JSON rather than being collapsed. Fabric 0.2's Claude and Codex adapters require text input and
+reject structured multi-turn input.
+
+Rollout results retain:
+
+- the complete `fabric_result`;
+- resource-server reward and score fields;
+- normalized input, output, cached-input, and reasoning-token usage when reported;
+- Gym's per-call `ng_model_call_capture.metrics` when observability is enabled.
+
+## Included environments
+
+| Config | Harness | Evaluation |
+| --- | --- | --- |
+| `math_with_judge_nemo_fabric_hermes.yaml` | Hermes | OpenMathReasoning with math-verify |
+| `reasoning_gym_nemo_fabric_hermes.yaml` | Hermes | Reasoning Gym |
+| `anyswe_nemo_fabric.yaml` | mini-SWE-agent | AnySWE / SWE-bench |
+| `anyterminal_nemo_fabric.yaml` | mini-SWE-agent | AnyTerminal / Terminal Bench |
+
+AnySWE and AnyTerminal use public task images. Their setup hooks create a portable runtime that remote providers stage
+with the task payload, so no custom image build or copy is required. To run AnyTerminal on OpenSandbox, compose
+`anyterminal_nemo_fabric.yaml` with `nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml`.
