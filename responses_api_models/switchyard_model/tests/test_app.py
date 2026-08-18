@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import hashlib
 import importlib.util
 import json
 import socket
@@ -445,6 +446,192 @@ class TestProxyShutdown:
 
         (hosted,) = _FakeNativeServer.instances
         assert hosted.close_calls == 1
+
+
+class TestConditionRecord:
+    """The routing-condition record is what makes routed runs comparable after the fact."""
+
+    def _launch_server(self, monkeypatch: MonkeyPatch, tmp_path, **overrides) -> SwitchyardModel:
+        _install_fake_switchyard(monkeypatch, _FakeNativeServer)
+        deployment = tmp_path / "routes.toml"
+        deployment.write_text(
+            'schema_version = 1\n[llm_clients.up]\napi_key_env = "K"\napi_key = "sk-inline-secret"\n'
+        )
+        config = {
+            "host": "0.0.0.0",
+            "port": 8081,
+            "entrypoint": "",
+            "name": "test_switchyard_model",
+            "switchyard_model": "policy-model",
+            "deployment": str(deployment),
+            "proxy_port": 4123,
+            "condition_dir": str(tmp_path / "condition"),
+            **overrides,
+        }
+        return SwitchyardModel(
+            config=SwitchyardModelConfig(**config),
+            server_client=MagicMock(spec=ServerClient, global_config_dict={}),
+        )
+
+    def test_hosted_manifest_records_the_condition(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        server = self._launch_server(monkeypatch, tmp_path)
+
+        with TestClient(server.setup_webserver()):
+            manifest = json.loads((tmp_path / "condition" / "switchyard-condition.json").read_text())
+
+        assert manifest["route"] == "policy-model"
+        assert manifest["mode"] == "hosted"
+        assert manifest["proxy_root_url"] == "http://127.0.0.1:4123"
+        deployment_bytes = (tmp_path / "routes.toml").read_bytes()
+        assert manifest["deployment_sha256"] == hashlib.sha256(deployment_bytes).hexdigest()
+        # The archive keeps env-var references but never an inline credential.
+        assert 'api_key_env = "K"' in manifest["deployment_toml"]
+        assert "sk-inline-secret" not in manifest["deployment_toml"]
+
+    def test_attached_manifest_records_the_proxy(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        server = self._launch_server(
+            monkeypatch,
+            tmp_path,
+            deployment=None,
+            switchyard_base_url="http://127.0.0.1:4000/v1",
+        )
+
+        with TestClient(server.setup_webserver()):
+            manifest = json.loads((tmp_path / "condition" / "switchyard-condition.json").read_text())
+
+        assert manifest["mode"] == "attached"
+        assert manifest["proxy_root_url"] == "http://127.0.0.1:4000"
+        assert manifest["deployment_sha256"] is None
+        assert manifest["deployment_toml"] is None
+
+    def test_no_condition_dir_writes_nothing(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        server = self._launch_server(monkeypatch, tmp_path, condition_dir=None)
+
+        with TestClient(server.setup_webserver()):
+            pass
+
+        assert not (tmp_path / "condition").exists()
+
+    def test_unreachable_stats_endpoint_does_not_fail_shutdown(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        """The fake proxy's port answers nothing; shutdown must shrug, not raise."""
+        server = self._launch_server(monkeypatch, tmp_path)
+
+        with TestClient(server.setup_webserver()):
+            pass
+
+        assert not (tmp_path / "condition" / "switchyard-stats.json").exists()
+
+    def test_unwritable_condition_dir_does_not_fail_startup(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        """Provenance is worth a warning, not an outage: a bad dir must not stop serving."""
+        blocker = tmp_path / "not-a-dir"
+        blocker.write_text("a file where the condition dir should be")
+        server = self._launch_server(monkeypatch, tmp_path, condition_dir=str(blocker))
+
+        # Startup raising would fail this test; the manifest is the only casualty.
+        with TestClient(server.setup_webserver()):
+            pass
+
+        assert blocker.read_text() == "a file where the condition dir should be"
+
+    def test_missing_distribution_yields_null_version(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        """A source checkout without dist metadata still gets a manifest, with version null."""
+
+        def not_installed(name):
+            raise app_module.importlib.metadata.PackageNotFoundError(name)
+
+        monkeypatch.setattr(app_module.importlib.metadata, "version", not_installed)
+        server = self._launch_server(monkeypatch, tmp_path)
+
+        with TestClient(server.setup_webserver()):
+            manifest = json.loads((tmp_path / "condition" / "switchyard-condition.json").read_text())
+
+        assert manifest["nemo_switchyard_version"] is None
+
+    def test_stats_snapshot_needs_a_proxy_to_ask(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        """Before hosting starts there is no proxy URL; the snapshot must no-op, not guess."""
+        server = self._launch_server(monkeypatch, tmp_path)
+
+        assert server.proxy_root_url() is None
+        server.snapshot_proxy_stats()
+
+        assert not (tmp_path / "condition").exists()
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("switchyard_rust") is None,
+    reason="nemo-switchyard is not installed",
+)
+class TestConditionRecordIntegration:
+    """Real wheel, real traffic, no Gym client: the record survives the proxy's shutdown.
+
+    Requests go to the proxy directly over urllib so this test never touches Gym's
+    process-singleton aiohttp client, which other classes bind to their own event loop.
+    """
+
+    def test_manifest_and_stats_written_across_a_run(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setenv("SWITCHYARD_TEST_API_KEY", "stub-upstream-key")  # pragma: allowlist secret
+        _StubUpstream.requests = []
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), _StubUpstream)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        deployment = tmp_path / "routes.toml"
+        deployment.write_text(
+            f"""
+schema_version = 1
+
+[llm_clients.upstream]
+format = "openai_chat"
+base_url = "http://127.0.0.1:{httpd.server_address[1]}/v1"
+api_key_env = "SWITCHYARD_TEST_API_KEY"
+
+[targets.policy]
+id = "upstream/model"
+llm_client = "upstream"
+
+[routes.policy-model]
+id = "policy-model"
+type = "passthrough"
+target = "policy"
+"""
+        )
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            proxy_port = probe.getsockname()[1]
+        server = SwitchyardModel(
+            config=SwitchyardModelConfig(
+                host="0.0.0.0",
+                port=8081,
+                entrypoint="",
+                name="test_switchyard_model",
+                switchyard_model="policy-model",
+                deployment=str(deployment),
+                proxy_port=proxy_port,
+                condition_dir=str(tmp_path / "condition"),
+            ),
+            server_client=MagicMock(spec=ServerClient, global_config_dict={}),
+        )
+
+        try:
+            with TestClient(server.setup_webserver()):
+                request = urllib.request.Request(
+                    f"http://127.0.0.1:{proxy_port}/v1/chat/completions",
+                    data=json.dumps(
+                        {"model": "policy-model", "messages": [{"role": "user", "content": "hi"}]}
+                    ).encode(),
+                    headers={"Content-Type": "application/json", "Authorization": "Bearer dummy"},
+                )
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    assert response.status == 200
+        finally:
+            httpd.shutdown()
+            thread.join(timeout=5)
+
+        manifest = json.loads((tmp_path / "condition" / "switchyard-condition.json").read_text())
+        assert manifest["route"] == "policy-model"
+        assert manifest["nemo_switchyard_version"] == "0.2.0"
+
+        stats = json.loads((tmp_path / "condition" / "switchyard-stats.json").read_text())
+        assert "upstream/model" in json.dumps(stats)
 
 
 @pytest.mark.skipif(

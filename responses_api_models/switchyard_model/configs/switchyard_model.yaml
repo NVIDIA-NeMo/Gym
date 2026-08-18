@@ -45,6 +45,11 @@ policy_model:
         - x-switchyard-session-id
       forward_session_id: true
 
+      # Directory for this run's routing-condition record: a provenance manifest at startup
+      # (route, deployment hash + archived contents, nemo-switchyard version) and a /v1/stats
+      # snapshot at shutdown. Use one directory per run; null disables.
+      condition_dir: ${oc.env:SWITCHYARD_CONDITION_DIR,null}
+
       extra_body: {}
       default_headers: {}
       max_concurrent_requests: null

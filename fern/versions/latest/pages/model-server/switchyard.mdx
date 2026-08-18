@@ -130,6 +130,46 @@ To see which model served each call from Gym's side, enable [model-call capture]
 Read routing attribution from the capture records, not from the rollout response. Some agent harnesses overwrite the top-level response `model` with the configured policy model name, which would report the route name for every call regardless of what actually served it.
 </Warning>
 
+## Compare routing conditions
+
+A routing condition is a deployment file plus a selected route. To measure what routing does to a benchmark, run it once per condition and compare — the example deployment above defines two conditions ready for exactly that: `strong-only` (a fixed baseline) and `policy-model` (the strong/weak router).
+
+Run each condition with its own output file and `condition_dir`:
+
+```bash
+gym eval run --benchmark <name> --model-type switchyard_model \
+    --model strong-only \
+    -o results/strong-only/rollouts.jsonl \
+    ++policy_model.responses_api_models.switchyard_model.deployment=/abs/path/routes.toml \
+    ++policy_model.responses_api_models.switchyard_model.condition_dir=results/strong-only
+
+gym eval run --benchmark <name> --model-type switchyard_model \
+    --model policy-model \
+    -o results/policy-model/rollouts.jsonl \
+    ++policy_model.responses_api_models.switchyard_model.deployment=/abs/path/routes.toml \
+    ++policy_model.responses_api_models.switchyard_model.condition_dir=results/policy-model
+```
+
+Each results directory now identifies its condition. `switchyard-condition.json` is the provenance manifest — the route, the deployment's SHA-256 and archived contents (credential values redacted), and the `nemo-switchyard` version — written when the proxy starts. `switchyard-stats.json` is the proxy's `/v1/stats` at shutdown: per-target requests, tokens, retries, and latency, which for a hosted proxy would otherwise die with the process. Two runs are fairly comparable when their manifests differ only in `route`; a run is reproducible from the archived deployment alone.
+
+Scores and token cost come straight from the rollout rows:
+
+```bash
+python3 - <<'EOF'
+import json
+
+for condition in ("strong-only", "policy-model"):
+    rows = [json.loads(line) for line in open(f"results/{condition}/rollouts.jsonl")]
+    rewards = [row["reward"] for row in rows]
+    tokens = [row["response"]["usage"]["total_tokens"] for row in rows]
+    print(f"{condition}: mean reward {sum(rewards)/len(rewards):.3f}, total tokens {sum(tokens)}")
+EOF
+```
+
+<Tip>
+Routing strategies with session affinity are stateful — compare them through one shared proxy (attach mode) rather than per-replica hosted proxies, so calls that belong together route together. The stats snapshot works in attach mode too.
+</Tip>
+
 ## Configuration reference
 
 | Field | Default | Purpose |
@@ -141,6 +181,7 @@ Read routing attribution from the capture records, not from the rollout response
 | `proxy_port` | `null` | Fixed loopback port for the hosted proxy. `null` picks a free one. |
 | `session_id_headers` | `[x-switchyard-session-id]` | Header names carrying the rollout id. |
 | `forward_session_id` | `true` | Whether to send it at all. |
+| `condition_dir` | `null` | Directory receiving the condition manifest (startup) and `/v1/stats` snapshot (shutdown). One per run. |
 | `extra_body` | `{}` | Merged into every upstream request body. |
 | `default_headers` | `{}` | Sent on every upstream request. |
 | `max_concurrent_requests` | `null` | Cap on in-flight upstream requests. `null` is unlimited. |
