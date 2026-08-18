@@ -76,7 +76,10 @@ class TokenSink(Protocol):
         ...
 
     async def close(self) -> None:
-        """Flush pending work and release resources. Idempotent."""
+        """Flush pending work and release resources.
+
+        This operation is idempotent.
+        """
         ...
 
 
@@ -103,7 +106,10 @@ class TokenSource(Protocol):
         ...
 
     async def close(self) -> None:
-        """Release resources. Idempotent."""
+        """Release resources.
+
+        This operation is idempotent.
+        """
         ...
 
 

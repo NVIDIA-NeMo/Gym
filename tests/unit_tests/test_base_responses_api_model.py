@@ -1140,7 +1140,7 @@ def test_maybe_rollout_id_from_run_body_prefers_an_explicit_id():
     # A retry of an explicitly keyed rollout still gets a distinct key.
     # Otherwise retry calls would append to the first attempt.
     assert maybe_rollout_id_from_run_body({"_ng_rollout_id": "s7-3-2", "_ng_attempt_index": 1}) == "s7-3-2-a1"
-    # The explicit id stands alone: no indices needed.
+    # The explicit id requires no indices.
     assert maybe_rollout_id_from_run_body({"_ng_rollout_id": "abc"}) == "abc"
 
 

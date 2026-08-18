@@ -80,7 +80,8 @@ class TokenIdCaptureSettings(BaseModel):
     # Capture model calls from every agent.
     # The default keeps capture scoped by each agent's ``token_id_capture`` setting.
     all_agents: bool = False
-    # Where the default file store writes. Falls back to ``model_call_capture_dir``.
+    # Where the default file store writes.
+    # Falls back to ``model_call_capture_dir``.
     dir: Path | None = None
     # ``module.path:ClassName`` implementing TokenSink, constructed per server process.
     sink: str | None = None

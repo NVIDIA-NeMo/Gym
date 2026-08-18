@@ -109,7 +109,8 @@ async def capture_tokens(response: Any) -> None:
         if info is None:
             await _capture_missing(sink, "the response carries no token ids")
             return
-        # Content only: the arrays live on the entry, not on the items as well.
+        # Keep content on the output items.
+        # Store token arrays only on the entry.
         content_items, token_item_index = strip_token_fields(response_to_output_items(payload))
 
         entry = TokenEntry(
