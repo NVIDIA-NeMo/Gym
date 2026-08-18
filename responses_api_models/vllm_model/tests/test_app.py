@@ -5123,12 +5123,11 @@ class TestSamplingOverrides:
 
 
 class TestPrefixSupply:
-    """Supplying the engine the previous call's exact tokens.
+    """Supply a verified parent's exact tokens to the engine.
 
-    Without this the engine re-renders every prompt from text: a re-tokenized
-    assistant turn can split differently than the model sampled, and a reasoning
-    model's template drops earlier thinking entirely. Either way the new prompt
-    does not extend the old one and the trajectory cannot be chained.
+    Re-rendering can tokenize an assistant turn differently from generation.
+    A reasoning template can also omit earlier thinking.
+    Either case breaks the token chain.
     """
 
     @staticmethod
@@ -5226,10 +5225,11 @@ class TestPrefixSupply:
     def test_fingerprint_miss_falls_back_rather_than_supplying_something_wrong(
         self, monkeypatch: MonkeyPatch, tmp_path
     ) -> None:
-        """A rewritten history must send the request untouched. The splice applies
-        whatever it is given without checking it belongs to this conversation, so
-        a wrong prefix would silently generate from a conversation the harness
-        never asked for."""
+        """Leave a rewritten history untouched.
+
+        The backend trusts the supplied prefix.
+        A wrong prefix would generate from a conversation that the harness never requested.
+        """
         server = self._server(monkeypatch, enabled=True)
         lineage_index().for_rollout("sup-2").record("parent", [{"role": "assistant", "content": "hello"}], [1, 2], "d")
 
@@ -5261,9 +5261,8 @@ class TestPrefixSupply:
     def test_a_fork_gets_the_parents_prefix_not_the_previous_calls(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
         """Two sub-agents branching from one parent must both get cum(parent).
 
-        A running cursor would hand the second branch a prefix containing the
-        first branch's generation, which the splice would apply without
-        complaint, generating from a conversation that never happened.
+        A running cursor would include the first branch's generation in the second branch.
+        The backend would then generate from a conversation that never happened.
         """
         server = self._server(monkeypatch, enabled=True)
         shared = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "plan"}]
@@ -5288,16 +5287,15 @@ class TestPrefixSupply:
     def test_reasoning_stripped_history_still_supplies_the_real_tokens(
         self, monkeypatch: MonkeyPatch, tmp_path
     ) -> None:
-        """The case supplying exists for.
+        """Restore reasoning tokens omitted from the rendered history.
 
-        A reasoning model's chat template drops earlier thinking when it renders
-        a later prompt, so the re-rendered prompt cannot extend the previous
-        prompt-plus-generation: the tokens are gone, not merely re-split. The
-        supplied prefix comes from the recording, so those tokens are restored
-        and the chain survives.
+        A reasoning template can drop earlier thinking from a later prompt.
+        The rendered prompt then cannot extend the previous generation.
+        The verified parent's recorded tokens restore the chain.
         """
         server = self._server(monkeypatch, enabled=True)
-        # The recorded turn included reasoning; what the harness echoes back does not.
+        # The recorded turn included reasoning.
+        # The history returned by the harness does not.
         recorded_turn = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "answer"}]
         real_tokens_including_reasoning = [1, 2, 3, 4, 5, 6, 7]
         lineage_index().for_rollout("sup-5").record("parent", recorded_turn, real_tokens_including_reasoning, "d")
@@ -5315,10 +5313,10 @@ class TestPrefixSupply:
 class TestPrefixSupplyAccounting:
     """Supply must be auditable after the fact.
 
-    Without this the only evidence supply fired is that chains happen to be
-    contiguous, which they often are anyway, so a supply run and a non-supply
-    run look identical. That ambiguity made the first live supply experiment
-    inconclusive.
+    Contiguous chains do not prove that supply fired.
+    prefix_requested records intent only.
+    prefix_supplied records generation-time proof.
+    A lock protects the diagnostic counters.
     """
 
     def test_supplied_call_is_only_requested_until_generation_proves_it(
@@ -5358,7 +5356,8 @@ class TestPrefixSupplyAccounting:
         )
         token = set_token_sink(ctx)
         try:
-            # A rewritten history: no unique parent, so supply must decline.
+            # A rewritten history has no unique verified parent.
+            # Prefix supply must decline.
             asyncio.run(resolve_parent([{"role": "assistant", "content": "rewritten"}]))
             out = server._apply_prefix_supply({"messages": [{"role": "assistant", "content": "rewritten"}]})
         finally:
@@ -5366,18 +5365,16 @@ class TestPrefixSupplyAccounting:
 
         assert "required_prefix_token_ids" not in out
         assert ctx.prefix_supplied is False
-        assert server._prefix_supply_counts == [0, 1]  # eligible, not supplied
+        assert server._prefix_supply_counts == [0, 1]  # Configured but not proven.
 
 
 class TestPrefixSupplyReachesTokenize:
-    """Supply only works if the prefix reaches BOTH calls the model server makes.
+    """Require generation-time proof for supplied prefixes.
 
-    Generation gets the prefix on /chat/completions, but prompt_token_ids is recovered
-    from a separate /tokenize call. If that second request omits the prefix, the engine
-    generates from the spliced prompt while the record holds a plain re-render of the
-    conversation, so the captured chain does not extend its parent. Training consumes the
-    record, so the two disagreeing is a training bug, not a reporting one, and it is
-    invisible to any assertion made on the outbound chat body alone.
+    The generation request carries required_prefix_token_ids.
+    A supplied request skips the separate tokenize call.
+    The generation response must return the actual prompt_token_ids.
+    Those token IDs prove whether the backend applied the requested prefix.
     """
 
     @staticmethod
@@ -5518,10 +5515,10 @@ class TestPrefixSupplyReachesTokenize:
         return context, error
 
     def test_a_backend_that_ignores_the_prefix_is_recorded_as_not_supplied(self, tmp_path, caplog) -> None:
-        """Supply sets a field on a request; only the returned prompt says whether it was used.
+        """Treat a requested prefix as intent until the generation response proves application.
 
-        A backend without the field drops it and answers normally. Every check downstream is
-        satisfied by construction when the prefix was applied, so none of them can catch this.
+        A backend can ignore an unsupported request field and answer normally.
+        Only generation-time prompt_token_ids can detect that behavior.
         """
         with caplog.at_level(logging.ERROR):
             context, error = self._supply_and_return_prompt(tmp_path, [900, 901, 77], "ver-ignored")
@@ -5530,7 +5527,7 @@ class TestPrefixSupplyReachesTokenize:
         assert "do not start with required_prefix_token_ids" in str(error)
 
     def test_a_backend_that_applies_the_prefix_is_recorded_as_supplied(self, tmp_path) -> None:
-        """Control: the returned prompt starts with the supplied tokens."""
+        """Record supply when generation-time prompt_token_ids start with the requested prefix."""
         context, error = self._supply_and_return_prompt(tmp_path, [11, 12, 13, 77], "ver-applied")
         assert error is None
         assert context.prefix_supplied is True
@@ -5542,7 +5539,7 @@ class TestPrefixSupplyReachesTokenize:
         assert context.prefix_supplied is False
 
     def test_tokenize_body_omits_the_prefix_when_supply_did_not_fire(self, tmp_path) -> None:
-        """No parent resolved means no prefix on either call, not a stale one on one of them."""
+        """Omit the prefix when no verified parent was resolved."""
         model = self._model()
         app = model.setup_webserver()
 
@@ -5596,10 +5593,9 @@ class TestPrefixSupplyReachesTokenize:
 class TestPrefixSupplyUsesTheRequestAsReceived:
     """Supply consumes a parent resolved before the request was dispatched.
 
-    The body reaching ``_apply_prefix_supply`` has been through Responses-to-Chat conversion
-    and chat preprocessing, which reshape the conversation. The lineage index was built from
-    the request as the server received it, so resolving here instead would compare two
-    different representations of the same turns and miss a parent that exists.
+    Responses-to-Chat conversion and preprocessing can reshape the request body.
+    The lineage index records the request as received.
+    Resolving from the reshaped body could miss a verified parent.
     """
 
     def test_supply_does_not_fire_without_a_resolved_parent(self, monkeypatch, tmp_path):
@@ -5609,7 +5605,7 @@ class TestPrefixSupplyUsesTheRequestAsReceived:
 
         token = set_token_sink(TestPrefixSupply._armed("sup-x", tmp_path))
         try:
-            # No resolve_parent call: nothing decided that this request continues anything.
+            # No parent resolution proved that this request continues another call.
             out = server._apply_prefix_supply({"messages": turn})
         finally:
             reset_token_sink(token)
@@ -5617,7 +5613,7 @@ class TestPrefixSupplyUsesTheRequestAsReceived:
         assert "required_prefix_token_ids" not in out
 
     def test_a_body_reshaped_after_resolution_still_supplies(self, monkeypatch, tmp_path):
-        """The decision is made on the original request, so later reshaping cannot lose it."""
+        """Preserve a verified parent decision across later request reshaping."""
         server = TestPrefixSupply._server(monkeypatch, enabled=True)
         original = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
         lineage_index().for_rollout("sup-y").record("parent", original, [7, 8, 9], "d")
@@ -5625,7 +5621,7 @@ class TestPrefixSupplyUsesTheRequestAsReceived:
         token = set_token_sink(TestPrefixSupply._armed("sup-y", tmp_path))
         try:
             asyncio.run(resolve_parent(original))
-            # Whatever conversion did to the messages by the time supply runs.
+            # Conversion reshaped the messages before prefix supply ran.
             out = server._apply_prefix_supply(
                 {"messages": [{"role": "user", "content": "reshaped beyond recognition"}]}
             )
