@@ -53,6 +53,7 @@ from nemo_gym.config_types import (
 )
 from nemo_gym.exporters import setup_exporters
 from nemo_gym.secret_utils import recursively_hide_secrets
+from nemo_gym.telemetry.setup import TELEMETRY_KEY_NAME
 
 
 _GLOBAL_CONFIG_DICT = None
@@ -136,6 +137,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     COMPONENT_NAME_KEY_NAME,
     SKIP_VERIFICATION_KEY_NAME,
     SKIP_VERIFICATION_REWARD_KEY_NAME,
+    TELEMETRY_KEY_NAME,
 ]
 
 # Data keys
