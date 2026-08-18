@@ -1017,6 +1017,24 @@ def test_lineage_resolves_the_parent_across_a_turn():
     assert parent.cum_tokens == [1, 2, 3] and parent.cum_len == 3
 
 
+def test_lineage_record_is_idempotent():
+    lineage = RolloutLineage()
+    messages = [{"role": "assistant", "content": "hi"}]
+    lineage.record("call-1", messages, [1, 2, 3], "d1")
+    lineage.record("call-1", messages, [1, 2, 3], "d1")
+
+    parent = lineage.resolve(messages)
+    assert parent is not None and parent.call_id == "call-1"
+
+
+def test_lineage_rejects_a_conflicting_call_identity():
+    lineage = RolloutLineage()
+    lineage.record("call-1", [{"role": "assistant", "content": "a"}], [1], "d1")
+
+    with pytest.raises(ValueError, match="conflicting lineage record"):
+        lineage.record("call-1", [{"role": "assistant", "content": "b"}], [2], "d2")
+
+
 def test_lineage_misses_on_a_rewritten_history():
     """A compacted or rewritten context is a new root, not a wrong parent."""
     lineage = RolloutLineage()
