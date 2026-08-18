@@ -106,7 +106,7 @@ class BuildNotes:
     # Calls without generated tokens are excluded from the chain.
     empty_generation_calls: list[str] = field(default_factory=list)
     # Why a recorded parent link was not used, by reason.
-    parent_link_fallbacks: dict[str, int] = field(default_factory=dict)
+    parent_link_failures: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -187,7 +187,7 @@ def _resolve_parent(
     if claimed is not None:
         parent = by_call_id.get(claimed)
         if parent is None:
-            return _infer_parent(prompt, prefix_index) + ("parent_call_id_missing",)
+            return None, False, "parent_call_id_missing"
         cum_len = parent.entry.cum_len
         if cum_len is None:
             cum_len = len(parent.cumulative)
@@ -195,7 +195,7 @@ def _resolve_parent(
             parent.entry.digest or compute_digest(parent.cumulative)
         ):
             return parent, False, None
-        return _infer_parent(prompt, prefix_index) + ("parent_digest_mismatch",)
+        return None, False, "parent_digest_mismatch"
     return _infer_parent(prompt, prefix_index) + (None,)
 
 
@@ -238,14 +238,16 @@ def prefix_merging(entries: list[TokenEntry], terminal_call_id: str | None = Non
     quarantined: list[str] = []
     prefix_index = _PrefixIndex()
     nodes_by_call_id: dict[str, _Node] = {}
-    fallbacks: dict[str, int] = {}
+    parent_link_failures: dict[str, int] = {}
 
     for entry in ordered:
         prompt = list(entry.prompt_token_ids)
         node = _Node(entry=entry, cumulative=prompt + list(entry.generation_token_ids))
         parent, ambiguous, note = _resolve_parent(node, nodes_by_call_id, prefix_index)
         if note:
-            fallbacks[note] = fallbacks.get(note, 0) + 1
+            parent_link_failures[note] = parent_link_failures.get(note, 0) + 1
+            node.quarantined = True
+            quarantined.append(entry.model_call_id)
         if parent is not None:
             node.parent = parent
             if ambiguous:
@@ -421,7 +423,7 @@ def prefix_merging(entries: list[TokenEntry], terminal_call_id: str | None = Non
         empty_generation_calls=empty_generation,
         terminal_call_id=terminal_call_id,
         terminal_chain=terminal_chain_status,
-        parent_link_fallbacks=fallbacks,
+        parent_link_failures=parent_link_failures,
     )
     return BuildOutput(chains=chains, quarantined=quarantined, notes=notes)
 

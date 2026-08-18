@@ -61,9 +61,9 @@ from nemo_gym.token_id_capture import (
     TokenIdCaptureConfig,
     capture_tokens,
     commit_entry,
-    current_capture_context,
     compute_digest,
     cumulative_tokens,
+    current_capture_context,
     extract_token_fields,
     install_token_sink,
     register_call_intent,
@@ -72,6 +72,7 @@ from nemo_gym.token_id_capture import (
     stamp_lineage,
 )
 from nemo_gym.token_id_capture.lineage import (
+    FileLineageStore,
     LineageIndex,
     RolloutLineage,
     assistant_fingerprint,
@@ -538,9 +539,15 @@ class _CapturingModel(SimpleResponsesAPIModel):
         return _training_chat_completion()
 
 
-def _server(global_config_dict) -> SimpleResponsesAPIModel:
+def _server(global_config_dict, *, num_workers: int | None = None) -> SimpleResponsesAPIModel:
     return _CapturingModel(
-        config=BaseResponsesAPIModelConfig(host="0.0.0.0", port=8099, entrypoint="", name="srv"),
+        config=BaseResponsesAPIModelConfig(
+            host="0.0.0.0",
+            port=8099,
+            entrypoint="",
+            name="srv",
+            num_workers=num_workers,
+        ),
         server_client=MagicMock(spec=ServerClient, global_config_dict=global_config_dict),
     )
 
@@ -1048,7 +1055,7 @@ def test_a_malformed_token_payload_does_not_fail_the_model_call(installed_sink):
 
 def test_capture_stamps_cum_len_and_digest(tmp_path):
     client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
-    client.post("/ng-rollout/lineage0-roll0/v1/responses", json={"input": "hi"})
+    client.post("/ng-rollout/lineage0-roll0/token-capture/v1/responses", json={"input": "hi"})
     (entry,) = TokenCaptureStore(tmp_path).read_entries("lineage0-roll0")
     assert entry.cum_len == len(PTOKS) + len(GTOKS)
     assert entry.digest == compute_digest(PTOKS + GTOKS)
@@ -1165,19 +1172,67 @@ def test_lineage_index_is_bounded():
     assert len(index) == 3
 
 
+def _record_shared_file_lineage(root: str) -> None:
+    store = FileLineageStore(root)
+    asyncio.run(
+        store.record(
+            "process-shared",
+            "child-process-call",
+            [{"role": "user", "content": "hello"}],
+            [{"role": "assistant", "content": "hi"}],
+            [1, 2, 3],
+            "digest",
+        )
+    )
+
+
+async def test_file_lineage_resolves_across_independent_worker_instances(tmp_path):
+    writer = FileLineageStore(tmp_path)
+    reader = FileLineageStore(tmp_path)
+    request = [{"role": "user", "content": "hello"}]
+    response = [{"role": "assistant", "content": "hi"}]
+    await writer.record("shared-rollout", "call-1", request, response, [1, 2, 3], "digest-1")
+
+    parent = await reader.resolve("shared-rollout", request + response + [{"role": "user", "content": "next"}])
+
+    assert parent is not None
+    assert parent.model_call_id == "call-1"
+    assert parent.cumulative_token_ids == (1, 2, 3)
+
+
+async def test_file_lineage_resolves_across_spawned_worker_processes(tmp_path):
+    context = multiprocessing.get_context("spawn")
+    process = context.Process(target=_record_shared_file_lineage, args=(str(tmp_path),))
+    process.start()
+    process.join(timeout=10)
+    assert process.exitcode == 0
+
+    store = FileLineageStore(tmp_path)
+    parent = await store.resolve(
+        "process-shared",
+        [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+            {"role": "user", "content": "next"},
+        ],
+    )
+    assert parent is not None
+    assert parent.model_call_id == "child-process-call"
+
+
 def test_served_calls_link_to_their_parent(tmp_path):
     """End to end: a second call whose request echoes the first call's assistant
     turn is recorded with parent_call_id pointing at it."""
     client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
     first = [{"role": "user", "content": "hello"}]
-    client.post("/ng-rollout/lin0-roll0/v1/chat/completions", json={"messages": first})
+    client.post("/ng-rollout/lin0-roll0/token-capture/v1/chat/completions", json={"messages": first})
     entries = TokenCaptureStore(tmp_path).read_entries("lin0-roll0")
     assert len(entries) == 1 and entries[0].parent_call_id is None
 
     content = entries[0].output_items[0]["content"]
     served_text = content if isinstance(content, str) else content[0]["text"]
     second = first + [{"role": "assistant", "content": served_text}, {"role": "user", "content": "more"}]
-    client.post("/ng-rollout/lin0-roll0/v1/chat/completions", json={"messages": second})
+    client.post("/ng-rollout/lin0-roll0/token-capture/v1/chat/completions", json={"messages": second})
 
     entries = TokenCaptureStore(tmp_path).read_entries("lin0-roll0")
     assert len(entries) == 2
@@ -1195,7 +1250,10 @@ def test_served_calls_do_not_link_across_a_changed_system_prompt(tmp_path):
     store = TokenCaptureStore(tmp_path)
 
     def call(rollout, system, messages):
-        client.post(f"/ng-rollout/{rollout}/v1/messages", json={"system": system, "messages": messages, **_MSG_ARGS})
+        client.post(
+            f"/ng-rollout/{rollout}/token-capture/v1/messages",
+            json={"system": system, "messages": messages, **_MSG_ARGS},
+        )
 
     first = [{"role": "user", "content": "hello"}]
     call("sys0", "SYSTEM ONE", first)
@@ -1407,6 +1465,28 @@ class _ConfiguredSink:
         pass
 
 
+class _ConfiguredLineage:
+    def __init__(self, namespace: str = "") -> None:
+        self.namespace = namespace
+
+    async def resolve(self, rollout_id: str, request_items: list[dict]):
+        return None
+
+    async def record(
+        self,
+        rollout_id: str,
+        model_call_id: str,
+        request_items: list[dict],
+        response_items: list[dict],
+        cumulative_token_ids: list[int],
+        digest: str,
+    ) -> None:
+        pass
+
+    async def close(self) -> None:
+        pass
+
+
 class _NotASink:
     async def put(self, entry) -> None:
         pass
@@ -1487,6 +1567,35 @@ def test_a_sink_receives_its_configured_kwargs():
     )
     sink = config.build_sink()
     assert (sink.endpoint, sink.shard) == ("https://dp", 3)
+
+
+def test_a_lineage_store_receives_its_configured_kwargs():
+    config = TokenIdCaptureConfig.model_validate(
+        _block(
+            lineage_store=f"{__name__}:_ConfiguredLineage",
+            lineage_store_kwargs={"namespace": "training-run"},
+        )
+    )
+    lineage = config.build_lineage_store()
+    assert lineage.namespace == "training-run"
+
+
+def test_multi_worker_custom_capture_requires_shared_lineage():
+    config = _block(sink=f"{__name__}:_ConfiguredSink")
+    with pytest.raises(ValueError, match="lineage_store is required"):
+        _server(config, num_workers=2).setup_webserver()
+
+
+def test_multi_worker_custom_capture_accepts_configured_shared_lineage():
+    config = _block(
+        sink=f"{__name__}:_ConfiguredSink",
+        lineage_store=f"{__name__}:_ConfiguredLineage",
+    )
+    _server(config, num_workers=2).setup_webserver()
+
+
+def test_multi_worker_file_capture_uses_process_shared_lineage(tmp_path):
+    _server(_both_enabled(tmp_path), num_workers=2).setup_webserver()
 
 
 def test_a_sink_given_kwargs_it_cannot_take_is_refused_at_startup():
