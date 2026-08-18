@@ -284,7 +284,7 @@ class TokenCaptureStore:
                 return False
             self.path_for(rollout_id).unlink(missing_ok=True)
             self.incomplete_path_for(rollout_id).unlink(missing_ok=True)
-            (self.root / f"{rollout_id}.lineage.json").unlink(missing_ok=True)
+            (self.root / f"{rollout_id}.lineage.jsonl").unlink(missing_ok=True)
             # Keep a frozen tombstone until explicit pre-dispatch cleanup.
             # A late writer from this attempt must still observe the freeze.
             state["retired"] = True
@@ -306,7 +306,7 @@ class TokenCaptureStore:
             self.path_for(rollout_id).unlink(missing_ok=True)
             self.incomplete_path_for(rollout_id).unlink(missing_ok=True)
             self.state_path_for(rollout_id).unlink(missing_ok=True)
-            (self.root / f"{rollout_id}.lineage.json").unlink(missing_ok=True)
+            (self.root / f"{rollout_id}.lineage.jsonl").unlink(missing_ok=True)
             (self.root / f"{rollout_id}.lineage.lock").unlink(missing_ok=True)
             self._fsync_root()
 

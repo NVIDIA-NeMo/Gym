@@ -152,7 +152,8 @@ def _resolve_parent(
     if claimed is not None:
         parent = by_call_id.get(claimed)
         if parent is None:
-            return None, False, "parent_call_id_missing"
+            inferred, ambiguous = _infer_parent(prompt, candidates)
+            return inferred, ambiguous, "parent_call_id_missing"
         cum_len = parent.entry.cum_len
         if cum_len is None:
             cum_len = len(parent.cumulative)
@@ -210,8 +211,9 @@ def prefix_merging(entries: list[TokenEntry]) -> BuildOutput:
         parent, ambiguous, note = _resolve_parent(node, nodes_by_call_id, nodes)
         if note:
             parent_link_failures[note] = parent_link_failures.get(note, 0) + 1
-            node.quarantined = True
-            quarantined.append(entry.model_call_id)
+            if note == "parent_digest_mismatch":
+                node.quarantined = True
+                quarantined.append(entry.model_call_id)
         if parent is not None:
             node.parent = parent
             if ambiguous:
