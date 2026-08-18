@@ -208,8 +208,6 @@ class RewardProfiler:
         if n <= 1:
             return None
         if sem == 0:
-            # scipy's t.interval computes ±inf * 0 internally when scale=0, which is
-            # indeterminate and returns NaN rather than the degenerate (mean, mean) interval.
             warnings.warn(
                 f"Standard error is 0 (all {n} values are identical) -- confidence interval "
                 "collapses to a single point rather than being computed.",
@@ -291,26 +289,14 @@ class RewardProfiler:
     def _aggregate_repeat_level_metrics(self, repeat_level_metrics: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Aggregate per-repeat estimates (e.g. mean/reward) across repeats, per agent.
 
-        Treats each repeat's stat as one observation and reports the mean and median across
-        repeats, plus the standard error of that mean -- how much the repeat-level estimates
-        themselves vary from repeat to repeat, as distinct from the intra-repeat spread already
-        captured by std/sem/CI in `_compute_repeat_level_metrics`.
-
-        Emitted as `{stat}_across_repeats/{per_repeat_stat}/{field}` -- e.g.
-        "mean_across_repeats/mean/reward" is the mean across repeats of each repeat's mean reward.
-        The `_across_repeats` suffix marks which half of the pair is the cross-repeat one; the older
-        "mean/mean/reward" spelling read as though one of the two means were a typo. Keeping the
-        per-repeat stat in the key leaves room for aggregating estimates other than the mean.
-        Deliberately not prefixed with "mean/", so these do not fall into the default
-        `get_key_metrics()` selection alongside the per-rollout "mean/{field}" headline.
+        Treats each repeat's stat as one observation and reports the statistics across
+        repeats.
         """
         if not repeat_level_metrics:
             return []
 
         df = DataFrame.from_records(repeat_level_metrics)
         df["agent_name"] = df[AGENT_REF_KEY_NAME].apply(lambda ref: ref["name"])
-        # Only aggregate per-repeat means (mean/{col}) — not derived stats like CI bounds,
-        # std, sem, or quartiles, which are meaningless to average across repeats.
         numeric_cols = [c for c in df.select_dtypes(include="number").columns if c.startswith("mean/")]
 
         aggregated_metrics = []

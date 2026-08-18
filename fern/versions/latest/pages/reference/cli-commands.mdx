@@ -706,7 +706,7 @@ gym eval aggregate \
 
 ### `gym eval profile`
 
-Compute a reward profile from collected rollouts. Outputs per-task statistics such as average reward, standard deviation, min/max, and pass rate, useful for filtering tasks before training by difficulty or variance. Works with any number of repeats, but the per-task and per-repeat spread is only meaningful with `--num-repeats` greater than 1.
+Compute a reward profile from collected rollouts. Outputs per-task statistics such as average reward, standard deviation, min/max, and pass rate, useful for filtering tasks before training by difficulty or variance. Requires rollouts collected with `--num-repeats` greater than 1.
 
 | Option | Description |
 | --- | --- |
