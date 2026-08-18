@@ -10,10 +10,7 @@ from typing import Any
 
 import aiohttp
 import pytest
-from omegaconf import OmegaConf
 
-import nemo_gym.global_config
-from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
 from nemo_gym.sandbox.providers.opensandbox import cleanup_sandboxes
 
 
@@ -382,27 +379,21 @@ def test_cleanup_rejects_invalid_domain() -> None:
 @pytest.mark.parametrize(
     "argv",
     [
-        ["--user", "alice"],
-        ["--run-id", "job-7"],
-        ["--run-id", "", "--user", "alice"],
-        ["--run-id", "job-7", "--user", " "],
-        ["--run-id", "job-7", "--user", "alice", "--unknown"],
+        ["--run-id", "job-7", "--user", "alice"],
+        ["--connection-config", "env.yaml", "--user", "alice"],
+        ["--connection-config", "env.yaml", "--run-id", "job-7"],
+        ["--connection-config", "env.yaml", "--run-id", "", "--user", "alice"],
+        ["--connection-config", "env.yaml", "--run-id", "job-7", "--user", " "],
+        ["--connection-config", "env.yaml", "--run-id", "job-7", "--user", "alice", "--unknown"],
     ],
 )
-def test_cli_requires_exact_scope_before_loading_config(
-    monkeypatch: pytest.MonkeyPatch,
-    argv: list[str],
-) -> None:
-    def fail_config(**_kwargs: object) -> object:
-        pytest.fail("config must not be loaded")
-
-    monkeypatch.setattr(nemo_gym.global_config, "get_global_config_dict", fail_config)
+def test_cli_requires_connection_config_and_exact_scope(argv: list[str]) -> None:
     with pytest.raises(SystemExit, match="2"):
         cleanup_sandboxes.main(argv)
 
 
 @pytest.mark.parametrize(("configured_protocol", "expected_protocol"), [(None, "http"), ("https", "https")])
-def test_cli_uses_gym_config_and_forwards_return_codes(
+def test_cli_uses_standalone_connection_config_and_forwards_return_codes(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
@@ -410,42 +401,26 @@ def test_cli_uses_gym_config_and_forwards_return_codes(
     expected_protocol: str,
 ) -> None:
     calls = []
-    benchmark_config = tmp_path / "benchmarks" / "custom" / "config.yaml"
-    benchmark_config.parent.mkdir(parents=True)
-    benchmark_config.write_text("# fixture\n")
-    connection = {"domain": "sandbox.example", "api_key": TEST_ACCESS_KEY}
-    if configured_protocol:
-        connection["protocol"] = configured_protocol
-
-    def load_config(*, global_config_dict_parser_config: Any) -> object:
-        assert global_config_dict_parser_config.offline is True
-        assert sys.argv[1:] == [
-            "+verbose=true",
-            f"+config_paths=[base.yaml,{benchmark_config}]",
-            "++sandbox.opensandbox.connection.request_timeout_s=10",
-        ]
-        return OmegaConf.create(
-            {"sandbox": {"default_metadata": {"decoy": "value"}, "opensandbox": {"connection": connection}}}
-        )
-
-    monkeypatch.setattr(nemo_gym.global_config, "get_global_config_dict", load_config)
-    monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, "original-root")
-    original_argv = ["pytest", "sentinel"]
-    monkeypatch.setattr(sys, "argv", original_argv)
+    config = tmp_path / "env.yaml"
+    protocol = f"      protocol: {configured_protocol}\n" if configured_protocol else ""
+    config.write_text(
+        "decoy:\n"
+        "  domain: wrong.example\n"
+        "sandbox:\n"
+        "  opensandbox:\n"
+        "    connection:\n"
+        "      domain: sandbox.example\n"
+        f"      api_key: {TEST_ACCESS_KEY}\n"
+        f"{protocol}"
+    )
     argv = [
-        "--config",
-        "base.yaml",
-        "--benchmark",
-        "custom",
-        "--search-dir",
-        str(tmp_path),
-        "--verbose",
+        "--connection-config",
+        str(config),
         "--run-id",
         "job-7",
         "--user",
         "alice",
         "--reap",
-        "++sandbox.opensandbox.connection.request_timeout_s=10",
     ]
 
     async def record_cleanup(**kwargs: object) -> int:
@@ -454,8 +429,6 @@ def test_cli_uses_gym_config_and_forwards_return_codes(
 
     monkeypatch.setattr(cleanup_sandboxes, "cleanup_sandboxes", record_cleanup)
     assert cleanup_sandboxes.main(argv) == 0
-    assert sys.argv is original_argv
-    assert os.environ[NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME] == "original-root"
     assert calls == [
         {
             "domain": "sandbox.example",
@@ -482,40 +455,55 @@ def test_cli_uses_gym_config_and_forwards_return_codes(
 
 
 @pytest.mark.parametrize(
-    ("sandbox_config", "message"),
+    ("config", "message"),
     [
-        ({"opensandbox": {"connection": {"api_key": TEST_ACCESS_KEY}}}, "connection.domain' is required"),
-        ({"opensandbox": {"connection": {"domain": "sandbox.example"}}}, "connection.api_key' is required"),
-        ({"docker": {}}, "must select the OpenSandbox provider"),
-        ({"opensandbox": {}}, "connection' is required"),
+        ("[]\n", "must contain a YAML object"),
+        ("other: {}\n", "config 'sandbox' is required"),
+        ("sandbox:\n  docker: {}\n", "config 'sandbox.opensandbox' is required"),
+        ("sandbox:\n  opensandbox: {}\n", "connection' is required"),
         (
-            {
-                "opensandbox": {
-                    "connection": {"domain": "sandbox.example", "api_key": TEST_ACCESS_KEY, "protocol": "ftp"}
-                }
-            },
+            f"sandbox:\n  opensandbox:\n    connection:\n      api_key: {TEST_ACCESS_KEY}\n",
+            "connection.domain' is required",
+        ),
+        (
+            "sandbox:\n  opensandbox:\n    connection:\n      domain: sandbox.example\n",
+            "connection.api_key' is required",
+        ),
+        (
+            "sandbox:\n"
+            "  opensandbox:\n"
+            "    connection:\n"
+            "      domain: sandbox.example\n"
+            f"      api_key: {TEST_ACCESS_KEY}\n"
+            "      protocol: ftp\n",
             "connection.protocol' must be http or https",
+        ),
+        (
+            "sandbox:\n  opensandbox:\n    connection:\n      api_key: [fixture-access-key\n",
+            "invalid YAML connection config",
         ),
     ],
 )
-def test_cli_rejects_invalid_gym_connection_config(
+def test_cli_rejects_invalid_connection_config(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    sandbox_config: dict[str, Any],
+    tmp_path: Path,
+    config: str,
     message: str,
 ) -> None:
-    monkeypatch.setattr(
-        nemo_gym.global_config,
-        "get_global_config_dict",
-        lambda **_kwargs: OmegaConf.create({"sandbox": sandbox_config}),
-    )
+    config_path = tmp_path / "env.yaml"
+    config_path.write_text(config)
 
     async def fail_cleanup(**_kwargs: object) -> int:
         pytest.fail("network request must not be made")
 
     monkeypatch.setattr(cleanup_sandboxes, "cleanup_sandboxes", fail_cleanup)
-    assert cleanup_sandboxes.main(["--run-id", "job-7", "--user", "alice"]) == 1
-    assert message in capsys.readouterr().err
+    assert (
+        cleanup_sandboxes.main(["--connection-config", str(config_path), "--run-id", "job-7", "--user", "alice"]) == 1
+    )
+    stderr = capsys.readouterr().err
+    assert message in stderr
+    assert TEST_ACCESS_KEY not in stderr
 
 
 def test_script_help_runs_by_direct_path() -> None:
@@ -528,16 +516,23 @@ def test_script_help_runs_by_direct_path() -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_slurm_batch_command_wires_cleanup_epilogue() -> None:
+@pytest.mark.parametrize("eval_status", [37, 143])
+def test_slurm_batch_command_wires_cleanup_epilogue(tmp_path: Path, eval_status: int) -> None:
     render = subprocess.run(
         [
             "bash",
             "-c",
-            'sbatch() { printf "%s\\n%s\\n" "$EVAL_COMMAND" "$VLLM_PD_BATCH_COMMAND"; }; '
-            'source "$1" --config "benchmark path.yaml" \'++sentinel=$(echo injected)\' '
-            "--run-id attacker --user attacker",
+            'sbatch() { printf "%s\\n__BATCH_COMMAND__\\n%s\\n" "$EVAL_COMMAND" "$VLLM_PD_BATCH_COMMAND"; }; '
+            'source "$1" "${@:2}"',
             "bash",
             str(SBATCH_SCRIPT),
+            "--config",
+            "benchmark path.yaml",
+            "++sentinel=$(echo injected)",
+            "--run-id",
+            "attacker",
+            "--user",
+            "attacker",
         ],
         check=False,
         capture_output=True,
@@ -555,26 +550,92 @@ def test_slurm_batch_command_wires_cleanup_epilogue() -> None:
         text=True,
     )
     assert render.returncode == 0, render.stderr
-    assert "trap cleanup_job EXIT" in render.stdout
-    assert "trap cleanup_sandboxes EXIT" in render.stdout
-    assert "cleanup_sandboxes.py" in render.stdout
-    assert "source /opt/Gym_venv/bin/activate" in render.stdout
-    assert '--run-id "$NEMO_GYM_RUN_ID"' in render.stdout
-    assert '--user "$NEMO_GYM_USER"' in render.stdout
-    assert "opensandbox_domain" not in render.stdout
-    assert "opensandbox_protocol" not in render.stdout
-    assert "--api-key-stdin" not in render.stdout
-    assert "awk '/^sandbox:/" not in render.stdout
-    assert "OPENSANDBOX_" not in render.stdout
-    assert render.stdout.index("trap cleanup_sandboxes EXIT") < render.stdout.index("gym eval prepare")
+    eval_command, batch_command = render.stdout.split("\n__BATCH_COMMAND__\n", maxsplit=1)
 
-    cleanup_start = render.stdout.index("python nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py")
-    cleanup_end = render.stdout.index("cleanup_status=$?", cleanup_start)
-    cleanup_command = render.stdout[cleanup_start:cleanup_end]
-    assert "--config benchmark\\ path.yaml" in cleanup_command
-    assert "++sentinel=\\$\\(echo\\ injected\\)" in cleanup_command
-    assert cleanup_command.index("--run-id attacker") < cleanup_command.index('--run-id "$NEMO_GYM_RUN_ID"')
-    assert cleanup_command.index("--user attacker") < cleanup_command.index('--user "$NEMO_GYM_USER"')
+    assert 'export NEMO_GYM_RUN_ID="$SLURM_JOB_ID"' in eval_command
+    assert 'export NEMO_GYM_USER="${NEMO_GYM_USER:-$SLURM_JOB_USER}"' in eval_command
+    assert "cleanup_sandboxes.py" not in eval_command
+    assert "trap cleanup_sandboxes" not in eval_command
+    assert "--config benchmark\\ path.yaml" in eval_command
+    assert "++sentinel=\\$\\(echo\\ injected\\)" in eval_command
 
-    syntax = subprocess.run(["bash", "-n"], input=render.stdout, check=False, capture_output=True, text=True)
-    assert syntax.returncode == 0, syntax.stderr
+    assert "trap cleanup_job EXIT" in batch_command
+    assert 'cleanup_config="$SLURM_SUBMIT_DIR/env.yaml"' in batch_command
+    assert 'cleanup_user="${NEMO_GYM_USER:-$SLURM_JOB_USER}"' in batch_command
+    cleanup_function = batch_command[batch_command.index("cleanup_job()") : batch_command.index("trap cleanup_job")]
+    assert cleanup_function.index("job_status=$?") < cleanup_function.index("trap - EXIT INT TERM")
+    assert cleanup_function.index("trap - EXIT INT TERM") < cleanup_function.index("set +e")
+    assert cleanup_function.index("set +e") < cleanup_function.index('python3 "$cleanup_script"')
+    assert cleanup_function.index('python3 "$cleanup_script"') < cleanup_function.index('kill "$server_step"')
+    assert cleanup_function.index('kill "$server_step"') < cleanup_function.index('exit "$job_status"')
+    assert 'wait "$server_step"' not in cleanup_function
+    assert '--connection-config "$cleanup_config"' in cleanup_function
+    assert '--run-id "$SLURM_JOB_ID"' in cleanup_function
+    assert '--user "$cleanup_user"' in cleanup_function
+    assert 'exit "$job_status"' in cleanup_function
+    assert "attacker" not in batch_command
+    assert "sentinel" not in batch_command
+
+    for command in (eval_command, batch_command):
+        syntax = subprocess.run(["bash", "-n"], input=command, check=False, capture_output=True, text=True)
+        assert syntax.returncode == 0, syntax.stderr
+
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir()
+    events = tmp_path / "events"
+    stubs = {
+        "scontrol": "#!/bin/bash\nprintf 'node-a\\nnode-b\\n'\n",
+        "python3": (
+            "#!/bin/bash\n"
+            'if [[ " $* " == *" --reap "* ]]; then\n'
+            '    echo "reap $*" >> "$EVENTS"\n'
+            "    exit 9\n"
+            "fi\n"
+            'echo "audit $*" >> "$EVENTS"\n'
+        ),
+        "srun": (
+            "#!/bin/bash\n"
+            'if [[ " $* " == *eval-container-on-node* ]]; then\n'
+            '    while [[ ! -f "$SERVER_READY" ]]; do sleep 0.01; done\n'
+            '    if [[ "$EVAL_STATUS" == 143 ]]; then kill -TERM "$PPID"; fi\n'
+            '    exit "$EVAL_STATUS"\n'
+            "fi\n"
+            "trap 'echo server-stop >> \"$EVENTS\"; exit 0' TERM\n"
+            'touch "$SERVER_READY"\n'
+            "while :; do sleep 0.1; done\n"
+        ),
+    }
+    for name, contents in stubs.items():
+        stub = stub_dir / name
+        stub.write_text(contents)
+        stub.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", "-c", batch_command],
+        check=False,
+        capture_output=True,
+        env={
+            **os.environ,
+            "PATH": f"{stub_dir}:{os.environ['PATH']}",
+            "EVENTS": str(events),
+            "EVAL_STATUS": str(eval_status),
+            "NEMO_GYM_USER": "synthetic-user",
+            "SERVER_READY": str(tmp_path / "server-ready"),
+            "SLURM_CPUS_ON_NODE": "4",
+            "SLURM_JOB_ID": "job-7",
+            "SLURM_JOB_NODELIST": "nodes",
+            "SLURM_JOB_USER": "slurm-user",
+            "SLURM_SUBMIT_DIR": str(tmp_path),
+            "EVAL_COMMAND": "eval-command",
+            "VLLM_PD_WORKLOAD": "server-command",
+        },
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == eval_status
+    assert "OpenSandbox cleanup failed with status 9" in result.stderr
+    event_lines = events.read_text().splitlines()
+    assert event_lines[0].startswith("audit ")
+    assert event_lines[1].startswith("reap ")
+    assert "--run-id job-7 --user synthetic-user --reap" in event_lines[1]
+    assert event_lines[2:] == ["server-stop"]
