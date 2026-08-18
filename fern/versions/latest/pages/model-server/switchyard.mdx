@@ -25,7 +25,41 @@ If you set both, Gym attaches to `switchyard_base_url` and logs a warning that `
 
 Nothing to install. Switchyard is a dependency of this model server, so NeMo Gym installs its published wheel into the server's virtual environment when the server starts. It is scoped to this server rather than to Gym's core dependencies — Gym itself never imports Switchyard on Gym's side of the boundary, and runs that do not route through it are unaffected.
 
-Point `deployment` at a native Switchyard TOML deployment — the `llm_clients`, `targets`, and `routes` the proxy serves — and run an eval:
+A deployment is a TOML file declaring the `llm_clients`, `targets`, and `routes` the proxy serves. A minimal one with a fixed baseline route and a strong/weak classifier route looks like this (see the [Switchyard documentation](https://github.com/NVIDIA-NeMo/Switchyard/tree/main/docs) for the full schema and the other routing algorithms):
+
+```toml
+schema_version = 1
+
+[llm_clients.nvidia]
+format = "openai_chat"
+base_url = "https://integrate.api.nvidia.com/v1"
+api_key_env = "NVIDIA_API_KEY"
+
+[targets.strong]
+id = "meta/llama-3.3-70b-instruct"
+llm_client = "nvidia"
+
+[targets.weak]
+id = "meta/llama-3.1-8b-instruct"
+llm_client = "nvidia"
+
+[routes.strong-only]
+id = "strong-only"
+type = "passthrough"
+target = "strong"
+
+[routes.policy-model]
+id = "policy-model"
+type = "llm_classifier"
+classifier_target = "weak"
+strong_target = "strong"
+weak_target = "weak"
+base_threshold = 0.5
+```
+
+Each route is a routing condition an eval can run under, and `--model` selects one — so running the same benchmark twice, once with `--model strong-only` and once with `--model policy-model`, compares the fixed baseline against the router on identical tasks.
+
+Point `deployment` at your TOML file and run an eval:
 
 ```bash
 gym eval run \
@@ -53,7 +87,7 @@ Use an absolute path for `deployment`. The path is opened by the server process 
 
 Under the hood, Gym hosts Switchyard's native Rust server inside the model-server process (`switchyard_rust.server.Server`) on a free loopback port that does not collide with Gym's own servers, and points its client at `http://127.0.0.1:<port>/v1`. The deployment is loaded and validated when the server starts, so a bad routing config fails immediately with Switchyard's validation error rather than as a timeout mid-run. Because the proxy lives in the server's process, it also cannot outlive it — there is no subprocess to leak or reap.
 
-The deployment file is the routing condition the eval runs under — an explicit, diffable artifact. Comparing routing conditions means running the same benchmark with two deployment files and comparing the results.
+The deployment file plus the selected route is the routing condition the eval runs under — an explicit, diffable artifact. Comparing routing conditions means running the same benchmark per condition and comparing the results: either two routes from one deployment file (as in the example above) or two deployment files.
 
 ## `--model` names a route, not a model
 
