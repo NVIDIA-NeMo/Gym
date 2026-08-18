@@ -113,9 +113,13 @@ class TokenSource(Protocol):
 
 A transport without a delete operation implements `drop` as a successful no-op. The storage owner remains responsible for record retention.
 
-### Writing somewhere other than Gym's file store
+### Connecting a framework-owned transport
 
+<<<<<<< ours
 Configure a class that implements `TokenSink`, and Gym constructs it instead of the file store. The capture path does not change. The model server still assembles the record, but the token arrays go to the configured transport instead of disk. They do not return through an HTTP response.
+=======
+The training framework owns the transport and its client configuration. Gym owns the model-server processes, so each server worker must construct a framework-provided `TokenSink` and `LineageStore` proxy inside that worker. The configured class paths are worker factory descriptors, not shared Python objects and not transport implementations owned by Gym.
+>>>>>>> theirs
 
 ```yaml
 env:
@@ -133,7 +137,18 @@ Gym passes `sink_kwargs` to the constructor, so a sink can receive the required 
 
 `sink` replaces the file store, so a `dir` configured alongside it is not used. This condition produces a warning instead of an error because no data is lost. No capture files appear on disk.
 
+The framework separately constructs its `TokenSource` in the trainer or rollout-consumer process. That process may use another virtual environment or actor because the source and sink are independent clients of the same transport.
+
+```python
+source = TransferQueueTokenSource(queue_handle)
+built = await finalize_rollout_token_capture(result, source)
+await durable_handoff(built)
+await retire_rollout_token_capture(result["_ng_rollout_id"], source, built)
+```
+
 `rebuild_response: false` tells Gym to stop after the write. Correlation and capture are unaffected. Only the read-back after each rollout stops. The training framework freezes records through its `TokenSource` and retires the consumed snapshot with `drop` after durable handoff. Without this setting, Gym tries to read from a source that received no records and reports every healthy rollout as a failed rebuild.
+
+When Gym's rollout collector owns rebuilding over a framework transport, install the framework-created source in that collector process with `install_token_source` before collection starts. The default file-backed path needs no installation because Gym constructs a `TokenCaptureStore` from `token_id_capture.dir`.
 
 Leaving `enabled` off disables capture. An external harness then produces rollouts without token ids and no token data for training. Use this configuration only for evaluation.
 
