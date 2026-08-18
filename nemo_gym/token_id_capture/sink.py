@@ -32,8 +32,7 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from typing import Any
 
-from nemo_gym.token_id_capture.lineage import LineageIndex
-from nemo_gym.token_id_capture.protocols import TokenSink
+from nemo_gym.token_id_capture.protocols import LineageStore, TokenSink
 from nemo_gym.token_id_capture.records import (
     TokenEntry,
     cumulative_tokens,
@@ -45,24 +44,6 @@ from nemo_gym.token_id_capture.records import (
 
 
 logger = logging.getLogger(__name__)
-
-
-# Which recorded call each request continues, per rollout. Process-wide because the
-# capture path is per request; bounded, so an abandoned rollout cannot leak. Losing an
-# entry costs a fallback to prefix matching, never a wrong answer.
-#
-# Being process-wide means it does not span uvicorn workers. With num_workers > 1 the
-# calls of one rollout can be handled by different workers, and a call landing on a
-# worker that did not record its parent resolves nothing: parent_call_id stays unset and
-# the builder matches the parent by token prefix instead. Prefix supply, which needs a
-# resolved parent, does not fire for those calls. Both degrade rather than break, and
-# parent_link_fallbacks reports the rate. The file store is unaffected because it is keyed
-# per rollout and appends under a file lock, which holds across processes.
-_LINEAGE = LineageIndex()
-
-
-def lineage_index() -> LineageIndex:
-    return _LINEAGE
 
 
 @dataclass
@@ -79,6 +60,7 @@ class CaptureContext:
     # ``None`` means another process owns record staging.
     # The context still carries the capture identity.
     token_sink: TokenSink | None
+    lineage_store: LineageStore | None = None
     model: str = ""
     # ``commit_entry`` sets this after another capture path records the call.
     committed: bool = False
@@ -112,7 +94,7 @@ def reset_token_sink(token: Token) -> None:
     _CAPTURE_CONTEXT.reset(token)
 
 
-def resolve_parent(request_messages: list | None) -> None:
+async def resolve_parent(request_messages: list | None) -> None:
     """Resolve which recorded call this request continues.
 
     Use the request representation received from the harness.
@@ -122,18 +104,18 @@ def resolve_parent(request_messages: list | None) -> None:
     A miss leaves the parent link unset.
     """
     context = _CAPTURE_CONTEXT.get()
-    if context is None or request_messages is None:
+    if context is None or request_messages is None or context.lineage_store is None:
         return
     context.parent_resolved = True
     try:
-        parent = _LINEAGE.for_rollout(context.rollout_id).resolve(request_messages)
+        parent = await context.lineage_store.resolve(context.rollout_id, request_messages)
     except Exception:
         logger.warning("Could not resolve a parent for rollout %s.", context.rollout_id, exc_info=True)
         return
     if parent is None:
         return
-    context.parent_call_id = parent.call_id
-    context.parent_tokens = list(parent.cum_tokens)
+    context.parent_call_id = parent.model_call_id
+    context.parent_tokens = list(parent.cumulative_token_ids)
 
 
 async def capture_tokens(
@@ -172,13 +154,12 @@ async def capture_tokens(
         # Which call does this one continue? Normally decided before dispatch by
         # ``resolve_parent``, so the record names the same call whose tokens were supplied.
         # A caller that did not resolve first still gets a link, from the same messages.
-        lineage = _LINEAGE.for_rollout(context.rollout_id)
         if parent_call_id is None:
             if context.parent_resolved:
                 parent_call_id = context.parent_call_id
-            elif request_messages is not None:
-                parent = lineage.resolve(request_messages)
-                parent_call_id = parent.call_id if parent is not None else None
+            elif request_messages is not None and context.lineage_store is not None:
+                parent = await context.lineage_store.resolve(context.rollout_id, request_messages)
+                parent_call_id = parent.model_call_id if parent is not None else None
         entry = TokenEntry(
             rollout_id=context.rollout_id,
             model_call_id=context.model_call_id,
@@ -200,18 +181,19 @@ async def capture_tokens(
     # request resolves to it. Indexing lives here rather than in ``commit_entry`` because it
     # is keyed on the request the server saw, which an engine-side caller does not have. The
     # digest it reads is stamped during the commit above.
-    if request_messages is not None:
+    if request_messages is not None and context.lineage_store is not None:
         try:
             # Index the served items as they are, not a turn rebuilt from them. The next request
             # echoes those items back, and the fingerprint canonicalizes both sides the same way,
             # so anything in between is a chance for the two to disagree. One response can also
             # echo as several items, which a single rebuilt turn cannot represent.
-            lineage.record(
+            await context.lineage_store.record(
+                context.rollout_id,
                 context.model_call_id,
-                list(request_messages) + list(entry.output_items or []),
+                list(request_messages),
+                list(entry.output_items or []),
                 cumulative_tokens(entry),
                 entry.digest or "",
-                context_len=len(request_messages),
             )
         except Exception:
             # Only costs the next call its parent link, which falls back to prefix matching.

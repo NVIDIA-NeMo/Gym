@@ -71,6 +71,7 @@ from nemo_gym.server_utils import (
 from nemo_gym.token_id_capture import (
     CaptureContext,
     capture_tokens,
+    installed_lineage_store,
     installed_token_sink,
     reset_token_sink,
     resolve_parent,
@@ -80,6 +81,7 @@ from nemo_gym.token_id_capture import (
 # The store factory needs Gym's server stack.
 # The leaf package does not re-export it.
 from nemo_gym.token_id_capture.config import token_id_capture_config
+from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore
 from nemo_gym.token_id_capture.store import make_token_store
 
 
@@ -173,6 +175,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             capture_config,
             model_server_name=self.config.name,
             global_config_dict=self.server_client.global_config_dict,
+            num_workers=self.config.num_workers,
         )
 
         app.post("/v1/chat/completions")(self.chat_completions_dispatch)
@@ -277,7 +280,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # Resolve the parent before dispatching, from the request as this server received it.
         # The lineage index was built from the same representation, so the prefix a request may
         # be given and the parent its record names come from one decision rather than two.
-        resolve_parent(_request_messages(params))
+        await resolve_parent(_request_messages(params))
         if "request" in inspect.signature(self.chat_completions).parameters:
             completion = await self.chat_completions(request=request, body=params)
         else:
@@ -317,7 +320,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # Resolve the parent before dispatching, from the request as this server received it.
         # The lineage index was built from the same representation, so the prefix a request may
         # be given and the parent its record names come from one decision rather than two.
-        resolve_parent(_request_messages(params))
+        await resolve_parent(_request_messages(params))
         if "request" in inspect.signature(self.responses).parameters:
             response = await self.responses(request=request, body=params)
         else:
@@ -1144,6 +1147,7 @@ class _CaptureMiddleware:
         model_server_name: str | None,
         token_store: Any = None,
         configured_sink: Any = None,
+        lineage_store: Any = None,
         token_capture_enabled: bool = False,
     ) -> None:
         self._app = app
@@ -1153,6 +1157,7 @@ class _CaptureMiddleware:
         self._token_store = token_store
         # Built from token_id_capture.sink, once, in this process.
         self._configured_sink = configured_sink
+        self._lineage_store = lineage_store
         # Capture may have no destination in this process.
         # A framework may stage records from its inference worker.
         # This process still resolves the capture identity.
@@ -1201,7 +1206,12 @@ class _CaptureMiddleware:
         sink_token = None
         if capture_wanted:
             sink_token = set_token_sink(
-                CaptureContext(rollout_id=rollout_id, model_call_id=model_call_id, token_sink=token_sink)
+                CaptureContext(
+                    rollout_id=rollout_id,
+                    model_call_id=model_call_id,
+                    token_sink=token_sink,
+                    lineage_store=self._lineage_store,
+                )
             )
 
         # Training-only capture has no evaluation record.
@@ -1371,6 +1381,7 @@ def install_model_call_capture(
     *,
     model_server_name: str | None = None,
     global_config_dict: Any = None,
+    num_workers: int | None = None,
 ) -> None:
     """Install model-call capture middleware.
 
@@ -1384,20 +1395,35 @@ def install_model_call_capture(
     Consumers access records through ``TokenSource.freeze``.
     There is no HTTP token reader.
     """
+    capture_settings = token_id_capture_config(global_config_dict) if global_config_dict is not None else None
     token_store = make_token_store(global_config_dict) if global_config_dict is not None else None
     # Build this sink at app startup.
     # Each uvicorn worker constructs its own sink.
     # Spawned workers do not inherit a launcher-installed sink.
-    configured_sink = (
-        token_id_capture_config(global_config_dict).build_sink() if global_config_dict is not None else None
-    )
-    owned_sinks = [sink for sink in (configured_sink, token_store) if sink is not None]
+    configured_sink = capture_settings.build_sink() if capture_settings is not None else None
+    configured_lineage = capture_settings.build_lineage_store() if capture_settings is not None else None
+    lineage_store = configured_lineage or installed_lineage_store()
+    default_lineage = None
+    if lineage_store is None and capture_settings is not None and capture_settings.enabled:
+        default_lineage = FileLineageStore(token_store.root) if token_store is not None else InMemoryLineageStore()
+        lineage_store = default_lineage
+    if capture_settings is not None and capture_settings.enabled and (num_workers or 1) > 1:
+        if isinstance(lineage_store, InMemoryLineageStore):
+            raise ValueError(
+                "token_id_capture.lineage_store is required with num_workers > 1 "
+                "when capture is not using Gym's shared file store"
+            )
+    owned_endpoints = [
+        endpoint
+        for endpoint in (configured_sink, token_store, configured_lineage, default_lineage)
+        if endpoint is not None
+    ]
 
-    async def _close_token_sinks() -> None:
-        for sink in owned_sinks:
-            await sink.close()
+    async def _close_capture_endpoints() -> None:
+        for endpoint in owned_endpoints:
+            await endpoint.close()
 
-    if owned_sinks:
+    if owned_endpoints:
         original_lifespan = app.router.lifespan_context
 
         @asynccontextmanager
@@ -1406,7 +1432,7 @@ def install_model_call_capture(
                 async with original_lifespan(application) as state:
                     yield state
             finally:
-                await _close_token_sinks()
+                await _close_capture_endpoints()
 
         app.router.lifespan_context = _capture_lifespan
     app.add_middleware(
@@ -1415,9 +1441,8 @@ def install_model_call_capture(
         model_server_name=model_server_name,
         token_store=token_store,
         configured_sink=configured_sink,
-        token_capture_enabled=(
-            token_id_capture_config(global_config_dict).enabled if global_config_dict is not None else False
-        ),
+        lineage_store=lineage_store,
+        token_capture_enabled=capture_settings.enabled if capture_settings is not None else False,
     )
 
 

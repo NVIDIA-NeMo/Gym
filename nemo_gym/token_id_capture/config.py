@@ -73,6 +73,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from nemo_gym.token_id_capture.protocols import (
+    LineageStore,
     TokenSink,
     installed_token_sink,
 )
@@ -101,6 +102,9 @@ class TokenIdCaptureSettings(BaseModel):
     # A real transport needs explicit endpoint, client, or credential wiring.
     # Use ``${oc.env:VAR}`` for secrets instead of writing them here.
     sink_kwargs: dict[str, Any] = Field(default_factory=dict)
+    # Optional process-shared request-time lineage supplied by a framework.
+    lineage_store: str | None = None
+    lineage_store_kwargs: dict[str, Any] = Field(default_factory=dict)
     # Whether Gym freezes capture records and rebuilds the response.
     # Finalization does not retire the frozen snapshot.
     # Durable delivery permits retirement by snapshot id and version.
@@ -164,6 +168,18 @@ class TokenIdCaptureConfig(BaseModel):
         if not self.token_id_capture.enabled or target is None:
             return None
         return self._build_endpoint(target, self.token_id_capture.sink_kwargs, TokenSink, "sink")
+
+    def build_lineage_store(self) -> LineageStore | None:
+        """Construct the configured request-time lineage store."""
+        target = self.token_id_capture.lineage_store
+        if not self.token_id_capture.enabled or target is None:
+            return None
+        return self._build_endpoint(
+            target,
+            self.token_id_capture.lineage_store_kwargs,
+            LineageStore,
+            "lineage_store",
+        )
 
     @staticmethod
     def _build_endpoint(target: str, kwargs: dict[str, Any], protocol: type, kind: str):
