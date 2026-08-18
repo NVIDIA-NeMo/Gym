@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import pytest
 from openai.types.completion_usage import CompletionTokensDetails, CompletionUsage, PromptTokensDetails
 
+from nemo_gym.base_responses_api_model import _cache_signal
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -83,6 +84,15 @@ def test_usage_detail_ignores_ambiguous_top_level_names():
     usage = {"cached_tokens": 99, "cached_input_tokens": 7, "reasoning_tokens": 88, "reasoning_output_tokens": 3}
     assert _usage_detail(usage, "prompt_tokens_details", "cached_tokens", "cached_input_tokens") == 7
     assert _usage_detail(usage, "completion_tokens_details", "reasoning_tokens", "reasoning_output_tokens") == 3
+
+
+def test_usage_detail_prefers_nested_details_in_mappings():
+    usage = {
+        "prompt_tokens_details": {"cached_tokens": 5},
+        "cached_input_tokens": 7,
+    }
+
+    assert _usage_detail(usage, "prompt_tokens_details", "cached_tokens", "cached_input_tokens") == 5
 
 
 # ===========================================================================
@@ -349,6 +359,62 @@ def test_responses_to_chat_completion_rejects_unrepresentable_function_output(
         converter.responses_to_chat_completion_create_params(responses_params)
 
 
+def test_responses_to_chat_completion_plain_assistant_turn_omits_tool_calls(converter: ResponsesConverter):
+    """A plain assistant turn must not carry `tool_calls: []`.
+
+    OpenAI rejects an empty array outright ("empty array. Expected an array with minimum
+    length 1"), which breaks any dataset row that carries conversation history.
+    """
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"},
+                {"role": "user", "content": "bye"},
+            ]
+        )
+    )
+    assistant_msg = params.messages[1]
+    assert assistant_msg["content"] == "hello"
+    assert "tool_calls" not in assistant_msg
+
+
+def test_responses_to_chat_completion_chat_shaped_tool_turn(converter: ResponsesConverter):
+    """Chat-Completions-shaped tool turns embedded in `input` convert without loss.
+
+    Datasets that carry pre-canned tool turns (e.g. IHEval) express them as an assistant
+    message with `tool_calls` and no `content` key at all, followed by a `role: "tool"`
+    result, rather than as `function_call`/`function_call_output` items.
+    """
+    params = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {"role": "user", "content": "call a tool"},
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "get_weather", "arguments": '{"city": "nyc"}'},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_1", "name": "get_weather", "content": "sunny"},
+            ]
+        )
+    )
+    assert [m["role"] for m in params.messages] == ["user", "assistant", "tool"]
+    assistant_msg = params.messages[1]
+    assert assistant_msg["content"] is None
+    assert assistant_msg["tool_calls"] == [
+        {"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": "nyc"}'}}
+    ]
+    tool_msg = params.messages[2]
+    assert tool_msg["tool_call_id"] == "call_1"
+    assert tool_msg["content"] == "sunny"
+
+
 def test_responses_to_chat_completion_reasoning_prepended(converter: ResponsesConverter):
     reasoning = NeMoGymResponseReasoningItem(
         id="rs_1",
@@ -568,7 +634,6 @@ def test_responses_to_chat_completion_preserves_empty_training_assistant():
         {
             "role": "assistant",
             "content": None,
-            "tool_calls": [],
             "prompt_token_ids": [],
             "generation_token_ids": [],
             "generation_log_probs": [],
@@ -809,6 +874,31 @@ def test_chat_completion_to_response_sanity(converter: ResponsesConverter, finis
     )
 
     assert expected_response == actual_response
+
+
+def test_chat_completion_to_response_preserves_unknown_usage_details(converter: ResponsesConverter):
+    response = converter.chat_completion_to_response(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(model="", input="hello"),
+        chat_completion=NeMoGymChatCompletion(
+            id="",
+            created=0,
+            model="",
+            object="chat.completion",
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason="stop",
+                    message=NeMoGymChatCompletionMessage(role="assistant", content="hi"),
+                )
+            ],
+            usage=CompletionUsage(prompt_tokens=11, completion_tokens=5, total_tokens=16),
+        ),
+    )
+
+    assert response.usage is not None
+    assert response.usage.input_tokens_details.cached_tokens is None
+    assert response.usage.output_tokens_details.reasoning_tokens is None
+    assert _cache_signal(response.usage.model_dump()) == (None, None)
 
 
 # ===========================================================================

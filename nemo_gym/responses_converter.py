@@ -75,7 +75,7 @@ def _optional_token_count(value: Any) -> Optional[int]:
 
 def _usage_detail(usage: Any, detail_group: str, detail_name: str, *top_level_aliases: str) -> Optional[int]:
     """Read one canonical nested token detail, then named provider aliases."""
-    details = getattr(usage, detail_group, None)
+    details = usage.get(detail_group) if isinstance(usage, dict) else getattr(usage, detail_group, None)
     value = details.get(detail_name) if isinstance(details, dict) else getattr(details, detail_name, None)
     value = _optional_token_count(value)
     if value is not None:
@@ -107,8 +107,10 @@ class ResponsesConverterState(BaseModel):
         shared_params = dict(
             content=self.content_buffer or None,
             role="assistant",
-            tool_calls=self.tool_calls_buffer,
         )
+        # Omit rather than send `tool_calls: []` — OpenAI rejects empty arrays.
+        if self.tool_calls_buffer:
+            shared_params["tool_calls"] = self.tool_calls_buffer
 
         if self.return_token_id_information and self.token_information is not None:
             message = NeMoGymChatCompletionAssistantMessageForTrainingParam(
@@ -306,7 +308,8 @@ class ResponsesConverter(BaseModel):
         m: dict,
         state: ResponsesConverterState,
     ) -> None:
-        content = m["content"]
+        # Tool-call-only assistant turns may omit `content` entirely, not just null it.
+        content = m.get("content")
 
         if isinstance(content, list) and m["role"] != "assistant":
             converted_parts = []
@@ -329,21 +332,43 @@ class ResponsesConverter(BaseModel):
             case "assistant":
                 state.assistant_item_buffered = True
                 final_content = ""
-                if m["content"] is None:
+                if content is None:
                     # Tool-call only turns have "None" according to the official API spec.
                     pass
-                elif isinstance(m["content"], list):
-                    content_str = "".join([part.get("text", "") for part in m["content"]])
+                elif isinstance(content, list):
+                    content_str = "".join([part.get("text", "") for part in content])
                     final_content += content_str
-                elif isinstance(m["content"], str):
-                    final_content += m["content"]
+                elif isinstance(content, str):
+                    final_content += content
                 else:
                     raise NotImplementedError(
-                        f"Expected m['content'] to be str or list[dict], but got {type(m['content']).__name__!r}: {m['content']!r}"
+                        f"Expected m['content'] to be str or list[dict], but got {type(content).__name__!r}: {content!r}"
                     )
 
                 converted = []
                 state.content_buffer += final_content
+                # Chat-shaped turns carry tool calls inline, not as separate `function_call` items.
+                for tool_call in m.get("tool_calls") or []:
+                    state.tool_calls_buffer.append(
+                        NeMoGymChatCompletionMessageToolCallParam(
+                            id=tool_call["id"],
+                            function=NeMoGymChatCompletionMessageToolCallFunctionParam(
+                                arguments=tool_call["function"]["arguments"],
+                                name=tool_call["function"]["name"],
+                            ),
+                            type="function",
+                        )
+                    )
+            case "tool":
+                # Chat-shaped tool result — the `function_call_output` equivalent.
+                state.flush_assistant()
+                converted = [
+                    NeMoGymChatCompletionToolMessageParam(
+                        content=content,
+                        role="tool",
+                        tool_call_id=m["tool_call_id"],
+                    )
+                ]
             case "user":
                 state.flush_assistant()
                 converted = [
@@ -575,12 +600,10 @@ class ResponsesConverter(BaseModel):
             usage = NeMoGymResponseUsage(
                 input_tokens=chat_completion.usage.prompt_tokens,
                 input_tokens_details=NeMoGymResponseInputTokensDetails(
-                    cached_tokens=cached_tokens if cached_tokens is not None else 0,
+                    cached_tokens=cached_tokens,
                 ),
                 output_tokens=chat_completion.usage.completion_tokens,
-                output_tokens_details=NeMoGymResponseOutputTokensDetails(
-                    reasoning_tokens=reasoning_tokens if reasoning_tokens is not None else 0
-                ),
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=reasoning_tokens),
                 # Provider totals can use accounting that differs from prompt + completion.
                 total_tokens=chat_completion.usage.total_tokens,
             )
