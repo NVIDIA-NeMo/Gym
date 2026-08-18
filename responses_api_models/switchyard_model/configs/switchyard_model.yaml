@@ -37,8 +37,12 @@ policy_model:
       proxy_port: null
 
       # Gym's rollout-attempt id is sent as Switchyard's opaque session id, so routing decisions
-      # and costs can be joined back to the rollout that produced them.
-      session_id_header: proxy_x_session_id
+      # and costs can be joined back to the rollout that produced them. x-switchyard-session-id is
+      # the name the native server reads into routing metadata; add proxy_x_session_id when
+      # attaching to a switchyard-server running with --routing-log-file, whose session log keys
+      # on that name.
+      session_id_headers:
+        - x-switchyard-session-id
       forward_session_id: true
 
       extra_body: {}
