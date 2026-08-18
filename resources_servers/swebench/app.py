@@ -295,7 +295,7 @@ Stderr:
             try:
                 original_workdir = (await eval_sandbox.exec("pwd")).stdout.strip()
                 model_patch_result = await original_sandbox.exec(
-                    f"cd {original_workdir} && git --no-pager --cached diff"
+                    f"cd {original_workdir} && git --no-pager diff --cached"
                 )
                 model_patch = model_patch_result.stdout
             except:
