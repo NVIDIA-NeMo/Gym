@@ -587,7 +587,9 @@ def test_exception_http_details_tolerates_lazy_response_failure():
 
 # --- capture-store config + init failure ---
 def test_model_call_capture_keys_are_reserved_global_config():
-    assert {"observability_enabled", "model_call_capture_dir"} <= set(NEMO_GYM_RESERVED_TOP_LEVEL_KEYS)
+    assert {"observability_enabled", "model_call_capture_dir", "token_id_capture"} <= set(
+        NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
+    )
 
 
 def test_model_call_capture_config_requires_absolute_dir_when_enabled(tmp_path, monkeypatch):
