@@ -6,9 +6,11 @@ set -euo pipefail
 NUM_PREFILL_NODES=$NUM_PREFILL_NODES
 NUM_DECODE_NODES=$NUM_DECODE_NODES
 MODEL=$MODEL
+MODEL_REVISION=$MODEL_REVISION
 CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
 VLLM_CONFIG=$VLLM_CONFIG
+VLLM_ROUTER_BINARY=$VLLM_ROUTER_BINARY
 
 should_run_eval=$(( $# > 0 ))
 if (( should_run_eval )); then
@@ -113,6 +115,30 @@ export UCX_RNDV_THRESH=0
 
 source "$VLLM_CONFIG"
 
+# Observed Super VL full-rack no-MTP throughput winner (TP4, 5P+11D).
+VLLM_OPTIMAL_ARGS=(
+    --tensor-parallel-size 4
+    --data-parallel-size 1
+    --data-parallel-backend mp
+    --distributed-executor-backend mp
+    --dtype bfloat16
+    --kv-cache-dtype auto
+    --max-num-seqs 512
+    --trust-remote-code
+    --max-model-len 97257
+    --max-num-batched-tokens 32768
+    --block-size 128
+    --enable-prefix-caching
+    --language-model-only
+    --async-scheduling
+    --enable-expert-parallel
+    --mamba-ssm-cache-dtype float32
+    --mamba-cache-mode align
+    --revision "$MODEL_REVISION"
+    --seed 0
+    --served-model-name "$MODEL"
+)
+
 this_node_hostname=\$(hostname)
 # Split nodes here by index
 if (( SLURM_PROCID == 0 )); then
@@ -120,12 +146,9 @@ if (( SLURM_PROCID == 0 )); then
 
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
+    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" "\${VLLM_OPTIMAL_ARGS[@]}" \
         --host \$this_node_hostname \
         --port $PREFILL_SERVER_PORT \
-        --data-parallel-size $NUM_PREFILL_NODES \
-        --data-parallel-address \$this_node_hostname \
-        --data-parallel-rpc-port $PREFILL_DP_RPC_PORT \
         --api-server-count 1 \
         &
     prefill_pid=\$!
@@ -134,49 +157,51 @@ if (( SLURM_PROCID == 0 )); then
     # @bxyu-nvidia: for --intra-node-data-parallel-size: Not sure what to set this to other than 1. I can't tell from the docs what is appropriate and 1 seems to work fine.
     # Set a super long request timeout since some reasoning requests may take a long time to generate.
     # Don't manually wait as vllm-router will wait for the URLs to come up
-    vllm-router \
-        --policy consistent_hash \
+    read -r -a nodes <<< "\$ALL_NODES"
+    router_args=( \
+        --policy round_robin \
         --vllm-pd-disaggregation \
-        --prefill http://\$PREFILL_HEAD:$PREFILL_SERVER_PORT \
-        --decode http://\$DECODE_HEAD:$DECODE_SERVER_PORT \
         --host \$PREFILL_HEAD \
         --port $ROUTER_SERVER_PORT \
+        --max-concurrent-requests 8192 \
         --intra-node-data-parallel-size 1 \
         --request-timeout-secs 86400 \
         --log-level error
+    )
+    for (( i = 0; i < $NUM_PREFILL_NODES; i++ )); do
+        router_args+=(--prefill "http://\${nodes[i]}:$PREFILL_SERVER_PORT")
+    done
+    for (( i = 0; i < $NUM_DECODE_NODES; i++ )); do
+        node_idx=\$(( $NUM_PREFILL_NODES + i ))
+        router_args+=(--decode "http://\${nodes[node_idx]}:$DECODE_SERVER_PORT")
+    done
+    "$VLLM_ROUTER_BINARY" "\${router_args[@]}"
 elif (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
     # Prefill worker
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
-        --headless \
-        --data-parallel-size $NUM_PREFILL_NODES \
-        --data-parallel-start-rank \$SLURM_PROCID \
-        --data-parallel-address \$PREFILL_HEAD \
-        --data-parallel-rpc-port $PREFILL_DP_RPC_PORT
+    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" "\${VLLM_OPTIMAL_ARGS[@]}" \
+        --host \$this_node_hostname \
+        --port $PREFILL_SERVER_PORT \
+        --api-server-count 1
 elif (( SLURM_PROCID == NUM_PREFILL_NODES )); then
     # Decode head
 
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
+    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" "\${VLLM_OPTIMAL_ARGS[@]}" \
         --host \$this_node_hostname \
         --port $DECODE_SERVER_PORT \
-        --data-parallel-size $NUM_DECODE_NODES \
-        --data-parallel-address \$DECODE_HEAD \
-        --data-parallel-rpc-port $DECODE_DP_RPC_PORT \
         --api-server-count 1
 else
     # Decode worker
 
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
-        --headless \
-        --data-parallel-size $NUM_DECODE_NODES \
-        --data-parallel-start-rank \$(( SLURM_PROCID - $NUM_PREFILL_NODES )) \
-        --data-parallel-address \$DECODE_HEAD \
-        --data-parallel-rpc-port $DECODE_DP_RPC_PORT
+    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" "\${VLLM_OPTIMAL_ARGS[@]}" \
+        --host \$this_node_hostname \
+        --port $DECODE_SERVER_PORT \
+        --api-server-count 1
 fi
 EOF
 )
@@ -189,6 +214,7 @@ nodes=(\$(scontrol show hostnames "\$SLURM_JOB_NODELIST"))
 PREFILL_HEAD="\${nodes[0]}"
 DECODE_HEAD="\${nodes[$NUM_PREFILL_NODES]}"
 
+ALL_NODES="\${nodes[*]}" \
 PREFILL_HEAD="\$PREFILL_HEAD" \
 DECODE_HEAD="\$DECODE_HEAD" \
 srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 \
