@@ -168,6 +168,7 @@ def _attach_exec_client(sb: engine.EcsFargateSandbox, result: engine.ExecResult 
 # ── _require_aws_sdks ─────────────────────────────────────────────────
 
 
+@pytest.mark.sandbox
 def test_require_aws_sdks_returns_triple():
     pytest.importorskip("boto3")  # real boto3/botocore only with the sandbox extra
     from botocore.exceptions import ClientError as RealClientError

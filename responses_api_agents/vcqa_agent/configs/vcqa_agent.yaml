@@ -1,0 +1,46 @@
+vcqa_agent:
+  responses_api_agents:
+    vcqa_agent:
+      entrypoint: app.py
+      domain: coding
+      description: Verified Code QA - investigate a per-task repo snapshot or git bundle, then answer against a must-have rubric graded by an LLM judge.
+      value: Code investigation across fileset and git-history tasks.
+      verified: false
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      container_image: docker://debian:bookworm-slim
+      apptainer_setup_command: >-
+        apt-get update -qq &&
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends
+        ripgrep git fd-find tree ca-certificates
+        && ln -sf $(command -v fdfind) /usr/local/bin/fd
+      apptainer_exec_timeout_s: 30
+      artifact_url_prefix: https://huggingface.co/datasets/appliedcompute/vcqa-v1/resolve/v1.0.0
+      artifact_request_headers:
+        Authorization: Bearer ${oc.env:HF_TOKEN}
+      judge_base_url: ${policy_base_url}
+      judge_api_key: ${policy_api_key}
+      judge_model_name: ${policy_model_name}
+      judge_timeout_s: 60
+      max_turns: 150
+      inject_tools: true
+      include_distractor_tools: true
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/vcqa_agent/data/example.jsonl
+        - name: vcqa_v1_train
+          type: train
+          jsonl_fpath: responses_api_agents/vcqa_agent/data/train.jsonl
+          huggingface_identifier:
+            repo_id: appliedcompute/vcqa-v1
+            artifact_fpath: rows/train.jsonl
+          license: Apache 2.0
+        - name: vcqa_v1_test
+          type: validation
+          jsonl_fpath: responses_api_agents/vcqa_agent/data/test.jsonl
+          huggingface_identifier:
+            repo_id: appliedcompute/vcqa-v1
+            artifact_fpath: rows/test.jsonl
+          license: Apache 2.0

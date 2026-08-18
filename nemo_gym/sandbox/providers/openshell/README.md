@@ -6,7 +6,7 @@ container/MicroVM sandboxes through a compute driver (Docker, Podman, Kubernetes
 enforces policy-based egress on every outbound connection.
 
 The provider talks to the gateway's gRPC control plane through the synchronous
-[`openshell`](https://pypi.org/project/openshell/) SDK (installed with the `nemo-gym[sandbox]`
+[`openshell`](https://pypi.org/project/openshell/) SDK (installed with the `nemo-gym[openshell]`
 extra). Blocking SDK calls run on a thread pool bounded by `exec.concurrency`; providers built
 from identical connection configs share one gRPC channel and one pool, so per-sandbox provider
 instances (the `AsyncSandbox` pattern) do not multiply threads or channels. Sandboxes live in
