@@ -192,16 +192,6 @@ nodes=(\$(scontrol show hostnames "\$SLURM_JOB_NODELIST"))
 PREFILL_HEAD="\${nodes[0]}"
 DECODE_HEAD="\${nodes[$NUM_PREFILL_NODES]}"
 
-if (( $should_run_eval )); then
-    cleanup_script="\$SLURM_SUBMIT_DIR/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py"
-    cleanup_config="\$SLURM_SUBMIT_DIR/env.yaml"
-    cleanup_user="\${NEMO_GYM_USER:-\$SLURM_JOB_USER}"
-    python3 "\$cleanup_script" \
-        --connection-config "\$cleanup_config" \
-        --run-id "\$SLURM_JOB_ID" \
-        --user "\$cleanup_user"
-fi
-
 PREFILL_HEAD="\$PREFILL_HEAD" \
 DECODE_HEAD="\$DECODE_HEAD" \
 srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 \
@@ -223,10 +213,10 @@ cleanup_job() {
     set +e
     if (( $should_run_eval )); then
         echo "Starting OpenSandbox cleanup"
-        python3 "\$cleanup_script" \
-            --connection-config "\$cleanup_config" \
+        python3 "\$SLURM_SUBMIT_DIR/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py" \
+            --connection-config "\$SLURM_SUBMIT_DIR/env.yaml" \
             --run-id "\$SLURM_JOB_ID" \
-            --user "\$cleanup_user" \
+            --user "\${NEMO_GYM_USER:-\$SLURM_JOB_USER}" \
             --reap
         cleanup_status=\$?
         if (( cleanup_status != 0 )); then
