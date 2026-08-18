@@ -24,7 +24,7 @@ from typing import Any, ClassVar, Dict, List, Optional, Union
 
 from aiohttp.client_exceptions import ClientResponseError
 from fastapi import Request
-from pydantic import Field, PrivateAttr
+from pydantic import Field, PrivateAttr, model_validator
 
 
 LOG = logging.getLogger(__name__)
@@ -173,7 +173,8 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
     # Supply the engine the exact tokens of the call this request continues, instead of letting the
     # chat template re-render them from text. See _apply_prefix_supply below. Off by default: it
-    # requires a backend that honours required_prefix_token_ids; a stock vLLM server does not.
+    # requires a backend that honours required_prefix_token_ids and returns its generation-time
+    # prompt_token_ids as proof; a stock vLLM server does not.
     supply_prefix_token_ids: bool = False
 
     # As of Feb 2026, we default this to False since majority of open source models aren't responses native with the exception of GPT-OSS
@@ -208,6 +209,12 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # ``data:audio/<fmt>;base64,...`` URI at request time — keeps the JSONL
     # small without depending on vLLM's ``--allowed-local-media-path``.
     audio_root: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _validate_prefix_supply(self) -> "VLLMModelConfig":
+        if self.supply_prefix_token_ids and not self.return_token_id_information:
+            raise ValueError("supply_prefix_token_ids requires return_token_id_information=true")
+        return self
 
     # When True, outbound calls go to vLLM's /v1/completions endpoint instead
     # of /v1/chat/completions. The Gym /v1/responses and /v1/chat/completions
@@ -655,40 +662,36 @@ class VLLMModel(SimpleResponsesAPIModel):
         if not context.parent_tokens:
             return body_dict
         body_dict["required_prefix_token_ids"] = list(context.parent_tokens)
-        # Record that this call's prefix was supplied, both on the durable record (so a run can be
-        # audited afterwards from the capture files) and as a running ratio in the log. Supply only
-        # fires on a unique, verified parent, so supplied/total is the honest measure of how often
-        # it applied rather than falling back to re-rendering.
-        context.prefix_supplied = True
-        self._prefix_supply_counts[0] += 1
-        supplied, total = self._prefix_supply_counts[0], self._prefix_supply_counts[1]
-        if total and supplied % 10 == 0:
-            LOG.info("prefix supply: %d/%d calls supplied (%.0f%%)", supplied, total, 100.0 * supplied / total)
+        # This is only a request. ``prefix_supplied`` remains false until the generation
+        # response proves which prompt token IDs the engine actually used.
+        context.prefix_requested = True
         return body_dict
 
-    def _check_the_prefix_was_applied(self, tokenize_body_dict: dict, tokens: list) -> None:
-        """Record whether the engine used the supplied prefix, not whether we asked it to.
-
-        Setting ``required_prefix_token_ids`` is a request. A backend that does not implement
-        the field drops it and answers normally, and no check downstream can tell: contiguity
-        and the parent digest are both satisfied by construction whenever the prefix *was*
-        applied, so they only ever confirm the case that already worked. This is the one place
-        the engine's own prompt is available to compare against what was sent.
-        """
-        supplied = tokenize_body_dict.get("required_prefix_token_ids")
-        if not supplied or list(tokens[: len(supplied)]) == list(supplied):
-            return
-        LOG.error(
-            "`%s` supplied a %d token prefix but the engine returned a prompt that does not start "
-            "with it, so the backend is ignoring required_prefix_token_ids. Recording this call as "
-            "not supplied.",
-            self.config.name,
-            len(supplied),
-        )
+    def _verify_generation_prefix(self, body_dict: dict, response: dict) -> list[int] | None:
+        """Require generation-time proof that the engine applied the requested prefix."""
+        required = body_dict.get("required_prefix_token_ids")
+        if not required:
+            return None
+        tokens = response.get("prompt_token_ids")
+        if not isinstance(tokens, list):
+            raise RuntimeError(
+                f"`{self.config.name}` requested required_prefix_token_ids, but the generation "
+                "response did not include prompt_token_ids proving which prompt the engine used"
+            )
+        tokens = [int(token) for token in tokens]
+        if tokens[: len(required)] != list(required):
+            raise RuntimeError(
+                f"`{self.config.name}` returned generation prompt_token_ids that do not start "
+                "with required_prefix_token_ids"
+            )
         context = current_capture_context()
         if context is not None:
-            context.prefix_supplied = False
-        self._prefix_supply_counts[0] -= 1
+            context.prefix_supplied = True
+        self._prefix_supply_counts[0] += 1
+        supplied, total = self._prefix_supply_counts
+        if supplied % 10 == 0:
+            LOG.info("prefix supply: %d/%d calls supplied (%.0f%%)", supplied, total, 100.0 * supplied / total)
+        return tokens
 
     async def chat_completions(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
@@ -807,6 +810,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             )
 
         choice_dict = chat_completion_dict["choices"][0]
+        self._verify_generation_prefix(body_dict, chat_completion_dict)
         if self.config.uses_reasoning_parser:
             # See the TODO wrt reasoning_content above
             reasoning_content = choice_dict["message"].get("reasoning_content") or choice_dict["message"].get(
