@@ -172,10 +172,10 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # Whether or not the model can generate a reasoning output, and called again to produce additional reasoning output.
     sequential_reasoning_allowed: bool = True
 
-    # Supply the engine the exact tokens of the call this request continues, instead of letting the
-    # chat template re-render them from text. See _apply_prefix_supply below. Off by default: it
-    # requires a backend that honours required_prefix_token_ids and returns its generation-time
-    # prompt_token_ids as proof; a stock vLLM server does not.
+    # Opt in to supplying a verified parent's exact tokens to the engine.
+    # Prefix supply requires generation-time prompt_token_ids as proof.
+    # Stock vLLM does not support the required_prefix_token_ids extension.
+    # Prefix supply is incompatible with use_completions_api=true.
     supply_prefix_token_ids: bool = False
 
     # As of Feb 2026, we default this to False since majority of open source models aren't responses native with the exception of GPT-OSS
@@ -626,32 +626,21 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         return body_dict
 
-    # ``[supplied, eligible]`` diagnostic counts.
+    # The lock protects the ``[proven, configured]`` diagnostic counts.
     _prefix_supply_counts: List[int] = PrivateAttr(default_factory=lambda: [0, 0])
     _prefix_supply_lock: Any = PrivateAttr(default_factory=Lock)
 
     def _apply_prefix_supply(self, body_dict: Dict[str, Any]) -> Dict[str, Any]:
-        """Hand the engine the previous call's exact tokens, so this prompt extends them.
+        """Request that the engine extend a verified parent's exact tokens.
 
-        Without this the engine builds every prompt by re-rendering the whole
-        conversation through the chat template. Two things go wrong. Re-tokenizing
-        an assistant turn can produce a different (equally valid) split than the
-        one the model sampled, so the new prompt does not extend the old
-        prompt-plus-generation. And for a reasoning model the template drops
-        earlier thinking entirely, so the tokens are not merely re-split, they are
-        gone. Either way the trajectory cannot be chained and training silently
-        collapses to the first call.
-
-        Supplying the parent's cumulative ids makes a backend that implements the splice keep them
-        verbatim and append only the newly rendered tail, so contiguity holds by
-        construction and stripped reasoning is restored.
-
-        The rule is conservative on purpose: the splice applies whatever it is
-        given without checking that it belongs to this conversation, so a wrong
-        prefix would silently generate from a conversation the harness never
-        asked for. Supply only on a unique, verified parent; otherwise send the
-        request untouched and let it start a new chain. A fallback costs a cold
-        KV cache and a shorter trained chain, never a wrong answer.
+        Prefix supply is opt-in.
+        A unique verified parent provides the cumulative prefix.
+        The backend must implement the required_prefix_token_ids extension.
+        Stock vLLM does not implement this extension.
+        The request records intent through prefix_requested.
+        Only generation-time prompt_token_ids can prove application through prefix_supplied.
+        A missing or ambiguous parent leaves the request unchanged.
+        This fallback avoids supplying tokens from the wrong conversation.
         """
         if not self.config.supply_prefix_token_ids:
             return body_dict
@@ -659,16 +648,16 @@ class VLLMModel(SimpleResponsesAPIModel):
             self._prefix_supply_counts[1] += 1
         context = current_capture_context()
         if context is None:
-            # Not a correlated rollout call, so there is no lineage to supply from.
+            # An uncorrelated rollout call has no verified parent.
             return body_dict
-        # Resolved before dispatch, from the request as the server received it. Resolving here
-        # instead would run against a body that Responses-to-Chat conversion and preprocessing
-        # have already reshaped, which is not the representation the index was built from.
+        # The parent was resolved before dispatch from the request as received.
+        # Conversion and preprocessing may have reshaped this body.
+        # Resolving from this body would use a representation that the index did not record.
         if not context.parent_tokens:
             return body_dict
         body_dict["required_prefix_token_ids"] = list(context.parent_tokens)
-        # This is only a request. ``prefix_supplied`` remains false until the generation
-        # response proves which prompt token IDs the engine actually used.
+        # This records intent only.
+        # ``prefix_supplied`` remains false until generation-time prompt_token_ids prove application.
         context.prefix_requested = True
         return body_dict
 
