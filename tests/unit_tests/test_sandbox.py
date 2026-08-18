@@ -14,6 +14,7 @@
 
 import asyncio
 import importlib.util
+import inspect
 import threading
 from datetime import timedelta
 from pathlib import Path
@@ -43,7 +44,7 @@ from nemo_gym.sandbox import (
     resolve_provider_metadata,
 )
 from nemo_gym.sandbox.api import _AsyncLoopRunner
-from nemo_gym.sandbox.utils import rewrite_image
+from nemo_gym.sandbox.utils import rewrite_image, wrap_command_with_cpu_pin
 from responses_api_agents.mini_swe_agent_2.sandbox_environment import MiniSWESandboxEnvironment
 
 
@@ -291,6 +292,8 @@ async def _assert_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> Non
         "timeout_s": 60,
         "user": "agent",
     }
+    await sandbox.exec("make", cpu_pin_enabled=True)
+    assert provider.exec_calls[1]["command"] == wrap_command_with_cpu_pin("make")
     assert await sandbox.status() == SandboxStatus.RUNNING
     assert await sandbox.endpoint(8000) == SandboxEndpoint(
         endpoint="http://127.0.0.1:8000",
@@ -376,6 +379,60 @@ async def _assert_async_sandbox_requires_spec_and_reports_unknown_status() -> No
 def test_rewrite_image_validation() -> None:
     assert rewrite_image(None, []) is None
     assert rewrite_image("image:tag", [{"from": "other/", "to": "mirror/"}]) == "image:tag"
+
+
+def test_cpu_pin_enabled_is_exec_only() -> None:
+    from nemo_gym.sandbox import SandboxPty
+
+    for method in (AsyncSandbox.exec, Sandbox.exec):
+        option = inspect.signature(method).parameters["cpu_pin_enabled"]
+        assert option.kind is inspect.Parameter.KEYWORD_ONLY
+        assert option.default is False
+
+    for target in (AsyncSandbox, Sandbox, SandboxPty.exec, SandboxPty.create, SandboxSpec):
+        assert "cpu_pin_enabled" not in inspect.signature(target).parameters
+
+
+def test_cpu_pin_wrapper_is_posix_and_preserves_command_status() -> None:
+    import subprocess
+
+    script = wrap_command_with_cpu_pin("exit 37")
+    syntax = subprocess.run(["sh", "-n"], input=script, capture_output=True, text=True, timeout=30)
+    assert syntax.returncode == 0, syntax.stderr
+
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 37
+    assert result.stdout == ""
+    assert result.stderr == ""
+
+
+def test_cpu_pin_wrapper_uses_process_affinity_and_clamps_threads(tmp_path: Path) -> None:
+    import os
+    import subprocess
+
+    cpu_max = tmp_path / "cpu.max"
+    cpu_max.write_text("300000 100000\n", encoding="utf-8")
+    process_status = tmp_path / "status"
+    process_status.write_text("Name:\ttest\nCpus_allowed_list:\t46-47\n", encoding="utf-8")
+
+    taskset_trace = tmp_path / "taskset.trace"
+    taskset = tmp_path / "taskset"
+    taskset.write_text('#!/bin/sh\nprintf \'%s\\n\' "$*" > "$NG_TASKSET_TRACE"\n', encoding="utf-8")
+    taskset.chmod(0o755)
+
+    script = wrap_command_with_cpu_pin("printf '%s\\n' \"$OMP_NUM_THREADS,$OPENBLAS_NUM_THREADS,$MAKEFLAGS\"").replace(
+        "/sys/fs/cgroup/cpu.max", str(cpu_max)
+    )
+    script = script.replace("/proc/self/status", str(process_status))
+    env = {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}", "NG_TASKSET_TRACE": str(taskset_trace)}
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=30, env=env)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "2,2,-j2\n"
+    assert result.stderr == ""
+    taskset_args = taskset_trace.read_text(encoding="utf-8").split()
+    assert taskset_args[0] == "-pc"
+    assert set(taskset_args[1].split(",")) == {"46", "47"}
 
 
 def test_sandbox_resources_validation() -> None:
@@ -648,6 +705,8 @@ def test_sync_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> None:
             "timeout_s": 60,
             "user": "agent",
         }
+        sandbox.exec("make", cpu_pin_enabled=True)
+        assert provider.exec_calls[1]["command"] == wrap_command_with_cpu_pin("make")
         assert sandbox.status() == SandboxStatus.RUNNING
 
         upload_path = tmp_path / "sync-upload.txt"
