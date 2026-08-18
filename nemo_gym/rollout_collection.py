@@ -89,9 +89,10 @@ from nemo_gym.token_id_capture import (
     TokenCaptureStore,
     TokenIdCaptureConfig,
     clear_token_captures_for_rollouts,
+    installed_token_source,
     token_id_capture_dirs_from_config,
 )
-from nemo_gym.token_id_capture.delivery import finalize_rollout_token_capture
+from nemo_gym.token_id_capture.delivery import finalize_rollout_token_capture, retire_rollout_token_capture
 
 
 logger = logging.getLogger(__name__)
@@ -808,8 +809,15 @@ class RolloutCollectionHelper(BaseModel):
         # reads through its own transport. The store is still written and still cleared in that last
         # case, since clearing is about a rerun reusing a deterministic id, not about readback.
         token_source = None
-        if token_capture_dirs and TokenIdCaptureConfig.model_validate(global_config).token_id_capture.rebuild_response:
-            token_source = TokenCaptureStore(token_capture_dirs[0])
+        owned_token_source = None
+        token_capture_config = TokenIdCaptureConfig.model_validate(global_config)
+        if token_capture_config.enabled and token_capture_config.token_id_capture.rebuild_response:
+            configured_source = token_capture_config.build_source()
+            token_source = configured_source or installed_token_source()
+            if token_source is None and token_capture_dirs:
+                token_source = TokenCaptureStore(token_capture_dirs[0])
+            if configured_source is not None or isinstance(token_source, TokenCaptureStore):
+                owned_token_source = token_source
 
         # Clear only rows about to be dispatched, after resume has assigned retry suffixes. This also
         # removes a kill-shaped attempt's partial capture when its rollout-attempt id is reused.
@@ -862,7 +870,7 @@ class RolloutCollectionHelper(BaseModel):
             # Build this rollout's captured tokens into a trajectory and attach it (no-op when token
             # capture is off or no tokens were captured for the rollout). Never alters output/reward.
             # A caller that drives run_examples itself calls the same function on each record.
-            await finalize_rollout_token_capture(result, token_source)
+            token_capture_build = await finalize_rollout_token_capture(result, token_source)
 
             no_persist = bool(result.get(NG_NO_PERSIST_KEY))
             failure_class = result.get(NG_FAILURE_CLASS_KEY)
@@ -886,6 +894,15 @@ class RolloutCollectionHelper(BaseModel):
                 results_file.flush()
                 persisted_rows.append(row)
                 persisted_results.append(result)
+                rollout_id = maybe_rollout_id_from_run_body(result)
+                if (
+                    rollout_id is not None
+                    and token_capture_build is not None
+                    and token_capture_build.get("rebuilt_response") is not None
+                    and not token_capture_build.get("mask_sample")
+                ):
+                    os.fsync(results_file.fileno())
+                    await retire_rollout_token_capture(rollout_id, token_source, token_capture_build)
 
             counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
             if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
@@ -923,6 +940,8 @@ class RolloutCollectionHelper(BaseModel):
 
         results_file.close()
         failures_file.close()
+        if owned_token_source is not None:
+            await owned_token_source.close()
 
         if config.upload_rollouts and get_exporters():  # pragma: no cover
             print("Uploading rollouts. This may take a few minutes if your data is large.")

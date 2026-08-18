@@ -28,6 +28,8 @@ This leaf package avoids imports from Gym's server stack.
 The rollout-record finalizer needs Gym's server stack.
 It is deliberately not re-exported here.
 Import ``nemo_gym.token_id_capture.delivery`` from server-side code.
+The incomplete state prevents training on a rollout that lost a model call.
+The caller conditionally retires the snapshot only after durable delivery.
 """
 
 from nemo_gym.token_id_capture.builder import (

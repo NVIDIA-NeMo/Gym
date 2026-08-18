@@ -165,14 +165,32 @@ async def finalize_rollout_token_capture(result: dict, source: TokenSource | Non
         )
     result[TOKEN_CAPTURE_KEY] = record_metrics
 
-    # Retire on consume. Rollouts record hundreds of KB each and a store appends, so keeping
-    # consumed records both grows without bound and lets a later run with the same id append onto
-    # them. A failed build keeps its records: they are the only evidence of why it failed.
-    if projected is not None:
-        try:
-            await source.drop(rollout_id)
-        except Exception:
-            # Housekeeping. Losing it costs disk, not correctness, and must not take down a rollout
-            # that was rebuilt successfully.
-            warnings.warn(f"could not retire the records for rollout {rollout_id}.", stacklevel=2)
     return built
+
+
+async def retire_rollout_token_capture(
+    rollout_id: str,
+    source: TokenSource | None,
+    built: dict | None,
+) -> bool:
+    """Conditionally retire a snapshot after its rebuilt rollout is durably handed off.
+
+    The caller owns the durability boundary. It must call this only after the
+    rebuilt record has been accepted by its downstream data plane or fsynced to
+    local storage. Failed or masked builds are retained as diagnostic evidence.
+    """
+    if source is None or built is None or built.get("rebuilt_response") is None or built.get(MASK_SAMPLE_KEY):
+        return False
+    snapshot = built.get("_capture_snapshot")
+    if not isinstance(snapshot, dict):
+        warnings.warn(f"rollout {rollout_id} has no sealed capture identity to retire.", stacklevel=2)
+        return False
+    try:
+        return await source.drop(
+            rollout_id,
+            seal_id=str(snapshot["seal_id"]),
+            version=int(snapshot["version"]),
+        )
+    except Exception:
+        warnings.warn(f"could not retire the records for rollout {rollout_id}.", stacklevel=2)
+        return False
