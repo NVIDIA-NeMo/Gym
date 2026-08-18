@@ -57,6 +57,16 @@ call when `observability_enabled` is set. Be aware that some agents overwrite th
 response `model` with the configured policy model name (`harbor_agent` does), so routing
 attribution should be read from the model-call capture records rather than the rollout response.
 
+## Routing-condition record
+
+Set `condition_dir` (one directory per run) and the server records the routing condition the run
+served under: `switchyard-condition.json` at startup — route, mode, deployment SHA-256 and
+archived contents (credential values redacted), `nemo-switchyard` version — and
+`switchyard-stats.json` at shutdown, the proxy's `/v1/stats` (per-target requests, tokens,
+retries, latency), which for a hosted proxy would otherwise die with the process. This is what
+makes two routed runs comparable and one routed run reproducible after the fact; the documented
+comparison workflow in the docs page builds on it.
+
 ## Dependency direction
 
 Gym knows Switchyard; Switchyard does not know Gym.
