@@ -15,12 +15,15 @@ never calls one — your service brings its own model, so the resulting rollouts
 carry no token IDs to train on. If you need the policy model, write an in-tree agent server instead.
 </Note>
 
+## Prerequisites
+
+- Complete the [Quickstart](/get-started/quickstart) — this tutorial assumes NeMo Gym is installed and
+  you've already run an evaluation.
+- Clone the [NeMo Gym repo](https://github.com/NVIDIA-NeMo/Gym) — the worked example lives in-tree at
+  `examples/langchain_deepagent`.
+
 The full example source code lives in
 [`examples/langchain_deepagent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/examples/langchain_deepagent). 
-
-- [`langchain_agent/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/examples/langchain_deepagent/langchain_agent)
-is the agent itself. 
-- Everything else in that directory is NeMo Gym wiring that uses `langchain_agent` as a local package.
 
 ## Run the agent standalone
 
