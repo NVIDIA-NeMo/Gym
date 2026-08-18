@@ -360,6 +360,37 @@ def test_gym_sandbox_backend_is_passed_as_plain_env_configuration(monkeypatch) -
     assert kwargs["sandbox_ready_poll_s"] == 0.25
 
 
+def test_opensandbox_pool_backend_preserves_sdk_compatibility_image(monkeypatch) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+
+    result = osworld_client.run_osworld_task(
+        {"id": "task-opensandbox", "instruction": "Finish the task."},
+        model_fn=lambda *_args: "```DONE```",
+        env_class_path="fake.FakeEnv",
+        sandbox_provider_config={"opensandbox": {"connection": {}}},
+        sandbox_spec={
+            "image": "busybox:1.36",
+            "provider_options": {
+                "extensions": {"poolRef": "osworld-kvm"},
+            },
+        },
+        vm_path="/opensandbox/Ubuntu.qcow2",
+        sandbox_require_kvm=False,
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert result.finished is True
+    kwargs = FakeEnv.instances[0].kwargs
+    assert kwargs["sandbox_provider"] == {
+        "opensandbox": {"connection": {}},
+    }
+    assert kwargs["sandbox_spec"]["image"] == "busybox:1.36"
+    assert kwargs["sandbox_spec"]["provider_options"]["extensions"]["poolRef"] == ("osworld-kvm")
+    assert kwargs["path_to_vm"] == "/opensandbox/Ubuntu.qcow2"
+    assert kwargs["sandbox_require_kvm"] is False
+
+
 def test_pointer_gym_sandbox_uses_pointer_environment(monkeypatch, tmp_path: Path) -> None:
     _patch_client_for_fake_runtime(monkeypatch)
     monkeypatch.setenv("OSWORLD_POINTER_RESULTS_DIR", str(tmp_path))
