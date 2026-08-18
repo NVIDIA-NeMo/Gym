@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import asyncio
 import json
 import logging
@@ -14,6 +29,8 @@ from harbor.models.trajectories import Trajectory
 from harbor.models.trial.config import AgentConfig, EnvironmentConfig, VerifierConfig
 from harbor.models.trial.paths import TrialPaths
 from harbor.models.trial.result import TrialResult
+from pydantic import ConfigDict, Field, PrivateAttr, field_validator
+
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
@@ -33,7 +50,7 @@ from nemo_gym.openai_utils import (
     NeMoGymSummary,
 )
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY
-from pydantic import ConfigDict, Field, PrivateAttr, field_validator
+
 
 logger = logging.getLogger(__name__)
 
