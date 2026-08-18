@@ -295,6 +295,14 @@ class RewardProfiler:
         repeats, plus the standard error of that mean -- how much the repeat-level estimates
         themselves vary from repeat to repeat, as distinct from the intra-repeat spread already
         captured by std/sem/CI in `_compute_repeat_level_metrics`.
+
+        Emitted as `{stat}_across_repeats/{per_repeat_stat}/{field}` -- e.g.
+        "mean_across_repeats/mean/reward" is the mean across repeats of each repeat's mean reward.
+        The `_across_repeats` suffix marks which half of the pair is the cross-repeat one; the older
+        "mean/mean/reward" spelling read as though one of the two means were a typo. Keeping the
+        per-repeat stat in the key leaves room for aggregating estimates other than the mean.
+        Deliberately not prefixed with "mean/", so these do not fall into the default
+        `get_key_metrics()` selection alongside the per-rollout "mean/{field}" headline.
         """
         if not repeat_level_metrics:
             return []
@@ -316,11 +324,11 @@ class RewardProfiler:
                 mean = float(col_data.mean())
                 std = float(col_data.std(ddof=1)) if n > 1 else 0.0
                 se = std / n**0.5
-                entry[f"mean/{col}"] = mean
-                entry[f"median/{col}"] = float(col_data.median())
-                entry[f"se/{col}"] = se
+                entry[f"mean_across_repeats/{col}"] = mean
+                entry[f"median_across_repeats/{col}"] = float(col_data.median())
+                entry[f"se_across_repeats/{col}"] = se
                 if ci := self._confidence_interval(mean, se, n):
-                    entry[f"ci_low_95/{col}"], entry[f"ci_high_95/{col}"] = ci
+                    entry[f"ci_low_95_across_repeats/{col}"], entry[f"ci_high_95_across_repeats/{col}"] = ci
             aggregated_metrics.append(entry)
         return aggregated_metrics
 

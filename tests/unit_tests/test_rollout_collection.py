@@ -869,9 +869,9 @@ class TestRolloutCollection:
         # Cross-repeat aggregates (mean/median/se of the per-repeat "mean/abc usage" estimate)
         # are merged into agent_metrics -- both repeats agree exactly (constant "abc usage"=1),
         # so the cross-repeat mean/median equal 1.0 and the SE across repeats is 0.
-        assert agent_metrics["mean/mean/abc usage"] == pytest.approx(1.0)
-        assert agent_metrics["median/mean/abc usage"] == pytest.approx(1.0)
-        assert agent_metrics["se/mean/abc usage"] == pytest.approx(0.0)
+        assert agent_metrics["mean_across_repeats/mean/abc usage"] == pytest.approx(1.0)
+        assert agent_metrics["median_across_repeats/mean/abc usage"] == pytest.approx(1.0)
+        assert agent_metrics["se_across_repeats/mean/abc usage"] == pytest.approx(0.0)
 
     async def test_run_from_config_repeat_level_metrics_e2e(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock

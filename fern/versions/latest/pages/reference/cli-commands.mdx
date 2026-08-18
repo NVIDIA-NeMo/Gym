@@ -706,7 +706,7 @@ gym eval aggregate \
 
 ### `gym eval profile`
 
-Compute a reward profile from collected rollouts. Outputs per-task statistics such as average reward, standard deviation, min/max, and pass rate, useful for filtering tasks before training by difficulty or variance. Requires rollouts collected with `--num-repeats` greater than 1.
+Compute a reward profile from collected rollouts. Outputs per-task statistics such as average reward, standard deviation, min/max, and pass rate, useful for filtering tasks before training by difficulty or variance. Works with any number of repeats, but the per-task and per-repeat spread is only meaningful with `--num-repeats` greater than 1.
 
 | Option | Description |
 | --- | --- |
@@ -718,6 +718,16 @@ gym eval profile \
     --inputs materialized_inputs.jsonl \
     --rollouts rollouts.jsonl
 ```
+
+Writes three files next to the rollouts, named from its stem:
+
+| File | Contents |
+| --- | --- |
+| `<rollouts>_reward_profiling.jsonl` | One row per task. |
+| `<rollouts>_agent_metrics.json` | One entry per agent. |
+| `<rollouts>_repeat_level_metrics.json` | One entry per repeat. |
+
+See [Repeat-Level Metrics](/evaluation/aggregate-metrics#repeat-level-metrics) for the full field list and how to read the variability statistics.
 
 ### `gym eval reverify`
 
