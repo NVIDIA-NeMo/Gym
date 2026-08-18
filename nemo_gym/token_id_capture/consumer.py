@@ -13,18 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The consumer that turns a rollout's captured tokens into trajectories.
+"""Turn a rollout's frozen token capture into trajectories.
 
-This is the single primitive both consumers call after a rollout finishes: Gym's
-rollout collection (co-located, reading the token store's files) and a trainer's
-finalizer, which passes whatever ``TokenSource`` its transport provides.
-The only difference between them is where the ``TokenEntry`` records come from;
-the build and projection are identical.
+Gym rollout collection and trainer finalization use this consumer.
+Gym reads a frozen snapshot from the local token store.
+A trainer freezes the ``TokenSource`` provided by its transport.
+Both paths pass snapshot entries through the same build and projection.
+Single-response delivery rejects ``per_request`` because it can return multiple trajectories.
 
-It is deliberately free of any rollout-record or model-server imports, so it
-does not couple to those layers. The caller supplies the ``rollout_id`` (Gym's
-rollout collection derives it from the record's task/rollout/attempt indices)
-and the metrics that describe what the build kept.
+This module does not import rollout-record or model-server modules.
+The caller supplies the ``rollout_id``.
+Gym derives that ID from task, rollout, and attempt indices.
+The result includes metrics that describe the build.
 """
 
 from __future__ import annotations
@@ -57,12 +57,12 @@ def _failed_build(rollout_id: str, builder: str, error: str, *, n_calls: int = 0
 
 
 def token_id_capture_dirs_from_config(global_config_dict) -> list[Path]:
-    """Resolve the token store directory when training-token capture is enabled, else []."""
+    """Return the enabled token store directory or an empty list."""
     from nemo_gym.token_id_capture.config import TokenIdCaptureConfig
 
     config = TokenIdCaptureConfig.model_validate(global_config_dict)
     directory = config.resolved_dir()
-    # A configured sink replaces the file store, so there is no directory to read back from.
+    # A configured sink replaces the readable file store.
     if not config.enabled or config.token_id_capture.sink is not None:
         return []
     return [directory] if directory is not None else []
@@ -71,11 +71,12 @@ def token_id_capture_dirs_from_config(global_config_dict) -> list[Path]:
 def clear_token_captures_for_rollouts(records: list, token_capture_dirs: list[Path]) -> None:
     """Remove stale token records for rollouts about to be dispatched.
 
-    Rollout ids are deterministic and ``TokenCaptureStore.append`` opens in "ab"
-    mode, so a rerun that reuses an id would append onto the previous attempt's
-    records and the builder would stitch two attempts into one trajectory. The
-    caller passes only the rows being dispatched, after any retry suffix has been
-    assigned.
+    Rollout IDs are deterministic.
+    ``TokenCaptureStore.append`` uses append mode.
+    A reused ID would append records to a previous attempt.
+    The builder could then combine two attempts.
+    The caller passes only rows ready for dispatch.
+    Retry suffixes must already be assigned.
     """
     if not token_capture_dirs:
         return
@@ -96,15 +97,16 @@ def _assemble(
     model: str,
 ) -> dict:
     if builder == "per_request":
+        # Single-response delivery cannot represent multiple trajectories.
         return _failed_build(
             rollout_id,
             builder,
             "per_request returns multiple trajectories and is not supported by single-response delivery",
             n_calls=len(entries),
         )
-    # A malformed capture must degrade this one rollout, not take down the caller.
-    # The contiguity assertion and flattener can both raise.
-    # An escaping exception would kill a full rollout or training batch.
+    # Mask a malformed rollout instead of failing the caller.
+    # The contiguity check and projection can raise.
+    # An uncaught exception could fail a full rollout or training batch.
     try:
         out = run_builder(entries, builder)
         for chain in out.chains:
@@ -126,8 +128,8 @@ def _assemble(
         )
 
     notes = out.notes
-    # Surface what the build dropped.
-    # A partial build must not look like a rollout that trained on every call.
+    # Report everything dropped by the build.
+    # A partial build must not appear complete.
     metrics = {
         "n_calls": len(entries),
         "chains": notes.chains,
@@ -137,8 +139,8 @@ def _assemble(
         "delivered_fraction": notes.delivered_fraction,
         "generated_tokens_captured": notes.generated_tokens_captured,
         "generated_tokens_delivered": notes.generated_tokens_delivered,
-        # Calls with no generated tokens carry no training signal.
-        # A non-zero count can indicate an output-budget or content-filter cutoff.
+        # Calls without generated tokens have no training signal.
+        # A nonzero count can indicate an output-budget or content-filter cutoff.
         "empty_generation_calls": len(notes.empty_generation_calls),
     }
     unresolved = notes.unresolved_retries
@@ -147,8 +149,8 @@ def _assemble(
         "builder": builder,
         "rebuilt_response": response,
         "metrics": metrics,
-        # A final-call retry can leave two plausible generations.
-        # Mask the rollout because the client-selected generation is unknown.
+        # A retry of the final call can leave two plausible generations.
+        # Mask the rollout when the client-selected generation is unknown.
         "mask_sample": bool(unresolved) or notes.roots != 1 or notes.chains != 1,
         "unresolved_retries": list(unresolved),
     }
@@ -161,11 +163,11 @@ def trajectories_for_rollout(
     builder: str = "prefix_merging",
     model: str = "",
 ) -> dict | None:
-    """Co-located path: read the rollout's tokens from the store files and build its trajectories.
+    """Build trajectories from a frozen local token-store snapshot.
 
-    come from the verifier result and ride the trajectory; they are not read from the token store.
-    Returns ``None`` only when no capture directory is configured. A configured
-    capture with no records is unusable and returns a masked result.
+    Return ``None`` only when no capture directory is configured.
+    Missing records are unsafe and return a masked result.
+    An incomplete snapshot is unsafe and returns a masked result.
     """
     for directory in token_capture_dirs:
         store = TokenCaptureStore(directory)
@@ -196,9 +198,10 @@ async def trajectories_from_source(
     builder: str = "prefix_merging",
     model: str = "",
 ) -> dict | None:
-    """Read the rollout's records through a ``TokenSource`` and build its trajectories.
+    """Build trajectories from a frozen ``TokenSource`` snapshot.
 
-    Returns ``None`` when nothing was recorded for it.
+    Missing records are unsafe and return a masked result.
+    An incomplete snapshot is unsafe and returns a masked result.
     """
     try:
         snapshot = await source.freeze(rollout_id)

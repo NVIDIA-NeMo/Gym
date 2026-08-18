@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Trajectory builder: chaining calls into one contiguous Responses projection."""
+"""Test trajectory building and contiguous Responses projection."""
 
 import asyncio
 
@@ -41,13 +41,15 @@ def _entry(mcid, prompt, gen, lp=None, created_at=0.0):
         prompt_token_ids=prompt,
         generation_token_ids=gen,
         generation_log_probs=lp if lp is not None else [-0.1] * len(gen),
-        # Stamped when the call completed. Chain selection orders on it.
+        # Capture stamps this value when the call completes.
+        # Chain selection uses this value.
         created_at=created_at,
     )
 
 
-# An append-only 3-call rollout: each call's prompt extends the prior prompt+generation
-# plus interstitial tokens (tool output / new user turn).
+# This append-only rollout has three calls.
+# Each prompt extends the previous prompt and generation.
+# Interstitial tokens represent tool output or a new user turn.
 CALL1 = _entry("c1", [1, 2, 3], [10, 11])
 CALL2 = _entry("c2", [1, 2, 3, 10, 11, 4, 5], [12])
 CALL3 = _entry("c3", [1, 2, 3, 10, 11, 4, 5, 12, 6], [13, 14])
@@ -55,7 +57,7 @@ APPEND_ONLY = [CALL1, CALL2, CALL3]
 
 
 def _generated_tokens(response: dict) -> list[int]:
-    """What the policy sampled, read back off the projection."""
+    """Return policy-sampled tokens from the projection."""
     out: list[int] = []
     for item in response["output"]:
         out += item.get("generation_token_ids") or []
@@ -67,15 +69,16 @@ def test_prefix_merging_builds_one_contiguous_main_chain():
     assert [c.chain_id for c in out.chains] == ["main"]
 
     response = project_main_chain_response("t0-r0", out, model="m")
-    # Each item's prompt is the running cumulative sequence, so the loss mask a trainer needs
-    # follows from the structure: prompt positions are context, generation positions are sampled.
+    # Each prompt is the cumulative sequence.
+    # Prompt positions are context.
+    # Generation positions are sampled tokens.
     assert [i["prompt_token_ids"] for i in response["output"]] == [
         [1, 2, 3],
         [1, 2, 3, 10, 11, 4, 5],
         [1, 2, 3, 10, 11, 4, 5, 12, 6],
     ]
     assert [i["generation_token_ids"] for i in response["output"]] == [[10, 11], [12], [13, 14]]
-    # A log probability for every sampled token.
+    # Every sampled token has a log probability.
     assert [len(i["generation_log_probs"]) for i in response["output"]] == [2, 1, 2]
 
 
@@ -90,7 +93,7 @@ def test_order_independent():
 
 
 def test_per_request_marks_the_same_generated_tokens():
-    # Both builders must agree on which tokens the policy sampled.
+    # Both builders identify the same sampled tokens.
     merged = prefix_merging(APPEND_ONLY)
     per_req = per_request(APPEND_ONLY)
     assert len(per_req.chains) == 3
@@ -111,12 +114,14 @@ def test_projection_is_prefix_contiguous():
     response = project_main_chain_response("t0-r0", out, model="m")
     assert [len(i["prompt_token_ids"]) for i in response["output"]] == [3, 7, 9]
     assert response["usage"] == {"input_tokens": 3, "output_tokens": 5}
-    assert_prefix_contiguity(response)  # must not raise
+    assert_prefix_contiguity(response)  # This must not raise.
 
 
 def test_projection_uses_the_recorded_carrier():
-    """The record holds the arrays once; projection puts the chain-correct values back on
-    the item they came off, leaving the other content items token-free."""
+    """Restore token arrays to their recorded carrier item.
+
+    Leave other content items without token fields.
+    """
     entry = _entry("m1", [1, 2, 3], [4, 5])
     entry.output_items = [
         {"type": "message", "content": "thinking out loud"},
@@ -131,8 +136,11 @@ def test_projection_uses_the_recorded_carrier():
 
 
 def test_projection_falls_back_for_records_without_a_carrier_index():
-    """Records written before the arrays moved off the items carry them inline and set no
-    index. Scanning for the item that has them projects those identically."""
+    """Support records that keep token arrays inline.
+
+    Older records do not set a carrier index.
+    Scan those records for the token-bearing item.
+    """
     entry = _entry("m1", [1, 2, 3], [4, 5])
     entry.output_items = [
         {"type": "message", "content": "thinking out loud"},
@@ -147,7 +155,7 @@ def test_contiguity_assert_catches_a_gap():
     broken = {
         "output": [
             {"type": "message", "prompt_token_ids": [1, 2, 3], "generation_token_ids": [10]},
-            # prompt does not extend [1,2,3,10]:
+            # This prompt does not extend [1, 2, 3, 10].
             {"type": "message", "prompt_token_ids": [1, 2, 3, 99], "generation_token_ids": [11]},
         ]
     }
@@ -185,15 +193,16 @@ def test_projection_carries_content_and_stays_contiguous():
     out = prefix_merging(entries)
     resp = project_main_chain_response("t0-r0", out, model="m")
     texts = [item["content"][0]["text"] for item in resp["output"]]
-    assert texts == ["first turn", "second turn"]  # content preserved (not token-only)
+    assert texts == ["first turn", "second turn"]  # Preserve content.
     assert [len(i["prompt_token_ids"]) for i in resp["output"]] == [3, 7]
-    assert_prefix_contiguity(resp)  # prompts still contiguous with content attached
+    assert_prefix_contiguity(resp)  # Content does not break prompt contiguity.
 
 
 def test_projection_handles_content_only_leading_item():
-    # A single call whose output is an assistant text message (no token fields) followed by a
-    # tool call that carries the token fields, the real shape when a model narrates before a
-    # tool call. Usage must be read from the token-bearing item, not output[0].
+    # This call emits assistant text before a tool call.
+    # The assistant text has no token fields.
+    # The tool call carries the token fields.
+    # Usage comes from the token-bearing item.
     entry = TokenEntry(
         rollout_id="t0-r0",
         model_call_id="c1",
@@ -208,14 +217,14 @@ def test_projection_handles_content_only_leading_item():
     )
     out = prefix_merging([entry])
     resp = project_main_chain_response("t0-r0", out, model="m")
-    assert resp["output"][0]["type"] == "message"  # content-only leading item preserved
+    assert resp["output"][0]["type"] == "message"  # Preserve the leading content-only item.
     assert "prompt_token_ids" not in resp["output"][0]
-    assert resp["usage"] == {"input_tokens": 3, "output_tokens": 2}  # counts from the token-bearing item
+    assert resp["usage"] == {"input_tokens": 3, "output_tokens": 2}  # Count the token-bearing item.
     assert_prefix_contiguity(resp)
 
 
 def test_consumer_reads_store_and_builds(tmp_path):
-    # The colocated consumer builds from records written to the local store.
+    # The colocated consumer freezes the local store before building.
     store = TokenCaptureStore(tmp_path)
     for e in APPEND_ONLY:
         store.append(e.model_copy(update={"rollout_id": "t0-r0"}))
@@ -224,7 +233,7 @@ def test_consumer_reads_store_and_builds(tmp_path):
     merged = trajectories_for_rollout("t0-r0", dirs, builder="prefix_merging")
     assert merged is not None
     assert merged["builder"] == "prefix_merging"
-    # Three calls become three contiguous output items on one Responses payload.
+    # Three calls become contiguous items in one Responses payload.
     output = merged["rebuilt_response"]["output"]
     assert len(output) == 3
     assert output[-1]["prompt_token_ids"] + output[-1]["generation_token_ids"] == [
@@ -358,7 +367,7 @@ def test_single_response_consumer_rejects_per_request_builder():
 def test_consumer_noop_when_disabled_or_absent(tmp_path):
     assert token_id_capture_dirs_from_config({}) == []
     assert trajectories_for_rollout("t0-r0", []) is None
-    # Once capture is configured, missing records are unsafe rather than a no-op.
+    # Missing records are unsafe after capture is configured.
     dirs = token_id_capture_dirs_from_config({"token_id_capture": {"enabled": True, "dir": str(tmp_path)}})
     missing = trajectories_for_rollout("missing", dirs)
     assert missing["mask_sample"] is True
@@ -366,14 +375,16 @@ def test_consumer_noop_when_disabled_or_absent(tmp_path):
 
 
 def test_ambiguous_parents_are_quarantined():
-    # Two roots with identical prompt+generation, then a call extending that shared
-    # sequence: its parent is ambiguous, so the subtree is quarantined, not guessed.
+    # Two roots have identical cumulative sequences.
+    # A call extends that shared sequence.
+    # Its parent is ambiguous.
+    # The builder quarantines the subtree.
     a = _entry("a", [1, 2], [7, 8])
     b = _entry("b", [1, 2], [7, 8])
     child = _entry("child", [1, 2, 7, 8, 9], [20])
     out = prefix_merging([a, b, child])
     assert "child" in out.quarantined
-    # The quarantined child is excluded from every emitted chain.
+    # Every emitted chain excludes the quarantined child.
     for chain in out.chains:
         assert all(link.entry.model_call_id != "child" for link in chain.links)
 
@@ -397,11 +408,13 @@ def test_ambiguous_retry_evidence_cannot_collapse_to_an_empty_success(tmp_path):
 def test_the_earliest_root_becomes_the_delivered_chain():
     """The rollout's own first call completes before anything it goes on to do.
 
-    Prompt length cannot decide this: the first real call carries the whole system prompt and
-    tool definitions, so it is among the longest, while an auxiliary call is tiny. Generated
-    length cannot either: an orchestrator that delegates generates less than what it delegates to.
+    Prompt length cannot identify this call.
+    The first task call contains the system prompt and tool definitions.
+    An auxiliary call can have a much shorter prompt.
+    Generation length cannot identify this call either.
+    An orchestrator can generate fewer tokens than its delegate.
     """
-    # A short auxiliary call, dispatched after the agent's first turn was already served.
+    # This short auxiliary call starts after the first agent turn completes.
     side = _entry("side", [9000, 9001], [7, 7, 7], created_at=200.0)
     real_1 = _entry("real1", list(range(100, 160)), [200, 201, 202, 203], created_at=100.0)
     real_2 = _entry("real2", list(range(100, 160)) + [200, 201, 202, 203, 500], [300, 301, 302], created_at=150.0)
@@ -411,15 +424,19 @@ def test_the_earliest_root_becomes_the_delivered_chain():
 
     assert [link.entry.model_call_id for link in main.links] == ["real1", "real2"]
     assert out.notes.chains == 2
-    # The dropped chain is reported rather than silently discarded.
+    # Metrics report the dropped chain.
     assert out.notes.generated_tokens_captured == 10
     assert out.notes.generated_tokens_delivered == 7
     assert out.notes.delivered_fraction == 0.7
 
 
 def test_an_orchestrator_is_delivered_over_the_sub_agent_it_delegates_to():
-    """An orchestrator generates little and delegates the work, so the chain that generated
-    the most is the wrong one to deliver. It starts first, which is what selection uses."""
+    """Deliver the orchestrator instead of its sub-agent.
+
+    The orchestrator generates few tokens before delegation.
+    The longest generation is therefore the wrong selection criterion.
+    Selection uses the earlier start.
+    """
     orchestrator = _entry("orch", list(range(100, 160)), [1, 2], created_at=100.0)
     sub_agent = _entry("sub", [9000, 9001], list(range(500, 560)), created_at=120.0)
 
@@ -427,18 +444,19 @@ def test_an_orchestrator_is_delivered_over_the_sub_agent_it_delegates_to():
     main = next(c for c in out.chains if c.chain_id == "main")
 
     assert [link.entry.model_call_id for link in main.links] == ["orch"]
-    # Most of the rollout's generation was not delivered, and that is visible rather than silent.
+    # Metrics expose the undelivered generation.
     assert out.notes.chains == 2
     assert out.notes.delivered_fraction < 0.1
 
 
 def test_an_auxiliary_call_that_finishes_first_is_selected_and_reported():
-    """A known limitation, pinned so it is not mistaken for correct behaviour.
+    """Document the known auxiliary-call selection limitation.
 
-    A harness that issues an auxiliary call before the agent's first turn, and whose short prompt
-    returns sooner, has that call selected as the root. Selection cannot tell the two apart,
-    because nothing in a record says which agent made the call. The rollout is not silently wrong:
-    it reports more than one chain and a low delivered fraction.
+    A harness issues an auxiliary call before the first agent turn.
+    The short auxiliary call finishes first.
+    Selection chooses that call as the root.
+    Records do not identify the calling agent.
+    Metrics report multiple chains and a low delivered fraction.
     """
     side = _entry("side", [9000, 9001], [7, 7, 7], created_at=90.0)
     real = _entry("real", list(range(100, 160)), [200, 201, 202, 203], created_at=100.0)
@@ -466,11 +484,15 @@ def test_selection_is_deterministic_when_timestamps_tie():
 
 
 def test_post_compaction_chain_is_reported_as_dropped():
-    """A rewritten context starts a new root. Only one chain is delivered today,
-    so what is left behind has to show up in the metrics."""
+    """Report a post-compaction chain as dropped.
+
+    A rewritten context starts a new root.
+    Only one chain is delivered.
+    Metrics report the remaining chain.
+    """
     call_1 = _entry("c1", [1, 2, 3], [4, 5])
     call_2 = _entry("c2", [1, 2, 3, 4, 5, 6], [7])
-    # Compaction: the prompt no longer extends anything captured.
+    # The compacted prompt does not extend a captured sequence.
     call_3 = _entry("c3", [90, 91], [92, 93, 94, 95])
 
     out = prefix_merging([call_1, call_2, call_3])
@@ -483,12 +505,13 @@ def test_post_compaction_chain_is_reported_as_dropped():
 
 
 def test_malformed_capture_masks_the_rollout_instead_of_raising(tmp_path):
-    """The callers are a rollout-collection loop and a training framework's loop; an
-    escaping exception there kills a whole step's batch rather than dropping one
-    sample."""
+    """Mask a malformed capture instead of raising.
+
+    An escaping exception can fail a rollout collection or training batch.
+    """
     store = TokenCaptureStore(tmp_path)
     bad = _entry("c1", [1, 2, 3], [4, 5])
-    bad.generation_log_probs = [-0.1]  # one log prob for two generated tokens
+    bad.generation_log_probs = [-0.1]  # One log probability covers two generated tokens.
     store.append(bad)
 
     built = trajectories_for_rollout("t0-r0", [tmp_path])
@@ -499,8 +522,11 @@ def test_malformed_capture_masks_the_rollout_instead_of_raising(tmp_path):
 
 
 def test_incomplete_capture_masks_the_rollout(tmp_path):
-    """A rollout that lost a call can still stitch into a clean-looking chain --
-    it is just missing a turn. The marker is what makes that visible."""
+    """Mask an incomplete capture.
+
+    A missing call can still produce a clean-looking chain.
+    The incomplete marker exposes the missing turn.
+    """
     store = TokenCaptureStore(tmp_path)
     store.append(_entry("c1", [1, 2, 3], [4, 5]))
     asyncio.run(store.mark_incomplete("t0-r0", "c2"))
@@ -531,9 +557,12 @@ def _sc(mcid, prompt, gen, requested_model=""):
 
 
 def test_a_call_that_generated_nothing_is_not_a_parent():
-    """A filtered call and its retry share a prompt. If the filtered one is treated as a parent the
-    pair reads as a two-turn chain, and retry resolution never compares them because it only looks
-    at siblings under a shared parent."""
+    """Exclude an empty generation from parent inference.
+
+    A filtered call and its retry share a prompt.
+    Treating the filtered call as a parent creates a false two-turn chain.
+    Retry resolution compares only siblings.
+    """
     filtered = _entry("filtered", [1, 2, 3], [])
     retry = _entry("retry", [1, 2, 3], [9, 9])
 
@@ -571,8 +600,11 @@ def test_multiple_roots_are_masked_instead_of_rewarding_an_auxiliary_chain(tmp_p
 
 
 def test_the_builder_runs_once_per_rollout(tmp_path, monkeypatch):
-    """The metrics and the trajectories must come from the same chaining pass, and chaining is
-    quadratic in call count when parent links are absent."""
+    """Run the builder once per rollout.
+
+    Metrics and trajectories must use the same chaining pass.
+    Chaining is quadratic without parent links.
+    """
     import nemo_gym.token_id_capture.consumer as consumer_module
 
     store = TokenCaptureStore(tmp_path)
@@ -594,9 +626,12 @@ def test_the_builder_runs_once_per_rollout(tmp_path, monkeypatch):
 
 
 def test_a_chain_that_breaks_is_split_and_reported():
-    """Two calls whose prompts do not extend each other are separate sequences. Stitching them
-    would hand the trainer positions the policy never generated in that order, so they become
-    separate chains and delivered_fraction reports what was left behind."""
+    """Split calls whose prompts do not extend each other.
+
+    These calls are separate sequences.
+    Joining them would create an order that the policy never generated.
+    The delivered fraction reports the omitted chain.
+    """
     first = _entry("a", [1, 2, 3], [4, 5])
     unrelated = _entry("b", [80, 81], [82])
 

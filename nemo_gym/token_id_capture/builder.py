@@ -13,30 +13,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Turn a rollout's captured token records into trainable trajectories.
+"""Build trainable trajectories from a frozen token capture.
 
-The builder is a pure function over a list of ``TokenEntry`` records (whatever a
-``TokenSource`` returns). It has two strategies:
+The builder consumes ``TokenEntry`` records from a ``TokenCaptureSnapshot``.
+The snapshot is frozen before the consumer passes its entries to the builder.
 
-  per_request     assumes nothing about how the calls relate; every call becomes
-                  its own training sequence. Always valid.
-  prefix_merging  chains calls by the token-prefix relationship: each call is
-                  parented to the earlier call whose full token sequence (prompt
-                  plus generation) is the longest prefix of this call's prompt.
-                  This rebuilds a multi-turn, append-only rollout into one chain.
-                  A prompt that no longer extends any earlier call starts a new
-                  root (a compacted or rewritten context). Two candidate parents
-                  with identical sequences are ambiguous, so that subtree is
-                  quarantined rather than guessed.
+``per_request`` creates one training sequence per call.
+It does not infer relationships between calls.
+It can return multiple trajectories.
 
-Both are order-independent: they do not depend on arrival order or any sequence
-number. ``prefix_merging`` processes entries by increasing prompt length, which
-is derived from the tokens themselves (a parent's prompt is shorter than its
-child's), so concurrent or out-of-order capture yields the same result.
+``prefix_merging`` chains calls by token-prefix relationships.
+Each call uses the earlier call with the longest matching cumulative sequence as its parent.
+The cumulative sequence contains the prompt and generation.
+This strategy rebuilds an append-only rollout as one chain.
+A rewritten or compacted prompt starts a new root.
+Identical candidate parents are ambiguous.
+The builder quarantines the ambiguous subtree.
 
-Loss masks follow provenance: tokens the policy generated are marked 1 (with
-their captured log probabilities), and everything re-fed into a prompt (history,
-tool output, tokens added between calls) is marked 0.
+Both strategies are independent of capture order.
+``prefix_merging`` processes entries by increasing prompt length.
+This order comes from the tokens.
+A parent's prompt is shorter than its child's prompt.
+
+Loss masks follow token provenance.
+Policy-generated tokens have a mask value of 1 and retain their captured log probabilities.
+Prompt tokens have a mask value of 0.
 """
 
 from __future__ import annotations
@@ -50,7 +51,7 @@ from nemo_gym.token_id_capture.records import TokenEntry
 @dataclass
 class ChainLink:
     entry: TokenEntry
-    interstitial: list[int]  # prompt tokens added since the parent (tool output, new user turn); mask 0
+    interstitial: list[int]  # Prompt tokens added after the parent have a mask value of 0.
 
 
 @dataclass
@@ -60,8 +61,10 @@ class Chain:
     root_prompt: list[int] = field(default_factory=list)
 
     def validate(self) -> None:
-        """Every generated token needs its log probability; a trainer cannot use a chain
-        where they disagree, and the mismatch is easier to read here than downstream."""
+        """Require one log probability for each generated token.
+
+        A trainer cannot use a chain with mismatched token and log-probability counts.
+        """
         for link in self.links:
             generated = link.entry.generation_token_ids
             log_probs = link.entry.generation_log_probs
@@ -74,11 +77,10 @@ class Chain:
 
 @dataclass
 class BuildNotes:
-    """What the build kept, dropped and had to guess at.
+    """Describe what the build kept, dropped, or could not resolve.
 
-    Typed rather than a free-form dict because the consumer turns these into the metrics a run is
-    judged by, and a renamed key in an untyped dict reads as a zero on a dashboard instead of an
-    error.
+    The consumer converts these fields into run metrics.
+    Typed fields prevent renamed keys from appearing as zero values on dashboards.
     """
 
     builder: str
@@ -86,20 +88,21 @@ class BuildNotes:
     chains: int = 0
     generated_tokens_captured: int = 0
     generated_tokens_delivered: int = 0
-    # Only one chain is delivered per rollout today, so sub-agent branches and everything after a
-    # context compaction are dropped. That is a deliberate limitation and has to stay visible.
+    # Only one chain is delivered per rollout.
+    # Sub-agent branches and post-compaction chains are dropped.
+    # The delivered fraction exposes this limitation.
     delivered_fraction: float = 0.0
-    # Calls whose sibling was a retry the harness may or may not have kept. Unresolvable for the
-    # final call of a rollout, because no later call names the survivor.
+    # These calls have a retry sibling that the harness may not have kept.
+    # A final-call retry is unresolved because no later call identifies the survivor.
     unresolved_retries: list[str] = field(default_factory=list)
-    # Calls the model returned with no generated tokens, kept out of the chain entirely.
+    # Calls without generated tokens are excluded from the chain.
     empty_generation_calls: list[str] = field(default_factory=list)
 
 
 @dataclass
 class BuildOutput:
     chains: list[Chain]
-    quarantined: list[str] = field(default_factory=list)  # model_call_ids
+    quarantined: list[str] = field(default_factory=list)  # Model call IDs.
     notes: BuildNotes = field(default_factory=lambda: BuildNotes(builder=""))
 
 
@@ -116,21 +119,21 @@ def _is_prefix(a: list[int], b: list[int]) -> bool:
     return len(a) <= len(b) and b[: len(a)] == a
 
 
-@dataclass(eq=False)  # identity-based, so nodes are hashable for set membership
+@dataclass(eq=False)  # Identity-based equality keeps nodes hashable.
 class _Node:
     entry: TokenEntry
-    cumulative: list[int]  # prompt + generation for this call
+    cumulative: list[int]  # Prompt and generation tokens for this call.
     parent: "_Node | None" = None
     children: list["_Node"] = field(default_factory=list)
     quarantined: bool = False
 
 
 def _infer_parent(prompt: list[int], candidates: list["_Node"]) -> tuple["_Node | None", bool]:
-    """Fallback when no verified parent link is recorded: the earlier call whose
-    cumulative sequence is the longest prefix of this prompt.
+    """Infer the parent from the longest cumulative prefix.
 
-    Two candidates with identical cumulative sequences are indistinguishable, so
-    the subtree is quarantined rather than guessed.
+    This is the fallback when no verified parent link exists.
+    Identical cumulative sequences are ambiguous.
+    The caller quarantines an ambiguous subtree.
     """
     matches = [n for n in candidates if _is_prefix(n.cumulative, prompt)]
     if not matches:
@@ -141,11 +144,11 @@ def _infer_parent(prompt: list[int], candidates: list["_Node"]) -> tuple["_Node 
 
 
 def prefix_merging(entries: list[TokenEntry]) -> BuildOutput:
-    # A call that generated nothing (content filter, or the output budget exhausted before the
-    # first token) has no trainable tokens, and its cumulative sequence equals its prompt. Left in,
-    # it matches the prefix test against any call sharing that prompt and becomes its parent, so a
-    # filtered call followed by a retry reads as a two-turn chain. Retry resolution only compares
-    # siblings under a shared parent, so it would never see the pair.
+    # A call without generated tokens has no training signal.
+    # Its cumulative sequence equals its prompt.
+    # Keeping it would make it the parent of another call with the same prompt.
+    # A filtered call and its retry would then look like a two-turn chain.
+    # Retry resolution compares only siblings and would miss that pair.
     empty_generation = [e.model_call_id for e in entries if not e.generation_token_ids]
     entries = [e for e in entries if e.generation_token_ids]
     if not entries:
@@ -153,9 +156,10 @@ def prefix_merging(entries: list[TokenEntry]) -> BuildOutput:
             chains=[], notes=BuildNotes(builder="prefix_merging", empty_generation_calls=empty_generation)
         )
 
-    # Increasing prompt length is an order derived from the tokens: a parent's
-    # cumulative sequence is a prefix of its child's prompt, so the parent's
-    # prompt is shorter. This makes the pass order-independent.
+    # Increasing prompt length defines an order from the tokens.
+    # A parent's cumulative sequence is a prefix of its child's prompt.
+    # The parent's prompt is therefore shorter.
+    # This makes the pass independent of capture order.
     ordered = sorted(entries, key=lambda e: (len(e.prompt_token_ids), e.model_call_id))
     nodes: list[_Node] = []
     roots: list[_Node] = []
@@ -168,7 +172,7 @@ def prefix_merging(entries: list[TokenEntry]) -> BuildOutput:
         if parent is not None:
             node.parent = parent
             if ambiguous:
-                # Two candidate parents with identical sequences: quarantine rather than guess.
+                # Quarantine calls with identical candidate parents.
                 node.quarantined = True
                 quarantined.append(entry.model_call_id)
             parent.children.append(node)
@@ -176,19 +180,21 @@ def prefix_merging(entries: list[TokenEntry]) -> BuildOutput:
             roots.append(node)
         nodes.append(node)
 
-    # Resolve retry siblings. A harness (Claude Code) retries on timeout / 5xx / dropped SSE, and the
-    # capture point records a call even if the client never received it, so a retry yields two nodes
-    # with identical prompt ids under the same parent and divergent generations.
+    # Resolve retry siblings.
+    # A harness can retry after a timeout, server error, or dropped stream.
+    # The capture point can record a call that the client never received.
+    # A retry then creates siblings with identical prompts and different generations.
     #
-    # A recorded parent link settles this exactly: a later call names the sibling the harness actually
-    # kept, so the other is provably unused. Without one we fall back to "the sibling a later call
-    # extended wins". Neither can resolve a retry of the last call, because no later call names the
-    # survivor, so that case is flagged as unresolved rather than tie-broken silently, and the
-    # caller masks the rollout instead of training on a generation the client may never have received.
+    # A recorded parent link identifies the sibling retained by the harness.
+    # Without a link, retain the sibling extended by a later call.
+    # Neither method can resolve a retry of the final call.
+    # Mark that retry as unresolved.
+    # The consumer masks the rollout instead of training on an unconfirmed generation.
     unresolved_retries: list[str] = []
-    # Group by parent identity. Roots share the ROOTS key on purpose: a retry of a rollout's first
-    # call produces two roots with the same prompt, and they have to be compared as siblings like
-    # any other pair. An explicit key says so, where id(None) would leave it looking accidental.
+    # Group calls by parent identity.
+    # All roots share the explicit ROOTS key.
+    # A retry of the first call creates roots with the same prompt.
+    # Treat those roots as siblings.
     ROOTS = "roots"
     siblings_by_parent: dict[object, list[_Node]] = {}
     for node in nodes:
@@ -233,32 +239,32 @@ def prefix_merging(entries: list[TokenEntry]) -> BuildOutput:
     for root in roots:
         walk(root, [])
 
-    # Only one chain is delivered per rollout, so when a rollout has more than one root, one has
-    # to be chosen. The choice is the root whose call completed first.
+    # Deliver only one chain per rollout.
+    # Choose the chain whose root call completed first.
     #
-    # That is dispatch order for a sequential harness. capture_tokens is awaited inside the model
-    # server's response path, so a call's record is durable before its response reaches the
-    # harness, which means the next call has not been made yet. created_at is stamped at that
-    # point. Ordering on the record's own timestamp rather than on file order matters because a
-    # server running num_workers > 1 has several processes appending, and their interleaving is
-    # lock order, not completion order.
+    # Completion order matches dispatch order for a sequential harness.
+    # The model server awaits token capture before returning the response.
+    # The next call therefore starts after the previous record is durable.
+    # The capture point sets ``created_at``.
+    # Use this timestamp instead of file order.
+    # Multiple server workers append in lock order rather than completion order.
     #
-    # Two known shapes are not handled, both involving a second agent:
+    # Two unsupported shapes involve a second agent.
     #
-    # An auxiliary call the harness makes on its own account, such as generating a conversation
-    # title, is short and can complete before the agent's first real turn. It would then be picked
-    # as the root and the agent's own chain relabelled a branch.
+    # A short auxiliary call can finish before the agent's first task call.
+    # Selection then treats the auxiliary call as the main root.
     #
-    # Parallel sub-agents overlap, so completion order stops meaning dispatch order at all, and
-    # nothing in a record says which agent made the call. Ordering cannot recover that. Keeping
-    # sub-agent calls out of the records, by pointing them at a model server that is not the
-    # policy's, can; some harnesses support configuring that.
+    # Parallel sub-agents make completion order differ from dispatch order.
+    # Records do not identify the calling agent.
+    # Ordering cannot recover that identity.
+    # Some harnesses can route sub-agent calls to a different model server.
     #
-    # Both are follow-up work. Until then the split is visible rather than silent: a rollout that
-    # split reports chains > 1 and a delivered_fraction below 1.
+    # These shapes require future work.
+    # A split rollout reports multiple chains and a delivered fraction below 1.
     def selection_key(c: Chain) -> tuple:
-        # Earliest root first. Ties break on call id so the result is deterministic when two
-        # records share a timestamp, and a chain with no links sorts last rather than raising.
+        # Sort by the earliest root.
+        # Break timestamp ties by call ID.
+        # Sort an empty chain last.
         if not c.links:
             return (float("inf"), "")
         root = c.links[0].entry
@@ -295,7 +301,7 @@ _BUILDERS: dict[str, Callable[[list[TokenEntry]], BuildOutput]] = {
 
 
 def run_builder(entries: list[TokenEntry], builder: str = "prefix_merging") -> BuildOutput:
-    """Chain a rollout's records using the named strategy."""
+    """Chain frozen snapshot entries with the named strategy."""
     if builder not in _BUILDERS:
         raise ValueError(f"unknown builder {builder!r}; known: {sorted(_BUILDERS)}")
     return _BUILDERS[builder](entries)
@@ -305,12 +311,14 @@ def run_builder(entries: list[TokenEntry], builder: str = "prefix_merging") -> B
 
 
 def project_chain_to_output_items(chain: Chain) -> list[dict]:
-    """Project the chain into content-bearing Responses output items whose prompts are
-    contiguous. For each call, emit its captured output items (assistant text, tool
-    calls preserved) and set the contiguous prompt on the item that carries the
-    generation, so each generated item's prompt extends the previous one. That is the
-    shape a trainer ingests, with the text intact for anything that scores it. Falls back to a
-    synthesized token-only item only when a call captured no content items."""
+    """Project a chain into Responses output items with contiguous prompts.
+
+    Preserve captured assistant text and tool calls.
+    Put the contiguous prompt on the item that carries each generation.
+    Each generated item's prompt extends the previous generated item.
+    Preserve text for downstream scoring.
+    Create a token-only item only when a call has no captured content items.
+    """
     items: list[dict] = []
     cumulative = list(chain.root_prompt)
     for step, link in enumerate(chain.links):
@@ -319,13 +327,13 @@ def project_chain_to_output_items(chain: Chain) -> list[dict]:
         content_items = [dict(item) for item in (entry.output_items or [])]
         index = entry.token_item_index
         if index is not None and 0 <= index < len(content_items):
-            # The item the arrays were taken off, recorded at capture time.
+            # Capture records the item that originally carried the token arrays.
             generated = [content_items[index]]
         else:
-            # Records written before the arrays were de-duplicated still carry them inline.
+            # Older records keep token arrays inline.
             generated = [item for item in content_items if item.get("generation_token_ids") is not None]
         if not generated and content_items:
-            # No item carried token fields (unexpected); attach to the last so tokens are not lost.
+            # Attach tokens to the last item when no item carries token fields.
             generated = content_items[-1:]
         if content_items:
             for item in generated:
@@ -352,11 +360,10 @@ def project_chain_to_output_items(chain: Chain) -> list[dict]:
 def project_main_chain_response(rollout_id: str, out: BuildOutput, model: str = "") -> dict:
     """Rebuild the main chain as a Responses object whose output items are contiguous.
 
-    The result is an ordinary Gym-native Responses payload: ``object: "response"``, a list
-    of ``output`` items, and ``usage``. The only thing that distinguishes it from what the
-    model server returned is that the token fields on each generated item now describe an
-    unbroken sequence across the whole rollout, because the items come from several model
-    calls stitched together rather than one.
+    The result is a Gym-native Responses payload.
+    It contains ``object: "response"``, ``output`` items, and ``usage``.
+    Token fields describe one unbroken sequence across the rollout.
+    The sequence combines items from multiple model calls.
     """
     if not out.chains:
         raise ValueError("capture produced no safe trainable chain")
@@ -366,9 +373,10 @@ def project_main_chain_response(rollout_id: str, out: BuildOutput, model: str = 
     output = project_chain_to_output_items(mains[0])
     if not any(item.get("generation_token_ids") for item in output):
         raise ValueError("capture produced no trainable generated tokens")
-    # Token fields ride only on generated items; a content-only leading item (e.g. assistant
-    # text emitted before a tool call) carries none. Read the usage counts from the items that
-    # actually have token fields so a leading content item does not KeyError or skew the totals.
+    # Only generated items carry token fields.
+    # A leading content-only item carries no token fields.
+    # Read usage counts from token-bearing items.
+    # This avoids missing keys and incorrect totals.
     generated = [item for item in output if item.get("generation_token_ids") is not None]
     n_in = len(generated[0]["prompt_token_ids"]) if generated else 0
     n_out = sum(len(item["generation_token_ids"]) for item in generated)
@@ -382,9 +390,11 @@ def project_main_chain_response(rollout_id: str, out: BuildOutput, model: str = 
 
 
 def assert_prefix_contiguity(response: dict) -> None:
-    """Check the invariant the projection promises: each output item's
-    prompt_token_ids must extend the tokens seen so far (prompt plus generation
-    of all prior items). Raises AssertionError otherwise."""
+    """Require each generated item to extend all preceding tokens.
+
+    The preceding tokens include the prompt and all prior generations.
+    Raise ``AssertionError`` when the response is not contiguous.
+    """
     seen: list[int] = []
     for item in response.get("output", []):
         if not isinstance(item, dict) or item.get("generation_token_ids") is None:
