@@ -14,6 +14,8 @@
 # limitations under the License.
 """Trajectory builder: chaining calls into one contiguous Responses projection."""
 
+import asyncio
+
 import pytest
 
 from nemo_gym.token_id_capture import (
@@ -241,9 +243,11 @@ def test_consumer_reads_store_and_builds(tmp_path):
 def test_consumer_noop_when_disabled_or_absent(tmp_path):
     assert token_id_capture_dirs_from_config({}) == []
     assert trajectories_for_rollout("t0-r0", []) is None
-    # Enabled dir but no file for this rollout -> None (graceful no-op).
+    # Once capture is configured, missing records are unsafe rather than a no-op.
     dirs = token_id_capture_dirs_from_config({"token_id_capture": {"enabled": True, "dir": str(tmp_path)}})
-    assert trajectories_for_rollout("missing", dirs) is None
+    missing = trajectories_for_rollout("missing", dirs)
+    assert missing["mask_sample"] is True
+    assert missing["rebuilt_response"] is None
 
 
 def test_ambiguous_parents_are_quarantined():
@@ -257,6 +261,19 @@ def test_ambiguous_parents_are_quarantined():
     # The quarantined child is excluded from every emitted chain.
     for chain in out.chains:
         assert all(link.entry.model_call_id != "child" for link in chain.links)
+
+
+def test_ambiguous_retry_evidence_cannot_collapse_to_an_empty_success(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    for entry in (
+        _entry("a", [1, 2], [7, 8]),
+        _entry("b", [1, 2], [7, 8]),
+        _entry("child", [1, 2, 7, 8, 9], [20]),
+    ):
+        store.append(entry)
+    built = trajectories_for_rollout("t0-r0", [tmp_path])
+    assert built["mask_sample"] is True
+    assert built["rebuilt_response"] is None
 
 
 # --- side calls and chain selection -------------------------------------------
@@ -363,7 +380,7 @@ def test_malformed_capture_masks_the_rollout_instead_of_raising(tmp_path):
     assert built is not None
     assert built["mask_sample"] is True
     assert built["rebuilt_response"] is None
-    assert "ValueError" in built["error"]
+    assert "ValidationError" in built["error"]
 
 
 def test_incomplete_capture_masks_the_rollout(tmp_path):
@@ -371,7 +388,7 @@ def test_incomplete_capture_masks_the_rollout(tmp_path):
     it is just missing a turn. The marker is what makes that visible."""
     store = TokenCaptureStore(tmp_path)
     store.append(_entry("c1", [1, 2, 3], [4, 5]))
-    store.mark_incomplete("t0-r0", "c2")
+    asyncio.run(store.mark_incomplete("t0-r0", "c2"))
 
     built = trajectories_for_rollout("t0-r0", [tmp_path])
     assert built["mask_sample"] is True
@@ -417,6 +434,25 @@ def test_a_rollout_of_only_empty_generations_builds_nothing():
     out = prefix_merging([_entry("a", [1, 2], []), _entry("b", [1, 2, 3], [])])
     assert out.chains == []
     assert out.notes.empty_generation_calls == ["a", "b"]
+
+
+def test_a_rollout_of_only_empty_generations_is_masked(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    store.append(_entry("a", [1, 2], []))
+    store.append(_entry("b", [1, 2, 3], []))
+    built = trajectories_for_rollout("t0-r0", [tmp_path])
+    assert built["mask_sample"] is True
+    assert built["rebuilt_response"] is None
+
+
+def test_multiple_roots_are_masked_instead_of_rewarding_an_auxiliary_chain(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    store.append(_entry("side", [90], [91], created_at=1.0))
+    store.append(_entry("task", [1, 2], [3], created_at=2.0))
+    built = trajectories_for_rollout("t0-r0", [tmp_path])
+    assert built["mask_sample"] is True
+    assert built["metrics"]["roots"] == 2
+    assert built["metrics"]["chains"] == 2
 
 
 def test_the_builder_runs_once_per_rollout(tmp_path, monkeypatch):

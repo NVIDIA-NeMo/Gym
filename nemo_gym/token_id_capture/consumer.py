@@ -45,6 +45,17 @@ from nemo_gym.token_id_capture.store import TokenCaptureStore
 logger = logging.getLogger(__name__)
 
 
+def _failed_build(rollout_id: str, builder: str, error: str, *, n_calls: int = 0) -> dict:
+    return {
+        "rollout_id": rollout_id,
+        "builder": builder,
+        "rebuilt_response": None,
+        "mask_sample": True,
+        "error": error,
+        "metrics": {"n_calls": n_calls},
+    }
+
+
 def token_id_capture_dirs_from_config(global_config_dict) -> list[Path]:
     """Resolve the token store directory when training-token capture is enabled, else []."""
     from nemo_gym.token_id_capture.config import TokenIdCaptureConfig
@@ -101,14 +112,12 @@ def _assemble(
             len(entries),
             error,
         )
-        return {
-            "rollout_id": rollout_id,
-            "builder": builder,
-            "rebuilt_response": None,
-            "mask_sample": True,
-            "error": f"{type(error).__name__}: {error}",
-            "metrics": {"n_calls": len(entries)},
-        }
+        return _failed_build(
+            rollout_id,
+            builder,
+            f"{type(error).__name__}: {error}",
+            n_calls=len(entries),
+        )
 
     notes = out.notes
     # Surface what the build dropped, so a rollout that trained on one of five calls does not look
@@ -116,6 +125,7 @@ def _assemble(
     metrics = {
         "n_calls": len(entries),
         "chains": notes.chains,
+        "roots": notes.roots,
         "quarantined_calls": len(out.quarantined),
         "quarantined_fraction": round(len(out.quarantined) / len(entries), 4) if entries else 0.0,
         "delivered_fraction": notes.delivered_fraction,
@@ -134,7 +144,7 @@ def _assemble(
         "metrics": metrics,
         # A retry of the final call leaves two generations with no way to tell which one the client
         # received. Training on the wrong one is silently off-policy, so the rollout is masked.
-        "mask_sample": bool(unresolved),
+        "mask_sample": bool(unresolved) or notes.roots != 1 or notes.chains != 1,
         "unresolved_retries": list(unresolved),
     }
 
@@ -149,20 +159,28 @@ def trajectories_for_rollout(
     """Co-located path: read the rollout's tokens from the store files and build its trajectories.
 
     come from the verifier result and ride the trajectory; they are not read from the token store.
-    Returns ``None`` when no tokens were captured for the rollout (capture off, or a dialect the
-    engine returned no ids for). Mirrors how evaluation capture is merged into a rollout record.
+    Returns ``None`` only when no capture directory is configured. A configured
+    capture with no records is unusable and returns a masked result.
     """
     for directory in token_capture_dirs:
         store = TokenCaptureStore(directory)
-        entries = store.read_entries(rollout_id)
-        if entries:
-            built = _assemble(rollout_id, entries, builder, model)
-            if store.is_incomplete(rollout_id):
-                # At least one call of this rollout failed to capture. The chain we built may look
-                # perfectly contiguous while being missing a turn, so mask rather than train on it.
-                built["mask_sample"] = True
-                built.setdefault("metrics", {})["capture_incomplete"] = True
-            return built
+        try:
+            snapshot = store.seal_now(rollout_id)
+        except Exception as error:
+            logger.warning("Could not seal token capture for rollout %s.", rollout_id, exc_info=True)
+            return _failed_build(rollout_id, builder, f"{type(error).__name__}: {error}")
+        if not snapshot.entries:
+            built = _failed_build(rollout_id, builder, "capture contains no token records")
+        else:
+            built = _assemble(rollout_id, list(snapshot.entries), builder, model)
+        if snapshot.incomplete:
+            built["mask_sample"] = True
+            built.setdefault("metrics", {})["capture_incomplete"] = True
+        built["_capture_snapshot"] = {
+            "seal_id": snapshot.seal_id,
+            "version": snapshot.version,
+        }
+        return built
     return None
 
 
@@ -177,14 +195,20 @@ async def trajectories_from_source(
 
     Returns ``None`` when nothing was recorded for it.
     """
-    entries = await source.tokens_for(rollout_id)
-    if not entries:
-        return None
-    built = _assemble(rollout_id, entries, builder, model)
-    # A rollout that lost a call can stitch into a chain that looks perfectly contiguous while
-    # missing a turn, so this is the only way to tell. A transport that cannot report it says so
-    # by returning False.
-    if source.is_incomplete(rollout_id):
+    try:
+        snapshot = await source.seal(rollout_id)
+    except Exception as error:
+        logger.warning("Could not seal token capture for rollout %s.", rollout_id, exc_info=True)
+        return _failed_build(rollout_id, builder, f"{type(error).__name__}: {error}")
+    if not snapshot.entries:
+        built = _failed_build(rollout_id, builder, "capture contains no token records")
+    else:
+        built = _assemble(rollout_id, list(snapshot.entries), builder, model)
+    if snapshot.incomplete:
         built["mask_sample"] = True
         built.setdefault("metrics", {})["capture_incomplete"] = True
+    built["_capture_snapshot"] = {
+        "seal_id": snapshot.seal_id,
+        "version": snapshot.version,
+    }
     return built
