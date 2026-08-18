@@ -618,7 +618,8 @@ def test_captured_entry_carries_content(tmp_path):
     client.post("/ng-rollout/task0-rollC/training-token-capture/v1/responses", json={"input": "hi"})
     tokens = TokenCaptureStore(tmp_path).read_entries("task0-rollC")
     assert len(tokens) == 1
-    # Not token-only: the captured record carries the content-bearing output items.
+    # The captured record is not token-only.
+    # It carries the content-bearing output items.
     assert tokens[0].output_items
     text = tokens[0].output_items[-1]["content"][0]["text"]
     assert text == "hi from responses"
@@ -637,9 +638,11 @@ def test_token_arrays_are_stored_once(tmp_path):
     assert entry.generation_token_ids == GTOKS
     for item in entry.output_items:
         assert not any(field in item for field in TOKEN_FIELDS)
-    # Content is kept; only the arrays move off.
+    # Content remains on the item.
+    # Only the token arrays move to the entry.
     assert entry.output_items[-1]["content"][0]["text"] == "hi from responses"
-    # Which item they came off, so a consumer can put the chain-correct values back.
+    # Record which item carried the arrays.
+    # The consumer restores chain-correct values there.
     assert entry.token_item_index == len(entry.output_items) - 1
 
 
@@ -678,7 +681,10 @@ def test_tokens_captured_even_when_eval_capture_disabled(tmp_path):
 
 
 def test_observability_prefix_does_not_enable_training_token_capture(tmp_path):
-    """Rollout correlation is neutral; token capture requires explicit path intent."""
+    """Keep rollout correlation neutral.
+
+    Token capture requires explicit path intent.
+    """
     client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
     resp = client.post("/ng-rollout/observed-only/v1/responses", json={"input": "hi"})
     assert resp.status_code == 200
@@ -690,7 +696,8 @@ def test_uncorrelated_call_captures_nothing(tmp_path):
     client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
     resp = client.post("/v1/responses", json={"input": "hi"})
     assert resp.status_code == 200
-    # No rollout prefix -> nothing recorded, no file created.
+    # An unprefixed call records nothing.
+    # It creates no capture file.
     assert list(tmp_path.glob("*.tokens.jsonl")) == []
 
 
@@ -733,7 +740,7 @@ def test_streamed_messages_capture_tokens_absent_from_the_stream(tmp_path):
     # Nothing on the wire carries token ids.
     assert "generation_token_ids" not in body
     assert "prompt_token_ids" not in body
-    # ...yet the record is complete.
+    # The captured record is still complete.
     entries = TokenCaptureStore(tmp_path).read_entries("stream0-roll0")
     assert len(entries) == 1
     assert entries[0].generation_token_ids == GTOKS
@@ -788,7 +795,8 @@ def test_a_response_without_token_ids_marks_the_rollout_incomplete(tmp_path):
     """
     client = TestClient(_silent_server(_both_enabled(tmp_path)).setup_webserver())
     resp = client.post("/ng-rollout/silent0-roll0/training-token-capture/v1/responses", json={"input": "hi"})
-    # The model call itself still succeeds; capture never breaks the harness's run.
+    # The model call itself still succeeds.
+    # Capture never breaks the harness's run.
     assert resp.status_code == 200
 
     store = TokenCaptureStore(tmp_path)
@@ -897,7 +905,7 @@ def test_delete_removes_records_and_marker(tmp_path):
     store.delete("gone-0")
     assert not store.path_for("gone-0").exists()
     assert not store.is_incomplete("gone-0")
-    # Idempotent: consuming a rollout twice must not raise.
+    # Repeated deletion is idempotent.
     store.delete("gone-0")
 
 
@@ -1007,7 +1015,7 @@ def test_installed_sink_is_marked_incomplete_through_the_protocol(installed_sink
         ).setup_webserver()
     )
     resp = client.post("/ng-rollout/task0-sink1/training-token-capture/v1/responses", json={"input": "hi"})
-    assert resp.status_code == 200  # capture never fails the model call
+    assert resp.status_code == 200  # Capture never fails the model call.
     assert installed_sink.incomplete == [("task0-sink1", installed_sink.incomplete[0][1])]
 
 
@@ -1073,7 +1081,7 @@ def test_a_malformed_token_payload_does_not_fail_the_model_call(installed_sink):
     entry_ctor = TokenEntry
 
     def _bad_entry(**kwargs):
-        # Stand in for a payload that fails validation, e.g. token ids that are not integers.
+        # Stand in for token ids that fail validation.
         raise ValueError("prompt_token_ids: not a list of ints")
 
     with patch("nemo_gym.token_id_capture.sink.TokenEntry", _bad_entry):
@@ -1095,7 +1103,7 @@ def test_a_malformed_token_payload_does_not_fail_the_model_call(installed_sink):
     assert [r for r, _ in installed_sink.incomplete] == ["task0-bad0"], (
         "the rollout lost a call and must not look complete"
     )
-    assert entry_ctor is TokenEntry  # patch scoped
+    assert entry_ctor is TokenEntry  # Confirm the patch stayed scoped.
 
 
 def test_capture_stamps_cum_len_and_digest(tmp_path):
@@ -1894,7 +1902,10 @@ async def test_an_external_endpoint_round_trips_the_sink_and_source_protocols():
 
 
 def test_a_configured_sink_wins_over_an_installed_one(installed_sink):
-    """Both routes exist; the configured one is preferred because it survives extra workers."""
+    """Expose both installation routes.
+
+    Prefer the configured route because it survives extra workers.
+    """
     _ConfiguredSink.entries = []
     config = {
         "token_id_capture": {
@@ -2021,7 +2032,7 @@ def test_a_programmatically_installed_sink_does_not_reach_a_spawned_worker():
     They do not inherit launcher process globals.
     Each worker must construct its configured sink.
     """
-    ctx = multiprocessing.get_context("spawn")  # the context uvicorn uses
+    ctx = multiprocessing.get_context("spawn")  # Match uvicorn's process context.
     queue = ctx.Queue()
     process = ctx.Process(target=_report_installed_sink, args=(queue,))
     process.start()

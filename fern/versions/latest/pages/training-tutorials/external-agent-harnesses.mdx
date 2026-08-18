@@ -78,6 +78,8 @@ An unresolved call begins a separate incomplete fragment. Gym never crosses that
 
 The loss mask follows from this structure instead of being sent separately. Prompt positions provide context. Generation positions are trainable.
 
+Single-response delivery uses `prefix_merging` because one rollout record can carry only one rebuilt response. Gym rejects the `per_request` builder for this path because it can return multiple trajectories.
+
 ## What to watch on a first run
 
 Read these metrics before the reward curve. A rollout can appear healthy because its reward changes even when most of the rollout never reaches training.
@@ -188,7 +190,7 @@ With Gym's local file backend, all workers append and resolve from the same toke
 
 ### Reading records back
 
-`TokenCaptureStore` satisfies both sink and source protocols and is the default. The local deployment also uses `FileLineageStore`, whose lock and state files are shared by model-server workers using the same directory.
+`TokenCaptureStore` satisfies both sink and source protocols and is the default. The local deployment also uses `FileLineageStore`, an append-only JSONL store shared by model-server workers using the same directory.
 
 A framework staging records through its own transport reads them through its own `TokenSource`, which lives wherever that transport does. Nothing in the protocol requires node-local storage.
 
@@ -198,22 +200,13 @@ Consume records through `TokenSource.freeze`. Reading entries alone is insuffici
 
 ## How a rollout's calls are linked
 
-By default the calls of a rollout are chained by their token prefixes: a call is parented to the
-earlier call whose prompt plus generation is the longest prefix of this call's prompt. That is
-correct, and it has one blind spot. If a harness retries a call, both attempts share a prompt and
-differ only in what they generated, so prefix matching cannot tell which one the harness kept.
+By default the calls of a rollout are chained by their token prefixes: a call is parented to the earlier call whose prompt plus generation is the longest prefix of this call's prompt. That is correct, and it has one blind spot. If a harness retries a call, both attempts share a prompt and differ only in what they generated, so prefix matching cannot tell which one the harness kept.
 
-The model server therefore identifies the parent at request time instead. A harness must echo the
-conversation to continue it, so hashing the model-authored turns of an incoming request finds the
-call that produced the last one. Nothing is added to the wire and nothing depends on the harness
-preserving a field Gym invented.
+The model server therefore identifies the parent at request time instead. A harness must echo the conversation to continue it, so hashing the model-authored turns of an incoming request finds the call that produced the last one. Nothing is added to the wire and nothing depends on the harness preserving a field Gym invented.
 
-Two things are checked before a match is used. It must be unique, because two calls that produced
-byte-identical output cannot be told apart. And the conversation those turns arrived with must still
-match what that call was sent, which is what rules out a compacted or summarized history whose model
-output is unchanged.
+Two things are checked before a match is used. It must be unique because two calls that produced byte-identical output cannot be told apart. The conversation containing those turns must also match the request sent to that call. This check rules out a compacted or summarized history whose model output is unchanged.
 
-A request-time miss leaves the explicit link unset, and the builder can still infer a parent from token prefixes. A present but invalid explicit link is quarantined rather than silently replaced. `parent_link_failures` in the per-rollout metrics reports invalid explicit links.
+A request-time miss or missing parent target leaves no usable explicit link, so the builder falls back to strict token-prefix matching. A digest mismatch quarantines the call instead of falling back. `parent_link_failures` in the per-rollout metrics reports invalid explicit links.
 
 ### Driving rollouts yourself
 
@@ -250,18 +243,11 @@ The id becomes a URL path segment. It can contain letters, digits, dots, dashes,
 
 ### Prefix supply
 
-By default the inference engine builds each prompt by re-rendering the whole conversation through the
-chat template. That can produce a different sequence than the model sampled. A tool-call parser
-truncates the assistant turn at the tool call and discards anything generated after it; a chat
-template can re-tokenize an assistant turn differently; a reasoning model's template may drop earlier
-thinking entirely. In each case the new prompt no longer extends the previous one and the rollout
-cannot be chained.
+By default the inference engine builds each prompt by re-rendering the whole conversation through the chat template. That can produce a different sequence than the model sampled. A tool-call parser truncates the assistant turn at the tool call and discards anything generated after it; a chat template can re-tokenize an assistant turn differently; a reasoning model's template may drop earlier thinking entirely. In each case the new prompt no longer extends the previous one and the rollout cannot be chained.
 
-Prefix supply sends the engine the exact tokens of the call being continued, so the new prompt
-extends the previous one by construction. Enable it by overlaying
-`responses_api_models/vllm_model/configs/vllm_model_supply_prefix.yaml`.
+Prefix supply sends the engine the exact tokens of the call being continued, so the new prompt extends the previous one by construction. Enable it by overlaying `responses_api_models/vllm_model/configs/vllm_model_supply_prefix.yaml`.
 
-It requires a backend that honors `required_prefix_token_ids` during generation and returns the generation-time `prompt_token_ids` in the chat-completion response. Gym verifies that those ids start with the required prefix before recording `prefix_supplied: true`. A missing or mismatched proof fails the model call instead of silently capturing off-policy tokens. The separate tokenize endpoint is used only when no prefix was requested.
+Setting `required_prefix_token_ids` records prefix intent. It does not prove that the backend generated from that prefix. The backend must return the generation-time `prompt_token_ids` in the Chat Completions response. Gym records `prefix_supplied: true` only after verifying that those ids start with the required prefix. Missing or mismatched proof fails the model call instead of silently capturing off-policy tokens. The separate tokenize endpoint is used only when no prefix was requested. Prefix supply is incompatible with `use_completions_api: true`.
 
 ### Sampling pin
 
