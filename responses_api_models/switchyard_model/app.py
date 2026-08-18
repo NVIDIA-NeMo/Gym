@@ -31,7 +31,7 @@ import contextvars
 import logging
 import re
 from contextlib import asynccontextmanager, nullcontext
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import Field, model_validator
 
@@ -121,9 +121,14 @@ class SwitchyardModelConfig(BaseResponsesAPIModelConfig):
     # The hosted proxy binds loopback only; this server is the network-facing piece.
     proxy_port: Optional[int] = None
 
-    # Header Switchyard reads as its opaque session id. Gym sends its rollout-attempt id so
+    # Headers Switchyard reads as its opaque session id. Gym sends its rollout-attempt id so
     # per-call routing decisions can be joined back to the rollout after the run.
-    session_id_header: str = "proxy_x_session_id"
+    # x-switchyard-session-id is the name the native server parses into routing metadata (session
+    # affinity, request logs, spans). A list because attach-mode proxies can key other subsystems
+    # on other names -- e.g. proxy_x_session_id for switchyard-server durable routing logs -- but
+    # add names knowingly: Switchyard strips only the headers it recognizes, so an unrecognized
+    # name is forwarded verbatim to the upstream provider.
+    session_id_headers: List[str] = Field(default_factory=lambda: ["x-switchyard-session-id"])
     forward_session_id: bool = True
 
     extra_body: Dict[str, Any] = Field(default_factory=dict)
@@ -183,34 +188,32 @@ class SwitchyardModel(SimpleResponsesAPIModel):
         )
 
     def setup_webserver(self):
-        # Launch here rather than in model_post_init so the proxy only starts when this server is
-        # actually going to serve -- matching local_vllm_model, and keeping config validation and
-        # tests free of side effects.
-        if self.config.launches_proxy:
-            print("Starting Switchyard proxy...")
-            self._build_client(self.start_proxy())
-
         app = super().setup_webserver()
         # Added last, so it wraps the capture middleware and still sees the correlation prefix.
         app.add_middleware(_RolloutSessionMiddleware)
-        self.setup_proxy_shutdown(app)
+        self.setup_proxy_lifespan(app)
         return app
 
-    def setup_proxy_shutdown(self, app) -> None:
-        """Stop the proxy when the app shuts down.
+    def setup_proxy_lifespan(self, app) -> None:
+        """Host the proxy for exactly as long as the app serves.
 
-        The proxy runs in this process, so it cannot outlive an orchestrated SIGKILL the way a
-        subprocess could -- this hook exists for the graceful path, where an explicit close()
-        stops the listener promptly and flushes Switchyard's telemetry instead of relying on
-        interpreter teardown.
+        Startup and shutdown must share a thread: the native server's PyO3 binding is
+        thread-affine (unsendable), so the thread that constructs it is the only one allowed to
+        close it. Running both ends inside the lifespan guarantees that on any host -- uvicorn
+        runs the lifespan on the main thread, test clients on a worker thread, and either way
+        construction and close land together. It also keeps config validation, app assembly, and
+        tests free of side effects; the proxy exists only while the app serves.
         """
         main_app_lifespan = app.router.lifespan_context
 
         @asynccontextmanager
         async def lifespan_wrapper(app):
+            if self.config.launches_proxy:
+                print("Starting Switchyard proxy...")
+                self._build_client(self.start_proxy())
             # finally, not a trailing statement: startup can fail after the proxy is already
-            # serving, and a proxy that outlives a server which never finished starting is the
-            # same leak as one that outlives a server which did.
+            # serving, and a proxy left serving by a server which never finished starting is the
+            # same waste as one left serving by a server which did.
             try:
                 async with main_app_lifespan(app) as maybe_state:
                     yield maybe_state
@@ -270,7 +273,9 @@ class SwitchyardModel(SimpleResponsesAPIModel):
         if rollout_id is None or not self.config.forward_session_id:
             return self._client
 
-        headers = {**self._client.default_headers, self.config.session_id_header: rollout_id}
+        headers = {**self._client.default_headers}
+        for name in self.config.session_id_headers:
+            headers[name] = rollout_id
         return self._client.model_copy(update={"default_headers": headers})
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:

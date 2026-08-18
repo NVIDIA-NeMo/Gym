@@ -86,9 +86,9 @@ Two reasons to prefer this mode:
 
 ## Correlating routing decisions with rollouts
 
-Gym sends its rollout-attempt id to Switchyard as an opaque session id, using the `proxy_x_session_id` header. That lets proxy-side records — which model was chosen, what it cost — be joined back to the rollout that produced them. Set `forward_session_id: false` to disable it, or `session_id_header` to change the header name.
+Gym sends its rollout-attempt id to Switchyard as an opaque session id, using the `x-switchyard-session-id` header — the name the native server parses into its routing metadata, where it reaches request logs, OpenTelemetry spans, and session-affinity routing. Set `forward_session_id: false` to disable it, or `session_id_headers` to change the names sent.
 
-On the Switchyard side, aggregate routing statistics are on `/v1/stats`, and with a durable routing log enabled in the deployment, per-session decisions are on `/v1/routing/session-stats` — queryable by the rollout-attempt ids Gym sent.
+On the Switchyard side, aggregate routing statistics are on `/v1/stats`. Per-session decision snapshots on `/v1/routing/session-stats` require a durable routing log, which at Switchyard 0.2.0 only the standalone binary can enable — run `switchyard-server --routing-log-file <path>`, attach with `switchyard_base_url`, and add `proxy_x_session_id` to `session_id_headers`, the name that log keys sessions on. Add header names knowingly: Switchyard forwards headers it does not recognize (and, at 0.2.0, the session header itself) through to the upstream provider.
 
 To see which model served each call from Gym's side, enable [model-call capture](/model-server/model-call-capture). Each captured exchange records the response, so the routed model is visible per call.
 
@@ -105,7 +105,7 @@ Read routing attribution from the capture records, not from the rollout response
 | `switchyard_model` | `${policy_model_name}` | Route name to request. |
 | `switchyard_api_key` | `dummy` | Sent as the bearer token to the proxy. |
 | `proxy_port` | `null` | Fixed loopback port for the hosted proxy. `null` picks a free one. |
-| `session_id_header` | `proxy_x_session_id` | Header carrying the rollout id. |
+| `session_id_headers` | `[x-switchyard-session-id]` | Header names carrying the rollout id. |
 | `forward_session_id` | `true` | Whether to send it at all. |
 | `extra_body` | `{}` | Merged into every upstream request body. |
 | `default_headers` | `{}` | Sent on every upstream request. |
