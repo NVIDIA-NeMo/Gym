@@ -521,6 +521,41 @@ class TestConditionRecord:
 
         assert not (tmp_path / "condition" / "switchyard-stats.json").exists()
 
+    def test_unwritable_condition_dir_does_not_fail_startup(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        """Provenance is worth a warning, not an outage: a bad dir must not stop serving."""
+        blocker = tmp_path / "not-a-dir"
+        blocker.write_text("a file where the condition dir should be")
+        server = self._launch_server(monkeypatch, tmp_path, condition_dir=str(blocker))
+
+        # Startup raising would fail this test; the manifest is the only casualty.
+        with TestClient(server.setup_webserver()):
+            pass
+
+        assert blocker.read_text() == "a file where the condition dir should be"
+
+    def test_missing_distribution_yields_null_version(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        """A source checkout without dist metadata still gets a manifest, with version null."""
+
+        def not_installed(name):
+            raise app_module.importlib.metadata.PackageNotFoundError(name)
+
+        monkeypatch.setattr(app_module.importlib.metadata, "version", not_installed)
+        server = self._launch_server(monkeypatch, tmp_path)
+
+        with TestClient(server.setup_webserver()):
+            manifest = json.loads((tmp_path / "condition" / "switchyard-condition.json").read_text())
+
+        assert manifest["nemo_switchyard_version"] is None
+
+    def test_stats_snapshot_needs_a_proxy_to_ask(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        """Before hosting starts there is no proxy URL; the snapshot must no-op, not guess."""
+        server = self._launch_server(monkeypatch, tmp_path)
+
+        assert server.proxy_root_url() is None
+        server.snapshot_proxy_stats()
+
+        assert not (tmp_path / "condition").exists()
+
 
 @pytest.mark.skipif(
     importlib.util.find_spec("switchyard_rust") is None,
