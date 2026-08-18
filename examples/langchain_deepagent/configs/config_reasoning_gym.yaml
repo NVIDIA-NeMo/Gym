@@ -1,0 +1,29 @@
+# reasoning_gym + remote_agent, pointed at a deepagents service you run yourself.
+#
+#   gym env start "+config_paths=[examples/langchain_deepagent/configs/config_reasoning_gym.yaml]"
+#
+# Both blocks have to be here: `gym env start` launches exactly the server instances it finds in
+# the merged config, so referencing a built-in environment without declaring it starts nothing.
+
+reasoning_gym:                # server_id — your name for this instance
+  resources_servers:
+    reasoning_gym:             # implementation — must match resources_servers/reasoning_gym/
+      entrypoint: app.py
+      domain: knowledge
+
+remote_agent:                 # server_id — your name for this instance
+  responses_api_agents:
+    remote_agent:                # implementation — must match responses_api_agents/remote_agent/
+      entrypoint: app.py
+      agent_base_url: http://localhost:9000
+      resources_server:
+        type: resources_servers
+        name: reasoning_gym # the server_id above, not the implementation
+      # Each unit of concurrency is one in-flight deepagents run, and each of those fans out into
+      # provider calls of its own. 8 keeps a first run under most API rate limits; the Gym default
+      # is 32.
+      concurrency: 8
+      # deepagents runs its own tools internally and answers in a single call, so one step per
+      # rollout is the whole loop. Raise this only once the service returns unpaired
+      # `function_call` items for Gym to execute.
+      max_steps: 1
