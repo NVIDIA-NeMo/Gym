@@ -27,18 +27,9 @@ and costs join back to the rollout that produced them.
 """
 
 import asyncio
-import atexit
 import contextvars
-import ctypes
 import logging
 import re
-import shutil
-import signal
-import subprocess
-import sys
-import time
-import urllib.error
-import urllib.request
 from contextlib import asynccontextmanager, nullcontext
 from typing import Any, Dict, Optional
 
@@ -104,39 +95,17 @@ class _RolloutSessionMiddleware:
             _ROLLOUT_ID.reset(token)
 
 
-_PR_SET_PDEATHSIG = 1
-
-
-def _set_parent_death_signal() -> None:
-    """Ask the kernel to SIGTERM this child when its parent dies.
-
-    Gym's orchestrator stops a server with SIGINT and escalates to SIGKILL after one second, and a
-    SIGKILLed parent runs no handler -- not the shutdown event, not atexit. Without a kernel-level
-    tie the proxy survives its owner and keeps holding its port, so every eval that cycles servers
-    leaks one. prctl is Linux-only; elsewhere this is a no-op and the shutdown handler is the only
-    line of defence.
-
-    Raising here would fail the spawn, which is a worse outcome than a proxy that needs reaping, so
-    a platform without prctl is tolerated silently.
-    """
-    if sys.platform != "linux":
-        return
-    try:
-        ctypes.CDLL("libc.so.6", use_errno=True).prctl(_PR_SET_PDEATHSIG, signal.SIGTERM)
-    except (OSError, AttributeError):
-        pass
-
-
 class SwitchyardModelConfig(BaseResponsesAPIModelConfig):
     """Configuration for serving Gym model calls through a Switchyard proxy.
 
-    By default Gym launches the proxy itself from ``routing_profiles``, so a routed eval is one
-    command and the user never manages a proxy. Setting ``switchyard_base_url`` instead attaches to
-    a proxy someone else runs -- useful when an eval needs to pin a specific Switchyard build, or
-    when several servers should share one instance.
+    By default Gym hosts the proxy itself from ``deployment``, so a routed eval is one command and
+    the user never manages a proxy. Setting ``switchyard_base_url`` instead attaches to a proxy
+    someone else runs -- useful when an eval needs to pin a specific Switchyard build, or when
+    several servers should share one instance (routing strategies with session or agent affinity
+    are stateful, so replicas each hosting their own proxy would not route like one shared proxy).
     """
 
-    # Set to attach to an already-running proxy instead of launching one.
+    # Set to attach to an already-running proxy instead of hosting one.
     switchyard_base_url: Optional[str] = None
     switchyard_api_key: str = "dummy"  # pragma: allowlist secret
 
@@ -145,13 +114,12 @@ class SwitchyardModelConfig(BaseResponsesAPIModelConfig):
     # the response.
     switchyard_model: str
 
-    # Used when launching. routing_profiles is the routing config Switchyard serves.
-    routing_profiles: Optional[str] = None
-    # 0.0.0.0 so the proxy is reachable off-box; this server always talks to it over loopback.
-    proxy_host: str = "0.0.0.0"
+    # Used when hosting. A native Switchyard TOML deployment: llm_clients, targets, and routes,
+    # validated by the server when it loads. This is the routing condition an eval runs under --
+    # an explicit, diffable artifact, which is what makes routed runs comparable.
+    deployment: Optional[str] = None
+    # The hosted proxy binds loopback only; this server is the network-facing piece.
     proxy_port: Optional[int] = None
-    proxy_startup_timeout_s: float = 120.0
-    switchyard_executable: str = "switchyard"
 
     # Header Switchyard reads as its opaque session id. Gym sends its rollout-attempt id so
     # per-call routing decisions can be joined back to the rollout after the run.
@@ -174,20 +142,20 @@ class SwitchyardModelConfig(BaseResponsesAPIModelConfig):
 
     @model_validator(mode="after")
     def validate_target(self) -> "SwitchyardModelConfig":
-        if self.launches_proxy and not self.routing_profiles:
+        if self.launches_proxy and not self.deployment:
             raise ValueError(
-                "switchyard_model needs either routing_profiles (Gym launches the proxy) or "
-                "switchyard_base_url (attach to a proxy you run yourself)"
+                "switchyard_model needs either deployment (Gym hosts the proxy from a native "
+                "Switchyard TOML deployment) or switchyard_base_url (attach to a proxy you run yourself)"
             )
-        if self.switchyard_base_url and self.routing_profiles:
+        if self.switchyard_base_url and self.deployment:
             # Both fields default from environment variables, so this is easy to hit by accident.
-            # Attaching wins, but say so -- silently ignoring a routing profile the user supplied
-            # would look like their routing config was in effect when it was not.
+            # Attaching wins, but say so -- silently ignoring a deployment the user supplied would
+            # look like their routing config was in effect when it was not.
             logger.warning(
-                "switchyard_model: both switchyard_base_url and routing_profiles are set. Attaching to %s; "
-                "the routing profile %s is served by that proxy, not by Gym, and is otherwise ignored.",
+                "switchyard_model: both switchyard_base_url and deployment are set. Attaching to %s; "
+                "the deployment %s is served by that proxy, not by Gym, and is otherwise ignored.",
                 self.switchyard_base_url,
-                self.routing_profiles,
+                self.deployment,
             )
         return self
 
@@ -231,10 +199,10 @@ class SwitchyardModel(SimpleResponsesAPIModel):
     def setup_proxy_shutdown(self, app) -> None:
         """Stop the proxy when the app shuts down.
 
-        The graceful half of proxy cleanup. atexit does not cover this on its own: uvicorn's
-        signal handling ends the process without running interpreter exit hooks, so a proxy
-        launched here outlived every orchestrated shutdown. See _set_parent_death_signal for the
-        other half, which covers shutdowns too abrupt for any handler to run.
+        The proxy runs in this process, so it cannot outlive an orchestrated SIGKILL the way a
+        subprocess could -- this hook exists for the graceful path, where an explicit close()
+        stops the listener promptly and flushes Switchyard's telemetry instead of relying on
+        interpreter teardown.
         """
         main_app_lifespan = app.router.lifespan_context
 
@@ -254,75 +222,40 @@ class SwitchyardModel(SimpleResponsesAPIModel):
     # --- Proxy lifecycle ---
 
     def start_proxy(self) -> str:
-        """Start `switchyard ... serve` and block until it answers /health.
+        """Host the native Switchyard server in-process and return its base URL.
 
-        nemo-switchyard is a dependency of this server, so the CLI is normally installed with it.
-        Check anyway -- a custom switchyard_executable or a hand-built environment can leave it
-        missing, and an explicit message beats an opaque FileNotFoundError from Popen.
+        The constructor loads and validates the TOML deployment, binds loopback, and returns
+        already serving -- a bad deployment or an unbindable port is an exception here, not a
+        timeout later, so there is no health polling and no subprocess to reap.
+
+        nemo-switchyard is a dependency of this server, so the import normally succeeds. Catch
+        anyway -- a hand-built environment can leave it missing, and an explicit message beats a
+        bare ModuleNotFoundError.
         """
-        if shutil.which(self.config.switchyard_executable) is None:
+        try:
+            from switchyard_rust.server import Server
+        except ImportError as error:
             raise RuntimeError(
-                f"switchyard_model could not find the {self.config.switchyard_executable!r} executable on PATH, "
-                "so it cannot launch a proxy. It ships with this server's nemo-switchyard dependency; if you "
-                "are running a custom environment, install it with `pip install 'nemo-switchyard[server]'` or "
-                "set switchyard_base_url to attach to a proxy you run yourself."
-            )
+                "switchyard_model could not import switchyard_rust, so it cannot host a proxy. It ships "
+                "with this server's nemo-switchyard dependency; if you are running a custom environment, "
+                "install it with `pip install nemo-switchyard==0.2.0` or set switchyard_base_url to attach "
+                "to a proxy you run yourself."
+            ) from error
 
         port = self.config.proxy_port or find_open_port(
             disallowed_ports=get_global_config_dict()[DISALLOWED_PORTS_KEY_NAME]
         )
-        command = [
-            self.config.switchyard_executable,
-            "--routing-profiles",
-            str(self.config.routing_profiles),
-            "--",
-            "serve",
-            "--host",
-            self.config.proxy_host,
-            "--port",
-            str(port),
-        ]
-        logger.info("Starting Switchyard proxy: %s", " ".join(command))
-        # preexec_fn runs between fork and exec, which is the only point where the child can ask
-        # the kernel to tie its lifetime to this process. It carries the documented thread-safety
-        # caveat, but this runs once at startup before the server serves traffic.
-        process = subprocess.Popen(command, preexec_fn=_set_parent_death_signal)
-        self._proxy_process = process
-        atexit.register(self.stop_proxy)
-
-        # The proxy binds a wildcard address so it is reachable off-box, but a wildcard is not a
-        # destination -- this server always reaches its own child over loopback.
-        host = "127.0.0.1" if self.config.proxy_host in ("0.0.0.0", "::") else self.config.proxy_host
-        root_url = f"http://{host}:{port}"
-        self.wait_for_proxy(root_url, process)
-        return f"{root_url}/v1"
-
-    def wait_for_proxy(self, root_url: str, process: subprocess.Popen) -> None:
-        deadline = time.monotonic() + self.config.proxy_startup_timeout_s
-        while time.monotonic() < deadline:
-            if process.poll() is not None:
-                raise RuntimeError(f"Switchyard proxy exited during startup with code {process.returncode}")
-            try:
-                with urllib.request.urlopen(f"{root_url}/health", timeout=5) as response:
-                    if response.status == 200:
-                        logger.info("Switchyard proxy is up at %s", root_url)
-                        return
-            except (urllib.error.URLError, OSError):
-                pass
-            time.sleep(1)
-
-        self.stop_proxy()
-        raise TimeoutError(f"Switchyard proxy did not become healthy within {self.config.proxy_startup_timeout_s}s")
+        logger.info("Hosting Switchyard proxy from deployment %s on port %d", self.config.deployment, port)
+        self._proxy_server = Server(str(self.config.deployment), port=port)
+        logger.info("Switchyard proxy is up at %s", self._proxy_server.base_url)
+        return f"{self._proxy_server.base_url}/v1"
 
     def stop_proxy(self) -> None:
-        process = getattr(self, "_proxy_process", None)
-        if process is None or process.poll() is not None:
+        server = getattr(self, "_proxy_server", None)
+        if server is None:
             return
-        process.terminate()
-        try:
-            process.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            process.kill()
+        self._proxy_server = None
+        server.close()
 
     # --- Model calls ---
 
