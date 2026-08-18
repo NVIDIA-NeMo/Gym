@@ -20,7 +20,12 @@ provider A/B.
 
 - `include_news` (default `false`) adds You.com's news section ahead of the web results.
   Turn it on for recency-sensitive benchmarks (LiveBench-style), where web-only retrieval
-  systematically misses fresh sources.
+  systematically misses fresh sources. `/v1/search` returns both sections unconditionally,
+  so this is an output-side filter — no request parameter opts into news.
+- `crawl_timeout` (default `10`) bounds every `/v1/contents` fetch (`find_in_page`,
+  `scroll_page`) in all modes, and `/v1/search` in `full_page` mode.
+- `page_cache_max_entries` (default `512`) bounds the per-process page cache. Only
+  successful fetches are cached, so one crawl timeout does not disable a URL for the run.
 - `exclude_domains_file_path` is **optional**. Point it at a domain opt-out registry if
   your deployment has legal exclusions to honour; leave it unset otherwise. Entries are
   sent to the API (capped at its 500-domain limit) *and* enforced client-side, so
@@ -76,9 +81,13 @@ gym dataset download --storage gitlab \
   NeMo Gym's global aiohttp client. There is no vendored httpx transport to adapt — the
   reason `tavily_search` needs `TavilySearchAIOHTTPClient` does not apply here.
 - **Two endpoints back the three tools.** `web_search` calls `POST /v1/search`;
-  `find_in_page` and `scroll_page` both call `POST /v1/contents` and share a per-process
-  page cache, so scrolling a long page costs one crawl regardless of how many windows the
-  agent reads.
+  `find_in_page` and `scroll_page` both call `POST /v1/contents` and share a bounded
+  per-process page cache, so scrolling a long page costs one crawl regardless of how many
+  windows the agent reads.
+- **`find_in_page` selects its window client-side.** `/v1/contents` takes no query —
+  passing one returns an identical payload — so the server scores candidate windows by
+  query-term coverage and returns the best-matching region, snapped to a line boundary,
+  rather than the head of every page.
 - **Result bodies are deduplicated.** You.com's `description` is frequently a truncated
   copy of `snippets`; emitting both cost ~16% more tokens per call for no added
   information. Whichever is subsumed by the other is dropped.

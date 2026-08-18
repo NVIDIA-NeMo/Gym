@@ -34,7 +34,7 @@ aiohttp client directly.
 import json
 import re
 from asyncio import sleep
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from contextlib import asynccontextmanager
 from pathlib import Path
 from time import time
@@ -79,14 +79,20 @@ class YouSearchResourcesServerConfig(BaseResourcesServerConfig):
     search_mode: SearchMode = "snippets"
     base_url: str = "https://ydc-index.io"
     num_results: int = 10
+    # Surfaces the response's ``results.news`` section ahead of the web results.
+    # /v1/search returns both `news` and `web` unconditionally, so this is a pure
+    # output-side filter -- no request parameter opts into news.
     include_news: bool = False
-    # full_page only: seconds You.com may spend crawling a page before giving up.
+    # Seconds You.com may spend crawling a page. Applies to every /v1/contents fetch
+    # (find_in_page, scroll_page) in all modes, and to /v1/search in full_page mode.
     crawl_timeout: int = 10
     # Per-result character cap. 2000 matches the Tavily server; raise it when running
     # full_page, where the default truncates away most of what you paid to crawl.
     max_result_chars: int = 2000
     # Optional. Path to a domain opt-out registry; see _parse_exclude_domains.
     exclude_domains_file_path: Optional[str] = None
+    # Pages are cached per process; bound it so a long eval cannot grow without limit.
+    page_cache_max_entries: int = 512
     use_judge: bool = True  # If False, use regex matching instead of LLM judge
     judge_model_server: Optional[ModelServerRef] = None
     judge_responses_create_params: Optional[NeMoGymResponseCreateParamsNonStreaming] = None
@@ -178,7 +184,7 @@ class YouSearchResourcesServer(SimpleResourcesServer):
         self._session_id_to_metrics = defaultdict(YouSearchMetrics)
 
         self._exclude_domains = self._parse_exclude_domains()
-        self._page_cache: dict[str, str] = {}
+        self._page_cache: "OrderedDict[str, str]" = OrderedDict()
         print(f"Excluded domains: {self._exclude_domains}")
         print(f"Search mode: {self.config.search_mode}")
         if self.config.debug:
@@ -223,7 +229,6 @@ class YouSearchResourcesServer(SimpleResourcesServer):
         Retries do not count against the try budget when the failure is a rate
         limit, matching the Tavily server's behaviour.
         """
-        headers = {"X-API-Key": self._select_api_key()}
         url = f"{self.config.base_url}{endpoint}"
 
         MAX_NUM_TRIES = 3  # Hardcode for now
@@ -232,6 +237,9 @@ class YouSearchResourcesServer(SimpleResourcesServer):
         response = None
         while tries < max_num_tries:
             tries += 1
+            # Chosen per try: a retry after a 429 rotates onto the next key instead of
+            # hammering the one that was just throttled.
+            headers = {"X-API-Key": self._select_api_key()}
             response = await request(method="POST", url=url, headers=headers, json=payload)
 
             if response.status in RETRY_ERROR_CODES:
@@ -246,6 +254,11 @@ class YouSearchResourcesServer(SimpleResourcesServer):
                 await sleep(0.5)
                 continue
 
+            # Non-retryable failures (401 bad key, 400 bad payload, 403) must raise rather
+            # than fall through. Returning the error body as if it were results turns a
+            # misconfigured key into a full run of silent zero-reward "No results found."
+            await raise_for_status(response)
+
             data = await response.json()
             if self.config.debug:
                 print(f"Received the following You.com response: {data}")
@@ -253,6 +266,27 @@ class YouSearchResourcesServer(SimpleResourcesServer):
 
         # We've exited the loop
         await raise_for_status(response)
+
+    async def _tracked_post(
+        self, function: str, metrics: YouSearchMetrics, endpoint: str, payload: Dict[str, Any]
+    ) -> Any:
+        """``_post`` with the call recorded in ``metrics`` whether it succeeds or fails.
+
+        Timing only the successes makes the histogram in ``plot_session_id_metrics.py``
+        survivor-biased, and tail latency is one of the numbers this environment exists to
+        compare across providers.
+        """
+        start_time = time()
+        status = "success"
+        try:
+            return await self._post(endpoint, payload)
+        except Exception:
+            status = "failure"
+            raise
+        finally:
+            metrics.you_api_calls.append(
+                YouSearchSingleAPICallMetrics(function=function, status=status, start_time=start_time, end_time=time())
+            )
 
     def _search_payload(self, query: str) -> Dict[str, Any]:
         payload: Dict[str, Any] = {"query": query, "count": self.config.num_results}
@@ -284,11 +318,7 @@ class YouSearchResourcesServer(SimpleResourcesServer):
         if len(body.query) > 400:
             return YouSearchResponse(results_string="Query is too long")
 
-        start_time = time()
-        results = await self._post("/v1/search", self._search_payload(body.query))
-        metrics.you_api_calls.append(
-            YouSearchSingleAPICallMetrics(function="search", status="success", start_time=start_time, end_time=time())
-        )
+        results = await self._tracked_post("search", metrics, "/v1/search", self._search_payload(body.query))
 
         postprocessed_results = self._postprocess_search_results(results)
         return YouSearchResponse(results_string="".join(postprocessed_results))
@@ -313,20 +343,24 @@ class YouSearchResourcesServer(SimpleResourcesServer):
         if not raw_content:
             return FindInPageResponse(results_string="No content found.")
 
-        # Format: header + clean + truncate + line numbers
+        # Format: header + clean + query-relevant window + line numbers
         domain = self._extract_domain(body.url)
         cleaned = self._clean_text(raw_content)
-        truncated, was_truncated = self._truncate_text(cleaned)
-        numbered = self._add_line_numbers(truncated)
+        window, window_start = self._query_window(cleaned, body.query)
+        numbered = self._add_line_numbers(window)
 
-        header = (
-            f"Content from: {domain}\n"
-            f"URL: {body.url}\n"
-            f'Query: "{body.query}"\n'
-            f"========================================\n"
-        )
+        header_lines = [
+            f"Content from: {domain}",
+            f"URL: {body.url}",
+            f'Query: "{body.query}"',
+        ]
+        if window_start > 0:
+            header_lines.append(f"Showing the best match for the query, from character {window_start}.")
+        header_lines.append("========================================\n")
+        header = "\n".join(header_lines)
+
         footer = ""
-        if was_truncated:
+        if len(window) < len(cleaned):
             footer = "\n[...truncated, use scroll_page for full content]"
 
         return FindInPageResponse(results_string=header + numbered + footer)
@@ -348,7 +382,11 @@ class YouSearchResourcesServer(SimpleResourcesServer):
 
         words = page_content.split()
         total_words = len(words)
-        sliced_words = words[body.start_index : body.start_index + body.n]
+        # start_index/n come straight from the model. A negative start_index would wrap to
+        # the tail of the document while the header described a completely different span.
+        start_index = min(max(body.start_index, 0), total_words)
+        n = max(body.n, 0)
+        sliced_words = words[start_index : start_index + n]
         chunk_text = " ".join(sliced_words)
 
         # Format: header + clean + line numbers
@@ -356,11 +394,11 @@ class YouSearchResourcesServer(SimpleResourcesServer):
         cleaned = self._clean_text(chunk_text)
         numbered = self._add_line_numbers(cleaned)
 
-        end_index = min(body.start_index + body.n, total_words)
+        end_index = min(start_index + n, total_words)
         header = (
             f"Page content from: {domain}\n"
             f"URL: {body.url}\n"
-            f"Showing words [{body.start_index}-{end_index}] of {total_words}\n"
+            f"Showing words [{start_index}-{end_index}] of {total_words}\n"
             f"========================================\n"
         )
 
@@ -374,20 +412,17 @@ class YouSearchResourcesServer(SimpleResourcesServer):
         if url in self._page_cache:
             if self.config.debug:
                 print(f"Cache hit for {url}")
+            self._page_cache.move_to_end(url)
             return self._page_cache[url]
 
         if self.config.debug:
             print(f"Cache miss for {url}, fetching with You.com contents")
 
-        start_time = time()
-        results = await self._post(
+        results = await self._tracked_post(
+            "contents",
+            metrics,
             "/v1/contents",
             {"urls": [url], "formats": ["markdown"], "crawl_timeout": self.config.crawl_timeout},
-        )
-        metrics.you_api_calls.append(
-            YouSearchSingleAPICallMetrics(
-                function="contents", status="success", start_time=start_time, end_time=time()
-            )
         )
 
         # /v1/contents answers with a bare array, one entry per requested URL.
@@ -395,10 +430,16 @@ class YouSearchResourcesServer(SimpleResourcesServer):
         if results:
             page_content = results[0].get("markdown") or ""
 
-        self._page_cache[url] = page_content
+        # Only successful fetches are cached. Caching "" would let one crawl timeout
+        # disable both find_in_page and scroll_page for this URL for the process lifetime.
+        if page_content:
+            self._page_cache[url] = page_content
+            while len(self._page_cache) > self.config.page_cache_max_entries:
+                self._page_cache.popitem(last=False)
         return page_content
 
     async def verify(self, request: Request, body: YouSearchVerifyRequest) -> YouSearchVerifyResponse:
+        session_id = request.session[SESSION_ID_KEY]
         question = body.question
         ground_truth = body.ground_truth
         last_assistant_response = body.response.output_text
@@ -414,31 +455,70 @@ class YouSearchResourcesServer(SimpleResourcesServer):
             **body.model_dump(),
             **judge_evaluation.model_dump(),
             num_tool_calls=sum(o.type == "function_call" for o in body.response.output),
-            metrics=self._session_id_to_metrics[request.session[SESSION_ID_KEY]],
+            metrics=self._session_id_to_metrics[session_id],
         )
+        # The rollout is scored, so its metrics are no longer needed -- unless they are
+        # being dumped at shutdown. Otherwise this map grows by one entry per rollout.
+        if not self.config.dump_session_id_to_metrics_on_exit:
+            self._session_id_to_metrics.pop(session_id, None)
         if judge_error is not None:
             raise JudgeError(judge_error)
         return response
 
     ###### UTILITY FUNCTIONS ######
 
+    @staticmethod
+    def _url_hostname(url: str) -> str:
+        """Hostname of ``url``, tolerating the scheme-less URLs models sometimes emit.
+
+        ``urlparse("example.com/p").hostname`` is None -- the whole string lands in
+        ``path`` -- which would silently exempt such a URL from the exclusion check.
+        """
+        candidate = url.strip()
+        if "//" not in candidate:
+            candidate = f"//{candidate}"
+        return (urlparse(candidate).hostname or "").strip().lower().rstrip(".")
+
+    @staticmethod
+    def _normalize_domain(domain: str) -> str:
+        """Canonical form for comparing registry entries against hostnames."""
+        domain = domain.strip().lower().rstrip(".")
+        return domain[4:] if domain.startswith("www.") else domain
+
     def _is_url_excluded(self, url: str) -> bool:
         """Check if the URL's domain is in the excluded domains list."""
-        hostname = urlparse(url).hostname or ""
+        hostname = self._normalize_domain(self._url_hostname(url))
+        if not hostname:
+            return False
         return any(hostname == domain or hostname.endswith("." + domain) for domain in self._exclude_domains)
 
     def _extract_domain(self, url: str) -> str:
         """Extract domain from URL."""
-        return urlparse(url).hostname or url
+        return self._url_hostname(url) or url
 
     def _clean_text(self, text: str) -> str:
         """Remove wiki/web navigation artifacts and normalize whitespace."""
         # Strip [edit] markers
         text = re.sub(r"\[edit\]", "", text)
-        # Strip wiki navigation chrome lines: [Jump to content], [Search...], [Read], [View history], etc.
-        text = re.sub(r"^\[(?:Jump to content|Search|Read|Edit|View history)[^\]]*\].*$", "", text, flags=re.MULTILINE)
-        # Strip wiki language sidebar links: [LangName](https://xx.wikipedia.org/...)
-        text = re.sub(r"\[[^\]]+\]\(https?://[a-z]{2,3}\.wikipedia\.org/[^\)]*\)", "", text)
+        # Strip wiki navigation chrome lines: [Jump to content], [Search...], [Read], etc.
+        # The line must consist *only* of the bracketed item (optionally a markdown link).
+        # An earlier form ended in `.*$`, so a content line such as
+        # "[Reading list](...) - the 2025 laureate was X" matched on "[Read" and was
+        # deleted whole, taking the answer with it.
+        text = re.sub(
+            r"^\[(?:Jump to content|Search|Read|Edit|View history)[^\]]*\](?:\([^)]*\))?[ \t]*$",
+            "",
+            text,
+            flags=re.MULTILINE,
+        )
+        # Strip wiki language sidebar links: [LangName](https://xx.wikipedia.org/...).
+        # Whole-line only -- unanchored, this also removed inline citations from prose.
+        text = re.sub(
+            r"^[ \t]*(?:[-*][ \t]*)?\[[^\]]+\]\(https?://[a-z]{2,3}\.wikipedia\.org/[^\)]*\)[ \t]*$",
+            "",
+            text,
+            flags=re.MULTILINE,
+        )
         # Strip table-of-contents anchor links: * [(Top)](#) etc.
         text = re.sub(r"^\s*\*\s*\[[^\]]*\]\(#[^\)]*\)\s*$", "", text, flags=re.MULTILINE)
         # Strip zero-width spaces and special unicode
@@ -468,6 +548,61 @@ class YouSearchResourcesServer(SimpleResourcesServer):
         if cut == -1:
             cut = max_chars
         return text[:cut], True
+
+    def _query_window(self, text: str, query: str) -> tuple[str, int]:
+        """The ``max_result_chars`` slice of ``text`` most relevant to ``query``.
+
+        Returns ``(window, start_offset)``. You.com's /v1/contents takes no query -- passing
+        one returns the identical payload -- so relevance selection has to happen here.
+        Without it ``find_in_page`` returns the head of every page (nav chrome and the lead
+        paragraph) no matter what was asked, which is not what the tool's name promises.
+        """
+        max_chars = self.config.max_result_chars
+        if len(text) <= max_chars:
+            return text, 0
+
+        terms = {t for t in re.findall(r"\w+", query.lower()) if len(t) > 2}
+        if not terms:
+            return self._truncate_text(text)[0], 0
+
+        lowered = text.lower()
+        # Weight each term by how rare it is in this page. Counting terms equally lets
+        # filler words ("the", "first", "win") outvote the discriminative ones, landing the
+        # window on a passage that merely repeats them -- measured on the Nobel economics
+        # article, an unweighted score put "Elinor Ostrom" (char 7075) outside the window.
+        weights = {t: 1.0 / lowered.count(t) for t in terms if lowered.count(t)}
+        if not weights:
+            return self._truncate_text(text)[0], 0
+
+        # Step by half a window so a match straddling a boundary is still captured whole.
+        step = max(1, max_chars // 2)
+        best_start, best_score = 0, 0.0
+        for start in range(0, len(text), step):
+            window = lowered[start : start + max_chars]
+            score = sum(weight for term, weight in weights.items() if term in window)
+            if score > best_score:
+                best_start, best_score = start, score
+
+        if best_score <= 0:
+            return self._truncate_text(text)[0], 0
+
+        # Anchor on the rarest term present in the winning window and open a quarter width
+        # ahead of it. Snapping straight to the window start would shift the window back
+        # onto the previous line boundary and push the match off the tail.
+        found = [
+            (weight, pos)
+            for weight, pos in (
+                (weight, lowered.find(term, best_start, best_start + max_chars)) for term, weight in weights.items()
+            )
+            if pos != -1
+        ]
+        anchor = max(found)[1] if found else best_start
+        start = max(0, anchor - max_chars // 4)
+        # Snap back to a line boundary so the window does not open mid-sentence.
+        newline = text.rfind("\n", 0, start)
+        if newline != -1:
+            start = newline + 1
+        return text[start : start + max_chars], start
 
     def _result_body(self, result: dict) -> str:
         """The per-result text the model sees, by search_mode precedence.
@@ -558,7 +693,9 @@ class YouSearchResourcesServer(SimpleResourcesServer):
         for notice in notices:
             for prop in notice["properties"]:
                 if prop.get("type") == "domain":
-                    exclude_domains.append(prop["value"])
+                    domain = self._normalize_domain(prop["value"])
+                    if domain:
+                        exclude_domains.append(domain)
         return exclude_domains
 
     async def _verify_answer_with_judge(

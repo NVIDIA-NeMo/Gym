@@ -14,10 +14,11 @@
 # limitations under the License.
 import os
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import orjson
-from pytest import approx, fixture
+from aiohttp import ClientResponseError
+from pytest import approx, fixture, raises
 
 from nemo_gym.server_utils import SESSION_ID_KEY
 
@@ -25,6 +26,7 @@ from nemo_gym.server_utils import SESSION_ID_KEY
 _TEST_DIR = os.path.dirname(os.path.abspath(__file__))
 
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -38,6 +40,7 @@ from resources_servers.you_search.app import (
     YouSearchRequest,
     YouSearchResourcesServer,
     YouSearchResourcesServerConfig,
+    YouSearchSingleAPICallMetrics,
     YouSearchVerifyRequest,
 )
 
@@ -526,3 +529,363 @@ class TestApp:
         calls = server._session_id_to_metrics["abcd"].you_api_calls
         assert len(calls) == 5
         assert all(c.function == "search" and c.time_taken is not None for c in calls)
+
+    # ---- _post: the You.com transport ----
+
+    def _fake_response(self, status: int, payload: Any = None, body: bytes = b"boom") -> MagicMock:
+        """Stand-in for an aiohttp ClientResponse, enough for _post and raise_for_status."""
+        response = MagicMock()
+        response.status = status
+        response.ok = status < 400
+        response.json = AsyncMock(return_value=payload)
+        response.content.read = AsyncMock(return_value=body)
+
+        def _raise() -> None:
+            raise ClientResponseError(request_info=None, history=(), status=status)
+
+        response.raise_for_status = _raise
+        return response
+
+    async def test_post_returns_parsed_json(self, server: YouSearchResourcesServer) -> None:
+        with patch("resources_servers.you_search.app.request", AsyncMock()) as mock_request:
+            mock_request.return_value = self._fake_response(200, {"results": {"web": []}})
+            assert await server._post("/v1/search", {"query": "q"}) == {"results": {"web": []}}
+            assert mock_request.call_args.kwargs["headers"] == {
+                "X-API-Key": "test_api_key"
+            }  # pragma: allowlist secret
+
+    async def test_post_raises_on_non_retryable_status(self, server: YouSearchResourcesServer) -> None:
+        """A bad API key must fail loudly, not come back as an empty result set.
+
+        401 is not in RETRY_ERROR_CODES; without an explicit raise the error body was
+        returned as if it were results and every task scored 0.0 with a clean log.
+        """
+        with patch("resources_servers.you_search.app.request", AsyncMock()) as mock_request:
+            mock_request.return_value = self._fake_response(401, {"detail": "invalid api key"})
+            with raises(ClientResponseError):
+                await server._post("/v1/search", {"query": "q"})
+            assert mock_request.call_count == 1  # not retried
+
+    async def test_web_search_propagates_auth_failure(self, server: YouSearchResourcesServer) -> None:
+        """End to end: the 401 surfaces rather than becoming 'No results found.'"""
+        with patch("resources_servers.you_search.app.request", AsyncMock()) as mock_request:
+            mock_request.return_value = self._fake_response(401, {"detail": "invalid api key"})
+            with raises(ClientResponseError):
+                await server.web_search(self._create_dummy_request(), YouSearchRequest(query="q"))
+
+    async def test_post_retries_transient_failure_then_succeeds(self, server: YouSearchResourcesServer) -> None:
+        ok = self._fake_response(200, {"results": {}})
+        with patch("resources_servers.you_search.app.request", AsyncMock()) as mock_request:
+            mock_request.side_effect = [self._fake_response(500), ok]
+            assert await server._post("/v1/search", {"query": "q"}) == {"results": {}}
+            assert mock_request.call_count == 2
+
+    async def test_post_rotates_key_on_retry(self, config: YouSearchResourcesServerConfig) -> None:
+        """A retry after a 429 must move to the next key, not re-hit the throttled one."""
+        config.you_api_key = ["key1", "key2"]  # pragma: allowlist secret
+        server = YouSearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        with patch("resources_servers.you_search.app.request", AsyncMock()) as mock_request:
+            mock_request.side_effect = [self._fake_response(429), self._fake_response(200, {"ok": True})]
+            assert await server._post("/v1/search", {"query": "q"}) == {"ok": True}
+            used = [c.kwargs["headers"]["X-API-Key"] for c in mock_request.call_args_list]
+            assert used == ["key1", "key2"]  # pragma: allowlist secret
+
+    async def test_post_rate_limit_extends_try_budget(self, server: YouSearchResourcesServer) -> None:
+        """429 grants an extra try, so 3 rate limits still leave a fourth attempt."""
+        with patch("resources_servers.you_search.app.request", AsyncMock()) as mock_request:
+            mock_request.side_effect = [self._fake_response(429)] * 3 + [self._fake_response(200, {"ok": True})]
+            assert await server._post("/v1/search", {"query": "q"}) == {"ok": True}
+            assert mock_request.call_count == 4
+
+    async def test_post_raises_after_exhausting_retries(self, server: YouSearchResourcesServer) -> None:
+        with patch("resources_servers.you_search.app.request", AsyncMock()) as mock_request:
+            mock_request.return_value = self._fake_response(500)
+            with raises(ClientResponseError):
+                await server._post("/v1/search", {"query": "q"})
+            assert mock_request.call_count == 3
+
+    # ---- metrics record failures too ----
+
+    async def test_metrics_records_failed_call(self, server: YouSearchResourcesServer) -> None:
+        """Timing only the successes would make the latency histogram survivor-biased."""
+        server._post = AsyncMock(side_effect=RuntimeError("boom"))
+        with raises(RuntimeError):
+            await server.web_search(self._create_dummy_request(), YouSearchRequest(query="q"))
+
+        calls = server._session_id_to_metrics["abcd"].you_api_calls
+        assert [c.status for c in calls] == ["failure"]
+        assert calls[0].time_taken is not None
+
+    # ---- page cache ----
+
+    async def test_fetch_page_does_not_cache_empty_content(self, server: YouSearchResourcesServer) -> None:
+        """One crawl timeout must not disable the URL for the process lifetime."""
+        server._post = AsyncMock(return_value=[{"url": "https://example.com/p", "markdown": None}])
+        metrics = server._session_id_to_metrics["abcd"]
+
+        assert await server._fetch_page("https://example.com/p", metrics) == ""
+        assert "https://example.com/p" not in server._page_cache
+
+        # A later retry succeeds and is cached.
+        server._post = AsyncMock(return_value=[{"url": "https://example.com/p", "markdown": "recovered"}])
+        assert await server._fetch_page("https://example.com/p", metrics) == "recovered"
+        assert server._page_cache["https://example.com/p"] == "recovered"
+
+    async def test_page_cache_evicts_least_recently_used(self, config: YouSearchResourcesServerConfig) -> None:
+        config.page_cache_max_entries = 2
+        server = YouSearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        metrics = server._session_id_to_metrics["abcd"]
+
+        for name in ("a", "b"):
+            server._post = AsyncMock(return_value=[{"markdown": name}])
+            await server._fetch_page(f"https://example.com/{name}", metrics)
+
+        # Touch "a" so "b" becomes the least recently used entry.
+        await server._fetch_page("https://example.com/a", metrics)
+
+        server._post = AsyncMock(return_value=[{"markdown": "c"}])
+        await server._fetch_page("https://example.com/c", metrics)
+
+        assert set(server._page_cache) == {"https://example.com/a", "https://example.com/c"}
+
+    # ---- domain matching ----
+
+    def test_is_url_excluded_normalizes_case_www_and_scheme(self, server: YouSearchResourcesServer) -> None:
+        """The registry is a legal opt-out list; near-miss spellings must not slip through."""
+        server._exclude_domains = [server._normalize_domain("WWW.BlackListedDomain.COM ")]
+        assert server._exclude_domains == ["blacklisteddomain.com"]
+        assert server._is_url_excluded("https://BlackListedDomain.com/page") is True
+        assert server._is_url_excluded("https://www.blacklisteddomain.com/page") is True
+        # A scheme-less URL puts the host in `path`, so urlparse().hostname would be None.
+        assert server._is_url_excluded("blacklisteddomain.com/page") is True
+        assert server._is_url_excluded("https://example.com/page") is False
+        assert server._is_url_excluded("") is False
+
+    def test_extract_domain_handles_scheme_less_url(self, server: YouSearchResourcesServer) -> None:
+        assert server._extract_domain("example.com/path") == "example.com"
+
+    # ---- _clean_text must not eat content ----
+
+    def test_clean_text_keeps_content_line_starting_with_link(self, server: YouSearchResourcesServer) -> None:
+        """`[Read...` once matched any line prefix and `.*$` deleted the rest of the line."""
+        text = "[Reading list](https://example.com/l) - the 2025 laureate was Mokyr"
+        assert "2025 laureate was Mokyr" in server._clean_text(text)
+
+    def test_clean_text_still_strips_standalone_nav_lines(self, server: YouSearchResourcesServer) -> None:
+        text = "[Jump to content]\n[View history](/history)\nreal content"
+        cleaned = server._clean_text(text)
+        assert "Jump to content" not in cleaned
+        assert "View history" not in cleaned
+        assert "real content" in cleaned
+
+    def test_clean_text_keeps_inline_wikipedia_citation(self, server: YouSearchResourcesServer) -> None:
+        """Unanchored, the sidebar rule also stripped citations out of running prose."""
+        text = "The prize went to [Mokyr](https://en.wikipedia.org/wiki/Joel_Mokyr) in 2025."
+        cleaned = server._clean_text(text)
+        assert "Mokyr" in cleaned
+        assert "in 2025." in cleaned
+
+    def test_clean_text_strips_language_sidebar_line(self, server: YouSearchResourcesServer) -> None:
+        text = "* [Deutsch](https://de.wikipedia.org/wiki/X)\nbody text"
+        cleaned = server._clean_text(text)
+        assert "Deutsch" not in cleaned
+        assert "body text" in cleaned
+
+    # ---- find_in_page relevance ----
+
+    async def test_find_in_page_windows_on_query(self, config: YouSearchResourcesServerConfig) -> None:
+        """/v1/contents takes no query, so relevance selection happens client-side."""
+        config.max_result_chars = 120
+        server = YouSearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        page = (
+            ("navigation chrome and boilerplate\n" * 20)
+            + "the 2025 economics laureate was Joel Mokyr\n"
+            + ("trailing filler\n" * 20)
+        )
+        server._post = AsyncMock(return_value=[{"markdown": page}])
+
+        response = await server.find_in_page(
+            self._create_dummy_request(),
+            FindInPageRequest(url="https://example.com/p", query="economics laureate"),
+        )
+
+        assert "Joel Mokyr" in response.results_string
+        assert "Showing the best match for the query" in response.results_string
+        assert "[...truncated, use scroll_page for full content]" in response.results_string
+
+    async def test_find_in_page_falls_back_to_head_without_match(self, config: YouSearchResourcesServerConfig) -> None:
+        config.max_result_chars = 60
+        server = YouSearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        server._post = AsyncMock(return_value=[{"markdown": "alpha bravo charlie\n" * 20}])
+
+        response = await server.find_in_page(
+            self._create_dummy_request(),
+            FindInPageRequest(url="https://example.com/p", query="nothing matches here"),
+        )
+        assert "Showing the best match" not in response.results_string
+        assert "L0: alpha bravo charlie" in response.results_string
+
+    def test_query_window_weights_rare_terms_over_filler(self, config: YouSearchResourcesServerConfig) -> None:
+        """Filler words must not outvote the discriminative ones.
+
+        Scoring every term equally put a window full of "the/first/prize" ahead of the one
+        actually naming the person asked about, on the real Nobel economics article.
+        """
+        config.max_result_chars = 100
+        server = YouSearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        filler = "the first prize win the first prize win\n"
+        page = (filler * 12) + "Elinor Ostrom was the first woman to win the prize\n" + (filler * 12)
+
+        window, start = server._query_window(page, "Elinor Ostrom first woman to win the prize")
+
+        assert "Ostrom" in window
+        assert start > 0
+
+    def test_query_window_short_text_is_untouched(self, server: YouSearchResourcesServer) -> None:
+        assert server._query_window("short page", "anything") == ("short page", 0)
+
+    def test_query_window_without_usable_terms_returns_head(self, config: YouSearchResourcesServerConfig) -> None:
+        """Stopword-length tokens carry no signal, so fall back to the head of the page."""
+        config.max_result_chars = 40
+        server = YouSearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        window, start = server._query_window("x" * 200, "a of")
+        assert start == 0
+        assert len(window) <= 40
+
+    # ---- scroll_page bounds ----
+
+    async def test_scroll_page_clamps_negative_start_index(self, server: YouSearchResourcesServer) -> None:
+        """Negative indices wrapped to the tail while the header described another span."""
+        server._post = AsyncMock(return_value=[{"markdown": " ".join(f"w{i}" for i in range(100))}])
+
+        response = await server.scroll_page(
+            self._create_dummy_request(), ScrollPageRequest(url="https://example.com/p", start_index=-5, n=3)
+        )
+        assert "Showing words [0-3] of 100" in response.results_string
+        assert "w0 w1 w2" in response.results_string
+
+    async def test_scroll_page_start_index_past_end(self, server: YouSearchResourcesServer) -> None:
+        server._post = AsyncMock(return_value=[{"markdown": " ".join(f"w{i}" for i in range(10))}])
+        response = await server.scroll_page(
+            self._create_dummy_request(), ScrollPageRequest(url="https://example.com/p", start_index=500, n=5)
+        )
+        assert response.total_words == 10
+        assert "Showing words [10-10] of 10" in response.results_string
+
+    # ---- regex verifier and session bookkeeping ----
+
+    async def test_verify_with_regex_verifier(self, config: YouSearchResourcesServerConfig) -> None:
+        config.use_judge = False
+        server = YouSearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+        req = YouSearchVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=self._create_model_response("Answer: Paris\nConfidence: 90%"),
+            ground_truth="Paris",
+            question="What is the capital of France?",
+        )
+        res = await server.verify(self._create_dummy_request(), req)
+        assert res.reward == approx(1.0)
+        assert res.extracted_final_answer == "Paris"
+
+    async def test_verify_with_regex_verifier_no_match(self, config: YouSearchResourcesServerConfig) -> None:
+        config.use_judge = False
+        server = YouSearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+        req = YouSearchVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=self._create_model_response("I could not find it."),
+            ground_truth="Paris",
+            question="What is the capital of France?",
+        )
+        res = await server.verify(self._create_dummy_request(), req)
+        assert res.reward == approx(0.0)
+        assert res.extracted_final_answer == ""
+
+    async def test_verify_releases_session_metrics(self, config: YouSearchResourcesServerConfig) -> None:
+        """Otherwise the map grows by one entry per rollout for the process lifetime."""
+        config.use_judge = False
+        server = YouSearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        server._post = AsyncMock(return_value={"results": {"web": []}})
+        dummy_request = self._create_dummy_request()
+
+        await server.web_search(dummy_request, YouSearchRequest(query="q"))
+        assert "abcd" in server._session_id_to_metrics
+
+        req = YouSearchVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=self._create_model_response("Answer: Paris\nConfidence: 90%"),
+            ground_truth="Paris",
+            question="q",
+        )
+        res = await server.verify(dummy_request, req)
+
+        assert len(res.metrics.you_api_calls) == 1  # still attached to the response
+        assert "abcd" not in server._session_id_to_metrics
+
+    async def test_verify_keeps_session_metrics_when_dumping(self, config: YouSearchResourcesServerConfig) -> None:
+        config.use_judge = False
+        config.dump_session_id_to_metrics_on_exit = True
+        server = YouSearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+        req = YouSearchVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=self._create_model_response("Answer: Paris\nConfidence: 90%"),
+            ground_truth="Paris",
+            question="q",
+        )
+        await server.verify(self._create_dummy_request(), req)
+        assert "abcd" in server._session_id_to_metrics
+
+    # ---- debug logging, lifespan, judge failure ----
+
+    async def test_debug_mode_exercises_logging_paths(self, config: YouSearchResourcesServerConfig) -> None:
+        """debug=True is the documented way to inspect a run; it must not crash."""
+        config.debug = True
+        server = YouSearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        dummy_request = self._create_dummy_request()
+
+        with patch("resources_servers.you_search.app.request", AsyncMock()) as mock_request:
+            mock_request.return_value = self._fake_response(
+                200, {"results": {"web": [_web_result("https://example.com/p", "T")]}}
+            )
+            await server.web_search(dummy_request, YouSearchRequest(query="q"))
+
+        server._post = AsyncMock(return_value=[{"markdown": "line one\nline two"}])
+        await server.find_in_page(dummy_request, FindInPageRequest(url="https://example.com/p", query="one"))
+        # Second fetch hits the cache, covering the cache-hit branch.
+        await server.scroll_page(dummy_request, ScrollPageRequest(url="https://example.com/p", n=5))
+        assert server._post.call_count == 1
+
+    async def test_lifespan_dumps_session_metrics(self, config: YouSearchResourcesServerConfig, tmp_path) -> None:
+        config.dump_session_id_to_metrics_on_exit = True
+        server = YouSearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        server._session_id_to_metrics["abcd"].you_api_calls.append(
+            YouSearchSingleAPICallMetrics(function="search", status="success", start_time=0.0, end_time=1.0)
+        )
+
+        app = server.setup_webserver()
+        out_file = tmp_path / "session_id_metrics.json"
+        with patch("resources_servers.you_search.app.Path") as mock_path:
+            mock_path.return_value.parent.__truediv__.return_value = out_file
+            async with app.router.lifespan_context(app):
+                pass
+
+        dumped = orjson.loads(out_file.read_bytes())
+        assert dumped["abcd"]["you_api_calls"][0]["time_taken"] == approx(1.0)
+
+    async def test_verify_raises_judge_error(self, config: YouSearchResourcesServerConfig) -> None:
+        """A judge that fails must surface, not be scored as a wrong answer."""
+        server = YouSearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+        req = YouSearchVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=self._create_model_response("Paris"),
+            ground_truth="Paris",
+            question="capital of France?",
+        )
+        with patch(
+            "resources_servers.you_search.app.call_judge", AsyncMock(side_effect=JudgeError("judge unreachable"))
+        ):
+            with raises(JudgeError):
+                await server.verify(self._create_dummy_request(), req)
