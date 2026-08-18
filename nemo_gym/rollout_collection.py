@@ -818,8 +818,8 @@ class RolloutCollectionHelper(BaseModel):
             if ATTEMPT_INDEX_KEY_NAME in row:
                 result[ATTEMPT_INDEX_KEY_NAME] = row[ATTEMPT_INDEX_KEY_NAME]
             if ROLLOUT_ID_KEY_NAME in row:
-                # Capture readback recomputes the id from the finished record, so an explicit id
-                # has to travel from the dispatched row onto the result the same way the indices do.
+                # Capture readback recomputes the id from the finished record.
+                # Preserve an explicit id on the result just like the indices.
                 result[ROLLOUT_ID_KEY_NAME] = row[ROLLOUT_ID_KEY_NAME]
 
             # Fold this rollout's captured model calls into its record (uniform across agents; no-op

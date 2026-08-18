@@ -13,23 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Training-token capture: produce, store, read, and source ``TokenEntry`` records.
+"""Provide the core training-token capture interfaces.
 
-This is the per-model-call training data path, kept separate from evaluation
-capture. The capture middleware sets a per-request token sink; the model server
-records a ``TokenEntry`` from its complete response; a trainer reads a rollout's
-entries through a ``TokenSource`` and stitches them into a trajectory.
-
-**This package is a leaf.** Importing it must not pull in fastapi, ray, uvicorn,
-aiohttp, requests, or torch, because a training framework's inference worker
-imports the record, the protocols, and the capture core to write into its own
-data plane (see ``protocols.py``).
-
-Records are read back through a ``TokenSource``.
-``TokenCaptureStore`` is Gym's local implementation.
-A framework staging records through its own transport supplies its own source.
-The source freezes an atomic snapshot containing both entries and incomplete state.
-This prevents a consumer from training on a rollout that lost a model call.
+Training capture is separate from evaluation capture.
+Middleware sets a request-scoped token sink.
+The model server records a ``TokenEntry`` from its complete response.
+Consumers call ``TokenSource.freeze`` for an atomic snapshot.
+The snapshot includes entries and incomplete state.
+Its ``snapshot_id`` identifies the exact frozen state.
+``TokenCaptureStore`` is Gym's local sink and source implementation.
+Framework transports may provide their own sink and source.
+There is no HTTP token reader.
+This leaf package avoids imports from Gym's server stack.
 """
 
 from nemo_gym.token_id_capture.config import TokenIdCaptureConfig

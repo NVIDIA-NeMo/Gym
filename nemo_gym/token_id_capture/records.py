@@ -13,19 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The training-token record and how to pull it off a served response.
+"""Define training-token records extracted from served responses.
 
-A ``TokenEntry`` holds only what a trainer needs from one model call: the exact
-prompt token ids the engine ran on, the generated token ids, and one log
-probability per generated token. It is deliberately separate from the model-call
-capture record used for evaluation (``ModelCallRecord``): the eval record is a
-compact request/response summary and never carries token ids, while a
-``TokenEntry`` is large and read only when building training data. Keeping them
-apart lets eval reads skip the token payloads and lets training token ids move
-to a different store later without touching the eval schema.
-
-Both records for the same model call share a ``model_call_id``, so training can
-join a ``TokenEntry`` to its ``ModelCallRecord`` when it needs the eval context.
+A ``TokenEntry`` contains one model call's training data.
+It stores the exact prompt token ids.
+It stores generated token ids and their log probabilities.
+Evaluation uses a separate ``ModelCallRecord``.
+Evaluation records do not carry token arrays.
+Both records share a ``model_call_id``.
 """
 
 from __future__ import annotations
@@ -35,35 +30,30 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-# The fields the model server attaches to a served response when token-id return
-# is on. ``routed_experts`` is present only for MoE backends that report it.
+# These fields carry token metadata on a served response.
+# ``routed_experts`` is optional for MoE backends.
 TOKEN_FIELDS = ("prompt_token_ids", "generation_token_ids", "generation_log_probs", "routed_experts")
 
-# Bumped whenever a field is added or its meaning changes. Writer and reader are different
-# processes and may be different repositories, and records outlive a deploy, so a reader has to
-# be able to refuse a record it was not built for. ``extra="allow"`` means an unknown shape
-# otherwise decodes cleanly and corrupts training rows in silence. The field is present from the
-# first version because a check added later cannot tell an old record from an unversioned one.
+# Increment this version when a field or its meaning changes.
+# Writers and readers may run in different processes or repositories.
+# Records may outlive a deployment.
+# Readers must reject unsupported newer records.
+# ``extra="allow"`` otherwise hides unknown fields.
 #
 #   1  rollout and call identity, the token arrays, the output items and their carrier index
 TOKEN_ENTRY_RECORD_SCHEMA_VERSION = 1
 
 
 class TokenEntry(BaseModel):
-    """One model call's captured record: the content-bearing output items (assistant
-    text, tool calls) together with the token fields, keyed to its rollout and to the
-    ``model_call_id`` the capture middleware minted for the call.
+    """Store one model call's content and token metadata.
 
-    ``output_items`` holds the served response's output items with their content. Token
-    ids alone are not enough for a trainer that scores text, such as penalties for an
-    invalid tool call or a malformed thinking block.
-
-    The token arrays are stored once, at the top level. The served response carries
-    them on the output item that produced the generation, and those per-item copies
-    are dropped on write: the builder overwrites them anyway, since an item's prompt
-    in a chained trajectory is the running cumulative sequence rather than the prompt
-    of the single call. ``token_item_index`` records which item they came off, so the
-    builder can put the chain-correct values back on the right one.
+    The rollout id identifies the training sample.
+    The model call id joins evaluation context.
+    ``output_items`` preserves assistant text and tool calls.
+    Text-based penalties require that content.
+    Token arrays are stored once at the top level.
+    ``token_item_index`` identifies their original output item.
+    A trajectory builder can restore chain-correct token fields there.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -76,28 +66,22 @@ class TokenEntry(BaseModel):
     generation_token_ids: list[int]
     generation_log_probs: list[float]
     routed_experts: Any | None = None
-    # The served response's output items (Responses shape), content preserved, token
-    # arrays removed.
+    # Preserve response output items without token arrays.
     output_items: list[dict] = Field(default_factory=list)
-    # Index into ``output_items`` of the item the token arrays were taken off, or null
-    # when no item carried them. Records written before the arrays were de-duplicated
-    # leave this unset and still carry the arrays inline, which the builder handles.
+    # This index identifies the item that carried token arrays.
+    # ``None`` means no item carried them.
+    # Older records may keep arrays inline and leave this unset.
     token_item_index: int | None = None
-    # Non-semantic; a cheap diagnostic for retry/sibling-branch cases.
+    # This non-semantic timestamp helps diagnose retries and sibling branches.
     created_at: float = 0.0
 
     @model_validator(mode="after")
     def _refuse_a_newer_record(self) -> "TokenEntry":
-        """Decode a record older than this reader, refuse one newer.
+        """Accept older records and reject newer records.
 
-        Older is safe: a field this reader does not have takes its default and the consumer
-        degrades, so a record written before parent links existed simply has none and the builder
-        matches token prefixes instead.
-
-        Newer is not, and it is the direction ``extra="allow"`` hides. A field this reader cannot
-        see is kept and ignored, so a record whose tokens were written under rules this reader does
-        not know decodes clean and trains as though nothing were different. Refusing is loud: the
-        read fails, the caller marks that rollout unusable, and the run says which version it saw.
+        Missing older fields use their defaults.
+        Unknown newer fields may change token semantics.
+        Rejecting them prevents silent training corruption.
         """
         if self.schema_version > TOKEN_ENTRY_RECORD_SCHEMA_VERSION:
             raise ValueError(
@@ -120,9 +104,9 @@ class TokenEntry(BaseModel):
 def response_to_output_items(payload: dict) -> list[dict]:
     """Normalize a served response to a list of content-bearing Responses output items.
 
-    Responses payloads already carry ``output``. Chat payloads carry
-    ``choices[*].message``; the assistant message is wrapped as a single Responses
-    ``message`` item so the training record is dialect-uniform.
+    Responses payloads already carry ``output``.
+    Chat payloads carry ``choices[*].message``.
+    Wrap each assistant message as a Responses ``message`` item.
     """
     output = payload.get("output")
     if isinstance(output, list) and output:

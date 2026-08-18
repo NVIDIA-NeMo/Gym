@@ -76,8 +76,8 @@ from nemo_gym.token_id_capture import (
     set_token_sink,
 )
 
-# The read route and its store factory need Gym's server stack, so they are not
-# re-exported from the leaf package (see nemo_gym/token_id_capture/__init__.py).
+# The store factory needs Gym's server stack.
+# The leaf package does not re-export it.
 from nemo_gym.token_id_capture.config import token_id_capture_config
 from nemo_gym.token_id_capture.store import make_token_store
 
@@ -246,9 +246,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             response = await self.responses(request=request, body=params)
         else:
             response = await self.responses(body=params)
-        # Capture here rather than at the route: the streaming dispatch returns a StreamingResponse
-        # and the Anthropic mapping drops the token fields, so this is the last point where the
-        # assembled response still carries them, for every dialect.
+        # Capture before streaming dispatch wraps the response.
+        # Anthropic mapping drops the token fields.
+        # The assembled response still carries them here for every dialect.
         await capture_tokens(response)
         return response
 
@@ -1070,13 +1070,13 @@ class _CaptureMiddleware:
         self._app = app
         self._store = store
         self._model_server_name = model_server_name
-        # When set, correlated+observed calls also record training tokens via a per-request sink.
+        # This store records training tokens for correlated training-capture calls.
         self._token_store = token_store
         # Built from token_id_capture.sink, once, in this process.
         self._configured_sink = configured_sink
-        # Capture can be on with no destination in this process, when a framework stages records
-        # from the inference worker instead. The identity and the parent resolution still have to
-        # happen here, so enablement rather than a destination decides whether this runs.
+        # Capture may have no destination in this process.
+        # A framework may stage records from its inference worker.
+        # This process still resolves the capture identity.
         self._token_capture_enabled = token_capture_enabled
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
@@ -1096,16 +1096,15 @@ class _CaptureMiddleware:
 
         dialect = _OBSERVED_PATHS.get(path)
 
-        # Nothing to capture: neither store is active, the call isn't correlated to a rollout, or the
-        # path isn't an observed model endpoint. The prefix is already stripped, so just forward.
+        # Forward when no active store needs this correlated endpoint.
+        # The prefix is already stripped.
         # An unprefixed call is forwarded rather than mixed with unrelated calls under a shared key.
-        # Destination order: a sink configured for this process, then one installed
-        # programmatically, then the file store. Both sink routes exist because a framework may
-        # send records to its own transport instead of disk; the configured one is preferred
-        # because it is built inside this process at app startup and so survives num_workers > 1,
-        # where a sink installed by a launcher does not reach the spawned workers at all. The
-        # installed sink is still resolved per request, so one installed after the app is built
-        # still takes effect.
+        # Prefer the configured sink.
+        # Then use the installed sink.
+        # Finally use the file store.
+        # Configured sinks are built in each server process.
+        # Launcher-installed sinks do not reach spawned workers.
+        # Installed sinks are resolved for each request.
         token_sink = self._configured_sink or installed_token_sink() or self._token_store
         capture_wanted = token_capture_requested and (token_sink is not None or self._token_capture_enabled)
         if (self._store is None and not capture_wanted) or rollout_from_path is None or dialect is None:
@@ -1115,19 +1114,19 @@ class _CaptureMiddleware:
         rollout_id = rollout_from_path
         model_call_id = uuid4().hex
 
-        # Hand the model server a per-request token sink keyed to this call. It records token ids
-        # from its complete response. The middleware cannot: token ids are dropped on the SSE wire.
-        # Set whenever capture is on, even with no destination here. The context carries the
-        # identity a staged record is keyed by and the parent a request continues, and both are
-        # resolved in this process whether or not it is the one that writes.
+        # Give the model server a token sink keyed to this call.
+        # The sink records token ids from the complete response.
+        # Middleware cannot recover token ids from SSE.
+        # The context exists even without a local destination.
+        # External staging uses the identity resolved here.
         sink_token = None
         if capture_wanted:
             sink_token = set_token_sink(
                 CaptureContext(rollout_id=rollout_id, model_call_id=model_call_id, sink=token_sink)
             )
 
-        # Training-token capture only: no evaluation record, so skip the response buffering entirely
-        # and just forward with the sink live.
+        # Training-only capture has no evaluation record.
+        # Forward without buffering while the sink is active.
         if self._store is None:
             try:
                 await self._app(scope, receive, send)
@@ -1296,21 +1295,20 @@ def install_model_call_capture(
 ) -> None:
     """Install model-call capture middleware.
 
-    Always installed so the ``/ng-rollout/<id>`` correlation prefix is stripped before routing
-    regardless of whether capture is enabled (otherwise a default ``gym eval`` would 404 on every
-    prefixed model call). When evaluation capture is enabled the middleware additionally records each
-    observed call's request + response into a rollout-keyed CaptureStore while forwarding bytes
-    downstream unchanged (non-terminal SSE chunks are forwarded as they arrive; the terminal event
-    follows the durable capture write).
-
-    Training-token capture is a separate, independently-gated concern that reuses the same
-    correlation point: when enabled, the middleware hands the model server a per-request token sink
-    (keyed by the same rollout id and model_call_id) and the server records token ids from its
-    complete response. The read route is registered only when that capture is enabled.
+    Always strip ``/ng-rollout/<id>/...`` before routing.
+    Evaluation capture records requests and responses for that path.
+    Non-terminal SSE chunks continue immediately.
+    The terminal event follows the durable evaluation write.
+    Training capture uses ``/ng-rollout/<id>/training-token-capture/...``.
+    That path provides a request-scoped token sink.
+    The model server records token ids from its complete response.
+    Consumers access records through ``TokenSource.freeze``.
+    There is no HTTP token reader.
     """
     token_store = make_token_store(global_config_dict) if global_config_dict is not None else None
-    # Built here, at app startup, so every uvicorn worker constructs its own. A sink installed by a
-    # launcher process is not inherited by spawned workers and would silently go unused.
+    # Build this sink at app startup.
+    # Each uvicorn worker constructs its own sink.
+    # Spawned workers do not inherit a launcher-installed sink.
     configured_sink = (
         token_id_capture_config(global_config_dict).build_sink() if global_config_dict is not None else None
     )
