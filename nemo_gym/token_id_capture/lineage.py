@@ -65,10 +65,19 @@ sub-agents cannot corrupt each other's lineage.
 
 from __future__ import annotations
 
+import asyncio
+import fcntl
 import hashlib
 import json
+import os
+import re
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+from uuid import uuid4
+
+from nemo_gym.token_id_capture.protocols import LineageMatch
 
 
 _FINGERPRINT_DOMAIN = b"nemo-gym-lineage"
@@ -407,5 +416,175 @@ class LineageIndex:
         """
         self._rollouts.pop(rollout_id, None)
 
+    def clear(self) -> None:
+        self._rollouts.clear()
+
     def __len__(self) -> int:
         return len(self._rollouts)
+
+
+class InMemoryLineageStore:
+    """Worker-local fallback implementing the external lineage contract.
+
+    Safe for a single worker. Multi-worker deployments that need exact parent
+    links or prefix supply configure a shared ``LineageStore`` implementation.
+    """
+
+    def __init__(self, max_rollouts: int = 512, max_tokens: int = 8_000_000) -> None:
+        self.index = LineageIndex(max_rollouts=max_rollouts, max_tokens=max_tokens)
+
+    async def resolve(self, rollout_id: str, request_items: list[dict]) -> LineageMatch | None:
+        node = self.index.for_rollout(rollout_id).resolve(request_items)
+        if node is None:
+            return None
+        return LineageMatch(
+            model_call_id=node.call_id,
+            cumulative_token_ids=tuple(node.cum_tokens),
+            digest=node.digest,
+        )
+
+    async def record(
+        self,
+        rollout_id: str,
+        model_call_id: str,
+        request_items: list[dict],
+        response_items: list[dict],
+        cumulative_token_ids: list[int],
+        digest: str,
+    ) -> None:
+        self.index.for_rollout(rollout_id).record(
+            model_call_id,
+            list(request_items) + list(response_items),
+            cumulative_token_ids,
+            digest,
+            context_len=len(request_items),
+        )
+
+    async def close(self) -> None:
+        self.index.clear()
+
+
+class FileLineageStore:
+    """Process-shared lineage for Gym's local file capture deployment."""
+
+    def __init__(self, root: str | Path) -> None:
+        self.root = Path(root)
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _validate_rollout_id(rollout_id: str) -> None:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", rollout_id):
+            raise ValueError(f"unsafe rollout_id {rollout_id!r}")
+
+    def _state_path(self, rollout_id: str) -> Path:
+        self._validate_rollout_id(rollout_id)
+        return self.root / f"{rollout_id}.lineage.json"
+
+    def _lock_path(self, rollout_id: str) -> Path:
+        self._validate_rollout_id(rollout_id)
+        return self.root / f"{rollout_id}.lineage.lock"
+
+    @contextmanager
+    def _locked(self, rollout_id: str):
+        lock_path = self._lock_path(rollout_id)
+        with lock_path.open("a+b") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    def _read(self, rollout_id: str) -> list[dict]:
+        path = self._state_path(rollout_id)
+        if not path.exists():
+            return []
+        payload = json.loads(path.read_text())
+        if not isinstance(payload, list):
+            raise ValueError(f"lineage state for {rollout_id} is not a list")
+        return payload
+
+    def _write(self, rollout_id: str, records: list[dict]) -> None:
+        path = self._state_path(rollout_id)
+        temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+        with temporary.open("w") as handle:
+            json.dump(records, handle, sort_keys=True, separators=(",", ":"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(self.root, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+    async def resolve(self, rollout_id: str, request_items: list[dict]) -> LineageMatch | None:
+        return await asyncio.to_thread(self._resolve, rollout_id, request_items)
+
+    def _resolve(self, rollout_id: str, request_items: list[dict]) -> LineageMatch | None:
+        fingerprint = assistant_fingerprint(request_items)
+        if not fingerprint:
+            return None
+        with self._locked(rollout_id):
+            records = [record for record in self._read(rollout_id) if record["fingerprint"] == fingerprint]
+        if len(records) != 1:
+            return None
+        record = records[0]
+        context_len = int(record["context_len"])
+        if len(request_items) < context_len:
+            return None
+        if conversation_digest(request_items[:context_len]) != record["context_digest"]:
+            return None
+        return LineageMatch(
+            model_call_id=str(record["model_call_id"]),
+            cumulative_token_ids=tuple(int(token) for token in record["cumulative_token_ids"]),
+            digest=str(record["digest"]),
+        )
+
+    async def record(
+        self,
+        rollout_id: str,
+        model_call_id: str,
+        request_items: list[dict],
+        response_items: list[dict],
+        cumulative_token_ids: list[int],
+        digest: str,
+    ) -> None:
+        await asyncio.to_thread(
+            self._record,
+            rollout_id,
+            model_call_id,
+            request_items,
+            response_items,
+            cumulative_token_ids,
+            digest,
+        )
+
+    def _record(
+        self,
+        rollout_id: str,
+        model_call_id: str,
+        request_items: list[dict],
+        response_items: list[dict],
+        cumulative_token_ids: list[int],
+        digest: str,
+    ) -> None:
+        record = {
+            "model_call_id": model_call_id,
+            "fingerprint": assistant_fingerprint(list(request_items) + list(response_items)),
+            "context_len": len(request_items),
+            "context_digest": conversation_digest(request_items),
+            "cumulative_token_ids": list(cumulative_token_ids),
+            "digest": digest,
+        }
+        with self._locked(rollout_id):
+            records = self._read(rollout_id)
+            matches = [existing for existing in records if existing["model_call_id"] == model_call_id]
+            if matches:
+                if matches[0] != record:
+                    raise ValueError(f"conflicting lineage record for model call {model_call_id}")
+                return
+            records.append(record)
+            self._write(rollout_id, records)
+
+    async def close(self) -> None:
+        return None
