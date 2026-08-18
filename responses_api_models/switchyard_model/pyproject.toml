@@ -27,27 +27,28 @@ dependencies = [
 
     "nemo-gym[dev]",
 
-    # nemo-switchyard: provides the `switchyard` CLI this server launches. Scoped to this model
-    # server rather than Gym's core dependencies, so only runs that route through Switchyard pay
-    # for it -- Gym itself never imports Switchyard.
+    # nemo-switchyard: provides the native in-process Switchyard server this model server hosts
+    # (switchyard_rust.server.Server). Scoped to this model server rather than Gym's core
+    # dependencies, so only runs that route through Switchyard pay for it -- Gym itself never
+    # imports Switchyard.
     #
-    # Pinned to a git commit rather than a release because the published 0.1.0 cannot serve this
-    # server's /v1/responses endpoint at all: its chat->responses translation omits the
-    # input_tokens_details and output_tokens_details objects that the Responses schema requires,
-    # so every response fails NeMoGymResponse validation. Fixed in
-    # NVIDIA-NeMo/Switchyard#144, which is merged but not yet released -- PyPI still carries only
-    # 0.1.0. Move to `>=0.1.1,<0.2.0` as soon as a release carrying that fix ships.
+    # Pinned exactly, like vllm in local_vllm_model, because this server hosts the pinned code
+    # in-process and depends on its wire behavior: the TOML deployment schema, the
+    # proxy_x_session_id session header, and the /v1 endpoint set are all version-coupled.
+    # Switchyard is moving fast (0.2.0 deprecates its Python serve stack and the next release
+    # removes it), so upgrades should be deliberate, tested events rather than resolver drift.
+    # No extras: the [server] extra covers only Switchyard's deprecated Python serve path, which
+    # this server does not use.
     #
-    # Installing from git bypasses Switchyard's published cp312-abi3 wheels and builds its Rust
-    # extension through maturin. That needs no toolchain on the installing machine -- maturin
-    # pulls in puccinialin and bootstraps rustup when it finds none, verified on a host with no
-    # cargo, no rustup and a cold cache -- but it does add a minute or two to a cold environment
-    # build, and the build fetches from static.rust-lang.org and crates.io on top of PyPI and
-    # GitHub. Restricted egress is the failure mode to warn users about, not a missing compiler.
+    # 0.2.0 is the floor as well as the pin -- it is the first release whose chat->responses
+    # translation emits the input_tokens_details and output_tokens_details objects the Responses
+    # schema requires (NVIDIA-NeMo/Switchyard#144); published 0.1.0 fails NeMoGymResponse
+    # validation on every /v1/responses call. Installs from PyPI cp312-abi3 wheels; no Rust
+    # toolchain, no git, no non-PyPI egress.
     #
-    # Updated Sun Jul 26, 2026 with nemo-switchyard[server] @ 0a03235
+    # Updated Mon Aug 17, 2026 with nemo-switchyard==0.2.0
     # License: Apache 2.0 https://github.com/NVIDIA-NeMo/Switchyard/blob/main/LICENSE
-    "nemo-switchyard[server] @ git+https://github.com/NVIDIA-NeMo/Switchyard@0a03235ba9cacb439e6981f44754965f64347dea",
+    "nemo-switchyard==0.2.0",
 ]
 
 [build-system]
