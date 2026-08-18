@@ -1013,9 +1013,9 @@ class TestRolloutCollection:
             lambda: {"observability_enabled": True, "model_call_capture_dir": str(capture_dir)},
         )
 
-        # Indices that would derive "0-0" plus an explicit id. The explicit id has to win on both
-        # sides, or the writer and the reader key the same rollout differently and the readback
-        # finds nothing.
+        # These indices would derive ``0-0``.
+        # The explicit id must win for both writer and consumer.
+        # Otherwise readback finds no matching capture.
         source_row = {
             "responses_create_params": {"input": []},
             AGENT_REF_KEY_NAME: {"name": "agent"},
@@ -1047,8 +1047,8 @@ class TestRolloutCollection:
 
         assert results[0][ROLLOUT_ID_KEY_NAME] == "step7.0-0"
         assert [call["model_call_id"] for call in results[0]["ng_model_call_capture"]["calls"]] == ["call"]
-        # Nothing was filed under the derived id, so the explicit id replaced it rather than
-        # sitting alongside it.
+        # No capture uses the derived id.
+        # The explicit id replaces it.
         assert store.read("0-0") == []
 
     async def test_run_from_config_sorted(self, tmp_path: Path, empty_global_config: MagicMock) -> None:

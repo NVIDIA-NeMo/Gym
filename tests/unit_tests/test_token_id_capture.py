@@ -12,12 +12,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Training-token capture: schema, store, readers, source, and the served path.
+"""Test training-token capture records, stores, and sources.
 
-The served-path tests build a real ``SimpleResponsesAPIModel`` so the full chain runs:
-the capture middleware mints a ``model_call_id`` and sets a per-request token sink, the
-model server records a ``TokenEntry`` from its complete response, and the entry is read
-back through the store, the HTTP route, and a ``TokenSource``.
+Served-path tests build a real ``SimpleResponsesAPIModel``.
+Middleware mints a ``model_call_id``.
+Middleware sets a request-scoped token sink.
+The model server records a ``TokenEntry``.
+Consumers read records through ``TokenSource.freeze``.
+There is no HTTP token reader.
 """
 
 import asyncio
@@ -258,8 +260,10 @@ def test_config_disabled_needs_no_dir():
 
 
 def test_config_enabled_requires_absolute_dir(tmp_path):
-    """A directory that is set has to be absolute. A relative one silently resolves against
-    whatever the server's working directory happens to be."""
+    """Reject a relative capture directory.
+
+    Relative paths depend on the server working directory.
+    """
     with pytest.raises(ValueError):
         TokenIdCaptureConfig.model_validate(_block(dir="relative/dir"))
     cfg = TokenIdCaptureConfig.model_validate(_block(dir=str(tmp_path)))
@@ -272,16 +276,17 @@ def test_config_falls_back_to_model_call_capture_dir(tmp_path):
 
 
 def test_config_keeps_settings_when_capture_is_off(tmp_path):
-    """Templated configs set a directory unconditionally and toggle `enabled` per run, so the
-    rest of the block is left alone rather than rejected."""
+    """Allow inactive settings in templated configurations.
+
+    A run may toggle only ``enabled``.
+    """
     cfg = TokenIdCaptureConfig.model_validate({"token_id_capture": {"enabled": False, "dir": str(tmp_path)}})
     assert cfg.enabled is False
     assert cfg.build_sink() is None
 
 
 def test_config_warns_rather_than_fails_on_a_sink_beside_a_directory(caplog):
-    """Nothing is lost, the directory is just never read, but someone expecting files on disk
-    will not find any."""
+    """Warn when a custom sink replaces the configured directory."""
     with caplog.at_level(logging.WARNING):
         cfg = TokenIdCaptureConfig.model_validate(_block(sink=f"{__name__}:_ConfiguredSink", dir="/tmp/x"))
     assert cfg.enabled is True
@@ -409,10 +414,11 @@ def test_captured_entry_carries_content(tmp_path):
 
 
 def test_token_arrays_are_stored_once(tmp_path):
-    """The served response carries the arrays on an output item; the record does not repeat them.
+    """Store token arrays once and preserve response content.
 
-    Storing them again per item roughly doubles a record, and the per-item copy is not the
-    value a trainer reads: an item's prompt in a chained trajectory is the running sequence.
+    Served responses carry arrays on an output item.
+    Captured records move them to the entry.
+    Chained trajectories rebuild each item's running prompt.
     """
     client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
     client.post("/ng-rollout/task0-rollDedup/training-token-capture/v1/responses", json={"input": "hi"})
@@ -478,13 +484,11 @@ def test_uncorrelated_call_captures_nothing(tmp_path):
 
 
 def test_package_is_dependency_free_leaf():
-    """``nemo_gym.token_id_capture`` must import without Gym's server stack.
+    """Keep token capture independent of Gym's server stack.
 
-    A training framework's inference worker imports the record, the protocols,
-    and the capture core so it can write into its own data plane (see
-    ``protocols.py``). If the package drags in ray/fastapi/uvicorn, that is not
-    possible. Run in a subprocess so this test is unaffected by whatever the
-    rest of the suite has already imported.
+    Framework inference workers import the record and protocols.
+    They must not import Ray, FastAPI, or uvicorn through this package.
+    A subprocess isolates this check from earlier test imports.
     """
     heavy = ("ray", "fastapi", "uvicorn", "aiohttp", "requests", "torch")
     program = (
@@ -496,11 +500,11 @@ def test_package_is_dependency_free_leaf():
 
 
 def test_streamed_messages_capture_tokens_absent_from_the_stream(tmp_path):
-    """The Claude Code shape: streamed /v1/messages.
+    """Capture tokens before streaming Anthropic messages.
 
-    Token ids exist only on the assembled response, before it is converted to
-    Anthropic and split into SSE. This is the case the whole design turns on, so
-    it is asserted end to end rather than only through the non-streamed path.
+    Token ids exist only on the assembled response.
+    Anthropic conversion omits them from SSE.
+    This test covers the complete served path.
     """
     client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
     with client.stream(
@@ -527,10 +531,10 @@ def test_streamed_messages_capture_tokens_absent_from_the_stream(tmp_path):
 
 
 def test_capture_failure_marks_the_rollout_incomplete(tmp_path, monkeypatch):
-    """A lost call must not leave the rollout looking complete.
+    """Mark a rollout incomplete when capture loses a call.
 
-    Capture stays best-effort so a bad payload cannot break the harness's run,
-    but delivery has to be able to tell "10 of 10 captured" from "9 of 10".
+    A bad payload must not break the model call.
+    Consumers must still detect the missing record.
     """
     store = TokenCaptureStore(tmp_path)
 
@@ -566,11 +570,10 @@ def _silent_server(global_config_dict) -> SimpleResponsesAPIModel:
 
 
 def test_a_response_without_token_ids_marks_the_rollout_incomplete(tmp_path):
-    """A call that returns no token ids is a hole, not traffic to skip.
+    """Treat missing token ids as an incomplete capture.
 
-    Skipping it quietly is the worse failure: the rollout still looks complete, and the
-    call's generated tokens end up inside the next call's prompt, where they are trained
-    as if the environment had written them.
+    Silent omission makes the rollout look complete.
+    Generated tokens may then enter the next prompt with mask zero.
     """
     client = TestClient(_silent_server(_both_enabled(tmp_path)).setup_webserver())
     resp = client.post("/ng-rollout/silent0-roll0/training-token-capture/v1/responses", json={"input": "hi"})
@@ -591,9 +594,10 @@ def _external_mode(tmp_path) -> dict:
 
 
 def test_external_mode_still_mints_identity_for_a_correlated_call(tmp_path):
-    """A framework staging from the inference worker keys its record on the identity minted here.
+    """Create capture identity without a local destination.
 
-    Nothing in this process writes, so the machinery cannot be gated on having a destination.
+    Framework inference workers use the identity minted here.
+    Local destination availability must not gate that identity.
     """
     seen = {}
 
@@ -622,10 +626,10 @@ def test_external_mode_still_mints_identity_for_a_correlated_call(tmp_path):
 
 
 def test_external_mode_does_not_mark_a_token_less_response_incomplete(tmp_path):
-    """Under external staging a response with no token ids is ordinary, not a hole.
+    """Leave completeness to external staging without a local destination.
 
-    This process writes nothing, so it cannot tell a lost call from normal operation, and
-    marking here would mask every rollout of the run.
+    This process cannot distinguish a lost call from normal external capture.
+    Marking locally would mask every rollout.
     """
     client = TestClient(_silent_server(_external_mode(tmp_path)).setup_webserver())
     assert (
@@ -687,9 +691,10 @@ def test_delete_removes_records_and_marker(tmp_path):
 
 
 def test_concurrent_appends_to_one_rollout_stay_intact(tmp_path):
-    """Writes take an exclusive file lock, which is what keeps two writers from interleaving a
-    partial line. Under sharding the writers are separate processes, so the lock has to hold there
-    too; this covers the same code path with threads."""
+    """Keep concurrent writers from interleaving partial records.
+
+    The exclusive file lock covers threads and processes.
+    """
     import concurrent.futures
 
     store = TokenCaptureStore(tmp_path)
@@ -718,11 +723,10 @@ def test_concurrent_appends_to_one_rollout_stay_intact(tmp_path):
 
 
 class _RecordingSink:
-    """A sink that is only a ``TokenSink``: no file store, no directory.
+    """Implement ``TokenSink`` without a file store.
 
-    Deliberately not a ``TokenCaptureStore`` subclass. A training framework whose sink is
-    its own transport has nothing on disk, and this is the shape the capture path has to
-    accept for ``install_token_sink`` to mean anything.
+    Framework transports may keep no local files.
+    The capture path must accept this protocol-only implementation.
     """
 
     def __init__(self) -> None:
@@ -766,10 +770,9 @@ def test_config_allows_no_directory_when_a_sink_is_installed(installed_sink):
 
 
 def test_config_allows_capture_with_no_destination_at_all():
-    """A framework that stages records from the inference worker writes nothing here.
+    """Allow external staging without a local store.
 
-    It still needs capture on, because the identity a record is keyed by and the parent a
-    request continues are resolved in this process and nowhere else.
+    This process still resolves the capture identity.
     """
     cfg = TokenIdCaptureConfig.model_validate(_block())
     assert cfg.enabled is True
@@ -778,10 +781,9 @@ def test_config_allows_capture_with_no_destination_at_all():
 
 
 def test_installed_sink_is_marked_incomplete_through_the_protocol(installed_sink, monkeypatch):
-    """A protocol-only sink must receive the incomplete signal.
+    """Send incomplete state through the ``TokenSink`` protocol.
 
-    Reaching for a concrete store attribute here would raise inside the failure path and be
-    swallowed, leaving a rollout that lost a call looking complete.
+    Capture code must not require concrete store attributes.
     """
 
     async def boom(entry):
@@ -815,10 +817,10 @@ def test_a_sink_without_mark_incomplete_is_logged_not_swallowed(caplog):
 
 
 def test_commit_entry_records_a_call_with_no_token_fields_on_the_response(installed_sink):
-    """Engine-side capture: the caller has the arrays, the served response does not.
+    """Allow engine-side capture to commit an existing entry.
 
-    The commit half has to be reachable on its own, otherwise a framework in that position
-    forks the durability ordering rather than sharing it.
+    Engine-side callers already have the token arrays.
+    They should share the standard durability path.
     """
     entry = TokenEntry(
         rollout_id="task0-sink3",
@@ -850,11 +852,11 @@ def test_records_carry_a_schema_version():
 
 
 def test_a_malformed_token_payload_does_not_fail_the_model_call(installed_sink):
-    """Building the record is guarded, not just writing it.
+    """Guard record construction failures.
 
-    ``capture_tokens`` is awaited directly on the model server's response path, so anything
-    it raises fails the model call. A payload whose token fields do not validate has to be
-    treated like any other capture failure: the call succeeds and the rollout is marked.
+    ``capture_tokens`` runs on the model response path.
+    Invalid token fields must not fail the model call.
+    The rollout must still be marked incomplete.
     """
     entry_ctor = TokenEntry
 
@@ -878,16 +880,17 @@ def test_a_malformed_token_payload_does_not_fail_the_model_call(installed_sink):
 
 @pytest.mark.parametrize("bad", ["", "a/b", "../escape", "a b"])
 def test_an_unsafe_rollout_id_is_rejected(tmp_path, bad):
-    """The id names the capture file, so it has to be a safe filename component: a separator
-    would let a rollout id write outside the store directory."""
+    """Reject rollout ids that could escape the store directory."""
     with pytest.raises(ValueError):
         TokenCaptureStore(tmp_path).path_for(bad)
 
 
 def test_a_record_is_readable_as_soon_as_put_returns(tmp_path):
-    """``put`` is awaited rather than backgrounded, so the record is on disk before the model
-    call returns. A reader in another process runs after the rollout and has no way to wait for
-    a writer, and delete-on-consume is only safe because nothing is still in flight."""
+    """Make ``put`` durable before it returns.
+
+    Consumers may run in another process after rollout completion.
+    Conditional deletion requires all writes to be finished.
+    """
     store = TokenCaptureStore(tmp_path)
     entry = TokenEntry(
         rollout_id="r0",
@@ -901,8 +904,11 @@ def test_a_record_is_readable_as_soon_as_put_returns(tmp_path):
 
 
 def test_a_rollout_that_lost_a_call_is_distinguishable_from_a_complete_one(tmp_path):
-    """Capture failures do not fail the model call, so nothing downstream would otherwise know
-    a turn is missing. The chain built from what survived can look perfectly contiguous."""
+    """Expose incomplete capture to consumers.
+
+    Capture failures do not fail model calls.
+    Surviving records may otherwise look contiguous.
+    """
     store = TokenCaptureStore(tmp_path)
     entry = TokenEntry(
         rollout_id="r0",
@@ -1009,8 +1015,7 @@ def test_a_configured_sink_wins_over_an_installed_one(installed_sink):
 
 
 def test_a_sink_receives_its_configured_kwargs():
-    """A sink for a real transport needs an endpoint and a client; a zero-argument one could only
-    get them from ambient state."""
+    """Require explicit constructor wiring for a transport sink."""
     config = TokenIdCaptureConfig.model_validate(
         _block(sink=f"{__name__}:_KwargSink", sink_kwargs={"endpoint": "https://dp", "shard": 3})
     )
@@ -1025,8 +1030,7 @@ def test_a_sink_given_kwargs_it_cannot_take_is_refused_at_startup():
 
 
 def test_a_sink_that_cannot_report_failures_is_refused_at_startup():
-    """Without mark_incomplete an incomplete rollout looks complete, so this fails at startup
-    rather than at whichever step first loses a call."""
+    """Reject sinks that cannot mark incomplete capture."""
     config = TokenIdCaptureConfig.model_validate(
         {
             "token_id_capture": {
@@ -1041,9 +1045,11 @@ def test_a_sink_that_cannot_report_failures_is_refused_at_startup():
 
 
 def test_a_sink_whose_protocol_member_is_not_callable_is_refused():
-    """isinstance against a Protocol only checks that the attributes exist, so callability is
-    checked too. Both are derived from the protocol rather than a list written out here, so the
-    check keeps up if TokenSink gains a method."""
+    """Require callable methods for the ``TokenSink`` protocol.
+
+    Attribute presence alone is insufficient.
+    Derive the checks from the protocol.
+    """
     config = TokenIdCaptureConfig.model_validate(
         {
             "token_id_capture": {
@@ -1070,15 +1076,11 @@ def test_a_malformed_sink_path_is_refused_at_startup(target, expected):
 
 
 def test_a_programmatically_installed_sink_does_not_reach_a_spawned_worker():
-    """A model server with num_workers > 1 is launched by uvicorn with an app string and
-    workers=N, and uvicorn spawns those workers (multiprocessing "spawn"), re-importing the app
-    module rather than inheriting the launcher's memory. ``install_token_sink`` sets a process
-    global, so it does not cross that boundary and capture silently falls back to the file store,
-    or writes nothing when no directory is set.
+    """Build configured sinks inside spawned workers.
 
-    This is why ``token_id_capture.sink`` is configuration rather than only a function call: it is
-    constructed inside each worker. The test pins the limitation so the reason for the config key
-    does not get lost.
+    Uvicorn workers re-import the app module.
+    They do not inherit launcher process globals.
+    Each worker must construct its configured sink.
     """
     ctx = multiprocessing.get_context("spawn")  # the context uvicorn uses
     queue = ctx.Queue()
@@ -1097,8 +1099,10 @@ def _report_installed_sink(queue) -> None:
 
 
 def test_the_store_is_a_token_source(tmp_path):
-    """Records are read back through a TokenSource, and the file store is one. There is no
-    separate local reader: a wrapper over the store would only forward every call."""
+    """Use the file store as the local ``TokenSource``.
+
+    A separate local reader would only forward each call.
+    """
     store = TokenCaptureStore(tmp_path)
     assert isinstance(store, TokenSource)
 
@@ -1113,8 +1117,8 @@ def test_the_store_is_a_token_source(tmp_path):
     )
     assert [e.model_call_id for e in asyncio.run(store.tokens_for("r0"))] == ["c1"]
 
-    # A colocated source can tell that a call failed to capture, which is what keeps an
-    # incomplete rollout from being trained on.
+    # A colocated source can detect a capture failure.
+    # This prevents training on an incomplete rollout.
     assert store.is_incomplete("r0") is False
     asyncio.run(store.mark_incomplete("r0", "c2"))
     assert store.is_incomplete("r0") is True
@@ -1132,22 +1136,19 @@ def _entry_fields(**overrides):
 
 
 def test_a_record_older_than_this_reader_is_accepted():
-    """A field this reader does not have takes its default and the consumer degrades: a record
-    written before parent links existed simply has none, and the builder matches prefixes."""
+    """Use defaults for fields absent from older records."""
     entry = TokenEntry(**_entry_fields(schema_version=TOKEN_ENTRY_RECORD_SCHEMA_VERSION - 1))
     assert entry.generation_token_ids == [2]
 
 
 def test_a_record_newer_than_this_reader_is_refused():
-    """The direction extra="allow" hides. A field this reader cannot see is kept and ignored, so
-    without this the record decodes clean and trains as though nothing were different."""
+    """Reject newer records hidden by ``extra="allow"``."""
     with pytest.raises(ValidationError, match="this reader understands up to"):
         TokenEntry(**_entry_fields(schema_version=TOKEN_ENTRY_RECORD_SCHEMA_VERSION + 1))
 
 
 def test_a_newer_record_in_the_store_fails_the_read_rather_than_being_skipped(tmp_path):
-    """Read failure is the loud path: the caller marks that rollout unusable rather than training
-    on a partial set that looks complete."""
+    """Fail loudly instead of training on a partial newer record."""
     store = TokenCaptureStore(tmp_path)
     store.append(TokenEntry(**_entry_fields()))
     path = next(tmp_path.glob("*.tokens.jsonl"))

@@ -13,20 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Served-layer token capture for one model call.
+"""Capture training tokens from one complete model response.
 
-Token ids are dropped on the wire for streaming responses (Anthropic
-``/v1/messages``, OpenAI chat SSE), so the capture middleware, which only sees
-the streamed bytes, cannot record them. But the model server holds the
-complete response, token ids included, for a moment before it synthesizes the
-SSE stream. The middleware therefore hands the model server a per-request "token
-sink" through a request-scoped ContextVar; the server calls ``capture_tokens``
-on its complete response and the sink writes a ``TokenEntry``.
-
-The sink carries the ``model_call_id`` the middleware minted for the same call,
-so a captured ``TokenEntry`` joins its ``ModelCallRecord``. Only the middleware
-sets a sink (for rollout-correlated, observed calls), so ordinary untagged
-traffic captures nothing.
+Streaming responses omit token ids from the wire.
+The model server still holds the complete response before streaming.
+Middleware provides a request-scoped token sink.
+The model server passes its complete response to ``capture_tokens``.
+The sink writes a ``TokenEntry``.
+Its ``model_call_id`` joins the corresponding evaluation record.
+Untagged traffic has no capture context.
 """
 
 from __future__ import annotations
@@ -51,24 +46,20 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class CaptureContext:
-    """What the capture middleware hands the model server for one call: which
-    rollout and call this is, and where the record goes.
+    """Describe one in-flight training-token capture.
 
-    ``sink`` is Gym's file store by default and anything satisfying ``TokenSink``
-    otherwise, which is how a training framework redirects the write to its own data
-    plane without changing the capture code. It is typed as the protocol rather than
-    the file store so that redirection is a supported path and not an accident.
+    The context identifies the rollout and model call.
+    ``sink`` receives the resulting record.
+    A framework may provide any ``TokenSink`` implementation.
     """
 
     rollout_id: str
     model_call_id: str
-    # None when capture is enabled but nothing in this process writes records. A framework that
-    # stages engine-side still needs the identity and the parent resolution this context carries,
-    # and there is no destination here to hand them to.
+    # ``None`` means another process owns record staging.
+    # The context still carries the capture identity.
     sink: TokenSink | None
     model: str = ""
-    # Set by ``commit_entry`` so the no-token-ids path can tell a call that was recorded by
-    # somebody else from one that was lost.
+    # ``commit_entry`` sets this after another capture path records the call.
     committed: bool = False
 
 
@@ -80,11 +71,10 @@ def set_token_sink(sink: CaptureContext) -> Token:
 
 
 def current_capture_context() -> CaptureContext | None:
-    """The capture context for the in-flight call, or None for untagged traffic.
+    """Return the capture context for the in-flight call.
 
-    The supported way to read the identity this call was minted with.
-    A framework that stages records from its inference worker keys them on that identity,
-    and this process is the only one that has it.
+    Return ``None`` for untagged traffic.
+    Framework inference workers use this identity for staged records.
     """
     return _TOKEN_SINK.get()
 
@@ -94,21 +84,19 @@ def reset_token_sink(token: Token) -> None:
 
 
 async def capture_tokens(response: Any) -> None:
-    """Record a ``TokenEntry`` from a complete model response when a sink is set.
+    """Record a ``TokenEntry`` from a complete model response.
 
-    ``response`` is a served response as a pydantic model or dict. No-op when no
-    sink is active (untagged traffic) or the response carries no token ids. The
-    write is awaited, so the entry is durable before the model call returns and a
-    post-rollout reader always sees it, with no background writer to drain.
+    Accept a Pydantic model or dictionary.
+    Return without work when no capture context exists.
+    Mark local capture incomplete when required token ids are absent.
+    Await the write before the model call returns.
     """
     sink = _TOKEN_SINK.get()
     if sink is None:
         return
-    # Everything that reads the response is guarded, not just the write. Decoding a payload and
-    # validating a record can fail on malformed token data exactly as writing it can, and the
-    # consequence is the same: the rollout is short a call. It is guarded here rather than left
-    # to the caller because the caller is the model server's own response path, so an exception
-    # escaping this function would fail the model call and break the harness's run.
+    # Guard response decoding and record validation.
+    # Either failure leaves the rollout short one call.
+    # Capture errors must not fail the model call.
     try:
         if hasattr(response, "model_dump"):
             payload = response.model_dump()
@@ -132,8 +120,7 @@ async def capture_tokens(response: Any) -> None:
             generation_token_ids=info["generation_token_ids"],
             generation_log_probs=info["generation_log_probs"],
             routed_experts=info.get("routed_experts"),
-            # Keep the content (assistant text, tool calls) so the trajectory the trainer
-            # reads is not token-only, since text-based penalties need it.
+            # Preserve content for text-based training penalties.
             output_items=content_items,
             token_item_index=token_item_index,
             created_at=time.time(),
@@ -147,15 +134,12 @@ async def capture_tokens(response: Any) -> None:
 async def commit_entry(entry: TokenEntry) -> None:
     """Durably record a finished entry against the in-flight call.
 
-    Public and separate from ``capture_tokens`` because the two halves are useful apart.
-    ``capture_tokens`` reads the arrays off a served response; a framework that captures
-    engine-side already has them, and the response Gym sees may carry none at all, so it
-    needs this half without the extraction half. Forking it instead would duplicate the
-    ordering below, which is the part worth sharing.
-
-    No-op when no sink is active. Never raises: capture is best effort per call, but a
-    rollout that lost a call is marked so a consumer masks it rather than training on a
-    chain with a hole.
+    ``capture_tokens`` extracts arrays from a served response.
+    Engine-side capture may already have those arrays.
+    Engine-side callers can use this method directly.
+    Return without work when no capture context exists.
+    Capture failures mark the rollout incomplete.
+    This method never fails the model call.
     """
     sink = _TOKEN_SINK.get()
     if sink is None:
@@ -181,11 +165,9 @@ async def commit_entry(entry: TokenEntry) -> None:
 async def _capture_failed(sink: CaptureContext, stage: str) -> None:
     """Report a capture failure without letting it reach the model call.
 
-    Capture is best effort per call: a bad token payload must never fail the model call and
-    break the harness's run. But a rollout that lost a call must not look identical to a
-    complete one, so it is marked, and delivery masks the sample rather than training on a
-    chain with a hole. Called only from an ``except`` block, so ``exc_info`` picks up the
-    active exception.
+    Bad token payloads must not fail the model call.
+    Mark the rollout so consumers can mask the sample.
+    Call this only from an ``except`` block.
     """
     logger.warning(
         "Training-token capture failed to %s the record for model call %s of rollout %s.",
@@ -202,14 +184,12 @@ async def _capture_missing(sink: CaptureContext, reason: str) -> None:
 
     A response with no token ids is a hole in the chain rather than traffic to skip.
     The builder reads the gap between one call's tokens and the next call's prompt as tool output.
-    So a skipped call's generated tokens arrive inside the next prompt at mask 0,
-    and tokens the policy sampled train as if the environment had written them.
+    A skipped call's generated tokens then enter the next prompt with mask zero.
+    Policy tokens would train as if the environment produced them.
 
     Two cases are not holes and are left alone.
-    A call already committed through ``commit_entry`` was recorded by a caller that had the arrays
-    when this process did not.
-    A context with no sink means nothing here writes records at all,
-    so this process cannot tell a lost call from ordinary operation and the staging side owns that.
+    A committed call was recorded by another capture path.
+    A context without a sink delegates completeness to external staging.
     """
     if sink.committed or sink.sink is None:
         return
@@ -225,10 +205,8 @@ async def _capture_missing(sink: CaptureContext, reason: str) -> None:
 async def _mark_incomplete(sink: CaptureContext) -> None:
     """Mark the rollout, or say loudly why it could not be marked.
 
-    A sink that does not implement ``mark_incomplete`` would otherwise raise inside the
-    failure path above and have the exception swallowed, leaving an incomplete rollout
-    that looks complete. That is the one outcome this whole path exists to prevent, so
-    it is logged at error rather than passed over.
+    A missing ``mark_incomplete`` method can hide incomplete capture.
+    Log that condition as an error.
     """
     mark = getattr(sink.sink, "mark_incomplete", None)
     if mark is None:

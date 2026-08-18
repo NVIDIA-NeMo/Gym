@@ -93,16 +93,13 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         return app
 
     def _capture_correlation_enabled(self) -> bool:
-        """Whether the per-rollout ``/ng-rollout/<id>`` correlation prefix should be applied.
+        """Return whether this agent needs rollout correlation.
 
-        Two independent capture paths consume the same prefix:
-        - Eval model-call capture (``observability_enabled``), which applies to every agent.
-        - Training token capture (``token_id_capture.enabled``), which applies only to agents
-          that opt in with the per-agent ``token_id_capture`` flag. Native agents carry token
-          ids inline and do not need the store, so they do not emit the prefix for token capture.
-
-        Fail closed: an agent whose client carries no usable global config runs uncorrelated
-        rather than erroring on every model call.
+        Evaluation uses ``/ng-rollout/<id>/...`` for every agent.
+        Training capture uses ``/ng-rollout/<id>/training-token-capture/...``.
+        Training capture requires ``token_id_capture.enabled``.
+        It also requires the static agent flag or run-level ``all_agents``.
+        Missing global configuration disables correlation.
         """
         return self._model_call_capture_enabled() or self._token_id_capture_enabled()
 
@@ -126,22 +123,21 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         )
 
     def rollout_id_from_run(self, body: Any) -> Optional[str]:
-        """Per-rollout capture id for a run-request (its task/rollout indices).
+        """Return the capture id for a run request.
 
-        None when neither capture path is enabled or the body carries no indices, so callers apply
-        no correlation prefix in either case.
+        Return ``None`` when capture is disabled.
+        Return ``None`` when the body has no usable identity.
         """
         if not self._capture_correlation_enabled():
             return None
         return maybe_rollout_id_from_run_body(body)
 
     def url_path_for_run(self, url_path: str, body: Any) -> str:
-        """A downstream url_path with the per-rollout capture-correlation prefix applied.
+        """Apply this run's capture path to a downstream URL path.
 
-        Returns ``/ng-rollout/<id><url_path>`` when observability is enabled and the run body
-        carries task/rollout indices; otherwise ``url_path`` unchanged. Use for calls made while
-        handling ``/run`` — both direct model-server calls and self-calls to ``/v1/responses``
-        (the prefixed self-call route carries the id into ``responses()``).
+        Evaluation uses ``/ng-rollout/<id>/...``.
+        Training capture uses ``/ng-rollout/<id>/training-token-capture/...``.
+        Calls without a rollout id remain unchanged.
         """
         return (
             f"{rollout_path_prefix(self.rollout_id_from_run(body), token_capture=self._token_id_capture_enabled())}"
@@ -149,11 +145,9 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         )
 
     def base_url_for_run(self, base_url: str, body: Any) -> str:
-        """A model-server base URL with the per-rollout capture-correlation prefix applied.
+        """Apply this run's capture path to a model-server root URL.
 
-        ``base_url_for_run`` is the base-URL counterpart of ``url_path_for_run`` for SDK-style
-        harnesses that configure a client once instead of prefixing each call: same gating, applied
-        to a server root URL (append the API-version suffix afterwards).
+        Append the API-version suffix after this method returns.
         """
         return apply_rollout_prefix(
             base_url,
@@ -162,11 +156,11 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         )
 
     def url_path_for_request(self, url_path: str, request: Optional[Request]) -> str:
-        """Carry an inbound ``/ng-rollout/<id>`` self-call prefix onto a downstream url_path.
+        """Carry an inbound capture path onto a downstream URL path.
 
-        Agents whose model calls happen inside ``responses()`` receive the correlation id as the
-        ``rollout_id`` path parameter of the prefixed self-call route; this re-applies it to the
-        outgoing model call. Unprefixed requests pass through unchanged.
+        Prefixed self-calls expose the rollout id as a path parameter.
+        Training-capture requests preserve their dedicated path segment.
+        Unprefixed requests remain unchanged.
         """
         path_params = getattr(request, "path_params", None)
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None

@@ -13,20 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Append-only, rollout-keyed store for training ``TokenEntry`` records.
+"""Store training ``TokenEntry`` records by rollout.
 
-One file per rollout (``<rollout_id>.tokens.jsonl``), separate from the
-evaluation capture file (``<rollout_id>.capture.jsonl``) so token payloads never
-bloat eval reads. Each write fsyncs and holds a per-file ``flock`` (which
-excludes other threads and worker processes writing the *same* rollout file),
-because a killed box must not lose a rollout's training tokens.
-
-Concurrency is per file, not global: there is deliberately no process-wide lock.
-Every model call appends to its own rollout's file, so a global lock would
-serialize all of them behind one fsync. On a shared or network filesystem that
-collapses throughput to ~1/fsync-latency regardless of core count. The per-file
-flock keeps concurrent writers to one rollout correct while letting writes to
-different rollouts proceed in parallel.
+Each rollout uses one ``<rollout_id>.tokens.jsonl`` file.
+Evaluation records use a separate file.
+Each write uses ``fsync``.
+A per-rollout file lock serializes writers to the same rollout.
+Different rollouts can write concurrently.
 """
 
 from __future__ import annotations
@@ -239,9 +232,10 @@ class TokenCaptureStore:
     # Both interfaces offload blocking work to the process-wide default thread pool.
 
     async def put(self, entry: TokenEntry) -> None:
-        """``TokenSink``: durable on return. The blocking append is offloaded so
-        it does not sit on the event loop, and awaited so a reader after the
-        rollout never races a partial file."""
+        """Store an entry durably without blocking the event loop.
+
+        Await the append so later consumers cannot race a partial file.
+        """
         await asyncio.to_thread(self.append, entry)
 
     async def freeze(self, rollout_id: str) -> TokenCaptureSnapshot:
@@ -297,8 +291,8 @@ class TokenCaptureStore:
     def delete(self, rollout_id: str) -> None:
         """Unconditionally remove a rollout's records.
 
-        This compatibility helper is for administrative cleanup. Normal
-        consumers use conditional ``drop``.
+        This compatibility helper supports administrative cleanup.
+        Normal consumers use conditional ``drop``.
         """
         with self._locked(rollout_id):
             self.path_for(rollout_id).unlink(missing_ok=True)
@@ -324,10 +318,11 @@ class TokenCaptureStore:
 
 
 def make_token_store(global_config_dict: Any) -> TokenCaptureStore | None:
-    """Build the training-token store, or ``None`` when this process is not writing one.
+    """Build the training-token file store.
 
-    ``None`` when capture is off, when no directory resolves, or when a sink is configured: the
-    records go to that transport instead and there is no file store to build.
+    Return ``None`` when capture is disabled.
+    Return ``None`` when no directory resolves.
+    Return ``None`` when a custom sink owns the records.
     """
     from nemo_gym.token_id_capture.config import TokenIdCaptureConfig
 

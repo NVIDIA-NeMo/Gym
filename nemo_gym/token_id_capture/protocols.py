@@ -13,23 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Interfaces for writing and reading captured training tokens.
+"""Define interfaces for captured training tokens.
 
-Gym owns the record shape, these protocols, and the code that builds a record. A
-training framework supplies the implementations and runs them wherever its
-tokens are produced. Neither side imports the other's transport.
-
-Placement of the write is therefore a deployment choice:
-
-- Gym owns serving (today): install the sink in the model server, which already
-  holds the assembled response, so there is no extra hop.
-- A framework owns the inference worker: install the sink there, so bulk token
-  arrays go to the framework's data plane instead of riding back through Gym's
-  HTTP response.
-
-The capture code is the same in both cases. This module must stay free of
-fastapi, ray, torch and aiohttp imports so a framework's worker can import it
-without pulling in Gym's server stack. A unit test enforces that.
+Gym owns the record shape and capture protocols.
+A training framework may implement the transport.
+The sink may run in a Gym model server.
+It may instead run in a framework inference worker.
+Engine-side placement keeps token arrays off Gym's HTTP response.
+Consumers read through ``TokenSource.freeze``.
+They identify the frozen state with ``snapshot_id``.
+There is no HTTP token reader.
+This module avoids FastAPI, Ray, Torch, and aiohttp imports.
 """
 
 from __future__ import annotations
@@ -113,9 +107,9 @@ class TokenSource(Protocol):
         ...
 
 
-# Installed once at process startup by whoever owns the process: Gym's model
-# server, or a framework's inference worker. The capture path reads it when a
-# request-scoped context does not carry an explicit sink.
+# Install these defaults once in the process that owns them.
+# The owner may be a Gym model server or a framework inference worker.
+# Request-scoped sinks take precedence.
 _INSTALLED_SINK: TokenSink | None = None
 _INSTALLED_SOURCE: TokenSource | None = None
 
