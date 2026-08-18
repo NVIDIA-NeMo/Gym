@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+config_paths:
+  - responses_api_agents/opencode_sandboxed_agent/configs/opencode_agent.yaml
+  - resources_servers/deepswe/configs/deepswe.yaml
+
+opencode_deepswe_resources_server:
+  _inherit_from: deepswe_resources_server
+  resources_servers:
+    deepswe:
+      sandbox_model_server_name: policy_model
+      workspace_excluded_paths:
+        - export.json
+
+opencode_sandboxed_agent_deepswe:
+  _inherit_from: opencode_sandboxed_agent
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      resources_server:
+        type: resources_servers
+        name: opencode_deepswe_resources_server
+      sandbox_config:
+        env:
+          OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX: "262144"
+        metadata:
+          benchmark: deepswe-v1-1
+          harness: opencode
+      opencode_config:
+        provider:
+          nemo_gym:
+            models:
+              dummy_model:
+                limit:
+                  context: 262144
+                  input: 262144
+                  output: 262144
+      datasets:
+        - name: deepswe_v1_1
+          type: benchmark
+          jsonl_fpath: benchmarks/deepswe/data/deepswe_benchmark.jsonl
+          prepare_script: benchmarks/deepswe/prepare.py
+          num_repeats: 1

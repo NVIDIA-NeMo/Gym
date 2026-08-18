@@ -18,6 +18,14 @@ opencode_sandboxed_agent:
 
       # Taken from https://github.com/sdevare-nv/nv-opencode/blob/f261004b4e4269a6e193fd242e5ec8ced9a7aec0/packages/opencode/src/bench/cli.ts#L198-L325
       opencode_config:
+        provider:
+          nemo_gym:
+            models:
+              dummy_model:
+                limit:
+                  context: 0
+                  input: 0
+                  output: 32000
         permission:
           "*": allow
 
@@ -142,6 +150,8 @@ opencode_sandboxed_agent:
       sandbox_config:
         ttl_s: 18000
         ready_timeout_s: 1200
+        env:
+          OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX: null
         resources:
           cpu: 2
           memory_mib: 8192

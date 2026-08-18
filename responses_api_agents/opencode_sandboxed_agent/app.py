@@ -15,6 +15,7 @@
 
 import json
 import sys
+from copy import deepcopy
 from pathlib import Path
 from shlex import quote
 from time import time
@@ -124,7 +125,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             ttl_s=self.config.sandbox_config.get("ttl_s", None),
             ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s", None),
             workdir=None,  # Default to container's WORKDIR
-            env=dict(),
+            env=self._sandbox_env(),
             files=dict(),
             metadata=provider_default_metadata
             | self.config.sandbox_config.get("metadata", {})
@@ -141,8 +142,24 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         return sandbox
 
-    def _create_opencode_config(self) -> Dict[str, Any]:
+    @staticmethod
+    def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+        for key, value in override.items():
+            if key in base and isinstance(base[key], dict) and isinstance(value, dict):
+                OpenCodeSandboxedAgent._deep_merge(base[key], value)
+            else:
+                base[key] = value
+        return base
+
+    def _sandbox_env(self) -> Dict[str, str]:
         return {
+            str(key): str(value)
+            for key, value in self.config.sandbox_config.get("env", {}).items()
+            if value is not None
+        }
+
+    def _create_opencode_config(self) -> Dict[str, Any]:
+        config = {
             "model": "nemo_gym/dummy_model",
             "$schema": "https://opencode.ai/config.json",
             "provider": {
@@ -167,8 +184,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     },
                 }
             },
-            **self.config.opencode_config,
         }
+        return self._deep_merge(config, deepcopy(self.config.opencode_config))
 
     def _opencode_export_to_usages(self, opencode_export: Dict[str, Any]) -> List[NeMoGymResponseUsage]:
         usages: List[NeMoGymResponseUsage] = []
@@ -291,6 +308,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && VERSION={self.config.opencode_version} bash "$installer\""""
 
         # --auto is to approve not explicitly denied requests.
+        # `--` ends option parsing so prompts beginning with `-` remain positional arguments.
         command = f"""
         echo "Shell: $SHELL" \
         && {conda_activate_command_str} \
@@ -298,7 +316,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && {install_str} \
         && export PATH=$HOME/.opencode/bin:$PATH \
         && echo "Installed OpenCode" \
-        && opencode run {opencode_debug_str} {opencode_thinking_str} {quote(query)} \
+        && opencode run {opencode_debug_str} {opencode_thinking_str} -- {quote(query)} \
         && echo "OpenCode run finished"
         """
 
@@ -309,10 +327,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             print(f"OpenCode config JSON str: {opencode_config_content}", file=sys.stderr)
 
         try:
+            opencode_env = self._sandbox_env()
+            opencode_env["OPENCODE_CONFIG_CONTENT"] = opencode_config_content
             result = await sandbox.exec(
                 command=command,
                 timeout_s=self.config.sandbox_timeout,
-                env={"OPENCODE_CONFIG_CONTENT": opencode_config_content},
+                env=opencode_env,
             )
         except:
             result = None

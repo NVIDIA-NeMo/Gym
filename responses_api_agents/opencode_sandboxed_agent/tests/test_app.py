@@ -128,8 +128,37 @@ class TestOpenCodeSandboxedAgent:
 
         assert expected_usages == actual_usages
 
+    def test_create_opencode_config_deep_merges_model_limits(self, monkeypatch: MonkeyPatch) -> None:
+        config = self._create_config()
+        config.opencode_config = {
+            "provider": {
+                "nemo_gym": {
+                    "models": {
+                        "dummy_model": {
+                            "limit": {"context": 262_144, "input": 262_144, "output": 262_144},
+                        }
+                    }
+                }
+            }
+        }
+        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        monkeypatch.setattr(
+            "responses_api_agents.opencode_sandboxed_agent.app.get_server_url", lambda _: "http://model"
+        )
+
+        opencode_config = server._create_opencode_config()
+
+        provider = opencode_config["provider"]["nemo_gym"]
+        assert provider["options"]["baseURL"] == "http://model/v1"
+        assert provider["models"]["dummy_model"]["limit"] == {
+            "context": 262_144,
+            "input": 262_144,
+            "output": 262_144,
+        }
+
     async def test_responses_sanity(self, opencode_export_test_data: Dict[str, Any], monkeypatch: MonkeyPatch) -> None:
         config = self._create_config()
+        config.sandbox_config = {"env": {"OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": "262144"}}
         server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
         sandbox_mock = AsyncMock()
@@ -156,9 +185,15 @@ class TestOpenCodeSandboxedAgent:
         actual_response = await server.responses(
             request=MagicMock(session={SESSION_ID_KEY: "my session"}, cookies={"sandbox_id": ""}),
             body=NeMoGymResponseCreateParamsNonStreaming(
-                input=[{"role": "user", "content": "hello"}],
+                input=[{"role": "user", "content": "- hello"}],
             ),
         )
+        assert "opencode run  --thinking -- '- hello'" in sandbox_mock.exec.await_args_list[0].kwargs["command"]
+        assert sandbox_mock.exec.await_args_list[0].kwargs["env"] == {
+            "OPENCODE_CONFIG_CONTENT": "{}",
+            "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": "262144",
+        }
+
         expected_response = NeMoGymResponse(
             id="resp_",
             created_at=0.0,

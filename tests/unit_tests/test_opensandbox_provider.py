@@ -235,6 +235,41 @@ async def test_direct_create_passes_resource_requests_to_sdk_create(
         )
 
 
+async def test_direct_create_passes_network_policy_to_sdk_create(
+    fake_opensandbox_sdk: None,
+) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 10},
+        probe={"command": None},
+    )
+
+    await provider.create(
+        SandboxSpec(
+            image="image:tag",
+            provider_options={"network_policy": {"defaultAction": "allow", "egress": []}},
+        ),
+    )
+
+    sent = FakeSandbox.created_kwargs["network_policy"]
+    assert sent.model_dump(by_alias=True, exclude_none=True) == {"defaultAction": "allow", "egress": []}
+
+
+async def test_direct_create_omits_network_policy_when_unset(fake_opensandbox_sdk: None) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 10},
+        probe={"command": None},
+    )
+
+    await provider.create(SandboxSpec(image="image:tag"))
+
+    assert "network_policy" not in FakeSandbox.created_kwargs
+
+
+def test_network_policy_option_must_be_a_mapping() -> None:
+    with pytest.raises(TypeError, match="network_policy"):
+        opensandbox_provider.OpenSandboxProviderOptions.from_mapping({"network_policy": "allow-all"})
+
+
 async def test_direct_create_passes_image_auth_to_sdk_create(
     fake_opensandbox_sdk: None,
 ) -> None:
