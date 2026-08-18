@@ -628,7 +628,7 @@ def test_external_mode_still_mints_identity_for_a_correlated_call(tmp_path):
             context = current_capture_context()
             seen["rollout_id"] = context.rollout_id if context else None
             seen["model_call_id"] = context.model_call_id if context else None
-            seen["sink"] = context.sink if context else "no context"
+            seen["sink"] = context.token_sink if context else "no context"
             return _training_response("hi")
 
     model = _Peek(
@@ -663,7 +663,7 @@ def test_external_mode_does_not_mark_a_token_less_response_incomplete(tmp_path):
 def test_a_committed_call_is_not_marked_even_without_token_ids(tmp_path):
     """A caller that had the arrays when this process did not has already accounted for the call."""
     store = TokenCaptureStore(tmp_path)
-    context = CaptureContext(rollout_id="cm0-r0", model_call_id="c1", sink=store)
+    context = CaptureContext(rollout_id="cm0-r0", model_call_id="c1", token_sink=store)
     token = set_token_sink(context)
     try:
         asyncio.run(
@@ -851,7 +851,7 @@ def test_commit_entry_records_a_call_with_no_token_fields_on_the_response(instal
         generation_token_ids=GTOKS,
         generation_log_probs=LPS,
     )
-    token = set_token_sink(CaptureContext(rollout_id="task0-sink3", model_call_id="mc-1", sink=installed_sink))
+    token = set_token_sink(CaptureContext(rollout_id="task0-sink3", model_call_id="mc-1", token_sink=installed_sink))
     try:
         asyncio.run(commit_entry(entry))
     finally:

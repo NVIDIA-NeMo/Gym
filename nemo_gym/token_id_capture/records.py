@@ -70,7 +70,6 @@ class TokenEntry(BaseModel):
     output_items: list[dict] = Field(default_factory=list)
     # This index identifies the item that carried token arrays.
     # ``None`` means no item carried them.
-    # Older records may keep arrays inline and leave this unset.
     token_item_index: int | None = None
     # This non-semantic timestamp helps diagnose retries and sibling branches.
     created_at: float = 0.0

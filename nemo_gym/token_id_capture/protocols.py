@@ -22,7 +22,6 @@ It may instead run in a framework inference worker.
 Engine-side placement keeps token arrays off Gym's HTTP response.
 Consumers read through ``TokenSource.freeze``.
 They identify the frozen state with ``snapshot_id``.
-There is no HTTP token reader.
 This module avoids FastAPI, Ray, Torch, and aiohttp imports.
 """
 
@@ -47,10 +46,7 @@ class TokenCaptureSnapshot:
 
 @runtime_checkable
 class TokenSink(Protocol):
-    """Where captured records go.
-
-    Gym's file store and framework-owned transports implement this protocol.
-    """
+    """Receive captured records through Gym's file store or a framework transport."""
 
     async def put(self, entry: TokenEntry) -> None:
         """Durably store one record.
@@ -76,10 +72,7 @@ class TokenSink(Protocol):
         ...
 
     async def close(self) -> None:
-        """Flush pending work and release resources.
-
-        This operation is idempotent.
-        """
+        """Flush pending work and release resources idempotently."""
         ...
 
 
@@ -106,10 +99,7 @@ class TokenSource(Protocol):
         ...
 
     async def close(self) -> None:
-        """Release resources.
-
-        This operation is idempotent.
-        """
+        """Release resources idempotently."""
         ...
 
 
