@@ -1,17 +1,18 @@
 # Route Gym model calls through a Switchyard proxy, so any benchmark Gym supports can be run
 # against a router.
 #
-# Gym launches and manages the proxy for you. Point routing_profiles at your Switchyard routing
-# config and run:
+# Gym hosts the proxy for you, in-process. Point deployment at a native Switchyard TOML
+# deployment -- the llm_clients, targets, and routes the proxy serves -- and run:
 #
 #   gym eval run --benchmark <name> --model-type switchyard_model \
-#     ++policy_model.responses_api_models.switchyard_model.routing_profiles=/path/to/routes.yaml
+#     ++policy_model.responses_api_models.switchyard_model.deployment=/path/to/routes.toml
 #
-# Launching drives the `switchyard` CLI, which is installed with this server -- nemo-switchyard is
-# one of its dependencies. The proxy is started when this server starts and stopped when it exits.
+# Hosting uses the native server that ships with this server's nemo-switchyard dependency; there
+# is no separate process to install or manage. The proxy starts when this server starts and stops
+# when it exits.
 #
 # To attach to a proxy you already run instead -- to pin a specific Switchyard build, or to share
-# one instance across servers -- set switchyard_base_url and routing_profiles is not needed:
+# one instance across servers -- set switchyard_base_url and deployment is not needed:
 #
 #   ++policy_model.responses_api_models.switchyard_model.switchyard_base_url=http://127.0.0.1:4000/v1
 policy_model:
@@ -19,23 +20,21 @@ policy_model:
     switchyard_model:
       entrypoint: app.py
 
-      # The routing config Switchyard serves. Required unless switchyard_base_url is set.
-      routing_profiles: ${oc.env:SWITCHYARD_ROUTING_PROFILES,null}
+      # The native TOML deployment the hosted proxy serves. Required unless switchyard_base_url
+      # is set.
+      deployment: ${oc.env:SWITCHYARD_DEPLOYMENT,null}
 
       # Route name to request. Switchyard maps it to a concrete target; the model that actually
       # served each call comes back on the response.
       switchyard_model: ${policy_model_name}
 
-      # Set to attach to an already-running proxy instead of launching one.
+      # Set to attach to an already-running proxy instead of hosting one.
       switchyard_base_url: ${oc.env:SWITCHYARD_BASE_URL,null}
       switchyard_api_key: ${oc.env:SWITCHYARD_API_KEY,dummy}
 
-      # Wildcard bind so the proxy is reachable off-box; this server talks to it over loopback.
-      proxy_host: 0.0.0.0
+      # The hosted proxy binds loopback; this server is the network-facing piece.
       # null picks a free port that does not collide with Gym's own servers.
       proxy_port: null
-      proxy_startup_timeout_s: 120.0
-      switchyard_executable: switchyard
 
       # Gym's rollout-attempt id is sent as Switchyard's opaque session id, so routing decisions
       # and costs can be joined back to the rollout that produced them.

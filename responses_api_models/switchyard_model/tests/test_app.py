@@ -12,10 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import signal
-import subprocess
-import urllib.error
-from contextlib import asynccontextmanager, contextmanager
+import importlib.util
+import socket
+import sys
+import types
+import urllib.request
+from contextlib import asynccontextmanager
 from unittest.mock import MagicMock
 
 import pytest
@@ -33,8 +35,35 @@ from responses_api_models.switchyard_model.app import (
 )
 
 
-# Captured before any test monkeypatches subprocess.Popen, so mocks keep a real spec.
-_REAL_POPEN = subprocess.Popen
+class _FakeNativeServer:
+    """Stands in for switchyard_rust.server.Server: bound once constructed, closed explicitly.
+
+    The real constructor loads the TOML deployment, binds loopback, and returns serving -- so the
+    fake's contract is just to record what it was asked to host and whether it was closed.
+    """
+
+    def __init__(self, config: str, *, port: int = 0) -> None:
+        self.config = config
+        self.port = port
+        self.base_url = f"http://127.0.0.1:{port}"
+        self.close_calls = 0
+
+    def close(self, *, timeout_secs: float = 2.0) -> None:
+        self.close_calls += 1
+
+
+def _install_fake_switchyard(monkeypatch: MonkeyPatch, server_cls: type) -> None:
+    """Publish a stand-in switchyard_rust.server module without importing the real package.
+
+    app.py imports the native server lazily inside start_proxy, so seeding both sys.modules
+    entries is enough -- the import system returns them without touching any installed wheel.
+    """
+    module = types.ModuleType("switchyard_rust.server")
+    module.Server = server_cls
+    package = types.ModuleType("switchyard_rust")
+    package.server = module
+    monkeypatch.setitem(sys.modules, "switchyard_rust", package)
+    monkeypatch.setitem(sys.modules, "switchyard_rust.server", module)
 
 
 def _response_data() -> dict:
@@ -75,18 +104,18 @@ def _chat_data() -> dict:
 
 
 class TestConfig:
-    def test_requires_a_routing_profile_or_a_base_url(self) -> None:
-        with pytest.raises(ValueError, match="routing_profiles"):
+    def test_requires_a_deployment_or_a_base_url(self) -> None:
+        with pytest.raises(ValueError, match="deployment"):
             SwitchyardModelConfig(host="0.0.0.0", port=8081, entrypoint="", name="sy", switchyard_model="policy-model")
 
-    def test_routing_profiles_alone_means_gym_launches(self) -> None:
+    def test_deployment_alone_means_gym_hosts(self) -> None:
         config = SwitchyardModelConfig(
             host="0.0.0.0",
             port=8081,
             entrypoint="",
             name="sy",
             switchyard_model="policy-model",
-            routing_profiles="/tmp/routes.yaml",
+            deployment="/tmp/routes.toml",
         )
         assert config.launches_proxy is True
 
@@ -97,12 +126,12 @@ class TestConfig:
             entrypoint="",
             name="sy",
             switchyard_model="policy-model",
-            routing_profiles="/tmp/routes.yaml",
+            deployment="/tmp/routes.toml",
             switchyard_base_url="http://127.0.0.1:4000/v1",
         )
 
         assert config.launches_proxy is False
-        assert "both switchyard_base_url and routing_profiles are set" in caplog.text
+        assert "both switchyard_base_url and deployment are set" in caplog.text
 
     def test_base_url_alone_means_attach(self) -> None:
         config = SwitchyardModelConfig(
@@ -273,7 +302,7 @@ class TestProxyLifecycle:
             entrypoint="",
             name="test_switchyard_model",
             switchyard_model="policy-model",
-            routing_profiles="/tmp/routes.yaml",
+            deployment="/tmp/routes.toml",
             proxy_port=4123,
             **overrides,
         )
@@ -284,185 +313,106 @@ class TestProxyLifecycle:
             server_client=MagicMock(spec=ServerClient, global_config_dict={}),
         )
 
-    def _launch_server(self, monkeypatch: MonkeyPatch) -> SwitchyardModel:
-        """Build a launch-mode server with the spawn stubbed out."""
-        monkeypatch.setattr(app_module.shutil, "which", lambda executable: f"/usr/bin/{executable}")
-        monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: MagicMock(spec=_REAL_POPEN))
-        monkeypatch.setattr(SwitchyardModel, "wait_for_proxy", lambda self, root_url, proc: None)
-        return self._build()
-
-    def test_constructing_the_server_does_not_spawn_a_proxy(self, monkeypatch: MonkeyPatch) -> None:
+    def test_constructing_the_server_does_not_host_a_proxy(self, monkeypatch: MonkeyPatch) -> None:
         """The proxy belongs to serving, not to config validation."""
 
-        def explode(*args, **kwargs):
-            raise AssertionError("constructing SwitchyardModel must not spawn a proxy")
+        class Explode:
+            def __init__(self, *args, **kwargs):
+                raise AssertionError("constructing SwitchyardModel must not host a proxy")
 
-        monkeypatch.setattr(subprocess, "Popen", explode)
+        _install_fake_switchyard(monkeypatch, Explode)
 
         self._build()
 
-    def test_missing_executable_explains_how_to_fix(self, monkeypatch: MonkeyPatch) -> None:
+    def test_missing_dependency_explains_how_to_fix(self, monkeypatch: MonkeyPatch) -> None:
         server = self._build()
-        monkeypatch.setattr(app_module.shutil, "which", lambda executable: None)
+        # None in sys.modules makes the import fail the way an uninstalled package does.
+        monkeypatch.setitem(sys.modules, "switchyard_rust", None)
+        monkeypatch.setitem(sys.modules, "switchyard_rust.server", None)
 
         with pytest.raises(RuntimeError, match="nemo-switchyard"):
             server.setup_webserver()
 
-    def test_start_proxy_builds_command_and_waits(self, monkeypatch: MonkeyPatch) -> None:
-        commands: list = []
-        process = MagicMock(spec=_REAL_POPEN)
-        process.poll.return_value = None
-
-        def mock_popen(command, *args, **kwargs):
-            commands.append(command)
-            return process
-
-        monkeypatch.setattr(app_module.shutil, "which", lambda executable: f"/usr/bin/{executable}")
-        monkeypatch.setattr(subprocess, "Popen", mock_popen)
-        monkeypatch.setattr(SwitchyardModel, "wait_for_proxy", lambda self, root_url, proc: None)
+    def test_start_proxy_hosts_the_deployment(self, monkeypatch: MonkeyPatch) -> None:
+        _install_fake_switchyard(monkeypatch, _FakeNativeServer)
 
         server = self._build()
         server.setup_webserver()
 
-        # Bound on the wildcard so the proxy is reachable off-box, but addressed over loopback.
-        assert commands[0] == [
-            "switchyard",
-            "--routing-profiles",
-            "/tmp/routes.yaml",
-            "--",
-            "serve",
-            "--host",
-            "0.0.0.0",
-            "--port",
-            "4123",
-        ]
+        # The deployment and the configured port reach the native server; the client is built on
+        # the address the server reports, not one assembled independently.
+        assert server._proxy_server.config == "/tmp/routes.toml"
+        assert server._proxy_server.port == 4123
         assert server._client.base_url == "http://127.0.0.1:4123/v1"
 
-    def test_wait_for_proxy_raises_when_process_dies(self, monkeypatch: MonkeyPatch) -> None:
-        server = self._launch_server(monkeypatch)
-        # Drop the construction-time patches so the real wait_for_proxy runs below.
-        monkeypatch.undo()
-
-        dead = MagicMock(spec=_REAL_POPEN)
-        dead.poll.return_value = 1
-        dead.returncode = 1
-
-        with pytest.raises(RuntimeError, match="exited during startup"):
-            server.wait_for_proxy("http://127.0.0.1:4123", dead)
-
-    def test_stop_proxy_terminates_then_kills(self, monkeypatch: MonkeyPatch) -> None:
-        server = self._launch_server(monkeypatch)
-
-        process = MagicMock(spec=_REAL_POPEN)
-        process.poll.return_value = None
-        process.wait.side_effect = subprocess.TimeoutExpired(cmd="switchyard", timeout=30)
-        server._proxy_process = process
+    def test_stop_proxy_closes_the_server(self, monkeypatch: MonkeyPatch) -> None:
+        _install_fake_switchyard(monkeypatch, _FakeNativeServer)
+        server = self._build()
+        server.setup_webserver()
+        hosted = server._proxy_server
 
         server.stop_proxy()
 
-        process.terminate.assert_called_once()
-        process.kill.assert_called_once()
+        assert hosted.close_calls == 1
 
-    def test_wait_for_proxy_returns_once_healthy(self, monkeypatch: MonkeyPatch) -> None:
-        server = self._launch_server(monkeypatch)
-        monkeypatch.undo()
-
-        alive = MagicMock(spec=_REAL_POPEN)
-        alive.poll.return_value = None
-
-        attempts = {"count": 0}
-
-        @contextmanager
-        def mock_urlopen(url, timeout=None):
-            attempts["count"] += 1
-            # First probe refused, as it is while the proxy is still binding.
-            if attempts["count"] == 1:
-                raise urllib.error.URLError("connection refused")
-            yield MagicMock(status=200)
-
-        monkeypatch.setattr(app_module.urllib.request, "urlopen", mock_urlopen)
-        monkeypatch.setattr(app_module.time, "sleep", lambda seconds: None)
-
-        server.wait_for_proxy("http://127.0.0.1:4123", alive)
-
-        assert attempts["count"] == 2
-
-    def test_wait_for_proxy_times_out(self, monkeypatch: MonkeyPatch) -> None:
-        server = self._launch_server(monkeypatch)
-        monkeypatch.undo()
-        server.config.proxy_startup_timeout_s = 0.0
-        server._proxy_process = None
-
-        alive = MagicMock(spec=_REAL_POPEN)
-        alive.poll.return_value = None
-
-        with pytest.raises(TimeoutError, match="did not become healthy"):
-            server.wait_for_proxy("http://127.0.0.1:4123", alive)
-
-    def test_stop_proxy_is_noop_when_already_exited(self, monkeypatch: MonkeyPatch) -> None:
-        server = self._launch_server(monkeypatch)
-
-        process = MagicMock(spec=_REAL_POPEN)
-        process.poll.return_value = 0
-        server._proxy_process = process
+    def test_stop_proxy_closes_only_once(self, monkeypatch: MonkeyPatch) -> None:
+        """Shutdown converges from several paths (lifespan, explicit); close must not double-fire."""
+        _install_fake_switchyard(monkeypatch, _FakeNativeServer)
+        server = self._build()
+        server.setup_webserver()
+        hosted = server._proxy_server
 
         server.stop_proxy()
+        server.stop_proxy()
 
-        process.terminate.assert_not_called()
+        assert hosted.close_calls == 1
+
+    def test_stop_proxy_is_noop_when_nothing_was_hosted(self) -> None:
+        server = self._build()
+
+        server.stop_proxy()  # attach mode and pre-startup both reach here with no proxy
 
 
-class TestProxyOutlivesNothing:
-    """The proxy is a child process, so it must not survive the server that launched it.
+class TestProxyShutdown:
+    """The proxy runs in-process, so shutdown is about promptness, not survival.
 
-    Gym's orchestrator sends SIGINT and escalates to SIGKILL after one second, so cleanup needs
-    both a graceful handler and a kernel-level tie for the shutdowns too abrupt to run one.
+    An in-process server cannot outlive its owner the way a subprocess could -- what these tests
+    pin down is that the graceful paths close it explicitly, which stops the listener without
+    waiting for interpreter teardown and flushes Switchyard's telemetry.
     """
 
-    def _launch_config(self, **overrides) -> SwitchyardModelConfig:
-        return SwitchyardModelConfig(
-            host="0.0.0.0",
-            port=8081,
-            entrypoint="",
-            name="test_switchyard_model",
-            switchyard_model="policy-model",
-            routing_profiles="/tmp/routes.yaml",
-            proxy_port=4123,
-            **overrides,
-        )
-
     def _launch_server(self, monkeypatch: MonkeyPatch) -> SwitchyardModel:
-        monkeypatch.setattr(app_module.shutil, "which", lambda executable: f"/usr/bin/{executable}")
-        monkeypatch.setattr(SwitchyardModel, "wait_for_proxy", lambda self, root_url, proc: None)
+        _install_fake_switchyard(monkeypatch, _FakeNativeServer)
         return SwitchyardModel(
-            config=self._launch_config(),
+            config=SwitchyardModelConfig(
+                host="0.0.0.0",
+                port=8081,
+                entrypoint="",
+                name="test_switchyard_model",
+                switchyard_model="policy-model",
+                deployment="/tmp/routes.toml",
+                proxy_port=4123,
+            ),
             server_client=MagicMock(spec=ServerClient, global_config_dict={}),
         )
 
-    def test_graceful_shutdown_stops_the_proxy(self, monkeypatch: MonkeyPatch) -> None:
-        """A clean shutdown must reap the proxy. atexit does not run on uvicorn's signal exit."""
-        monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: MagicMock(spec=_REAL_POPEN))
+    def test_graceful_shutdown_closes_the_proxy(self, monkeypatch: MonkeyPatch) -> None:
         server = self._launch_server(monkeypatch)
 
         app = server.setup_webserver()
-
-        process = MagicMock(spec=_REAL_POPEN)
-        process.poll.return_value = None
-        server._proxy_process = process
+        hosted = server._proxy_server
 
         # Entering and leaving the TestClient context runs the app's startup/shutdown events.
         with TestClient(app):
-            process.terminate.assert_not_called()
+            assert hosted.close_calls == 0
 
-        process.terminate.assert_called_once()
+        assert hosted.close_calls == 1
 
-    def test_failed_startup_still_stops_the_proxy(self, monkeypatch: MonkeyPatch) -> None:
-        """The proxy is up before the app finishes starting, so a failed startup must still reap it."""
-        monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: MagicMock(spec=_REAL_POPEN))
+    def test_failed_startup_still_closes_the_proxy(self, monkeypatch: MonkeyPatch) -> None:
+        """The proxy is up before the app finishes starting, so a failed startup must still close it."""
         server = self._launch_server(monkeypatch)
-
-        process = MagicMock(spec=_REAL_POPEN)
-        process.poll.return_value = None
-        server._proxy_process = process
+        server._build_client(server.start_proxy())
+        hosted = server._proxy_server
 
         app = FastAPI()
 
@@ -478,54 +428,87 @@ class TestProxyOutlivesNothing:
             with TestClient(app):
                 pass  # pragma: no cover - startup raises before the body runs
 
-        process.terminate.assert_called_once()
+        assert hosted.close_calls == 1
 
-    def test_spawn_ties_proxy_lifetime_to_this_process(self, monkeypatch: MonkeyPatch) -> None:
-        """A SIGKILLed parent runs no handler, so the kernel must reap the child instead."""
-        spawns: list = []
 
-        def mock_popen(command, *args, **kwargs):
-            spawns.append(kwargs)
-            return MagicMock(spec=_REAL_POPEN)
+@pytest.mark.skipif(
+    importlib.util.find_spec("switchyard_rust") is None,
+    reason="nemo-switchyard is not installed",
+)
+class TestNativeServerIntegration:
+    """Host a real native server from a real TOML deployment -- no mocks.
 
-        monkeypatch.setattr(subprocess, "Popen", mock_popen)
-        server = self._launch_server(monkeypatch)
+    The upstream target points at a closed port, which is fine: these tests exercise hosting,
+    health, and shutdown, none of which call upstream.
+    """
 
-        server.setup_webserver()
+    _DEPLOYMENT = """
+schema_version = 1
 
-        assert spawns[0]["preexec_fn"] is app_module._set_parent_death_signal
+[llm_clients.upstream]
+format = "openai_chat"
+base_url = "http://127.0.0.1:9/v1"
+api_key_env = "SWITCHYARD_TEST_API_KEY"
 
-    def test_parent_death_signal_is_requested_on_linux(self, monkeypatch: MonkeyPatch) -> None:
-        calls: list = []
-        monkeypatch.setattr(app_module.sys, "platform", "linux")
-        monkeypatch.setattr(
-            app_module.ctypes,
-            "CDLL",
-            lambda name, use_errno=False: MagicMock(prctl=lambda *args: calls.append(args)),
+[targets.policy]
+id = "upstream/model"
+llm_client = "upstream"
+
+[routes.policy-model]
+id = "policy-model"
+type = "passthrough"
+target = "policy"
+"""
+
+    def test_hosts_serves_health_and_stops(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setenv("SWITCHYARD_TEST_API_KEY", "dummy")  # pragma: allowlist secret
+        deployment = tmp_path / "routes.toml"
+        deployment.write_text(self._DEPLOYMENT)
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+
+        server = SwitchyardModel(
+            config=SwitchyardModelConfig(
+                host="0.0.0.0",
+                port=8081,
+                entrypoint="",
+                name="test_switchyard_model",
+                switchyard_model="policy-model",
+                deployment=str(deployment),
+                proxy_port=port,
+            ),
+            server_client=MagicMock(spec=ServerClient, global_config_dict={}),
         )
 
-        app_module._set_parent_death_signal()
+        base_url = server.start_proxy()
+        try:
+            assert base_url == f"http://127.0.0.1:{port}/v1"
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=5) as response:
+                assert response.status == 200
+        finally:
+            server.stop_proxy()
 
-        assert calls == [(app_module._PR_SET_PDEATHSIG, signal.SIGTERM)]
+    def test_invalid_deployment_fails_at_startup(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+        """A bad routing config is a startup error with the validator's message, not a timeout."""
+        deployment = tmp_path / "routes.toml"
+        deployment.write_text("schema_version = 1\n[routes.broken]\n")
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
 
-    def test_parent_death_signal_is_skipped_off_linux(self, monkeypatch: MonkeyPatch) -> None:
-        """macOS has no prctl; the spawn must still succeed there."""
+        server = SwitchyardModel(
+            config=SwitchyardModelConfig(
+                host="0.0.0.0",
+                port=8081,
+                entrypoint="",
+                name="test_switchyard_model",
+                switchyard_model="policy-model",
+                deployment=str(deployment),
+                proxy_port=port,
+            ),
+            server_client=MagicMock(spec=ServerClient, global_config_dict={}),
+        )
 
-        def explode(*args, **kwargs):
-            raise AssertionError("must not touch libc off Linux")
-
-        monkeypatch.setattr(app_module.sys, "platform", "darwin")
-        monkeypatch.setattr(app_module.ctypes, "CDLL", explode)
-
-        app_module._set_parent_death_signal()
-
-    def test_missing_prctl_does_not_break_the_spawn(self, monkeypatch: MonkeyPatch) -> None:
-        """Losing the kernel tie is worse than nothing, but failing to launch is worse still."""
-        monkeypatch.setattr(app_module.sys, "platform", "linux")
-
-        def no_libc(name, use_errno=False):
-            raise OSError("libc.so.6 not found")
-
-        monkeypatch.setattr(app_module.ctypes, "CDLL", no_libc)
-
-        app_module._set_parent_death_signal()
+        with pytest.raises(RuntimeError):
+            server.start_proxy()
