@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import sys
+from glob import glob
 from pathlib import Path
 from shutil import rmtree
 from time import time
@@ -42,13 +43,14 @@ from resources_servers.swebench.swebench_patches import (
     patch_swebench_multilingual_golden_patch_pass,
     patch_swebench_multilingual_log_parsing,
     patch_swebench_multilingual_resources_request,
-    patch_swebench_multilingual_sandbox_upload,
+    patch_swebench_multilingual_sandbox,
     run_instance,
 )
 
 
 class SwebenchResourcesServerConfig(BaseResourcesServerConfig):
     is_verifying_golden_patch: bool = False
+    apply_anti_cheating: bool = True
 
     evaluation_timeout: Optional[int] = None
 
@@ -98,6 +100,7 @@ class SWEBenchVerifyResponse(BaseVerifyResponse):
     patch_verification_time_taken: float
 
     instance_id: str
+    test_output: str
     model_patch: Optional[str]
 
     log_dir: str
@@ -215,7 +218,7 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         eval_sandbox = AsyncSandbox(resolved_sandbox_provider)
         await eval_sandbox.start(eval_sandbox_spec)
 
-        await patch_swebench_multilingual_sandbox_upload(test_spec.repo, eval_sandbox)
+        await patch_swebench_multilingual_sandbox(test_spec.repo, test_spec.instance_id, eval_sandbox)
 
         return eval_sandbox
 
@@ -238,6 +241,21 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         # TODO @bxyu-nvidia: This pattern is not yet supported because calls to sandbox.exec use separate processes
         # For now, the activation is put on the harness side.
         # await eval_sandbox.exec("source /opt/miniconda3/bin/activate && conda activate testbed")
+
+        if self.config.apply_anti_cheating:
+            # Remove the current Git repo's future history beyond the current commit to prevent the model from cheating.
+            wd = (await eval_sandbox.exec("pwd")).stdout.strip()
+            anti_cheat_setup_fpath = Path(__file__).parent / "anti_cheat_setup.sh"
+            await eval_sandbox.upload(anti_cheat_setup_fpath, f"{wd}/anti_cheat_setup.sh")
+            result = await eval_sandbox.exec(
+                f"""WORKING_DIRECTORY={wd} bash anti_cheat_setup.sh && rm anti_cheat_setup.sh"""
+            )
+            if result.return_code != 0:
+                print(f"""Failed to setup anti-cheating for {test_spec.instance_id}. Return code: {result.return_code}
+Stdout:
+{result.stdout}
+Stderr:
+{result.stderr}""")
 
         return SWEBenchSeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)
 
@@ -307,6 +325,13 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         patch_verification_time_taken = time() - start_time
 
         log_dir = Path(__file__).parent / "logs/run_evaluation" / run_id
+
+        test_output_fpaths = glob(str(log_dir / "**" / "test_output.txt"), recursive=True)
+        test_output = ""
+        if test_output_fpaths:
+            test_output_fpath = Path(test_output_fpaths[0])
+            test_output = test_output_fpath.read_text()
+
         if self.config.clear_swebench_debug_logs:
             rmtree(str(log_dir), ignore_errors=True)
             log_dir = ""
@@ -320,6 +345,7 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             eval_sandbox_start_time_taken=eval_sandbox_start_time_taken,
             patch_verification_time_taken=patch_verification_time_taken,
             model_patch=model_patch or None,
+            test_output=test_output,
             log_dir=str(log_dir),
         )
 

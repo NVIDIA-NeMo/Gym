@@ -13,6 +13,8 @@ opencode_sandboxed_agent:
       debug: false
 
       opencode_version: 1.17.11
+      opencode_max_context_window: 262144
+
       remote_opencode_install_script_path: null
       remote_opencode_binary_path: null
 

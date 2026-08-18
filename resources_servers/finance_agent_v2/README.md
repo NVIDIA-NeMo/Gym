@@ -3,9 +3,13 @@
 A NeMo Gym integration of the official [Vals Finance Agent Benchmark v2](https://github.com/vals-ai/finance-agent-v2)
 that **reuses Vals's own tool code directly** (tools-only wrap) instead of
 reimplementing it. The upstream `finance_agent.tools.*` classes are imported and
-exposed as HTTP endpoints; the `responses_api_agents/finance_agent_v2` loop drives
-them. The public release ships no grader, so scoring is our own per-criterion
-rubric judge — see [Verification](#verification).
+exposed as HTTP endpoints; the shared `responses_api_agents/finance_agent` loop
+drives them, configured to Vals's v2 harness policy in
+`configs/finance_agent_v2.yaml`. The public release ships no grader, so scoring is
+our own per-criterion rubric judge — see [Verification](#verification).
+
+`tests/test_upstream_parity.py` checks that configured policy against the
+installed upstream package, so a pin bump that changes the harness fails here.
 
 ## Tools (imported from `finance_agent.tools`)
 

@@ -267,19 +267,6 @@ async def run_instance(
 
 
 def patch_swebench_multilingual_golden_patch_pass(eval_sh: str, instance_id: str) -> str:
-    # This init.d is necessary for some Java tests to properly pull from the maven mirror
-    # e.g. apache__lucene and apache__druid
-    #
-    # Lucene's applied Gradle scripts have their own buildscript scopes. Those scopes
-    # are not exposed through the root project's repository handler, so an init script
-    # cannot rewrite them before they resolve. Rewrite Maven Central references in all
-    # checked-in Gradle scripts before Gradle starts (but never mutate its cache).
-    lucene_mirror_setup = """if [ -d gradle ]; then
-find . -path './.gradle' -prune -o -type f \\( -name '*.gradle' -o -name '*.gradle.kts' \\) -exec sed -i 's#mavenCentral()#maven { url = uri("https://maven-central.storage-download.googleapis.com/maven2/") }#g; s#https://repo.maven.apache.org/maven2#https://maven-central.storage-download.googleapis.com/maven2#g; s#https://repo1.maven.org/maven2#https://maven-central.storage-download.googleapis.com/maven2#g' {} +
-fi
-./gradlew --init-script /root/.gradle/init.d/maven_central_mirror.gradle test"""
-    eval_sh = eval_sh.replace("./gradlew test", lucene_mirror_setup)
-
     # Run Maven tests without the daemon which causes issues with gson tests.
     eval_sh = eval_sh.replace("mvnd test", "mvn test")
 
@@ -288,26 +275,16 @@ fi
     if instance_id == "apache__druid-16875":
         eval_sh = eval_sh.replace("mvn test", "mvn test -Dgit.commit.id.skip=true")
 
-    # valkey-io__valkey-928 checks the source node immediately after
-    # an asynchronous replica migration. Allow the cluster state to
-    # settle before its role assertion runs.
-    if instance_id == "valkey-io__valkey-928":
+    # These projects resolve Gradle plugins through Plugin Portal. Load the
+    # uploaded mirror script explicitly because the sandbox Gradle process does
+    # not auto-discover init.d under /root.
+    if instance_id in {"apache__lucene-13494", "reactivex__rxjava-7597"}:
         eval_sh = eval_sh.replace(
-            "TERM=dumb ./runtest",
-            "sed -i 's/assert_equal \\[lindex \\[R 3 role\\] 2\\] {}/after 5000; assert_equal [lindex [R 3 role] 2] {}/' "
-            "tests/unit/cluster/replica-migration.tcl\nTERM=dumb ./runtest",
+            "./gradlew", "./gradlew --init-script /root/.gradle/init.d/maven_central_mirror.gradle"
         )
 
     # axios__axios-4738 needs more than 10s for cold dependency and process startup.
     eval_sh = eval_sh.replace("timeout 10s", "timeout 120s")
-
-    # tokio-rs__tokio-4384 otherwise resolves getrandom 0.4.3, which
-    # requires Cargo 1.85 while its image provides Cargo 1.81.
-    if instance_id == "tokio-rs__tokio-4384":
-        eval_sh = eval_sh.replace(
-            "RUSTFLAGS=-Awarnings cargo test",
-            "cargo update -p getrandom@0.4.3 --precise 0.4.2 && cargo update -p proptest@1.11.0 --precise 1.5.0 && RUSTFLAGS=-Awarnings cargo test",
-        )
 
     # Preact's Chrome tests use a 2s Mocha timeout, which is too short
     if "preactjs__preact" in instance_id:
@@ -315,29 +292,60 @@ fi
             "npx karma start karma.conf.js", "npx karma start karma.conf.js --client.mocha.timeout=60000"
         )
 
+    # valkey-io__valkey-928 checks the source node immediately after an
+    # asynchronous replica migration. Let the cluster state settle before the
+    # test's role assertion.
+    if instance_id == "valkey-io__valkey-928":
+        eval_sh = eval_sh.replace(
+            "TERM=dumb ./runtest",
+            "sed -i 's/assert_equal \\[lindex \\[R 3 role\\] 2\\] {}/after 5000; assert_equal [lindex [R 3 role] 2] {}/' "
+            "tests/unit/cluster/replica-migration.tcl\nTERM=dumb ./runtest",
+        )
+
     return eval_sh
 
 
 def patch_swebench_multilingual_resources_request(resources: Dict[str, Any], instance_id: str) -> None:
-    # Chrome is OOM-killed before Karma can connect for preactjs__preact-
-    # {2896,4316,4436}; reserve enough memory for its two-browser runner.
-    if instance_id in {"preactjs__preact-2896", "preactjs__preact-4316", "preactjs__preact-4436"}:
+    high_resource_repos = {
+        "preactjs__preact",
+        "axios__axios",
+        "valkey-io__valkey",
+    }
+    if any(r in instance_id for r in high_resource_repos):
+        resources["cpu"] = max(resources.get("cpu", 0), 8)
         resources["memory_mib"] = max(resources.get("memory_mib", 0), 16 * 1024)
 
 
-async def patch_swebench_multilingual_sandbox_upload(repo: str, sandbox: AsyncSandbox) -> None:
+async def patch_swebench_multilingual_sandbox(repo: str, instance_id: str, sandbox: AsyncSandbox) -> None:
     if MAP_REPO_TO_EXT.get(repo) == "java":
         base_path = PARENT_DIR / "responses_api_agents/swe_agents/maven_mirror"
         settings_xml_path = base_path / "settings.xml"
         init_gradle_path = base_path / "init.gradle"
 
-        await sandbox.exec("""mkdir -p /root/.m2 /root/.gradle/init.d""")
+        # This init.d is necessary for some Java tests to properly pull from the maven mirror
+        # e.g. apache__lucene and apache__druid
+        #
+        # Lucene's applied Gradle scripts have their own buildscript scopes. Those scopes
+        # are not exposed through the root project's repository handler, so an init script
+        # cannot rewrite them before they resolve. Rewrite Maven Central references in all
+        # checked-in Gradle scripts before Gradle starts (but never mutate its cache).
+        await sandbox.exec("""mkdir -p /root/.m2 ~/.gradle/init.d \
+        && if [ -d gradle ]; then
+find . -path './.gradle' -prune -o -type f \\( -name '*.gradle' -o -name '*.gradle.kts' \\) -exec sed -i 's#mavenCentral()#maven { url = uri("https://maven-central.storage-download.googleapis.com/maven2/") }#g; s#https://repo.maven.apache.org/maven2#https://maven-central.storage-download.googleapis.com/maven2#g; s#https://repo1.maven.org/maven2#https://maven-central.storage-download.googleapis.com/maven2#g' {} +
+fi""")
 
         # This settings.xml is necessary for some Java tests to properly pull from the maven mirror
         await sandbox.upload(settings_xml_path, "/root/.m2/settings.xml")
 
         # This init.d is necessary for some Java tests to properly pull from the maven mirror
-        await sandbox.upload(init_gradle_path, "/root/.gradle/init.d/maven_central_mirror.gradle")
+        await sandbox.upload(init_gradle_path, "~/.gradle/init.d/maven_central_mirror.gradle")
+
+    # tokio-rs__tokio-4384 otherwise resolves getrandom 0.4.3, which
+    # requires Cargo 1.85 while its image provides Cargo 1.81.
+    if instance_id == "tokio-rs__tokio-4384":
+        await sandbox.exec(
+            "cargo update -p getrandom@0.4.3 --precise 0.4.2 && cargo update -p proptest@1.11.0 --precise 1.5.0"
+        )
 
 
 def patch_swebench_multilingual_log_parsing(stdout: str, stderr: str, instance_id: str) -> Optional[str]:

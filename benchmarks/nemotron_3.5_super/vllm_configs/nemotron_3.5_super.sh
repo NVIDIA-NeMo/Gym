@@ -1,6 +1,7 @@
 #!/bin/bash
 
 VLLM_COMMON_ARGS=(
+    --trust-remote-code
     --disable-uvicorn-access-log
     --gpu-memory-utilization 0.9
     --distributed-executor-backend mp
