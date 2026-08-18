@@ -68,7 +68,9 @@ class CaptureContext:
     model: str = ""
     # ``commit_entry`` sets this after another capture path records the call.
     committed: bool = False
-    # Record whether the model server supplied this call's prefix.
+    # Record whether the model server requested prefix supply.
+    prefix_requested: bool = False
+    # Record whether generation-time evidence proved prefix supply.
     prefix_supplied: bool = False
     # Resolve the parent once before dispatch.
     # Downstream inference and capture share this immutable decision.
