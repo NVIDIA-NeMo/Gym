@@ -294,7 +294,9 @@ Stderr:
             original_sandbox = self._session_id_to_sandbox[request.session[SESSION_ID_KEY]]
             try:
                 original_workdir = (await eval_sandbox.exec("pwd")).stdout.strip()
-                model_patch_result = await original_sandbox.exec(f"cd {original_workdir} && git --no-pager diff")
+                model_patch_result = await original_sandbox.exec(
+                    f"cd {original_workdir} && git --no-pager --cached diff"
+                )
                 model_patch = model_patch_result.stdout
             except:
                 print("Failed to extract patch from container", format_exc(), file=sys.stderr)
