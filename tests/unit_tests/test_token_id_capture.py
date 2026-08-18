@@ -1055,7 +1055,7 @@ def test_a_malformed_token_payload_does_not_fail_the_model_call(installed_sink):
 
 def test_capture_stamps_cum_len_and_digest(tmp_path):
     client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
-    client.post("/ng-rollout/lineage0-roll0/token-capture/v1/responses", json={"input": "hi"})
+    client.post("/ng-rollout/lineage0-roll0/training-token-capture/v1/responses", json={"input": "hi"})
     (entry,) = TokenCaptureStore(tmp_path).read_entries("lineage0-roll0")
     assert entry.cum_len == len(PTOKS) + len(GTOKS)
     assert entry.digest == compute_digest(PTOKS + GTOKS)
@@ -1218,6 +1218,24 @@ async def test_file_lineage_resolves_across_independent_worker_instances(tmp_pat
     assert parent.cumulative_token_ids == (1, 2, 3)
 
 
+async def test_file_lineage_appends_without_rewriting_prior_records(tmp_path):
+    store = FileLineageStore(tmp_path)
+    request = [{"role": "user", "content": "hello"}]
+    first_response = [{"role": "assistant", "content": "first"}]
+    second_response = [{"role": "assistant", "content": "second"}]
+    await store.record("shared-rollout", "call-1", request, first_response, [1, 2, 3], "digest-1")
+    path = tmp_path / "shared-rollout.lineage.jsonl"
+    first_payload = path.read_bytes()
+    first_inode = path.stat().st_ino
+
+    await store.record("shared-rollout", "call-2", request, second_response, [4, 5, 6], "digest-2")
+
+    payload = path.read_bytes()
+    assert path.stat().st_ino == first_inode
+    assert payload.startswith(first_payload)
+    assert len(payload.splitlines()) == 2
+
+
 async def test_file_lineage_resolves_across_spawned_worker_processes(tmp_path):
     context = multiprocessing.get_context("spawn")
     process = context.Process(target=_record_shared_file_lineage, args=(str(tmp_path),))
@@ -1243,14 +1261,14 @@ def test_served_calls_link_to_their_parent(tmp_path):
     turn is recorded with parent_call_id pointing at it."""
     client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
     first = [{"role": "user", "content": "hello"}]
-    client.post("/ng-rollout/lin0-roll0/token-capture/v1/chat/completions", json={"messages": first})
+    client.post("/ng-rollout/lin0-roll0/training-token-capture/v1/chat/completions", json={"messages": first})
     entries = TokenCaptureStore(tmp_path).read_entries("lin0-roll0")
     assert len(entries) == 1 and entries[0].parent_call_id is None
 
     content = entries[0].output_items[0]["content"]
     served_text = content if isinstance(content, str) else content[0]["text"]
     second = first + [{"role": "assistant", "content": served_text}, {"role": "user", "content": "more"}]
-    client.post("/ng-rollout/lin0-roll0/token-capture/v1/chat/completions", json={"messages": second})
+    client.post("/ng-rollout/lin0-roll0/training-token-capture/v1/chat/completions", json={"messages": second})
 
     entries = TokenCaptureStore(tmp_path).read_entries("lin0-roll0")
     assert len(entries) == 2
@@ -1269,7 +1287,7 @@ def test_served_calls_do_not_link_across_a_changed_system_prompt(tmp_path):
 
     def call(rollout, system, messages):
         client.post(
-            f"/ng-rollout/{rollout}/token-capture/v1/messages",
+            f"/ng-rollout/{rollout}/training-token-capture/v1/messages",
             json={"system": system, "messages": messages, **_MSG_ARGS},
         )
 

@@ -75,7 +75,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 from nemo_gym.token_id_capture.protocols import LineageMatch
 
@@ -472,6 +471,7 @@ class FileLineageStore:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
+        self._cache: dict[str, tuple[int, int, list[dict]]] = {}
 
     @staticmethod
     def _validate_rollout_id(rollout_id: str) -> None:
@@ -480,7 +480,7 @@ class FileLineageStore:
 
     def _state_path(self, rollout_id: str) -> Path:
         self._validate_rollout_id(rollout_id)
-        return self.root / f"{rollout_id}.lineage.json"
+        return self.root / f"{rollout_id}.lineage.jsonl"
 
     def _lock_path(self, rollout_id: str) -> Path:
         self._validate_rollout_id(rollout_id)
@@ -499,25 +499,48 @@ class FileLineageStore:
     def _read(self, rollout_id: str) -> list[dict]:
         path = self._state_path(rollout_id)
         if not path.exists():
+            self._cache.pop(rollout_id, None)
             return []
-        payload = json.loads(path.read_text())
-        if not isinstance(payload, list):
-            raise ValueError(f"lineage state for {rollout_id} is not a list")
-        return payload
+        file_stat = path.stat()
+        inode, offset, cached = self._cache.get(rollout_id, (file_stat.st_ino, 0, []))
+        if inode != file_stat.st_ino or offset < 0 or offset > file_stat.st_size:
+            inode, offset, cached = file_stat.st_ino, 0, []
+        if offset == file_stat.st_size:
+            return cached
 
-    def _write(self, rollout_id: str, records: list[dict]) -> None:
+        records = list(cached)
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            for line in handle:
+                payload = line.strip()
+                if not payload:
+                    continue
+                record = json.loads(payload)
+                if not isinstance(record, dict):
+                    raise ValueError(f"lineage record for {rollout_id} is not an object")
+                records.append(record)
+            offset = handle.tell()
+        self._cache[rollout_id] = (inode, offset, records)
+        return records
+
+    def _append(self, rollout_id: str, record: dict, records: list[dict]) -> None:
         path = self._state_path(rollout_id)
-        temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
-        with temporary.open("w") as handle:
-            json.dump(records, handle, sort_keys=True, separators=(",", ":"))
+        created = not path.exists()
+        payload = json.dumps(record, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        with path.open("ab") as handle:
+            handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        directory_fd = os.open(self.root, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+            offset = handle.tell()
+            inode = os.fstat(handle.fileno()).st_ino
+        if created:
+            directory_fd = os.open(self.root, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        records.append(record)
+        self._cache[rollout_id] = (inode, offset, records)
 
     async def resolve(self, rollout_id: str, request_items: list[dict]) -> LineageMatch | None:
         return await asyncio.to_thread(self._resolve, rollout_id, request_items)
@@ -585,8 +608,7 @@ class FileLineageStore:
                 if matches[0] != record:
                     raise ValueError(f"conflicting lineage record for model call {model_call_id}")
                 return
-            records.append(record)
-            self._write(rollout_id, records)
+            self._append(rollout_id, record, records)
 
     async def close(self) -> None:
-        return None
+        self._cache.clear()
