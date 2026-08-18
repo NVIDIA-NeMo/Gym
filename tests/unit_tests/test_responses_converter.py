@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import pytest
 from openai.types.completion_usage import CompletionTokensDetails, CompletionUsage, PromptTokensDetails
 
+from nemo_gym.base_responses_api_model import _cache_signal
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -83,6 +84,15 @@ def test_usage_detail_ignores_ambiguous_top_level_names():
     usage = {"cached_tokens": 99, "cached_input_tokens": 7, "reasoning_tokens": 88, "reasoning_output_tokens": 3}
     assert _usage_detail(usage, "prompt_tokens_details", "cached_tokens", "cached_input_tokens") == 7
     assert _usage_detail(usage, "completion_tokens_details", "reasoning_tokens", "reasoning_output_tokens") == 3
+
+
+def test_usage_detail_prefers_nested_details_in_mappings():
+    usage = {
+        "prompt_tokens_details": {"cached_tokens": 5},
+        "cached_input_tokens": 7,
+    }
+
+    assert _usage_detail(usage, "prompt_tokens_details", "cached_tokens", "cached_input_tokens") == 5
 
 
 # ===========================================================================
@@ -864,6 +874,31 @@ def test_chat_completion_to_response_sanity(converter: ResponsesConverter, finis
     )
 
     assert expected_response == actual_response
+
+
+def test_chat_completion_to_response_preserves_unknown_usage_details(converter: ResponsesConverter):
+    response = converter.chat_completion_to_response(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(model="", input="hello"),
+        chat_completion=NeMoGymChatCompletion(
+            id="",
+            created=0,
+            model="",
+            object="chat.completion",
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason="stop",
+                    message=NeMoGymChatCompletionMessage(role="assistant", content="hi"),
+                )
+            ],
+            usage=CompletionUsage(prompt_tokens=11, completion_tokens=5, total_tokens=16),
+        ),
+    )
+
+    assert response.usage is not None
+    assert response.usage.input_tokens_details.cached_tokens is None
+    assert response.usage.output_tokens_details.reasoning_tokens is None
+    assert _cache_signal(response.usage.model_dump()) == (None, None)
 
 
 # ===========================================================================
