@@ -1008,7 +1008,7 @@ def test_commit_entry_records_a_call_with_no_token_fields_on_the_response(instal
     finally:
         reset_token_sink(token)
     assert len(installed_sink.entries) == 1
-    # The commit half is what stamps lineage, so a caller that skips extraction still gets it.
+    # The commit step stamps lineage even when the caller skips extraction.
     assert installed_sink.entries[0].cum_len == len(PTOKS) + len(GTOKS)
     assert installed_sink.entries[0].digest
 
@@ -1059,7 +1059,7 @@ def test_capture_stamps_cum_len_and_digest(tmp_path):
     (entry,) = TokenCaptureStore(tmp_path).read_entries("lineage0-roll0")
     assert entry.cum_len == len(PTOKS) + len(GTOKS)
     assert entry.digest == compute_digest(PTOKS + GTOKS)
-    # No parent index yet, so the link is absent and the builder matches prefixes instead.
+    # A missing parent link makes the builder match strict token prefixes.
     assert entry.parent_call_id is None
 
 
@@ -1076,7 +1076,8 @@ def test_digest_round_trip_and_stamp_lineage():
     assert entry.cum_len == 3
     assert entry.parent_call_id == "parent-1"
     assert entry.digest == compute_digest([1, 2, 3])
-    # Distinct sequences must not collide, and the empty sequence is well defined.
+    # Distinct sequences must not collide.
+    # The empty sequence has a stable digest.
     assert compute_digest([1, 2, 3]) != compute_digest([1, 2, 4])
     assert compute_digest([]) == compute_digest([])
     with pytest.raises(ValueError):
@@ -1084,19 +1085,16 @@ def test_digest_round_trip_and_stamp_lineage():
 
 
 def test_fingerprint_ignores_non_assistant_turns():
-    """Only assistant turns identify lineage: they are what we produced. User and
-    tool content varies with the environment and is irrelevant."""
+    """Use only model-authored turns for lineage lookup."""
     a = assistant_fingerprint([{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}])
     b = assistant_fingerprint([{"role": "user", "content": "DIFFERENT"}, {"role": "assistant", "content": "a"}])
     assert a == b != ""
-    # No assistant turn at all is a new conversation, not a match.
+    # A request without an assistant turn starts a new conversation.
     assert assistant_fingerprint([{"role": "user", "content": "q"}]) == ""
 
 
 def test_fingerprint_survives_tool_argument_reserialization():
-    """Harnesses re-serialize tool-call arguments between turns, compact one
-    turn, pretty-printed the next. Without canonicalization the same call would
-    not compare equal to itself and every tool-using turn would miss."""
+    """Match tool arguments across equivalent JSON serializations."""
     compact = [
         {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "f", "arguments": '{"b":1,"a":2}'}}]}
     ]
@@ -1115,7 +1113,7 @@ def test_lineage_resolves_the_parent_across_a_turn():
     first_request = [{"role": "user", "content": "hello"}]
     lineage.record("call-1", first_request + [{"role": "assistant", "content": "hi"}], [1, 2, 3], "d1")
 
-    # The next request echoes the assistant turn, as any harness must to continue.
+    # The next request echoes the assistant turn.
     second_request = first_request + [{"role": "assistant", "content": "hi"}, {"role": "user", "content": "more"}]
     parent = lineage.resolve(second_request)
     assert parent is not None and parent.call_id == "call-1"
@@ -1141,15 +1139,14 @@ def test_lineage_rejects_a_conflicting_call_identity():
 
 
 def test_lineage_misses_on_a_rewritten_history():
-    """A compacted or rewritten context is a new root, not a wrong parent."""
+    """Treat a compacted or rewritten context as a new root."""
     lineage = RolloutLineage()
     lineage.record("call-1", [{"role": "assistant", "content": "hi"}], [1, 2, 3], "d1")
     assert lineage.resolve([{"role": "assistant", "content": "a summary of the above"}]) is None
 
 
 def test_lineage_refuses_an_ambiguous_parent():
-    """Two recorded calls with byte-identical output cannot be told apart. Guessing
-    would attribute tokens to the wrong parent, so a unique match is required."""
+    """Refuse to guess between calls with identical output."""
     lineage = RolloutLineage()
     messages = [{"role": "assistant", "content": "same"}]
     lineage.record("call-a", messages, [1, 2], "da")
@@ -1158,11 +1155,10 @@ def test_lineage_refuses_an_ambiguous_parent():
 
 
 def test_lineage_is_a_tree_so_forks_get_the_parent_not_the_previous_call():
-    """Two sub-agents branching from one parent must BOTH resolve to that parent.
+    """Resolve both branches to their shared parent.
 
-    A running cursor ("the last call") would hand the second branch a prefix
-    containing the first branch's generation, and the splice applies a supplied
-    prefix unconditionally, so that would be silently wrong rather than merely wasteful.
+    A running cursor would give the second branch the first branch's generation.
+    Exact prefix supply would then consume the wrong cumulative tokens.
     """
     lineage = RolloutLineage()
     shared = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "plan"}]
@@ -1174,7 +1170,7 @@ def test_lineage_is_a_tree_so_forks_get_the_parent_not_the_previous_call():
         "da",
     )
 
-    # The second branch continues the PARENT, not branch-a.
+    # The second branch continues the shared parent.
     second = shared + [{"role": "user", "content": "b"}]
     parent = lineage.resolve(second)
     assert parent is not None and parent.call_id == "parent"
@@ -1182,8 +1178,7 @@ def test_lineage_is_a_tree_so_forks_get_the_parent_not_the_previous_call():
 
 
 def test_lineage_index_is_bounded():
-    """An abandoned rollout is never read again, so eviction cannot wait for
-    consumption. Losing an entry costs a fallback, never a wrong answer."""
+    """Bound worker-local lineage for abandoned rollouts."""
     index = LineageIndex(max_rollouts=3)
     for i in range(10):
         index.for_rollout(f"r{i}")
@@ -1257,8 +1252,7 @@ async def test_file_lineage_resolves_across_spawned_worker_processes(tmp_path):
 
 
 def test_served_calls_link_to_their_parent(tmp_path):
-    """End to end: a second call whose request echoes the first call's assistant
-    turn is recorded with parent_call_id pointing at it."""
+    """Record the echoed first call as the second call's parent."""
     client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
     first = [{"role": "user", "content": "hello"}]
     client.post("/ng-rollout/lin0-roll0/training-token-capture/v1/chat/completions", json={"messages": first})
@@ -1276,11 +1270,10 @@ def test_served_calls_link_to_their_parent(tmp_path):
 
 
 def test_served_calls_do_not_link_across_a_changed_system_prompt(tmp_path):
-    """The system prompt is rendered into the prompt but is not a message.
+    """Reject lineage across a changed system prompt.
 
-    Anthropic sends it as ``system``, beside the message list, so a match on messages alone
-    would hand this call a prefix built under different instructions, which is a conversation
-    the harness never sent.
+    Anthropic sends the system prompt beside the message list.
+    Reusing the old prefix would continue instructions that the harness did not send.
     """
     client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
     store = TokenCaptureStore(tmp_path)
@@ -1304,7 +1297,7 @@ def test_served_calls_do_not_link_across_a_changed_system_prompt(tmp_path):
     assert len(entries) == 2
     assert entries[1].parent_call_id is None
 
-    # Control: unchanged instructions still link, or this would break every real rollout.
+    # Unchanged instructions preserve the link.
     call("sys1", "SYSTEM ONE", first)
     call("sys1", "SYSTEM ONE", second)
     linked = store.read_entries("sys1")
@@ -1313,7 +1306,7 @@ def test_served_calls_do_not_link_across_a_changed_system_prompt(tmp_path):
 
 
 def test_a_changed_tool_schema_breaks_the_link():
-    """Tools are rendered into the prompt too, and a harness can change them mid-rollout."""
+    """Reject lineage across a changed tool schema."""
     turn = [{"role": "user", "content": "hi"}, _ASSISTANT_TURN]
     with_search = _request_messages({"messages": turn, "tools": [{"name": "search"}]})
     with_bash = _request_messages({"messages": turn, "tools": [{"name": "bash"}]})
@@ -1325,7 +1318,7 @@ def test_a_changed_tool_schema_breaks_the_link():
 
 
 def test_the_envelope_does_not_change_the_lookup_key():
-    """It is not an assistant turn, so the fingerprint the index keys on is unaffected."""
+    """Exclude the request envelope from the assistant fingerprint."""
     turn = [{"role": "user", "content": "hi"}, _ASSISTANT_TURN]
     plain = _request_messages({"messages": turn})
     enveloped = _request_messages({"messages": turn, "instructions": "be brief"})
@@ -1334,8 +1327,7 @@ def test_the_envelope_does_not_change_the_lookup_key():
 
 
 def test_the_envelope_is_stable_across_dict_and_model_tools():
-    """Tools reach the request as dicts on one call and as models on the next. Two strings for
-    one schema would break a chain that never changed."""
+    """Normalize equivalent dictionary and model tool schemas."""
 
     class _Tool(BaseModel):
         name: str
@@ -1346,14 +1338,10 @@ def test_the_envelope_is_stable_across_dict_and_model_tools():
 
 
 def test_fingerprint_matches_across_openai_and_anthropic_tool_shapes():
-    """A tool-using turn must match itself across dialects.
+    """Match equivalent OpenAI and Anthropic tool-call shapes.
 
-    We record the turn we produced in OpenAI shape (``tool_calls``), but Claude
-    Code echoes it back in Anthropic shape (``content`` blocks of type
-    ``tool_use``). If those hash differently, the parent is never resolved for
-    exactly the turns that create multi-turn rollouts, which is what happened
-    in the first live multi-turn run: every record came back with
-    ``parent_call_id: None`` even though the calls chained perfectly.
+    OpenAI records calls in ``tool_calls``.
+    Anthropic echoes calls in ``tool_use`` content blocks.
     """
     recorded = [
         {
@@ -1375,12 +1363,11 @@ def test_fingerprint_matches_across_openai_and_anthropic_tool_shapes():
 
 
 def test_fingerprint_agrees_across_all_three_dialects():
-    """The same turn must hash identically however the harness represents it.
+    """Hash equivalent turns identically across all dialects.
 
-    Chat puts tool calls on the message, Anthropic nests them in content blocks, and Responses
-    emits a standalone function_call item with no role. A role-only check misses the Responses
-    case entirely, which would silently disable parent resolution and prefix supply for every
-    harness that speaks it.
+    Chat puts tool calls on the message.
+    Anthropic nests tool calls in content blocks.
+    Responses emits roleless ``function_call`` items.
     """
 
     anthropic = [
@@ -1405,8 +1392,7 @@ def test_fingerprint_agrees_across_all_three_dialects():
 
 
 def test_responses_tool_calls_are_distinguished():
-    """Two Responses turns differing only in tool arguments must not collide, or the index
-    treats them as the same call and refuses to resolve either."""
+    """Distinguish Responses turns with different tool arguments."""
 
     def turn(cmd):
         return [
@@ -1426,8 +1412,8 @@ def test_lineage_resolves_a_tool_using_turn_echoed_in_anthropic_shape():
     }
     lineage.record("call-1", [{"role": "user", "content": "factor 420"}, produced], [1, 2, 3], "d1")
 
-    # The harness continues the conversation, echoing the turn as Anthropic blocks
-    # and appending the tool result.
+    # The harness echoes the turn as Anthropic blocks.
+    # The harness then appends the tool result.
     next_request = [
         {"role": "user", "content": "factor 420"},
         {"role": "assistant", "content": [{"type": "tool_use", "name": "Bash", "input": {"command": "factor 420"}}]},
@@ -1772,8 +1758,7 @@ def test_a_newer_record_in_the_store_fails_the_read_rather_than_being_skipped(tm
 
 
 def test_digest_and_cum_len_are_filled_for_every_entry():
-    """Both describe the entry's own tokens, so they are computable even with no generation.
-    A consumer verifying a parent link needs them present on every record, not most."""
+    """Stamp cumulative length and digest on every entry."""
     empty = TokenEntry(
         rollout_id="r",
         model_call_id="e",
@@ -1796,11 +1781,7 @@ def test_digest_and_cum_len_are_filled_for_every_entry():
 
 
 def test_a_rewritten_conversation_does_not_resolve_to_the_original_call():
-    """A node's tokens encode the conversation as it was when the call was made. A harness that
-    compacts or summarizes earlier turns while echoing the same model output produces the same
-    assistant fingerprint, so the lookup alone would match. Supplying those tokens would then
-    generate from a conversation the harness did not send, which is why the earlier turns are
-    verified before the node is returned."""
+    """Reject an assistant match when the earlier conversation changed."""
     lineage = RolloutLineage()
     original = [{"role": "user", "content": "solve task ALPHA"}]
     lineage.record("call-1", original + [_ASSISTANT_TURN], cum_tokens=[1, 2, 3], digest="d1")
@@ -1811,9 +1792,7 @@ def test_a_rewritten_conversation_does_not_resolve_to_the_original_call():
 
 
 def test_appending_a_tool_result_still_resolves():
-    """The case the fingerprint exists for. A continuation appends to the conversation and
-    echoes the model's turn unchanged, so it must still find its parent; a check strict enough
-    to reject the rewrite above must not reject this."""
+    """Resolve a continuation after it appends a tool result."""
     lineage = RolloutLineage()
     sent = [{"role": "user", "content": "q"}]
     lineage.record("call-1", sent + [_ASSISTANT_TURN], cum_tokens=[1, 2, 3], digest="d1")
@@ -1825,9 +1804,7 @@ def test_appending_a_tool_result_still_resolves():
 
 
 def test_two_calls_with_identical_output_resolve_to_neither():
-    """Nothing distinguishes them, and picking either would attribute the next call's tokens to
-    the wrong parent. A harness retry produces exactly this, because capture records a response
-    the client may never have accepted."""
+    """Resolve neither call when their outputs are identical."""
     lineage = RolloutLineage()
     messages = [{"role": "user", "content": "q"}, _ASSISTANT_TURN]
     lineage.record("call-1", messages, cum_tokens=[1, 2], digest="d1")
@@ -1837,8 +1814,7 @@ def test_two_calls_with_identical_output_resolve_to_neither():
 
 
 def test_a_conversation_with_no_model_turn_starts_a_new_root():
-    """There is nothing to continue from, so it must not match some earlier call that happens to
-    share a user message."""
+    """Start a new root when the request has no model-authored turn."""
     lineage = RolloutLineage()
     lineage.record("call-1", [{"role": "user", "content": "q"}, _ASSISTANT_TURN], cum_tokens=[1], digest="d")
 
@@ -1847,9 +1823,7 @@ def test_a_conversation_with_no_model_turn_starts_a_new_root():
 
 
 def test_two_forks_of_one_call_both_resolve_to_it():
-    """The index is keyed by call rather than being a running cursor, so a call can have several
-    children. Two sub-agents branching from the same turn each continue that turn, so both get
-    its tokens rather than one of them getting the other's."""
+    """Resolve two forks to the same parent and cumulative tokens."""
     lineage = RolloutLineage()
     base = [{"role": "user", "content": "q"}, _ASSISTANT_TURN]
     lineage.record("parent", base, cum_tokens=[1, 2, 3], digest="dp")
@@ -1863,8 +1837,7 @@ def test_two_forks_of_one_call_both_resolve_to_it():
 
 
 def test_recording_a_child_does_not_mutate_its_parent():
-    """Sub-agents are recorded concurrently, so a write for one must not disturb another's
-    entry. Nodes are added and never updated in place."""
+    """Keep a parent immutable while recording children."""
     lineage = RolloutLineage()
     base = [{"role": "user", "content": "q"}, _ASSISTANT_TURN]
     lineage.record("parent", base, cum_tokens=[1, 2, 3], digest="dp")
@@ -1877,9 +1850,7 @@ def test_recording_a_child_does_not_mutate_its_parent():
 
 
 def test_an_evicted_rollout_resolves_to_nothing_rather_than_to_another_rollout():
-    """The index is bounded, so entries are dropped under pressure. Losing one has to cost a
-    fallback to matching the parent by token prefix, not a match against a different
-    rollout that happens to share an assistant turn."""
+    """Resolve an evicted rollout to nothing."""
     index = LineageIndex(max_rollouts=2, max_tokens=10_000_000)
     for name in ("r1", "r2", "r3"):
         index.for_rollout(name).record(name, [{"role": "user", "content": "q"}, _ASSISTANT_TURN], [1], "d")
@@ -1888,8 +1859,7 @@ def test_an_evicted_rollout_resolves_to_nothing_rather_than_to_another_rollout()
 
 
 def test_the_last_rollout_is_kept_even_over_budget():
-    """At long context one rollout can exceed the token budget by itself. Evicting it would turn
-    the bound into a switch that disables lineage entirely."""
+    """Keep the only rollout even when it exceeds the token budget."""
     index = LineageIndex(max_rollouts=1, max_tokens=1)
     messages = [{"role": "user", "content": "q"}, _ASSISTANT_TURN]
     index.for_rollout("r1").record("c1", messages, [1] * 100, "d")
@@ -1898,11 +1868,10 @@ def test_the_last_rollout_is_kept_even_over_budget():
 
 
 def test_a_response_echoed_as_several_items_still_resolves():
-    """One served response can come back as more than one message.
+    """Resolve a response echoed as several items.
 
-    A Responses harness echoes assistant text and a tool call as separate items. Indexing the
-    served items as they are keeps both sides comparable; rebuilding them into a single turn
-    first would not, and this is the shape every multi-turn tool-calling rollout takes.
+    A Responses harness can echo assistant text and a tool call as separate items.
+    Indexing the served items preserves that shape.
     """
     served = [
         {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "let me look"}]},
@@ -1919,9 +1888,7 @@ def test_a_response_echoed_as_several_items_still_resolves():
 
 
 def test_reasoning_the_harness_drops_does_not_break_resolution():
-    """A harness need not echo standalone reasoning items, and the chat dialect carries
-    reasoning in a field the fingerprint does not read. Counting it would make the key depend
-    on which dialect is speaking and on whether the model's thinking was sent back."""
+    """Ignore standalone reasoning that the harness does not echo."""
     served = [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "answer"}]}]
     sent = [{"role": "user", "content": "q"}]
     lineage = RolloutLineage()
@@ -1940,17 +1907,17 @@ def test_reasoning_the_harness_drops_does_not_break_resolution():
 @pytest.mark.parametrize(
     "before, after",
     [
-        # Responses: the payload is on the item, under `output`.
+        # Responses stores the payload under ``output``.
         (
             [{"type": "function_call_output", "call_id": "c1", "output": "42 files"}],
             [{"type": "function_call_output", "call_id": "c1", "output": "[truncated]"}],
         ),
-        # Anthropic: a tool_result block, whose payload is under `content` rather than `text`.
+        # Anthropic stores the payload under ``content``.
         (
             [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "c1", "content": "42 files"}]}],
             [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "c1", "content": "[truncated]"}]}],
         ),
-        # Chat: a plain string content.
+        # Chat stores the payload as plain content.
         (
             [{"role": "tool", "tool_call_id": "c1", "content": "42 files"}],
             [{"role": "tool", "tool_call_id": "c1", "content": "[truncated]"}],
@@ -1958,15 +1925,12 @@ def test_reasoning_the_harness_drops_does_not_break_resolution():
     ],
 )
 def test_a_rewritten_tool_result_changes_the_conversation_digest(before, after):
-    """A harness that summarizes, redacts or truncates an earlier tool result changes what the
-    model is being asked to continue from. The digest has to see that, or a stale parent verifies
-    clean and its tokens are supplied for a conversation that no longer matches."""
+    """Change the digest when an earlier tool result changes."""
     assert conversation_digest(before) != conversation_digest(after)
 
 
 def test_the_fingerprint_still_ignores_tool_results():
-    """The fingerprint is the lookup key and has to survive a tool result being appended, which
-    is the ordinary way a conversation continues. Only the digest covers tool results."""
+    """Exclude appended tool results from the lookup fingerprint."""
     turn = [{"role": "assistant", "content": "ok"}]
     assert assistant_fingerprint(turn) == assistant_fingerprint(
         turn + [{"type": "function_call_output", "output": "42 files"}]
