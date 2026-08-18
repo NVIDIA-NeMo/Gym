@@ -92,6 +92,7 @@ from nemo_gym.token_id_capture import (
     installed_token_source,
     token_id_capture_dirs_from_config,
 )
+from nemo_gym.token_id_capture.config import token_id_capture_enabled_for_agent
 from nemo_gym.token_id_capture.delivery import finalize_rollout_token_capture, retire_rollout_token_capture
 
 
@@ -825,11 +826,16 @@ class RolloutCollectionHelper(BaseModel):
         if capture_dirs:
             print("Clearing existing model-call captures for rollouts being dispatched")
             clear_model_call_captures_for_rollouts(input_rows, capture_dirs)
-        if token_capture_dirs:
+        token_capture_rows = [
+            row
+            for row in input_rows
+            if token_id_capture_enabled_for_agent(global_config, (row.get(AGENT_REF_KEY_NAME) or {}).get("name"))
+        ]
+        if token_capture_dirs and token_capture_rows:
             # Token stores append under deterministic rollout ids.
             # Clear stale records to avoid merging different attempts.
             print("Clearing existing token captures for rollouts being dispatched")
-            clear_token_captures_for_rollouts(input_rows, token_capture_dirs)
+            clear_token_captures_for_rollouts(token_capture_rows, token_capture_dirs)
 
         # Intermediate status printing
         pcts_to_print = list(range(1, 100)) + [99.5]
@@ -867,11 +873,16 @@ class RolloutCollectionHelper(BaseModel):
             if "ng_model_call_capture" in result or "ng_agent_observations" in result or NG_TRAJECTORY_KEY in result:
                 _attach_trajectory_record(row, result)
 
-            # Freeze and rebuild this rollout's captured tokens.
+            # Freeze and rebuild tokens only for participating agents.
             # This step does not retire the frozen snapshot.
             # It leaves harness output and reward unchanged.
             # Direct callers of run_examples finalize each record themselves.
-            token_capture_build = await finalize_rollout_token_capture(result, token_source)
+            token_capture_build = None
+            if token_id_capture_enabled_for_agent(
+                global_config,
+                (row.get(AGENT_REF_KEY_NAME) or {}).get("name"),
+            ):
+                token_capture_build = await finalize_rollout_token_capture(result, token_source)
 
             no_persist = bool(result.get(NG_NO_PERSIST_KEY))
             failure_class = result.get(NG_FAILURE_CLASS_KEY)

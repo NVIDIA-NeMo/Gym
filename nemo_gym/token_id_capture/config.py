@@ -65,6 +65,7 @@ Read ownership is independent of write ownership.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from importlib import import_module
 from pathlib import Path
 from typing import Any
@@ -193,3 +194,26 @@ class TokenIdCaptureConfig(BaseModel):
 def token_id_capture_config(global_config_dict: Any) -> TokenIdCaptureConfig:
     """Read the capture settings out of a global config dict."""
     return TokenIdCaptureConfig.model_validate(global_config_dict or {})
+
+
+def token_id_capture_enabled_for_agent(global_config_dict: Any, agent_name: str | None) -> bool:
+    """Return whether one configured agent participates in capture."""
+    config = token_id_capture_config(global_config_dict)
+    settings = config.token_id_capture
+    if not settings.enabled:
+        return False
+    if settings.all_agents:
+        return True
+    if not agent_name or not isinstance(global_config_dict, Mapping):
+        return False
+    server_entry = global_config_dict.get(agent_name)
+    if not isinstance(server_entry, Mapping):
+        return False
+    agents = server_entry.get("responses_api_agents")
+    if not isinstance(agents, Mapping):
+        return False
+    return any(
+        bool(agent_config.get("token_id_capture", False))
+        for agent_config in agents.values()
+        if isinstance(agent_config, Mapping)
+    )

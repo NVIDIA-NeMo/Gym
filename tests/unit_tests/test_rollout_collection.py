@@ -1062,6 +1062,47 @@ class TestRolloutCollection:
         # The explicit id replaces it.
         assert store.read("0-0") == []
 
+    async def test_run_from_config_does_not_finalize_a_nonparticipating_agent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        capture_dir = tmp_path / "tokens"
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "get_global_config_dict",
+            lambda: {
+                "token_id_capture": {"enabled": True, "dir": str(capture_dir)},
+                "agent": {"responses_api_agents": {"implementation": {"token_id_capture": False}}},
+            },
+        )
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes(
+            orjson.dumps(
+                {
+                    "responses_create_params": {"input": []},
+                    AGENT_REF_KEY_NAME: {"name": "agent"},
+                }
+            )
+            + b"\n"
+        )
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            resume_from_cache=False,
+            disable_aggregation=True,
+        )
+
+        class Helper(RolloutCollectionHelper):
+            def run_examples(self, examples, *args, **kwargs):
+                [example] = examples
+                future = Future()
+                future.set_result((example, {"response": {"output": [], "usage": {}}}))
+                return [future]
+
+        [result] = await Helper().run_from_config(config)
+
+        assert MASK_SAMPLE_KEY not in result
+        assert TOKEN_CAPTURE_KEY not in result
+
     async def test_run_from_config_sorted(self, tmp_path: Path, empty_global_config: MagicMock) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"
         samples = [

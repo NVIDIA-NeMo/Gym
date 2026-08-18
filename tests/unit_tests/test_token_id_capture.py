@@ -66,6 +66,7 @@ from nemo_gym.token_id_capture import (
     reset_token_sink,
     set_token_sink,
 )
+from nemo_gym.token_id_capture.config import token_id_capture_enabled_for_agent
 from nemo_gym.token_id_capture.protocols import TokenSource
 from nemo_gym.token_id_capture.store import make_token_store
 
@@ -298,6 +299,26 @@ def test_config_keeps_settings_when_capture_is_off(tmp_path):
     cfg = TokenIdCaptureConfig.model_validate({"token_id_capture": {"enabled": False, "dir": str(tmp_path)}})
     assert cfg.enabled is False
     assert cfg.build_sink() is None
+
+
+def test_agent_capture_selection_uses_static_agent_config_or_all_agents():
+    config = {
+        "token_id_capture": {"enabled": True, "rebuild_response": False},
+        "captured": {"responses_api_agents": {"implementation": {"token_id_capture": True}}},
+        "ordinary": {"responses_api_agents": {"implementation": {"token_id_capture": False}}},
+    }
+
+    assert token_id_capture_enabled_for_agent(config, "captured")
+    assert not token_id_capture_enabled_for_agent(config, "ordinary")
+    assert not token_id_capture_enabled_for_agent(config, "missing")
+    assert token_id_capture_enabled_for_agent(
+        {**config, "token_id_capture": {**config["token_id_capture"], "all_agents": True}},
+        "ordinary",
+    )
+    assert not token_id_capture_enabled_for_agent(
+        {**config, "token_id_capture": {**config["token_id_capture"], "enabled": False, "all_agents": True}},
+        "captured",
+    )
 
 
 def test_config_warns_rather_than_fails_on_a_sink_beside_a_directory(caplog):
