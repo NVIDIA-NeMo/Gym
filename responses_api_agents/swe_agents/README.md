@@ -9,6 +9,8 @@ The wrapper supports two agent harnesses, selected by the `agent_framework` conf
 - **`openhands`** (default) — runs [nv-OpenHands](https://github.com/sdevare-nv/nv-OpenHands), with a custom NeMo-Gym-aware LLM client baked into the fork.
 - **`opencode`** — runs [opencode](https://opencode.ai)'s real `processor.ts` agentic loop, with a custom `LanguageModelV3` provider (`@opencode-ai/nemo-gym`) that swaps the LLM transport while keeping opencode's tools, prompts, and parsing intact. See [opencode integration](#opencode-integration) below.
 
+For the Cline harness, see the dedicated [Cline agent](../cline_agent/README.md), which runs the Cline CLI headlessly and includes an [SWE-bench configuration](../anyswe_agent/configs/anyswe_cline.yaml).
+
 ---
 
 ## Table of Contents
