@@ -46,7 +46,7 @@ class TokenCaptureSnapshot:
 
 @dataclass(frozen=True)
 class LineageMatch:
-    """A uniquely verified parent returned by a shared lineage store."""
+    """Describe a uniquely verified parent from a shared lineage store."""
 
     model_call_id: str
     cumulative_token_ids: tuple[int, ...]
@@ -55,20 +55,19 @@ class LineageMatch:
 
 @runtime_checkable
 class LineageStore(Protocol):
-    """Request-time lineage shared by every worker serving a rollout.
+    """Share request-time lineage across every worker serving a rollout.
 
-    External implementations must provide read-after-write consistency across
-    workers: after ``record`` returns, a later ``resolve`` must be able to see it.
-    A miss or ambiguous identity returns ``None``. It is never valid to guess one
-    of several candidates, because the returned tokens can change generation.
+    Implementations must provide cross-worker read-after-write consistency.
+    After ``record`` returns, a later ``resolve`` must see the record.
+    A missing or ambiguous identity returns ``None``.
+    Implementations must never guess among candidates.
     """
 
     async def resolve(self, rollout_id: str, request_items: list[dict]) -> LineageMatch | None:
         """Return one verified parent, or ``None`` for a root or ambiguity.
 
-        ``request_items`` are the unmodified items received from the harness.
-        The implementation must verify that they continue the recorded request
-        context, not merely match model-authored output.
+        ``request_items`` are the unmodified harness items.
+        The implementation must verify the recorded request context.
         """
         ...
 
@@ -83,10 +82,10 @@ class LineageStore(Protocol):
     ) -> None:
         """Publish a completed call for later request-time resolution.
 
-        The request and response items are the unmodified wire representations.
-        Repeating a model_call_id with the same payload is a no-op. Reusing it
-        with different data must fail. The method returns only once the record is
-        visible to every worker that can serve this rollout.
+        Request and response items retain their wire representations.
+        Repeating a model call ID with the same payload is a no-op.
+        Reusing a model call ID with different data must fail.
+        Return only after every serving worker can read the record.
         """
         ...
 

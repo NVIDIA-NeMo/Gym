@@ -46,8 +46,8 @@ TOKEN_FIELDS = ("prompt_token_ids", "generation_token_ids", "generation_log_prob
 #   2  parent_call_id, cum_len and digest, added when calls began being linked to their parent
 TOKEN_ENTRY_RECORD_SCHEMA_VERSION = 2
 
-# Bumped if the digest encoding below ever changes, so a stale digest fails to
-# verify instead of silently comparing equal.
+# Increment this version when the digest encoding changes.
+# A stale digest must fail verification.
 DIGEST_VERSION = 1
 _DIGEST_DOMAIN = b"nemo-gym-tokens"
 _EMPTY_DIGEST = hashlib.sha256(_DIGEST_DOMAIN).hexdigest()
@@ -56,8 +56,7 @@ _EMPTY_DIGEST = hashlib.sha256(_DIGEST_DOMAIN).hexdigest()
 def encode_token_ids(token_ids: list[int]) -> bytes:
     """Stable, length-delimited, big-endian encoding of a token sequence.
 
-    The encoding is fixed and length-delimited so an independent implementation
-    can hash the same bytes and get the same digest.
+    Independent implementations can hash the same bytes.
     """
     encoded = bytearray(struct.pack(">BQ", DIGEST_VERSION, len(token_ids)))
     for token_id in token_ids:
@@ -70,10 +69,9 @@ def encode_token_ids(token_ids: list[int]) -> bytes:
 def compute_digest(token_ids: list[int]) -> str:
     """Digest of an exact token sequence.
 
-    Used to verify a claimed ``parent_call_id`` in O(1) instead of comparing
-    whole arrays, and to detect a stale or interleaved store (a rerun that
-    appended onto a previous attempt's records fails the check rather than
-    merging silently).
+    The builder verifies a claimed parent by hashing the corresponding prompt prefix.
+    A mismatch quarantines the call.
+    This prevents stale or interleaved records from merging silently.
     """
     if not token_ids:
         return _EMPTY_DIGEST
@@ -110,22 +108,17 @@ class TokenEntry(BaseModel):
     # This non-semantic timestamp helps diagnose retries and sibling branches.
     created_at: float = 0.0
 
-    # --- Added with parent resolution (schema version 2).
-    # Optional: null when the model server could not identify the parent, in which case the
-    # builder matches token prefixes instead.
+    # These fields were added with parent resolution in schema version 2.
+    # A missing parent call ID triggers strict token-prefix matching.
     #
-    # When present these make the chain exact rather than matched. Two calls
-    # can share a prompt and differ only in their generation (a harness retry,
-    # since capture records a response the client may never have received);
-    # prefix matching has to guess between them, whereas the next call's parent
-    # link names the one the harness actually kept. They also turn the builder's
-    # O(N^2) prefix scan into an O(1) lookup, and let a claimed parent be
-    # verified rather than trusted.
+    # A parent link identifies the exact call retained by the harness.
+    # This disambiguates retries with the same prompt.
+    # The builder verifies the link instead of trusting it.
     parent_call_id: str | None = None
-    # len(prompt_token_ids) + len(generation_token_ids) for THIS call: the
-    # length of the prefix a child of this call must start with.
+    # This is the length of this call's prompt and generation.
+    # A child must start with a prefix of this length.
     cum_len: int | None = None
-    # compute_digest(prompt_token_ids + generation_token_ids).
+    # This is ``compute_digest(prompt_token_ids + generation_token_ids)``.
     digest: str | None = None
 
     @model_validator(mode="after")
@@ -162,8 +155,8 @@ def cumulative_tokens(entry: TokenEntry) -> list[int]:
 def stamp_lineage(entry: TokenEntry, parent_call_id: str | None) -> TokenEntry:
     """Fill ``cum_len`` and ``digest`` (always) and ``parent_call_id`` (when known).
 
-    ``cum_len``/``digest`` describe this call and are always computable; the
-    parent link is only known when the model server resolved one.
+    ``cum_len`` and ``digest`` always describe this call.
+    The parent link is present only when the model server resolved one.
     """
     cumulative = cumulative_tokens(entry)
     entry.cum_len = len(cumulative)

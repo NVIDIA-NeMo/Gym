@@ -13,54 +13,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Which recorded call does this request continue?
+"""Resolve the recorded call that a request continues.
 
-A rollout is several model calls, and training needs them as one contiguous token
-sequence. That means knowing, for each call, which earlier call it continues: its
-parent. There are two ways to find one.
+A rollout can contain several model calls.
+Training consumes their exact tokens as one contiguous sequence.
+Request-time lineage identifies the earlier call that each request continues.
 
-The builder can match token prefixes after the rollout, pairing a call with the
-earlier call whose token sequence is the longest prefix of this call's prompt. That
-needs no bookkeeping at all, and it cannot do two things:
+``assistant_fingerprint`` is the lookup key.
+It hashes model-authored turns and ignores user and tool content added between calls.
+``conversation_digest`` verifies the unchanged request context.
+A digest mismatch rejects the claimed lineage before any parent tokens are reused.
 
-- **Tell two attempts apart.** Capture records a call once its response is
-  assembled, including one the client never received, so a harness retry leaves two
-  records with the same prompt and different generations. Both are equally good
-  prefixes.
-- **Answer while a call is in flight.** Prefix matching needs the finished records,
-  and those only exist once the rollout is over. Supplying the engine the parent's
-  exact tokens, so the next prompt extends them by construction rather than being
-  re-rendered from text, has to happen as the request is forwarded.
+The shared ``LineageStore`` provides read-after-write visibility across workers.
+``FileLineageStore`` implements that contract with append-only JSONL files and a per-worker tail cache.
+Each child receives its parent's cumulative tokens.
+Downstream inference consumes those tokens to supply the exact prompt prefix.
 
-This module answers the question at request time instead, using only what the
-harness already sends. A harness has to echo the conversation back to continue it,
-so the model-authored turns arriving in a request are the ones we produced, and
-hashing them in order identifies the call that produced the last one::
-
-    call 1 request    [system, user]
-    call 1 response   assistant: <tool_call>       stored under hash(assistant turns)
-
-    call 2 request    [system, user,
-                       assistant: <tool_call>,     echoed back
-                       tool result]                new
-                      hash the assistant turns  -> finds call 1, and its tokens
-
-Nothing is added to the wire, nothing depends on the harness preserving a field we
-invented, and nothing depends on which dialect it speaks.
-
-Two hashes, for two jobs. ``assistant_fingerprint`` covers model-authored turns
-only and is the lookup key: it has to ignore user and tool content, because a tool
-result is appended between calls and a key covering it would never match twice.
-``conversation_digest`` covers every turn and is the check: precisely because the
-fingerprint ignores that content, a harness that rewrites earlier turns while
-echoing the same model output produces the same fingerprint, and the digest is what
-catches it before the parent's tokens are reused.
-
-The index is a map keyed by call, not a running cursor, so it is a tree and forks
-cost nothing. Two sub-agents branching from one parent both resolve to it and both
-get the same prefix, which is why the prefix to supply is ``cum(parent)`` and not
-``cum(previous call)``. Entries are added and never mutated, so concurrent
-sub-agents cannot corrupt each other's lineage.
+The builder remains the fallback when request-time lineage is unavailable.
+A missing ``parent_call_id`` target falls back to strict longest token-prefix matching.
+A digest mismatch quarantines the call instead of falling back.
 """
 
 from __future__ import annotations
@@ -86,10 +57,9 @@ _CONTEXT_DOMAIN = b"nemo-gym-lineage-context"
 def canonicalize_tool_arguments(value: Any) -> str:
     """Normalize a tool call's arguments for comparison only.
 
-    Harnesses re-serialize tool-call arguments between turns, compact one turn and
-    pretty-printed the next, so the same call does not compare equal to itself.
-    Comparison is done on sorted-key, separator-normalized JSON; the model's
-    original string is what stays in the record and is never rewritten.
+    Harnesses can reserialize tool-call arguments between turns.
+    Comparison uses sorted-key JSON with normalized separators.
+    The record retains the model's original string.
     """
     if value is None:
         return ""
@@ -107,12 +77,10 @@ def canonicalize_tool_arguments(value: Any) -> str:
 
 
 def _text_of(content: Any) -> str:
-    """Flatten a message's *text* content, across the shapes the dialects use.
+    """Flatten a message's text content across dialects.
 
-    Tool calls are deliberately not folded in here; see ``_tools_of``. The
-    dialects carry them in different places, so they have to be normalized
-    separately or the same turn hashes differently depending on which side is
-    looking at it.
+    Tool calls are normalized separately by ``_tools_of``.
+    Dialects store tool calls in different locations.
     """
     if content is None:
         return ""
@@ -129,20 +97,14 @@ def _text_of(content: Any) -> str:
 
 
 def _tools_of(message: dict) -> list[tuple[str, str]]:
-    """The tool calls in a model-authored turn, as (name, canonical args).
+    """Return tool calls as ``(name, canonical arguments)`` pairs.
 
-    Each dialect puts them somewhere different, and all three have to reduce to
-    the same list or a tool-using turn cannot match itself across a round trip.
-    That matters because a tool-using turn is the only kind that produces a
-    multi-turn rollout.
-
-    - Chat: ``tool_calls`` on the message, with ``function.name`` / ``arguments``.
-    - Anthropic: ``content`` blocks of ``type: tool_use``, with ``name`` / ``input``.
-    - Responses: a standalone ``function_call`` item whose ``name`` and
-      ``arguments`` are at the top level.
+    Chat stores calls in the message's ``tool_calls`` field.
+    Anthropic stores calls in ``tool_use`` content blocks.
+    Responses stores each call as a standalone ``function_call`` item.
     """
     tools: list[tuple[str, str]] = []
-    # Responses: the item *is* the tool call, with name and arguments at the top level.
+    # A Responses item is the tool call.
     if message.get("type") == "function_call":
         tools.append((str(message.get("name", "")), canonicalize_tool_arguments(message.get("arguments"))))
     content = message.get("content")
@@ -157,12 +119,11 @@ def _tools_of(message: dict) -> list[tuple[str, str]]:
 
 
 def _tool_result_text(message: dict) -> str:
-    """A tool result's payload, across the shapes the dialects use.
+    """Return a tool result payload across dialects.
 
-    Each dialect puts it somewhere ``_text_of`` does not look. Responses has a standalone
-    ``function_call_output`` item carrying ``output``; Anthropic has ``tool_result`` blocks whose
-    payload is under ``content``, not ``text``; chat puts a plain string in ``content``, which
-    ``_text_of`` already returns.
+    Responses stores results in standalone ``function_call_output`` items.
+    Anthropic stores results in ``tool_result`` content blocks.
+    Chat stores results as plain message content.
     """
     parts: list[str] = []
     if message.get("type") == "function_call_output":
@@ -178,31 +139,26 @@ def _tool_result_text(message: dict) -> str:
 
 
 def _is_assistant_authored(message: dict) -> bool:
-    """Whether this item is something the model produced.
+    """Return whether the model produced this item.
 
-    Chat and Anthropic mark it with ``role: assistant``. The Responses dialect
-    represents a tool call as a sibling ``function_call`` item with no role at
-    all, so a role check alone misses every tool call a Responses-speaking
-    harness makes.
+    Chat and Anthropic use the ``assistant`` role.
+    Responses tool calls are roleless ``function_call`` items.
     """
     if message.get("role") == "assistant":
         return True
-    # Reasoning is deliberately excluded. A harness need not echo standalone reasoning items,
-    # and the chat dialect carries reasoning in a field this never reads, so counting it would
-    # make the key depend on which dialect the harness speaks and on whether it chose to send
-    # the model's thinking back. Two calls differing only in reasoning collide instead, which
-    # resolves as ambiguous and falls back.
+    # Reasoning is deliberately excluded.
+    # A harness need not echo standalone reasoning items.
+    # Including reasoning would make fingerprints depend on the dialect and echo behavior.
+    # Reasoning-only collisions resolve as ambiguous and fall back.
     return message.get("type") == "function_call"
 
 
 def conversation_digest(messages: list[dict]) -> str:
     """Hash every turn of a conversation, model-authored or not.
 
-    ``assistant_fingerprint`` deliberately ignores user and tool content so that a request
-    still matches the call it continues after a tool result has been appended. That makes it
-    a good lookup key and a bad safety check: a harness that rewrites earlier turns while
-    echoing the same model output still produces the same fingerprint. This covers the rest
-    of the conversation so a match can be verified before its tokens are reused.
+    ``assistant_fingerprint`` ignores user and tool content.
+    This digest covers that omitted context.
+    A mismatch rejects the parent before its tokens are reused.
     """
     hasher = hashlib.sha256(_CONTEXT_DOMAIN)
     for message in messages or []:
@@ -216,9 +172,8 @@ def conversation_digest(messages: list[dict]) -> str:
             hasher.update(b"\x02")
             hasher.update(name.encode("utf-8"))
             hasher.update(arguments.encode("utf-8"))
-        # Tool results too. A harness that summarizes, redacts or truncates an earlier result
-        # changes what the model is being asked to continue from, and without this the digest is
-        # blind to it in the Responses and Anthropic shapes, so a stale parent verifies clean.
+        # Include tool results.
+        # Summarizing, redacting, or truncating a result changes the request context.
         hasher.update(b"\x03")
         hasher.update(_tool_result_text(message).encode("utf-8"))
     return hasher.hexdigest()
@@ -227,14 +182,9 @@ def conversation_digest(messages: list[dict]) -> str:
 def assistant_fingerprint(messages: list[dict]) -> str:
     """Fingerprint the model-authored turns of a request, in order.
 
-    Only what the model produced is hashed: it identifies the call that produced
-    the last one. User and tool content varies with the environment and is
-    irrelevant to lineage.
-
-    The three dialects represent the same turn differently, and all three have to
-    reduce to the same hash or a turn cannot match itself across a round trip:
-    chat puts tool calls on the message, Anthropic nests them in content blocks,
-    and Responses emits them as separate items.
+    The fingerprint identifies the call that produced the last model-authored turn.
+    User and tool content is excluded from the lookup key.
+    Dialect-specific tool-call shapes normalize to the same hash input.
     """
     hasher = hashlib.sha256(_FINGERPRINT_DOMAIN)
     count = 0
@@ -259,33 +209,28 @@ class LineageNode:
     cum_tokens: list[int]
     cum_len: int
     digest: str
-    # The conversation this call was sent, as sent: its length in messages and a digest over all
-    # of them. Deliberately excludes the turn the model produced. A continuation carries these
-    # messages, then the model's turn echoed back in whatever shape its dialect uses, then new
-    # content. Only the first part has a stable length, because one response can echo back as
-    # several items, so that is where the comparison is anchored.
+    # These fields describe the request context sent for this call.
+    # They exclude the model's response.
+    # The request context has a stable item count across dialect round trips.
     context_len: int = 0
     context_digest: str = ""
 
 
 @dataclass
 class RolloutLineage:
-    """Per-rollout call index. Append-only, so forks and concurrency are safe."""
+    """Keep an append-only per-rollout call index."""
 
     by_fingerprint: dict[str, list[str]] = field(default_factory=dict)
     by_call_id: dict[str, LineageNode] = field(default_factory=dict)
-    # Running sum of cum_len over recorded nodes, so the index can bound itself on memory without
-    # walking every node on every access.
+    # Cache the cumulative token count for memory bounds.
     total_tokens: int = 0
 
     def resolve(self, messages: list[dict]) -> LineageNode | None:
-        """The call this request continues, or ``None``.
+        """Return the unique call that this request continues.
 
-        ``None`` for a new root (nothing matches: a fresh conversation, or one
-        the harness rewrote) and, deliberately, for an ambiguous match: if two
-        recorded calls produced byte-identical output we cannot tell which one
-        this continues, and guessing would attribute tokens to the wrong parent.
-        A unique match is required.
+        Return ``None`` for a new root.
+        Return ``None`` for an ambiguous match.
+        Never guess among calls with identical output.
         """
         fingerprint = assistant_fingerprint(messages)
         if not fingerprint:
@@ -300,23 +245,14 @@ class RolloutLineage:
 
     @staticmethod
     def _continues(node: LineageNode, messages: list[dict]) -> bool:
-        """Whether this request extends the conversation the node was recorded against.
+        """Return whether this request extends the node's recorded context.
 
-        A continuation carries the conversation this call was sent, unchanged, before anything
-        else. So the request's first ``context_len`` messages must hash to what was recorded.
-        A harness that rewrote or summarized those turns fails here, which matters because the
-        node's tokens encode the conversation as it was, and reusing them would generate from a
-        conversation the harness did not send.
-
-        Comparing only the part the model did not produce is what keeps this robust. The
-        model's turn comes back in the shape the harness's dialect uses, and one response can
-        echo as several items, so any comparison that had to count those messages would break
-        on exactly the multi-turn tool-calling case this exists for.
+        The leading ``context_len`` items must match the recorded request.
+        A rewritten or summarized context fails verification.
+        Verification excludes the model response because dialects can echo it as different item counts.
         """
         if not node.context_digest:
-            # Unreachable while ``record`` is the only way to build a node, and fails closed if
-            # that stops being true: without a digest there is nothing to check the request
-            # against, and an unchecked match is the one this guard exists to stop.
+            # Fail closed when no context digest is available.
             return False
         if len(messages) < node.context_len:
             return False
@@ -330,11 +266,10 @@ class RolloutLineage:
         digest: str,
         context_len: int | None = None,
     ) -> None:
-        """Index a completed call by the conversation a continuation of it would carry.
+        """Index a completed call by its continuation fingerprint.
 
-        ``context_len`` is how many leading messages were the request as sent, before the turn
-        the model produced. It defaults to everything but the last message, which is right when
-        the caller appended a single synthesized turn.
+        ``context_len`` counts the request items before the model response.
+        The default assumes one synthesized response item.
         """
         node = LineageNode(
             call_id=call_id,
@@ -359,25 +294,13 @@ class RolloutLineage:
 
 
 class LineageIndex:
-    """All live rollouts' lineage, bounded so an abandoned rollout cannot leak.
+    """Bound worker-local lineage by rollout and cumulative token counts.
 
-    A rollout that dies (harness crash, a batch discarded on a NaN-logprob
-    retry) is never read again, and this index lives in the model server process
-    while records are consumed elsewhere, so eviction cannot be driven by
-    consumption. It is driven by two caps, and losing an entry costs a fallback
-    to re-rendering, never a wrong answer.
-
-    **The token cap is the one that matters.** Each node holds the parent's whole
-    cumulative sequence, so cost scales with context length, not call count: a
-    131k-token call measured ~4.5 MiB as a Python list of ints (~36 bytes per
-    token). Bounding on rollouts alone would have let a 512-rollout batch at long
-    context hold multiple GiB. The default budget is ~290 MiB.
-
-    Eviction is oldest-first by insertion, and runs on access rather than on
-    write, so the budget is exceeded by at most the single call recorded after
-    the last check, one ``cum_len``, about 4.5 MiB at 131k. A rollout still in
-    flight can be evicted under pressure; that is intended, and it degrades to
-    prefix matching rather than to a wrong parent.
+    This index backs the single-worker fallback.
+    Shared stores provide cross-worker visibility.
+    Eviction removes the oldest rollout.
+    An evicted parent degrades to strict token-prefix matching.
+    The only live rollout is never evicted.
     """
 
     def __init__(self, max_rollouts: int = 512, max_tokens: int = 8_000_000) -> None:
@@ -394,12 +317,10 @@ class LineageIndex:
         return lineage
 
     def _evict(self) -> None:
-        # Checked after every access, not only on insert: a rollout grows as its calls arrive, so
-        # the budget can be exceeded without any new rollout appearing.
+        # Check after every access because existing rollouts can grow.
         while self._rollouts and (len(self._rollouts) > self._max_rollouts or self.total_tokens > self._max_tokens):
             oldest = next(iter(self._rollouts))
-            # Never evict the only rollout: at long context a single one can exceed the budget, and
-            # dropping it would disable lineage entirely rather than bound it.
+            # Never evict the only rollout.
             if len(self._rollouts) == 1:
                 return
             self._rollouts.pop(oldest)
@@ -411,9 +332,8 @@ class LineageIndex:
     def drop(self, rollout_id: str) -> None:
         """Release a rollout's lineage early.
 
-        Unused by Gym's own path, because the model server has no signal that a rollout
-        finished. A framework that implements ``TokenSink`` in the same process
-        does have one, and should call this when it retires the records.
+        Gym's model server has no rollout-completion signal.
+        An in-process framework can call this when it retires the records.
         """
         self._rollouts.pop(rollout_id, None)
 
@@ -425,10 +345,9 @@ class LineageIndex:
 
 
 class InMemoryLineageStore:
-    """Worker-local fallback implementing the external lineage contract.
+    """Provide lineage within one worker.
 
-    Safe for a single worker. Multi-worker deployments that need exact parent
-    links or prefix supply configure a shared ``LineageStore`` implementation.
+    Multi-worker deployments require a shared ``LineageStore``.
     """
 
     def __init__(self, max_rollouts: int = 512, max_tokens: int = 8_000_000) -> None:
@@ -466,7 +385,12 @@ class InMemoryLineageStore:
 
 
 class FileLineageStore:
-    """Process-shared lineage for Gym's local file capture deployment."""
+    """Share append-only JSONL lineage across local workers.
+
+    Each worker caches records through its last byte offset.
+    Reads parse only the newly appended tail.
+    Locked appends provide read-after-write visibility across workers.
+    """
 
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)

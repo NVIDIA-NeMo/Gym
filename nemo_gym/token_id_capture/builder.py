@@ -97,7 +97,7 @@ class BuildNotes:
     unresolved_retries: list[str] = field(default_factory=list)
     # Calls without generated tokens are excluded from the chain.
     empty_generation_calls: list[str] = field(default_factory=list)
-    # Why a recorded parent link was not used, by reason.
+    # Count why recorded parent links were not used.
     parent_link_failures: dict[str, int] = field(default_factory=dict)
 
 
@@ -162,17 +162,12 @@ def _resolve_parent(
     by_call_id: dict[str, "_Node"],
     prefix_index: _PrefixIndex,
 ) -> tuple["_Node | None", bool, str | None]:
-    """Find this call's parent, preferring the recorded link over prefix matching.
+    """Find this call's parent.
 
-    Returns ``(parent, ambiguous, note)``. ``note`` names why the recorded link
-    was not used, so a run can report how often it fell back instead of silently
-    behaving differently.
-
-    The recorded link is verified rather than trusted: the child's prompt must
-    actually start with the parent's cumulative sequence, checked by digest so
-    it costs a hash of a prefix instead of comparing whole arrays. A stale store
-    (a rerun that appended onto a previous attempt's records) fails here and
-    falls back rather than merging two attempts into one trajectory.
+    Prefer a verified recorded link.
+    A missing parent target falls back to strict longest token-prefix matching.
+    A digest mismatch returns no parent and quarantines the call.
+    ``note`` reports why the recorded link was not used.
     """
     prompt = list(node.entry.prompt_token_ids)
     claimed = node.entry.parent_call_id
