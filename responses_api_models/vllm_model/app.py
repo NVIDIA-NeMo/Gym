@@ -595,14 +595,6 @@ class VLLMModel(SimpleResponsesAPIModel):
     async def chat_completions(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
-        original_max_tokens = body.max_tokens
-        original_max_completion_tokens = body.max_completion_tokens
-        body.max_tokens = None
-        body.max_completion_tokens = None
-        print(
-            f"Hit max_tokens: {original_max_tokens} max_completion_tokens: {original_max_completion_tokens}, updated to {body.max_tokens} and {body.max_completion_tokens}, respectively"
-        )
-
         if self.config.use_completions_api:
             return await self._chat_completions_via_completions_api(request, body)
 
