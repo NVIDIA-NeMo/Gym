@@ -226,7 +226,7 @@ evaluation-side diagnostics and never expose them as policy-visible data.
 ```text
 app.py                              two concurrent strict-JSON judge calls
 util.py                             row validation, parsing, reward mappings
-configs/bbq_two_judge.yaml          resource server and one-step agent
+configs/bbq.yaml                    resource server and one-step agent
 configs/bbq_judge_model.yaml        environment-backed judge endpoint (Gemma-4-31B-IT)
 configs/verifier_prompt_templates.yaml  versioned judge prompts
 data/example.jsonl                  five enriched BBQ fixtures

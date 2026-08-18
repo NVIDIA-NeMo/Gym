@@ -68,7 +68,7 @@ logger = logging.getLogger(__name__)
 class BBQTwoJudgeConfig(BaseResourcesServerConfig):
     """Runtime configuration for the shared judge endpoint and prompt templates."""
 
-    name: str = "bbq_two_judge"
+    name: str = "bbq"
     judge_model_server: ModelServerRef
     judge_chat_create_params: NeMoGymChatCompletionCreateParamsNonStreaming
     judge_system_message: str | None = None

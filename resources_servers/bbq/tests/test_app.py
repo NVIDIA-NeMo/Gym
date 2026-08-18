@@ -99,7 +99,7 @@ def make_server(
         host="127.0.0.1",
         port=8080,
         entrypoint="app.py",
-        name="bbq_two_judge",
+        name="bbq",
         judge_model_server=ModelServerRef(
             type="responses_api_models",
             name="bbq_judge_model",

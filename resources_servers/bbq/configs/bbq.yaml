@@ -39,9 +39,9 @@
 #
 # Supply a policy-model config separately when collecting rollouts.
 
-bbq_two_judge:
+bbq:
   resources_servers:
-    bbq_two_judge:
+    bbq:
       entrypoint: app.py
       domain: safety
       verified: false
@@ -79,14 +79,14 @@ bbq_two_judge:
       judge_max_attempts: 3
       judge_retry_backoff_seconds: 2.0
 
-bbq_two_judge_simple_agent:
+bbq_simple_agent:
   responses_api_agents:
     simple_agent:
       max_steps: 1  # Single-turn comparative QA
       entrypoint: app.py
       resources_server:
         type: resources_servers
-        name: bbq_two_judge
+        name: bbq
       model_server:
         type: responses_api_models
         name: policy_model

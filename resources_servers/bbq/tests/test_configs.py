@@ -23,8 +23,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_main_config_is_prototype_only() -> None:
-    config = yaml.safe_load((ROOT / "configs/bbq_two_judge.yaml").read_text(encoding="utf-8"))
-    server = config["bbq_two_judge"]["resources_servers"]["bbq_two_judge"]
+    config = yaml.safe_load((ROOT / "configs/bbq.yaml").read_text(encoding="utf-8"))
+    server = config["bbq"]["resources_servers"]["bbq"]
     assert server["verified"] is False
     assert server["judge_model_server"]["name"] == "bbq_judge_model"
     assert "grpo" not in str(config).lower()

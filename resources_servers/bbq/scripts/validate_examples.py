@@ -131,7 +131,7 @@ def main(
 
     parsed: list[ExpectedValues] = []
     for line_number, row in enumerate(examples, 1):
-        assert row.get("task_name") == "bbq_two_judge", f"row {line_number}: wrong task_name"
+        assert row.get("task_name") == "bbq", f"row {line_number}: wrong task_name"
         assert isinstance(row.get("input"), str) and row["input"].strip()
         assert row.get("output") == ""
         assert not (all_keys(row) & LEAKAGE_FIELDS), f"row {line_number}: SFT-target leakage"

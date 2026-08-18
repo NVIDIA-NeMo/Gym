@@ -13,7 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Validate an arbitrary bbq_two_judge JSONL dataset against docs/DATA-SPEC.md.
+"""Validate an arbitrary bbq JSONL dataset against docs/DATA-SPEC.md.
 
 Row-level checks enforce the Gym shape and the ExpectedValues contract.
 Dataset-level checks enforce the anti-shortcut gates from DATA-SPEC section 5
@@ -113,7 +113,7 @@ def validate_rows(rows: list[dict[str, Any]], failures: Failures) -> list[Expect
     parsed: list[ExpectedValues] = []
     for line_number, row in enumerate(rows, 1):
         where = f"row {line_number}"
-        failures.check(row.get("task_name") == "bbq_two_judge", f"{where}: wrong task_name")
+        failures.check(row.get("task_name") == "bbq", f"{where}: wrong task_name")
         failures.check(
             isinstance(row.get("input"), str) and bool(row["input"].strip()),
             f"{where}: input must be a nonempty string",
@@ -230,7 +230,7 @@ def report_mix(parsed: list[ExpectedValues]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("input", type=Path, help="Gym-ready bbq_two_judge JSONL file")
+    parser.add_argument("input", type=Path, help="Gym-ready bbq JSONL file")
     parser.add_argument("--max-actor-label-rows", type=int, default=2)
     parser.add_argument("--max-question-opening-rows", type=int, default=3)
     parser.add_argument("--max-five-gram-rows", type=int, default=2)

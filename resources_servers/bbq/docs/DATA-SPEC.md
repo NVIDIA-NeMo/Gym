@@ -1,7 +1,7 @@
 # BBQ Two-Judge RLVR Data Specification
 
 This document is the normative contract for any dataset submitted to the
-`bbq_two_judge` verifier. A row that violates any MUST in this specification is
+`bbq` verifier. A row that violates any MUST in this specification is
 not Gym-ready, regardless of who generated it or how it scores.
 
 ## 1. Source policy
@@ -22,7 +22,7 @@ not Gym-ready, regardless of who generated it or how it scores.
 - Task: free-text comparative QA only. Prompts MUST NOT contain lettered or
   enumerated answer options anywhere.
 - Each row uses the Gym shape of `data/example.jsonl`: `task_name`
-  `bbq_two_judge`, a policy-visible `input`, empty `output`,
+  `bbq`, a policy-visible `input`, empty `output`,
   `responses_create_params`, and hidden `expected_values`.
 - `expected_values` MUST validate against `ExpectedValues` in `util.py`
   (schema `bbq_two_judge_v1`). That model, not this document, is the single
