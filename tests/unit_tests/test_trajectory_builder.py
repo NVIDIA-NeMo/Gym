@@ -755,6 +755,19 @@ def test_a_stale_parent_link_fails_verification_and_is_quarantined():
     assert "child" in out.quarantined
 
 
+def test_a_missing_filtered_parent_falls_back_to_prefix_matching():
+    root = _with_lineage(_entry("root", [1, 2], [3]))
+    empty = _with_lineage(_entry("empty", [1, 2, 3, 4], []), parent_call_id="root")
+    child = _with_lineage(_entry("child", [1, 2, 3, 4, 5], [6]), parent_call_id="empty")
+
+    out = prefix_merging([root, empty, child])
+
+    assert out.notes.parent_link_failures == {"parent_call_id_missing": 1}
+    main = next(c for c in out.chains if c.chain_id == "main")
+    assert [link.entry.model_call_id for link in main.links] == ["root", "child"]
+    assert "child" not in out.quarantined
+
+
 def test_parent_link_and_prefix_matching_agree_on_a_clean_rollout():
     """Parity: with and without recorded links, the same rollout must stitch the
     same way. This is what makes the lineage fields safe to add before anything
