@@ -10,6 +10,8 @@ swebench_resources_server:          # instance name — how agents/CLI refer to 
 
       clear_swebench_debug_logs: true
 
+      apply_anti_cheating: true
+
       evaluation_timeout: 1800
 
       sandbox_provider: sandbox

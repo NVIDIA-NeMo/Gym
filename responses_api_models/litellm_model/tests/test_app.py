@@ -159,6 +159,18 @@ class TestNormalizeToResponse:
         assert result["output"][0]["content"][0]["text"] == "Hi from Opus!"
         assert result["usage"]["input_tokens"] == 10
         assert result["usage"]["output_tokens"] == 5
+        assert result["usage"]["input_tokens_details"]["cached_tokens"] is None
+        assert result["usage"]["output_tokens_details"]["reasoning_tokens"] is None
+
+    def test_chat_completion_usage_details_preserved(self) -> None:
+        data = deepcopy(CHAT_COMPLETION_RESPONSE)
+        data["usage"]["prompt_tokens_details"] = {"cached_tokens": 4}
+        data["usage"]["completion_tokens_details"] = {"reasoning_tokens": 2}
+
+        result = _normalize_to_response(data)
+
+        assert result["usage"]["input_tokens_details"]["cached_tokens"] == 4
+        assert result["usage"]["output_tokens_details"]["reasoning_tokens"] == 2
 
     def test_hybrid_format_normalization(self) -> None:
         """chat.completion with output[] (LiteLLM hybrid) is normalized."""
