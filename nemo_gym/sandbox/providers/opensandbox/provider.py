@@ -1244,7 +1244,6 @@ class OpenSandboxProvider:
             if not isinstance(error, SandboxBackendUnreachableError) and _exception_status_code(error) != 502:
                 raise
 
-            oom_status = None
             get_info = getattr(handle.raw, "get_info", None)
             if get_info is not None:
                 deadline = asyncio.get_running_loop().time() + 5.0
@@ -1264,23 +1263,16 @@ class OpenSandboxProvider:
                     message = getattr(raw_status, "message", None)
                     status_text = f"{reason} {message}"
                     if re.search(r"\boom[\s_-]*killed\b|\bout of memory\b", status_text, re.IGNORECASE):
-                        oom_status = raw_status
-                        break
+                        message = str(message or "")[:500]
+                        raise SandboxBackendUnreachableError(
+                            "Sandbox was OOM-killed. "
+                            f"OpenSandbox status: state={state!r}, reason={reason!r}, message={message!r}; "
+                            f"sandbox_id={handle.sandbox_id!r}"
+                        ) from error
                     if message and _to_sandbox_status(state) in {SandboxStatus.ERROR, SandboxStatus.STOPPED}:
                         break
                     await asyncio.sleep(min(0.5, max(0.0, deadline - asyncio.get_running_loop().time())))
-            if oom_status is None:
-                raise
-
-            state = getattr(oom_status, "state", None)
-            reason = getattr(oom_status, "reason", None)
-            message = getattr(oom_status, "message", None)
-            message = str(message or "")[:500]
-            raise SandboxBackendUnreachableError(
-                "Sandbox was OOM-killed. "
-                f"OpenSandbox status: state={state!r}, reason={reason!r}, message={message!r}; "
-                f"sandbox_id={handle.sandbox_id!r}"
-            ) from error
+            raise
 
     async def _exec_background(
         self,

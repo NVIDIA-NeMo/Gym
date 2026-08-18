@@ -813,6 +813,7 @@ async def test_exec_background_reports_oom_status_after_502(monkeypatch: pytest.
     monkeypatch.setattr(
         opensandbox_provider, "_require_opensandbox_sdk", lambda: (object, object, dict, object, object)
     )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
     provider = opensandbox_provider.OpenSandboxProvider(
         connection={"request_timeout_s": 5},
         probe={"command": None},
