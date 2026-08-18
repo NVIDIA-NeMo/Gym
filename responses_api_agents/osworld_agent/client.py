@@ -1716,7 +1716,9 @@ def run_osworld_task(
         }
         if use_gym_sandbox:
             effective_sandbox_spec = dict(sandbox_spec or {})
-            effective_sandbox_spec.setdefault("image", container_image)
+            sandbox_provider_name = str(next(iter(sandbox_provider_config or {}), "")).lower().strip()
+            if sandbox_provider_name == "docker":
+                effective_sandbox_spec.setdefault("image", container_image)
             env_kwargs.update(
                 {
                     "sandbox_provider": dict(sandbox_provider_config or {}),
