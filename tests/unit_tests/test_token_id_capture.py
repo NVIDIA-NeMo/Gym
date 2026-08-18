@@ -1526,13 +1526,12 @@ async def test_an_external_endpoint_round_trips_the_sink_and_source_protocols():
             "enabled": True,
             "rebuild_response": True,
             "sink": target,
-            "source": target,
         }
     }
     client = TestClient(_server(config).setup_webserver())
 
     response = client.post("/ng-rollout/task0-adapter/training-token-capture/v1/responses", json={"input": "hi"})
-    source = TokenIdCaptureConfig.model_validate(config).build_source()
+    source = _ConfiguredEndpoint()
     snapshot = await source.freeze("task0-adapter")
 
     assert response.status_code == 200
