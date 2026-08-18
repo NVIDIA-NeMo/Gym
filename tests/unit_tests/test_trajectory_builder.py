@@ -245,13 +245,14 @@ def test_projection_handles_content_only_leading_item():
 
 
 def test_retry_sibling_is_dropped_and_main_chain_is_deterministic():
-    # c2a and c2b are a retry pair (identical prompt, divergent generation). c3 extends c2a.
+    # ``c2a`` and ``c2b`` are retries with the same prompt.
+    # ``c3`` extends ``c2a``.
     c1 = _entry("c1", [1, 2, 3], [10, 11])
     c2a = _entry("c2a", [1, 2, 3, 10, 11, 4], [12])
     c2b = _entry("c2b", [1, 2, 3, 10, 11, 4], [99])
     c3 = _entry("c3", [1, 2, 3, 10, 11, 4, 12, 5], [13])
     out = prefix_merging([c1, c2a, c2b, c3])
-    assert "c2b" in out.quarantined  # unextended retry sibling dropped
+    assert "c2b" in out.quarantined  # Drop the unextended retry.
     main = next(c for c in out.chains if c.chain_id == "main")
     assert [link.entry.model_call_id for link in main.links] == ["c1", "c2a", "c3"]
     assert_prefix_contiguity(project_main_chain_response("t0-r0", out))
@@ -705,31 +706,28 @@ def _with_lineage(entry, parent_call_id=None):
 
 
 def test_recorded_parent_link_resolves_a_final_call_retry_exactly():
-    """Two siblings share a prompt and differ only in their generation.
+    """Use a recorded parent link to resolve retries exactly.
 
-    Prefix matching cannot tell which one the harness kept, because both are
-    equally valid children. A recorded parent link on the next call names the
-    survivor, so the other is provably unused rather than tie-broken.
+    The siblings share a prompt and differ only in their generation.
+    Prefix matching cannot identify which generation the harness kept.
+    The next call's parent link identifies the survivor.
     """
     root = _with_lineage(_entry("root", [1, 2], [3]))
     kept = _with_lineage(_entry("kept", [1, 2, 3, 4], [5]), parent_call_id="root")
     dropped = _with_lineage(_entry("dropped", [1, 2, 3, 4], [9]), parent_call_id="root")
-    # The next call continued `kept`, and says so.
+    # The next call explicitly continues ``kept``.
     nxt = _with_lineage(_entry("next", [1, 2, 3, 4, 5, 6], [7]), parent_call_id="kept")
 
     out = prefix_merging([root, kept, dropped, nxt])
     main = next(c for c in out.chains if c.chain_id == "main")
     assert [link.entry.model_call_id for link in main.links] == ["root", "kept", "next"]
     assert "dropped" in out.quarantined
-    # Resolved, so nothing is flagged for masking.
+    # Exact resolution leaves no retry unresolved.
     assert out.notes.unresolved_retries == []
 
 
 def test_unresolvable_final_retry_is_flagged_not_silently_tie_broken():
-    """A retry of the LAST call has no successor to name the survivor. Neither
-    inference nor a parent link can resolve it, so it must be reported so the
-    caller can mask the rollout instead of training on a generation the client
-    may never have received."""
+    """Report a final-call retry that has no successor."""
     root = _with_lineage(_entry("root", [1, 2], [3]))
     a = _with_lineage(_entry("a", [1, 2, 3, 4], [5]), parent_call_id="root")
     b = _with_lineage(_entry("b", [1, 2, 3, 4], [9]), parent_call_id="root")
@@ -739,13 +737,11 @@ def test_unresolvable_final_retry_is_flagged_not_silently_tie_broken():
 
 
 def test_a_stale_parent_link_fails_verification_and_is_quarantined():
-    """A rerun that appended onto a previous attempt's records must not merge two
-    attempts. The digest check catches the bad edge and refuses to infer around
-    an explicit but invalid lineage claim."""
+    """Quarantine an explicit parent link with a digest mismatch."""
     root = _with_lineage(_entry("root", [1, 2], [3]))
     child = _entry("child", [1, 2, 3, 4], [5])
     stamp_lineage(child, "root")
-    # Corrupt the recorded parent's digest, as a stale record would.
+    # Simulate a stale record by corrupting the parent digest.
     root.digest = compute_digest([42, 42, 42])
 
     out = prefix_merging([root, child])
@@ -769,9 +765,7 @@ def test_a_missing_filtered_parent_falls_back_to_prefix_matching():
 
 
 def test_parent_link_and_prefix_matching_agree_on_a_clean_rollout():
-    """Parity: with and without recorded links, the same rollout must stitch the
-    same way. This is what makes the lineage fields safe to add before anything
-    populates them."""
+    """Build the same clean rollout with links or strict prefix matching."""
     plain = [
         _entry("c1", [1, 2, 3], [4, 5]),
         _entry("c2", [1, 2, 3, 4, 5, 6], [7]),
@@ -792,9 +786,7 @@ def test_parent_link_and_prefix_matching_agree_on_a_clean_rollout():
 
 
 def test_a_recorded_parent_is_verified_not_trusted():
-    """A rerun appends to the same rollout file, so a record can name a parent from a previous
-    attempt whose tokens are an unrelated sequence. Chaining the two would train on a
-    conversation that never happened, so the digest check has to reject it and fall back."""
+    """Quarantine a recorded parent with unrelated tokens."""
     previous_attempt = _entry("old", [1, 2, 3], [4, 5])
     this_attempt = _entry("new", [90, 91, 92, 93], [94], parent="old")
 
@@ -806,8 +798,7 @@ def test_a_recorded_parent_is_verified_not_trusted():
 
 
 def test_a_correct_parent_link_is_used():
-    """The other half: a link that verifies must be honoured, or the recorded lineage buys
-    nothing over matching the parent by token prefix."""
+    """Use a recorded parent link that passes verification."""
     parent = _entry("p", [1, 2], [3, 4])
     child = _entry("c", [1, 2, 3, 4, 5], [6], parent="p")
 
