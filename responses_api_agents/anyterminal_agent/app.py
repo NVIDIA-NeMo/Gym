@@ -340,12 +340,22 @@ class AnyTerminalAgentConfig(BaseResponsesAPIAgentConfig):
     agent_config_class: str = Field(description="Agent config class name")
     agent_kwargs: Dict[str, Any] = Field(default_factory=dict)
 
+    oracle_mode: bool = Field(
+        default=False,
+        description="Run the task's gold solution (solution/solve.sh) instead of an agent, then verify. "
+        "Environment/gold verification; no model calls are made.",
+    )
     container_formatter: str | list[str] = Field(
         default="docker://{docker_image}",
         description="Template for the task's image reference: use as a path if it ends with .sif or starts with / or ., else as a docker:// URI.",
     )
     sandbox_provider: Dict[str, Any] = Field(default_factory=lambda: {"docker": {}})
     sandbox_default_metadata: Dict[str, Any] = Field(default_factory=dict)
+    sandbox_provider_options: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Per-sandbox provider options forwarded via SandboxSpec.provider_options "
+        "(e.g. OpenSandbox image_auth / platform).",
+    )
     # Docker network for the agent container. "host" lets the in-container agent reach a
     # model server on host loopback; None uses the docker default (e.g. for a remote server).
     docker_network: Optional[str] = "host"
@@ -579,6 +589,8 @@ class RunTerminalAgent(BaseModel):
         return env
 
     async def _run_agent(self, sandbox: AsyncSandbox, cfg: AnyTerminalInstanceConfig) -> tuple[float, bool]:
+        if cfg.oracle_mode:
+            return await self._run_oracle(sandbox, cfg)
         t0 = time.time()
         result = await sandbox.exec(
             _apt_root_sandbox(cfg) + (cfg.agent_command_str or ""),
@@ -600,6 +612,34 @@ class RunTerminalAgent(BaseModel):
             detail = result.stderr or result.stdout or ""
             print(f"[{cfg.task_name}] agent exit {result.return_code}: {detail[-2000:]}", flush=True)
         return time.time() - t0, result.error_type in ("timeout", "sandbox")
+
+    async def _run_oracle(self, sandbox: AsyncSandbox, cfg: AnyTerminalInstanceConfig) -> tuple[float, bool]:
+        """Gold verification: stage the task's solution/ at /solution (harbor contract) and run solve.sh."""
+        archive = await asyncio.to_thread(self._archive, Path(cfg.problem_info["task_dir"]) / "solution")
+        try:
+            await sandbox.upload(archive, "/tmp/anyterminal-solution.tar.gz")
+            staged = await sandbox.exec(
+                "rm -rf /solution && mkdir -p /solution && tar -xzf /tmp/anyterminal-solution.tar.gz -C /solution",
+                timeout_s=300,
+                user="root",
+            )
+            if staged.return_code != 0:
+                raise RuntimeError(staged.stderr or "failed to stage oracle solution")
+        finally:
+            archive.unlink(missing_ok=True)
+        t0 = time.time()
+        workdir = cfg.problem_info.get("workdir")
+        prefix = f"cd {shlex.quote(workdir)} && " if workdir else ""
+        # setsid: daemons the solution backgrounds must survive this exec's process-group cleanup
+        solve = "if command -v setsid >/dev/null; then setsid --wait bash /solution/solve.sh; else bash /solution/solve.sh; fi"
+        result = await sandbox.exec(
+            _apt_root_sandbox(cfg) + prefix + solve,
+            timeout_s=cfg.tb_agent_timeout,
+            user="root",
+        )
+        if result.return_code != 0:
+            print(f"[{cfg.task_name}] oracle exit {result.return_code}: {(result.stderr or '')[-2000:]}", flush=True)
+        return time.time() - t0, result.error_type == "timeout"
 
     async def _stage_tests(self, cfg: AnyTerminalInstanceConfig) -> None:
         """Copy the task's test files into the staging dir, visible to the sandbox at /tests."""
@@ -636,6 +676,13 @@ class RunTerminalAgent(BaseModel):
                 ttl_s=cfg.tb_sandbox_ttl,
                 workdir=cfg.problem_info.get("workdir"),
                 metadata=cfg.sandbox_default_metadata,
+                provider_options=cfg.sandbox_provider_options,
+                resources={
+                    "cpu": max(2.0, float(cfg.problem_info.get("cpus") or 1)),
+                    "memory_mib": max(
+                        4096, int(float(cfg.problem_info.get("memory_mb") or 2048)) + cfg.agent_overhead_mb
+                    ),
+                },
             ),
         )
         agent_timed_out = container_timed_out = False
@@ -643,7 +690,7 @@ class RunTerminalAgent(BaseModel):
         agent_run_time = eval_run_time = None
         try:
             await sandbox.start()
-            if not self._uses_bind_mounts(cfg):
+            if not self._uses_bind_mounts(cfg) and not cfg.oracle_mode:
                 await self._stage_remote_runtime(sandbox, cfg)
             agent_run_time, agent_timed_out = await self._run_agent(sandbox, cfg)
             await self._stage_tests(cfg)
@@ -735,7 +782,11 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
         agent_deps_dir = workspace
         agent_deps_archive = None
         agent_deps_url = None
-        if runtime_source == "auto":
+        if self.config.oracle_mode:
+            # Oracle mode replays the task's gold solution; no agent runtime is staged.
+            agent_deps_dir = workspace / "deps" / "oracle-unused"
+            agent_deps_dir.mkdir(parents=True, exist_ok=True)
+        elif runtime_source == "auto":
             agent_deps_dir = GymAgentHarnessProcessor(config=self.config).setup()
         elif runtime_source == "baked":
             if not remote_provider:
@@ -750,7 +801,7 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
             agent_deps_archive = Path(runtime_source).expanduser()
             if not agent_deps_archive.is_file():
                 raise ValueError(f"agent runtime archive not found: {agent_deps_archive}")
-        if remote_provider and runtime_source == "auto":
+        if remote_provider and runtime_source == "auto" and not self.config.oracle_mode:
             agent_deps_archive = workspace / f".{agent_deps_dir.name}.tar.gz"
             sentinel = agent_deps_dir / ".installed"
             if not agent_deps_archive.exists() or agent_deps_archive.stat().st_mtime < sentinel.stat().st_mtime:
@@ -865,7 +916,8 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
         params.metrics_fpath.write_text("{}")
 
         # Write instruction.txt + agent_runner.py, then resolve the in-sandbox run command.
-        params.agent_command_str = GymAgentHarnessProcessor(config=params).get_run_command()
+        if not params.oracle_mode:
+            params.agent_command_str = GymAgentHarnessProcessor(config=params).get_run_command()
 
         return params
 
