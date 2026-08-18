@@ -22,6 +22,7 @@ from copy import deepcopy
 from threading import Lock
 from time import monotonic, time, time_ns
 from typing import Any, ClassVar, Dict, List, Optional, Union
+from uuid import uuid4
 
 from aiohttp.client_exceptions import ClientResponseError
 from fastapi import Request
@@ -1388,7 +1389,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             )
 
         chat_completion_dict = {
-            "id": completion_dict.get("id", "chatcmpl-completions"),
+            "id": completion_dict.get("id") or f"chatcmpl-{uuid4().hex}",
             "object": "chat.completion",
             "created": completion_dict.get("created", int(time())),
             "model": completion_dict.get("model", self.config.model),
@@ -1408,7 +1409,8 @@ class VLLMModel(SimpleResponsesAPIModel):
 
     def _create_empty_chat_completion(self) -> NeMoGymChatCompletion:
         return NeMoGymChatCompletion(
-            id="chtcmpl-123",
+            # harbor_agent's nemo_gym_llm.py detects fabricated responses by this prefix.
+            id=f"chtcmpl-123-{uuid4().hex}",
             object="chat.completion",
             created=int(time()),
             model=self.config.model,
