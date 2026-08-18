@@ -1,0 +1,11 @@
+# Generated / downloaded training data — never commit (multi-GB).
+# The shared resources_servers/.gitignore only matches data/*train.jsonl and misses
+# the train_augmented/ shards, so ignore the whole data dir here.
+# NOTE: `data/*` not `data/` — git does not descend into an excluded DIRECTORY, so a
+# negation for a file inside it can never re-include that file.
+data/*
+
+# ...except the small example rows the config points at. configs/citation_if.yaml
+# declares data/example.jsonl as the `example` dataset, so it must be tracked or a
+# fresh clone gets a config referencing a missing file.
+!data/example.jsonl
