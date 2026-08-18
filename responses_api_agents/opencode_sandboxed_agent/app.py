@@ -15,6 +15,7 @@
 
 import json
 import sys
+from copy import deepcopy
 from pathlib import Path
 from shlex import quote
 from time import time
@@ -65,7 +66,6 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     remote_opencode_install_script_path: Optional[str] = None
     remote_opencode_binary_path: Optional[str] = None
     opencode_config: Dict[str, Any] = Field(default_factory=dict)
-    max_context_window: int
 
     # Sandbox config
     sandbox_provider: str
@@ -125,7 +125,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             ttl_s=self.config.sandbox_config.get("ttl_s", None),
             ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s", None),
             workdir=None,  # Default to container's WORKDIR
-            env=dict(),
+            env=self._sandbox_env(),
             files=dict(),
             metadata=provider_default_metadata
             | self.config.sandbox_config.get("metadata", {})
@@ -142,8 +142,24 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         return sandbox
 
-    def _create_opencode_config(self) -> Dict[str, Any]:
+    @staticmethod
+    def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+        for key, value in override.items():
+            if key in base and isinstance(base[key], dict) and isinstance(value, dict):
+                OpenCodeSandboxedAgent._deep_merge(base[key], value)
+            else:
+                base[key] = value
+        return base
+
+    def _sandbox_env(self) -> Dict[str, str]:
         return {
+            str(key): str(value)
+            for key, value in self.config.sandbox_config.get("env", {}).items()
+            if value is not None
+        }
+
+    def _create_opencode_config(self) -> Dict[str, Any]:
+        config = {
             "model": "nemo_gym/dummy_model",
             "$schema": "https://opencode.ai/config.json",
             "provider": {
@@ -157,16 +173,19 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     "models": {
                         "dummy_model": {
                             "limit": {
-                                "context": self.config.max_context_window,
-                                "input": self.config.max_context_window,
-                                "output": self.config.max_context_window,
+                                "context": 0,
+                                "input": 0,
+                                # @bxyu-nvidia: OpenCode defaults to 32k here https://github.com/anomalyco/opencode/blob/58a99916bb96edf5cf605dc03e1be1e4bacf9ff7/packages/opencode/src/provider/transform.ts#L21
+                                # and there is no way to set it to null.
+                                # We set it here to explicitly acknowledge that this parameter is set.
+                                "output": 32_000,
                             },
                         },
                     },
                 }
             },
-            **self.config.opencode_config,
         }
+        return self._deep_merge(config, deepcopy(self.config.opencode_config))
 
     def _opencode_export_to_usages(self, opencode_export: Dict[str, Any]) -> List[NeMoGymResponseUsage]:
         usages: List[NeMoGymResponseUsage] = []
@@ -289,6 +308,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && VERSION={self.config.opencode_version} bash "$installer\""""
 
         # --auto is to approve not explicitly denied requests.
+        # `--` ends option parsing so prompts beginning with `-` remain positional arguments.
         command = f"""
         echo "Shell: $SHELL" \
         && {conda_activate_command_str} \
@@ -307,13 +327,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             print(f"OpenCode config JSON str: {opencode_config_content}", file=sys.stderr)
 
         try:
+            opencode_env = self._sandbox_env()
+            opencode_env["OPENCODE_CONFIG_CONTENT"] = opencode_config_content
             result = await sandbox.exec(
                 command=command,
                 timeout_s=self.config.sandbox_timeout,
-                env={
-                    "OPENCODE_CONFIG_CONTENT": opencode_config_content,
-                    "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": str(self.config.max_context_window),
-                },
+                env=opencode_env,
             )
         except:
             result = None
