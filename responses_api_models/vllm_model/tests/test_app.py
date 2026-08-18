@@ -2578,7 +2578,7 @@ class TestApp:
 
         expected_response = NeMoGymResponse(
             **(COMMON_RESPONSE_PARAMS | {"status": "incomplete"}),
-            id="chtcmpl-123",
+            id=f"chtcmpl-123-{FIXED_UUID}",
             object="response",
             tools=[],
             created_at=FIXED_TIME,
@@ -2608,6 +2608,7 @@ class TestApp:
         )
 
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
+        monkeypatch.setattr("responses_api_models.vllm_model.app.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
 
         response = client.post(
@@ -4048,17 +4049,30 @@ class TestCompletionsBackendResponseTranslation:
         assert msg.generation_log_probs == [-0.1, -0.2]
         assert msg.prompt_token_ids == [6, 7, 8]
 
-    def test_default_id_uses_chat_completion_prefix(self) -> None:
+    @mark.parametrize(
+        "fabricate, id_prefix",
+        [
+            (
+                lambda model: model._completion_dict_to_chat_completion(
+                    {
+                        "object": "text_completion",
+                        "created": 123,
+                        "model": "base-model",
+                        "choices": [{"index": 0, "text": "ok", "finish_reason": "stop"}],
+                    }
+                ),
+                "chatcmpl-",
+            ),
+            (lambda model: model._create_empty_chat_completion(), "chtcmpl-123-"),
+        ],
+        ids=["missing_backend_id", "empty_chat_completion"],
+    )
+    def test_fabricated_ids_minted_unique(self, fabricate, id_prefix) -> None:
         model = _make_completions_backend_model()
-        chat_completion = model._completion_dict_to_chat_completion(
-            {
-                "object": "text_completion",
-                "created": 123,
-                "model": "base-model",
-                "choices": [{"index": 0, "text": "ok", "finish_reason": "stop"}],
-            }
-        )
-        assert chat_completion.id == "chatcmpl-completions"
+        first, second = fabricate(model), fabricate(model)
+        assert first.id.startswith(id_prefix)
+        assert second.id.startswith(id_prefix)
+        assert first.id != second.id
 
     def test_missing_logprobs_raises(self) -> None:
         model = _make_completions_backend_model(return_token_id_information=True)
@@ -5138,14 +5152,16 @@ class TestCompletionIdPropagation:
         params = NeMoGymResponseCreateParamsNonStreaming(input="hello", model="dummy_model")
         return converter.chat_completion_to_response(params, completion)
 
-    def test_backend_id_propagates(self, monkeypatch):
-        response = self._convert("chtcmpl-join-key", monkeypatch)
-        assert response.id == "chtcmpl-join-key"
+    @mark.parametrize(
+        "backend_id, expected_response_id, expected_completion_id",
+        [
+            ("chtcmpl-join-key", "chtcmpl-join-key", "chtcmpl-join-key"),
+            ("", f"resp_{FIXED_UUID}", None),
+        ],
+        ids=["backend_id_propagates", "missing_id_falls_back_to_minted"],
+    )
+    def test_completion_id_propagation(self, backend_id, expected_response_id, expected_completion_id, monkeypatch):
+        response = self._convert(backend_id, monkeypatch)
+        assert response.id == expected_response_id
         (item,) = response.output
-        assert item.completion_id == "chtcmpl-join-key"
-
-    def test_missing_backend_id_falls_back_to_minted(self, monkeypatch):
-        response = self._convert("", monkeypatch)
-        assert response.id == f"resp_{FIXED_UUID}"
-        (item,) = response.output
-        assert item.completion_id is None
+        assert item.completion_id == expected_completion_id
