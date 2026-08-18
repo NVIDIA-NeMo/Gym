@@ -19,6 +19,7 @@ import asyncio
 import pytest
 
 from nemo_gym.token_id_capture import (
+    TokenCaptureSnapshot,
     assert_prefix_contiguity,
     per_request,
     prefix_merging,
@@ -26,6 +27,7 @@ from nemo_gym.token_id_capture import (
     project_main_chain_response,
     token_id_capture_dirs_from_config,
     trajectories_for_rollout,
+    trajectories_from_source,
 )
 from nemo_gym.token_id_capture.records import TokenEntry
 from nemo_gym.token_id_capture.store import TokenCaptureStore
@@ -213,7 +215,7 @@ def test_projection_handles_content_only_leading_item():
 
 
 def test_consumer_reads_store_and_builds(tmp_path):
-    # The co-located consumer: write the rollout's tokens, then build from the store files.
+    # The colocated consumer builds from records written to the local store.
     store = TokenCaptureStore(tmp_path)
     for e in APPEND_ONLY:
         store.append(e.model_copy(update={"rollout_id": "t0-r0"}))
@@ -238,6 +240,119 @@ def test_consumer_reads_store_and_builds(tmp_path):
         13,
         14,
     ]
+
+
+def test_consumer_reads_and_freezes_an_external_source():
+    class Source:
+        async def freeze(self, rollout_id):
+            return TokenCaptureSnapshot(
+                rollout_id=rollout_id,
+                entries=tuple(APPEND_ONLY),
+                incomplete=False,
+                snapshot_id="snapshot-1",
+                version=4,
+            )
+
+        async def drop(self, rollout_id, *, snapshot_id, version):
+            return True
+
+        async def close(self):
+            return None
+
+    built = asyncio.run(trajectories_from_source("t0-r0", Source()))
+
+    assert built["mask_sample"] is False
+    assert built["_capture_snapshot"] == {
+        "snapshot_id": "snapshot-1",
+        "version": 4,
+    }
+
+
+def test_consumer_masks_an_incomplete_external_snapshot():
+    class Source:
+        async def freeze(self, rollout_id):
+            return TokenCaptureSnapshot(
+                rollout_id=rollout_id,
+                entries=(APPEND_ONLY[0],),
+                incomplete=True,
+                snapshot_id="snapshot-2",
+                version=2,
+            )
+
+        async def drop(self, rollout_id, *, snapshot_id, version):
+            return True
+
+        async def close(self):
+            return None
+
+    built = asyncio.run(trajectories_from_source("t0-r0", Source()))
+
+    assert built["mask_sample"] is True
+    assert built["metrics"]["capture_incomplete"] is True
+
+
+def test_consumer_masks_an_empty_external_snapshot():
+    class Source:
+        async def freeze(self, rollout_id):
+            return TokenCaptureSnapshot(
+                rollout_id=rollout_id,
+                entries=(),
+                incomplete=False,
+                snapshot_id="snapshot-empty",
+                version=1,
+            )
+
+        async def drop(self, rollout_id, *, snapshot_id, version):
+            return True
+
+        async def close(self):
+            return None
+
+    built = asyncio.run(trajectories_from_source("t0-r0", Source()))
+
+    assert built["mask_sample"] is True
+    assert built["error"] == "capture contains no token records"
+
+
+def test_consumer_masks_an_external_source_failure():
+    class Source:
+        async def freeze(self, rollout_id):
+            raise RuntimeError("transport unavailable")
+
+        async def drop(self, rollout_id, *, snapshot_id, version):
+            return True
+
+        async def close(self):
+            return None
+
+    built = asyncio.run(trajectories_from_source("t0-r0", Source()))
+
+    assert built["mask_sample"] is True
+    assert "transport unavailable" in built["error"]
+
+
+def test_single_response_consumer_rejects_per_request_builder():
+    class Source:
+        async def freeze(self, rollout_id):
+            return TokenCaptureSnapshot(
+                rollout_id=rollout_id,
+                entries=(APPEND_ONLY[0],),
+                incomplete=False,
+                snapshot_id="snapshot-3",
+                version=1,
+            )
+
+        async def drop(self, rollout_id, *, snapshot_id, version):
+            return True
+
+        async def close(self):
+            return None
+
+    built = asyncio.run(trajectories_from_source("t0-r0", Source(), builder="per_request"))
+
+    assert built["mask_sample"] is True
+    assert built["rebuilt_response"] is None
+    assert "not supported by single-response delivery" in built["error"]
 
 
 def test_consumer_noop_when_disabled_or_absent(tmp_path):

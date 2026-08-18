@@ -95,10 +95,16 @@ def _assemble(
     builder: str,
     model: str,
 ) -> dict:
+    if builder == "per_request":
+        return _failed_build(
+            rollout_id,
+            builder,
+            "per_request returns multiple trajectories and is not supported by single-response delivery",
+            n_calls=len(entries),
+        )
     # A malformed capture must degrade this one rollout, not take down the caller.
-    # Both the contiguity assertion and the flattener raise, and the callers are a
-    # rollout-collection loop and a trainer's step loop, where an escaping exception
-    # kills a whole batch rather than dropping one sample.
+    # The contiguity assertion and flattener can both raise.
+    # An escaping exception would kill a full rollout or training batch.
     try:
         out = run_builder(entries, builder)
         for chain in out.chains:
@@ -120,8 +126,8 @@ def _assemble(
         )
 
     notes = out.notes
-    # Surface what the build dropped, so a rollout that trained on one of five calls does not look
-    # like one that trained on all five.
+    # Surface what the build dropped.
+    # A partial build must not look like a rollout that trained on every call.
     metrics = {
         "n_calls": len(entries),
         "chains": notes.chains,
@@ -131,9 +137,8 @@ def _assemble(
         "delivered_fraction": notes.delivered_fraction,
         "generated_tokens_captured": notes.generated_tokens_captured,
         "generated_tokens_delivered": notes.generated_tokens_delivered,
-        # Calls the model returned with no generated tokens. They carry no training signal and are
-        # kept out of the chain; a non-zero count usually means the output budget or a content
-        # filter is cutting generations off.
+        # Calls with no generated tokens carry no training signal.
+        # A non-zero count can indicate an output-budget or content-filter cutoff.
         "empty_generation_calls": len(notes.empty_generation_calls),
     }
     unresolved = notes.unresolved_retries
@@ -142,8 +147,8 @@ def _assemble(
         "builder": builder,
         "rebuilt_response": response,
         "metrics": metrics,
-        # A retry of the final call leaves two generations with no way to tell which one the client
-        # received. Training on the wrong one is silently off-policy, so the rollout is masked.
+        # A final-call retry can leave two plausible generations.
+        # Mask the rollout because the client-selected generation is unknown.
         "mask_sample": bool(unresolved) or notes.roots != 1 or notes.chains != 1,
         "unresolved_retries": list(unresolved),
     }
@@ -165,9 +170,9 @@ def trajectories_for_rollout(
     for directory in token_capture_dirs:
         store = TokenCaptureStore(directory)
         try:
-            snapshot = store.seal_now(rollout_id)
+            snapshot = store.freeze_now(rollout_id)
         except Exception as error:
-            logger.warning("Could not seal token capture for rollout %s.", rollout_id, exc_info=True)
+            logger.warning("Could not freeze token capture for rollout %s.", rollout_id, exc_info=True)
             return _failed_build(rollout_id, builder, f"{type(error).__name__}: {error}")
         if not snapshot.entries:
             built = _failed_build(rollout_id, builder, "capture contains no token records")
@@ -177,7 +182,7 @@ def trajectories_for_rollout(
             built["mask_sample"] = True
             built.setdefault("metrics", {})["capture_incomplete"] = True
         built["_capture_snapshot"] = {
-            "seal_id": snapshot.seal_id,
+            "snapshot_id": snapshot.snapshot_id,
             "version": snapshot.version,
         }
         return built
@@ -196,9 +201,9 @@ async def trajectories_from_source(
     Returns ``None`` when nothing was recorded for it.
     """
     try:
-        snapshot = await source.seal(rollout_id)
+        snapshot = await source.freeze(rollout_id)
     except Exception as error:
-        logger.warning("Could not seal token capture for rollout %s.", rollout_id, exc_info=True)
+        logger.warning("Could not freeze token capture for rollout %s.", rollout_id, exc_info=True)
         return _failed_build(rollout_id, builder, f"{type(error).__name__}: {error}")
     if not snapshot.entries:
         built = _failed_build(rollout_id, builder, "capture contains no token records")
@@ -208,7 +213,7 @@ async def trajectories_from_source(
         built["mask_sample"] = True
         built.setdefault("metrics", {})["capture_incomplete"] = True
     built["_capture_snapshot"] = {
-        "seal_id": snapshot.seal_id,
+        "snapshot_id": snapshot.snapshot_id,
         "version": snapshot.version,
     }
     return built
