@@ -158,10 +158,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     "models": {
                         "dummy_model": {
                             "limit": {
-                                "context": 0,
-                                "input": 0,
+                                "context": 262144,
+                                "input": 262144,
                                 # See the OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX flag below for more information.
-                                "output": 1_000_000_000,
+                                "output": 262144,
                             },
                         },
                     },
