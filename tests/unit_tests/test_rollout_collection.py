@@ -1942,14 +1942,13 @@ class TestFinalizeRolloutTokenCapture:
         assert built is not None and built[MASK_SAMPLE_KEY] is True and built["rebuilt_response"] is None
 
     async def test_a_source_that_raises_loses_one_rollout_not_the_batch(self, tmp_path: Path) -> None:
-        """The source belongs to the caller and its transport can fail for reasons that have
-        nothing to do with this rollout, so the promise not to raise has to cover that."""
+        """Keep transport failures scoped to their rollout."""
 
         class _Failing:
-            async def seal(self, rollout_id: str):
+            async def freeze(self, rollout_id: str):
                 raise ConnectionError("data plane unreachable")
 
-            async def drop(self, rollout_id: str, *, seal_id: str, version: int) -> bool:
+            async def drop(self, rollout_id: str, *, snapshot_id: str, version: int) -> bool:
                 return False
 
             async def close(self) -> None: ...

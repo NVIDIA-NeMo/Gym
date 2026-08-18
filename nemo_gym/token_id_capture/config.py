@@ -96,7 +96,9 @@ class TokenIdCaptureSettings(BaseModel):
     # A real transport needs explicit endpoint, client, or credential wiring.
     # Use ``${oc.env:VAR}`` for secrets instead of writing them here.
     sink_kwargs: dict[str, Any] = Field(default_factory=dict)
-    # Rebuild opaque-harness responses from captured records after the run.
+    # Whether Gym rebuilds the response from frozen capture records.
+    # Finalization does not retire the frozen snapshot.
+    # Durable delivery permits retirement by snapshot id and version.
     rebuild_response: bool = True
 
 

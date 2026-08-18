@@ -148,15 +148,14 @@ async def finalize_rollout_token_capture(result: dict, source: TokenSource | Non
         else:
             result["response"] = projected
 
-    # Carry what the build dropped onto the record. Without this the quarantine and delivered-token
-    # fractions are computed and discarded, and a rollout that trained on one of five calls looks
-    # like one that trained on all five.
+    # Carry build losses onto the rollout record.
+    # Otherwise a partial trajectory looks like one that retained every call.
     record_metrics = dict(built.get("metrics") or {})
     if built.get("error"):
         record_metrics["error"] = built["error"]
     if built.get(MASK_SAMPLE_KEY):
-        # One location, at the top of the record, where a consumer finds it without knowing this
-        # feature exists. The metrics dict keeps the reasons, not the verdict.
+        # Keep the masking verdict at the top of the record.
+        # The metrics dictionary retains its reasons.
         result[MASK_SAMPLE_KEY] = True
         warnings.warn(
             f"rollout {rollout_id} was captured incompletely or ambiguously ({record_metrics}); "
@@ -175,20 +174,20 @@ async def retire_rollout_token_capture(
 ) -> bool:
     """Conditionally retire a snapshot after its rebuilt rollout is durably handed off.
 
-    The caller owns the durability boundary. It must call this only after the
-    rebuilt record has been accepted by its downstream data plane or fsynced to
-    local storage. Failed or masked builds are retained as diagnostic evidence.
+    The caller owns the durability boundary.
+    Call this only after downstream acceptance or a local fsync.
+    Failed or masked builds remain as diagnostic evidence.
     """
     if source is None or built is None or built.get("rebuilt_response") is None or built.get(MASK_SAMPLE_KEY):
         return False
     snapshot = built.get("_capture_snapshot")
     if not isinstance(snapshot, dict):
-        warnings.warn(f"rollout {rollout_id} has no sealed capture identity to retire.", stacklevel=2)
+        warnings.warn(f"rollout {rollout_id} has no frozen capture identity to retire.", stacklevel=2)
         return False
     try:
         return await source.drop(
             rollout_id,
-            seal_id=str(snapshot["seal_id"]),
+            snapshot_id=str(snapshot["snapshot_id"]),
             version=int(snapshot["version"]),
         )
     except Exception:
