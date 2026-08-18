@@ -156,12 +156,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     "models": {
                         "dummy_model": {
                             "limit": {
-                                "context": 0,
-                                "input": 0,
-                                # @bxyu-nvidia: OpenCode defaults to 32k here https://github.com/anomalyco/opencode/blob/58a99916bb96edf5cf605dc03e1be1e4bacf9ff7/packages/opencode/src/provider/transform.ts#L21
-                                # and there is no way to set it to null.
-                                # We set it here to explicitly acknowledge that this parameter is set.
-                                "output": 32_000,
+                                "context": 262144,
+                                "input": 262144,
+                                "output": 262144,
                             },
                         },
                     },
@@ -298,7 +295,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && {install_str} \
         && export PATH=$HOME/.opencode/bin:$PATH \
         && echo "Installed OpenCode" \
-        && opencode run {opencode_debug_str} {opencode_thinking_str} {quote(query)} \
+        && OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=262144 opencode run {opencode_debug_str} {opencode_thinking_str} {quote(query)} \
         && echo "OpenCode run finished"
         """
 
