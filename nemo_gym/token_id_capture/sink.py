@@ -64,11 +64,10 @@ class CaptureContext:
     model: str = ""
     # ``commit_entry`` sets this after another capture path records the call.
     committed: bool = False
-    # Which recorded call this request continues, resolved once before the request is
-    # dispatched. Both consumers read it from here rather than resolving for themselves:
-    # prefix supply needs the tokens before the engine is called, capture needs the id
-    # afterwards, and resolving twice invites the two to disagree. ``parent_resolved``
-    # separates "resolved to nothing" from "never resolved".
+    # Resolve the parent once before dispatch.
+    # Downstream inference consumes ``parent_tokens`` for exact prefix supply.
+    # Capture reuses the same parent decision.
+    # ``parent_resolved`` distinguishes a miss from an unresolved request.
     parent_resolved: bool = False
     parent_call_id: str | None = None
     parent_tokens: list[int] = field(default_factory=list)
@@ -151,9 +150,9 @@ async def capture_tokens(
         # Keep content on the output items.
         # Store token arrays only on the entry.
         content_items, token_item_index = strip_token_fields(response_to_output_items(payload))
-        # Which call does this one continue? Normally decided before dispatch by
-        # ``resolve_parent``, so the record names the same call whose tokens were supplied.
-        # A caller that did not resolve first still gets a link, from the same messages.
+        # Reuse the parent selected before dispatch.
+        # This keeps exact prefix supply and the recorded parent link consistent.
+        # Resolve here only when the caller skipped the pre-dispatch step.
         if parent_call_id is None:
             if context.parent_resolved:
                 parent_call_id = context.parent_call_id
@@ -177,16 +176,15 @@ async def capture_tokens(
         await _capture_failed(context, "build")
         return
     await commit_entry(entry, parent_call_id)
-    # Index this call by the conversation a continuation of it would carry, so the next
-    # request resolves to it. Indexing lives here rather than in ``commit_entry`` because it
-    # is keyed on the request the server saw, which an engine-side caller does not have. The
-    # digest it reads is stamped during the commit above.
+    # Index this call for the next request.
+    # Indexing needs the request representation seen by the server.
+    # Engine-side callers do not have that representation.
+    # The commit above stamps the digest.
     if request_messages is not None and context.lineage_store is not None:
         try:
-            # Index the served items as they are, not a turn rebuilt from them. The next request
-            # echoes those items back, and the fingerprint canonicalizes both sides the same way,
-            # so anything in between is a chance for the two to disagree. One response can also
-            # echo as several items, which a single rebuilt turn cannot represent.
+            # Index the served items without rebuilding a turn.
+            # The next request echoes these items.
+            # One response can echo as several items.
             await context.lineage_store.record(
                 context.rollout_id,
                 context.model_call_id,
@@ -196,7 +194,7 @@ async def capture_tokens(
                 entry.digest or "",
             )
         except Exception:
-            # Only costs the next call its parent link, which falls back to prefix matching.
+            # The builder falls back to strict token-prefix matching.
             logger.warning("Could not index lineage for rollout %s.", context.rollout_id, exc_info=True)
 
 
@@ -225,8 +223,8 @@ async def commit_entry(entry: TokenEntry, parent_call_id: str | None = None) -> 
         context.committed = True
         return
     try:
-        # cum_len/digest describe this call and are always computable; the parent
-        # link is filled only when the model server resolved one.
+        # The cumulative length and digest always describe this call.
+        # The parent link is present only after successful resolution.
         stamp_lineage(entry, parent_call_id)
         await context.token_sink.put(entry)
         context.committed = True

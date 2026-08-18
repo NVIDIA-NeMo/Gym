@@ -93,15 +93,12 @@ _ANTHROPIC_CONVERTER = AnthropicConverter()
 
 
 def _request_messages(body: Any) -> list[dict]:
-    """The conversation a request carries, across the three dialects.
+    """Return the conversation carried by any supported dialect.
 
-    Used only to identify which recorded call this request continues (see
-    ``token_id_capture.lineage``): the assistant turns in it are the ones we
-    produced. Chat and Anthropic both use ``messages``; Responses carries
-    ``input``, which is a string for a first turn and a list of items after that.
-
-    The system prompt and tool schema are prepended as one pseudo-turn, because both shape
-    the prompt without being messages.
+    Lineage uses model-authored turns to identify the parent call.
+    Chat and Anthropic use ``messages``.
+    Responses uses ``input``.
+    The request envelope is prepended as a pseudo-turn because it also shapes the prompt.
     """
     if body is None:
         return []
@@ -119,18 +116,17 @@ def _request_messages(body: Any) -> list[dict]:
     return _request_envelope(getter) + turns
 
 
-# Not a dialect role, so it cannot collide with a real turn, and not "assistant", so the
-# lookup fingerprint goes on ignoring it.
+# This role cannot collide with a dialect role.
+# It is not assistant-authored and does not affect the lookup fingerprint.
 _ENVELOPE_ROLE = "_ng_request_envelope"
 
 
 def _request_envelope(getter: Any) -> list[dict]:
-    """The parts of a request that shape the prompt without being turns.
+    """Return prompt-shaping request fields that are not turns.
 
-    Anthropic sends the system prompt as ``instructions`` and the tool schema as ``tools``,
-    both siblings of the message list, and the chat template renders both into the prompt.
-    Matching on messages alone would let a request be given a prefix built under a different
-    system prompt or a different set of tools, which is a conversation the harness never sent.
+    Instructions and tools can be siblings of the message list.
+    The chat template renders both into the prompt.
+    Including them prevents prefix reuse across different request envelopes.
     """
     instructions = getter("instructions", None)
     tools = getter("tools", None)
@@ -143,9 +139,8 @@ def _request_envelope(getter: Any) -> list[dict]:
 def _plain(value: Any) -> Any:
     """Reduce a request field to plain data so equal schemas serialize equally.
 
-    Tools arrive as dicts on one call and as pydantic models on the next, depending on which
-    handler parsed the body. Serializing those as they come gives two strings for one schema,
-    which would break a chain that never changed.
+    Handlers can expose tools as dictionaries or Pydantic models.
+    Normalization keeps an unchanged schema stable across handlers.
     """
     if hasattr(value, "model_dump"):
         return value.model_dump()
@@ -277,9 +272,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # chat_completions() signatures vary across servers: some take a leading `request`, some
         # only `body`. Dispatch on whichever this server declares so the shared dispatch works for
         # all of them.
-        # Resolve the parent before dispatching, from the request as this server received it.
-        # The lineage index was built from the same representation, so the prefix a request may
-        # be given and the parent its record names come from one decision rather than two.
+        # Resolve the parent from the received request before dispatch.
+        # Exact prefix supply and capture share this decision.
         await resolve_parent(_request_messages(params))
         if "request" in inspect.signature(self.chat_completions).parameters:
             completion = await self.chat_completions(request=request, body=params)
@@ -317,9 +311,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # responses() signatures vary across servers: some take a leading `request`, some only
         # `body`. Dispatch on whichever this server declares so the default messages() works for
         # all of them.
-        # Resolve the parent before dispatching, from the request as this server received it.
-        # The lineage index was built from the same representation, so the prefix a request may
-        # be given and the parent its record names come from one decision rather than two.
+        # Resolve the parent from the received request before dispatch.
+        # Exact prefix supply and capture share this decision.
         await resolve_parent(_request_messages(params))
         if "request" in inspect.signature(self.responses).parameters:
             response = await self.responses(request=request, body=params)
