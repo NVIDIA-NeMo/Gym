@@ -42,38 +42,42 @@ from nemo_gym.token_id_capture.records import TokenEntry
 
 @dataclass(frozen=True)
 class TokenCaptureSnapshot:
-    """An immutable, sealed view of one rollout's capture records."""
+    """An immutable view of one rollout's frozen capture records."""
 
     rollout_id: str
     entries: tuple[TokenEntry, ...]
     incomplete: bool
-    seal_id: str
+    snapshot_id: str
     version: int
 
 
 @runtime_checkable
 class TokenSink(Protocol):
-    """Where captured records go. Implemented by Gym's file store, or by a
-    framework over its own transport."""
+    """Where captured records go.
+
+    Gym's file store and framework-owned transports implement this protocol.
+    """
 
     async def put(self, entry: TokenEntry) -> None:
         """Durably store one record.
 
-        Repeating the same call id with the same payload is a no-op. Reusing a
-        call id with a different payload or writing after seal must fail.
+        Repeating the same call id with the same payload is a no-op.
+        Reusing a call id with a different payload must fail.
+        Writing after the rollout is frozen must fail.
 
-        May raise. The caller marks the rollout incomplete and never fails the
-        model call because of a capture error.
+        This method may raise.
+        The caller marks the rollout incomplete.
+        A capture error never fails the model call.
         """
         ...
 
     async def mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None:
         """Durably record that a call of this rollout failed to capture.
 
-        The rollout is now missing a turn, and a consumer must mask the sample rather
-        than train on a chain with a hole in it. The model call itself still succeeds,
-        so this is the only signal that anything went wrong: a sink that drops it makes
-        an incomplete rollout indistinguishable from a complete one.
+        The rollout is now missing a turn.
+        A consumer must mask the sample instead of training on a chain with a hole.
+        The model call itself still succeeds.
+        This marker is therefore the durable signal that capture failed.
         """
         ...
 
@@ -84,21 +88,23 @@ class TokenSink(Protocol):
 
 @runtime_checkable
 class TokenSource(Protocol):
-    """Where a trajectory builder seals, reads, and retires records."""
+    """Where a trajectory builder freezes, reads, and retires records."""
 
-    async def seal(self, rollout_id: str) -> TokenCaptureSnapshot:
-        """Seal a rollout and return one atomic snapshot.
+    async def freeze(self, rollout_id: str) -> TokenCaptureSnapshot:
+        """Freeze a rollout and return one atomic snapshot.
 
-        Sealing is idempotent. No successful writes may occur after it returns.
+        Freezing is idempotent.
+        No successful writes may occur after it returns.
         Entry order carries no meaning.
         """
         ...
 
-    async def drop(self, rollout_id: str, *, seal_id: str, version: int) -> bool:
-        """Conditionally retire the exact sealed snapshot that was consumed.
+    async def drop(self, rollout_id: str, *, snapshot_id: str, version: int) -> bool:
+        """Conditionally retire the exact frozen snapshot that was consumed.
 
-        Returns ``False`` if state changed after the snapshot. Implementations
-        that cannot delete return ``True`` and leave retention to their owner.
+        Return ``False`` if state changed after the snapshot.
+        Implementations that cannot delete return ``True``.
+        Their owner remains responsible for retention.
         """
         ...
 

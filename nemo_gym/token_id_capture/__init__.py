@@ -25,12 +25,11 @@ aiohttp, requests, or torch, because a training framework's inference worker
 imports the record, the protocols, and the capture core to write into its own
 data plane (see ``protocols.py``).
 
-Records are read back through a ``TokenSource``. ``TokenCaptureStore`` is one,
-and is what a reader sitting alongside the store uses. A framework staging
-records through its own transport supplies its own source, which lives wherever
-that transport does. What any source owes is an honest ``is_incomplete``: it is
-how a consumer learns a rollout lost a call, and one that always answers False
-trains on an incomplete rollout without knowing.
+Records are read back through a ``TokenSource``.
+``TokenCaptureStore`` is Gym's local implementation.
+A framework staging records through its own transport supplies its own source.
+The source freezes an atomic snapshot containing both entries and incomplete state.
+This prevents a consumer from training on a rollout that lost a model call.
 """
 
 from nemo_gym.token_id_capture.config import TokenIdCaptureConfig

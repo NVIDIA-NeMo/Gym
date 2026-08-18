@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import hashlib
 import os
 import tempfile
 from contextlib import contextmanager
@@ -89,11 +90,70 @@ class TokenCaptureStore:
     def _read_state(self, rollout_id: str) -> dict[str, Any]:
         path = self.state_path_for(rollout_id)
         if not path.exists():
-            return {"sealed": False, "incomplete": False, "seal_id": "", "version": 0}
+            return {
+                "frozen": False,
+                "incomplete": False,
+                "snapshot_id": "",
+                "version": 0,
+                "entry_digests": {},
+                "indexed_size": 0,
+            }
         state = orjson.loads(path.read_bytes())
         if not isinstance(state, dict):
             raise ValueError(f"Invalid token-capture state for rollout {rollout_id}")
         return state
+
+    @staticmethod
+    def _entry_digest(payload: bytes) -> str:
+        return hashlib.sha256(payload).hexdigest()
+
+    def _sync_entry_index(self, rollout_id: str, state: dict[str, Any]) -> bool:
+        """Reconcile an entry index with any durable JSONL tail.
+
+        The JSONL write is durable before its state update.
+        A process can therefore stop with one unindexed entry.
+        Normal writes use the state index without parsing prior token arrays.
+        Recovery parses only the unindexed tail.
+        """
+        path = self.path_for(rollout_id)
+        file_size = path.stat().st_size if path.exists() else 0
+        stored_index = state.get("entry_digests")
+        stored_size = state.get("indexed_size")
+        legacy_state = not isinstance(stored_index, dict) or not isinstance(stored_size, int)
+        entry_digests = dict(stored_index) if isinstance(stored_index, dict) else {}
+        indexed_size = stored_size if isinstance(stored_size, int) else 0
+        if indexed_size < 0 or indexed_size > file_size:
+            raise ValueError(f"Invalid token-capture index offset for rollout {rollout_id}")
+        if indexed_size == file_size and not legacy_state:
+            return False
+
+        recovered = 0
+        if path.exists():
+            with path.open("rb") as handle:
+                handle.seek(indexed_size)
+                for line in handle:
+                    payload = line.strip()
+                    if not payload:
+                        continue
+                    entry = TokenEntry.model_validate(orjson.loads(payload))
+                    digest = self._entry_digest(payload)
+                    existing = entry_digests.get(entry.model_call_id)
+                    if existing is not None and existing != digest:
+                        state["incomplete"] = True
+                        state["version"] = int(state.get("version", 0)) + 1
+                        self._write_state(rollout_id, state)
+                        raise ValueError(
+                            f"Model call id {entry.model_call_id!r} has conflicting durable payloads "
+                            f"for rollout {rollout_id!r}"
+                        )
+                    entry_digests[entry.model_call_id] = digest
+                    recovered += 1
+
+        state["entry_digests"] = entry_digests
+        state["indexed_size"] = file_size
+        if recovered and not legacy_state:
+            state["version"] = int(state.get("version", 0)) + recovered
+        return True
 
     def _write_state(self, rollout_id: str, state: dict[str, Any]) -> None:
         payload = orjson.dumps(state, option=orjson.OPT_SORT_KEYS | orjson.OPT_APPEND_NEWLINE)
@@ -143,16 +203,19 @@ class TokenCaptureStore:
         """Idempotently append one entry and fsync."""
         canonical = orjson.dumps(entry.model_dump(mode="json"), option=orjson.OPT_SORT_KEYS)
         line = canonical + b"\n"
+        digest = self._entry_digest(canonical)
         rollout_id = entry.rollout_id
         with self._locked(rollout_id):
             state = self._read_state(rollout_id)
-            if state.get("sealed", False):
-                raise RuntimeError(f"Token capture for rollout {rollout_id} is already sealed")
-            for existing in self._read_entries_unlocked(rollout_id):
-                if existing.model_call_id != entry.model_call_id:
-                    continue
-                existing_bytes = orjson.dumps(existing.model_dump(mode="json"), option=orjson.OPT_SORT_KEYS)
-                if existing_bytes == canonical:
+            if state.get("frozen", False):
+                raise RuntimeError(f"Token capture for rollout {rollout_id} is already frozen")
+            index_changed = self._sync_entry_index(rollout_id, state)
+            entry_digests = state["entry_digests"]
+            existing_digest = entry_digests.get(entry.model_call_id)
+            if existing_digest is not None:
+                if existing_digest == digest:
+                    if index_changed:
+                        self._write_state(rollout_id, state)
                     return
                 state["incomplete"] = True
                 state["version"] = int(state.get("version", 0)) + 1
@@ -165,15 +228,15 @@ class TokenCaptureStore:
                 handle.write(line)
                 handle.flush()
                 os.fsync(handle.fileno())
+                state["indexed_size"] = handle.tell()
+            entry_digests[entry.model_call_id] = digest
             state["version"] = int(state.get("version", 0)) + 1
             self._write_state(rollout_id, state)
 
-    # --- TokenSink / TokenSource. The file store is Gym's default implementation of both;
-    # a framework swaps in its own without touching the capture path.
+    # The file store is Gym's default TokenSink and TokenSource.
+    # A framework can replace it without changing the capture path.
     #
-    # Both offload to the default thread pool, which is shared process-wide and small
-    # (min(32, cpus + 4)). Serializing the entry dominates the cost rather than the write
-    # itself, so a long context is the case to watch if this ever shows up in a profile.
+    # Both interfaces offload blocking work to the process-wide default thread pool.
 
     async def put(self, entry: TokenEntry) -> None:
         """``TokenSink``: durable on return. The blocking append is offloaded so
@@ -181,40 +244,44 @@ class TokenCaptureStore:
         rollout never races a partial file."""
         await asyncio.to_thread(self.append, entry)
 
-    async def seal(self, rollout_id: str) -> TokenCaptureSnapshot:
-        return await asyncio.to_thread(self._seal, rollout_id)
+    async def freeze(self, rollout_id: str) -> TokenCaptureSnapshot:
+        return await asyncio.to_thread(self.freeze_now, rollout_id)
 
-    def _seal(self, rollout_id: str) -> TokenCaptureSnapshot:
+    def freeze_now(self, rollout_id: str) -> TokenCaptureSnapshot:
+        """Synchronously freeze one rollout and return its stable snapshot."""
         with self._locked(rollout_id):
             state = self._read_state(rollout_id)
-            if not state.get("sealed", False):
-                state["sealed"] = True
-                state["seal_id"] = uuid4().hex
+            index_changed = self._sync_entry_index(rollout_id, state)
+            if not state.get("frozen", False):
+                state["frozen"] = True
+                state["snapshot_id"] = uuid4().hex
                 state["version"] = int(state.get("version", 0)) + 1
+                self._write_state(rollout_id, state)
+            elif index_changed:
                 self._write_state(rollout_id, state)
             entries = tuple(self._read_entries_unlocked(rollout_id))
             return TokenCaptureSnapshot(
                 rollout_id=rollout_id,
                 entries=entries,
                 incomplete=bool(state.get("incomplete", False)),
-                seal_id=str(state["seal_id"]),
+                snapshot_id=str(state["snapshot_id"]),
                 version=int(state["version"]),
             )
 
     async def tokens_for(self, rollout_id: str) -> list[TokenEntry]:
-        """Compatibility read for diagnostics. Consumers should use ``seal``."""
+        """Compatibility read for diagnostics. Consumers should use ``freeze``."""
         return await asyncio.to_thread(self.read_entries, rollout_id)
 
-    async def drop(self, rollout_id: str, *, seal_id: str, version: int) -> bool:
-        """Conditionally delete the sealed snapshot."""
-        return await asyncio.to_thread(self._drop, rollout_id, seal_id, version)
+    async def drop(self, rollout_id: str, *, snapshot_id: str, version: int) -> bool:
+        """Conditionally delete the frozen snapshot."""
+        return await asyncio.to_thread(self._drop, rollout_id, snapshot_id, version)
 
-    def _drop(self, rollout_id: str, seal_id: str, version: int) -> bool:
+    def _drop(self, rollout_id: str, snapshot_id: str, version: int) -> bool:
         with self._locked(rollout_id):
             state = self._read_state(rollout_id)
             if (
-                not state.get("sealed", False)
-                or state.get("seal_id") != seal_id
+                not state.get("frozen", False)
+                or state.get("snapshot_id") != snapshot_id
                 or int(state.get("version", 0)) != version
             ):
                 return False

@@ -80,13 +80,16 @@ class TokenIdCaptureSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
+    # Capture model calls from every agent.
+    # The default keeps capture scoped by each agent's ``token_id_capture`` setting.
+    all_agents: bool = False
     # Where the default file store writes. Falls back to ``model_call_capture_dir``.
     dir: Path | None = None
     # ``module.path:ClassName`` implementing TokenSink, constructed per server process.
     sink: str | None = None
-    # Keyword arguments for that constructor: an endpoint, a client, credentials. A sink for a real
-    # transport needs wiring, and a zero-argument one could only get it from ambient state. Use
-    # ``${oc.env:VAR}`` for anything secret rather than writing it here.
+    # Keyword arguments for that constructor.
+    # A real transport needs explicit endpoint, client, or credential wiring.
+    # Use ``${oc.env:VAR}`` for secrets instead of writing them here.
     sink_kwargs: dict[str, Any] = Field(default_factory=dict)
     # Optional paired reader for framework-owned transports.
     source: str | None = None
