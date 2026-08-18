@@ -12,6 +12,8 @@ python responses_api_agents/opencode_sandboxed_agent/client.py \
     +benchmark_jsonl=benchmarks/swebench/data/swebench_verified_benchmark.jsonl
 ```
 
+For E2E functional testing, run as above and remove the actual opencode run command from the exec.
+
 ## Prefetch OpenCode binary and upload to S3
 ```bash
 curl -L https://opencode.ai/install -o opencode_install.sh
