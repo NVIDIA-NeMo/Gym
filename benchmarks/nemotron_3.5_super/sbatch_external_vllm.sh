@@ -173,16 +173,6 @@ set -euo pipefail
 
 nodes=(\$(scontrol show hostnames "\$SLURM_JOB_NODELIST"))
 
-if (( $should_run_eval )); then
-    cleanup_script="\$SLURM_SUBMIT_DIR/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py"
-    cleanup_config="\$SLURM_SUBMIT_DIR/env.yaml"
-    cleanup_user="\${NEMO_GYM_USER:-\$SLURM_JOB_USER}"
-    python3 "\$cleanup_script" \
-        --connection-config "\$cleanup_config" \
-        --run-id "\$SLURM_JOB_ID" \
-        --user "\$cleanup_user"
-fi
-
 ALL_NODES="\${nodes[*]}" \
 srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 \
     --container-image=$CONTAINER \
@@ -203,10 +193,10 @@ cleanup_job() {
     set +e
     if (( $should_run_eval )); then
         echo "Starting OpenSandbox cleanup"
-        python3 "\$cleanup_script" \
-            --connection-config "\$cleanup_config" \
+        python3 "\$SLURM_SUBMIT_DIR/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py" \
+            --connection-config "\$SLURM_SUBMIT_DIR/env.yaml" \
             --run-id "\$SLURM_JOB_ID" \
-            --user "\$cleanup_user" \
+            --user "\${NEMO_GYM_USER:-\$SLURM_JOB_USER}" \
             --reap
         cleanup_status=\$?
         if (( cleanup_status != 0 )); then
@@ -257,7 +247,6 @@ if (( $should_run_eval )); then
         echo "vLLM server step exited unexpectedly with status \$completed_status" >&2
         kill "\$eval_step" 2>/dev/null || true
         wait "\$eval_step" 2>/dev/null || true
-        trap - EXIT INT TERM
         exit "\$completed_status"
     fi
 

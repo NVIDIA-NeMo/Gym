@@ -516,13 +516,18 @@ def test_script_help_runs_by_direct_path() -> None:
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize("eval_status", [37, 143])
-def test_slurm_batch_command_wires_cleanup_epilogue(tmp_path: Path, eval_status: int) -> None:
+@pytest.mark.parametrize(
+    ("first_step", "eval_status", "expected_status"),
+    [("eval", 37, 37), ("eval", 143, 143), ("server", 0, 41)],
+)
+def test_slurm_batch_command_wires_cleanup_epilogue(
+    tmp_path: Path, first_step: str, eval_status: int, expected_status: int
+) -> None:
     render = subprocess.run(
         [
             "bash",
             "-c",
-            'sbatch() { printf "%s\\n__BATCH_COMMAND__\\n%s\\n" "$EVAL_COMMAND" "$VLLM_PD_BATCH_COMMAND"; }; '
+            'sbatch() { printf "%s\\n__BATCH_COMMAND__\\n%s\\n" "$eval_command" "$batch_command"; }; '
             'source "$1" "${@:2}"',
             "bash",
             str(SBATCH_SCRIPT),
@@ -557,18 +562,18 @@ def test_slurm_batch_command_wires_cleanup_epilogue(tmp_path: Path, eval_status:
     assert "trap cleanup_sandboxes" not in eval_command
 
     assert "trap cleanup_job EXIT" in batch_command
-    assert 'cleanup_config="$SLURM_SUBMIT_DIR/env.yaml"' in batch_command
-    assert 'cleanup_user="${NEMO_GYM_USER:-$SLURM_JOB_USER}"' in batch_command
+    assert batch_command.count("cleanup_sandboxes.py") == 1
     cleanup_function = batch_command[batch_command.index("cleanup_job()") : batch_command.index("trap cleanup_job")]
     assert cleanup_function.index("job_status=$?") < cleanup_function.index("trap - EXIT INT TERM")
     assert cleanup_function.index("trap - EXIT INT TERM") < cleanup_function.index("set +e")
-    assert cleanup_function.index("set +e") < cleanup_function.index('python3 "$cleanup_script"')
-    assert cleanup_function.index('python3 "$cleanup_script"') < cleanup_function.index('kill "$server_step"')
+    cleanup_command = 'python3 "$SLURM_SUBMIT_DIR/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py"'
+    assert cleanup_function.index("set +e") < cleanup_function.index(cleanup_command)
+    assert cleanup_function.index(cleanup_command) < cleanup_function.index('kill "$server_step"')
     assert cleanup_function.index('kill "$server_step"') < cleanup_function.index('exit "$job_status"')
     assert 'wait "$server_step"' not in cleanup_function
-    assert '--connection-config "$cleanup_config"' in cleanup_function
+    assert '--connection-config "$SLURM_SUBMIT_DIR/env.yaml"' in cleanup_function
     assert '--run-id "$SLURM_JOB_ID"' in cleanup_function
-    assert '--user "$cleanup_user"' in cleanup_function
+    assert '--user "${NEMO_GYM_USER:-$SLURM_JOB_USER}"' in cleanup_function
     assert 'exit "$job_status"' in cleanup_function
     assert "attacker" not in batch_command
 
@@ -583,21 +588,27 @@ def test_slurm_batch_command_wires_cleanup_epilogue(tmp_path: Path, eval_status:
         "scontrol": "#!/bin/bash\nprintf 'node-a\\nnode-b\\n'\n",
         "python3": (
             "#!/bin/bash\n"
-            'if [[ " $* " == *" --reap "* ]]; then\n'
-            '    echo "reap $*" >> "$EVENTS"\n'
-            "    exit 9\n"
+            'if [[ " $* " != *" --reap "* ]]; then\n'
+            '    echo "unexpected $*" >> "$EVENTS"\n'
+            "    exit 10\n"
             "fi\n"
-            'echo "audit $*" >> "$EVENTS"\n'
+            'echo "reap $*" >> "$EVENTS"\n'
+            "exit 9\n"
         ),
         "srun": (
             "#!/bin/bash\n"
             'if [[ " $* " == *eval-container-on-node* ]]; then\n'
             '    while [[ ! -f "$SERVER_READY" ]]; do sleep 0.01; done\n'
-            '    if [[ "$EVAL_STATUS" == 143 ]]; then kill -TERM "$PPID"; fi\n'
-            '    exit "$EVAL_STATUS"\n'
+            '    if [[ "$FIRST_STEP" == eval ]]; then\n'
+            '        if [[ "$EVAL_STATUS" == 143 ]]; then kill -TERM "$PPID"; fi\n'
+            '        exit "$EVAL_STATUS"\n'
+            "    fi\n"
+            "    trap 'exit 0' TERM\n"
+            "    while :; do sleep 0.1; done\n"
             "fi\n"
-            "trap 'echo server-stop >> \"$EVENTS\"; exit 0' TERM\n"
             'touch "$SERVER_READY"\n'
+            'if [[ "$FIRST_STEP" == server ]]; then exit "$SERVER_STATUS"; fi\n'
+            "trap 'echo server-stop >> \"$EVENTS\"; exit 0' TERM\n"
             "while :; do sleep 0.1; done\n"
         ),
     }
@@ -615,23 +626,24 @@ def test_slurm_batch_command_wires_cleanup_epilogue(tmp_path: Path, eval_status:
             "PATH": f"{stub_dir}:{os.environ['PATH']}",
             "EVENTS": str(events),
             "EVAL_STATUS": str(eval_status),
+            "FIRST_STEP": first_step,
             "NEMO_GYM_USER": "synthetic-user",
+            "SERVER_STATUS": "41",
             "SERVER_READY": str(tmp_path / "server-ready"),
             "SLURM_CPUS_ON_NODE": "4",
             "SLURM_JOB_ID": "job-7",
             "SLURM_JOB_NODELIST": "nodes",
             "SLURM_JOB_USER": "slurm-user",
             "SLURM_SUBMIT_DIR": str(tmp_path),
-            "EVAL_COMMAND": "eval-command",
-            "VLLM_PD_WORKLOAD": "server-command",
+            "eval_command": "eval-command",
+            "vllm_command": "server-command",
         },
         text=True,
         timeout=10,
     )
-    assert result.returncode == eval_status
+    assert result.returncode == expected_status
     assert "OpenSandbox cleanup failed with status 9" in result.stderr
     event_lines = events.read_text().splitlines()
-    assert event_lines[0].startswith("audit ")
-    assert event_lines[1].startswith("reap ")
-    assert "--run-id job-7 --user synthetic-user --reap" in event_lines[1]
-    assert event_lines[2:] == ["server-stop"]
+    assert event_lines[0].startswith("reap ")
+    assert "--run-id job-7 --user synthetic-user --reap" in event_lines[0]
+    assert event_lines[1:] == (["server-stop"] if first_step == "eval" else [])
