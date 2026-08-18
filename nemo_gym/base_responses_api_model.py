@@ -35,6 +35,7 @@ import os
 import re
 import time
 from abc import abstractmethod
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Mapping, Optional
 from uuid import uuid4
@@ -1320,7 +1321,17 @@ def install_model_call_capture(
             await sink.close()
 
     if owned_sinks:
-        app.add_event_handler("shutdown", _close_token_sinks)
+        original_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def _capture_lifespan(application):
+            try:
+                async with original_lifespan(application) as state:
+                    yield state
+            finally:
+                await _close_token_sinks()
+
+        app.router.lifespan_context = _capture_lifespan
     app.add_middleware(
         _CaptureMiddleware,
         store=make_capture_store(config),
