@@ -153,12 +153,13 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     "options": {
                         "baseURL": f"{get_server_url(self.config.model_server.name)}/v1",
                         "apiKey": "dummy_key",  # pragma: allowlist secret
+                        "timeout": 600000,
                     },
                     "models": {
                         "dummy_model": {
                             "limit": {
-                                "context": self.config.max_context_window,
-                                "input": self.config.max_context_window,
+                                "context": 0,
+                                "input": 0,
                                 "output": self.config.max_context_window,
                             },
                         },
