@@ -152,16 +152,28 @@ def _build_vllm_ray_command(service: VllmServiceConfig, total_nodes: int) -> str
     inner_cmd = _build_vllm_command(service) + " --distributed-executor-backend ray"
     if service.number_of_instances > 1:
         inner_cmd += " --data-parallel-backend ray"
+    resource_flags = (
+        "--num-cpus=${SLURM_CPUS_PER_TASK:-$SLURM_CPUS_ON_NODE} --num-gpus=${SLURM_GPUS_PER_TASK:-$SLURM_GPUS_ON_NODE}"
+    )
     # ray symmetric-run starts/joins a Ray cluster across every task and runs the entrypoint
-    # only on the elected head node, mirroring scripts/sbatch_base.sh.
+    # only on the elected head node, mirroring scripts/sbatch_base.sh. It requires Ray >= 2.50, so
+    # containers with an older pin fall back to manually starting head/worker Ray processes, keyed
+    # on Slurm's per-node task rank ($SLURM_NODEID). vLLM's Ray executor blocks on placement-group
+    # scheduling until every node's GPUs join, so the fallback needs no separate cluster-ready wait.
     return (
         "bash -lc '\n"
-        "    ray symmetric-run \\\n"
-        '        --address "$RAY_HEAD_NODE_IP" \\\n'
-        f"        --min-nodes {total_nodes} \\\n"
-        "        --num-cpus=${SLURM_CPUS_PER_TASK:-$SLURM_CPUS_ON_NODE} \\\n"
-        "        --num-gpus=${SLURM_GPUS_PER_TASK:-$SLURM_GPUS_ON_NODE} \\\n"
-        f"        -- {inner_cmd}\n"
+        "    if ray symmetric-run --help >/dev/null 2>&1; then\n"
+        "        ray symmetric-run \\\n"
+        '            --address "$RAY_HEAD_NODE_IP" \\\n'
+        f"            --min-nodes {total_nodes} \\\n"
+        f"            {resource_flags} \\\n"
+        f"            -- {inner_cmd}\n"
+        '    elif [ "$SLURM_NODEID" = "0" ]; then\n'
+        f"        ray start --head --port=6379 {resource_flags}\n"
+        f"        {inner_cmd}\n"
+        "    else\n"
+        f'        ray start --address="$RAY_HEAD_NODE_IP" {resource_flags} --block\n'
+        "    fi\n"
         "'"
     )
 
