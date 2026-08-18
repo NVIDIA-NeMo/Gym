@@ -360,6 +360,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 await sandbox.download(str(results_remote_fpath), results_local_fpath)
             except:
                 print(f"Failed to download export results to {results_local_fpath}", format_exc(), file=sys.stderr)
+                if export_result:
+                    print("Export stdout:\n", export_result.stdout, file=sys.stderr)
+                    print("Export stderr:\n", export_result.stderr, file=sys.stderr)
 
         opencode_export = dict()
         if results_local_fpath.exists():
