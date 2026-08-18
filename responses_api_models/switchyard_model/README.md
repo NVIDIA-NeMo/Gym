@@ -41,10 +41,15 @@ gym eval run --benchmark <name> --model-type switchyard_model \
 
 ## Rollout correlation
 
-Gym's rollout-attempt id is forwarded as Switchyard's session id (`proxy_x_session_id`), so
-proxy-side routing decisions and costs can be joined back to the rollout that produced them. With a
-durable routing log enabled in the deployment, Switchyard exposes those decisions per session on
-`/v1/routing/session-stats`, and aggregates on `/v1/stats`.
+Gym's rollout-attempt id is forwarded as Switchyard's session id (`x-switchyard-session-id`), so
+proxy-side routing decisions and costs — request logs, spans, session-affinity state, and the
+aggregates on `/v1/stats` — can be joined back to the rollout that produced them.
+
+For per-session snapshots on `/v1/routing/session-stats`, run `switchyard-server` yourself with
+`--routing-log-file`, attach with `switchyard_base_url`, and add `proxy_x_session_id` to
+`session_id_headers` — the name the 0.2.0 routing log keys on. Add names knowingly: Switchyard
+forwards headers it does not recognize (and, at 0.2.0, the session header itself) to the upstream
+provider.
 
 Note that `switchyard_model` is the *route* name, not a provider model id — Switchyard maps it to a
 concrete target. Which model actually served a call comes back on the response, and is recorded per
