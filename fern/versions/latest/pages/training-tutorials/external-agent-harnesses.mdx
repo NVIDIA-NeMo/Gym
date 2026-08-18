@@ -91,47 +91,66 @@ A rollout without a metrics dictionary was never rebuilt. Its model calls were n
 
 ## Integrating a training framework
 
-Gym defines the record shape and builds each record. The training framework controls where the record goes.
+Gym owns the record shape, capture lifecycle, and reconstruction code. A training framework supplies transport-backed implementations of the protocols below without adding its data-plane dependencies to Gym.
 
 ### The interfaces
 
-The `nemo_gym.token_id_capture.protocols` module defines two protocols. The module imports no web framework, cluster runtime, or tensor library. An inference worker can therefore import it without loading Gym's server stack.
+The protocols live in `nemo_gym.token_id_capture.protocols`. The module deliberately imports no web framework, cluster runtime, tensor library, or training framework, so an inference worker can import it without pulling in Gym's server stack.
 
 ```python
 class TokenSink(Protocol):
     async def put(self, entry: TokenEntry) -> None: ...
-    def mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None: ...
+    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None: ...
+    async def close(self) -> None: ...
 
 class TokenSource(Protocol):
-    async def tokens_for(self, rollout_id: str) -> list[TokenEntry]: ...
-    async def drop(self, rollout_id: str) -> None: ...
+    async def seal(self, rollout_id: str) -> TokenCaptureSnapshot: ...
+    async def drop(self, rollout_id: str, *, seal_id: str, version: int) -> bool: ...
+    async def close(self) -> None: ...
+
+class LineageStore(Protocol):
+    async def resolve(self, rollout_id: str, request_items: list[dict]) -> LineageMatch | None: ...
+    async def record(
+        self,
+        rollout_id: str,
+        model_call_id: str,
+        request_items: list[dict],
+        response_items: list[dict],
+        cumulative_token_ids: list[int],
+        digest: str,
+    ) -> None: ...
+    async def close(self) -> None: ...
 ```
 
-`put` must make the record durable before it returns. A reader that runs after the rollout must see the record. This guarantee allows the exact frozen snapshot to be retired after durable downstream handoff.
+`TokenSink.put` must be durable before it returns. Repeating the same model call and payload is a no-op. Reusing a model-call id with different data must fail.
 
-`mark_incomplete` is the durable signal that a rollout lost a call. The model call still succeeds. A sink that drops this signal makes an incomplete rollout look complete.
+`TokenSink.mark_incomplete` is the only signal that a rollout lost a call. The model call itself still succeeds, so an adapter that drops this state makes an incomplete rollout look complete.
 
-A transport without a delete operation implements `drop` as a successful no-op. The storage owner remains responsible for record retention.
+`TokenSource.freeze` atomically closes one rollout to new writes and returns its entries, incomplete state, `snapshot_id`, and version. `drop` conditionally retires that exact snapshot after the rebuilt rollout reaches a durable downstream boundary. It returns `false` if the source changed, so a delayed consumer cannot delete a newer attempt. A transport with no delete operation returns `true` and leaves retention to its owner.
+
+`LineageStore` is the request-time control plane. After `record` returns, every worker that can serve the rollout must be able to resolve it. A miss or ambiguous match returns `None`; an implementation must never guess because the returned cumulative token ids can change generation.
 
 ### Connecting a framework-owned transport
 
-The training framework owns the transport and its client configuration. Gym owns the model-server processes, so each server worker constructs a framework-provided `TokenSink` proxy from the configured class path. The configured class is a worker factory descriptor, not a shared Python object or a transport implementation owned by Gym.
+The training framework owns the transport and its client configuration. Gym owns the model-server processes, so each server worker constructs framework-provided `TokenSink` and `LineageStore` proxies from configured class paths. The configured classes are worker factory descriptors, not shared Python objects or transport implementations owned by Gym.
 
 ```yaml
 env:
   nemo_gym:
     token_id_capture:
       enabled: true
-      sink: my_pkg.sinks:MyDataPlaneSink   # module.path:ClassName
+      sink: my_pkg.capture:MyCaptureEndpoint   # module.path:ClassName
       sink_kwargs:
         endpoint: ${oc.env:MY_DATAPLANE_URL}
         shard: ${oc.select:cluster_shard,0}
+      lineage_store: my_pkg.capture:MySharedLineage
+      lineage_store_kwargs:
+        endpoint: ${oc.env:MY_DATAPLANE_URL}
+        namespace: ${run_id}
       rebuild_response: false
 ```
 
-Gym passes `sink_kwargs` to the constructor, so a sink can receive the required endpoint, client, or credentials instead of reading ambient state. Use `${oc.env:VAR}` for secrets instead of writing them into the config. Unsupported constructor arguments cause a startup error. A sink that does not implement `mark_incomplete` also causes a startup error because it could otherwise make a rollout with a missing call look complete.
-
-`sink` replaces the file store, so a `dir` configured alongside it is not used. This condition produces a warning instead of an error because no data is lost. No capture files appear on disk.
+The framework must install `my_pkg.capture` in the model-server worker environment. Each `*_kwargs` mapping is passed to the corresponding constructor in that environment. Use `${oc.env:VAR}` for secrets rather than writing them into the config. Unknown constructor arguments and missing protocol methods are startup errors.
 
 The framework separately constructs its `TokenSource` in the trainer or rollout-consumer process. That process may use another virtual environment or actor because the source and sink are independent clients of the same transport.
 
@@ -142,29 +161,29 @@ await durable_handoff(built)
 await retire_rollout_token_capture(result["_ng_rollout_id"], source, built)
 ```
 
-`rebuild_response: false` tells Gym to stop after the write. Correlation and capture are unaffected. Only the read-back after each rollout stops. The training framework freezes records through its `TokenSource` and retires the consumed snapshot with `drop` after durable handoff. Without this setting, Gym tries to read from a source that received no records and reports every healthy rollout as a failed rebuild.
+`rebuild_response: false` tells Gym to stop after the write. Correlation and capture are unaffected. The training framework freezes, reconstructs, durably hands off, and retires the snapshot through its `TokenSource`. Set `rebuild_response: true` only when Gym's rollout collector owns that sequence; the collector process then requires an installed source or the default file store.
 
 When Gym's rollout collector owns rebuilding over a framework transport, install the framework-created source in that collector process with `install_token_source` before collection starts. The default file-backed path needs no installation because Gym constructs a `TokenCaptureStore` from `token_id_capture.dir`.
 
 Leaving `enabled` off disables capture. An external harness then produces rollouts without token ids and no token data for training. Use this configuration only for evaluation.
 
 <Warning>
-Configure the sink instead of installing it from a launcher script. Programmatic installation must run inside the serving process.
+Do not install a sink only in a launcher process.
 
-`install_token_sink` sets a process global. A model server with `num_workers > 1` launches uvicorn with an app string and `workers=N`. Uvicorn spawns workers that re-import the app module instead of inheriting the launcher's memory. A sink installed by the parent process therefore does not exist in any worker. Capture then falls back to the file store. If no `dir` is set, the worker has no local destination.
+`install_token_sink` and `install_lineage_store` set process globals. A model server with `num_workers > 1` is launched by uvicorn with an app string and `workers=N`; each worker imports the app independently. An object installed only in the launcher does not appear in those workers.
 
-Gym constructs the configured sink inside each worker at app startup, which avoids this process-boundary problem.
+Configured sink and lineage factories run inside each worker at app startup. Their adapter package must be installed in that worker's environment, and their underlying transport must be shared. A worker-local `InMemoryLineageStore` is rejected when `num_workers > 1`.
 </Warning>
 
 ### Reading records back
 
-`TokenCaptureStore` implements both protocols and is the default. A reader beside the store uses the store as its `TokenSource`. This arrangement applies to `gym eval run` and to a trainer colocated with the model server. The store directory should therefore be node-local.
+`TokenCaptureStore` satisfies both sink and source protocols and is the default. The local deployment also uses `FileLineageStore`, whose lock and state files are shared by model-server workers using the same directory.
 
-A framework that stages records through its own transport reads them through its own `TokenSource`. That source can run wherever the transport runs. Reading through a custom source is not restricted to the model server node.
+A framework staging records through its own transport reads them through its own `TokenSource`, which lives wherever that transport does. Nothing in the protocol requires node-local storage.
 
-Every source must return an accurate `incomplete` value in its frozen snapshot. This value tells the consumer that a rollout lost a model call. The records that arrived can form a contiguous-looking chain while still missing a turn. A source that always reports `false` can cause training to use that incomplete rollout.
+Every frozen snapshot must carry an honest `incomplete` value. It is how a consumer learns that a rollout lost a model call; the records that did arrive can otherwise stitch into a chain that looks contiguous while missing a turn.
 
-Gym does not provide an HTTP reader. No current integration requires one. A reader must return an atomic snapshot that includes both the entries and the incomplete state.
+Gym ships no HTTP reader. A route serving entries alone would omit the snapshot identity and incomplete state required for safe consumption.
 
 ## How a rollout's calls are linked
 
@@ -183,12 +202,11 @@ byte-identical output cannot be told apart. And the conversation those turns arr
 match what that call was sent, which is what rules out a compacted or summarized history whose model
 output is unchanged.
 
-A miss is not a problem: the builder falls back to prefix matching, which is what it did before.
-`parent_link_fallbacks` on the per-rollout metrics reports how often that happened and why.
+A request-time miss leaves the explicit link unset, and the builder can still infer a parent from token prefixes. A present but invalid explicit link is quarantined rather than silently replaced. `parent_link_failures` in the per-rollout metrics reports invalid explicit links.
 
 ### Driving rollouts yourself
 
-`gym eval run` finalizes each record. A framework that calls `run_examples` directly does not use that path, so it must call the same function for each finished record:
+`gym eval run` finalizes and retires each record for you. A framework that owns rollout collection calls the same two functions around its own durable handoff:
 
 ```python
 from nemo_gym.token_id_capture.delivery import (
@@ -201,9 +219,9 @@ await downstream.put(result)  # Must be durable when this returns.
 await retire_rollout_token_capture(rollout_id, source, built)
 ```
 
-This function freezes the capture snapshot, rebuilds `response.output`, and attaches the build metrics. It mutates the record in place and never raises. The caller supplies the `TokenSource` as the second argument. The function does not retire the snapshot. Retirement occurs only after durable downstream handoff.
+`finalize_rollout_token_capture` freezes the source snapshot, rebuilds `response.output`, and attaches build metrics. It mutates the record in place and does not retire evidence. `retire_rollout_token_capture` conditionally drops only the frozen snapshot that was rebuilt, and only after the caller establishes its durability boundary. Failed and masked builds remain available for diagnosis.
 
-A rollout that cannot be rebuilt is flagged with `mask_sample: true` at the top level of its record. Exclude these rollouts from the loss. The trajectory is missing a turn, or two candidate generations could not be distinguished. Training on such a trajectory is off-policy.
+A rollout that could not be rebuilt is flagged with `mask_sample: true` at the top of its record. Drop it from the loss. Capture is masked when it is incomplete or unresolved, has anything other than one root and one chain, or contains no trainable generated tokens.
 
 ### Rollout ids
 
@@ -232,10 +250,7 @@ Prefix supply sends the engine the exact tokens of the call being continued, so 
 extends the previous one by construction. Enable it by overlaying
 `responses_api_models/vllm_model/configs/vllm_model_supply_prefix.yaml`.
 
-It requires a backend that honours `required_prefix_token_ids` on both the chat and the tokenize
-endpoints, and it applies only when a parent resolved. Otherwise the request is forwarded unchanged
-and starts a new chain, which costs a cold cache but is never wrong. Each record carries whether its
-prefix was supplied, so the rate is auditable after a run.
+It requires a backend that honors `required_prefix_token_ids` during generation and returns the generation-time `prompt_token_ids` in the chat-completion response. Gym verifies that those ids start with the required prefix before recording `prefix_supplied: true`. A missing or mismatched proof fails the model call instead of silently capturing off-policy tokens. The separate tokenize endpoint is used only when no prefix was requested.
 
 ### Sampling pin
 
@@ -246,3 +261,5 @@ prefix was supplied, so the rate is auditable after a run.
 **One trajectory per rollout.** A harness that forks sub-agents or retries a call produces a tree of model calls. Gym delivers one chain and reports omitted sampled tokens through `delivered_fraction` instead of dropping them silently. Training on the full tree requires a trainer contract that accepts a tree.
 
 **Harness calls outside the rollout.** A harness may generate a conversation title or a context-compaction summary. These calls are policy output and can be selected for training. A compaction summary can be long enough to outweigh the rollout it summarizes. This pattern appears as `chains` above 1 and `delivered_fraction` below 1.0 in `_ng_token_capture`.
+
+**Backend support for prefix supply.** Stock vLLM does not implement Gym's required-prefix request and generation-proof response contract. Leave `supply_prefix_token_ids` off unless the inference backend implements both fields. Capture and reconstruction still work without prefix supply, but a re-rendered prompt that does not extend the sampled tokens produces a separate root and masks the rollout.
