@@ -1,0 +1,41 @@
+-e nemo-gym[dev] @ ../../
+
+# OSWorld supports Gym's OpenSandbox backend without installing every optional
+# Sandbox provider SDK into this managed server environment.
+opensandbox>=0.1.15
+tenacity>=9.1.4
+
+# JeffPengCoder/OSWorld nv-gym at an immutable commit: upstream main
+# 83e85344 plus the nv-gym provider overlay, proxy-runtime repair, and VLC
+# gateway-auth fallback. Use an archive because uv recursively initializes
+# git submodules, while optional SurferH submodules are not needed here.
+osworld @ https://github.com/JeffPengCoder/OSWorld/archive/dc23424e9f6316b181bde149e0dc9bc3c5ff78c9.tar.gz
+
+numkong==7.7.0
+docker==7.1.0
+
+# Needed by OSWorld's mm_agents.pointer implementation.
+anthropic
+boto3
+parallel-web
+requests-toolbelt~=1.0.0
+
+# OSWorld currently pins requests<2.32; prevent RequestsDependencyWarning
+# when transitive dependencies pull chardet 7.x.
+chardet<6
+
+# The Gym adapter imports these OSWorld paths at runtime. Repository policy
+# intentionally excludes cryptography, codec-bearing OpenCV, and torchvision
+# wheels from managed server resolution. Install those explicit opt-in runtime
+# dependencies after `gym env prefetch`; see
+# install_optional_runtime_deps.sh and benchmarks/osworld/README.md.
+cffi
+scipy
+numpy<2
+pynput
+ag2
+
+Pillow~=11.0.0
+scikit-learn
+matplotlib~=3.7.4
+func-timeout
