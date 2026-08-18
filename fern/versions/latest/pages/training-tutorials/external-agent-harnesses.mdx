@@ -44,6 +44,10 @@ responses_api_agents:
     token_id_capture: true
 ```
 
+For a training run that captures every configured agent, set `token_id_capture.all_agents: true` in the run-wide block instead of repeating the agent flag. This overrides agent-level opt-ins but does not enable capture by itself. Keep both `enabled` and `all_agents` false in evaluation configs.
+
+An opted-in agent adds `/training-token-capture` to its rollout-correlated model-server URL. The model server uses that segment to distinguish training capture from ordinary requests on the same endpoint, then strips it before API routing. It does not intercept or change the request body.
+
 Capture reads token ids from the served response, so the inference server must return them. For vLLM, that requires a tokenizer:
 
 ```yaml
@@ -104,8 +108,8 @@ class TokenSink(Protocol):
     async def close(self) -> None: ...
 
 class TokenSource(Protocol):
-    async def seal(self, rollout_id: str) -> TokenCaptureSnapshot: ...
-    async def drop(self, rollout_id: str, *, seal_id: str, version: int) -> bool: ...
+    async def freeze(self, rollout_id: str) -> TokenCaptureSnapshot: ...
+    async def drop(self, rollout_id: str, *, snapshot_id: str, version: int) -> bool: ...
     async def close(self) -> None: ...
 
 class LineageStore(Protocol):
