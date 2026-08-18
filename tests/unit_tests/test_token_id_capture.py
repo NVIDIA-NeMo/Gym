@@ -1780,18 +1780,18 @@ class _ConfiguredEndpoint:
     async def mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None:
         type(self).incomplete.add(rollout_id)
 
-    async def seal(self, rollout_id: str) -> TokenCaptureSnapshot:
+    async def freeze(self, rollout_id: str) -> TokenCaptureSnapshot:
         entries = tuple(type(self).entries.get(rollout_id, {}).values())
         return TokenCaptureSnapshot(
             rollout_id=rollout_id,
             entries=entries,
             incomplete=rollout_id in type(self).incomplete,
-            seal_id=f"sealed-{rollout_id}",
+            snapshot_id=f"snapshot-{rollout_id}",
             version=len(entries),
         )
 
-    async def drop(self, rollout_id: str, *, seal_id: str, version: int) -> bool:
-        if seal_id != f"sealed-{rollout_id}" or version != len(type(self).entries.get(rollout_id, {})):
+    async def drop(self, rollout_id: str, *, snapshot_id: str, version: int) -> bool:
+        if snapshot_id != f"snapshot-{rollout_id}" or version != len(type(self).entries.get(rollout_id, {})):
             return False
         type(self).entries.pop(rollout_id, None)
         type(self).incomplete.discard(rollout_id)
@@ -1882,15 +1882,15 @@ async def test_an_external_endpoint_round_trips_the_sink_and_source_protocols():
     }
     client = TestClient(_server(config).setup_webserver())
 
-    response = client.post("/ng-rollout/task0-adapter/token-capture/v1/responses", json={"input": "hi"})
+    response = client.post("/ng-rollout/task0-adapter/training-token-capture/v1/responses", json={"input": "hi"})
     source = TokenIdCaptureConfig.model_validate(config).build_source()
-    snapshot = await source.seal("task0-adapter")
+    snapshot = await source.freeze("task0-adapter")
 
     assert response.status_code == 200
     assert [entry.rollout_id for entry in snapshot.entries] == ["task0-adapter"]
     assert snapshot.entries[0].generation_token_ids == GTOKS
-    assert await source.drop("task0-adapter", seal_id=snapshot.seal_id, version=snapshot.version)
-    assert (await source.seal("task0-adapter")).entries == ()
+    assert await source.drop("task0-adapter", snapshot_id=snapshot.snapshot_id, version=snapshot.version)
+    assert (await source.freeze("task0-adapter")).entries == ()
 
 
 def test_a_configured_sink_wins_over_an_installed_one(installed_sink):
