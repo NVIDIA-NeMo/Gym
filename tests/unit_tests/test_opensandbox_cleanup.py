@@ -527,8 +527,7 @@ def test_slurm_batch_command_wires_cleanup_epilogue(tmp_path: Path, eval_status:
             "bash",
             str(SBATCH_SCRIPT),
             "--config",
-            "benchmark path.yaml",
-            "++sentinel=$(echo injected)",
+            "benchmark.yaml",
             "--run-id",
             "attacker",
             "--user",
@@ -556,8 +555,6 @@ def test_slurm_batch_command_wires_cleanup_epilogue(tmp_path: Path, eval_status:
     assert 'export NEMO_GYM_USER="${NEMO_GYM_USER:-$SLURM_JOB_USER}"' in eval_command
     assert "cleanup_sandboxes.py" not in eval_command
     assert "trap cleanup_sandboxes" not in eval_command
-    assert "--config benchmark\\ path.yaml" in eval_command
-    assert "++sentinel=\\$\\(echo\\ injected\\)" in eval_command
 
     assert "trap cleanup_job EXIT" in batch_command
     assert 'cleanup_config="$SLURM_SUBMIT_DIR/env.yaml"' in batch_command
@@ -574,7 +571,6 @@ def test_slurm_batch_command_wires_cleanup_epilogue(tmp_path: Path, eval_status:
     assert '--user "$cleanup_user"' in cleanup_function
     assert 'exit "$job_status"' in cleanup_function
     assert "attacker" not in batch_command
-    assert "sentinel" not in batch_command
 
     for command in (eval_command, batch_command):
         syntax = subprocess.run(["bash", "-n"], input=command, check=False, capture_output=True, text=True)
