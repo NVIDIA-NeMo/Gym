@@ -148,14 +148,14 @@ class TokenIDLogProbTypedDictMixin(TypedDict):
     routed_experts: NotRequired[RoutedExperts]
 
 
-_REQUIRED_TOKEN_METADATA_FIELDS = frozenset(
+REQUIRED_TOKEN_METADATA_FIELDS = frozenset(
     {
         "prompt_token_ids",
         "generation_token_ids",
         "generation_log_probs",
     }
 )
-_TOKEN_METADATA_FIELDS = _REQUIRED_TOKEN_METADATA_FIELDS | {"routed_experts"}
+TOKEN_METADATA_FIELDS = REQUIRED_TOKEN_METADATA_FIELDS | {"routed_experts"}
 
 
 def _validate_atomic_token_metadata(value: Any) -> Any:
@@ -163,11 +163,11 @@ def _validate_atomic_token_metadata(value: Any) -> Any:
     if not isinstance(value, dict):
         return value
 
-    present_fields = _TOKEN_METADATA_FIELDS.intersection(value)
+    present_fields = TOKEN_METADATA_FIELDS.intersection(value)
     if not present_fields:
         return value
 
-    missing_fields = _REQUIRED_TOKEN_METADATA_FIELDS.difference(present_fields)
+    missing_fields = REQUIRED_TOKEN_METADATA_FIELDS.difference(present_fields)
     if missing_fields:
         missing = ", ".join(sorted(missing_fields))
         raise ValueError(f"Token metadata must include all required fields; missing: {missing}")
