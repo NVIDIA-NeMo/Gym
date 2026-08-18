@@ -11,5 +11,7 @@ policy_model:
       chat_template_kwargs: null
       sampling_overrides:
         max_output_tokens: null
+        max_tokens: null
+        max_completion_tokens: null
       extra_body: null
       default_headers: {}
