@@ -109,6 +109,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.judge import judge_failsafe
+from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.server_utils import SESSION_ID_KEY
 
@@ -324,13 +325,22 @@ class LitmusAgentVerifyResponse(BaseVerifyResponse):
     correct: bool = False
     resolved_answer_type: str = ""
     resolved_reward_rule: str = ""
+    # |predicted - expected|, set only for continuous property types
+    # (_MAE_PROPERTY_TYPES) with a parseable prediction; None otherwise.
+    abs_error: Optional[float] = None
 
 
 # Fields verify() sets explicitly; passthrough dataset fields sharing these names
 # are dropped before the splat so they can't collide (see verify()).
 _RESERVED_RESPONSE_FIELDS = frozenset(
-    {"reward", "predicted_value", "correct", "resolved_answer_type", "resolved_reward_rule"}
+    {"reward", "predicted_value", "correct", "resolved_answer_type", "resolved_reward_rule", "abs_error"}
 )
+
+# Property types where absolute error is meaningful. `fragment` is numeric but
+# excluded; `bool`/`presence` are 0/1, where MAE just restates accuracy.
+# Rows carrying no `property_type` fall back to the resolved `answer_type`,
+# where `float` is the continuous case.
+_MAE_PROPERTY_TYPES = frozenset({"float", "count"})
 
 
 # ---------------------------------------------------------------------------
@@ -581,6 +591,27 @@ def _normalize_str(value: object) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _compute_abs_error(predicted: Any, expected: Any, property_type: Any, answer_type: str) -> Optional[float]:
+    """|predicted - expected| for continuous rows, else None.
+
+    A row's `property_type` decides when it carries one, so a legacy `fragment`
+    row stays excluded even though it resolves to the `float` answer type.
+    Modern rows carry no `property_type` and are judged on `answer_type`.
+
+    None also covers an unparseable prediction or a non-numeric expected value,
+    so a rollout that produced no answer is excluded from the mean rather than
+    scoring an error of 0.
+    """
+    continuous = property_type in _MAE_PROPERTY_TYPES if property_type is not None else answer_type == FLOAT
+    if not continuous or predicted is None:
+        return None
+    try:
+        error = abs(float(predicted) - float(expected))
+    except (TypeError, ValueError):
+        return None
+    return error if math.isfinite(error) else None
+
+
 def resolve_reward_rule(answer_type: str, match: Optional[Dict[str, Any]]) -> tuple[str, Dict[str, Any]]:
     """Resolve (rule_name, params) from a per-row ``match`` or the type default.
 
@@ -823,13 +854,19 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
             correct=reward == 1.0,
             resolved_answer_type=answer_type,
             resolved_reward_rule=rule_name,
+            abs_error=_compute_abs_error(predicted, body.expected_answer, extra.get("property_type"), answer_type),
         )
+
+    @staticmethod
+    def _score_fn(r: Dict[str, Any]) -> Dict[str, float]:
+        return {"accuracy": float(r.get("correct", False))}
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
         """Aggregate reward/accuracy, grouped by method x answer_type.
 
         ``method`` is a pass-through field (set by the dataset, e.g.
         direct/mcp-python); it is read here only for grouping, never required.
+        Shared pass@k / majority@k / variance metrics are merged in alongside it.
         """
         rollouts = [r for task in tasks for r in task]
 
@@ -848,16 +885,38 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
                 "mean_reward": statistics.mean(rewards),
             }
 
+        def _mae_stats(group: list) -> Dict[str, Any]:
+            # `mae_count` < `count` means rollouts were skipped (non-continuous
+            # property type, or no parseable answer); read MAE alongside it.
+            errors = [r["abs_error"] for r in group if isinstance(r.get("abs_error"), (int, float))]
+            if not errors:
+                return {"mae": None, "mae_count": 0}
+            return {"mae": statistics.mean(errors), "mae_count": len(errors)}
+
         result: Dict[str, Any] = {}
         for method in sorted(grouped):
             method_rollouts = [r for g in grouped[method].values() for r in g]
             by_atype = {atype: _stats(g) for atype, g in sorted(grouped[method].items())}
             result[method] = {**_stats(method_rollouts), "by_answer_type": by_atype}
+
+        by_property: Dict[str, list] = defaultdict(list)
+        for r in rollouts:
+            by_property[r.get("property", "unknown") or "unknown"].append(r)
+
+        result["by_property"] = {
+            prop: {**_stats(group), **_mae_stats(group)} for prop, group in sorted(by_property.items())
+        }
+
+        result.update(compute_pass_majority_metrics(tasks, score_fn=self._score_fn, answer_key="predicted_value")[0])
         return result
 
     def get_key_metrics(self, agent_metrics: dict[str, Any]) -> dict[str, Any]:
-        keys = {"mean/reward", "mean/correct"}
-        return {k: v for k, v in agent_metrics.items() if k in keys}
+        keys = {"mean/reward", "mean/correct", "mean/abs_error", "mean/input_tokens", "mean/output_tokens"}
+        key = {k: v for k, v in agent_metrics.items() if k in keys}
+        key.update(highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]", score_names=["accuracy"]))
+        key.update(highest_k_metrics(agent_metrics, "pass@{k}", score_names=["accuracy"]))
+        key.update(highest_k_metrics(agent_metrics, "majority@{k}", score_names=["accuracy"]))
+        return key
 
 
 if __name__ == "__main__":

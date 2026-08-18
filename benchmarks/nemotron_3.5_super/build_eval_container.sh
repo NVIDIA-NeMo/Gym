@@ -12,6 +12,12 @@ MOUNTS=$MOUNTS
 GYM_CONFIG=$GYM_CONFIG
 NEMO_GYM_GIT_URL=${NEMO_GYM_GIT_URL:-https://github.com/NVIDIA-NeMo/Gym}
 NEMO_GYM_GIT_REF=${NEMO_GYM_GIT_REF:-main}
+TAU_2_MOUNT_BASE_GYM_DIR=${TAU_2_MOUNT_BASE_GYM_DIR:-""}
+
+
+if [[ -n "$TAU_2_MOUNT_BASE_GYM_DIR" ]]; then
+    MOUNTS="$MOUNTS,$TAU_2_MOUNT_BASE_GYM_DIR:$TAU_2_MOUNT_BASE_GYM_DIR"
+fi
 
 srun --nodes=1 --ntasks=1 \
     --container-image=$INPUT_CONTAINER \
@@ -56,11 +62,17 @@ uv pip install gdown
 gdown --folder "https://drive.google.com/drive/folders/1W5GZW6_bdiDAiipuFMqdUhvUaHIj6-pR" \
     -O benchmarks/scicode/data
 
+if [[ -n "$TAU_2_MOUNT_BASE_GYM_DIR" ]]; then
+    echo "Copying Tau2 and Tau3 data from mounted Gym dir: $TAU_2_MOUNT_BASE_GYM_DIR"
+    cp -r "$TAU_2_MOUNT_BASE_GYM_DIR/benchmarks/tau2/nemo_gym_data" benchmarks/tau2/nemo_gym_data
+    cp -r "$TAU_2_MOUNT_BASE_GYM_DIR/responses_api_agents/tau2/tau2_data" responses_api_agents/tau2/tau2_data
+fi
+
 ########################################
 # END Benchmark specific preparation
 ########################################
 
-gym eval prepare --config $GYM_CONFIG
+gym eval prepare +num_prepare_benchmark_processes=4 --config $GYM_CONFIG
 
 gym env start \
     --config $GYM_CONFIG \
