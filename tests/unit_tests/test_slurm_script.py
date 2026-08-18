@@ -243,6 +243,12 @@ def test_build_vllm_ray_command_not_ray_serve_library():
     assert "serve.run" not in cmd
 
 
+def test_build_vllm_ray_command_installs_ray_if_missing(vllm_service):
+    # Model-serving images (e.g. vllm/vllm-openai) don't necessarily bundle the ray CLI.
+    cmd = _build_vllm_ray_command(vllm_service, total_nodes=2)
+    assert 'command -v ray >/dev/null 2>&1 || pip install -q "ray[default]"' in cmd
+
+
 # ---------------------------------------------------------------------------
 # render_gym_cmd
 # ---------------------------------------------------------------------------

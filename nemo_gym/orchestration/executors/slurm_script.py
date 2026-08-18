@@ -160,8 +160,12 @@ def _build_vllm_ray_command(service: VllmServiceConfig, total_nodes: int) -> str
     # containers with an older pin fall back to manually starting head/worker Ray processes, keyed
     # on Slurm's per-node task rank ($SLURM_NODEID). vLLM's Ray executor blocks on placement-group
     # scheduling until every node's GPUs join, so the fallback needs no separate cluster-ready wait.
+    # Model-serving images (e.g. vllm/vllm-openai) don't necessarily bundle the ray CLI - vLLM only
+    # needs ray as a runtime dependency when the ray executor backend is actually selected - so
+    # install it on the fly if it's missing before relying on either code path above.
     return (
         "bash -lc '\n"
+        '    command -v ray >/dev/null 2>&1 || pip install -q "ray[default]"\n'
         "    if ray symmetric-run --help >/dev/null 2>&1; then\n"
         "        ray symmetric-run \\\n"
         '            --address "$RAY_HEAD_NODE_IP" \\\n'
