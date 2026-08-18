@@ -5173,6 +5173,22 @@ class TestPrefixSupply:
                 supply_prefix_token_ids=True,
             )
 
+    def test_rejects_completions_api_prefix_supply(self) -> None:
+        with raises(ValueError, match="not supported with use_completions_api=true"):
+            VLLMModelConfig(
+                host="0.0.0.0",
+                port=8081,
+                base_url="http://api.openai.com/v1",
+                api_key="dummy_key",  # pragma: allowlist secret
+                model="dummy_model",
+                entrypoint="",
+                name="",
+                return_token_id_information=True,
+                uses_reasoning_parser=False,
+                supply_prefix_token_ids=True,
+                use_completions_api=True,
+            )
+
     def test_supplies_the_parents_cumulative_tokens(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
         server = self._server(monkeypatch, enabled=True)
         first_turn = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
