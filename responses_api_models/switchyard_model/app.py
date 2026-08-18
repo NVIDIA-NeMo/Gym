@@ -28,9 +28,16 @@ and costs join back to the rollout that produced them.
 
 import asyncio
 import contextvars
+import hashlib
+import importlib.metadata
+import json
 import logging
 import re
+import urllib.error
+import urllib.request
 from contextlib import asynccontextmanager, nullcontext
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from pydantic import Field, model_validator
@@ -131,6 +138,13 @@ class SwitchyardModelConfig(BaseResponsesAPIModelConfig):
     session_id_headers: List[str] = Field(default_factory=lambda: ["x-switchyard-session-id"])
     forward_session_id: bool = True
 
+    # Directory that receives this run's routing-condition record: a manifest written at startup
+    # (route, mode, deployment hash and archived contents, nemo-switchyard version) and a
+    # /v1/stats snapshot written at shutdown. Point it at the run's output directory, one per
+    # run -- the manifest is what makes a routed run identifiable and reproducible after the
+    # proxy is gone. None disables both writes.
+    condition_dir: Optional[str] = None
+
     extra_body: Dict[str, Any] = Field(default_factory=dict)
     default_headers: Dict[str, str] = Field(default_factory=dict)
 
@@ -211,6 +225,7 @@ class SwitchyardModel(SimpleResponsesAPIModel):
             if self.config.launches_proxy:
                 print("Starting Switchyard proxy...")
                 self._build_client(self.start_proxy())
+            self.write_condition_manifest()
             # finally, not a trailing statement: startup can fail after the proxy is already
             # serving, and a proxy left serving by a server which never finished starting is the
             # same waste as one left serving by a server which did.
@@ -218,6 +233,8 @@ class SwitchyardModel(SimpleResponsesAPIModel):
                 async with main_app_lifespan(app) as maybe_state:
                     yield maybe_state
             finally:
+                # Stats before stop: the snapshot needs the proxy still answering.
+                self.snapshot_proxy_stats()
                 self.stop_proxy()
 
         app.router.lifespan_context = lifespan_wrapper
@@ -259,6 +276,86 @@ class SwitchyardModel(SimpleResponsesAPIModel):
             return
         self._proxy_server = None
         server.close()
+
+    # --- Routing-condition record ---
+
+    def proxy_root_url(self) -> Optional[str]:
+        """The proxy's root URL (no /v1), in whichever mode is active."""
+        server = getattr(self, "_proxy_server", None)
+        if server is not None:
+            return server.base_url
+        if self.config.switchyard_base_url:
+            return self.config.switchyard_base_url.rstrip("/").removesuffix("/v1")
+        return None
+
+    def write_condition_manifest(self) -> None:
+        """Record the routing condition this run serves under, if condition_dir is set.
+
+        The manifest is the run's provenance: which route, against which deployment (hash and
+        archived contents), on which nemo-switchyard version. Two runs are comparable when their
+        manifests differ only in the route or deployment, and a run is reproducible from the
+        archive alone. Failing to write it must not take down serving -- provenance is worth a
+        warning, not an outage.
+        """
+        if not self.config.condition_dir:
+            return
+
+        deployment_sha256: Optional[str] = None
+        deployment_toml: Optional[str] = None
+        if self.config.launches_proxy:
+            deployment_bytes = Path(str(self.config.deployment)).read_bytes()
+            deployment_sha256 = hashlib.sha256(deployment_bytes).hexdigest()
+            # The native schema references credentials by environment variable name, but an
+            # inline literal would be a secret -- drop the value, keep the line visible.
+            deployment_toml = re.sub(
+                r"^(\s*api_key\s*=\s*).*$",
+                r"\1'<redacted>'",
+                deployment_bytes.decode(errors="replace"),
+                flags=re.MULTILINE,
+            )
+
+        manifest = {
+            "route": self.config.switchyard_model,
+            "mode": "hosted" if self.config.launches_proxy else "attached",
+            "proxy_root_url": self.proxy_root_url(),
+            "nemo_switchyard_version": self._nemo_switchyard_version(),
+            "deployment_path": str(self.config.deployment) if self.config.deployment else None,
+            "deployment_sha256": deployment_sha256,
+            "deployment_toml": deployment_toml,
+            "session_id_headers": list(self.config.session_id_headers),
+            "written_at": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            condition_dir = Path(self.config.condition_dir)
+            condition_dir.mkdir(parents=True, exist_ok=True)
+            (condition_dir / "switchyard-condition.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        except OSError:
+            logger.warning("switchyard_model: could not write the condition manifest", exc_info=True)
+
+    def snapshot_proxy_stats(self) -> None:
+        """Persist the proxy's /v1/stats before it goes away, if condition_dir is set.
+
+        A hosted proxy's counters die with the process, so this is the only chance to keep the
+        proxy-side view of the run -- per-target requests, tokens, retries, latency -- next to
+        the eval outputs it explains. Best-effort for the same reason as the manifest.
+        """
+        root_url = self.proxy_root_url()
+        if not self.config.condition_dir or root_url is None:
+            return
+        try:
+            with urllib.request.urlopen(f"{root_url}/v1/stats", timeout=5) as response:
+                stats = response.read()
+            condition_dir = Path(self.config.condition_dir)
+            condition_dir.mkdir(parents=True, exist_ok=True)
+            (condition_dir / "switchyard-stats.json").write_bytes(stats + b"\n")
+        except (OSError, urllib.error.URLError):
+            logger.warning("switchyard_model: could not snapshot proxy stats", exc_info=True)
+
+    def _nemo_switchyard_version(self) -> Optional[str]:
+        try:
+            return importlib.metadata.version("nemo-switchyard")
+        except importlib.metadata.PackageNotFoundError:
+            return None
 
     # --- Model calls ---
 
