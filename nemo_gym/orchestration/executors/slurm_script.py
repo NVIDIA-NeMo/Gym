@@ -50,16 +50,20 @@ _SCRIPT_TEMPLATE = """\
 """
 
 
-# Resolves the Ray head node from Slurm's node list, mirroring scripts/sbatch_base.sh.
+# Resolves the head node from Slurm's node list, mirroring scripts/sbatch_base.sh.
 # Runs once in the main sbatch shell (before any srun step) so $SLURM_JOB_NODELIST is available.
+# Used by both multi-node code paths below: HEAD_NODE_IP for vLLM's own --data-parallel-address
+# (data-parallel spanning nodes), RAY_HEAD_NODE_IP for `ray start`/`ray symmetric-run` (tensor/
+# pipeline-parallel spanning nodes).
 _RAY_PRELUDE = """\
-# Resolve Ray head node IP for multi-node vLLM services (distributed_backend: ray).
+# Resolve the head node IP for multi-node vLLM services (distributed_backend: ray).
 nodes=$(scontrol show hostnames "$SLURM_JOB_NODELIST")
 nodes_array=($nodes)
 head_node_hostname=${nodes_array[0]}
 head_node_ip=$(getent hosts "$head_node_hostname" | awk '{print $1}')
+export HEAD_NODE_IP="$head_node_ip"
 export RAY_HEAD_NODE_IP="$head_node_ip:6379"
-echo "Ray head node IP address: $RAY_HEAD_NODE_IP\""""
+echo "Head node IP address: $HEAD_NODE_IP\""""
 
 
 def _render_directives(compute: SlurmComputeConfig, remote_bench_dir: Path, benchmark_name: str) -> str:
@@ -131,7 +135,7 @@ def _render_service_command(
     )
 
 
-def _build_vllm_command(service: VllmServiceConfig) -> str:
+def _vllm_base_flags(service: VllmServiceConfig) -> str:
     cmd = (
         f"vllm serve {shlex.quote(service.model)}"
         f" --port {service.port}"
@@ -139,6 +143,11 @@ def _build_vllm_command(service: VllmServiceConfig) -> str:
     )
     if service.pipeline_parallel_size > 1:
         cmd += f" --pipeline-parallel-size {service.pipeline_parallel_size}"
+    return cmd
+
+
+def _build_vllm_command(service: VllmServiceConfig) -> str:
+    cmd = _vllm_base_flags(service)
     if service.number_of_instances > 1:
         cmd += f" --data-parallel-size {service.number_of_instances}"
     if service.trust_remote_code:
@@ -146,12 +155,11 @@ def _build_vllm_command(service: VllmServiceConfig) -> str:
     return cmd
 
 
-def _build_vllm_ray_command(service: VllmServiceConfig, total_nodes: int) -> str:
-    # Uses vLLM's own Ray *core* executor to span nodes (--distributed-executor-backend ray).
-    # This is not the ray.serve library - no Serve deployment/ingress/HTTP proxy is involved.
+def _build_vllm_multi_node_tp_command(service: VllmServiceConfig, total_nodes: int) -> str:
+    # A single instance's tensor/pipeline-parallel footprint spans nodes. Uses vLLM's own Ray
+    # *core* executor (--distributed-executor-backend ray) - not the ray.serve library, no Serve
+    # deployment/ingress/HTTP proxy is involved.
     inner_cmd = _build_vllm_command(service) + " --distributed-executor-backend ray"
-    if service.number_of_instances > 1:
-        inner_cmd += " --data-parallel-backend ray"
     resource_flags = (
         "--num-cpus=${SLURM_CPUS_PER_TASK:-$SLURM_CPUS_ON_NODE} --num-gpus=${SLURM_GPUS_PER_TASK:-$SLURM_GPUS_ON_NODE}"
     )
@@ -180,6 +188,53 @@ def _build_vllm_ray_command(service: VllmServiceConfig, total_nodes: int) -> str
         "    fi\n"
         "'"
     )
+
+
+def _build_vllm_multi_node_dp_command(service: VllmServiceConfig, total_nodes: int) -> str:
+    # Data-parallel replicas span nodes. vLLM's Ray-based DP auto-placement doesn't spread ranks
+    # across physical nodes - launching a single `vllm serve --data-parallel-size N` from one node
+    # only sees that node's own GPUs when placing DP ranks. Real multi-node DP instead needs one
+    # `vllm serve` invocation per node: the head node's serves the OpenAI API and coordinates,
+    # worker nodes run `--headless` with a --data-parallel-start-rank offset. This is vLLM's
+    # documented multi-node data-parallel deployment pattern and doesn't use Ray at all - each
+    # node's tensor-parallel ranks stay local via vLLM's default (mp) executor backend.
+    if service.number_of_instances % total_nodes != 0:
+        raise ValueError(
+            f"number_of_instances ({service.number_of_instances}) must be evenly divisible by the number of "
+            f"nodes ({total_nodes}) for multi-node data-parallel deployment."
+        )
+    dp_size_local = service.number_of_instances // total_nodes
+    common = _vllm_base_flags(service)
+    dp_flags = (
+        f" --data-parallel-size {service.number_of_instances}"
+        f" --data-parallel-size-local {dp_size_local}"
+        ' --data-parallel-address "$HEAD_NODE_IP"'
+        " --data-parallel-rpc-port 13345"
+    )
+    trust_flag = " --trust-remote-code" if service.trust_remote_code else ""
+    head_cmd = common + dp_flags + trust_flag
+    worker_cmd = (
+        common
+        + dp_flags
+        + trust_flag
+        + " --headless"
+        + f" --data-parallel-start-rank $(( SLURM_NODEID * {dp_size_local} ))"
+    )
+    return (
+        "bash -lc '\n"
+        '    if [ "$SLURM_NODEID" = "0" ]; then\n'
+        f"        {head_cmd}\n"
+        "    else\n"
+        f"        {worker_cmd}\n"
+        "    fi\n"
+        "'"
+    )
+
+
+def _build_vllm_ray_command(service: VllmServiceConfig, total_nodes: int) -> str:
+    if service.number_of_instances > 1:
+        return _build_vllm_multi_node_dp_command(service, total_nodes)
+    return _build_vllm_multi_node_tp_command(service, total_nodes)
 
 
 def _build_ray_command(_service: RayServiceConfig) -> str:

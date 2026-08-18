@@ -192,9 +192,10 @@ class SubmitConfig(_StrictModel):
 
         sole_compute = next(iter(compute_names))
         compute = self.compute[sole_compute]
-        is_multi_node = (
-            isinstance(compute, SlurmComputeConfig) and sum(p.nodes for p in compute.node_pools.values()) > 1
+        total_nodes = (
+            sum(p.nodes for p in compute.node_pools.values()) if isinstance(compute, SlurmComputeConfig) else 1
         )
+        is_multi_node = total_nodes > 1
 
         for service_name, service in self.services.items():
             if service.placement is None:
@@ -212,8 +213,20 @@ class SubmitConfig(_StrictModel):
             ):
                 raise ValueError(
                     f"Service '{service_name}' is placed on compute '{sole_compute}', which spans multiple nodes "
-                    f"({sum(p.nodes for p in compute.node_pools.values())} total). vLLM services on multi-node "
-                    "compute must use distributed_backend: {type: ray}."
+                    f"({total_nodes} total). vLLM services on multi-node compute must use "
+                    "distributed_backend: {type: ray}."
+                )
+
+            if (
+                is_multi_node
+                and isinstance(service, VllmServiceConfig)
+                and service.number_of_instances > 1
+                and service.number_of_instances % total_nodes != 0
+            ):
+                raise ValueError(
+                    f"Service '{service_name}' has number_of_instances={service.number_of_instances}, which must "
+                    f"be evenly divisible by the number of nodes ({total_nodes}) for multi-node data-parallel "
+                    "deployment - each node hosts an equal share of the data-parallel replicas."
                 )
 
         if self.driver.policy_model is not None:

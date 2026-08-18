@@ -170,3 +170,28 @@ def test_ray_backend_on_multi_node_compute_accepted():
         )
     )
     assert config.services["svc"].distributed_backend.type == "ray"
+
+
+def test_ray_backend_multi_node_dp_evenly_divisible_accepted():
+    # COMPUTE_MULTI_NODE has 2 nodes; 4 instances split evenly (2 per node).
+    config = SubmitConfig.model_validate(
+        _config(
+            services={
+                "svc": {**SERVICE, "number_of_instances": 4, "distributed_backend": {"type": "ray"}},
+            },
+            compute=COMPUTE_MULTI_NODE,
+        )
+    )
+    assert config.services["svc"].number_of_instances == 4
+
+
+def test_ray_backend_multi_node_dp_uneven_split_raises():
+    with pytest.raises(ValidationError, match="evenly divisible"):
+        SubmitConfig.model_validate(
+            _config(
+                services={
+                    "svc": {**SERVICE, "number_of_instances": 3, "distributed_backend": {"type": "ray"}},
+                },
+                compute=COMPUTE_MULTI_NODE,
+            )
+        )

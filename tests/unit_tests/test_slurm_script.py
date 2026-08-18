@@ -200,7 +200,7 @@ def test_build_vllm_command_pipeline_parallel_1_omits_flag(vllm_service):
 
 
 # ---------------------------------------------------------------------------
-# _build_vllm_ray_command
+# _build_vllm_ray_command - single instance, TP/PP spans nodes (uses Ray core)
 # ---------------------------------------------------------------------------
 
 
@@ -217,24 +217,6 @@ def test_build_vllm_ray_command_wraps_in_symmetric_run(vllm_service):
     assert '--address "$RAY_HEAD_NODE_IP"' in cmd
 
 
-def test_build_vllm_ray_command_multi_instance_adds_dp_backend():
-    service = VllmServiceConfig(
-        type="vllm",
-        container="vllm:latest",
-        model="org/model",
-        number_of_instances=4,
-        distributed_backend={"type": "ray"},
-    )
-    cmd = _build_vllm_ray_command(service, total_nodes=2)
-    assert "--data-parallel-size 4" in cmd
-    assert "--data-parallel-backend ray" in cmd
-
-
-def test_build_vllm_ray_command_single_instance_omits_dp_backend(vllm_service):
-    cmd = _build_vllm_ray_command(vllm_service, total_nodes=2)
-    assert "--data-parallel-backend" not in cmd
-
-
 def test_build_vllm_ray_command_not_ray_serve_library():
     # Sanity check the plan constraint: this must not shell out to `serve` / ray.serve.
     service = VllmServiceConfig(type="vllm", container="vllm:latest", model="org/model")
@@ -247,6 +229,55 @@ def test_build_vllm_ray_command_installs_ray_if_missing(vllm_service):
     # Model-serving images (e.g. vllm/vllm-openai) don't necessarily bundle the ray CLI.
     cmd = _build_vllm_ray_command(vllm_service, total_nodes=2)
     assert 'command -v ray >/dev/null 2>&1 || pip install -q "ray[default]"' in cmd
+
+
+# ---------------------------------------------------------------------------
+# _build_vllm_ray_command - multiple instances (data parallel) span nodes
+# ---------------------------------------------------------------------------
+
+
+def test_build_vllm_ray_command_dp_does_not_use_ray():
+    # Multi-node DP uses vLLM's own --data-parallel-address/--headless coordination, not Ray.
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        number_of_instances=4,
+        distributed_backend={"type": "ray"},
+    )
+    cmd = _build_vllm_ray_command(service, total_nodes=2)
+    assert "ray" not in cmd
+    assert "symmetric-run" not in cmd
+
+
+def test_build_vllm_ray_command_dp_head_and_worker_branches():
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        number_of_instances=4,
+        distributed_backend={"type": "ray"},
+    )
+    cmd = _build_vllm_ray_command(service, total_nodes=2)
+    assert 'if [ "$SLURM_NODEID" = "0" ]; then' in cmd
+    assert "--headless" in cmd
+    assert "--data-parallel-size 4" in cmd
+    assert "--data-parallel-size-local 2" in cmd
+    assert '--data-parallel-address "$HEAD_NODE_IP"' in cmd
+    assert "--data-parallel-rpc-port 13345" in cmd
+    assert "--data-parallel-start-rank $(( SLURM_NODEID * 2 ))" in cmd
+
+
+def test_build_vllm_ray_command_dp_uneven_split_raises():
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        number_of_instances=3,
+        distributed_backend={"type": "ray"},
+    )
+    with pytest.raises(ValueError, match="evenly divisible"):
+        _build_vllm_ray_command(service, total_nodes=2)
 
 
 # ---------------------------------------------------------------------------
