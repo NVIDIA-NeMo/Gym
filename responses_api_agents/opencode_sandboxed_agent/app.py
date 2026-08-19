@@ -334,6 +334,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         try:
             export_result = await sandbox.exec(
                 command=f"""export PATH=$HOME/.opencode/bin:$PATH \
+            && (command -v jq >/dev/null 2>&1 || (apt-get update && apt-get install -y --no-install-recommends jq)) \
             && session_id=$(opencode session list --format json | jq -r '.[0].id') \
             && opencode export $session_id > {export_fname}"""
             )
