@@ -65,6 +65,7 @@ Read ownership is independent of write ownership.
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Mapping
 from importlib import import_module
 from pathlib import Path
@@ -82,6 +83,33 @@ from nemo_gym.token_id_capture.protocols import (
 logger = logging.getLogger(__name__)
 
 TOKEN_ID_CAPTURE_BLOCK = "token_id_capture"
+
+
+class TokenCaptureGateSettings(BaseModel):
+    """Control/data-plane settings for worker-owned staging custody."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    registration_ttl_s: float = Field(default=3600.0, gt=0)
+    tombstone_ttl_s: float = Field(default=300.0, gt=0)
+    expiry_sweep_interval_s: float = Field(default=30.0, gt=0)
+    # Store only the environment variable name in config/telemetry. The
+    # control credential itself is resolved inside the serving process.
+    control_auth_token_env: str = Field(
+        default="NEMO_GYM_TOKEN_CAPTURE_CONTROL_TOKEN",
+        min_length=1,
+    )
+
+    def resolve_control_auth_token(self) -> str:
+        """Read the control secret without serializing it into run config."""
+        token = os.environ.get(self.control_auth_token_env)
+        if not token:
+            raise ValueError(
+                "token_id_capture.gate requires a control bearer in environment "
+                f"variable {self.control_auth_token_env}"
+            )
+        return token
 
 
 class TokenIdCaptureSettings(BaseModel):
@@ -109,6 +137,9 @@ class TokenIdCaptureSettings(BaseModel):
     # Finalization does not retire the frozen snapshot.
     # Durable delivery permits retirement by snapshot id and version.
     rebuild_response: bool = True
+    # Framework-worker staging gate. This remains single-process until the
+    # complete admission/commit/seal state machine has a shared atomic store.
+    gate: TokenCaptureGateSettings = Field(default_factory=TokenCaptureGateSettings)
 
 
 class TokenIdCaptureConfig(BaseModel):
@@ -123,6 +154,13 @@ class TokenIdCaptureConfig(BaseModel):
     @model_validator(mode="after")
     def _validate(self) -> "TokenIdCaptureConfig":
         block = self.token_id_capture
+        if block.gate.enabled and not block.enabled:
+            raise ValueError("token_id_capture.gate.enabled requires token_id_capture.enabled")
+        if block.gate.enabled and block.rebuild_response:
+            raise ValueError(
+                "token_id_capture.gate.enabled requires rebuild_response=false because the "
+                "framework owns staged-record finalization"
+            )
         if not block.enabled:
             # Keep inactive settings for templated configurations.
             # A run may toggle only ``enabled``.
