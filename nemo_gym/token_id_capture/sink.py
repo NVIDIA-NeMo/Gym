@@ -30,7 +30,7 @@ import logging
 import time
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from nemo_gym.token_id_capture.protocols import LineageStore, TokenSink
 from nemo_gym.token_id_capture.records import (
@@ -44,6 +44,10 @@ from nemo_gym.token_id_capture.records import (
 
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from nemo_gym.token_id_capture.gate import RolloutCaptureGate
+    from nemo_gym.token_id_capture.staging.records import CaptureAdmission
 
 
 @dataclass
@@ -75,6 +79,12 @@ class CaptureContext:
     parent_resolved: bool = False
     parent_call_id: str | None = None
     parent_tokens: list[int] = field(default_factory=list)
+    # Gate state is process-shared; each worker's request context carries only
+    # this call's authenticated inputs and typed admission result.
+    staging_gate: RolloutCaptureGate | None = None
+    data_capability: str = ""
+    logical_request_id: str | None = None
+    capture_admission: CaptureAdmission | None = None
 
 
 _CAPTURE_CONTEXT: ContextVar[CaptureContext | None] = ContextVar("nemo_gym_capture_context", default=None)
@@ -126,18 +136,27 @@ async def resolve_parent(request_messages: list | None) -> None:
     A miss leaves the parent link unset.
     """
     context = _CAPTURE_CONTEXT.get()
-    if context is None or request_messages is None or context.lineage_store is None:
+    if context is None or request_messages is None:
         return
     context.parent_resolved = True
-    try:
-        parent = await context.lineage_store.resolve(context.rollout_id, request_messages)
-    except Exception:
-        logger.warning("Could not resolve a parent for rollout %s.", context.rollout_id, exc_info=True)
-        return
-    if parent is None:
-        return
-    context.parent_call_id = parent.model_call_id
-    context.parent_tokens = list(parent.cumulative_token_ids)
+    if context.lineage_store is not None:
+        try:
+            parent = await context.lineage_store.resolve(context.rollout_id, request_messages)
+        except Exception as error:
+            if context.staging_gate is not None:
+                raise RuntimeError(f"gate lineage resolution failed for rollout {context.rollout_id}") from error
+            logger.warning("Could not resolve a parent for rollout %s.", context.rollout_id, exc_info=True)
+            return
+        if parent is not None:
+            context.parent_call_id = parent.model_call_id
+            context.parent_tokens = list(parent.cumulative_token_ids)
+    if context.staging_gate is not None and context.capture_admission is None:
+        context.capture_admission = await context.staging_gate.admit_context(
+            context,
+            data_capability=context.data_capability,
+            request_items=list(request_messages),
+            logical_request_id=context.logical_request_id,
+        )
 
 
 async def capture_tokens(
@@ -154,6 +173,10 @@ async def capture_tokens(
     """
     context = _CAPTURE_CONTEXT.get()
     if context is None:
+        return
+    # Worker custody has already staged and committed through the gate-specific
+    # response hook. It must never fall back to a local/no-op token sink.
+    if context.staging_gate is not None:
         return
     # Guard response decoding and record validation.
     # Either failure leaves the rollout short one call.

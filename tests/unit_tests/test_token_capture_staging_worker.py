@@ -195,6 +195,18 @@ def test_bad_delta_poisons_capture_without_staging() -> None:
     assert sink.events == []
 
 
+def test_child_rejects_a_generation_prompt_with_the_wrong_parent_prefix() -> None:
+    capture, sink = _capture()
+    coords = capture.complete_call(
+        capture.begin_call(_child()),
+        prompt_token_ids=[10, 99, 12, 20],
+        generated_token_ids=[21],
+        generated_logprobs=[-0.2],
+    )
+    assert coords.disposition == "capture_failed"
+    assert sink.events == []
+
+
 def test_duplicate_completion_and_failure_are_rejected() -> None:
     capture, _ = _capture()
     call = capture.begin_call(_root())

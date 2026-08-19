@@ -94,6 +94,9 @@ class TokenCaptureGateSettings(BaseModel):
     registration_ttl_s: float = Field(default=3600.0, gt=0)
     tombstone_ttl_s: float = Field(default=300.0, gt=0)
     expiry_sweep_interval_s: float = Field(default=30.0, gt=0)
+    # Every model-server worker opens this same atomic state file. It contains
+    # live data capabilities and is therefore created with mode 0600.
+    state_store_path: Path | None = None
     # Store only the environment variable name in config/telemetry. The
     # control credential itself is resolved inside the serving process.
     control_auth_token_env: str = Field(
@@ -137,8 +140,8 @@ class TokenIdCaptureSettings(BaseModel):
     # Finalization does not retire the frozen snapshot.
     # Durable delivery permits retirement by snapshot id and version.
     rebuild_response: bool = True
-    # Framework-worker staging gate. This remains single-process until the
-    # complete admission/commit/seal state machine has a shared atomic store.
+    # Framework-worker staging gate. All serving workers coordinate through
+    # ``gate.state_store_path`` and the configured process-shared lineage store.
     gate: TokenCaptureGateSettings = Field(default_factory=TokenCaptureGateSettings)
 
 
@@ -161,6 +164,12 @@ class TokenIdCaptureConfig(BaseModel):
                 "token_id_capture.gate.enabled requires rebuild_response=false because the "
                 "framework owns staged-record finalization"
             )
+        if block.gate.enabled:
+            state_store_path = block.gate.state_store_path
+            if state_store_path is None:
+                raise ValueError("token_id_capture.gate.enabled requires an explicit gate.state_store_path")
+            if not state_store_path.is_absolute():
+                raise ValueError("token_id_capture.gate.state_store_path must be an absolute path")
         if not block.enabled:
             # Keep inactive settings for templated configurations.
             # A run may toggle only ``enabled``.

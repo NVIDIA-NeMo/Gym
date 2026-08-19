@@ -17,7 +17,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Optional
 
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 
 if TYPE_CHECKING:
@@ -86,7 +86,20 @@ class BaseResourcesServer(BaseServer):
 
 
 class BaseRunRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
+    capture_rollout_id: Optional[str] = Field(
+        default=None,
+        alias="_ng_rollout_id",
+        exclude=True,
+    )
+    capture_data_capability: Optional[str] = Field(
+        default=None,
+        alias="_ng_capture_capability",
+        exclude=True,
+        repr=False,
+    )
 
 
 class BaseVerifyRequest(BaseRunRequest):

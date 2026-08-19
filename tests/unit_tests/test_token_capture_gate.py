@@ -14,6 +14,11 @@ from nemo_gym.token_id_capture.gate import (
     OperationConflictError,
     RolloutCaptureGate,
 )
+from nemo_gym.token_id_capture.gate_store import (
+    FileGateStateStore,
+    GateStateStore,
+    InMemoryGateStateStore,
+)
 from nemo_gym.token_id_capture.protocols import LineageMatch
 from nemo_gym.token_id_capture.sink import CaptureContext
 from nemo_gym.token_id_capture.staging.records import CommitCoords
@@ -57,11 +62,13 @@ def _gate(
     store: _LineageStore | None = None,
     *,
     ttl: float = 60.0,
+    state_store: GateStateStore | None = None,
 ) -> tuple[RolloutCaptureGate, _LineageStore]:
     actual_store = store or _LineageStore()
     return (
         RolloutCaptureGate(
             lineage_store=actual_store,
+            state_store=state_store or InMemoryGateStateStore(),
             registration_ttl_s=ttl,
             tombstone_ttl_s=60.0,
         ),
@@ -133,6 +140,73 @@ def test_register_retry_returns_the_identical_capability() -> None:
                 owner_id="controller-2",
                 operation_id="register-1",
             )
+
+    asyncio.run(scenario())
+
+
+def test_independent_workers_share_registration_calls_and_seal(tmp_path) -> None:
+    async def scenario() -> None:
+        lineage_store = _LineageStore()
+        state_path = tmp_path / "capture-gate.json"
+        worker_a, _ = _gate(
+            lineage_store,
+            state_store=FileGateStateStore(state_path),
+        )
+        worker_b, _ = _gate(
+            lineage_store,
+            state_store=FileGateStateStore(state_path),
+        )
+
+        registration = await _register(worker_a)
+        await worker_b.admit_context(
+            _context("root", store=lineage_store),
+            data_capability=registration.data_capability,
+            request_items=[{"role": "user", "content": "start"}],
+            logical_request_id="root-logical",
+        )
+        await worker_a.commit_coords(
+            _coords("root", token_ids=[10, 11]),
+            response_items=[{"role": "assistant", "content": "root"}],
+        )
+        admission = await worker_b.admit_context(
+            _context(
+                "child",
+                parent_call_id="root",
+                parent_tokens=[10, 11],
+                store=lineage_store,
+            ),
+            data_capability=registration.data_capability,
+            request_items=[{"role": "assistant", "content": "root"}],
+            logical_request_id="terminal-logical",
+        )
+        assert admission.required_prefix_token_ids == [10, 11]
+        await worker_a.commit_coords(
+            _coords(
+                "child",
+                parent_call_id="root",
+                prev_len=2,
+                token_ids=[12],
+            ),
+            response_items=[{"role": "assistant", "content": "done"}],
+        )
+        receipt = await worker_b.seal_rollout(
+            "rollout-1",
+            owner_id="controller-1",
+            operation_id="seal-1",
+            reward=1.0,
+            terminal_logical_request_id="terminal-logical",
+        )
+
+        assert receipt.terminal_model_call_id == "child"
+        assert [record.model_call_id for record in receipt.manifest] == ["root", "child"]
+        metrics = await worker_a.snapshot_metrics()
+        assert metrics["registered"] == 1
+        assert metrics["admitted"] == 2
+        assert metrics["text"] == 1
+        assert metrics["token_in"] == 1
+        assert metrics["staged"] == 2
+        assert metrics["sealed"] == 1
+        assert state_path.stat().st_mode & 0o777 == 0o600
 
     asyncio.run(scenario())
 

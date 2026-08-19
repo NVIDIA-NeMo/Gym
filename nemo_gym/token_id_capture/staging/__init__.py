@@ -48,8 +48,8 @@ from nemo_gym.token_id_capture.staging.protocols import (
 )
 from nemo_gym.token_id_capture.staging.rebuild import (
     LinearizedRow,
-    ReceiptVerificationError,
     RebuildError,
+    ReceiptVerificationError,
     WeightVersionSpan,
     linearize,
     verify_and_linearize,
@@ -67,6 +67,11 @@ from nemo_gym.token_id_capture.staging.records import (
     StagedCallSnapshot,
     StageResult,
     staging_key,
+)
+from nemo_gym.token_id_capture.staging.routes import (
+    RoutedExpertsFragment,
+    decode_routed_experts,
+    routed_experts_token_count,
 )
 
 
@@ -91,6 +96,7 @@ __all__ = [
     "RebuildError",
     "RolloutReceipt",
     "RolloutTokenCapture",
+    "RoutedExpertsFragment",
     "StagedCallRecord",
     "StagedCallSnapshot",
     "StageResult",
@@ -103,11 +109,13 @@ __all__ = [
     "build_staging_delta",
     "compute_extras_digest",
     "compute_staging_digest",
+    "decode_routed_experts",
     "encode_token_ids",
     "hash_token_ids",
     "install_capture",
     "linearize",
     "load_golden_vectors",
+    "routed_experts_token_count",
     "staging_key",
     "verify_and_linearize",
 ]

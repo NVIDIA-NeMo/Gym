@@ -53,7 +53,18 @@ from nemo_gym.responses_converter import (
     split_responses_input_output_items,  # noqa: F401
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
-from nemo_gym.token_id_capture import current_capture_context
+from nemo_gym.token_id_capture import (
+    current_capture_context,
+    mark_external_staging_committed,
+)
+from nemo_gym.token_id_capture.config import token_id_capture_config
+from nemo_gym.token_id_capture.gate import NG_CAPTURE_FIELD, NG_COMMIT_COORDS_FIELD
+from nemo_gym.token_id_capture.records import (
+    TOKEN_FIELDS,
+    response_to_output_items,
+    strip_token_fields,
+)
+from nemo_gym.token_id_capture.staging.records import CommitCoords
 
 
 LOG = logging.getLogger("nemo_gym.vllm_model")
@@ -260,6 +271,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         "mm_processor_kwargs",
         "required_prefix_token_ids",
     )
+    _gate_capture_enabled: bool = PrivateAttr(default=False)
 
     def get_converter(self) -> "VLLMConverter":
         """Return the converter used for Responses API <-> Chat Completions mapping.
@@ -296,6 +308,20 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         self._converter = self.get_converter()
         self._transport_call_index = 0
+
+        global_config = getattr(self.server_client, "global_config_dict", None)
+        capture_config = token_id_capture_config(global_config) if global_config is not None else None
+        self._gate_capture_enabled = bool(capture_config is not None and capture_config.token_id_capture.gate.enabled)
+        if self._gate_capture_enabled:
+            if self.config.use_completions_api:
+                raise ValueError("token_id_capture.gate does not support use_completions_api=true")
+            if self.config.is_responses_native:
+                raise ValueError("token_id_capture.gate requires the chat-backed Responses API path")
+            if self.config.return_token_id_information:
+                raise ValueError(
+                    "token_id_capture.gate requires return_token_id_information=false; "
+                    "worker custody replaces the token echo"
+                )
 
         self._chat_template_tokenizer = None
         if self.config.use_completions_api and self.config.render_chat_template:
@@ -622,8 +648,29 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         self._apply_sampling_overrides(body_dict)
         self._validate_single_choice_token_request(body_dict)
-        body_dict = self._apply_prefix_supply(body_dict)
+        if self._gate_capture_enabled:
+            body_dict = self._apply_gate_capture(body_dict)
+        else:
+            body_dict = self._apply_prefix_supply(body_dict)
 
+        return body_dict
+
+    def _apply_gate_capture(self, body_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Attach the typed admission to this worker-bound chat request."""
+        context = current_capture_context()
+        if context is None or context.staging_gate is None:
+            return body_dict
+        admission = context.capture_admission
+        if admission is None:
+            raise RuntimeError("gate admission must complete before vLLM preprocessing")
+        body_dict[NG_CAPTURE_FIELD] = admission.model_dump(mode="json")
+        body_dict.update(
+            logprobs=True,
+            top_logprobs=0,
+            return_tokens_as_token_ids=True,
+        )
+        if admission.mode == "token_in":
+            body_dict["required_prefix_token_ids"] = list(admission.required_prefix_token_ids)
         return body_dict
 
     # The lock protects the ``[proven, configured]`` diagnostic counts.
@@ -827,6 +874,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                 f"NeMo Gym server `{self.config.name}` config has explicitly been set to not use a reasoning parser i.e. `uses_reasoning_parser: false`. Please do not use a reasoning parser in your vLLM endpoint, or fix the `{self.config.name}` server config!"
             )
 
+        if self._gate_capture_enabled:
+            await self._finalize_gate_capture(chat_completion_dict)
+
         if self.config.return_token_id_information:
             message_dict = choice_dict["message"]
 
@@ -892,6 +942,64 @@ class VLLMModel(SimpleResponsesAPIModel):
             choice_dict["message"] = NeMoGymChatCompletionMessageForTraining.model_validate(message_dict)
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
+
+    async def _finalize_gate_capture(self, payload: Dict[str, Any]) -> None:
+        """Commit worker coordinates, then remove every custody-only field."""
+        context = current_capture_context()
+        if context is None or context.staging_gate is None:
+            return
+        coords_payload = payload.pop(NG_COMMIT_COORDS_FIELD, None)
+        try:
+            if coords_payload is None:
+                await context.staging_gate.fail_call(
+                    context.rollout_id,
+                    context.model_call_id,
+                    reason="worker_response_missing_commit_coordinates",
+                )
+                return
+            coords = CommitCoords.model_validate(coords_payload)
+            response_items, _ = strip_token_fields(response_to_output_items(payload))
+            committed = await context.staging_gate.commit_coords(
+                coords,
+                response_items=response_items,
+                logical_request_id=context.logical_request_id or (str(payload["id"]) if payload.get("id") else None),
+            )
+            if committed:
+                mark_external_staging_committed(
+                    rollout_id=coords.rollout_id,
+                    model_call_id=coords.model_call_id,
+                )
+        except Exception:
+            # Worker/framework payloads are an external integrity boundary.
+            # Poison capture without turning a valid model completion into a
+            # harness failure.
+            LOG.exception(
+                "Worker capture acknowledgement failed for rollout %s call %s",
+                context.rollout_id,
+                context.model_call_id,
+            )
+            await context.staging_gate.fail_call(
+                context.rollout_id,
+                context.model_call_id,
+                reason="invalid_worker_commit_coordinates",
+            )
+        finally:
+            self._strip_gate_transport_fields(payload)
+
+    @staticmethod
+    def _strip_gate_transport_fields(payload: Dict[str, Any]) -> None:
+        """Keep token IDs, logprobs, routes, and coordinates off the agent hop."""
+        payload.pop(NG_COMMIT_COORDS_FIELD, None)
+        payload.pop("prompt_token_ids", None)
+        for choice in payload.get("choices") or []:
+            if not isinstance(choice, dict):
+                continue
+            choice.pop("logprobs", None)
+            choice.pop("token_ids", None)
+            message = choice.get("message")
+            if isinstance(message, dict):
+                for field_name in TOKEN_FIELDS:
+                    message.pop(field_name, None)
 
     @staticmethod
     def _require_token_id_list(value: Any, field_name: str) -> List[Any]:
@@ -1007,10 +1115,10 @@ class VLLMModel(SimpleResponsesAPIModel):
         return {field: body_dict[field] for field in cls._TOKENIZE_CHAT_FIELDS if field in body_dict}
 
     def _validate_single_choice_token_request(self, body_dict: Dict[str, Any]) -> None:
-        if self.config.return_token_id_information and body_dict.get("n") not in (None, 1):
-            raise ValueError(
-                f"NeMo Gym server `{self.config.name}` requires n=1 when return_token_id_information=true."
-            )
+        context = current_capture_context()
+        gate_capture = context is not None and context.staging_gate is not None
+        if (self.config.return_token_id_information or gate_capture) and body_dict.get("n") not in (None, 1):
+            raise ValueError(f"NeMo Gym server `{self.config.name}` requires n=1 for token capture.")
 
     async def _chat_completions_via_completions_api(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming
