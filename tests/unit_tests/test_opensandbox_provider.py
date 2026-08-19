@@ -780,6 +780,65 @@ async def test_exec_background_polls_status_and_logs(monkeypatch: pytest.MonkeyP
     assert raw.commands.log_calls == ["exec-42"]
 
 
+@pytest.mark.asyncio
+async def test_exec_background_reports_oom_status_after_502(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Backend502Error(Exception):
+        status_code = 502
+
+    class FakeCommands:
+        async def run(self, command: str, *, opts: Any) -> Any:
+            return SimpleNamespace(id="exec-oom")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            raise Backend502Error("Get command status failed: HTTP 502")
+
+    class FakeRaw:
+        def __init__(self) -> None:
+            self.commands = FakeCommands()
+            self.statuses = [
+                SimpleNamespace(state="Running", reason=None, message=None),
+                SimpleNamespace(
+                    state="Failed",
+                    reason="FAILED",
+                    message="container sandbox terminated with OOMKilled (exit code 137); " + "x" * 1000,
+                ),
+            ]
+            self.info_calls = 0
+
+        async def get_info(self) -> Any:
+            status = self.statuses[min(self.info_calls, len(self.statuses) - 1)]
+            self.info_calls += 1
+            return SimpleNamespace(status=status)
+
+    monkeypatch.setattr(
+        opensandbox_provider, "_require_opensandbox_sdk", lambda: (object, object, dict, object, object)
+    )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 5},
+        probe={"command": None},
+        operations={"background_exec": True, "retries": 0},
+    )
+    raw = FakeRaw()
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-oom", provider_name="opensandbox", raw=raw)
+
+    with pytest.raises(opensandbox_provider.SandboxBackendUnreachableError) as exc_info:
+        await provider.exec(handle, "allocate memory", timeout_s=30)
+
+    message = str(exc_info.value)
+    assert "OOM-killed" in message
+    assert "SandboxResources.memory_mib" not in message
+    assert "reason='FAILED'" in message
+    assert len(message) < 800
+    assert isinstance(exc_info.value.__cause__, Backend502Error)
+    assert raw.info_calls == 2
+
+    raw.statuses = [SimpleNamespace(state="Failed", reason="FAILED", message="sandbox node was drained")]
+    raw.info_calls = 0
+    with pytest.raises(Backend502Error, match="Get command status failed"):
+        await provider.exec(handle, "retry after non-OOM failure", timeout_s=30)
+
+
 @pytest.mark.parametrize(
     ("status", "missing"),
     [
@@ -1478,6 +1537,9 @@ async def test_exec_persistent_502_raises_typed_backend_unreachable(
     class FakeRaw:
         def __init__(self) -> None:
             self.commands = FakeCommands()
+
+        async def get_info(self) -> Any:
+            raise ConnectionError("status API unavailable")
 
     monkeypatch.setattr(
         opensandbox_provider,
