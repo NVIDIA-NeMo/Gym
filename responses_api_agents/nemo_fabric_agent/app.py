@@ -137,21 +137,6 @@ def _turns_used(output: dict[str, Any]) -> int:
     return 1
 
 
-def _response_text(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
-
-
-def _adapter_response(output: dict[str, Any]) -> Any:
-    for key in ("response", "output", "final_response", "submission"):
-        if key in output and output[key] is not None:
-            return output[key]
-    return output
-
-
 class NeMoFabricAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
@@ -322,6 +307,11 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
         )
         reasoning_tokens = _usage_value(usage, "reasoning_tokens", "reasoning_output_tokens", "reasoningOutputTokens")
         total_tokens = _usage_value(usage, "total_tokens", "totalTokens") or input_tokens + output_tokens
+        response_text = output.get("response", output.get("output"))
+        if not isinstance(response_text, str):
+            response_text = (
+                "" if response_text is None else json.dumps(response_text, ensure_ascii=False, sort_keys=True)
+            )
         response = NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
@@ -330,9 +320,7 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
             output=[
                 NeMoGymResponseOutputMessage(
                     id=f"msg_{uuid4().hex}",
-                    content=[
-                        NeMoGymResponseOutputText(text=_response_text(_adapter_response(output)), annotations=[])
-                    ],
+                    content=[NeMoGymResponseOutputText(text=response_text, annotations=[])],
                     role="assistant",
                     status="completed",
                     type="message",
@@ -395,11 +383,15 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
             )
             await raise_for_status(verify_response)
             verify_json = await get_response_json(verify_response)
+            fabric_output = _mapping(fabric_result.get("output"))
+            finished_naturally = not fabric_output.get("failed", False)
+            if "completed" in fabric_output:
+                finished_naturally = bool(fabric_output["completed"])
             return NeMoFabricAgentVerifyResponse.model_validate(
                 verify_json
                 | {
-                    "turns_used": _turns_used(_mapping(fabric_result.get("output"))),
-                    "finished_naturally": True,
+                    "turns_used": _turns_used(fabric_output),
+                    "finished_naturally": finished_naturally,
                     "fabric_result": fabric_result,
                 }
             )

@@ -17,12 +17,10 @@ from responses_api_agents.nemo_fabric_agent.app import (
     NeMoFabricAgent,
     NeMoFabricAgentConfig,
     NeMoFabricAgentRunRequest,
-    _adapter_response,
     _content_text,
     _extract_request_input,
     _mapping,
     _normalized_usage,
-    _response_text,
     _skill_paths,
     _turns_used,
     _usage_value,
@@ -107,8 +105,6 @@ def test_content_and_response_normalizers_handle_generic_values() -> None:
     assert _mapping(None) == {}
     assert _usage_value({"first": True, "second": -1, "third": 7}, "first", "second", "third") == 7
     assert _usage_value({}, "missing") == 0
-    assert _response_text(None) == ""
-    assert _response_text({"answer": 42}) == '{"answer": 42}'
 
 
 def test_normalized_usage_supports_canonical_and_adapter_shapes() -> None:
@@ -162,13 +158,6 @@ def test_normalized_usage_supports_canonical_and_adapter_shapes() -> None:
 )
 def test_turns_used_supports_adapter_shapes(output: dict, expected: int) -> None:
     assert _turns_used(output) == expected
-
-
-def test_adapter_response_supports_harness_specific_final_output() -> None:
-    assert _adapter_response({"response": "deep agents"}) == "deep agents"
-    assert _adapter_response({"output": "mini swe"}) == "mini swe"
-    assert _adapter_response({"submission": "fallback"}) == "fallback"
-    assert _adapter_response({"custom": "generic"}) == {"custom": "generic"}
 
 
 def test_skill_paths_expands_gym_variant(tmp_path: Path) -> None:
@@ -312,7 +301,13 @@ def test_rollout_mcp_metadata_is_optional_and_headers_are_optional(caplog) -> No
     assert "has no session headers" in caplog.text
 
 
-def test_run_preserves_fabric_result_and_verifies(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("answer_key", "completed", "finished_naturally"),
+    [("response", True, True), ("output", False, False)],
+)
+def test_run_preserves_fabric_result_and_verifies(
+    answer_key: str, completed: bool, finished_naturally: bool, tmp_path: Path
+) -> None:
     agent = _agent(cwd=str(tmp_path))
     agent.server_client.global_config_dict = {
         "resources": {"resources_servers": {"resources": {"host": "127.0.0.1", "port": 9001}}},
@@ -347,13 +342,18 @@ def test_run_preserves_fabric_result_and_verifies(tmp_path: Path) -> None:
     request.cookies = {}
 
     fabric = MagicMock()
-    fabric.run = AsyncMock(return_value=_FakeResult())
+    fabric_result = _FakeResult()
+    if answer_key == "output":
+        fabric_result.output["output"] = fabric_result.output.pop("response")
+    fabric_result.output.update(completed=completed, failed=not completed)
+    fabric.run = AsyncMock(return_value=fabric_result)
     with patch("responses_api_agents.nemo_fabric_agent.app.Fabric", return_value=fabric):
         result = asyncio.run(agent.run(request, body))
 
     assert result.reward == 1.0
     assert result.fabric_result["request_id"] == "request-1"
     assert result.turns_used == 2
+    assert result.finished_naturally is finished_naturally
     assert result.response.usage.input_tokens == 3
     assert result.response.usage.output_tokens == 4
     called_config = fabric.run.call_args.args[0].to_mapping()
