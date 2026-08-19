@@ -37,6 +37,8 @@ with open(args.rollout_jsonl) as f_in:
         if row["instance_id"] != args.instance_id:
             continue
 
+        print(f"Verification time taken: {row['patch_verification_time_taken']}")
+
         if row["test_output"].strip():
             to_write = f"Reward: {row['reward']}\n\nTest output:\n{row['test_output']}"
             # to_write = f"Reward: {row['reward']}\n\nTest output:\n{row['test_output']}\n\nModel patch:\n{row['model_patch']}\n\nOpencode stdout:\n{row['opencode_run_stdout']}"
