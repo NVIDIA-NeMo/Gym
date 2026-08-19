@@ -317,7 +317,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     "OPENCODE_CONFIG_CONTENT": opencode_config_content,
                     # @bxyu-nvidia: OpenCode defaults to 32k here https://github.com/anomalyco/opencode/blob/58a99916bb96edf5cf605dc03e1be1e4bacf9ff7/packages/opencode/src/provider/transform.ts#L21
                     # and there is no way to set it to null.
-                    # @bxyu-nvidia: Set an exorbitantly high number that cannot ever be reached.
+                    # Here, we set an exorbitantly high number that cannot ever be reached.
+                    # In future versions of OpenCode, this can be directly passed via maxOutputTokens in the limit config above https://github.com/anomalyco/opencode/blob/1b18a50418f730aca32630ccfcde850f2b5fc360/packages/opencode/src/provider/transform.ts#L1418
                     "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": str(1_000_000_000),
                 },
             )
