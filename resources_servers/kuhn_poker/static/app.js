@@ -1,6 +1,7 @@
 const elements = {
   actions: document.querySelector("#actions"),
   architectureCaption: document.querySelector("#architecture-caption"),
+  architectureModeLabel: document.querySelector("#architecture-mode-label"),
   card0: document.querySelector("#card0"),
   card1: document.querySelector("#card1"),
   connectionDot: document.querySelector("#connection-dot"),
@@ -31,6 +32,7 @@ let spectatorView = null;
 let pendingView = null;
 let eventSource = null;
 let busy = false;
+let architecturePulseTimer = null;
 
 function playerLabel(agent) {
   return agent === "player1" ? "Player 1" : "Player 0";
@@ -48,10 +50,28 @@ function updateArchitectureMode() {
       node.dataset.architecture === "resource" || node.dataset.architecture === mode,
     );
   });
+  document.querySelectorAll("[data-architecture-link]").forEach((link) => {
+    link.classList.toggle("active", link.dataset.architectureLink === mode);
+  });
+  elements.architectureModeLabel.textContent =
+    mode === "play" ? "Play path active" : "Spectator path active";
   elements.architectureCaption.textContent =
     mode === "play"
       ? "Play mode calls /reset and /step directly through your private browser session."
       : "Spectate mode listens to public SSE snapshots emitted by the same environment used for agent rollouts.";
+}
+
+function pulseArchitecture() {
+  const activePath = document.querySelectorAll(
+    ".architecture-node.active, [data-architecture-link].active",
+  );
+  activePath.forEach((element) => element.classList.remove("recent-update"));
+  void elements.architectureModeLabel.offsetWidth;
+  activePath.forEach((element) => element.classList.add("recent-update"));
+  clearTimeout(architecturePulseTimer);
+  architecturePulseTimer = setTimeout(() => {
+    activePath.forEach((element) => element.classList.remove("recent-update"));
+  }, 650);
 }
 
 function renderCard(element, card) {
@@ -221,6 +241,7 @@ async function startHand() {
     const response = await post("/reset", requestMetadata());
     playView = response.info.view;
     setConnection("Private game", "live");
+    pulseArchitecture();
     queueHandoff(playView);
   } catch (error) {
     setConnection("Could not start game", "error");
@@ -245,6 +266,7 @@ async function takeAction(action) {
     const nextView = response.info.view;
     const changedPlayer = nextView.active_agent && nextView.active_agent !== playView.active_agent;
     playView = nextView;
+    pulseArchitecture();
     if (nextView.status === "finished") {
       renderView(nextView);
     } else if (changedPlayer) {
@@ -270,7 +292,10 @@ function openSpectatorStream() {
   eventSource.addEventListener("open", () => setConnection("Watching live", "live"));
   eventSource.addEventListener("message", (event) => {
     spectatorView = JSON.parse(event.data);
-    if (mode === "spectate") renderView(spectatorView);
+    if (mode === "spectate") {
+      pulseArchitecture();
+      renderView(spectatorView);
+    }
   });
   eventSource.addEventListener("error", () => setConnection("Reconnecting…", "error"));
 }

@@ -19,6 +19,8 @@
         </div>
       </header>
 
+      <div class="workspace">
+        <div class="game-column">
       <section class="toolbar">
         <div id="play-controls" class="play-controls">
           <label for="seed">Deal seed</label>
@@ -77,12 +79,17 @@
           <p id="message" class="message" role="alert"></p>
         </div>
       </section>
+        </div>
 
       <section class="architecture-panel">
         <div class="architecture-heading">
           <div>
             <p class="eyebrow">Under the hood</p>
             <h2>How this connects to NeMo Gym</h2>
+            <div class="architecture-live" aria-live="polite">
+              <span class="architecture-pulse"></span>
+              <span id="architecture-mode-label">Play path active</span>
+            </div>
           </div>
           <p id="architecture-caption" class="architecture-caption">
             Play mode calls the environment directly through your browser session.
@@ -118,7 +125,7 @@
             <small>Owns cards, rules, turns, session state, and rewards.</small>
           </article>
 
-          <div class="architecture-arrow">
+          <div class="architecture-arrow" data-architecture-link="spectate">
             <span>SSE /events</span>
             <b>→</b>
           </div>
@@ -136,7 +143,7 @@
             <strong>Browser play mode</strong>
             <small>Sends actions with its private game-session cookie.</small>
           </article>
-          <div class="direct-play-arrow">
+          <div class="direct-play-arrow active" data-architecture-link="play">
             <b>↗</b>
             <span>POST /reset · POST /step</span>
           </div>
@@ -146,6 +153,7 @@
           </p>
         </div>
       </section>
+      </div>
     </main>
 
     <div id="handoff" class="handoff hidden" role="dialog" aria-modal="true">
