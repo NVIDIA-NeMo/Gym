@@ -1,5 +1,6 @@
 const elements = {
   actions: document.querySelector("#actions"),
+  architectureCaption: document.querySelector("#architecture-caption"),
   card0: document.querySelector("#card0"),
   card1: document.querySelector("#card1"),
   connectionDot: document.querySelector("#connection-dot"),
@@ -36,6 +37,19 @@ function playerLabel(agent) {
 function setConnection(label, state = "") {
   elements.connectionLabel.textContent = label;
   elements.connectionDot.className = `connection-dot ${state}`.trim();
+}
+
+function updateArchitectureMode() {
+  document.querySelectorAll("[data-architecture]").forEach((node) => {
+    node.classList.toggle(
+      "active",
+      node.dataset.architecture === "resource" || node.dataset.architecture === mode,
+    );
+  });
+  elements.architectureCaption.textContent =
+    mode === "play"
+      ? "Play mode calls /reset and /step directly through your private browser session."
+      : "Spectate mode listens to public SSE snapshots emitted by the same environment used for agent rollouts.";
 }
 
 function renderCard(element, card) {
@@ -258,6 +272,7 @@ function setMode(nextMode) {
   mode = nextMode;
   pendingView = null;
   elements.handoff.classList.add("hidden");
+  updateArchitectureMode();
   document.querySelectorAll(".mode-button").forEach((button) => {
     button.classList.toggle("active", button.dataset.mode === mode);
   });
@@ -291,4 +306,5 @@ elements.reveal.addEventListener("click", () => {
   }
 });
 
+updateArchitectureMode();
 renderView(null);

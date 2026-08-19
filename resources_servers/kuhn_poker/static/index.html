@@ -77,6 +77,75 @@
           <p id="message" class="message" role="alert"></p>
         </div>
       </section>
+
+      <section class="architecture-panel">
+        <div class="architecture-heading">
+          <div>
+            <p class="eyebrow">Under the hood</p>
+            <h2>How this connects to NeMo Gym</h2>
+          </div>
+          <p id="architecture-caption" class="architecture-caption">
+            Play mode calls the environment directly through your browser session.
+          </p>
+        </div>
+
+        <div class="architecture-flow" aria-label="NeMo Gym request architecture">
+          <article class="architecture-node">
+            <span class="node-kind">Evaluation</span>
+            <strong>gym eval run</strong>
+            <small>Loads a task and waits for the completed rollout.</small>
+          </article>
+
+          <div class="architecture-arrow">
+            <span>POST /run</span>
+            <b>→</b>
+          </div>
+
+          <article class="architecture-node">
+            <span class="node-kind">Controller</span>
+            <strong>Multi-agent agent</strong>
+            <small>Routes each private observation to the active player.</small>
+          </article>
+
+          <div class="architecture-arrow">
+            <span>/reset · /step</span>
+            <b>→</b>
+          </div>
+
+          <article class="architecture-node active" data-architecture="resource">
+            <span class="node-kind">Environment</span>
+            <strong>Kuhn resource server</strong>
+            <small>Owns cards, rules, turns, session state, and rewards.</small>
+          </article>
+
+          <div class="architecture-arrow">
+            <span>SSE /events</span>
+            <b>→</b>
+          </div>
+
+          <article class="architecture-node" data-architecture="spectate">
+            <span class="node-kind">Visualization</span>
+            <strong>Live spectator</strong>
+            <small>Receives public snapshots without blocking gameplay.</small>
+          </article>
+        </div>
+
+        <div class="direct-play-path">
+          <article class="architecture-node active" data-architecture="play">
+            <span class="node-kind">Human controller</span>
+            <strong>Browser play mode</strong>
+            <small>Sends actions with its private game-session cookie.</small>
+          </article>
+          <div class="direct-play-arrow">
+            <b>↗</b>
+            <span>POST /reset · POST /step</span>
+          </div>
+          <p>
+            Both human and agent actions reach the same environment API, so the rules and visualization stay
+            controller-independent.
+          </p>
+        </div>
+      </section>
     </main>
 
     <div id="handoff" class="handoff hidden" role="dialog" aria-modal="true">
