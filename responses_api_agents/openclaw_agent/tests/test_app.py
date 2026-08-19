@@ -15,7 +15,10 @@
 
 import asyncio
 import json
+import os
+import signal
 from pathlib import Path
+from typing import Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import yaml
@@ -635,6 +638,115 @@ class TestObservability:
         assert episode.response.output == baseline.output
         assert episode.response.usage == baseline.usage
         assert [gap.code for gap in episode.observations.gaps] == ["observation_capture_failed"]
+
+
+def _seed_session(home: Path, session_id: str, text: str, mtime: Optional[float] = None) -> Path:
+    session_path = home / ".openclaw" / "agents" / "main" / "sessions" / f"{session_id}.jsonl"
+    session_path.parent.mkdir(parents=True, exist_ok=True)
+    session_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "session", "id": session_id}),
+                json.dumps(
+                    {
+                        "type": "message",
+                        "message": {"role": "assistant", "content": [{"type": "text", "text": text}]},
+                    }
+                ),
+            ]
+        )
+    )
+    if mtime is not None:
+        os.utime(session_path, (mtime, mtime))
+    return session_path
+
+
+class TestFindPartialSession:
+    def test_returns_most_recently_written_parseable_session(self, tmp_path: Path) -> None:
+        home = tmp_path / "home"
+        older = _seed_session(home, "older", "old", mtime=1)
+        newer = _seed_session(home, "newer", "new", mtime=2)
+
+        assert OpenClawAgent._find_partial_session(home) == newer
+        assert older != newer
+
+    def test_skips_unparseable_files_and_returns_none_when_none_parse(self, tmp_path: Path) -> None:
+        home = tmp_path / "home"
+        home.mkdir()
+        (home / "empty.jsonl").write_text("")
+        (home / "garbage.jsonl").write_text("not json\n")
+
+        assert OpenClawAgent._find_partial_session(home) is None
+
+    def test_returns_none_when_home_missing(self, tmp_path: Path) -> None:
+        assert OpenClawAgent._find_partial_session(tmp_path / "missing") is None
+
+
+class TestTimeoutSalvage:
+    def test_config_timeout_returns_partial_session_from_disk(self, tmp_path: Path) -> None:
+        agent = _make_agent()
+        work_dir = tmp_path / "run"
+        home = work_dir / ".openclaw-home"
+        config_path = home / ".openclaw" / "openclaw.json"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text("{}")
+        _seed_session(home, "session-1", "partial")
+
+        async def _run_exec_stub(cmd, *, cwd, env, timeout):
+            if "setup" in cmd:
+                return 0, "", ""
+            raise TimeoutError("openclaw timed out")
+
+        with (
+            patch.object(agent, "_workspace_root", return_value=work_dir),
+            patch.object(agent, "_run_exec", _run_exec_stub),
+        ):
+            output, usage, _ = asyncio.run(agent._run_openclaw("solve", None))
+
+        assert output
+        assert output[0].content[0].text == "partial"
+        assert not work_dir.exists()  # workdir cleanup still runs after salvage
+
+
+class TestSigtermSalvage:
+    def test_sigterm_returns_partial_session_from_disk(self, tmp_path: Path) -> None:
+        agent = _make_agent()
+        work_dir = tmp_path / "run"
+        home = work_dir / ".openclaw-home"
+        config_path = home / ".openclaw" / "openclaw.json"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text("{}")
+        _seed_session(home, "session-1", "partial")
+
+        registered: dict = {}
+
+        async def _run_exec_stub(cmd, *, cwd, env, timeout):
+            if "setup" in cmd:
+                return 0, "", ""
+            await asyncio.Event().wait()  # hangs until the SIGTERM path cancels it
+
+        async def _main():
+            loop = asyncio.get_running_loop()
+            loop.add_signal_handler = lambda sig, cb, *a: registered.__setitem__(sig, cb)  # type: ignore[method-assign]
+            loop.remove_signal_handler = lambda sig: registered.pop(sig, None)  # type: ignore[method-assign]
+            task = asyncio.ensure_future(agent._run_openclaw("solve", None))
+            for _ in range(100):
+                if signal.SIGTERM in registered:
+                    break
+                await asyncio.sleep(0)
+            assert signal.SIGTERM in registered, "SIGTERM handler was never installed"
+            registered[signal.SIGTERM]()
+            return await task
+
+        with (
+            patch.object(agent, "_workspace_root", return_value=work_dir),
+            patch.object(agent, "_run_exec", _run_exec_stub),
+        ):
+            output, usage, _ = asyncio.run(_main())
+
+        assert output
+        assert output[0].content[0].text == "partial"
+        assert not work_dir.exists()
 
 
 class TestDeepMerge:
