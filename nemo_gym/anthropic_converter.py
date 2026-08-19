@@ -808,10 +808,8 @@ class AnthropicConverter:
         output_tokens = usage.get("output_tokens", 0)
         return NeMoGymResponseUsage(
             input_tokens=input_tokens,
-            input_tokens_details=NeMoGymResponseInputTokensDetails(
-                cached_tokens=usage.get("cache_read_input_tokens", 0)
-            ),
+            input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=usage.get("cache_read_input_tokens")),
             output_tokens=output_tokens,
-            output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+            output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=None),
             total_tokens=input_tokens + output_tokens,
         )

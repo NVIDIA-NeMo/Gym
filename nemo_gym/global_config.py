@@ -81,6 +81,8 @@ MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME = "model_endpoint_readiness_timeout_se
 ALLOW_OPENAI_VERSION_SKEW_KEY_NAME = "allow_openai_version_skew"
 UV_CACHE_DIR_KEY_NAME = "uv_cache_dir"
 UV_VENV_DIR_KEY_NAME = "uv_venv_dir"
+RESULTS_DIR_KEY_NAME = "results_dir"
+CACHE_DIR_KEY_NAME = "cache_dir"
 INHERIT_FROM_KEY_NAME = "_inherit_from"
 COPY_KEY_NAME = "_copy"
 DELETE_KEY_KEY_NAME = "_delete_key"
@@ -96,6 +98,8 @@ QUERY_KEY_NAME = "query"
 OBSERVABILITY_ENABLED_KEY_NAME = "observability_enabled"
 MODEL_CALL_CAPTURE_DIR_KEY_NAME = "model_call_capture_dir"
 COMPONENT_NAME_KEY_NAME = "component_name"
+SKIP_VERIFICATION_KEY_NAME = "skip_verification"
+SKIP_VERIFICATION_REWARD_KEY_NAME = "skip_verification_reward"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -117,6 +121,8 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     ALLOW_OPENAI_VERSION_SKEW_KEY_NAME,
     UV_CACHE_DIR_KEY_NAME,
     UV_VENV_DIR_KEY_NAME,
+    RESULTS_DIR_KEY_NAME,
+    CACHE_DIR_KEY_NAME,
     INHERIT_FROM_KEY_NAME,
     COPY_KEY_NAME,
     NEMO_GYM_LOG_DIR_KEY_NAME,
@@ -126,6 +132,8 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     OBSERVABILITY_ENABLED_KEY_NAME,
     MODEL_CALL_CAPTURE_DIR_KEY_NAME,
     COMPONENT_NAME_KEY_NAME,
+    SKIP_VERIFICATION_KEY_NAME,
+    SKIP_VERIFICATION_REWARD_KEY_NAME,
 ]
 
 # Data keys
@@ -303,14 +311,30 @@ class GlobalConfigDictParser(BaseModel):
 
     def load_extra_config_paths(self, config_paths: List[str]) -> Tuple[List[str], List[DictConfig]]:
         """
-        Returns the new total config_paths and the extra configs
+        Returns the new total config_paths and the extra configs, ordered for merging.
+
+        Two rules decide precedence:
+
+        - A config named in another config's ``config_paths`` is *inner*. The config
+          that pulled it in overrides it, however deep the nesting goes.
+        - Configs listed together are siblings, in the order they were listed. A later
+          sibling overrides an earlier one, and so does everything it pulled in.
+
+        The returned configs are ordered so that a left-to-right ``OmegaConf.merge``
+        produces both rules: the include tree flattened so that a config follows
+        everything it pulled in, with each subtree kept contiguous.
         """
         config_paths = config_paths.copy()
+        # The entries the caller passed; everything appended below was pulled in by one
+        # of them, directly or transitively.
+        root_count = len(config_paths)
+        # Entries pulled in by each entry, parallel to config_paths, in listed order.
+        children: List[List[int]] = [[] for _ in config_paths]
 
         extra_configs: List[DictConfig] = []
         duplicate_config_paths: List[str] = []
         # Just a careful note here that we explicitly mutate config_paths as it is being appended to
-        for config_path in config_paths:
+        for index, config_path in enumerate(config_paths):
             original_entry = config_path
             config_path = Path(config_path)
             # Search NEMO_GYM_EXTRA_ROOTS, cwd, then the install root (see _resolve_under_cwd_or_install).
@@ -333,6 +357,8 @@ Check the path is spelled correctly and is relative to your working directory, a
             for new_config_path in extra_config.get(CONFIG_PATHS_KEY_NAME) or []:
                 if new_config_path not in config_paths:
                     config_paths.append(new_config_path)
+                    children.append([])
+                    children[index].append(len(config_paths) - 1)
                 else:
                     duplicate_config_paths.append(new_config_path)
             extra_configs.append(extra_config)
@@ -343,6 +369,21 @@ Check the path is spelled correctly and is relative to your working directory, a
 In cases like these, you may want to consider using the `inherit_from` OmegaConf directive e.g. '++my_specific_server=${{inherit_from:generic_server}}' and then overriding config parameters in `my_specific_server`.
 Duplicate config paths:
 {duplicate_config_paths_str}""")
+
+        # Flatten the include tree so that every config merges after -- and therefore
+        # overrides -- the ones it pulled in, and each subtree stays contiguous in
+        # listed order, so a later sibling and its own includes override an earlier
+        # sibling's. Iterative post-order, since include chains can nest arbitrarily.
+        merge_order: List[int] = []
+        pending: List[Tuple[int, bool]] = [(root, False) for root in reversed(range(root_count))]
+        while pending:
+            index, children_visited = pending.pop()
+            if children_visited:
+                merge_order.append(index)
+                continue
+            pending.append((index, True))
+            pending.extend((child, False) for child in reversed(children[index]))
+        extra_configs = [extra_configs[i] for i in merge_order]
 
         return config_paths, extra_configs
 
@@ -385,6 +426,8 @@ Duplicate config paths:
         port_range_low: int,
         port_range_high: int,
         initial_disallowed_ports: Optional[List[int]] = None,
+        skip_verification: Optional[bool] = None,
+        skip_verification_reward: Optional[float] = None,
         probe_ports: bool = True,
     ) -> List[int]:
         server_refs = [c.get_server_ref() for c in server_instance_configs]
@@ -433,6 +476,15 @@ Duplicate config paths:
                 else:
                     # Port already exists, add it to the disallowed list.
                     disallowed_ports.append(run_server_config_dict["port"])
+
+                if server_instance_config.SERVER_TYPE == "responses_api_agents":
+                    if skip_verification is not None and SKIP_VERIFICATION_KEY_NAME not in run_server_config_dict:
+                        run_server_config_dict[SKIP_VERIFICATION_KEY_NAME] = skip_verification
+                    if (
+                        skip_verification_reward is not None
+                        and SKIP_VERIFICATION_REWARD_KEY_NAME not in run_server_config_dict
+                    ):
+                        run_server_config_dict[SKIP_VERIFICATION_REWARD_KEY_NAME] = skip_verification_reward
 
         return disallowed_ports
 
@@ -650,10 +702,9 @@ Pass each config with --config (it builds the list for you), e.g.:
   gym env start --config resources_servers/<env>/configs/<env>.yaml"""
             ) from e
 
+        # Returned in merge order: a config follows everything it pulled in, so it
+        # overrides them; siblings in listed order, so a later one overrides earlier.
         config_paths, extra_configs = self.load_extra_config_paths(config_paths)
-
-        # Reverse here so the "inner" configs (appended to the list) are ovreridden by the outer configs.
-        extra_configs.reverse()
 
         # Dot env overrides previous configs
         extra_configs.append(dotenv_extra_config)
@@ -743,6 +794,8 @@ Found global config dict yaml:
             initial_disallowed_ports=initial_disallowed_ports,
             port_range_low=port_range_low,
             port_range_high=port_range_high,
+            skip_verification=global_config_dict.get(SKIP_VERIFICATION_KEY_NAME),
+            skip_verification_reward=global_config_dict.get(SKIP_VERIFICATION_REWARD_KEY_NAME),
             probe_ports=not parse_config.offline,
         )
 
@@ -807,14 +860,34 @@ Found global config dict yaml:
             # a connection. Generous because vLLM can take minutes to load weights; 0 skips it.
             global_config_dict.setdefault(MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME, 600)
 
+            # Artifact roots. `results_dir` is where servers write run artifacts;
+            # `cache_dir` is where they keep reusable setup trees (clones, venvs,
+            # toolchains). Overridable independently, so a run can point results at
+            # a shared filesystem while caches stay on fast local (or baked
+            # container) storage. Normalized to absolute here: children resolve
+            # relative paths against their own cwd, which differs per process.
+            for dir_key_name, dir_default in (
+                (RESULTS_DIR_KEY_NAME, RESULTS_DIR),
+                (CACHE_DIR_KEY_NAME, CACHE_DIR),
+            ):
+                dir_value = global_config_dict.setdefault(dir_key_name, str(dir_default))
+                if not isinstance(dir_value, str) or not dir_value:
+                    raise ConfigError(f"{dir_key_name} must be a non-empty path string, got {dir_value!r}.")
+                global_config_dict[dir_key_name] = str(Path(dir_value).expanduser().resolve())
+
             # UV related configuration
-            # UV caching directory overrides to local folders.
-            global_config_dict.setdefault(UV_CACHE_DIR_KEY_NAME, str(CACHE_DIR / "uv"))
+            # UV caching directory overrides to local folders, under the cache root.
+            global_config_dict.setdefault(
+                UV_CACHE_DIR_KEY_NAME, str(Path(global_config_dict[CACHE_DIR_KEY_NAME]) / "uv")
+            )
             # Runtime subprocesses inherit the configured cache directory.
             if not parse_config.offline:
                 environ["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
             # By default, build the directories in their individual folders using the root repository
             # e.g. WORKING_DIR/responses_api_models/my_server
+            # Deliberately anchored at WORKING_DIR rather than the cache root: venv
+            # trees don't relocate safely once built, and the key is independently
+            # overridable for deployments that want them elsewhere.
             global_config_dict.setdefault(UV_VENV_DIR_KEY_NAME, str(WORKING_DIR))
 
         if parse_config.hide_secrets:  # pragma: no cover
@@ -829,7 +902,7 @@ Found global config dict yaml:
             _WANDB_RUN = wandb.init(
                 project=wandb_config.wandb_project,
                 name=wandb_config.wandb_name,
-                dir=str(RESULTS_DIR / "wandb"),
+                dir=str(Path(global_config_dict[RESULTS_DIR_KEY_NAME]) / "wandb"),
             )
 
             # Log params
@@ -876,6 +949,30 @@ Found global config dict yaml:
         return almost_servers
 
 
+def maybe_get_global_config_dict() -> Optional[DictConfig]:
+    """The global config dict when this process already has one; never triggers a CLI parse.
+
+    Returns the cached dict, or the one the parent injected via
+    NEMO_GYM_CONFIG_DICT (caching it), or None in a bare process. Library code
+    that only wants to *consult* the config should use this instead of
+    `get_global_config_dict`, which falls through to a full CLI/hydra parse.
+    """
+    global _GLOBAL_CONFIG_DICT
+    if _GLOBAL_CONFIG_DICT is not None:
+        return _GLOBAL_CONFIG_DICT
+
+    nemo_gym_config_dict_str_from_env = getenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME)
+    if nemo_gym_config_dict_str_from_env:
+        global_config_dict = OmegaConf.create(nemo_gym_config_dict_str_from_env)
+
+        _GLOBAL_CONFIG_DICT = global_config_dict
+
+        _apply_verbosity(global_config_dict)
+        return global_config_dict
+
+    return None
+
+
 def get_global_config_dict(
     global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
     global_config_dict_parser_cls: Type[GlobalConfigDictParser] = GlobalConfigDictParser,
@@ -897,18 +994,9 @@ def get_global_config_dict(
 
     If this function is run by a child server of the main proc, that child will have been spun up with an environment variable with key NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME. The config dict will be read directly off this variable, cached, and returned with no additional validation.
     """
-    global _GLOBAL_CONFIG_DICT
-    if _GLOBAL_CONFIG_DICT is not None:
-        return _GLOBAL_CONFIG_DICT
-
-    nemo_gym_config_dict_str_from_env = getenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME)
-    if nemo_gym_config_dict_str_from_env:
-        global_config_dict = OmegaConf.create(nemo_gym_config_dict_str_from_env)
-
-        _GLOBAL_CONFIG_DICT = global_config_dict
-
-        _apply_verbosity(global_config_dict)
-        return global_config_dict
+    existing_global_config_dict = maybe_get_global_config_dict()
+    if existing_global_config_dict is not None:
+        return existing_global_config_dict
 
     set_global_config_dict(
         global_config_dict_parser_config=global_config_dict_parser_config,
