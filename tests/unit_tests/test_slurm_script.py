@@ -177,7 +177,7 @@ def test_build_vllm_command_multi_instance():
         container="vllm:latest",
         model="org/model",
         number_of_instances=4,
-        distributed_backend={"type": "vllm_service"},
+        distributed_backend={"type": "mp"},
     )
     cmd = _build_vllm_command(service)
     assert "--data-parallel-size 4" in cmd

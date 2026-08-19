@@ -319,10 +319,22 @@ class ResponsesConverter(BaseModel):
                         converted_parts.append({"type": "text", "text": part_param["text"]})
                     case "input_image":
                         image_url = part_param.get("image_url", "")
+                        if isinstance(image_url, dict):
+                            image_url = image_url.get("url", "")
+                        if not image_url:
+                            raise ValueError(f"{part_param['type']} requires a non-empty image_url")
                         detail = part_param.get("detail", "auto")
                         converted_parts.append(
                             {"type": "image_url", "image_url": {"url": image_url, "detail": detail}}
                         )
+                    case "input_video":
+                        source_key = "video_url" if "video_url" in part_param else "video"
+                        video_url = part_param[source_key]
+                        if isinstance(video_url, dict):
+                            video_url = video_url.get("url", "")
+                        if not video_url:
+                            raise ValueError(f"input_video.{source_key} requires a non-empty URL")
+                        converted_parts.append({"type": "video_url", "video_url": {"url": video_url}})
                     case _:
                         raise NotImplementedError(f"Unsupported part param type: {part_param['type']}")
             content = converted_parts

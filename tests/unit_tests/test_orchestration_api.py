@@ -102,7 +102,7 @@ def test_service_unknown_field_raises():
 # number_of_instances / distributed_backend
 # ---------------------------------------------------------------------------
 
-_MULTI_SERVICE = {**SERVICE, "number_of_instances": 4, "distributed_backend": {"type": "vllm_service"}}
+_MULTI_SERVICE = {**SERVICE, "number_of_instances": 4, "distributed_backend": {"type": "mp"}}
 
 
 def test_number_of_instances_with_backend_accepted():
@@ -110,7 +110,7 @@ def test_number_of_instances_with_backend_accepted():
     svc = config.services["svc"]
     assert svc.number_of_instances == 4
     assert svc.distributed_backend is not None
-    assert svc.distributed_backend.type == "vllm_service"
+    assert svc.distributed_backend.type == "mp"
 
 
 def test_number_of_instances_defaults_to_1():
@@ -119,9 +119,11 @@ def test_number_of_instances_defaults_to_1():
     assert config.services["svc"].distributed_backend is None
 
 
-def test_multi_instance_without_backend_raises():
-    with pytest.raises(ValidationError, match="distributed_backend must be set"):
-        SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "number_of_instances": 4}}))
+def test_multi_instance_without_backend_defaults_to_mp():
+    config = SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "number_of_instances": 4}}))
+    svc = config.services["svc"]
+    assert svc.distributed_backend is not None
+    assert svc.distributed_backend.type == "mp"
 
 
 def test_number_of_instances_zero_raises():
@@ -216,7 +218,7 @@ def test_gpu_footprint_exact_fit_accepted():
         **SERVICE,
         "tensor_parallel_size": 2,
         "number_of_instances": 4,
-        "distributed_backend": {"type": "vllm_service"},
+        "distributed_backend": {"type": "mp"},
     }
     config = SubmitConfig.model_validate(_config(services={"svc": service}, compute=COMPUTE_8_GPUS_PER_NODE))
     assert config.services["svc"].number_of_instances == 4
@@ -227,7 +229,7 @@ def test_gpu_footprint_exceeds_node_raises():
         **SERVICE,
         "tensor_parallel_size": 2,
         "number_of_instances": 8,
-        "distributed_backend": {"type": "vllm_service"},
+        "distributed_backend": {"type": "mp"},
     }
     with pytest.raises(ValidationError, match="exceeds the largest available"):
         SubmitConfig.model_validate(_config(services={"svc": service}, compute=COMPUTE_8_GPUS_PER_NODE))
@@ -238,7 +240,7 @@ def test_gpu_footprint_underutilized_warns():
         **SERVICE,
         "tensor_parallel_size": 2,
         "number_of_instances": 2,
-        "distributed_backend": {"type": "vllm_service"},
+        "distributed_backend": {"type": "mp"},
     }
     with pytest.warns(UserWarning, match="leaving 4 GPU"):
         config = SubmitConfig.model_validate(_config(services={"svc": service}, compute=COMPUTE_8_GPUS_PER_NODE))

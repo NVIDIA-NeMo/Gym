@@ -19,9 +19,6 @@ services:
     trust_remote_code: true
     tensor_parallel_size: 2
     number_of_instances: 4       # 4 engine replicas, total 8 GPUs
-    distributed_backend:
-      type: vllm_service         # vLLM native --data-parallel-size, single node only. For multi-node,
-                                  # use distributed_backend: {type: ray} - see slurm_vllm_ray_multi_node.yaml
     port: 8000
     health_check:
       timeout_seconds: 1200
@@ -30,7 +27,7 @@ services:
 
 driver:
   policy_model: vllm_model
-  container: python:3.13
+  container: python:3.12
   gym_install:
     ref: main
   benchmarks:
