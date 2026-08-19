@@ -134,6 +134,10 @@ class BaseVerifyResponse(BaseVerifyRequest):
     # detail, so never a metric label; `failure_kind` is the groupable half.
     failure_reason: Optional[str] = None
 
+    # The same environment-side handle reported by ``/seed_session``, returned with the
+    # score so a rollout record and an environment log line share a join key.
+    env_session_id: Optional[str] = None
+
     @field_validator("failure_kind")
     @classmethod
     def _warn_on_unregistered_failure_kind(cls, value: Optional[str]) -> Optional[str]:
@@ -167,7 +171,16 @@ class BaseSeedSessionRequest(BaseModel):
 
 
 class BaseSeedSessionResponse(BaseModel):
-    pass
+    # The environment-side handle for this session: a container id, a browser context id,
+    # a provider session id. Opaque to Gym, and optional - an environment that does not
+    # report one is unaffected. Returning it lets the training side join its own rollout
+    # records against environment- and provider-side logs without timestamp guessing.
+    #
+    # Diagnostic correlation only. It is not the allocation, deduplication, authorization
+    # or cleanup identity - those belong to the caller-created ``_ng_session_id`` and its
+    # close capability (#2609), which exist precisely because a provider handle is learned
+    # from this response and is therefore unavailable when the response is lost.
+    env_session_id: Optional[str] = None
 
 
 class MCPServerMetadata(BaseModel):
