@@ -248,7 +248,7 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             anti_cheat_setup_fpath = Path(__file__).parent / "anti_cheat_setup.sh"
             await eval_sandbox.upload(anti_cheat_setup_fpath, f"{wd}/anti_cheat_setup.sh")
             result = await eval_sandbox.exec(
-                f"""WORKING_DIRECTORY={wd} bash anti_cheat_setup.sh && rm anti_cheat_setup.sh"""
+                f"""git reset --hard && WORKING_DIRECTORY={wd} bash anti_cheat_setup.sh && rm anti_cheat_setup.sh"""
             )
             if result.return_code != 0:
                 print(f"""Failed to setup anti-cheating for {test_spec.instance_id}. Return code: {result.return_code}
