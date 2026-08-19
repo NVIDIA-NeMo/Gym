@@ -13,6 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import shlex
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -979,6 +982,47 @@ def test_build_sbatch_script_ray_serve_backend_adds_head_node_prelude(bench_dir)
     assert "ray symmetric-run" in script
     assert "serve run --host 0.0.0.0 --port 8000" in script
     assert "git checkout main" in script
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_build_sbatch_script_ray_serve_backend_is_valid_bash(bench_dir):
+    # Regression test: _build_vllm_ray_serve_command nests `bash -c '...'` inside
+    # _wrap_in_ray_cluster's own `bash -lc '...'` wrapping; unescaped single quotes there
+    # previously broke the outer quoting and produced a script that failed with
+    # "syntax error: unexpected end of file" at job launch time.
+    config = _ray_serve_multi_node_config()
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    result = subprocess.run(["bash", "-n"], input=script, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_build_sbatch_script_ray_serve_backend_srun_arg_stays_single_token(bench_dir):
+    # bash -n alone isn't a reliable guard here: broken quote *nesting* can still leave an even
+    # total quote count (so it "balances" and passes -n) while completely corrupting which text is
+    # inside vs. outside the outer bash -lc quoting. Parse the actual srun invocation with shlex and
+    # confirm the whole ray-cluster script - including the nested `bash -c` body - comes back as a
+    # single argument, the way srun would receive it, rather than leaking into separate top-level
+    # shell words.
+    config = _ray_serve_multi_node_config()
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    # The command itself spans many lines (the nested bash -lc/bash -c blocks), so pull the whole
+    # multi-line srun invocation, not just its first line.
+    start = script.index("srun --overlap --no-container-mount-home")
+    end = script.index("VLLM_MODEL_PID=$!")
+    srun_block = script[start:end]
+    words = shlex.split(srun_block, posix=True)
+    assert words[:2] == ["srun", "--overlap"]
+    bash_lc_index = words.index("-lc")
+    entrypoint_arg = words[bash_lc_index + 1]
+    assert "ray symmetric-run" in entrypoint_arg
+    assert "curl -LsSf" in entrypoint_arg
+    assert "serve run --host 0.0.0.0 --port 8000" in entrypoint_arg
+    # Everything else after the single bash -lc argument should just be the trailing "&".
+    assert words[bash_lc_index + 2 :] == ["&"]
 
 
 # ---------------------------------------------------------------------------

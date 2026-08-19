@@ -157,12 +157,27 @@ def _build_vllm_command(service: VllmServiceConfig) -> str:
     return cmd
 
 
+def _escape_for_single_quotes(s: str) -> str:
+    """Escape s so it can be embedded literally inside a single-quoted bash string ('...').
+
+    Uses the standard close-quote/escaped-quote/reopen-quote trick ('\\'') so callers can safely
+    nest an already-quoted sub-command (e.g. `bash -c '...'`) inside another single-quoted string
+    without its own quotes prematurely terminating the outer one.
+    """
+    return s.replace("'", "'\\''")
+
+
 def _wrap_in_ray_cluster(entrypoint_cmd: str, total_nodes: int, ray_extras: str = "default") -> str:
     # Bootstraps a Ray cluster across every task and runs entrypoint_cmd only on the elected head
     # node, mirroring scripts/sbatch_base.sh.
     resource_flags = (
         "--num-cpus=${SLURM_CPUS_PER_TASK:-$SLURM_CPUS_ON_NODE} --num-gpus=${SLURM_GPUS_PER_TASK:-$SLURM_GPUS_ON_NODE}"
     )
+    # entrypoint_cmd is embedded inside this function's own single-quoted `bash -lc '...'` string
+    # below, so any single quotes it contains (e.g. from a nested `bash -c '...'` wrapper) must be
+    # escaped here or they'd prematurely close this outer quoting - this is a no-op for entrypoints
+    # that don't themselves contain single quotes (e.g. the plain `vllm serve ...` case).
+    entrypoint_cmd = _escape_for_single_quotes(entrypoint_cmd)
     # ray symmetric-run starts/joins a Ray cluster across every task and runs the entrypoint
     # only on the elected head node. It requires Ray >= 2.50, so containers with an older pin fall
     # back to manually starting head/worker Ray processes, keyed on Slurm's per-node task rank
@@ -265,7 +280,7 @@ def _build_vllm_ray_serve_command(
         f" trust_remote_code={service.trust_remote_code}"
     )
     body = "\n    ".join([*gym_install_preamble, serve_run_cmd])
-    inner_cmd = f"bash -c '\n    {body}\n'"
+    inner_cmd = f"bash -c '\n    {_escape_for_single_quotes(body)}\n'"
     return _wrap_in_ray_cluster(inner_cmd, total_nodes, ray_extras="serve,default")
 
 
