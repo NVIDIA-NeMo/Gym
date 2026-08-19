@@ -283,10 +283,16 @@ def _harbor_run_mocks(
         patch.object(HarborAgent, "_build_job_config", return_value={"job_name": "mock_job"}),
     ):
         mock_gc.return_value = _GLOBAL_CONFIG
-        mock_ray.remote.return_value = MagicMock()
+
+        # The handler awaits the ray ObjectRef directly, so the mocked
+        # future must be awaitable.
+        async def _resolve_future():
+            if side_effect:
+                raise side_effect
+            return trial_dir
 
         if side_effect:
-            mock_to_thread.side_effect = side_effect
+            trial_dir = None
         else:
             trial_dir = tempfile.mkdtemp(prefix="harbor_trial_")
             (Path(trial_dir) / "result.json").write_text(json.dumps(trial_result or DEFAULT_TRIAL_RESULT))
@@ -294,7 +300,14 @@ def _harbor_run_mocks(
                 agent_dir = Path(trial_dir) / "agent"
                 agent_dir.mkdir(parents=True, exist_ok=True)
                 (agent_dir / "trajectory.json").write_text(json.dumps(trajectory))
-            mock_to_thread.return_value = trial_dir
+        mock_ray.remote.side_effect = lambda *a, **k: _resolve_future()
+        mock_ray.options.return_value.remote.side_effect = lambda *a, **k: _resolve_future()
+
+        # File parsing goes through asyncio.to_thread; run it inline.
+        async def _run_inline(fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        mock_to_thread.side_effect = _run_inline
 
         yield
 

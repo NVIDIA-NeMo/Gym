@@ -2,24 +2,109 @@
 title: "New Environment"
 description: ""
 ---
-An environment consists of three components: Agents, Models, and Resources. Most contributors will create new resources servers while using existing agent server and model server implementations. If you need to create custom agents or models, you can reference the implementations in `responses_api_agents/` and `responses_api_models/`.
+An environment defines the tasks, verification, and interaction surface being measured. A Gym config composes that environment with an agent server and model server and supplies the runtime wiring. Those execution components are not the environment itself, although an integration profile can make specific agent behavior part of the measurement.
 
-This guide focuses on the resources server contribution process.
+The onboarding flow below covers a complete environment or benchmark. A resources server may be a reusable scoring, tool, or state component, or it may ship a runnable composition and data. Manifest-backed onboarding currently writes canonical workloads under `environments/` and `benchmarks/`; runnable configs still colocated under `resources_servers/` remain visible as `no-manifest` migration entries.
 
 <Tip>
 For a guide to building your first resources server, refer to [Single Step Environment](/environment-tutorials/single-step-environment).
 
 </Tip>
 
+## Environment Manifest
+
+Each newly onboarded environment or benchmark has a `manifest.yaml`. The manifest gives contributors, reviewers, and tooling one versioned description of authored metadata and mirrored composition without replacing Gym configuration. Gym defines this contract as a Pydantic model and can emit JSON Schema from it when another tool needs a language-neutral representation.
+
+The manifest is the place to read this declaration, but not every field is authored there:
+
+| Field group | Authority |
+| --- | --- |
+| Identity and catalog metadata: `name`, `version`, `kind`, `integration_profile`, `domain`, `description`, `modality`, `licensing`, and `authors` | Manifest |
+| Behavioral declarations: `reward`, `determinism`, and optional session, state, sandbox, provenance, and lifecycle fields | Manifest |
+| Composition: `resources_server`, `agent_server`, `model_server`, `datasets`, `rollout_driver`, and `grading_mode` | Gym config; mirrored read-only in the manifest |
+| Benchmark protocol: `canonical_split` and `standard_prompt_config` | Manifest |
+
+When composition changes, edit the Gym config and update its manifest mirror. The runtime continues to resolve and execute the config; it does not use the manifest as a second wiring system. `version` follows Semantic Versioning and is intended to identify the resolved composition rather than the manifest text alone. Validation reports the version but does not yet enforce immutable composition or require version bumps.
+
+### Integration Profiles
+
+`integration_profile` classifies where the episode is driven. `custom-gym-verifier` is the default path; the other profiles describe three existing extension points.
+
+| Profile | Use when | Additional requirement | Generated extension point |
+| --- | --- | --- | --- |
+| `custom-gym-verifier` | Gym drives the standard agent loop and only the model's answers are measured | `model_server` | None |
+| `custom-gym-agent-loop` | Authored agent behavior, such as browsing or planning strategy, is part of the measurement | `model_server` | Agent `responses()` |
+| `external-agent-loop` | An external framework owns the episode and adapts its result back to Gym | None | Agent `responses()` and `run()` |
+| `external-rollout-driver` | Rollout coordination runs above the agent | `rollout_driver` | Rollout-driver module |
+
+Every profile also requires a `resources_server`, an `agent_server`, and at least one dataset. `rollout_driver` is valid only for `external-rollout-driver`. A benchmark additionally requires `canonical_split`, `standard_prompt_config`, and at least one benchmark dataset with `prepare_script`; its dataset-level `prompt_config` remains optional.
+
+The profile is an authored classification, not a runtime dispatcher. Validation recognizes the default Gym agent loop, custom Gym agent behavior, external agent adapters, and external rollout drivers. It reports `unknown` when static inspection is inconclusive and warns when the declaration disagrees. Runtime behavior remains config-driven; concrete component versions, capabilities, pinning, and swap constraints are not yet enforced.
+
+## Validation Layers
+
+Environment validation is progressive. Manifest conformance checks the workload declaration. Static manifest validation checks whether that declaration matches the repository configuration. Verifier fixtures exercise representative scoring behavior, while evaluation runs and reward profiling establish runtime behavior and grading quality.
+
+Static manifest validation runs without starting the workload. It:
+
+- validates the manifest schema and workload identity;
+- resolves Gym configuration and inheritance without runtime side effects;
+- compares manifest composition mirrors with the authoritative configuration;
+- reports an inferred integration profile and the static evidence behind it;
+- parses referenced preparation and rollout-driver hooks without importing or executing them; and
+- streams declared JSONL data, applies benchmark prompts row by row, and checks the resulting rollout inputs.
+
+With synchronization enabled, it writes corrected composition mirrors atomically only after every static check passes. Authored metadata remains unchanged.
+
+It does not import components, start services, execute preparation code, call a model, run an evaluation, probe model or resources endpoints, or check evaluation-output writability. Runtime pre-run readiness is a separate validation layer. Component versions and capabilities, profile pinning, and `adopted_from` source resolution are deferred from this initial static validation. Scorer behavior and grading quality require the later validation layers.
+
+## Onboarding Commands
+
+Search the local catalog before creating a workload. The onboarding journey then uses four commands to scaffold, validate, test, and publish it:
+
+```bash
+gym search "task description"
+gym env init --environment my_eval --profile custom-gym-verifier
+gym env validate my_eval
+gym env test my_eval
+gym env publish my_eval
+```
+
+The scaffold creates a manifest, Gym config, sample data, and README. Names that create Python components must be lowercase Python identifiers. Benchmarks also receive source data, a prompt, and a `prepare()` function. A new scorer adds a resources server and verifier fixture. Non-default templates expose the selected extension point but initially delegate to existing Gym behavior; replace their generated TODO before review. For an external agent loop, replace `run()` with the framework adapter and make `responses()` raise `NotImplementedError`.
+
+To reuse a scorer that already exports the verifier-fixture contract, declare its reward contract instead of copying its implementation:
+
+```bash
+gym env init --benchmark my_benchmark --profile custom-gym-verifier \
+  --reuse-verifier existing_scorer --reward-range 0 1 --higher-is-better
+```
+
+Scaffolding is non-destructive: an identical rerun is a no-op, and any conflicting file aborts the complete write set. `gym env validate --sync NAME` updates only mirrored composition fields after all static checks pass. `gym env test --update-expected NAME` updates fixture rewards only after every behavioral check passes. `gym env publish NAME` runs validation and the fixture, rejects manifest metadata placeholders, and confirms that the exact manifest is discoverable. The manifest is the registry record, so this structural check is idempotent and does not commit or push changes.
+
+`gym list environments` and unqualified `gym search` read manifests and legacy runnable configs together. Manifest-backed entries are `experimental`; unmigrated entries are labeled `no-manifest`. Reusable resources-server components without agent composition and datasets remain available through `gym list resources-servers` and are not environment entries.
+
+<Note>
+Publication currently records readiness as `experimental`. CODEOWNERS updates, immutable version enforcement, capability checks, certificate-backed `validated` status, and a hosted catalog index are not yet automated.
+</Note>
+
+## Verifier Fixture Contract
+
+The resources server owns and exports one `VERIFIER_FIXTURE`, so every workload that reuses the scorer also reuses its scoring tests. The fixture requires three cases, plus a fourth when the manifest declares `seeded`:
+
+- a full-reward case that reaches the better endpoint declared by `higher_is_better`;
+- a zero-reward case that reaches the opposite endpoint;
+- a malformed request that fails as declared; and
+- for a seeded environment, the same request producing the same reward after an explicit reseed on fresh server instances.
+
+Fixture execution runs directly in the resources server's dependency environment and does not start Gym services or Ray. The first run prepares that environment in the same way as existing server tests. Updating expected rewards is explicit and atomic; range, endpoint, malformed-input, and determinism checks still apply. `gym env init --reuse-verifier` checks that the selected resources-server entrypoint declares a fixture, and `gym env test` executes it. A shared fixture attests the scorer itself, so a workload that overrides `grading_mode` needs workload-specific cases.
+
 ## Guiding Principles
 
-Adding a new training environment is similar to [Adding A Benchmark](/contribute/environments/adding-a-benchmark) with respect to the reward profiling and software correctness aspects. However, for adding a new training environment, you must additionally run training with your environment in isolation in order to determine the environment functionality and correctness.
+Adding a training environment has the same local correctness requirements as [Adding A Benchmark](/contribute/environments/adding-a-benchmark): its manifest must validate and its verifier fixture must pass. A full evaluation, reward profile, or training run can provide stronger evidence about measurement quality and training utility, but it is optional and is not a publication or merge compute gate.
 
-The typical training flow that is expected is the GRPO RL algorithm using NeMo RL, with 64 prompts per step and 16 rollouts per prompt. This is a suggestion that can vary depending on the environment capability itself (for example, it can require higher rollouts per prompt) and available compute. We just need to design an experimental setup that will help us determine the causation relationship of the data generated by the training environment on improvements on targeted model capability.
+When compute is available, a useful training experiment isolates the environment's effect on the targeted capability. GRPO with NeMo RL, 64 prompts per step, and 16 rollouts per prompt is one starting point; adjust it to the environment and available compute.
 
-Specifically, you should run training using a model that achieves meaningful performance on your reward profiling. And similar to the benchmark best practices, you should train using an instruct and thinking model to ensure infra correctness. The models can have different performances, but there should be no notable or unexplainable difference between the two types of models. The benchmark best practices includes a list of recommended models.
-
-When making a training environment PR, include W&B links and screenshots of the train and validation curves.
+If you run this experiment, use a model that achieves meaningful performance during reward profiling and include the relevant configuration, curves, and links in the pull request.
 
 ## Required Files
 
@@ -30,10 +115,11 @@ Your resources server must include these files:
 | `app.py` | Main server implementation with `verify` function |
 | `configs/*.yaml` | Configuration with valid `domain` field |
 | `tests/test_app.py` | At least one unit test |
-| `data/example.jsonl` | At least five example inputs |
-| `data/example_rollouts.jsonl` | Pre-generated rollouts from example data (generate before submitting PR) |
+| Example data | At least one representative input at a path referenced by the workload config |
 | `requirements.txt` | Python dependencies |
 | `README.md` | Documentation with licensing information |
+
+Optional rollout evidence may be saved in `data/example_rollouts.jsonl`.
 
 ## Contribution Workflow
 
@@ -44,11 +130,11 @@ Contributing a resources server follows this sequence:
 | 1 | Curate Tasks | Collect or generate training tasks and create example data |
 | 2 | Implementation | Build resources server with verification logic |
 | 3 | Testing | Write and run unit tests |
-| 4 | Example Rollouts | Generate example rollouts to verify functionality |
-| 5 | Reward Profiling | Validate reward distribution with inference runs |
-| 6 | Training Validation | Train with GRPO to ensure meaningful training signal |
+| 4 | Example Rollouts | Optionally capture runtime evidence |
+| 5 | Reward Profiling | Optionally inspect reward distribution |
+| 6 | Training Validation | Optionally test training utility |
 | 7 | Submit PR | Submit pull request with all required information |
-| 8 | Review | Address reviewer feedback and verify reproducibility |
+| 8 | Review | Address feedback on the required local checks and contribution metadata |
 
 ## Detailed Steps
 
@@ -57,7 +143,7 @@ Contributing a resources server follows this sequence:
 Prepare the dataset for your environment:
 
 - Collect or generate prompts/tasks for your environment
-- Create `data/example.jsonl` with at least 5 representative task examples
+- Create `data/example.jsonl` with at least one representative task example
 
 ### 2. Resources Server Implementation
 
@@ -76,16 +162,18 @@ Write and run tests for your resources server:
 - At least one test per server is required for PR approval
 - You are responsible for ensuring your tests adequately cover your server's functionality
 
-### 4. Generate Example Rollouts
+### 4. Generate Example Rollouts (Optional)
 
-Verify basic functionality and generate example rollouts:
+When a policy endpoint and compute are available, generate example rollouts as additional runtime evidence:
 
 - Document the command used to start your server, for example, `gym env start --resources-server my_server`
-- Generate rollouts and save 5 example outputs to `data/example_rollouts.jsonl` to demonstrate correct reward signals
+- If useful for review, save representative outputs to `data/example_rollouts.jsonl`
 
-### 5. Reward Profiling
+This evidence is not required to publish or merge the environment.
 
-Run inference to validate reward distribution:
+### 5. Reward Profiling (Optional)
+
+Run inference to inspect reward distribution:
 
 - Use a ~500 sample subset (minimum)
 - Use Qwen3-4B, Qwen3 30B A3B, or equivalent model
@@ -93,7 +181,7 @@ Run inference to validate reward distribution:
 - Report reward distribution
 - **For tool calling**: Provide tool call metrics and correlation with rewards
 
-### 6. Training-Based Validation
+### 6. Training-Based Validation (Optional)
 
 Validate with actual training:
 
@@ -114,11 +202,11 @@ Include the following in your pull request description:
 
 After submitting your PR:
 
-1. A team member will be assigned to review and reproduce your environment
-2. The reviewer will verify all steps and check correctness of the 5 example rollouts
-3. The reviewer will re-run the procedure to ensure reproducibility
-4. Address any feedback from reviewers
-5. After approval, maintainers will merge your contribution
+1. A team member reviews the manifest, composition, fixture, and licensing information
+2. Address any feedback from reviewers
+3. After approval, maintainers merge the contribution
+
+Reviewers may inspect optional rollout or training evidence when provided, but do not need to reproduce a compute-heavy run for the contribution to merge.
 
 ## Recommended Technical Design
 
@@ -138,10 +226,10 @@ Avoid spawning additional threads or processes unless necessary. A single Gym in
 
 ### NeMo Gym OpenAI Client
 
-We recommend using the NeMo Gym OpenAI client from `nemo_gym.openai_utils`:
+We recommend using the NeMo Gym OpenAI client. Import it and the core types from the top-level `nemo_gym` package:
 
 ```python
-from nemo_gym.openai_utils import (
+from nemo_gym import (
     NeMoGymAsyncOpenAI,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -152,11 +240,11 @@ The NeMo Gym client is optimized for scale and provides consistent behavior. Ext
 
 ### Pydantic Models
 
-Consider using Pydantic models for request and response validation by extending base classes from `nemo_gym.base_resources_server`:
+Consider using Pydantic models for request and response validation by extending base classes imported from the top-level `nemo_gym` package:
 
 ```python
 from pydantic import BaseModel
-from nemo_gym.base_resources_server import BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym import BaseVerifyRequest, BaseVerifyResponse
 
 class MyVerifyRequest(BaseVerifyRequest):
     expected_result: str

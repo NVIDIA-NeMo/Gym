@@ -643,7 +643,7 @@ Reproduction requirement: run the original repo first, reproduce published numbe
 
 ### Replacing httpx with aiohttp in external libraries
 
-Many external libraries use `httpx.AsyncClient` internally. NeMo Gym requires all async HTTP to go through its global aiohttp client (`nemo_gym.server_utils.request()`) because httpx/httpcore has O(n^2) connection pooling that causes hangs at high concurrency. See `docs/infrastructure/engineering-notes/aiohttp-vs-httpx.md`.
+Many external libraries use `httpx.AsyncClient` internally. NeMo Gym requires all async HTTP to go through its global aiohttp client (`nemo_gym.server_utils.request()`) because httpx/httpcore has O(n^2) connection pooling that causes hangs at high concurrency. See `fern/versions/latest/pages/infrastructure/engineering-notes/aiohttp-vs-httpx.mdx`.
 
 When wrapping such a library, create an adapter class that mimics the library's expected HTTP interface but routes calls through aiohttp. The `tavily_search` resources server demonstrates this pattern:
 

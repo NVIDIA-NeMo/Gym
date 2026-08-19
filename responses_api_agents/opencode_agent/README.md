@@ -60,11 +60,18 @@ opencode_config:
         nvidia/qwen/qwen3-next-80b-a3b-instruct: {}
 ```
 
+Alternatively, set `model_server` to a Gym model server and set `model` to its served model id. The
+agent creates the OpenCode provider entry automatically. Without `model_server`, the existing URL,
+key, and provider configuration are unchanged.
+
 ## Config fields
 
 - `concurrency`: max simultaneous `run()` calls
 - `command`: the OpenCode command, split on spaces so a multi-word launcher works (e.g. `npx opencode`)
 - `model`: `<provider>/<model-name>` (see Model id)
+- `model_server`: optional Gym model server used to generate the provider entry
+- `context_window`: context limit for a generated model entry
+- `max_output_tokens`: output limit for a generated model entry
 - `openai_api_key`: passed to the subprocess as `OPENAI_API_KEY`
 - `openai_base_url`: passed to the subprocess as `OPENAI_BASE_URL`
 - `env`: extra env vars for the subprocess

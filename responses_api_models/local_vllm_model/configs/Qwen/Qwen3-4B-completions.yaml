@@ -1,0 +1,36 @@
+# LocalVLLMModel with use_completions_api: true.
+#
+# Wired under the `policy_model` server name so it pairs directly with the
+# `simple_agent` reference in benchmark configs that follow the standard
+# `model_server: { type: responses_api_models, name: policy_model }` pattern.
+policy_model:
+  responses_api_models:
+    local_vllm_model:
+      entrypoint: app.py
+      model: Qwen/Qwen3-4B
+      return_token_id_information: false
+      # vLLM /v1/completions does not run the reasoning parser. <think>...</think>
+      # blocks (if the model emits them) come back inline; VLLMConverter extracts
+      # them downstream.
+      uses_reasoning_parser: false
+      uses_interleaved_reasoning: false
+      # Drives vLLM /v1/completions instead of /v1/chat/completions. Messages
+      # must be a single user message (optionally preceded by a single system
+      # message) — tools, multi-turn, and audio are rejected.
+      use_completions_api: true
+      debug: false
+
+      # For example, if your model is downloaded at ~/.cache/huggingface/hub/models--Qwen--Qwen3-4B, your hf_home here would be `~/.cache/huggingface`
+      hf_home: null
+
+      vllm_serve_env_vars:
+        VLLM_RAY_DP_PACK_STRATEGY: strict
+
+      vllm_serve_kwargs:
+        data_parallel_size: 1
+        tensor_parallel_size: 1
+        pipeline_parallel_size: 1
+
+        trust_remote_code: true
+        gpu_memory_utilization: 0.85
+        max_model_len: 8192

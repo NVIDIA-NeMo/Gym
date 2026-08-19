@@ -19,12 +19,28 @@ import pytest
 from omegaconf import OmegaConf
 from yaml import safe_load
 
+import nemo_gym.global_config
 from nemo_gym.cli.eval import list_benchmarks, prepare_benchmark
 
 
 def _mock_global_config(config: dict = None):
     """Return an OmegaConf config without CLI/file parsing."""
     return OmegaConf.create(config or {})
+
+
+def test_pinchbench_tavily_key_is_derived_from_environment() -> None:
+    repo_root = Path(__file__).parents[2]
+    benchmark = safe_load((repo_root / "benchmarks/pinchbench/config.yaml").read_text())
+    agent = safe_load((repo_root / "responses_api_agents/pinchbench/configs/pinchbench.yaml").read_text())
+
+    assert benchmark["tavily_api_key"] == "${oc.env:PINCHBENCH_TAVILY_API_KEY,null}"
+    assert agent["pinchbench_agent"]["responses_api_agents"]["pinchbench"]["tavily_api_key"] == ("${tavily_api_key}")
+
+
+@pytest.fixture(autouse=True)
+def _mock_port_allocation(monkeypatch):
+    """Keep benchmark-discovery tests independent of socket availability."""
+    monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", lambda **_: 12345)
 
 
 class TestListBenchmarks:
@@ -357,7 +373,35 @@ class TestPrepareBenchmark:
             patch("nemo_gym.cli.eval.importlib.import_module", return_value=mock_module),
         ):
             prepare_benchmark()
-            mock_module.prepare.assert_called_once()
+            mock_module.prepare.assert_called_once_with()
+
+    def test_forwards_prepare_script_args(self, tmp_path: Path) -> None:
+        bench_dir, config_path = self._make_bench_dir(tmp_path)
+
+        mock_module = MagicMock()
+        mock_module.prepare.return_value = tmp_path / "output.jsonl"
+
+        prepare_script_args = {
+            "model": "/path/to/checkpoint",
+            "length": 1048576,
+            "data_format": "default",
+        }
+        with (
+            patch(
+                "nemo_gym.cli.eval.get_global_config_dict",
+                return_value=_mock_global_config(
+                    {
+                        "config_paths": [str(config_path)],
+                        "prepare_script_args": prepare_script_args,
+                        **safe_load(config_path.read_text()),
+                    }
+                ),
+            ),
+            patch("nemo_gym.cli.eval.importlib.import_module", return_value=mock_module),
+        ):
+            prepare_benchmark()
+
+        mock_module.prepare.assert_called_once_with(**prepare_script_args)
 
     def test_missing_prepare_py(self, tmp_path: Path, capsys) -> None:
         bench_dir, config_path = self._make_bench_dir(tmp_path)
