@@ -30,7 +30,8 @@ set -xeuo pipefail
 # Hardlink, not clone to save space
 export UV_LINK_MODE=hardlink
 
-uv pip install --system vllm-router
+# The shared vLLM launcher enables VLLM_USE_FASTOKENS=1, so install Fastokens into the system vLLM environment.
+uv pip install --system "fastokens>=0.2.0" vllm-router
 
 apt-get update
 apt-get install -y --no-install-recommends \
@@ -52,9 +53,8 @@ git fetch origin $NEMO_GYM_GIT_REF
 git checkout $NEMO_GYM_GIT_REF
 
 uv sync --active
-# gym eval prepare imports nemo_gym.profiling at startup. In this Python 3.12 build,
-# uv sync --active can leave gprof2dot absent, so install the uv.lock version and verify the import.
-uv pip install "\$ray_dependency" "gprof2dot==2025.4.14"
+# Ensure Gym's profiling dependency is available in the runtime environment.
+uv pip install "gprof2dot==2025.4.14"
 python -c 'import gprof2dot'
 
 ########################################
