@@ -5,9 +5,9 @@ config_paths:
 - benchmarks/aalcr/config.yaml
 - benchmarks/scicode/config.yaml
 - benchmarks/omniscience/config.yaml
+- benchmarks/critpt/config.yaml
+- benchmarks/nemotron_3.5_super/benchmark_configs/hle_no_tools.yaml
 - responses_api_models/vllm_model/configs/vllm_model.yaml
-# TODO @bxyu-nvidia: need to figure out AA key
-# - benchmarks/critpt/config.yaml
 # TODO @bxyu-nvidia: Implementing in the harness x benchmark decoupling effort.
 - benchmarks/swebench/verified/opencode.yaml
 # - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
@@ -20,8 +20,6 @@ config_paths:
 # BrowseComp
 # TODO @bxyu-nvidia: need pipeclean (may be very complex)
 # GDPVal-AA-V2
-# TODO @bxyu-nvidia: need internal branch
-# LM Arena proxy (To help text Arena)
 
 ########################################
 # START Secrets
@@ -37,6 +35,8 @@ sandbox:
       domain: dummy
       api_key: dummy  # pragma: allowlist secret
 
+# Create your own key https://artificialanalysis.ai/login -> "API Access" -> "Your API keys"
+# Each key has its own rate limit for Crit PT benchmarks.
 critpt_benchmark_resources_server:
   resources_servers:
     critpt:
@@ -88,6 +88,13 @@ genrm_model:
       openai_model: gcp/google/gemini-3-flash-preview
       openai_api_key: ${nv_inference_api_key}
       max_concurrent_requests: 16
+
+hle_benchmark_equivalence_judge_model:
+  responses_api_models:
+    openai_model:
+      openai_base_url: https://inference-api.nvidia.com/v1
+      openai_api_key: ${nv_inference_api_key}
+      openai_model: azure/openai/gpt-4o
 
 policy_model:
   responses_api_models:

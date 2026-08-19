@@ -1029,4 +1029,7 @@ def _empty_response(
 
 
 if __name__ == "__main__":
+    from responses_api_agents.osworld_agent.runtime_dependencies import require_optional_runtime_dependencies
+
+    require_optional_runtime_dependencies()
     OSWorldAgent.run_webserver()
