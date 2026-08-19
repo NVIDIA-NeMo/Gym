@@ -885,9 +885,6 @@ class VLLMModel(SimpleResponsesAPIModel):
                 # The adapter consumed this compatibility payload.
                 choice_dict.pop("logprobs", None)
 
-            prompt_token_ids = message_dict["prompt_token_ids"]
-            self._check_the_prefix_was_applied(body_dict, prompt_token_ids)
-
             # Top-level and choice-level token-ID fields are transport details.
             chat_completion_dict.pop("prompt_token_ids", None)
             choice_dict.pop("token_ids", None)
