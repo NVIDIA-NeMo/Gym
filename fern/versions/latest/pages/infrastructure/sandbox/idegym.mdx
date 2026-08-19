@@ -1,0 +1,211 @@
+---
+title: "IdeGYM Provider"
+description: "Run NeMo Gym sandboxes as IdeGYM server pods on Kubernetes."
+position: 3
+---
+
+The `idegym` provider runs each sandbox as an [IdeGYM](https://github.com/JetBrains-Research/idegym) *server*: a Kubernetes pod provisioned through the IdeGYM orchestrator and driven over the HTTP API the orchestrator forwards to it. Use it when your evaluation environments already live in IdeGYM — SWE-bench-style repository tasks, IDE-backed environments, or anything else IdeGYM images provide — and you want to run them through NeMo Gym's agents and benchmarks.
+
+It implements the provider-neutral `SandboxProvider` contract, so any sandbox-backed agent or resources server can use it by selecting `idegym` in its sandbox config.
+
+## Setup
+
+Install the optional dependency:
+
+```bash
+uv pip install 'nemo-gym[idegym]'
+```
+
+Point the provider at your orchestrator:
+
+```bash
+export IDEGYM_ORCHESTRATOR_URL=idegym.example.com
+export IDEGYM_NAMESPACE=idegym
+export IDEGYM_AUTH_USERNAME=...
+export IDEGYM_AUTH_PASSWORD=...
+```
+
+<Warning>
+`spec.image` must be an **IdeGYM server image**. The pod runs the IdeGYM server, and that server is what exposes the API the orchestrator forwards commands to, so a plain benchmark image such as `swebench/sweb.eval.x86_64.*` does not boot one and fails readiness. Build IdeGYM images with IdeGYM's image builder and map upstream tags onto them with `image_rewrites` — see [Images](#images).
+</Warning>
+
+## Named Provider Config
+
+`nemo_gym/sandbox/providers/idegym/configs/idegym.yaml` ships the full block with every knob commented. The essentials:
+
+```yaml
+sandbox:
+  default_metadata:
+    sandbox-api: idegym-client
+  idegym:
+    connection:
+      orchestrator_url: ${oc.env:IDEGYM_ORCHESTRATOR_URL,idegym.test}
+      namespace: ${oc.env:IDEGYM_NAMESPACE,idegym}
+      username: ${oc.env:IDEGYM_AUTH_USERNAME,null}
+      password: ${oc.env:IDEGYM_AUTH_PASSWORD,null}
+      # Quota rules match this name by regex; pin it to whatever your rule expects.
+      client_name: ${oc.env:IDEGYM_CLIENT_NAME,null}
+      max_connections: 64
+    create:
+      ready_timeout_s: 1200
+      run_as_root: true
+    exec:
+      default_timeout_s: 180
+```
+
+Every shipped provider config binds the same instance name `sandbox`, so switching a benchmark to IdeGYM is swapping one config path:
+
+```bash
+AGENT=responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml
+MODEL=responses_api_models/vllm_model/configs/vllm_model.yaml
+gym env start \
+    --config $AGENT \
+    --config nemo_gym/sandbox/providers/idegym/configs/idegym.yaml \
+    --config $MODEL
+```
+
+### Config sections
+
+| Section | Purpose |
+| --- | --- |
+| `connection` | Orchestrator URL, namespace, auth, client name, HTTP pooling, tracing. |
+| `create` | Readiness budget, retries, generated server names, pod defaults, orchestrator polling backoff. |
+| `exec` | Default command timeout, client-side overhead, how `exec(user=...)` is honored. |
+| `probe` | Post-start readiness verification and the working-directory check. |
+| `files` | Upload and download chunk sizes and the download size cap. |
+| `operations` | Status and teardown timeouts and retries. |
+| `attribution` | How the registered IdeGYM client name is derived when it is not pinned. |
+
+<Note>
+Tracing is off unless `connection.tracing_endpoint` is set. The IdeGYM SDK otherwise defaults to a JetBrains-hosted collector, and NeMo Gym does not send telemetry to a third party implicitly.
+</Note>
+
+## Provider Options
+
+`SandboxSpec.provider_options` carries the IdeGYM pod options that have no neutral equivalent. They are validated before a pod is allocated.
+
+| Option | Notes |
+| --- | --- |
+| `resource_requests` | Kubernetes *requests*, paired with `spec.resources` as the limits. |
+| `runtime_class_name` | e.g. `gvisor` for a sandboxed runtime. |
+| `run_as_root` | Overrides `create.run_as_root` for this sandbox. |
+| `node_selector` | Node labels for scheduling. |
+| `volumes`, `volume_mounts` | Native Kubernetes shapes. |
+| `env_from` | ConfigMap/Secret env import — the only way to put environment on the *pod*. |
+| `service_account_name` | ServiceAccount for the pod. |
+| `pod_overrides` | Partial `V1PodSpec` deep-merged into the generated pod spec (tolerations, affinity, ...). |
+| `reuse_strategy`, `server_kind`, `snapshot`, `max_restarts` | Passed through to IdeGYM. |
+| `server_name` | Pins the server name, opting into IdeGYM's server reuse. Otherwise a unique name is generated per sandbox. |
+| `service_port`, `container_port` | Override the configured ports. |
+
+```yaml
+mini_swe_agent_2:
+  responses_api_agents:
+    mini_swe_agent_2:
+      sandbox_provider: sandbox
+      sandbox_spec:
+        ready_timeout_s: 1200
+        workdir: /testbed
+        resources:
+          cpu: 2
+          memory_mib: 8192
+          disk_gib: 30
+        provider_options:
+          resource_requests:
+            cpu: 0.5
+            memory_mib: 2048
+          runtime_class_name: gvisor
+        metadata:
+          instance_id: django__django-11099
+```
+
+## Resource Mapping
+
+| `SandboxSpec` field | IdeGYM mapping |
+| --- | --- |
+| `resources.cpu` | Kubernetes CPU **limit** (`2`, `500m`). |
+| `resources.memory_mib` | Memory **limit** (`8192Mi`). |
+| `resources.disk_gib` | `ephemeral-storage` **limit** (`30Gi`). |
+| `provider_options.resource_requests` | The matching Kubernetes **requests**. |
+| `resources.gpu`, `resources.gpu_type` | Not mapped; warns. Request accelerators via `node_selector` or `pod_overrides`. |
+
+IdeGYM's resource quota accounting reads limits first, so `spec.resources` is what counts against your quota rule — not the smaller `resource_requests`.
+
+## Spec Fields With Different Semantics
+
+| Field | Behavior |
+| --- | --- |
+| `workdir` | Not a pod setting. Each command `cd`s into it, and `create()` fails early if it does not exist (`probe.verify_workdir`). |
+| `env` | Exported per command. IdeGYM can only put ConfigMap/Secret env on the pod, via `provider_options.env_from`. |
+| `metadata` | Not Kubernetes labels — IdeGYM has no per-server label API. `create.server_name_metadata_keys` folds selected keys (default `instance_id`) into the pod name. |
+| `ttl_s` | Not enforced; warns. IdeGYM servers live until stopped, and its watcher reaps servers whose client stops heartbeating. |
+| `ports` | Ignored; warns. An IdeGYM pod exposes only its own API port. |
+| `entrypoint` | Rejected. The container entrypoint starts the IdeGYM server. |
+
+## First-Run Example
+
+```python
+import asyncio
+
+from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
+
+provider_config = {
+    "idegym": {
+        "connection": {"orchestrator_url": "idegym.example.com", "namespace": "idegym"},
+        "create": {"run_as_root": True},
+    }
+}
+
+spec = SandboxSpec(
+    image="registry.example.com/idegym/my-env:latest",
+    workdir="/testbed",
+    resources={"cpu": 2, "memory_mib": 8192, "disk_gib": 30},
+    metadata={"instance_id": "django__django-11099"},
+)
+
+
+async def main() -> None:
+    async with AsyncSandbox(provider_config, spec) as sandbox:
+        await sandbox.start()
+        result = await sandbox.exec("python -m pytest -q", timeout_s=600)
+        print(result.stdout or result.stderr)
+
+
+asyncio.run(main())
+```
+
+Leaving the `async with` block stops the server and deletes its Kubernetes resources.
+
+## Images
+
+Build IdeGYM server images with IdeGYM's image builder, publish them where your cluster can pull them, then map upstream benchmark tags onto them:
+
+```yaml
+sandbox_spec:
+  image_rewrites:
+    - from: "swebench/"
+      to: "registry.example.com/idegym-swebench/"
+```
+
+Rewrites are ordered and the first matching prefix wins. The provider does not build images.
+
+## Operational Notes
+
+**One registered client per process.** IdeGYM's unit of ownership is a *client*: a registered, heartbeating entity that owns N server pods, carries the resource quota keyed on its name, and terminates all of its servers when it stops. Every sandbox created from an identical `connection` config shares one registered client, reference-counted; the last release unregisters it, which also cleans up any server that was never closed. `connection.max_connections` bounds in-flight HTTP across all of them; bounding requests rather than whole operations means provisioning a new sandbox cannot block the exec calls of sandboxes already running.
+
+**Client naming matters.** Resource-limit rules are matched by regex against the client name, so set `connection.client_name` to whatever your deployment's rule expects. Left unset, the name is derived from job attribution (`NEMO_GYM_TEAM` / `NEMO_GYM_USER` / `NEMO_GYM_WORKLOAD`, then Slurm job variables) so a run is attributable in the IdeGYM dashboard.
+
+**Create waits for readiness.** A scheduled pod is not yet a usable sandbox, so `create()` returns only after the probe command passes `probe.stable_count` times and `spec.workdir` is confirmed to exist. Anything that fails after provisioning stops the server.
+
+**Command and output limits.** A command may not exceed roughly 100 KiB once shaped into a script — IdeGYM passes it to the shell as a single `execve()` argument — and an oversized command is reported as a failed `SandboxExecResult` with `error_type="command_too_long"` rather than raising. The IdeGYM executor also strips leading and trailing whitespace from stdout and stderr.
+
+**File transfer is not a bulk channel.** Uploads and downloads ride base64 over the bash tool, chunked in both directions, and `files.max_download_bytes` (64 MiB by default) caps a download. Have the sandbox fetch large inputs itself.
+
+## Unavailable Capabilities
+
+| Capability | Reason |
+| --- | --- |
+| `sandbox.endpoint(port)` | The orchestrator forwards API requests rather than routing raw TCP to arbitrary container ports. |
+| `sandbox.pty` | IdeGYM has no terminal API. |
+| `sandbox.serialize()` / `AsyncSandbox.connect()` | A server is only reachable through the registered client that owns it. Front this provider with a sandbox server to share a sandbox across processes. |
+| `exec(user=...)` | IdeGYM's bash tool has no user field; commands run as the container's user, which `provider_options.run_as_root` controls. `exec.user_mode` can wrap commands in `runuser` or `su` for images that ship them. |
