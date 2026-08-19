@@ -15,12 +15,14 @@ import logging
 import os
 import time
 from collections.abc import Mapping
+from http.server import ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlsplit
 
 import requests
 
 from nemo_gym.sandbox import Sandbox, SandboxEndpoint, SandboxSpec, SandboxStatus
+from responses_api_agents.osworld_agent.local_forwarder import start_forwarder
 
 
 LOG = logging.getLogger("nemo_gym.osworld_agent.sandbox_provider")
@@ -77,7 +79,7 @@ def _http_origin(host: str, port: int) -> str:
 
 
 class GymSandboxDesktopProvider:
-    """Implement OSWorld's provider contract with one Gym Docker Sandbox per VM."""
+    """Implement OSWorld's provider contract with one Gym Sandbox per VM."""
 
     def __init__(
         self,
@@ -99,9 +101,10 @@ class GymSandboxDesktopProvider:
 
         self._sandbox_provider = copy.deepcopy(dict(sandbox_provider))
         self._sandbox_provider_name = str(next(iter(self._sandbox_provider))).lower().strip()
-        if self._sandbox_provider_name != "docker":
+        if self._sandbox_provider_name not in {"docker", "opensandbox"}:
             raise ValueError(
-                "The OSWorld Gym Sandbox deployment requires Gym's Docker provider, "
+                "The OSWorld Gym Sandbox deployment requires Gym's Docker or "
+                "OpenSandbox provider, "
                 f"got {self._sandbox_provider_name!r}"
             )
         self._sandbox_spec = copy.deepcopy(dict(sandbox_spec))
@@ -109,6 +112,7 @@ class GymSandboxDesktopProvider:
         self._ready_timeout_s = float(ready_timeout_s)
         self._ready_poll_s = float(ready_poll_s)
         self._sandbox: Sandbox | None = None
+        self._forwarders: list[ThreadingHTTPServer] = []
         self._host: str | None = None
         self.server_port: int | None = None
         self.chromium_port: int | None = None
@@ -118,11 +122,57 @@ class GymSandboxDesktopProvider:
     def _build_spec(self, path_to_vm: str, *, headless: bool, os_type: str) -> SandboxSpec:
         if os_type.lower() not in {"ubuntu", "linux"}:
             raise ValueError(f"Gym Sandbox OSWorld adapter currently supports Ubuntu only, got {os_type!r}")
+
+        values = copy.deepcopy(self._sandbox_spec)
+        values["ports"] = list(dict.fromkeys([*(values.get("ports") or ()), *OSWORLD_SERVICE_PORTS]))
+
+        metadata = dict(values.get("metadata") or {})
+        metadata.setdefault("workload", "osworld")
+        metadata.setdefault(
+            "osworld-provider",
+            f"gym-{self._sandbox_provider_name}-sandbox",
+        )
+        run_id = os.environ.get("OSWORLD_RUN_ID", "").strip()
+        if run_id:
+            metadata.setdefault("run-id", run_id)
+        values["metadata"] = metadata
+
+        if self._sandbox_provider_name == "opensandbox":
+            if not values.get("image"):
+                raise ValueError(
+                    "OpenSandbox OSWorld Pool allocation requires sandbox_spec.image "
+                    "for SDK validation; the Pool still supplies the actual OSWorld VM"
+                )
+            provider_options = dict(values.get("provider_options") or {})
+            extensions = dict(provider_options.get("extensions") or {})
+            if not extensions.get("poolRef"):
+                raise ValueError("OpenSandbox OSWorld sandbox_spec requires provider_options.extensions.poolRef")
+            provider_options["extensions"] = extensions
+            values["provider_options"] = provider_options
+            values.setdefault("ttl_s", 7200)
+            values.setdefault("ready_timeout_s", self._ready_timeout_s)
+            # The SDK requires an image argument even for Pool allocation, but
+            # poolRef supplies the actual prebuilt OSWorld VM. The reusable
+            # profile's entrypoint, environment, and resources remain Docker-
+            # specific and are intentionally discarded.
+            pool_fields = {
+                key: values[key]
+                for key in (
+                    "image",
+                    "ttl_s",
+                    "ready_timeout_s",
+                    "ports",
+                    "metadata",
+                    "provider_options",
+                )
+                if key in values
+            }
+            return SandboxSpec(**pool_fields)
+
         vm_path = os.path.realpath(os.path.abspath(os.path.expanduser(path_to_vm)))
         if not os.path.isfile(vm_path) or not os.access(vm_path, os.R_OK):
             raise FileNotFoundError(f"OSWorld base qcow2 is not readable: {vm_path}")
 
-        values = copy.deepcopy(self._sandbox_spec)
         if not values.get("image"):
             raise ValueError("sandbox_spec.image is required for OSWorld")
 
@@ -134,12 +184,6 @@ class GymSandboxDesktopProvider:
         environment["KVM"] = "Y" if self._require_kvm else "N"
         values["env"] = environment
         values.setdefault("entrypoint", list(OSWORLD_IMAGE_ENTRYPOINT))
-        values["ports"] = list(dict.fromkeys([*(values.get("ports") or ()), *OSWORLD_SERVICE_PORTS]))
-
-        metadata = dict(values.get("metadata") or {})
-        metadata.setdefault("workload", "osworld")
-        metadata.setdefault("osworld-provider", "gym-docker-sandbox")
-        values["metadata"] = metadata
 
         provider_options = dict(values.get("provider_options") or {})
         volumes = _string_list(provider_options.get("volumes"), field="volumes")
@@ -151,7 +195,6 @@ class GymSandboxDesktopProvider:
         run_args = _string_list(provider_options.get("run_args"), field="run_args")
         if not _has_option(run_args, "--label", OSWORLD_WORKLOAD_LABEL):
             run_args.extend(["--label", OSWORLD_WORKLOAD_LABEL])
-        run_id = os.environ.get("OSWORLD_RUN_ID", "").strip()
         run_id_label = f"{OSWORLD_RUN_ID_LABEL}={run_id}"
         if run_id and not _has_option(run_args, "--label", run_id_label):
             run_args.extend(["--label", run_id_label])
@@ -165,29 +208,61 @@ class GymSandboxDesktopProvider:
         return SandboxSpec(**values)
 
     def _resolve_service_endpoints(self, sandbox: Sandbox) -> tuple[str, dict[int, int]]:
-        host: str | None = None
-        resolved_ports: dict[int, int] = {}
-        for container_port in OSWORLD_SERVICE_PORTS:
-            endpoint_host, endpoint_port = _parse_plain_http_endpoint(
-                sandbox.endpoint(container_port),
-                container_port,
-            )
-            if host is None:
-                host = endpoint_host
-            elif endpoint_host != host:
-                raise ValueError(
-                    "OSWorld requires all Sandbox service endpoints to share one host; "
-                    f"got {host!r} and {endpoint_host!r}"
+        endpoints = {container_port: sandbox.endpoint(container_port) for container_port in OSWORLD_SERVICE_PORTS}
+
+        # Preserve the zero-hop path for local Docker or a routed Pod network.
+        try:
+            direct = {
+                container_port: _parse_plain_http_endpoint(endpoint, container_port)
+                for container_port, endpoint in endpoints.items()
+            }
+        except ValueError:
+            direct = {}
+        if direct:
+            hosts = {host for host, _ in direct.values()}
+            if len(hosts) == 1:
+                return hosts.pop(), {
+                    container_port: endpoint_port for container_port, (_, endpoint_port) in direct.items()
+                }
+
+        # OpenSandbox's externally reachable endpoint is a path-based gateway
+        # URL. OSWorld only understands a shared host plus four integer ports,
+        # so give each service a loopback forwarder. The forwarder also carries
+        # Chrome CDP WebSockets and injects any route headers.
+        forwarders: list[ThreadingHTTPServer] = []
+        forwarded_ports: dict[int, int] = {}
+        try:
+            for container_port, endpoint in endpoints.items():
+                server, local_port = start_forwarder(
+                    endpoint.endpoint,
+                    endpoint.headers,
+                    timeout_s=max(self._ready_timeout_s, 300.0),
                 )
-            resolved_ports[container_port] = endpoint_port
-        if host is None:
-            raise RuntimeError("Gym Sandbox returned no OSWorld service endpoints")
-        return host, resolved_ports
+                forwarders.append(server)
+                forwarded_ports[container_port] = local_port
+        except BaseException:
+            for server in forwarders:
+                server.shutdown()
+                server.server_close()
+            raise
+
+        self._forwarders.extend(forwarders)
+        return "127.0.0.1", forwarded_ports
+
+    def _stop_forwarders(self) -> None:
+        forwarders = self._forwarders
+        self._forwarders = []
+        for server in forwarders:
+            with contextlib.suppress(Exception):
+                server.shutdown()
+            with contextlib.suppress(Exception):
+                server.server_close()
 
     def _wait_for_vm_ready(self, sandbox: Sandbox, host: str, server_port: int) -> None:
         deadline = time.monotonic() + self._ready_timeout_s
         last_error = "guest readiness was not attempted"
         with requests.Session() as session:
+            session.trust_env = False
             while time.monotonic() < deadline:
                 try:
                     response = session.get(
@@ -218,6 +293,7 @@ class GymSandboxDesktopProvider:
             host, ports = self._resolve_service_endpoints(sandbox)
             self._wait_for_vm_ready(sandbox, host, ports[5000])
         except BaseException:
+            self._stop_forwarders()
             # Preserve the startup failure if best-effort cleanup also fails.
             with contextlib.suppress(Exception):
                 sandbox.stop()
@@ -263,5 +339,6 @@ class GymSandboxDesktopProvider:
         self.chromium_port = None
         self.vnc_port = None
         self.vlc_port = None
+        self._stop_forwarders()
         if sandbox is not None:
             sandbox.stop()
