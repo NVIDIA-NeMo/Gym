@@ -18,9 +18,11 @@ These exercise runner generation, image resolution, and configuration.
 
 import base64
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
+from responses_api_agents.anyswe_agent.agent_runner import _extract_patch, _snapshot_repo
 from responses_api_agents.anyswe_agent.app import (
     AnySweAgent,
     AnySweAgentConfig,
@@ -60,13 +62,35 @@ class TestAgentRunner:
         compile(source, "<runner>", "exec")
         assert 'os.environ["NGSWE_AGENT_MODULE"]' in source
         assert '["git", "add", "-A"]' in source
-        assert '["git", "diff", "--no-color", "--cached", "HEAD"]' in source
+        assert '["git", "diff", "--no-color", "--cached", baseline_tree]' in source
 
-    def test_patch_extraction_includes_untracked_files(self) -> None:
-        source = self._source()
-        assert '["git", "add", "-A"]' in source
-        assert '["git", "diff", "--no-color", "--cached", "HEAD"]' in source
-        assert "patch.diff" in source
+    def test_patch_extraction_excludes_image_dirt_and_includes_agent_files(self, tmp_path) -> None:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+        (repo / "agent-edited.txt").write_text("committed\n")
+        (repo / "image-dirty.txt").write_text("committed\n")
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "initial"], cwd=repo, check=True)
+
+        (repo / "agent-edited.txt").write_text("image baseline\n")
+        (repo / "image-dirty.txt").write_text("pre-existing task image change\n")
+        (repo / "image-untracked.txt").write_text("pre-existing untracked file\n")
+        index_path = tmp_path / "baseline.index"
+        baseline_tree = _snapshot_repo(repo, index_path)
+
+        (repo / "agent-edited.txt").write_text("agent change\n")
+        (repo / "agent-new.txt").write_text("new from agent\n")
+        patch_text = _extract_patch(repo, index_path, baseline_tree)
+
+        assert "agent-edited.txt" in patch_text
+        assert "agent change" in patch_text
+        assert "agent-new.txt" in patch_text
+        assert "new from agent" in patch_text
+        assert "image-dirty.txt" not in patch_text
+        assert "image-untracked.txt" not in patch_text
 
     def test_sampling_is_forwarded(self) -> None:
         source = self._source()
@@ -190,10 +214,16 @@ class TestSetupScriptsExist:
         scripts = Path(__file__).parent.parent / "setup_scripts"
         assert (scripts / "hermes_agent_deps.sh").exists()
         assert (scripts / "claude_code_agent_deps.sh").exists()
+        assert (scripts / "cline_agent_deps.sh").exists()
         assert (scripts / "opencode_agent_deps.sh").exists()
         assert (scripts / "openclaw_agent_deps.sh").exists()
         assert (scripts / "pi_agent_deps.sh").exists()
         assert (scripts / "_portable_python.sh").exists()
+
+    def test_portable_python_meets_project_minimum(self) -> None:
+        script = (Path(__file__).parent.parent / "setup_scripts" / "_portable_python.sh").read_text()
+        assert 'PYTHON_VERSION="${PYTHON_VERSION:-3.13.14}"' in script
+        assert 'PBS_RELEASE="${PBS_RELEASE:-20260805}"' in script
 
 
 class TestExampleData:
