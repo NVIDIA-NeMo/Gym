@@ -14,6 +14,9 @@
 # limitations under the License.
 from unittest.mock import MagicMock
 
+import pytest
+
+from nemo_gym.base_resources_server import AggregateMetricsRequest
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgent,
     BaseResponsesAPIAgentConfig,
@@ -39,3 +42,29 @@ class TestBaseResponsesAPIAgent:
 
         agent = TestSimpleResponsesAPIAgent(config=config, server_client=MagicMock(spec=ServerClient))
         agent.setup_webserver()
+
+    async def test_aggregate_metrics_skip_verification_warns_and_returns_empty_metrics(self) -> None:
+        config = BaseResponsesAPIAgentConfig(
+            host="",
+            port=0,
+            entrypoint="",
+            name="",
+            skip_verification=True,
+        )
+
+        class TestSimpleResponsesAPIAgent(SimpleResponsesAPIAgent):
+            async def responses(self, body=...):
+                raise NotImplementedError
+
+            async def run(self, body=...):
+                raise NotImplementedError
+
+        agent = TestSimpleResponsesAPIAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        body = AggregateMetricsRequest(verify_responses=[])
+
+        with pytest.warns(RuntimeWarning, match="skip_verification=True"):
+            result = await agent.aggregate_metrics(body)
+
+        assert result.group_level_metrics == []
+        assert result.agent_metrics == {}
+        assert result.key_metrics == {}
