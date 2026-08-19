@@ -96,6 +96,10 @@ VERBOSE_KEY_NAME = "verbose"
 JSON_OUTPUT_KEY_NAME = "json"
 QUERY_KEY_NAME = "query"
 OBSERVABILITY_ENABLED_KEY_NAME = "observability_enabled"
+# Correlate rollouts with resources-server calls without turning on model-call capture.
+# The prefix costs one path segment, and incident attribution needs it precisely in runs
+# that do not have full capture enabled. Opt-in for now to keep behavior unchanged.
+ROLLOUT_CORRELATION_ENABLED_KEY_NAME = "rollout_correlation_enabled"
 MODEL_CALL_CAPTURE_DIR_KEY_NAME = "model_call_capture_dir"
 COMPONENT_NAME_KEY_NAME = "component_name"
 SKIP_VERIFICATION_KEY_NAME = "skip_verification"

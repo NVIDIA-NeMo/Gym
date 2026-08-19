@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from unittest.mock import MagicMock
 from urllib.parse import urlsplit
 
 import orjson
@@ -38,8 +39,8 @@ from nemo_gym.base_responses_api_model import (
     merge_model_call_capture_into_record,
 )
 from nemo_gym.config_types import BaseServerConfig
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
-from nemo_gym.server_utils import ServerClient, get_response_json
+from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body, rollout_context
+from nemo_gym.server_utils import ServerClient, get_response_json, rollout_path_prefix
 
 
 def _model_response(model: str, text: str = "") -> dict:
@@ -234,3 +235,51 @@ def test_rollout_id_does_not_serialize_run_body() -> None:
     )
 
     assert maybe_rollout_id_from_run_body(body) == "4-2"
+
+
+def _client_with(config: dict) -> ServerClient:
+    return ServerClient(
+        head_server_config=BaseServerConfig(host="head.test", port=80),
+        global_config_dict=OmegaConf.create(config),
+    )
+
+
+def _resources_only_config(**flags) -> dict:
+    return {
+        "resources": {"resources_servers": {"env": {"host": "resources.test", "port": 80}}},
+        **flags,
+    }
+
+
+@pytest.mark.asyncio
+async def test_resources_correlation_is_off_by_default(monkeypatch) -> None:
+    """Nothing changes for a run that opts into neither flag."""
+    seen: list[str] = []
+
+    async def _request(method, url, **kwargs):
+        seen.append(url)
+        return MagicMock()
+
+    monkeypatch.setattr("nemo_gym.server_utils.request", _request)
+    client = _client_with(_resources_only_config())
+    with rollout_context("task-7"):
+        await client.post("resources", "/verify", json={})
+
+    assert seen == ["http://resources.test:80/verify"]
+
+
+@pytest.mark.asyncio
+async def test_rollout_correlation_flag_prefixes_without_full_observability(monkeypatch) -> None:
+    """Incident attribution needs the prefix in runs that never enabled capture."""
+    seen: list[str] = []
+
+    async def _request(method, url, **kwargs):
+        seen.append(url)
+        return MagicMock()
+
+    monkeypatch.setattr("nemo_gym.server_utils.request", _request)
+    client = _client_with(_resources_only_config(rollout_correlation_enabled=True))
+    with rollout_context("task-7"):
+        await client.post("resources", "/verify", json={})
+
+    assert seen == [f"http://resources.test:80{rollout_path_prefix('task-7')}/verify"]
