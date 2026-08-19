@@ -16,8 +16,14 @@
 This file contains patches copied from https://github.com/SWE-bench/SWE-bench/pull/630
 """
 
+from typing import Any, Dict, Optional
+
 # @bxyu-nvidia: We import wildcard because there are a million imports otherwise...
+from swebench.harness.constants import END_TEST_OUTPUT, MAP_REPO_TO_EXT, START_TEST_OUTPUT
 from swebench.harness.run_evaluation import *
+
+from nemo_gym import PARENT_DIR
+from nemo_gym.sandbox import AsyncSandbox
 
 
 # @bxyu-nvidia: We modify the run_instance function to:
@@ -134,6 +140,20 @@ async def run_instance(
                 break
             else:
                 logger.info(f"Failed to apply patch to container: {git_apply_cmd}")
+
+        # The jqlang__jq-2681 image contains dirty generated lexer files from
+        # a different Flex version. Apply its golden source files only; jq's
+        # evaluation build regenerates lexer.c/.h and parser.c/.h from them.
+        if not applied_patch and instance_id == "jqlang__jq-2681":
+            val = await container.exec_run(
+                f"git apply --include=src/lexer.l --include=src/parser.y {DOCKER_PATCH}",
+                workdir=DOCKER_WORKDIR,
+                user=DOCKER_USER,
+            )
+            if val.exit_code == 0:
+                logger.info(f"{APPLY_PATCH_PASS}: applied source patch before regeneration\n{val.output.decode(UTF8)}")
+                applied_patch = True
+
         if not applied_patch:
             logger.info(f"{APPLY_PATCH_FAIL}:\n{val.output.decode(UTF8)}")
             raise EvaluationError(
@@ -234,3 +254,108 @@ async def run_instance(
             "completed": eval_completed,
             "resolved": report.get(instance_id, {}).get("resolved", False),
         }
+
+
+########################################
+# START SWE Bench Multilingual instance patches
+########################################
+
+# @bxyu-nvidia: These are the patches to the `eval.sh` produced by SWE Bench that needed to be done in order for the golden patches to pass
+# Each patch here is not intended to help the model, they are literally making the test cases runnable.
+# Most of these are specific to Nvidia's OpenSandbox server. A lot of these aren't issues when run on bare metal AWS EC2 instances.
+# These patches may or may not be relevant to your specific sandboxing setup.
+
+
+def patch_swebench_multilingual_golden_patch_pass(eval_sh: str, instance_id: str) -> str:
+    # Run Maven tests without the daemon which causes issues with gson tests.
+    eval_sh = eval_sh.replace("mvnd test", "mvn test")
+
+    # apache__druid-16875 never reaches its focused tests because the
+    # build-metadata plugin's `git describe` exceeds its 30s timeout.
+    if instance_id == "apache__druid-16875":
+        eval_sh = eval_sh.replace("mvn test", "mvn test -Dgit.commit.id.skip=true")
+
+    # These projects resolve Gradle plugins through Plugin Portal. Load the
+    # uploaded mirror script explicitly because the sandbox Gradle process does
+    # not auto-discover init.d under /root.
+    if instance_id in {"apache__lucene-13494", "reactivex__rxjava-7597"}:
+        eval_sh = eval_sh.replace(
+            "./gradlew", "./gradlew --init-script /root/.gradle/init.d/maven_central_mirror.gradle"
+        )
+
+    # axios__axios-4738 needs more than 10s for cold dependency and process startup.
+    eval_sh = eval_sh.replace("timeout 10s", "timeout 120s")
+
+    # Preact's Chrome tests use a 2s Mocha timeout, which is too short
+    if "preactjs__preact" in instance_id:
+        eval_sh = eval_sh.replace(
+            "npx karma start karma.conf.js", "npx karma start karma.conf.js --client.mocha.timeout=60000"
+        )
+
+    # valkey-io__valkey-928 checks the source node immediately after an
+    # asynchronous replica migration. Let the cluster state settle before the
+    # test's role assertion.
+    if instance_id == "valkey-io__valkey-928":
+        eval_sh = eval_sh.replace(
+            "TERM=dumb ./runtest",
+            "sed -i 's/assert_equal \\[lindex \\[R 3 role\\] 2\\] {}/after 5000; assert_equal [lindex [R 3 role] 2] {}/' "
+            "tests/unit/cluster/replica-migration.tcl\nTERM=dumb ./runtest",
+        )
+
+    return eval_sh
+
+
+def patch_swebench_multilingual_resources_request(resources: Dict[str, Any], instance_id: str) -> None:
+    high_resource_repos = {
+        "preactjs__preact",
+        "axios__axios",
+        "valkey-io__valkey",
+    }
+    if any(r in instance_id for r in high_resource_repos):
+        resources["cpu"] = max(resources.get("cpu", 0), 8)
+        resources["memory_mib"] = max(resources.get("memory_mib", 0), 16 * 1024)
+
+
+async def patch_swebench_multilingual_sandbox(repo: str, instance_id: str, sandbox: AsyncSandbox) -> None:
+    if MAP_REPO_TO_EXT.get(repo) == "java":
+        base_path = PARENT_DIR / "responses_api_agents/swe_agents/maven_mirror"
+        settings_xml_path = base_path / "settings.xml"
+        init_gradle_path = base_path / "init.gradle"
+
+        # This init.d is necessary for some Java tests to properly pull from the maven mirror
+        # e.g. apache__lucene and apache__druid
+        #
+        # Lucene's applied Gradle scripts have their own buildscript scopes. Those scopes
+        # are not exposed through the root project's repository handler, so an init script
+        # cannot rewrite them before they resolve. Rewrite Maven Central references in all
+        # checked-in Gradle scripts before Gradle starts (but never mutate its cache).
+        await sandbox.exec("""mkdir -p /root/.m2 ~/.gradle/init.d \
+        && if [ -d gradle ]; then
+find . -path './.gradle' -prune -o -type f \\( -name '*.gradle' -o -name '*.gradle.kts' \\) -exec sed -i 's#mavenCentral()#maven { url = uri("https://maven-central.storage-download.googleapis.com/maven2/") }#g; s#https://repo.maven.apache.org/maven2#https://maven-central.storage-download.googleapis.com/maven2#g; s#https://repo1.maven.org/maven2#https://maven-central.storage-download.googleapis.com/maven2#g' {} +
+fi""")
+
+        # This settings.xml is necessary for some Java tests to properly pull from the maven mirror
+        await sandbox.upload(settings_xml_path, "/root/.m2/settings.xml")
+
+        # This init.d is necessary for some Java tests to properly pull from the maven mirror
+        await sandbox.upload(init_gradle_path, "~/.gradle/init.d/maven_central_mirror.gradle")
+
+    # tokio-rs__tokio-4384 otherwise resolves getrandom 0.4.3, which
+    # requires Cargo 1.85 while its image provides Cargo 1.81.
+    if instance_id == "tokio-rs__tokio-4384":
+        await sandbox.exec(
+            "cargo update -p getrandom@0.4.3 --precise 0.4.2 && cargo update -p proptest@1.11.0 --precise 1.5.0"
+        )
+
+
+def patch_swebench_multilingual_log_parsing(stdout: str, stderr: str, instance_id: str) -> Optional[str]:
+    test_output = None
+
+    # For RuboCop tests in SWE Multilingual specifically, there is an issue with the logs parsing if the stdout and stderr returned is not interleaved.
+    # We interleave the stderr inside the start and end tags in the stdout here instead. See `get_logs_eval`
+    if "rubocop" in instance_id and START_TEST_OUTPUT in stderr:
+        start, middle_end = stderr.split(START_TEST_OUTPUT)
+        middle, end = middle_end.split(END_TEST_OUTPUT)
+        test_output = start + START_TEST_OUTPUT + stdout + middle + END_TEST_OUTPUT + end
+
+    return test_output

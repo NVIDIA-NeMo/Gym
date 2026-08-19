@@ -8,13 +8,13 @@ position: 2.5
 
 **Goal**: Understand how NeMo Gym implements environments as composable server components.
 
-**Read first**: [Environments](/about/concepts/environments) — what an environment is and how it decomposes into dataset, agent harness, verifier, and state.
+**Read first**: [Environments](/about/concepts/environments) — what an environment owns and how Gym composes it with agent and model servers.
 
 </Info>
 
 ## How NeMo Gym Implements Environments
 
-NeMo Gym implements environments as composable FastAPI servers that communicate over async HTTP:
+NeMo Gym composes environments and agent-side components as FastAPI servers that communicate over async HTTP:
 
 | Concept | NeMo Gym Component Implementation |
 |---------|---------------|

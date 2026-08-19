@@ -20,7 +20,16 @@ gradle.beforeSettings { settings ->
         }
 
         // Keep this for plugin-marker artifacts not published to Maven Central.
-        gradlePluginPortal()
+        gradlePluginPortal {
+            // Plugin Portal's Gradle module metadata redirects some plugin
+            // implementation artifacts to Maven Central, which is rate
+            // limited in the sandbox. Its POM/artifact endpoints stay on
+            // plugins-artifacts.gradle.org.
+            metadataSources {
+                mavenPom()
+                artifact()
+            }
+        }
     }
 }
 

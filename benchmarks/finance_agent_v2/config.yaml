@@ -18,12 +18,12 @@ config_paths:
 finance_agent_v2_benchmark_resources_server:
   _inherit_from: finance_agent_v2_resources_server
 
-# Benchmark agent — inherits the finance_agent_v2 loop, overrides the dataset to
-# the frozen benchmark split and points at the isolated resources server above.
+# Benchmark agent — inherits the finance_agent_v2 instance, overrides the dataset
+# to the frozen benchmark split and points at the isolated resources server above.
 finance_agent_v2_benchmark_agent:
   _inherit_from: finance_agent_v2
   responses_api_agents:
-    finance_agent_v2:
+    finance_agent:
       resources_server:
         name: finance_agent_v2_benchmark_resources_server
       datasets:
