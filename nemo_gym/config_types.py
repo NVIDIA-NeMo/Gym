@@ -784,6 +784,43 @@ class ExporterConfig(BaseModel):
         raise NotImplementedError
 
 
+DEPRECATED_UPLOAD_ROLLOUTS_KEY = "upload_rollouts_to_wandb"
+
+
+class UploadRolloutsConfigMixin(BaseModel):
+    """`upload_rollouts` plus back-compat for the W&B-specific name it replaced.
+
+    The flag gates rollout upload for every configured exporter, not just W&B, so the old name is
+    accepted for one deprecation cycle and mapped onto the new field.
+    """
+
+    upload_rollouts: bool = Field(
+        default=True,
+        description=(
+            "Upload the rollouts to every configured exporter. Sometimes this should be off "
+            "because the rollouts are massive. Default: True"
+        ),
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def map_deprecated_upload_rollouts(cls, data):
+        if not isinstance(data, dict) or DEPRECATED_UPLOAD_ROLLOUTS_KEY not in data:
+            return data
+
+        data = dict(data)
+        legacy = data.pop(DEPRECATED_UPLOAD_ROLLOUTS_KEY)
+        warnings.warn(
+            f"`{DEPRECATED_UPLOAD_ROLLOUTS_KEY}` is deprecated; use `upload_rollouts`, which "
+            "gates rollout upload for every configured exporter.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        # An explicit `upload_rollouts` wins, so callers can migrate without removing the old key.
+        data.setdefault("upload_rollouts", legacy)
+        return data
+
+
 class WANDBConfig(ExporterConfig):
     wandb_project: Optional[str] = None
     wandb_name: Optional[str] = None

@@ -28,7 +28,7 @@ from tqdm.asyncio import tqdm
 
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest, ReverifyMode
-from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError
+from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError, UploadRolloutsConfigMixin
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
@@ -66,7 +66,7 @@ _RECOVERY_TWO_SOURCES_WARNING = (
 )
 
 
-class RolloutReverificationConfig(BaseNeMoGymCLIConfig):
+class RolloutReverificationConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
     materialized_inputs_jsonl_fpath: str = Field(
         description="The file path of the materialized inputs as output by `gym eval run`."
     )
@@ -96,10 +96,6 @@ class RolloutReverificationConfig(BaseNeMoGymCLIConfig):
         default=None,
         ge=1,
         description="Maximum number of examples to re-verify (omit for no limit). When combined with resume_from_cache, already-completed rows within the limit count against it, so fewer (or zero) rows may actually be re-verified.",
-    )
-    upload_rollouts_to_wandb: bool = Field(
-        default=True,
-        description="Upload the rollouts to W&B. Sometimes this should be off because the rollouts are massive. Default: True",
     )
     overwrite: bool = Field(
         default=False,
@@ -773,7 +769,7 @@ class RolloutReverificationHelper(BaseModel):
         # reused for both the rollouts export and aggregate metrics so the file is never re-read.
         results, agg_rows = _load_reverified_results(output_fpaths.output)
 
-        if config.upload_rollouts_to_wandb and get_exporters():  # pragma: no cover
+        if config.upload_rollouts and get_exporters():  # pragma: no cover
             print("Uploading rollouts. This may take a few minutes if your data is large.")
             export_rollouts([_rollout_for_wandb(r) for r in results])
 
