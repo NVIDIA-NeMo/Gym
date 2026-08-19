@@ -75,6 +75,11 @@ def setup_exporters(global_config_dict: DictConfig) -> list[BaseExporter]:
         exporter.export_config()
         _EXPORTERS.append(exporter)
 
+    # Registered here rather than at import so this lands after any hook a backend installed while
+    # opening. atexit runs LIFO, so ours goes first: the wandb SDK closes its service in its own
+    # hook, which would leave our teardown talking to a dead socket. Re-registering is harmless
+    # because `teardown_exporters` is idempotent.
+    atexit.register(teardown_exporters)
     return get_exporters()
 
 
@@ -96,6 +101,3 @@ def export_metrics(metrics: dict[str, Any], step: Optional[int] = None) -> None:
 def export_rollouts(rollouts: list[dict[str, Any]]) -> None:
     for exporter in _EXPORTERS:
         exporter.export_rollouts(rollouts)
-
-
-atexit.register(teardown_exporters)
