@@ -311,8 +311,8 @@ def _strip_capture_payloads(result: dict[str, Any]) -> None:
                 call.pop(key, None)
 
 
-def _rollout_for_wandb(result: dict[str, Any]) -> dict[str, Any]:
-    """Return a W&B view without the complete trajectory or raw capture payloads."""
+def _rollout_for_export(result: dict[str, Any]) -> dict[str, Any]:
+    """Return an exporter view without the complete trajectory or raw capture payloads."""
     sanitized = dict(result)
     sanitized.pop(NG_TRAJECTORY_KEY, None)
     sanitized.pop("ng_model_call_capture", None)
@@ -889,7 +889,7 @@ class RolloutCollectionHelper(BaseModel):
 
         if config.upload_rollouts and get_exporters():  # pragma: no cover
             print("Uploading rollouts. This may take a few minutes if your data is large.")
-            export_rollouts([_rollout_for_wandb(result) for result in results])
+            export_rollouts([_rollout_for_export(result) for result in results])
 
         print("Sorting results to ensure consistent ordering")
         rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))

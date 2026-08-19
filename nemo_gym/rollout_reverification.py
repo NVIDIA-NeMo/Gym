@@ -42,7 +42,7 @@ from nemo_gym.rollout_collection import (
     NG_NO_PERSIST_KEY,
     NG_TERMINAL_KEY,
     _get_max_rollout_attempts,
-    _rollout_for_wandb,
+    _rollout_for_export,
 )
 from nemo_gym.server_utils import (
     ServerClient,
@@ -771,7 +771,7 @@ class RolloutReverificationHelper(BaseModel):
 
         if config.upload_rollouts and get_exporters():  # pragma: no cover
             print("Uploading rollouts. This may take a few minutes if your data is large.")
-            export_rollouts([_rollout_for_wandb(r) for r in results])
+            export_rollouts([_rollout_for_export(r) for r in results])
 
         # Compute and write aggregate metrics via /aggregate_metrics on each agent server
         if config.disable_aggregation:
