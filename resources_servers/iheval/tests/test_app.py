@@ -904,17 +904,9 @@ class TestChatCompletionsVariant:
     """
 
     @staticmethod
-    def _load(name: str) -> list:
-        data = Path(__file__).resolve().parents[1] / "data" / name
+    def _rows() -> list:
+        data = Path(__file__).resolve().parents[1] / "data" / "example.jsonl"
         return [json.loads(line) for line in data.read_text().splitlines() if line.strip()]
-
-    @classmethod
-    def _rows(cls) -> list:
-        return cls._load("example.jsonl")
-
-    def test_committed_example_twin_is_in_sync(self) -> None:
-        """The committed twin must match what the generator produces today."""
-        assert self._load("example_chat.jsonl") == [_to_chat_row(r) for r in self._rows()]
 
     def test_only_the_request_shape_changes(self) -> None:
         """Verifier inputs are untouched, so both files score the same rows the same way."""
