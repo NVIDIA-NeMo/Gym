@@ -234,7 +234,6 @@ class KuhnPokerEnvironment(MultiAgentResourcesServer):
         }
         return {
             "status": "finished" if terminal else "playing",
-            "seed": state.seed,
             "active_agent": self.config.agent_ids[active_seat] if active_seat is not None else None,
             "active_seat": active_seat,
             "cards": cards,
