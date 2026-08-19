@@ -15,6 +15,60 @@ def read(path: str) -> str:
 
 
 class TestFernDocsLinks(unittest.TestCase):
+    def test_model_call_capture_leads_with_a_copy_paste_consumer_workflow(self):
+        for version in ("latest", "v0.5.0"):
+            with self.subTest(version=version):
+                guide = read(f"fern/versions/{version}/pages/model-server/model-call-capture.mdx")
+
+                workflow = guide.index("## Run an evaluation with capture")
+                author_guidance = guide.index("## If you build a custom agent")
+                self.assertLess(workflow, author_guidance)
+                self.assertIn("gym env start \\", guide)
+                self.assertIn("++observability_enabled=true", guide)
+                self.assertIn("++model_call_capture_dir=", guide)
+                self.assertIn("gym eval run --no-serve \\", guide)
+                self.assertIn("results/mcqa_rollouts.jsonl", guide)
+
+    def test_model_call_capture_shows_the_rollout_attachment_shape(self):
+        for version in ("latest", "v0.5.0"):
+            guide = read(f"fern/versions/{version}/pages/model-server/model-call-capture.mdx")
+
+            with self.subTest(version=version):
+                self.assertIn('"ng_model_call_capture": {', guide)
+                self.assertIn('"gaps": [', guide)
+                for metric in (
+                    "num_calls",
+                    "tokens_in",
+                    "tokens_out",
+                    "tokens_reasoning",
+                    "tokens_total",
+                    "latency_total_ms",
+                ):
+                    self.assertIn(f'"{metric}":', guide)
+                self.assertIn("<rollout_id>.capture.jsonl", guide)
+
+    def test_model_call_capture_labels_the_raw_record_as_synthetic(self):
+        for version in ("latest", "v0.5.0"):
+            with self.subTest(version=version):
+                guide = read(f"fern/versions/{version}/pages/model-server/model-call-capture.mdx")
+
+                self.assertIn("The following synthetic record shows the exact persisted field shape.", guide)
+
+    def test_model_call_capture_scopes_agent_observations_to_claude_code(self):
+        for version in ("latest", "v0.5.0"):
+            with self.subTest(version=version):
+                guide = read(f"fern/versions/{version}/pages/model-server/model-call-capture.mdx")
+
+                self.assertIn("Currently, only `claude_code_agent`", guide)
+                self.assertIn("### Advanced: correlation, compaction, and sandbox evidence", guide)
+
+    def test_model_server_index_links_model_call_capture(self):
+        for version in ("latest", "v0.5.0"):
+            with self.subTest(version=version):
+                index = read(f"fern/versions/{version}/pages/model-server/index.mdx")
+
+                self.assertIn('<Card title="Model-call capture" href="/model-server/model-call-capture">', index)
+
     def test_development_setup_uses_supported_cold_start_docs_command(self):
         guide = read("fern/versions/latest/pages/contribute/development-setup.mdx")
 
@@ -130,6 +184,25 @@ class TestFernDocsLinks(unittest.TestCase):
 
                 self.assertEqual([], broken_links)
                 self.assertEqual(2, canonical_links)
+
+    def test_internal_pages_are_linked_by_path_not_by_absolute_url(self):
+        """An absolute docs.nvidia.com link pins the reader to the default version.
+
+        Relative paths keep the reader inside the version they are already reading.
+        Prose that names the domain without linking to it is fine.
+
+        Scoped to `latest`. The frozen versions carry the same pattern but are left as
+        they shipped.
+        """
+        pages = REPO_ROOT / "fern/versions/latest/pages"
+        absolute_links = []
+
+        for page in pages.rglob("*.mdx"):
+            for line_number, line in enumerate(page.read_text().splitlines(), start=1):
+                if re.search(r'(?:\]\(|href=")https?://docs\.nvidia\.com/nemo/gym', line):
+                    absolute_links.append(f"{page.relative_to(REPO_ROOT)}:{line_number}")
+
+        self.assertEqual([], absolute_links)
 
     def test_private_cli_compat_api_link_redirects_to_the_public_cli_page(self):
         redirects = read("fern/docs.yml")

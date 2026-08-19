@@ -1,0 +1,50 @@
+compute:
+  cluster:
+    type: slurm
+    hostname: myslurmcluster
+    walltime: "00:30:00"
+    account: myaccount
+    node_pools:
+      compute:
+        partition: batch
+        nodes: 1
+        ntasks_per_node: 1
+        gpus_per_node: 4
+
+services:
+  vllm_model:
+    container: vllm/vllm-openai:v0.26.0 # optional, defaults
+    type: vllm
+    model: Qwen/Qwen2.5-0.5B-Instruct
+    trust_remote_code: true
+    tensor_parallel_size: ${oc.env:TP}  # set via: export TP=4
+    pipeline_parallel_size: 1
+    port: 8000
+    health_check:
+      timeout_seconds: 1200
+    mounts: 
+      - /lustre/datasets:/data
+
+driver:
+  policy_model: vllm_model # synthactic sugar
+  container: python:3.12 # optional, defaults to the service container
+  gym_install:
+    ref: main
+  # mounts: 
+  #   - /lustre/datasets:/data
+  benchmarks:
+    gpqa:
+      prepare:
+        config_paths:
+          - benchmarks/ifbench/config.yaml
+      run: # gym eval run
+        split: benchmark
+        overwrite_metrics_conflicts: true
+        responses_create_params:
+          temperature: 0.6
+          top_p: 0.9
+        config_paths: # if services include pre-defined service types, some configs might be created and added to the command automatically
+          - benchmarks/ifbench/config.yaml
+job:
+  output_path: /lustre/fsw/my-path
+

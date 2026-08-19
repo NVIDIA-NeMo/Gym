@@ -21,11 +21,14 @@ import argparse
 import hashlib
 import json
 import os
+import re
+import shlex
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 from benchmarks.osworld.assets import DEFAULT_SETUP_CACHE, ensure_osworld_assets
+from responses_api_agents.osworld_agent.runtime_dependencies import managed_agent_venv_path
 
 
 BENCHMARK_DIR = Path(__file__).resolve().parent
@@ -34,12 +37,18 @@ DEFAULT_CONFIG = BENCHMARK_DIR / "config.yaml"
 DEFAULT_INPUT = BENCHMARK_DIR / "data" / "example.jsonl"
 DEFAULT_OUTPUT = REPO_ROOT / "results" / "osworld" / "rollouts.jsonl"
 DEFAULT_ENV = BENCHMARK_DIR / "env.yaml"
+OSWORLD_RUNTIME_DEPS_INSTALLER = (
+    REPO_ROOT / "responses_api_agents" / "osworld_agent" / "install_optional_runtime_deps.sh"
+)
 
 BASE_AGENT_CONFIG = REPO_ROOT / "responses_api_agents" / "osworld_agent" / "configs" / "osworld_agent.yaml"
 OPENAI_MODEL_CONFIG = REPO_ROOT / "responses_api_models" / "openai_model" / "configs" / "openai_model.yaml"
 POINTER_AGENT_CONFIG = BENCHMARK_DIR / "configs" / "osworld_agent_pointer.yaml"
 NANO_OMNI_AGENT_CONFIG = BENCHMARK_DIR / "configs" / "osworld_agent_nano_omni.yaml"
 OSWORLD_PROVIDER_CONFIG = BENCHMARK_DIR / "configs" / "osworld_docker_pinned.yaml"
+OPENSANDBOX_CONFIG = BENCHMARK_DIR / "configs" / "osworld_opensandbox.yaml"
+OPENSANDBOX_VM_SENTINEL = "/opensandbox/Ubuntu.qcow2"
+OPENSANDBOX_COMPAT_IMAGE = "busybox:1.36"
 
 PROFILE_CONFIGS: dict[str, tuple[Path, ...]] = {
     "default": (DEFAULT_CONFIG,),
@@ -55,12 +64,58 @@ BACKEND_CONFIGS: dict[str, Path | None] = {
     # The reusable OSWorld agent config defines the Docker Sandbox provider;
     # env.yaml activates it for this backend.
     "gym_sandbox": None,
+    "gym_opensandbox": OPENSANDBOX_CONFIG,
     "osworld_provider": OSWORLD_PROVIDER_CONFIG,
 }
 
 PINNED_OSWORLD_IMAGE = (
     "docker://happysixd/osworld-docker@sha256:0e6497a9295647cf05bf2b2af522fdd79bdeba2737595259cab310a3bcf6baa9"
 )
+
+
+def _setup_command_texts(task: dict[str, Any]) -> tuple[str, ...]:
+    """Return commands that OSWorld will execute during the task setup."""
+
+    config = task.get("config")
+    if not isinstance(config, list):
+        return ()
+
+    commands: list[str] = []
+    for setup_item in config:
+        if not isinstance(setup_item, dict):
+            continue
+        parameters = setup_item.get("parameters")
+        if not isinstance(parameters, dict):
+            continue
+        command = parameters.get("command")
+        if isinstance(command, str):
+            commands.append(command)
+        elif isinstance(command, list):
+            commands.append(" ".join(str(argument) for argument in command))
+    return tuple(commands)
+
+
+def _validate_chrome_cdp_relay(task: dict[str, Any], *, line_number: int) -> None:
+    """Require OSWorld's guest relay when task setup starts Chrome CDP."""
+
+    commands = _setup_command_texts(task)
+    starts_chrome_cdp = any(
+        re.search(r"--remote-debugging-port(?:=|\s+)1337(?!\d)", command, flags=re.IGNORECASE) for command in commands
+    )
+    has_cdp_relay = any(
+        re.search(r"\bsocat\b", command, flags=re.IGNORECASE)
+        and re.search(r"\blisten:9222(?!\d)", command, flags=re.IGNORECASE)
+        and re.search(r"\b(?:localhost|127\.0\.0\.1):1337(?!\d)", command, flags=re.IGNORECASE)
+        for command in commands
+    )
+    if starts_chrome_cdp and not has_cdp_relay:
+        task_id = str(task.get("id") or "<unknown>")
+        raise ValueError(
+            f"OSWorld row {line_number} task {task_id!r} starts Chrome CDP on guest port 1337 "
+            "but verifier_metadata.osworld_task.config does not launch the required guest relay. "
+            "Add ['socat', 'tcp-listen:9222,fork', 'tcp:localhost:1337']; Gym publishes and "
+            "forwards port 9222 but does not start this task-owned process."
+        )
 
 
 def prepare(input_jsonl: Path = DEFAULT_INPUT) -> Path:
@@ -84,6 +139,7 @@ def prepare(input_jsonl: Path = DEFAULT_INPUT) -> Path:
             metadata = row.get("verifier_metadata")
             if not isinstance(metadata, dict) or not isinstance(metadata.get("osworld_task"), dict):
                 raise ValueError(f"OSWorld row {line_number} must contain verifier_metadata.osworld_task")
+            _validate_chrome_cdp_relay(metadata["osworld_task"], line_number=line_number)
             row_count += 1
 
     if row_count == 0:
@@ -290,6 +346,15 @@ def write_env(
     resolved_vm_path = vm_path.expanduser().resolve() if vm_path else None
     if execution_backend == "gym_sandbox" and resolved_vm_path is None:
         raise ValueError("gym_sandbox execution requires an explicit vm_path")
+    if execution_backend == "gym_opensandbox" and resolved_vm_path is not None:
+        raise ValueError("gym_opensandbox uses the server-side Pool image and does not accept vm_path")
+    sandbox_provider_name = {
+        "gym_sandbox": "osworld_sandbox",
+        "gym_opensandbox": "osworld_opensandbox",
+    }.get(execution_backend)
+    emitted_vm_path: str | Path | None = (
+        OPENSANDBOX_VM_SENTINEL if execution_backend == "gym_opensandbox" else resolved_vm_path
+    )
     contents = "\n".join(
         [
             "# Generated by benchmarks/osworld/prepare.py. This file is gitignored.",
@@ -325,8 +390,25 @@ def write_env(
             f"      concurrency: {num_samples_in_parallel}",
             f"      setup_cache_dir: {_yaml_string(setup_cache_dir.resolve())}",
             f"      asset_input_jsonl: {_yaml_string((asset_input_jsonl or input_jsonl).resolve())}",
-            f"      sandbox_provider: {'osworld_sandbox' if execution_backend == 'gym_sandbox' else 'null'}",
-            *([] if resolved_vm_path is None else [f"      vm_path: {_yaml_string(resolved_vm_path)}"]),
+            f"      sandbox_provider: {sandbox_provider_name or 'null'}",
+            *([] if emitted_vm_path is None else [f"      vm_path: {_yaml_string(emitted_vm_path)}"]),
+            *(
+                []
+                if execution_backend != "gym_opensandbox"
+                else [
+                    "      sandbox_require_kvm: false",
+                    "      sandbox_ready_timeout_s: 600.0",
+                    "      sandbox_spec:",
+                    "        # Required by the SDK; poolRef supplies the actual OSWorld VM.",
+                    f"        image: ${{oc.env:OPENSANDBOX_COMPAT_IMAGE,{OPENSANDBOX_COMPAT_IMAGE}}}",
+                    "        ttl_s: 14400",
+                    "        ready_timeout_s: 1200",
+                    "        provider_options:",
+                    "          skip_health_check: true",
+                    "          extensions:",
+                    "            poolRef: ${oc.env:OPENSANDBOX_POOL_REF,osworld-kvm}",
+                ]
+            ),
             *([] if max_steps is None else [f"      max_steps: {max_steps}"]),
             "",
         ]
@@ -380,13 +462,16 @@ def main() -> None:
         "--execution-backend",
         choices=tuple(BACKEND_CONFIGS),
         default="osworld_provider",
-        help="VM lifecycle owner; both choices still execute through Gym env",
+        help="VM lifecycle owner; every choice still executes through Gym env",
     )
     parser.add_argument(
         "--vm-path",
         type=Path,
         default=None,
-        help="Explicit qcow2 base; required for gym_sandbox and recommended for reproducible native runs",
+        help=(
+            "Explicit qcow2 base; required for gym_sandbox, unsupported for "
+            "gym_opensandbox, and recommended for reproducible native runs"
+        ),
     )
     parser.add_argument(
         "--expected-vm-sha256",
@@ -483,6 +568,8 @@ def main() -> None:
     vm_path = args.vm_path.expanduser().resolve() if args.vm_path else None
     if args.execution_backend == "gym_sandbox" and vm_path is None:
         parser.error("--execution-backend gym_sandbox requires --vm-path")
+    if args.execution_backend == "gym_opensandbox" and vm_path is not None:
+        parser.error("--execution-backend gym_opensandbox uses the Pool image and rejects --vm-path")
     if args.expected_vm_sha256 and vm_path is None:
         parser.error("--expected-vm-sha256 requires --vm-path")
     if vm_path is not None:
@@ -518,8 +605,21 @@ def main() -> None:
             force=args.force_env,
         )
 
-    print("\nNext steps:")
-    print(f"  cd {args.env_file.expanduser().resolve().parent}")
+    agent_venv = managed_agent_venv_path(REPO_ROOT, args.server_venv_root)
+    env_dir = args.env_file.expanduser().resolve().parent
+    print("\nNext steps (the OSWorld runtime package install is an explicit opt-in):")
+    print(f"  cd {shlex.quote(str(env_dir))}")
+    print("  gym env prefetch")
+    print(
+        "  "
+        + shlex.join(
+            [
+                "bash",
+                str(OSWORLD_RUNTIME_DEPS_INSTALLER),
+                str(agent_venv),
+            ]
+        )
+    )
     print("  gym env start")
     print("  gym eval run --no-serve")
 

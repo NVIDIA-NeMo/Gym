@@ -21,8 +21,6 @@ import sys
 import time
 from abc import abstractmethod
 from contextlib import asynccontextmanager
-from logging import Filter as LoggingFilter
-from logging import LogRecord, getLogger
 from os import environ, getenv
 from pathlib import Path
 from threading import Thread
@@ -66,6 +64,7 @@ from nemo_gym.global_config import (
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     OBSERVABILITY_ENABLED_KEY_NAME,
     RAY_HEAD_NODE_ADDRESS_KEY_NAME,
+    UVICORN_TIMEOUT_WORKER_HEALTHCHECK,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_first_server_config_dict,
@@ -725,20 +724,10 @@ Full body: {json.dumps(exc.body, indent=4)}
             server.setup_profiling(app, profiling_config)
 
         uvicorn_logging_cfg = UvicornLoggingConfig.model_validate(global_config_dict)
-        if not uvicorn_logging_cfg.uvicorn_logging_show_200_ok:
-
-            class No200Filter(LoggingFilter):
-                def filter(self, record: LogRecord) -> bool:
-                    msg = record.getMessage()
-                    return not msg.strip().endswith("200")
-
-            uvicorn_logger = getLogger("uvicorn.access")
-            uvicorn_logger.addFilter(No200Filter())
-
-            if is_main_fastapi_proc:
-                print(
-                    "Adding a uvicorn logging filter so that the logs aren't spammed with 200 OK messages. This is to help errors pop up better and filter out noise."
-                )
+        if not uvicorn_logging_cfg.uvicorn_logging_show_200_ok and is_main_fastapi_proc:
+            print(
+                "Disabling a uvicorn access logging so that the logs aren't spammed with 200 OK messages. This is to help errors pop up better and filter out noise."
+            )
 
         uvicorn_kwargs = dict(
             host=server.config.host,
@@ -746,9 +735,10 @@ Full body: {json.dumps(exc.body, indent=4)}
             # We add a very small graceful shutdown timeout so when we shutdown we cancel all inflight requests and there are no lingering requests (requests are cancelled)
             timeout_graceful_shutdown=0.5,
             # Some workers may take a while for imports and setup_webserver.
-            timeout_worker_healthcheck=30,
+            timeout_worker_healthcheck=global_config_dict.get(UVICORN_TIMEOUT_WORKER_HEALTHCHECK, 30),
             # Ensure server keepalive > client keepalive
             timeout_keep_alive=30,
+            access_log=uvicorn_logging_cfg.uvicorn_logging_show_200_ok,
         )
 
         if server.config.num_workers and server.config.num_workers > 1:
