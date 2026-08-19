@@ -167,7 +167,9 @@ def _escape_for_single_quotes(s: str) -> str:
     return s.replace("'", "'\\''")
 
 
-def _wrap_in_ray_cluster(entrypoint_cmd: str, total_nodes: int, ray_extras: str = "default") -> str:
+def _wrap_in_ray_cluster(
+    entrypoint_cmd: str, total_nodes: int, ray_extras: str = "default", use_symmetric_run: bool = True
+) -> str:
     # Bootstraps a Ray cluster across every task and runs entrypoint_cmd only on the elected head
     # node, mirroring scripts/sbatch_base.sh.
     resource_flags = (
@@ -184,13 +186,21 @@ def _wrap_in_ray_cluster(entrypoint_cmd: str, total_nodes: int, ray_extras: str 
     # ($SLURM_NODEID). Callers that block on cluster-wide scheduling (e.g. vLLM's Ray executor
     # waiting on placement groups, or Ray Serve replicas being placed) need no separate
     # cluster-ready wait in the fallback path.
+    #
+    # symmetric-run has its own internal timeout waiting for every node to join ("Waiting for nodes
+    # to start... N/M nodes started"); on real clusters, container-pull/apt-install variance between
+    # nodes can exceed it, tearing the whole cluster down before a slightly slower node ever
+    # connects. Callers that already elect a head deterministically via $SLURM_NODEID (rather than
+    # needing Ray's own peer discovery) should pass use_symmetric_run=False to skip straight to the
+    # manual branch below, which has no such timeout.
+    symmetric_run_check = "ray symmetric-run --help >/dev/null 2>&1" if use_symmetric_run else "false"
     # Model-serving images (e.g. vllm/vllm-openai) don't necessarily bundle the ray CLI - it's only
     # needed as a runtime dependency when a ray-based distributed backend is actually selected - so
     # install it on the fly if it's missing before relying on either code path above.
     return (
         "bash -lc '\n"
         f'    command -v ray >/dev/null 2>&1 || pip install -q "ray[{ray_extras}]"\n'
-        "    if ray symmetric-run --help >/dev/null 2>&1; then\n"
+        f"    if {symmetric_run_check}; then\n"
         "        ray symmetric-run \\\n"
         '            --address "$RAY_HEAD_NODE_IP" \\\n'
         f"            --min-nodes {total_nodes} \\\n"
@@ -291,7 +301,10 @@ def _build_vllm_ray_serve_command(
     )
     body = "\n    ".join([*gym_clone_preamble, *pythonpath_preamble, serve_run_cmd])
     inner_cmd = f"bash -c '\n    {_escape_for_single_quotes(body)}\n'"
-    return _wrap_in_ray_cluster(inner_cmd, total_nodes, ray_extras="serve,default")
+    # use_symmetric_run=False: the head is already elected deterministically via $SLURM_NODEID
+    # below, so there's no need for symmetric-run's own peer discovery/join-timeout, which has been
+    # observed to time out and tear down the whole cluster under real node-startup variance.
+    return _wrap_in_ray_cluster(inner_cmd, total_nodes, ray_extras="serve,default", use_symmetric_run=False)
 
 
 def _build_ray_command(_service: RayServiceConfig) -> str:

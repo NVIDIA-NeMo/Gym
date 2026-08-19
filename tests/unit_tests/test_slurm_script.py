@@ -28,6 +28,7 @@ from nemo_gym.orchestration.executors.script_templates import (
 )
 from nemo_gym.orchestration.executors.slurm_script import (
     _build_vllm_command,
+    _build_vllm_multi_node_tp_command,
     _build_vllm_ray_command,
     _build_vllm_ray_serve_command,
     _node_totals,
@@ -320,9 +321,29 @@ def test_build_vllm_ray_serve_command_runs_serve_run():
 def test_build_vllm_ray_serve_command_bootstraps_ray_cluster():
     service = _ray_serve_service()
     cmd = _build_vllm_ray_serve_command(service, total_nodes=2, gym_install=None)
-    assert "ray symmetric-run" in cmd
     assert "--min-nodes 2" in cmd
     assert '--address "$RAY_HEAD_NODE_IP"' in cmd
+
+
+def test_build_vllm_ray_serve_command_skips_symmetric_run():
+    # Regression: `ray symmetric-run`'s own node-join timeout has been observed to time out and
+    # tear down the whole cluster under real node-startup variance (image pull/apt install), even
+    # though ray_serve already elects its head deterministically via $SLURM_NODEID. Its branch must
+    # be unreachable (guarded by `if false`) rather than actually attempted.
+    service = _ray_serve_service()
+    cmd = _build_vllm_ray_serve_command(service, total_nodes=2, gym_install=None)
+    assert "if false; then" in cmd
+    assert "ray symmetric-run --help" not in cmd
+
+
+def test_build_vllm_ray_command_still_uses_symmetric_run():
+    # The plain "ray" backend (TP/PP spanning nodes) should be unaffected by the ray_serve fix -
+    # it still prefers symmetric-run when available.
+    cmd = _build_vllm_multi_node_tp_command(
+        VllmServiceConfig(type="vllm", container="vllm:latest", model="org/model", tensor_parallel_size=2),
+        total_nodes=2,
+    )
+    assert "ray symmetric-run --help" in cmd
 
 
 def test_build_vllm_ray_serve_command_installs_ray_serve_extra():
