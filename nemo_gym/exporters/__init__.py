@@ -68,8 +68,8 @@ def setup_exporters(global_config_dict: DictConfig) -> list[BaseExporter]:
         try:
             exporter = _load_exporter_class(class_path)(global_config_dict)
             exporter.setup()
-        except Exception:
-            logger.warning(f"Exporter {name} failed to start; continuing without it.", exc_info=True)
+        except Exception as e:
+            logger.warning(f"Exporter {name} failed to start; continuing without it: {e}", exc_info=True)
             continue
 
         exporter.export_config()
@@ -84,8 +84,8 @@ def teardown_exporters() -> None:
         exporter = _EXPORTERS.pop()
         try:
             exporter.teardown()
-        except Exception:
-            logger.warning(f"Exporter {exporter.name} failed to shut down cleanly.", exc_info=True)
+        except Exception as e:
+            logger.warning(f"Exporter {exporter.name} failed to shut down cleanly: {e}", exc_info=True)
 
 
 def export_metrics(metrics: dict[str, Any], step: Optional[int] = None) -> None:

@@ -79,8 +79,8 @@ class BaseExporter(ABC):
     def _guard(self, what: str, fn, *args) -> None:
         try:
             fn(*args)
-        except Exception:
-            logger.warning(f"Exporter {self.name} failed to log {what}; continuing.", exc_info=True)
+        except Exception as e:
+            logger.warning(f"Exporter {self.name} failed to log {what}; continuing: {e}", exc_info=True)
 
     def __enter__(self) -> "BaseExporter":
         self.setup()
