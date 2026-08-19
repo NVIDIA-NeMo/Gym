@@ -21,8 +21,12 @@ from fastapi import Response
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
-from nemo_gym.context_compaction import ContextCompactionSession, build_generation_contract
-from nemo_gym.context_history import ContextHistoryConfig
+from nemo_gym.context_compaction import (
+    ContextCompactionSession,
+    ContextHistoryConfig,
+    build_generation_contract,
+    normalize_semantic_items,
+)
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -225,7 +229,7 @@ class TestApp:
         assert prefixed_response.status_code == 200
         assert prefixed_response.json()["_ng_trajectory"]["rollout_id"] == "0-0"
 
-    async def test_identity_shadow_observes_without_changing_requests(self) -> None:
+    async def test_identity_history_preserves_requests(self) -> None:
         config = SimpleAgentConfig(
             host="0.0.0.0",
             port=8080,
@@ -233,7 +237,7 @@ class TestApp:
             name="",
             model_server=ModelServerRef(type="responses_api_models", name="model"),
             resources_server=ResourcesServerRef(type="resources_servers", name="resources"),
-            context_history={"enabled": True, "shadow_only": True},
+            context_history={"enabled": True},
         )
         server = SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
         client = TestClient(server.setup_webserver())
@@ -250,6 +254,9 @@ class TestApp:
                         "summary": [{"text": "thinking", "type": "summary_text"}],
                         "status": "completed",
                         "type": "reasoning",
+                        "prompt_token_ids": [1],
+                        "generation_token_ids": [11],
+                        "generation_log_probs": [-0.1],
                     }
                 ],
                 "parallel_tool_calls": True,
@@ -268,6 +275,9 @@ class TestApp:
                         "role": "assistant",
                         "status": "completed",
                         "type": "message",
+                        "prompt_token_ids": [1, 11, 2],
+                        "generation_token_ids": [12],
+                        "generation_log_probs": [-0.2],
                     }
                 ],
                 "parallel_tool_calls": True,
@@ -309,8 +319,10 @@ class TestApp:
         assert len(first_input) == 1
         assert len(second_input) == 2
         assert second_input[0] == first_input[0]
-        assert isinstance(second_input[1], NeMoGymResponseReasoningItem)
-        assert "context_compaction_contract" not in response.json()
+        assert second_input[1]["type"] == "reasoning"
+        assert second_input[1]["summary"] == [{"text": "thinking", "type": "summary_text"}]
+        assert "prompt_token_ids" not in second_input[1]
+        assert response.json()["context_compaction_contract"]["mode"] == "exact_trace_authority"
 
     async def test_responses_prefers_caller_owned_rollout_id_cookie(self) -> None:
         config = SimpleAgentConfig(
@@ -320,7 +332,7 @@ class TestApp:
             name="",
             model_server=ModelServerRef(type="responses_api_models", name="model"),
             resources_server=ResourcesServerRef(type="resources_servers", name="resources"),
-            context_history={"enabled": True, "shadow_only": False},
+            context_history={"enabled": True},
         )
         server = SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
         client = TestClient(server.setup_webserver())
@@ -360,6 +372,95 @@ class TestApp:
         assert response.status_code == 200
         assert response.json()["context_compaction_contract"]["rollout_id"] == "caller-rollout"
 
+    async def test_authority_identity_history_tracks_model_and_tool_outputs(self) -> None:
+        config = SimpleAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(type="responses_api_models", name="model"),
+            resources_server=ResourcesServerRef(type="resources_servers", name="resources"),
+            context_history={"enabled": True},
+        )
+        server = SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
+
+        function_call = {
+            "id": "call-item-1",
+            "call_id": "call-1",
+            "name": "act",
+            "arguments": "{}",
+            "type": "function_call",
+            "status": "completed",
+            "prompt_token_ids": [1],
+            "generation_token_ids": [11],
+            "generation_log_probs": [-0.1],
+        }
+        final_message = {
+            "id": "message-2",
+            "content": [{"annotations": [], "text": "done", "type": "output_text"}],
+            "role": "assistant",
+            "status": "completed",
+            "type": "message",
+            "prompt_token_ids": [1, 11, 2],
+            "generation_token_ids": [12],
+            "generation_log_probs": [-0.2],
+        }
+
+        def response_with_output(response_id: str, output: dict) -> dict:
+            return {
+                "id": response_id,
+                "created_at": 1.0,
+                "model": "dummy",
+                "object": "response",
+                "output": [output],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+
+        model_payloads = iter(
+            [
+                response_with_output("response-1", function_call),
+                response_with_output("response-2", final_message),
+            ]
+        )
+
+        async def post(*, server_name, **kwargs):
+            if server_name == "model":
+                return _mock_response(next(model_payloads))
+            if server_name == "resources":
+                return _mock_response(content='{"screen":"ready"}')
+            raise AssertionError(server_name)
+
+        server.server_client.post.side_effect = post
+        client = TestClient(server.setup_webserver())
+        response = client.post(
+            "/v1/responses",
+            cookies={_CONTEXT_COMPACTION_ROLLOUT_ID_COOKIE: "rollout-identity-authority"},
+            json={"input": "task"},
+        )
+
+        assert response.status_code == 200, response.text
+        model_calls = [
+            call for call in server.server_client.post.call_args_list if call.kwargs["server_name"] == "model"
+        ]
+        tool_response = NeMoGymFunctionCallOutput(
+            type="function_call_output",
+            call_id="call-1",
+            output='{"screen":"ready"}',
+        )
+        expected_complete_history = [
+            NeMoGymEasyInputMessage(role="user", content="task"),
+            function_call,
+            tool_response,
+        ]
+        assert normalize_semantic_items(model_calls[1].kwargs["json"].input) == normalize_semantic_items(
+            expected_complete_history
+        )
+        assert normalize_semantic_items(response.json()["output"]) == normalize_semantic_items(
+            [function_call, tool_response, final_message]
+        )
+
     async def test_active_recency_rewrites_only_at_chunk_boundaries(self) -> None:
         config = SimpleAgentConfig(
             host="0.0.0.0",
@@ -370,7 +471,6 @@ class TestApp:
             resources_server=ResourcesServerRef(type="resources_servers", name="resources"),
             context_history={
                 "enabled": True,
-                "shadow_only": False,
                 "policy": {
                     "type": "recency",
                     "config": {
@@ -513,7 +613,7 @@ class TestApp:
         assert len(payload["boundary_events"]) == 1
 
     async def test_run_preserves_authority_contract_across_resource_verification(self) -> None:
-        context_history = ContextHistoryConfig(enabled=True, shadow_only=False)
+        context_history = ContextHistoryConfig(enabled=True)
         config = SimpleAgentConfig(
             host="0.0.0.0",
             port=8080,
@@ -535,7 +635,6 @@ class TestApp:
             initial_context=[NeMoGymEasyInputMessage(role="user", content="task")],
         )
         prepared = await session.prepare_model_call(
-            legacy_request_input=[NeMoGymEasyInputMessage(role="user", content="task")],
             turn_id=1,
         )
         model_response = NeMoGymResponse.model_validate(
@@ -565,7 +664,6 @@ class TestApp:
         session.finalize()
         compacted = session.build_response(
             model_response,
-            output=model_response.output,
             agent_input=[NeMoGymEasyInputMessage(role="user", content="task")],
         )
         request_body = SimpleAgentRunRequest(

@@ -12,17 +12,19 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym.openai_utils import (
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseInput,
+from nemo_gym.context_compaction.config import ContextHistoryConfig
+from nemo_gym.context_compaction.controller import (
+    HistoryController,
+    TurnChunkedHistoryController,
+    build_guard_outcome_records,
+    evaluate_context_guards,
+    pending_observation_group_ids,
 )
-from nemo_gym.context_history import (
+from nemo_gym.context_compaction.history import (
     ContextMeasurements,
     FinalizedChunkRecord,
     GenerationContract,
     GuardOutcomeRecord,
-    HistoryController,
     MediaOccurrence,
     ObservedCompletion,
     PolicyDecisionEvidence,
@@ -32,18 +34,17 @@ from nemo_gym.context_history import (
     RewriteBoundaryEvent,
     SemanticHistory,
     TransformationLineageDeltaRecord,
-    TurnChunkedHistoryController,
     UnitLineageRecord,
-    ContextHistoryConfig,
-    assert_identity_shadow_matches,
-    build_guard_outcome_records,
-    build_history_policy,
     build_lineage_delta,
     canonical_digest,
     capture_observed_completion,
-    evaluate_context_guards,
-    pending_observation_group_ids,
     stable_id,
+)
+from nemo_gym.context_compaction.policies import build_history_policy
+from nemo_gym.openai_utils import (
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseInput,
 )
 
 
@@ -306,16 +307,13 @@ class ContextCompactionSession:
             )
 
         self.completion_evidence: list[ObservedCompletion] = []
+        self._output_items: list[Any] = []
         self.final_policy_decision: PolicyDecisionRecord | None = None
         self.lineage_deltas: list[TransformationLineageDeltaRecord] = []
         self._lineage_state: dict[str, UnitLineageRecord] = {}
         self._parent_transformation_id: str | None = None
         self.guard_records: list[GuardOutcomeRecord] = []
         self._segment_ids: dict[int, str] = {}
-
-    @property
-    def authority_mode(self) -> bool:
-        return not self.config.shadow_only
 
     @property
     def guards_enabled(self) -> bool:
@@ -329,22 +327,23 @@ class ContextCompactionSession:
             )
         )
 
+    @property
+    def output_items(self) -> tuple[Any, ...]:
+        """Return the complete logical rollout output in append order."""
+
+        return tuple(self._output_items)
+
     def _prepare_once(
         self,
         *,
-        legacy_request_input: Sequence[Any],
         turn_id: int,
     ) -> tuple[PreparedHistoryView, tuple[Any, ...], tuple[int, ...] | None]:
         prepared = self.history_controller.prepare(applies_to_step=turn_id)
         self.final_policy_decision = prepared.view.decision
-        if self.config.shadow_only:
-            assert_identity_shadow_matches(legacy_request_input, prepared.view)
-            request_input = tuple(legacy_request_input)
-        else:
-            request_input = tuple(prepared.view.items)
+        request_input = tuple(prepared.view.items)
 
         required_prefix = None
-        if self.authority_mode and prepared.append_compatible and self.completion_evidence:
+        if prepared.append_compatible and self.completion_evidence:
             previous = self.completion_evidence[-1]
             required_prefix = (
                 *previous.prompt_token_ids,
@@ -389,14 +388,12 @@ class ContextCompactionSession:
     async def prepare_model_call(
         self,
         *,
-        legacy_request_input: Sequence[Any],
         turn_id: int,
         measure_context: MeasureContext | None = None,
     ) -> PreparedContextCompactionCall:
         """Materialize and guard one request at a complete action boundary."""
 
         prepared, request_input, required_prefix = self._prepare_once(
-            legacy_request_input=legacy_request_input,
             turn_id=turn_id,
         )
         call = self._call_identity(
@@ -432,7 +429,6 @@ class ContextCompactionSession:
                 early_close = controller.close_for_guard(guard_name=exceeded[0].guard_name)
                 if early_close:
                     prepared, request_input, required_prefix = self._prepare_once(
-                        legacy_request_input=legacy_request_input,
                         turn_id=turn_id,
                     )
                     call = self._call_identity(
@@ -495,41 +491,37 @@ class ContextCompactionSession:
         call: PreparedContextCompactionCall,
         output_items: Sequence[Any],
         finish_reason: str | None,
-    ) -> ObservedCompletion | None:
+    ) -> ObservedCompletion:
         """Acknowledge one successful model call and append its semantic output."""
 
-        observed = None
-        if self.authority_mode:
-            observed = capture_observed_completion(
-                output_items,
-                rollout_id=self.rollout_id,
-                turn_id=call.turn_id,
-                media_ids=call.prepared_history.view.media_ids,
-                policy_decision=call.prepared_history.view.decision,
-                prepared_request_id=call.prepared_request_id,
-                context_epoch=call.prepared_history.context_epoch,
-                segment_index=call.prepared_history.segment_index,
-                segment_id=call.segment_id,
-                expected_append_compatible=(call.prepared_history.append_compatible),
-                compaction_event_id=(
-                    call.prepared_history.boundary.event_id if call.prepared_history.boundary is not None else None
-                ),
-                generation_contract_id=(self.generation_contract.generation_contract_id),
-                finish_reason=finish_reason,
-                required_prefix_token_ids=call.required_prefix_token_ids,
+        observed = capture_observed_completion(
+            output_items,
+            rollout_id=self.rollout_id,
+            turn_id=call.turn_id,
+            media_ids=call.prepared_history.view.media_ids,
+            policy_decision=call.prepared_history.view.decision,
+            prepared_request_id=call.prepared_request_id,
+            context_epoch=call.prepared_history.context_epoch,
+            segment_index=call.prepared_history.segment_index,
+            segment_id=call.segment_id,
+            expected_append_compatible=(call.prepared_history.append_compatible),
+            compaction_event_id=(
+                call.prepared_history.boundary.event_id if call.prepared_history.boundary is not None else None
+            ),
+            generation_contract_id=(self.generation_contract.generation_contract_id),
+            finish_reason=finish_reason,
+            required_prefix_token_ids=call.required_prefix_token_ids,
+        )
+        self.completion_evidence.append(observed)
+        if isinstance(
+            self.history_controller,
+            TurnChunkedHistoryController,
+        ):
+            self.history_controller.acknowledge_action(
+                call.prepared_history,
+                action_id=observed.action_id,
+                completion_id=observed.completion_id,
             )
-            self.completion_evidence.append(observed)
-            if isinstance(
-                self.history_controller,
-                TurnChunkedHistoryController,
-            ):
-                self.history_controller.acknowledge_action(
-                    call.prepared_history,
-                    action_id=observed.action_id,
-                    completion_id=observed.completion_id,
-                )
-            else:
-                self.history_controller.acknowledge(call.prepared_history)
         else:
             self.history_controller.acknowledge(call.prepared_history)
 
@@ -537,6 +529,7 @@ class ContextCompactionSession:
             output_items,
             turn_id=call.turn_id,
         )
+        self._output_items.extend(output_items)
         return observed
 
     def append_observation(
@@ -553,6 +546,7 @@ class ContextCompactionSession:
             turn_id=turn_id,
             conditions_action_turn=conditions_action_turn,
         )
+        self._output_items.extend(items)
 
     def finalize(self) -> None:
         if isinstance(self.history_controller, TurnChunkedHistoryController):
@@ -562,18 +556,15 @@ class ContextCompactionSession:
         self,
         response: NeMoGymResponse,
         *,
-        output: Sequence[Any],
         agent_input: Sequence[Any],
         seed_obs: Sequence[Any] = (),
     ) -> ContextCompactedResponse:
         """Attach the complete exact-evidence envelope to an ordinary response."""
 
-        if not self.authority_mode:
-            raise RuntimeError("Shadow-only sessions do not emit authority contracts")
         result = response.model_dump()
         result.update(
             {
-                "output": list(output),
+                "output": list(self.output_items),
                 "agent_input": list(agent_input),
                 "seed_obs": list(seed_obs),
                 "media_assets": self.semantic_history.media_arena.export(),

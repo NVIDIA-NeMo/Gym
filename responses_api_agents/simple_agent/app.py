@@ -37,11 +37,12 @@ from nemo_gym.context_compaction import (
     ContextCompactedResponse,
     ContextCompactedTransportResponse,
     ContextCompactionSession,
+    ContextHistoryConfig,
+    ContextMeasurements,
     PreparedContextCompactionCall,
     build_generation_contract,
     build_transport_response,
 )
-from nemo_gym.context_history import ContextHistoryConfig, ContextMeasurements
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -172,8 +173,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
         while True:
             step += 1
-            legacy_request_input = body.input + new_outputs
-            request_input = legacy_request_input
+            request_input = body.input + new_outputs
             prepared_call = None
             if context_session is not None:
 
@@ -218,7 +218,6 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     )
 
                 prepared_call = await context_session.prepare_model_call(
-                    legacy_request_input=legacy_request_input,
                     turn_id=step,
                     measure_context=measure_context,
                 )
@@ -266,7 +265,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                         else None
                     ),
                 )
-            new_outputs.extend(output)
+            else:
+                new_outputs.extend(output)
             if collect_trajectory:
                 turn_model_calls = []
                 if model_response.id:
@@ -365,13 +365,14 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                             output=json.dumps({"error": f"Invalid tool envelope: {exc!r}"}),
                         )
                     ]
-                new_outputs.extend(tool_responses)
                 if context_session is not None:
                     context_session.append_observation(
                         tool_responses,
                         turn_id=step,
                         conditions_action_turn=step + 1,
                     )
+                else:
+                    new_outputs.extend(tool_responses)
 
             if collect_trajectory and all_fn_calls:
                 turns[-1].step_count = len(tool_records)
@@ -383,12 +384,12 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
         if context_session is not None:
             context_session.finalize()
-        model_response.output = new_outputs
+        episode_output = list(context_session.output_items) if context_session is not None else new_outputs
+        model_response.output = episode_output
         model_response.usage = usage
-        if context_session is not None and context_session.authority_mode:
+        if context_session is not None:
             model_response = context_session.build_response(
                 model_response,
-                output=new_outputs,
                 agent_input=agent_input,
                 seed_obs=seed_observations,
             )
@@ -398,7 +399,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 invocation_id=invocation_id,
                 status=invocation_status,
                 model_calls=model_calls,
-                conversation=[*body.input, *new_outputs],
+                conversation=[*body.input, *episode_output],
             )
             trajectory = TrajectoryRecord(
                 task_id=task_id,
