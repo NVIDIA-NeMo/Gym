@@ -82,14 +82,12 @@ from openai.types.responses.response_create_params import (
 from openai.types.responses.response_function_call_output_item_list_param import (
     ResponseFunctionCallOutputItemListParam,
 )
+from openai.types.responses.response_input_content_param import ResponseInputContentParam
 from openai.types.responses.response_input_item import (
     ComputerCallOutput,
     LocalShellCallOutput,
     McpApprovalResponse,
     ResponseCustomToolCallOutput,
-)
-from openai.types.responses.response_input_param import (
-    ResponseInputMessageContentListParam,
 )
 from openai.types.responses.response_output_item import (
     ImageGenerationCall,
@@ -224,14 +222,46 @@ class NeMoGymResponseOutputMessage(BaseModel):
     type: Literal["message"] = "message"
 
 
+class NeMoGymInputVideoPart(TypedDict, total=False):
+    """Video content accepted by the Responses-compatible Gym API."""
+
+    type: Required[Literal["input_video"]]
+    video_url: Union[str, Dict[str, Any]]
+    video: Union[str, Dict[str, Any]]
+
+
+def _validate_input_video_part(value: Any) -> Any:
+    """Require one non-empty source without changing the TypedDict representation."""
+
+    if not isinstance(value, dict) or value.get("type") != "input_video":
+        return value
+
+    source_keys = [key for key in ("video_url", "video") if key in value]
+    if len(source_keys) != 1:
+        raise ValueError("input_video requires exactly one of video_url or video")
+
+    source = value[source_keys[0]]
+    url = source.get("url") if isinstance(source, dict) else source
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError(f"input_video.{source_keys[0]} must contain a non-empty URL")
+    return value
+
+
+NeMoGymResponseInputContentPart: TypeAlias = Annotated[
+    Union[ResponseInputContentParam, NeMoGymInputVideoPart],
+    BeforeValidator(_validate_input_video_part),
+]
+NeMoGymResponseInputContentList: TypeAlias = List[NeMoGymResponseInputContentPart]
+
+
 class NeMoGymEasyInputMessage(BaseModel):
-    content: Union[str, ResponseInputMessageContentListParam]
+    content: Union[str, NeMoGymResponseInputContentList]
     role: Literal["user", "assistant", "system", "developer"]
     type: Literal["message"] = "message"
 
 
 class NeMoGymMessage(BaseModel):
-    content: ResponseInputMessageContentListParam
+    content: NeMoGymResponseInputContentList
     role: Literal["user", "system", "developer"]
     status: Literal["in_progress", "completed", "incomplete"] = "completed"
     type: Literal["message"] = "message"
@@ -678,11 +708,17 @@ class NeMoGymChatCompletionContentPartFileParam(ChatCompletionContentPartFilePar
     pass
 
 
+class NeMoGymChatCompletionContentPartVideoUrlParam(TypedDict, total=False):
+    video_url: Required[Union[str, Dict[str, Any]]]
+    type: Required[Literal["video_url"]]
+
+
 NeMoGymChatCompletionContentPartParam = Union[
     NeMoGymChatCompletionContentPartTextParam,
     NeMoGymChatCompletionContentPartImageParam,
     NeMoGymChatCompletionContentPartInputAudioParam,
     NeMoGymChatCompletionContentPartFileParam,
+    NeMoGymChatCompletionContentPartVideoUrlParam,
 ]
 
 
