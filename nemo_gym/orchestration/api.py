@@ -52,12 +52,12 @@ class BaseModelServiceConfig(BaseServiceConfig):
 class VllmServiceDistributedBackend(_StrictModel):
     """Use vLLM's native data-parallel multi-instance (--data-parallel-size N)."""
 
-    type: Literal["vllm_service"] = "vllm_service"
+    type: Literal["mp"] = "mp"
 
 
 # Future backends: add Annotated[RayServeDistributedBackend, Tag("ray_serve")], etc.
 DistributedBackendConfig = Annotated[
-    Annotated[VllmServiceDistributedBackend, Tag("vllm_service")],
+    Annotated[VllmServiceDistributedBackend, Tag("mp")],
     Discriminator("type"),
 ]
 
@@ -79,13 +79,10 @@ class VllmServiceConfig(BaseModelServiceConfig):
 
     @model_validator(mode="after")
     def _validate_distributed_backend(self) -> "VllmServiceConfig":
-        if self.number_of_instances > 1 and self.distributed_backend is None:
-            raise ValueError(
-                f"distributed_backend must be set when number_of_instances > 1 (got {self.number_of_instances}). "
-                "Use: distributed_backend: {type: vllm_service}"
-            )
         if self.number_of_instances == 1 and self.distributed_backend is not None:
             raise ValueError("distributed_backend should not be set when number_of_instances == 1")
+        if self.number_of_instances > 1 and self.distributed_backend is None:
+            self.distributed_backend = VllmServiceDistributedBackend()
         return self
 
     @model_validator(mode="after")
@@ -242,7 +239,7 @@ class SubmitConfig(_StrictModel):
                 f"pipeline_parallel_size={service.pipeline_parallel_size} x "
                 f"number_of_instances={service.number_of_instances}), which exceeds the largest available "
                 f"node pool's gpus_per_node ({max_gpus_per_node}) on compute '{service.placement}'. "
-                "Multi-node vLLM services are not supported yet by the 'vllm_service' distributed backend; "
+                "Multi-node vLLM services are not supported yet by the 'mp' distributed backend; "
                 "reduce number_of_instances/tensor_parallel_size/pipeline_parallel_size to fit on a single node."
             )
         elif gpus_needed < max_gpus_per_node:

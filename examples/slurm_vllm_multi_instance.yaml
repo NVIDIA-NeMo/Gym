@@ -19,8 +19,6 @@ services:
     trust_remote_code: true
     tensor_parallel_size: 2
     number_of_instances: 4       # 4 engine replicas, total 8 GPUs
-    distributed_backend:
-      type: vllm_service         # vLLM native --data-parallel-size; ray_serve/dynamo coming later
     port: 8000
     health_check:
       timeout_seconds: 1200
