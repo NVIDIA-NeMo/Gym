@@ -25,7 +25,6 @@ model from `config_types` rather than asking the exporter class whether it is av
 import atexit
 import logging
 from importlib import import_module
-from pathlib import Path
 from typing import Any, Optional
 
 from omegaconf import DictConfig
@@ -97,11 +96,6 @@ def export_metrics(metrics: dict[str, Any], step: Optional[int] = None) -> None:
 def export_rollouts(rollouts: list[dict[str, Any]]) -> None:
     for exporter in _EXPORTERS:
         exporter.export_rollouts(rollouts)
-
-
-def export_artifacts(artifacts_dirpath: Path) -> None:
-    for exporter in _EXPORTERS:
-        exporter.export_artifacts(artifacts_dirpath)
 
 
 atexit.register(teardown_exporters)

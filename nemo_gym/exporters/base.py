@@ -15,7 +15,6 @@
 import logging
 from abc import ABC, abstractmethod
 from copy import deepcopy
-from pathlib import Path
 from typing import Any, ClassVar, Optional
 
 from omegaconf import DictConfig
@@ -27,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 class BaseExporter(ABC):
-    """Sink for the artifacts a NeMo Gym run produces: config, metrics, rollouts, files.
+    """Sink for the run metadata a NeMo Gym eval produces: config, metrics, rollouts.
 
     A backend (W&B, MLflow, ...) subclasses this and wraps its own run handle. Lifecycle is
     `setup` -> any number of `log_*` calls -> `teardown`. Whether a backend runs at all is decided
@@ -64,10 +63,6 @@ class BaseExporter(ABC):
     def _log_rollouts(self, rollouts: list[dict[str, Any]]) -> None:
         """Record rollout results as a table. Rollouts are sanitized dicts, one per rollout."""
 
-    @abstractmethod
-    def _log_artifacts(self, artifacts_dirpath: Path) -> None:
-        """Upload the contents of a results directory (rollout JSONL, aggregate metrics, logs)."""
-
     def export_config(self) -> None:
         # `global_config_dict` holds live credentials (the backend needs its own API key to connect),
         # so mask a copy rather than shipping it to a tracking server as-is.
@@ -80,9 +75,6 @@ class BaseExporter(ABC):
 
     def export_rollouts(self, rollouts: list[dict[str, Any]]) -> None:
         self._guard("rollouts", self._log_rollouts, rollouts)
-
-    def export_artifacts(self, artifacts_dirpath: Path) -> None:
-        self._guard("artifacts", self._log_artifacts, artifacts_dirpath)
 
     def _guard(self, what: str, fn, *args) -> None:
         try:

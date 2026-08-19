@@ -15,7 +15,6 @@
 import logging
 from math import isfinite
 from os import environ
-from pathlib import Path
 from time import time
 from typing import Any, ClassVar, Iterator, Optional
 
@@ -150,7 +149,3 @@ class MLflowExporter(BaseExporter):
         # set across environments. `log_table` appends when the artifact already exists.
         rows = [orjson.dumps(rollout).decode() for rollout in rollouts]
         client.log_table(run_id, data={"Rollout": rows}, artifact_file=self.ROLLOUTS_ARTIFACT_FILE)
-
-    def _log_artifacts(self, artifacts_dirpath: Path) -> None:
-        client, run_id = self._active()
-        client.log_artifacts(run_id, str(artifacts_dirpath))

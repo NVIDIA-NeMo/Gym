@@ -20,7 +20,7 @@ import orjson
 import wandb
 import wandb.util
 from omegaconf import DictConfig, OmegaConf
-from wandb import Artifact, Run, Table
+from wandb import Run, Table
 
 from nemo_gym.config_types import WANDBConfig
 from nemo_gym.exporters.base import BaseExporter
@@ -39,7 +39,6 @@ class WandbExporter(BaseExporter):
 
     name: ClassVar[str] = "wandb"
 
-    ARTIFACT_TYPE: ClassVar[str] = "nemo-gym-results"
     ROLLOUTS_TABLE_KEY: ClassVar[str] = "Rollouts"
 
     def __init__(self, global_config_dict: DictConfig) -> None:
@@ -76,9 +75,3 @@ class WandbExporter(BaseExporter):
         # One JSON blob per row: rollouts have no stable column set across environments.
         rows = [[orjson.dumps(rollout)] for rollout in rollouts]
         self._active_run().log({self.ROLLOUTS_TABLE_KEY: Table(data=rows, columns=["Rollout"])})
-
-    def _log_artifacts(self, artifacts_dirpath: Path) -> None:
-        run = self._active_run()
-        artifact = Artifact(name=f"{run.id}-results", type=self.ARTIFACT_TYPE)
-        artifact.add_dir(str(artifacts_dirpath))
-        run.log_artifact(artifact)
