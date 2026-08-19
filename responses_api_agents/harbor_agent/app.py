@@ -236,6 +236,13 @@ class HarborAgent(SimpleResponsesAPIAgent):
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         raise NotImplementedError
 
+    async def _run_job(self, job_config_dict: dict[str, Any]) -> str:
+        params = {"job_config_dict": job_config_dict}
+        runner = runner_ray_remote
+        if self.config.harbor_ray_task_num_cpus is not None:
+            runner = runner.options(num_cpus=self.config.harbor_ray_task_num_cpus)
+        return await runner.remote(_run_harbor_job_sync, params)
+
     async def run(self, body: HarborRunRequest) -> HarborVerifyResponse:
         async with self.sem:
             global_config_dict = get_global_config_dict()
@@ -268,17 +275,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
             )
 
             try:
-                params = dict(
-                    job_config_dict=job_config_dict,
-                )
-                runner = runner_ray_remote
-                if self.config.harbor_ray_task_num_cpus is not None:
-                    runner = runner_ray_remote.options(num_cpus=self.config.harbor_ray_task_num_cpus)
-                future = runner.remote(_run_harbor_job_sync, params)
-                # Await the ObjectRef directly; to_thread(ray.get, ...) would pin
-                # one executor thread per in-flight trial, so completed trials
-                # would queue behind long-running ones.
-                trial_dir_path = await future
+                trial_dir_path = await self._run_job(job_config_dict)
                 trial_dir = Path(trial_dir_path)
 
                 def _read_trial_files():

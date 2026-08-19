@@ -1,0 +1,2 @@
+harbor @ git+https://github.com/laude-institute/harbor.git@9dddd797b57ab8a0f9d6352a20fce73abbb29573
+litellm==1.79.3

@@ -46,6 +46,12 @@ class FakePlatformSpec:
     arch: str
 
 
+@dataclass(frozen=True)
+class FakeNetworkPolicy:
+    defaultAction: str = "deny"
+    egress: list[dict[str, Any]] | None = None
+
+
 class FakeConnectionConfig:
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs
@@ -201,6 +207,23 @@ async def test_direct_create_passes_platform_to_sdk_create(
         os="linux",
         arch="amd64",
     )
+
+
+async def test_direct_create_passes_network_policy_to_sdk_create(
+    fake_opensandbox_sdk: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(opensandbox_provider, "_to_network_policy", lambda value: FakeNetworkPolicy(**value))
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+
+    await provider.create(
+        SandboxSpec(
+            image="image:tag",
+            provider_options={"network_policy": {"defaultAction": "deny"}},
+        )
+    )
+
+    assert FakeSandbox.created_kwargs["network_policy"] == FakeNetworkPolicy(defaultAction="deny")
 
 
 async def test_direct_create_passes_resource_requests_to_sdk_create(
@@ -398,6 +421,8 @@ def test_provider_validation_and_retry_helpers() -> None:
         opensandbox_provider.OpenSandboxProviderOptions.from_mapping({"extensions": ["not", "a", "mapping"]})
     with pytest.raises(TypeError, match="must be a bool"):
         opensandbox_provider.OpenSandboxProviderOptions.from_mapping({"skip_health_check": "true"})
+    with pytest.raises(TypeError, match="network_policy"):
+        opensandbox_provider.OpenSandboxProviderOptions.from_mapping({"network_policy": ["deny"]})
 
     assert opensandbox_provider._resource_map(SandboxResources(cpu=2.0))["cpu"] == "2"
     assert opensandbox_provider._to_sandbox_status("starting") == SandboxStatus.STARTING
@@ -454,6 +479,7 @@ def test_provider_options_from_mapping() -> None:
     parsed = options_cls.from_mapping(
         {
             "image_auth": {"username": "user", "password": TEST_REGISTRY_PASSWORD},
+            "network_policy": {"defaultAction": "deny"},
             "platform": {"os": "linux", "arch": "amd64"},
             "snapshot_id": "snap-1",
             "volumes": [{"name": "workspace"}],
@@ -462,6 +488,7 @@ def test_provider_options_from_mapping() -> None:
         }
     )
     assert parsed.image_auth == {"username": "user", "password": TEST_REGISTRY_PASSWORD}
+    assert parsed.network_policy == {"defaultAction": "deny"}
     assert parsed.platform == {"os": "linux", "arch": "amd64"}
     assert parsed.snapshot_id == "snap-1"
     assert parsed.volumes == ({"name": "workspace"},)
