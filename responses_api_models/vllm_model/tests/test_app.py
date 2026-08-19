@@ -5153,7 +5153,7 @@ class TestPrefixSupply:
         return CaptureContext(
             rollout_id=rollout_id,
             model_call_id="call-x",
-            sink=TokenCaptureStore(tmp_path),
+            token_sink=TokenCaptureStore(tmp_path),
             lineage_store=_TEST_LINEAGE,
         )
 
@@ -5329,7 +5329,7 @@ class TestPrefixSupplyAccounting:
         ctx = CaptureContext(
             rollout_id="acct-0",
             model_call_id="c",
-            sink=TokenCaptureStore(tmp_path),
+            token_sink=TokenCaptureStore(tmp_path),
             lineage_store=_TEST_LINEAGE,
         )
         token = set_token_sink(ctx)
@@ -5351,7 +5351,7 @@ class TestPrefixSupplyAccounting:
         ctx = CaptureContext(
             rollout_id="acct-1",
             model_call_id="c",
-            sink=TokenCaptureStore(tmp_path),
+            token_sink=TokenCaptureStore(tmp_path),
             lineage_store=_TEST_LINEAGE,
         )
         token = set_token_sink(ctx)
@@ -5437,7 +5437,7 @@ class TestPrefixSupplyReachesTokenize:
             CaptureContext(
                 rollout_id="tok-0",
                 model_call_id="call-y",
-                sink=TokenCaptureStore(tmp_path),
+                token_sink=TokenCaptureStore(tmp_path),
                 lineage_store=_TEST_LINEAGE,
             )
         )
@@ -5495,7 +5495,7 @@ class TestPrefixSupplyReachesTokenize:
         context = CaptureContext(
             rollout_id=rollout,
             model_call_id="call-v",
-            sink=TokenCaptureStore(tmp_path),
+            token_sink=TokenCaptureStore(tmp_path),
             lineage_store=_TEST_LINEAGE,
         )
         sink = set_token_sink(context)
@@ -5576,7 +5576,7 @@ class TestPrefixSupplyReachesTokenize:
             CaptureContext(
                 rollout_id="tok-unknown",
                 model_call_id="call-z",
-                sink=TokenCaptureStore(tmp_path),
+                token_sink=TokenCaptureStore(tmp_path),
                 lineage_store=_TEST_LINEAGE,
             )
         )
