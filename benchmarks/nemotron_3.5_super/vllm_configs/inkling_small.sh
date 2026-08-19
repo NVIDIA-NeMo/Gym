@@ -24,7 +24,7 @@ VLLM_COMMON_ARGS=(
     --tool-call-parser inkling
     --reasoning-parser inkling
     --enable-chunked-prefill
-    --no-enable-prefix-caching
+    --enable-prefix-caching
     --enable-expert-parallel
     --no-async-scheduling
     --max-cudagraph-capture-size 256
@@ -32,7 +32,7 @@ VLLM_COMMON_ARGS=(
 
 VLLM_PREFILL_ARGS=(
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
-    --max-num-batched-tokens 8192
+    --max-num-batched-tokens 16384
     --max-num-seqs 256
     --data-parallel-size-local 1
     --tensor-parallel-size 4
@@ -48,9 +48,15 @@ VLLM_DECODE_ARGS=(
 )
 
 # This checkpoint contains eight trained MTP prediction layers. Keep speculative
-# decoding opt-in so non-MTP and MTP runs remain directly comparable. Prefill and
+# decoding opt-in so non-MTP and MTP runs remain directly comparable. Default to
+# all eight layers while allowing controlled draft-width experiments. Prefill and
 # decode must use the same setting because NIXL transfers their KV-cache state.
 if [[ "${INKLING_ENABLE_MTP:-0}" == "1" ]]; then
-    VLLM_PREFILL_ARGS+=(--speculative-config '{"method":"mtp","num_speculative_tokens":8}')
-    VLLM_DECODE_ARGS+=(--speculative-config '{"method":"mtp","num_speculative_tokens":8}')
+    INKLING_MTP_NUM_SPECULATIVE_TOKENS="${INKLING_MTP_NUM_SPECULATIVE_TOKENS:-8}"
+    VLLM_PREFILL_ARGS+=(
+        --speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${INKLING_MTP_NUM_SPECULATIVE_TOKENS}}"
+    )
+    VLLM_DECODE_ARGS+=(
+        --speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${INKLING_MTP_NUM_SPECULATIVE_TOKENS}}"
+    )
 fi
