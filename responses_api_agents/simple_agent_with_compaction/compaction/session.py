@@ -12,15 +12,15 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym.context_compaction.config import ContextHistoryConfig
-from nemo_gym.context_compaction.controller import (
+from responses_api_agents.simple_agent_with_compaction.compaction.config import ContextHistoryConfig
+from responses_api_agents.simple_agent_with_compaction.compaction.controller import (
     HistoryController,
     TurnChunkedHistoryController,
     build_guard_outcome_records,
     evaluate_context_guards,
     pending_observation_group_ids,
 )
-from nemo_gym.context_compaction.history import (
+from responses_api_agents.simple_agent_with_compaction.compaction.history import (
     ContextMeasurements,
     FinalizedChunkRecord,
     GenerationContract,
@@ -40,7 +40,7 @@ from nemo_gym.context_compaction.history import (
     capture_observed_completion,
     stable_id,
 )
-from nemo_gym.context_compaction.policies import build_history_policy
+from responses_api_agents.simple_agent_with_compaction.compaction.policies import build_history_policy
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,

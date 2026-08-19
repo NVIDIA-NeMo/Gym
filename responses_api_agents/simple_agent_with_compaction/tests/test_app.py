@@ -21,10 +21,17 @@ from fastapi import Response
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
+from responses_api_agents.simple_agent_with_compaction.compaction import (
+    ContextCompactionSession,
+    ContextHistoryConfig,
+    build_generation_contract,
+    normalize_semantic_items,
+)
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
+    NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseReasoningItem,
@@ -33,19 +40,21 @@ from nemo_gym.openai_utils import (
 from nemo_gym.rollout_collection import _attach_trajectory_record
 from nemo_gym.rollout_observability import TrajectoryRecord
 from nemo_gym.server_utils import ServerClient
-from responses_api_agents.simple_agent.app import (
+from responses_api_agents.simple_agent_with_compaction.app import (
+    _CONTEXT_COMPACTION_ROLLOUT_ID_COOKIE,
+    ContextCompactionResponseCreateParams,
     ModelServerRef,
     ResourcesServerRef,
-    SimpleAgent,
-    SimpleAgentConfig,
-    SimpleAgentRunRequest,
+    SimpleAgentWithCompaction,
+    SimpleAgentWithCompactionConfig,
+    SimpleAgentWithCompactionRunRequest,
 )
 
 
 def _make_agent(
-    observability_enabled: bool, agent_type: type[SimpleAgent] = SimpleAgent
-) -> tuple[SimpleAgent, MagicMock]:
-    config = SimpleAgentConfig(
+    observability_enabled: bool, agent_type: type[SimpleAgentWithCompaction] = SimpleAgentWithCompaction
+) -> tuple[SimpleAgentWithCompaction, MagicMock]:
+    config = SimpleAgentWithCompactionConfig(
         host="0.0.0.0",
         port=8080,
         entrypoint="",
@@ -58,16 +67,36 @@ def _make_agent(
     return agent_type(config=config, server_client=server_client), server_client
 
 
-def _mock_response(payload=None, *, status=200, content="") -> MagicMock:
-    response = MagicMock(status=status, cookies={}, ok=status < 400)
+def _mock_response(payload=None, *, status=200, content="", cookies=None) -> MagicMock:
+    response = MagicMock(status=status, cookies=cookies or {}, ok=status < 400)
     response.read = AsyncMock(return_value=json.dumps(payload or {}))
     response.content.read = AsyncMock(return_value=content.encode())
     return response
 
 
+class _ImageObservationAgent(SimpleAgentWithCompaction):
+    """Test-only adapter that turns resource JSON into a multimodal observation."""
+
+    async def _tool_response_items(self, output: str, call_id: str):
+        payload = json.loads(output)
+        return [
+            NeMoGymEasyInputMessage(
+                role="user",
+                content=[
+                    {
+                        "type": "input_image",
+                        "image_url": payload["image_url"],
+                        "detail": "auto",
+                    },
+                    {"type": "input_text", "text": payload["text"]},
+                ],
+            )
+        ]
+
+
 class TestApp:
     def test_sanity(self) -> None:
-        config = SimpleAgentConfig(
+        config = SimpleAgentWithCompactionConfig(
             host="0.0.0.0",
             port=8080,
             entrypoint="",
@@ -81,10 +110,10 @@ class TestApp:
                 name="",
             ),
         )
-        SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        SimpleAgentWithCompaction(config=config, server_client=MagicMock(spec=ServerClient))
 
     async def test_responses(self, monkeypatch: MonkeyPatch) -> None:
-        config = SimpleAgentConfig(
+        config = SimpleAgentWithCompactionConfig(
             host="0.0.0.0",
             port=8080,
             entrypoint="",
@@ -98,7 +127,7 @@ class TestApp:
                 name="",
             ),
         )
-        server = SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        server = SimpleAgentWithCompaction(config=config, server_client=MagicMock(spec=ServerClient))
         server.server_client.global_config_dict = {"observability_enabled": True}
         app = server.setup_webserver()
         client = TestClient(app)
@@ -139,7 +168,7 @@ class TestApp:
         server.server_client.post.assert_called_with(
             server_name="my server name",
             url_path="/v1/responses",
-            json=NeMoGymResponseCreateParamsNonStreaming(
+            json=ContextCompactionResponseCreateParams(
                 input=[NeMoGymEasyInputMessage(content="hello", role="user", type="message")]
             ),
             cookies=None,
@@ -200,6 +229,500 @@ class TestApp:
         )
         assert prefixed_response.status_code == 200
         assert prefixed_response.json()["_ng_trajectory"]["rollout_id"] == "0-0"
+
+    async def test_identity_history_preserves_requests(self) -> None:
+        config = SimpleAgentWithCompactionConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(type="responses_api_models", name="model"),
+            resources_server=ResourcesServerRef(type="resources_servers", name="resources"),
+            context_history={"enabled": True},
+        )
+        server = SimpleAgentWithCompaction(config=config, server_client=MagicMock(spec=ServerClient))
+        client = TestClient(server.setup_webserver())
+
+        responses = [
+            {
+                "id": "response-1",
+                "created_at": 1.0,
+                "model": "dummy_model",
+                "object": "response",
+                "output": [
+                    {
+                        "id": "reasoning-1",
+                        "summary": [{"text": "thinking", "type": "summary_text"}],
+                        "status": "completed",
+                        "type": "reasoning",
+                        "prompt_token_ids": [1],
+                        "generation_token_ids": [11],
+                        "generation_log_probs": [-0.1],
+                    }
+                ],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            },
+            {
+                "id": "response-2",
+                "created_at": 2.0,
+                "model": "dummy_model",
+                "object": "response",
+                "output": [
+                    {
+                        "id": "message-1",
+                        "content": [{"annotations": [], "text": "done", "type": "output_text"}],
+                        "role": "assistant",
+                        "status": "completed",
+                        "type": "message",
+                        "prompt_token_ids": [1, 11, 2],
+                        "generation_token_ids": [12],
+                        "generation_log_probs": [-0.2],
+                    }
+                ],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            },
+        ]
+        model_http_response = AsyncMock()
+        model_http_response.read.side_effect = [json.dumps(item) for item in responses]
+        model_http_response.cookies = {}
+        server.server_client.post.return_value = model_http_response
+
+        response = client.post(
+            "/v1/responses",
+            json={
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_image",
+                                "image_url": "data:image/png;base64,A",
+                                "detail": "auto",
+                            },
+                            {"type": "input_text", "text": "inspect"},
+                        ],
+                    }
+                ]
+            },
+        )
+
+        assert response.status_code == 200
+        model_calls = [
+            call for call in server.server_client.post.call_args_list if call.kwargs["server_name"] == "model"
+        ]
+        assert len(model_calls) == 2
+        assert all(call.kwargs["url_path"] == "/v1/responses/context-compaction" for call in model_calls)
+        first_input = model_calls[0].kwargs["json"].input
+        second_input = model_calls[1].kwargs["json"].input
+        assert len(first_input) == 1
+        assert len(second_input) == 2
+        assert second_input[0] == first_input[0]
+        assert second_input[1]["type"] == "reasoning"
+        assert second_input[1]["summary"] == [{"text": "thinking", "type": "summary_text"}]
+        assert "prompt_token_ids" not in second_input[1]
+        assert response.json()["context_compaction_contract"]["mode"] == "exact_trace_authority"
+
+    async def test_responses_prefers_caller_owned_rollout_id_cookie(self) -> None:
+        config = SimpleAgentWithCompactionConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(type="responses_api_models", name="model"),
+            resources_server=ResourcesServerRef(type="resources_servers", name="resources"),
+            context_history={"enabled": True},
+        )
+        server = SimpleAgentWithCompaction(config=config, server_client=MagicMock(spec=ServerClient))
+        client = TestClient(server.setup_webserver())
+        model_http_response = AsyncMock()
+        model_http_response.read.return_value = json.dumps(
+            {
+                "id": "response-1",
+                "created_at": 1.0,
+                "model": "dummy",
+                "object": "response",
+                "output": [
+                    {
+                        "id": "message-1",
+                        "content": [{"annotations": [], "text": "done", "type": "output_text"}],
+                        "role": "assistant",
+                        "status": "completed",
+                        "type": "message",
+                        "prompt_token_ids": [10],
+                        "generation_token_ids": [11],
+                        "generation_log_probs": [-0.1],
+                    }
+                ],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+        )
+        model_http_response.cookies = {}
+        server.server_client.post.return_value = model_http_response
+
+        response = client.post(
+            "/v1/responses",
+            cookies={_CONTEXT_COMPACTION_ROLLOUT_ID_COOKIE: "caller-rollout"},
+            json={"input": "task"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["context_compaction_contract"]["rollout_id"] == "caller-rollout"
+
+    async def test_authority_identity_history_tracks_model_and_tool_outputs(self) -> None:
+        config = SimpleAgentWithCompactionConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(type="responses_api_models", name="model"),
+            resources_server=ResourcesServerRef(type="resources_servers", name="resources"),
+            context_history={"enabled": True},
+        )
+        server = SimpleAgentWithCompaction(config=config, server_client=MagicMock(spec=ServerClient))
+
+        function_call = {
+            "id": "call-item-1",
+            "call_id": "call-1",
+            "name": "act",
+            "arguments": "{}",
+            "type": "function_call",
+            "status": "completed",
+            "prompt_token_ids": [1],
+            "generation_token_ids": [11],
+            "generation_log_probs": [-0.1],
+        }
+        final_message = {
+            "id": "message-2",
+            "content": [{"annotations": [], "text": "done", "type": "output_text"}],
+            "role": "assistant",
+            "status": "completed",
+            "type": "message",
+            "prompt_token_ids": [1, 11, 2],
+            "generation_token_ids": [12],
+            "generation_log_probs": [-0.2],
+        }
+
+        def response_with_output(response_id: str, output: dict) -> dict:
+            return {
+                "id": response_id,
+                "created_at": 1.0,
+                "model": "dummy",
+                "object": "response",
+                "output": [output],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+
+        model_payloads = iter(
+            [
+                response_with_output("response-1", function_call),
+                response_with_output("response-2", final_message),
+            ]
+        )
+
+        async def post(*, server_name, **kwargs):
+            if server_name == "model":
+                return _mock_response(next(model_payloads))
+            if server_name == "resources":
+                return _mock_response(content='{"screen":"ready"}')
+            raise AssertionError(server_name)
+
+        server.server_client.post.side_effect = post
+        client = TestClient(server.setup_webserver())
+        response = client.post(
+            "/v1/responses",
+            cookies={_CONTEXT_COMPACTION_ROLLOUT_ID_COOKIE: "rollout-identity-authority"},
+            json={"input": "task"},
+        )
+
+        assert response.status_code == 200, response.text
+        model_calls = [
+            call for call in server.server_client.post.call_args_list if call.kwargs["server_name"] == "model"
+        ]
+        tool_response = NeMoGymFunctionCallOutput(
+            type="function_call_output",
+            call_id="call-1",
+            output='{"screen":"ready"}',
+        )
+        expected_complete_history = [
+            NeMoGymEasyInputMessage(role="user", content="task"),
+            function_call,
+            tool_response,
+        ]
+        assert normalize_semantic_items(model_calls[1].kwargs["json"].input) == normalize_semantic_items(
+            expected_complete_history
+        )
+        assert normalize_semantic_items(response.json()["output"]) == normalize_semantic_items(
+            [function_call, tool_response, final_message]
+        )
+
+    async def test_active_recency_rewrites_only_at_chunk_boundaries(self) -> None:
+        config = SimpleAgentWithCompactionConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(type="responses_api_models", name="model"),
+            resources_server=ResourcesServerRef(type="resources_servers", name="resources"),
+            context_history={
+                "enabled": True,
+                "policy": {
+                    "type": "recency",
+                    "config": {
+                        "images": {
+                            "enabled": True,
+                            "protect_initial_context": True,
+                            "keep_last_groups": 1,
+                        },
+                    },
+                },
+                "schedule": {
+                    "type": "turn_chunked_recency",
+                    "actions_per_chunk": 2,
+                },
+            },
+        )
+        server = _ImageObservationAgent(config=config, server_client=MagicMock(spec=ServerClient))
+
+        def response_with_output(response_id: str, output: dict) -> dict:
+            return {
+                "id": response_id,
+                "created_at": 1.0,
+                "model": "dummy",
+                "object": "response",
+                "output": [output],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+
+        model_payloads = iter(
+            [
+                response_with_output(
+                    "response-1",
+                    {
+                        "id": "call-item-1",
+                        "call_id": "call-1",
+                        "name": "act",
+                        "arguments": "{}",
+                        "type": "function_call",
+                        "status": "completed",
+                        "prompt_token_ids": [1],
+                        "generation_token_ids": [11],
+                        "generation_log_probs": [-0.1],
+                    },
+                ),
+                response_with_output(
+                    "response-2",
+                    {
+                        "id": "call-item-2",
+                        "call_id": "call-2",
+                        "name": "act",
+                        "arguments": "{}",
+                        "type": "function_call",
+                        "status": "completed",
+                        "prompt_token_ids": [1, 11, 2],
+                        "generation_token_ids": [12],
+                        "generation_log_probs": [-0.1],
+                    },
+                ),
+                response_with_output(
+                    "response-3",
+                    {
+                        "id": "message-3",
+                        "content": [{"annotations": [], "text": "done", "type": "output_text"}],
+                        "role": "assistant",
+                        "status": "completed",
+                        "type": "message",
+                        "prompt_token_ids": [3],
+                        "generation_token_ids": [13],
+                        "generation_log_probs": [-0.1],
+                    },
+                ),
+            ]
+        )
+        observations = iter(
+            [
+                {"image_url": "data:image/png;base64,B", "text": "screen B"},
+                {"image_url": "data:image/png;base64,C", "text": "screen C"},
+            ]
+        )
+
+        async def post(*, server_name, **kwargs):
+            if server_name == "model":
+                return _mock_response(next(model_payloads))
+            if server_name == "resources":
+                return _mock_response(content=json.dumps(next(observations)))
+            raise AssertionError(server_name)
+
+        server.server_client.post.side_effect = post
+        client = TestClient(server.setup_webserver())
+        response = client.post(
+            "/v1/responses",
+            cookies={_CONTEXT_COMPACTION_ROLLOUT_ID_COOKIE: "rollout-recency"},
+            json={
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_image",
+                                "image_url": "data:image/png;base64,A",
+                                "detail": "auto",
+                            },
+                            {"type": "input_text", "text": "task"},
+                        ],
+                    }
+                ]
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        model_calls = [
+            call for call in server.server_client.post.call_args_list if call.kwargs["server_name"] == "model"
+        ]
+
+        def image_urls(call) -> list[str]:
+            def content(item):
+                return item.get("content") if isinstance(item, dict) else item.content
+
+            return [
+                part.get("image_url") if isinstance(part, dict) else part.image_url
+                for item in call.kwargs["json"].input
+                for part in (content(item) if isinstance(content(item), list) else [])
+                if (part.get("type") if isinstance(part, dict) else part.type) == "input_image"
+            ]
+
+        assert image_urls(model_calls[0]) == ["data:image/png;base64,A"]
+        assert image_urls(model_calls[1]) == [
+            "data:image/png;base64,A",
+            "data:image/png;base64,B",
+        ]
+        assert image_urls(model_calls[2]) == [
+            "data:image/png;base64,A",
+            "data:image/png;base64,C",
+        ]
+        payload = response.json()
+        assert len(payload["completion_evidence"]) == 3
+        assert [record["actual_action_count"] for record in payload["chunk_records"]] == [2, 1]
+        assert len(payload["boundary_events"]) == 1
+
+    @pytest.mark.parametrize("skip_verification", [False, True])
+    async def test_run_preserves_authority_contract_with_optional_resource_verification(
+        self,
+        skip_verification: bool,
+    ) -> None:
+        context_history = ContextHistoryConfig(enabled=True)
+        config = SimpleAgentWithCompactionConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="simple_agent",
+            model_server=ModelServerRef(type="responses_api_models", name="model"),
+            resources_server=ResourcesServerRef(type="resources_servers", name="resources"),
+            context_history=context_history,
+            skip_verification=skip_verification,
+            skip_verification_reward=0.25,
+        )
+        responses_create_params = NeMoGymResponseCreateParamsNonStreaming(input="task")
+        session = ContextCompactionSession(
+            config=context_history,
+            rollout_id="rollout-run",
+            generation_contract=build_generation_contract(
+                body=responses_create_params,
+                model_server=config.model_server,
+                context_history=context_history,
+            ),
+            initial_context=[NeMoGymEasyInputMessage(role="user", content="task")],
+        )
+        prepared = await session.prepare_model_call(
+            turn_id=1,
+        )
+        model_response = NeMoGymResponse.model_validate(
+            {
+                "id": "response-1",
+                "created_at": 1.0,
+                "model": "dummy",
+                "object": "response",
+                "output": [
+                    {
+                        "id": "message-1",
+                        "content": [{"annotations": [], "text": "done", "type": "output_text"}],
+                        "role": "assistant",
+                        "status": "completed",
+                        "type": "message",
+                        "prompt_token_ids": [10],
+                        "generation_token_ids": [11],
+                        "generation_log_probs": [-0.1],
+                    }
+                ],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+        )
+        session.record_model_response(call=prepared, output_items=model_response.output, finish_reason=None)
+        session.finalize()
+        compacted = session.build_response(
+            model_response,
+            agent_input=[NeMoGymEasyInputMessage(role="user", content="task")],
+        )
+        request_body = SimpleAgentWithCompactionRunRequest(
+            responses_create_params=responses_create_params,
+            context_compaction_rollout_id="rollout-run",
+            context_compaction_group_id="group-run",
+            context_compaction_task_id="task-run",
+            context_compaction_rollout_index=2,
+            context_compaction_attempt_index=1,
+        )
+
+        verified_base_response = NeMoGymResponse.model_validate(compacted.model_dump())
+        server = SimpleAgentWithCompaction(config=config, server_client=MagicMock(spec=ServerClient))
+        responses = [
+            _mock_response(cookies={"resource": "cookie"}),
+            _mock_response(compacted.model_dump(mode="json")),
+        ]
+        if not skip_verification:
+            responses.append(
+                _mock_response(
+                    {
+                        "responses_create_params": responses_create_params.model_dump(mode="json"),
+                        "response": verified_base_response.model_dump(mode="json"),
+                        "reward": 1.0,
+                    }
+                )
+            )
+        server.server_client.post.side_effect = responses
+        request = MagicMock(cookies={})
+
+        result = await server.run(request, request_body)
+
+        assert result.response.context_compaction_contract.rollout_id == "rollout-run"
+        assert result.response.context_compaction_contract.group_id == "group-run"
+        assert result.response.context_compaction_contract.task_id == "task-run"
+        assert result.response.context_compaction_contract.rollout_index == 2
+        assert result.response.context_compaction_contract.attempt_index == 1
+        expected_schema_version = 2 if skip_verification else 3
+        assert result.response.context_compaction_contract.schema_version == expected_schema_version
+        if skip_verification:
+            assert result.reward == 0.25
+            assert result.verification_skipped is True
+            assert len(result.response.completion_evidence) == 1
+            assert result.response.agent_input
+        else:
+            assert len(result.response.model_call_metadata) == 1
+            assert not hasattr(result.response, "completion_evidence")
+            assert not hasattr(result.response, "agent_input")
+            assert not hasattr(result.response, "seed_obs")
+        inner_responses_call = server.server_client.post.call_args_list[1]
+        assert inner_responses_call.kwargs["cookies"][_CONTEXT_COMPACTION_ROLLOUT_ID_COOKIE] == "rollout-run"
 
     @pytest.mark.parametrize("resolved", [False, None])
     async def test_run_emits_standard_turns_and_tool_observation(self, resolved: bool | None) -> None:
@@ -269,7 +792,7 @@ class TestApp:
             return _mock_response(result)
 
         server_client.post = AsyncMock(side_effect=post)
-        body = SimpleAgentRunRequest.model_validate(
+        body = SimpleAgentWithCompactionRunRequest.model_validate(
             {
                 "responses_create_params": {"input": [{"role": "user", "content": "question"}]},
                 "instance_id": 0,
@@ -341,13 +864,17 @@ class TestApp:
 
     @pytest.mark.parametrize(("capture_enabled", "override_responses"), ((False, False), (True, False), (True, True)))
     async def test_run_preserves_self_dispatch(self, capture_enabled: bool, override_responses: bool) -> None:
-        agent_type = SimpleAgent
+        agent_type = SimpleAgentWithCompaction
         if override_responses:
 
             async def overridden_responses(*args, **kwargs):
                 raise AssertionError("run must preserve self-dispatch for responses overrides")
 
-            agent_type = type("OverriddenSimpleAgent", (SimpleAgent,), {"responses": overridden_responses})
+            agent_type = type(
+                "OverriddenSimpleAgentWithCompaction",
+                (SimpleAgentWithCompaction,),
+                {"responses": overridden_responses},
+            )
         server, server_client = _make_agent(capture_enabled, agent_type)
 
         model_response = {
@@ -370,7 +897,7 @@ class TestApp:
             return _mock_response(kwargs["json"] | {"reward": 1.0})
 
         server_client.post = AsyncMock(side_effect=post)
-        body = SimpleAgentRunRequest.model_validate(
+        body = SimpleAgentWithCompactionRunRequest.model_validate(
             {
                 "responses_create_params": {"input": "question"},
                 TASK_INDEX_KEY_NAME: 0,
@@ -395,7 +922,7 @@ class TestApp:
         function_call_output and let the loop continue (ultimately terminating
         on a normal assistant message).
         """
-        config = SimpleAgentConfig(
+        config = SimpleAgentWithCompactionConfig(
             host="0.0.0.0",
             port=8080,
             entrypoint="",
@@ -409,7 +936,7 @@ class TestApp:
                 name="my resources server",
             ),
         )
-        server = SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        server = SimpleAgentWithCompaction(config=config, server_client=MagicMock(spec=ServerClient))
         app = server.setup_webserver()
         client = TestClient(app)
 
@@ -497,7 +1024,7 @@ class TestApp:
         assert "JSONDecodeError" in error_payload["error"]
 
     async def test_responses_continues_on_reasoning_only(self, monkeypatch: MonkeyPatch) -> None:
-        config = SimpleAgentConfig(
+        config = SimpleAgentWithCompactionConfig(
             host="0.0.0.0",
             port=8080,
             entrypoint="",
@@ -511,7 +1038,7 @@ class TestApp:
                 name="",
             ),
         )
-        server = SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        server = SimpleAgentWithCompaction(config=config, server_client=MagicMock(spec=ServerClient))
         app = server.setup_webserver()
         client = TestClient(app)
 
@@ -576,7 +1103,7 @@ class TestApp:
             call(
                 server_name="my server name",
                 url_path="/v1/responses",
-                json=NeMoGymResponseCreateParamsNonStreaming(
+                json=ContextCompactionResponseCreateParams(
                     input=[NeMoGymEasyInputMessage(content="hello", role="user", type="message")]
                 ),
                 cookies=None,
@@ -586,7 +1113,7 @@ class TestApp:
             call(
                 server_name="my server name",
                 url_path="/v1/responses",
-                json=NeMoGymResponseCreateParamsNonStreaming(
+                json=ContextCompactionResponseCreateParams(
                     input=[
                         NeMoGymEasyInputMessage(content="hello", role="user", type="message"),
                         NeMoGymResponseReasoningItem(
@@ -671,7 +1198,7 @@ class TestApp:
         assert expected_responses_dict == actual_responses_dict
 
     async def test_usage_sanity(self, monkeypatch: MonkeyPatch) -> None:
-        config = SimpleAgentConfig(
+        config = SimpleAgentWithCompactionConfig(
             host="0.0.0.0",
             port=8080,
             entrypoint="",
@@ -686,7 +1213,7 @@ class TestApp:
             ),
             max_steps=3,
         )
-        server = SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        server = SimpleAgentWithCompaction(config=config, server_client=MagicMock(spec=ServerClient))
         app = server.setup_webserver()
         client = TestClient(app)
 
@@ -758,7 +1285,7 @@ class TestApp:
         await self._test_incomplete_details_helper(monkeypatch, {"reason": "content_filter"})
 
     async def _test_incomplete_details_helper(self, monkeypatch: MonkeyPatch, incomplete_details) -> None:
-        config = SimpleAgentConfig(
+        config = SimpleAgentWithCompactionConfig(
             host="0.0.0.0",
             port=8080,
             entrypoint="",
@@ -772,7 +1299,7 @@ class TestApp:
                 name="",
             ),
         )
-        server = SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        server = SimpleAgentWithCompaction(config=config, server_client=MagicMock(spec=ServerClient))
         app = server.setup_webserver()
         client = TestClient(app)
 
@@ -838,7 +1365,7 @@ class TestApp:
             call(
                 server_name="my server name",
                 url_path="/v1/responses",
-                json=NeMoGymResponseCreateParamsNonStreaming(
+                json=ContextCompactionResponseCreateParams(
                     input=[NeMoGymEasyInputMessage(content="hello", role="user", type="message")]
                 ),
                 cookies=None,
@@ -900,7 +1427,7 @@ class TestApp:
         assert expected_responses_dict == actual_responses_dict
 
     async def test_run_skip_verification_uses_configured_reward(self) -> None:
-        config = SimpleAgentConfig(
+        config = SimpleAgentWithCompactionConfig(
             host="0.0.0.0",
             port=8080,
             entrypoint="",
@@ -916,7 +1443,7 @@ class TestApp:
             skip_verification=True,
             skip_verification_reward=0.25,
         )
-        server = SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        server = SimpleAgentWithCompaction(config=config, server_client=MagicMock(spec=ServerClient))
         app = server.setup_webserver()
         client = TestClient(app)
 

@@ -9,8 +9,8 @@ from collections import Counter
 from dataclasses import replace
 from typing import Literal, Sequence
 
-from nemo_gym.context_compaction.config import ContextGuardConfig
-from nemo_gym.context_compaction.history import (
+from responses_api_agents.simple_agent_with_compaction.compaction.config import ContextGuardConfig
+from responses_api_agents.simple_agent_with_compaction.compaction.history import (
     ContextMeasurements,
     FinalizedChunkRecord,
     GuardEvaluation,
@@ -27,12 +27,12 @@ from nemo_gym.context_compaction.history import (
     _semantic_part_digest,
     _view_digest,
 )
-from nemo_gym.context_compaction.materialization import (
+from responses_api_agents.simple_agent_with_compaction.compaction.materialization import (
     descriptor_is_append_compatible,
     materialize_history_view,
     ordered_media_is_append_compatible,
 )
-from nemo_gym.context_compaction.policies import HistoryPolicy
+from responses_api_agents.simple_agent_with_compaction.compaction.policies import HistoryPolicy
 
 
 class HistoryController:
