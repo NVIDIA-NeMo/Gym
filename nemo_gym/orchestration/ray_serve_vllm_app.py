@@ -40,6 +40,7 @@ def _to_bool(value: bool | str) -> bool:
 
 def build_app(
     model: str,
+    port: int | str = 8000,
     tensor_parallel_size: int | str = 1,
     pipeline_parallel_size: int | str = 1,
     number_of_instances: int | str = 1,
@@ -47,6 +48,7 @@ def build_app(
 ) -> Any:
     """Build the Ray Serve application. Args arrive as strings when invoked via `serve run`."""
     from ray import serve
+    from ray.serve.exceptions import RayServeException
     from vllm.engine.arg_utils import AsyncEngineArgs
     from vllm.engine.async_llm_engine import AsyncLLMEngine
     from vllm.entrypoints.openai.api_server import build_app as build_vllm_fastapi_app
@@ -54,10 +56,21 @@ def build_app(
     from vllm.entrypoints.openai.cli_args import make_arg_parser
     from vllm.utils import FlexibleArgumentParser
 
+    port = int(port)
     tensor_parallel_size = int(tensor_parallel_size)
     pipeline_parallel_size = int(pipeline_parallel_size)
     number_of_instances = int(number_of_instances)
     trust_remote_code = _to_bool(trust_remote_code)
+
+    # `serve run`'s own CLI flags for the HTTP proxy's host/port aren't consistently available
+    # across Ray versions for import-path apps, so set them here instead. `serve run` may have
+    # already started Serve with its own defaults before calling this builder; in that case
+    # serve.start raises (Serve is already running), which is fine as long as it's already bound to
+    # the port we need.
+    try:
+        serve.start(http_options={"host": "0.0.0.0", "port": port})
+    except RayServeException:
+        pass
 
     cli_args = [
         "--model",

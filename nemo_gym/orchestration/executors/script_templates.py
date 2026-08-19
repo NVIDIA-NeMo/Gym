@@ -66,6 +66,12 @@ def render_gym_install_preamble(repo: str | None, ref: str | None) -> list[str]:
         return []
     repo_name = repo.rstrip("/").split("/")[-1].removesuffix(".git")
     return [
+        # Fail fast: without this, a failed `git clone`/`cd` (e.g. git missing from a minimal
+        # model-serving image) silently falls through to `uv pip install -e .` running against the
+        # wrong directory, producing a confusing unrelated error instead of the real one.
+        "set -e",
+        # Not every container (e.g. vllm/vllm-openai) bundles git.
+        "command -v git >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq git)",
         "curl -LsSf https://astral.sh/uv/install.sh | sh",
         'source "$HOME/.local/bin/env"',
         f"git clone {shlex.quote(repo)}",

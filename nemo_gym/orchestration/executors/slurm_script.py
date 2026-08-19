@@ -270,10 +270,13 @@ def _build_vllm_ray_serve_command(
     gym_install_preamble = render_gym_install_preamble(
         gym_install.repo if gym_install else None, gym_install.ref if gym_install else None
     )
+    # `serve run`'s CLI flags for the HTTP proxy's host/port vary across Ray versions (and some
+    # don't expose them at all for import-path apps), so build_app configures serve.start's
+    # http_options itself from the `port` builder arg instead of relying on a `serve run` CLI flag.
     serve_run_cmd = (
-        f"serve run --host 0.0.0.0 --port {service.port}"
-        " nemo_gym.orchestration.ray_serve_vllm_app:build_app"
+        "serve run nemo_gym.orchestration.ray_serve_vllm_app:build_app"
         f" model={shlex.quote(service.model)}"
+        f" port={service.port}"
         f" tensor_parallel_size={service.tensor_parallel_size}"
         f" pipeline_parallel_size={service.pipeline_parallel_size}"
         f" number_of_instances={service.number_of_instances}"

@@ -21,7 +21,11 @@ from pathlib import Path
 import pytest
 
 from nemo_gym.orchestration.api import SubmitConfig
-from nemo_gym.orchestration.executors.script_templates import render_driver_entrypoint, render_gym_cmd
+from nemo_gym.orchestration.executors.script_templates import (
+    render_driver_entrypoint,
+    render_gym_cmd,
+    render_gym_install_preamble,
+)
 from nemo_gym.orchestration.executors.slurm_script import (
     _build_vllm_command,
     _build_vllm_ray_command,
@@ -302,11 +306,15 @@ def _ray_serve_service(**overrides):
 def test_build_vllm_ray_serve_command_runs_serve_run():
     service = _ray_serve_service(tensor_parallel_size=2, number_of_instances=4)
     cmd = _build_vllm_ray_serve_command(service, total_nodes=2, gym_install=None)
-    assert "serve run --host 0.0.0.0 --port 8000" in cmd
-    assert "nemo_gym.orchestration.ray_serve_vllm_app:build_app" in cmd
+    assert "serve run nemo_gym.orchestration.ray_serve_vllm_app:build_app" in cmd
     assert "model=org/model" in cmd
+    assert "port=8000" in cmd
     assert "tensor_parallel_size=2" in cmd
     assert "number_of_instances=4" in cmd
+    # host/port flags aren't consistently available on `serve run` across Ray versions for
+    # import-path apps; build_app configures serve.start's http_options itself instead. (A literal
+    # `--port=6379` legitimately appears elsewhere in cmd, for the ray-cluster bootstrap itself.)
+    assert "--host" not in cmd
 
 
 def test_build_vllm_ray_serve_command_bootstraps_ray_cluster():
@@ -372,6 +380,22 @@ def test_render_gym_cmd_prepare():
 # ---------------------------------------------------------------------------
 # render_driver_entrypoint
 # ---------------------------------------------------------------------------
+
+
+def test_render_gym_install_preamble_none_when_not_requested():
+    assert render_gym_install_preamble(None, None) == []
+
+
+def test_render_gym_install_preamble_fails_fast():
+    # Regression: without `set -e`, a failed `git clone`/`cd` (e.g. git missing from a minimal
+    # image) silently fell through to `uv pip install -e .` running in the wrong directory.
+    lines = render_gym_install_preamble("https://github.com/NVIDIA-NeMo/gym", "main")
+    assert lines[0] == "set -e"
+
+
+def test_render_gym_install_preamble_installs_git_if_missing():
+    lines = render_gym_install_preamble("https://github.com/NVIDIA-NeMo/gym", "main")
+    assert any("command -v git" in line and "apt-get install" in line for line in lines)
 
 
 def test_render_driver_entrypoint_no_install_no_prepare():
@@ -980,7 +1004,8 @@ def test_build_sbatch_script_ray_serve_backend_adds_head_node_prelude(bench_dir)
     script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
     assert "scontrol show hostnames" in script
     assert "ray symmetric-run" in script
-    assert "serve run --host 0.0.0.0 --port 8000" in script
+    assert "serve run nemo_gym.orchestration.ray_serve_vllm_app:build_app" in script
+    assert "port=8000" in script
     assert "git checkout main" in script
 
 
@@ -1020,7 +1045,7 @@ def test_build_sbatch_script_ray_serve_backend_srun_arg_stays_single_token(bench
     entrypoint_arg = words[bash_lc_index + 1]
     assert "ray symmetric-run" in entrypoint_arg
     assert "curl -LsSf" in entrypoint_arg
-    assert "serve run --host 0.0.0.0 --port 8000" in entrypoint_arg
+    assert "serve run nemo_gym.orchestration.ray_serve_vllm_app:build_app" in entrypoint_arg
     # Everything else after the single bash -lc argument should just be the trailing "&".
     assert words[bash_lc_index + 2 :] == ["&"]
 
