@@ -1,6 +1,5 @@
 import logging
 import os
-from typing import TypedDict
 
 import litellm
 from nooa import Agent
@@ -17,42 +16,16 @@ llm = get_llm_client(
 )
 
 
-class Result(TypedDict):
-    can_fulfill: bool
-    total_cost: float
-    unavailable_items: list[str]
+class FeedbackAgent(Agent, llm=llm):
+    """You are an agent specializing in analyzing customer feedback."""
 
-
-class InventoryAgent(Agent, llm=llm):
-    """You are an agent that checks inventory using deterministic helper methods."""
-
-    def __init__(self):
-        super().__init__()
-        self.inventory = {
-            "apple": {"stock": 50, "price": 0.75},
-            "banana": {"stock": 30, "price": 0.50},
-            "orange": {"stock": 0, "price": 0.80},  # Out of stock
-        }
-
-    # SW1: Deterministic Python - automatically available as "tools" for the LLM
-    def get_stock(self, item: str) -> int:
-        """Get current stock for an item."""
-        return self.inventory.get(item, {}).get("stock", 0)
-
-    def get_price(self, item: str) -> float:
-        """Get price for an item."""
-        return self.inventory.get(item, {}).get("price", 0.0)
-
-    # SW3: Generation method - LLM implements this, calling SW1 methods as needed
-    async def can_fulfill_order(self, items: list[str], budget: float) -> Result:
-        """Check if order can be fulfilled within budget."""
-        ...
+    async def analyze_feedback(self, text: str) -> str:
+        """Analyze customer feedback for sentiment and key topics in one sentence."""
+        ...  # Generation method - LLM implements based on docstring
 
 
 @autorun
 async def main():
-    agent = InventoryAgent()
-    result = await agent.can_fulfill_order(["apple", "banana", "orange"], budget=5.0)
-    print(f"Can fulfill: {result['can_fulfill']}")
-    print(f"Total cost: {result['total_cost']}")
-    print(f"Unavailable items: {result['unavailable_items']}")
+    agent = FeedbackAgent()
+    result = await agent.analyze_feedback("Great product, but shipping was slow")
+    print(result)
