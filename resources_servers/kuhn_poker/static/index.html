@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Kuhn Poker</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">NeMo Gym</p>
+          <h1>Kuhn Poker</h1>
+        </div>
+        <div class="mode-switch" role="group" aria-label="Viewer mode">
+          <button class="mode-button active" data-mode="play">Play</button>
+          <button class="mode-button" data-mode="spectate">Spectate</button>
+        </div>
+      </header>
+
+      <section class="toolbar">
+        <div id="play-controls" class="play-controls">
+          <label for="seed">Deal seed</label>
+          <input id="seed" type="number" value="0" />
+          <button id="new-hand" class="primary">Deal a hand</button>
+        </div>
+        <div class="connection">
+          <span id="connection-dot" class="connection-dot"></span>
+          <span id="connection-label">Ready to play</span>
+        </div>
+      </section>
+
+      <section class="table-wrap" aria-live="polite">
+        <div class="poker-table">
+          <article id="player1" class="seat seat-top">
+            <div class="seat-heading">
+              <span>Player 1</span>
+              <span id="reward1" class="reward"></span>
+            </div>
+            <div id="card1" class="card hidden-card">?</div>
+            <p id="status1" class="seat-status">Waiting</p>
+          </article>
+
+          <div class="table-center">
+            <div class="pot">
+              <span class="pot-label">Pot</span>
+              <strong id="pot">2</strong>
+              <span>chips</span>
+            </div>
+            <div id="game-status" class="game-status">Deal a hand to begin</div>
+          </div>
+
+          <article id="player0" class="seat seat-bottom">
+            <div class="seat-heading">
+              <span>Player 0</span>
+              <span id="reward0" class="reward"></span>
+            </div>
+            <div id="card0" class="card hidden-card">?</div>
+            <p id="status0" class="seat-status">Waiting</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="game-panel">
+        <div>
+          <p class="panel-label">Betting history</p>
+          <ol id="history" class="history">
+            <li class="empty-state">No actions yet</li>
+          </ol>
+        </div>
+        <div>
+          <p class="panel-label">Actions</p>
+          <div id="actions" class="actions">
+            <span class="empty-state">Deal a hand to choose an action</span>
+          </div>
+          <p id="message" class="message" role="alert"></p>
+        </div>
+      </section>
+    </main>
+
+    <div id="handoff" class="handoff hidden" role="dialog" aria-modal="true">
+      <div class="handoff-card">
+        <p class="eyebrow">Private handoff</p>
+        <h2 id="handoff-title">Pass to Player 0</h2>
+        <p>Make sure the other player cannot see the screen.</p>
+        <button id="reveal" class="primary">Reveal my card</button>
+      </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
