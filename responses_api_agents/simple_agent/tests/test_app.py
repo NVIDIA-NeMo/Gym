@@ -753,6 +753,241 @@ class TestApp:
         }
         assert expected_usage_dict == actual_usage_dict
 
+    async def test_incomplete_max_tokens_executes_completed_function_call_before_stopping(self) -> None:
+        server, server_client = _make_agent(False)
+        model_payload = {
+            "id": "resp-incomplete-tool",
+            "created_at": 1.0,
+            "model": "model",
+            "object": "response",
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [
+                {
+                    "id": "fc-1",
+                    "call_id": "call-1",
+                    "name": "lookup",
+                    "arguments": '{"q":"x"}',
+                    "type": "function_call",
+                    "status": "completed",
+                }
+            ],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+        model_call_count = 0
+
+        async def post(*, server_name, url_path, **kwargs):
+            nonlocal model_call_count
+            if server_name == "model":
+                model_call_count += 1
+                if model_call_count > 1:
+                    raise AssertionError("global incomplete response must stop before a second model call")
+                return _mock_response(model_payload)
+            if (server_name, url_path) == ("resources", "/lookup"):
+                return _mock_response(content='{"result":"found"}')
+            raise AssertionError(f"unexpected server call: {server_name=}, {url_path=}")
+
+        server_client.post = AsyncMock(side_effect=post)
+        request = MagicMock(cookies={}, path_params={})
+
+        result = await server.responses(
+            request,
+            Response(),
+            NeMoGymResponseCreateParamsNonStreaming(input="question"),
+        )
+
+        assert result.status == "incomplete"
+        assert result.incomplete_details is not None
+        assert result.incomplete_details.reason == "max_output_tokens"
+        assert [item.type for item in result.output] == ["function_call", "function_call_output"]
+        function_call, function_call_output = result.output
+        assert function_call.call_id == function_call_output.call_id == "call-1"
+        assert function_call_output.output == '{"result":"found"}'
+
+        assert server_client.post.await_count == 2
+        assert [
+            (post_call.kwargs["server_name"], post_call.kwargs["url_path"])
+            for post_call in server_client.post.await_args_list
+        ] == [
+            ("model", server.url_path_for_request("/v1/responses", request)),
+            ("resources", "/lookup"),
+        ]
+        assert server_client.post.await_args_list[1].kwargs["json"] == {"q": "x"}
+
+    async def test_incomplete_max_tokens_executes_only_completed_function_calls(self) -> None:
+        server, server_client = _make_agent(False)
+        completed_function_call = {
+            "id": "fc-completed",
+            "call_id": "call-completed",
+            "name": "lookup",
+            "arguments": '{"q":"completed"}',
+            "type": "function_call",
+            "status": "completed",
+        }
+        pending_function_call = {
+            "id": "fc-pending",
+            "call_id": "call-pending",
+            "name": "lookup",
+            "arguments": '{"q":"pending"}',
+            "type": "function_call",
+            "status": "in_progress",
+        }
+        model_payload = {
+            "id": "resp-incomplete-tool",
+            "created_at": 1.0,
+            "model": "model",
+            "object": "response",
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [completed_function_call, pending_function_call],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+        model_call_count = 0
+
+        async def post(*, server_name, url_path, **kwargs):
+            nonlocal model_call_count
+            if kwargs.get("json") == {"q": "pending"}:
+                raise AssertionError("in-progress function call must not execute")
+            if server_name == "model":
+                model_call_count += 1
+                if model_call_count > 1:
+                    raise AssertionError("global incomplete response must stop before a second model call")
+                return _mock_response(model_payload)
+            if (server_name, url_path) == ("resources", "/lookup"):
+                if kwargs.get("json") != {"q": "completed"}:
+                    raise AssertionError(f"unexpected lookup arguments: {kwargs.get('json')!r}")
+                return _mock_response(content='{"result":"found"}')
+            raise AssertionError(f"unexpected server call: {server_name=}, {url_path=}")
+
+        server_client.post = AsyncMock(side_effect=post)
+        request = MagicMock(cookies={}, path_params={})
+
+        result = await server.responses(
+            request,
+            Response(),
+            NeMoGymResponseCreateParamsNonStreaming(input="question"),
+        )
+
+        assert result.status == "incomplete"
+        assert result.incomplete_details is not None
+        assert result.incomplete_details.reason == "max_output_tokens"
+        assert [item.type for item in result.output] == [
+            "function_call",
+            "function_call",
+            "function_call_output",
+        ]
+        assert result.output[:2] == [
+            NeMoGymResponseFunctionToolCall.model_validate(completed_function_call),
+            NeMoGymResponseFunctionToolCall.model_validate(pending_function_call),
+        ]
+        function_call_outputs = [item for item in result.output if item.type == "function_call_output"]
+        assert len(function_call_outputs) == 1
+        assert function_call_outputs[0].call_id == "call-completed"
+        assert function_call_outputs[0].output == '{"result":"found"}'
+
+        assert model_call_count == 1
+        assert server_client.post.await_count == 2
+        assert [
+            (post_call.kwargs["server_name"], post_call.kwargs["url_path"])
+            for post_call in server_client.post.await_args_list
+        ] == [
+            ("model", server.url_path_for_request("/v1/responses", request)),
+            ("resources", "/lookup"),
+        ]
+        assert server_client.post.await_args_list[1].kwargs["json"] == {"q": "completed"}
+
+    @pytest.mark.parametrize(
+        "item_status", [None, "in_progress", "incomplete"], ids=["omitted", "in_progress", "incomplete"]
+    )
+    async def test_max_token_incomplete_does_not_execute_noncompleted_function_call(
+        self, item_status: str | None
+    ) -> None:
+        server, server_client = _make_agent(False)
+        function_call = {
+            "id": "fc-1",
+            "call_id": "call-1",
+            "name": "lookup",
+            "arguments": '{"q":"x"}',
+            "type": "function_call",
+        }
+        if item_status is not None:
+            function_call["status"] = item_status
+        model_payload = {
+            "id": "resp-incomplete-tool",
+            "created_at": 1.0,
+            "model": "model",
+            "object": "response",
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [function_call],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+        server_client.post = AsyncMock(return_value=_mock_response(model_payload))
+        request = MagicMock(cookies={}, path_params={})
+
+        result = await server.responses(
+            request,
+            Response(),
+            NeMoGymResponseCreateParamsNonStreaming(input="question"),
+        )
+
+        assert result.output == [NeMoGymResponseFunctionToolCall.model_validate(function_call)]
+        assert result.status == "incomplete"
+        assert result.incomplete_details is not None
+        assert result.incomplete_details.reason == "max_output_tokens"
+        server_client.post.assert_awaited_once()
+        assert [
+            (post_call.kwargs["server_name"], post_call.kwargs["url_path"])
+            for post_call in server_client.post.await_args_list
+        ] == [("model", server.url_path_for_request("/v1/responses", request))]
+
+    async def test_content_filter_does_not_execute_completed_function_call(self) -> None:
+        server, server_client = _make_agent(False)
+        function_call = {
+            "id": "fc-1",
+            "call_id": "call-1",
+            "name": "lookup",
+            "arguments": '{"q":"x"}',
+            "type": "function_call",
+            "status": "completed",
+        }
+        model_payload = {
+            "id": "resp-content-filtered-tool",
+            "created_at": 1.0,
+            "model": "model",
+            "object": "response",
+            "status": "incomplete",
+            "incomplete_details": {"reason": "content_filter"},
+            "output": [function_call],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+        server_client.post = AsyncMock(return_value=_mock_response(model_payload))
+        request = MagicMock(cookies={}, path_params={})
+
+        result = await server.responses(
+            request,
+            Response(),
+            NeMoGymResponseCreateParamsNonStreaming(input="question"),
+        )
+
+        assert result.output == [NeMoGymResponseFunctionToolCall.model_validate(function_call)]
+        assert result.status == "incomplete"
+        assert result.incomplete_details is not None
+        assert result.incomplete_details.reason == "content_filter"
+        server_client.post.assert_awaited_once()
+        assert [
+            (post_call.kwargs["server_name"], post_call.kwargs["url_path"])
+            for post_call in server_client.post.await_args_list
+        ] == [("model", server.url_path_for_request("/v1/responses", request))]
+
     async def test_incomplete_details(self, monkeypatch: MonkeyPatch) -> None:
         await self._test_incomplete_details_helper(monkeypatch, {"reason": "max_output_tokens"})
         await self._test_incomplete_details_helper(monkeypatch, {"reason": "content_filter"})

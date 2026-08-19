@@ -160,15 +160,24 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             usage = accumulate_response_usage(usage, model_response.usage)
             model_response.usage = None
 
-            if model_response.incomplete_details:
+            incomplete_details = model_response.incomplete_details
+            if incomplete_details:
                 invocation_status = "incomplete"
-                break
 
             all_fn_calls: List[NeMoGymResponseFunctionToolCall] = [o for o in output if o.type == "function_call"]
             all_output_messages: List[NeMoGymResponseOutputMessage] = [
                 o for o in output if o.type == "message" and o.role == "assistant"
             ]
-            if not all_fn_calls and all_output_messages:
+            stop_after_tool_outputs = False
+            if incomplete_details:
+                if incomplete_details.reason != "max_output_tokens":
+                    break
+                completed_fn_calls = [call for call in all_fn_calls if call.status == "completed"]
+                if not completed_fn_calls:
+                    break
+                all_fn_calls = completed_fn_calls
+                stop_after_tool_outputs = True
+            elif not all_fn_calls and all_output_messages:
                 break
 
             for output_function_call in all_fn_calls:
@@ -223,6 +232,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
             if collect_trajectory and all_fn_calls:
                 turns[-1].step_count = len(tool_records)
+
+            if stop_after_tool_outputs:
+                break
 
             # Check if max steps is not None and if we have exhausted it.
             if self.config.max_steps and step >= self.config.max_steps:
