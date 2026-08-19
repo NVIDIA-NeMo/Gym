@@ -66,6 +66,8 @@ def _split_overrides(overrides: list[str]) -> tuple[set[str], set[str]]:
 # `gym <command>` -> the legacy ng_<command> function it dispatches to, for the config-accepting commands.
 CONFIG_COMMANDS = [
     (["env", "start"], "nemo_gym.cli.env:run"),
+    (["env", "head"], "nemo_gym.cli.env:run_head"),
+    (["env", "serve"], "nemo_gym.cli.env:serve_instance"),
     (["env", "resolve"], "nemo_gym.cli.env:dump_config"),
     (["env", "validate"], "nemo_gym.cli.env:validate"),
     (["eval", "prepare"], "nemo_gym.cli.eval:prepare_benchmark"),
@@ -104,6 +106,37 @@ class TestConfigFlag:
     def test_without_config_no_config_paths_added(self, monkeypatch: MonkeyPatch) -> None:
         _, overrides = _dispatch_for(monkeypatch, ["env", "start", "+foo=bar"])
         assert overrides == ["+foo=bar"]
+
+    def test_env_serve_translates_instance(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            ["env", "serve", "--config", "kuhn.yaml", "--instance", "kuhn_player0"],
+        )
+        assert target == "nemo_gym.cli.env:serve_instance"
+        assert set(overrides) == {
+            "+config_paths=[kuhn.yaml]",
+            '+instance="kuhn_player0"',
+        }
+
+    def test_env_head_translates_repeated_instances(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            [
+                "env",
+                "head",
+                "--config",
+                "kuhn.yaml",
+                "--instance",
+                "kuhn_poker",
+                "--instance",
+                "kuhn_poker_orchestrator",
+            ],
+        )
+        assert target == "nemo_gym.cli.env:run_head"
+        assert set(overrides) == {
+            "+config_paths=[kuhn.yaml]",
+            '+instances=["kuhn_poker", "kuhn_poker_orchestrator"]',
+        }
 
     def test_config_rejected_on_non_config_command(self, monkeypatch: MonkeyPatch) -> None:
         # `dataset rm` does not declare --config, so the router must reject it rather than leak it downstream.

@@ -38,6 +38,7 @@ from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
+    ORCHESTRATOR_REF_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
@@ -799,6 +800,31 @@ class TestRolloutCollection:
         assert "responses_create_params" not in captured.out
         assert "do not log this" not in captured.out
         assert "[rollout_collection] /run failed" in captured.out
+
+    async def test_run_examples_prefers_orchestrator_ref(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        row = {
+            ORCHESTRATOR_REF_KEY_NAME: {"name": "turn_orchestrator"},
+            AGENT_REF_KEY_NAME: {"name": "legacy_agent"},
+        }
+        response = MagicMock()
+        response.read = AsyncMock(return_value=orjson.dumps({"reward": 1.0}))
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(return_value=response)
+        mock_server_client.global_config_dict = OmegaConf.create(
+            {"turn_orchestrator": {"rollout_orchestrators": {"alternating_turn": {}}}}
+        )
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "setup_server_client_utils",
+            lambda *args, **kwargs: mock_server_client,
+        )
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
+
+        returned_row, result = await next(RolloutCollectionHelper().run_examples([row]))
+
+        assert returned_row is row
+        assert result == {"reward": 1.0}
+        assert mock_server_client.post.await_args.kwargs["server_name"] == "turn_orchestrator"
 
     async def test_run_examples_records_agent_http_failure_as_a_failure_row(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1662,6 +1688,27 @@ class TestRolloutCollection:
             NeMoGymResponseCreateParamsNonStreaming.model_validate(rcp)
         # Seeds should track rollout index within each task (0, 1, 2 per task).
         assert seeds_seen == [0, 1, 2, 0, 1, 2]
+
+    def test_preprocess_rows_accepts_orchestrator_without_agent_ref(self, tmp_path: Path) -> None:
+        fpath = tmp_path / "input.jsonl"
+        fpath.write_text(
+            json.dumps(
+                {
+                    "responses_create_params": {"input": []},
+                    ORCHESTRATOR_REF_KEY_NAME: {"name": "turn_orchestrator"},
+                }
+            )
+            + "\n"
+        )
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+        )
+
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+        assert rows[0][ORCHESTRATOR_REF_KEY_NAME]["name"] == "turn_orchestrator"
+        assert AGENT_REF_KEY_NAME not in rows[0]
 
     def test_preprocess_rows_num_repeats_dict_form(self, tmp_path: Path) -> None:
         """Dict-form num_repeats applies the per-agent value to each row."""

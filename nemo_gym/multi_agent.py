@@ -65,6 +65,21 @@ class MultiAgentCloseResponse(BaseModel):
     closed: bool = True
 
 
+class AgentTurn(BaseModel):
+    observation: str
+    action: str
+
+
+class AgentActRequest(BaseModel):
+    agent_id: str
+    observation: str
+    history: list[AgentTurn] = Field(default_factory=list)
+
+
+class AgentActResponse(BaseModel):
+    action: str
+
+
 class MultiAgentResourcesServer(SimpleResourcesServer):
     """Base server for one-active-agent-at-a-time environments."""
 

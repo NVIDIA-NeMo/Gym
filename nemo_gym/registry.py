@@ -156,7 +156,7 @@ def _runnable_resource_config(
     datasets = [
         dataset
         for group, _name, config in servers
-        if group == "responses_api_agents"
+        if group in {"responses_api_agents", "rollout_orchestrators"}
         for dataset in (config.get("datasets") or [])
         if isinstance(dataset, (dict, DictConfig))
     ]
@@ -327,8 +327,9 @@ def read_environment_details(config_path: Path) -> Dict[str, object]:
     """Deep-parse an environment config for the ``gym list environments <name>`` inspect view.
 
     Returns ``domain``, ``description`` (via :func:`~nemo_gym.discovery.read_config_metadata`), plus
-    ``value``, ``resources_servers`` (names), ``agent`` (the agent type), and dataset ``names`` read from
-    the config's server blocks. Never raises: an unreadable config yields empty/None fields.
+    ``value``, ``resources_servers`` (names), ``agent``/``orchestrator`` (the rollout server type),
+    and dataset ``names`` read from the config's server blocks. Never raises: an unreadable config
+    yields empty/None fields.
     """
     domain, description = read_config_metadata(config_path)
     try:
@@ -339,6 +340,7 @@ def read_environment_details(config_path: Path) -> Dict[str, object]:
     value: Optional[str] = None
     resources_servers: List[str] = []
     agent: Optional[str] = None
+    orchestrator: Optional[str] = None
     datasets: List[str] = []
     for group_key, server_name, server_config in iter_server_configs(raw):
         if group_key == "resources_servers":
@@ -351,6 +353,12 @@ def read_environment_details(config_path: Path) -> Dict[str, object]:
             for dataset in server_config.get("datasets") or []:
                 if isinstance(dataset, (dict, DictConfig)) and dataset.get("name"):
                     datasets.append(str(dataset["name"]))
+        elif group_key == "rollout_orchestrators":
+            if orchestrator is None:
+                orchestrator = server_name
+            for dataset in server_config.get("datasets") or []:
+                if isinstance(dataset, (dict, DictConfig)) and dataset.get("name"):
+                    datasets.append(str(dataset["name"]))
 
     return {
         "domain": domain,
@@ -358,5 +366,6 @@ def read_environment_details(config_path: Path) -> Dict[str, object]:
         "value": value,
         "resources_servers": resources_servers,
         "agent": agent,
+        "orchestrator": orchestrator,
         "datasets": datasets,
     }
