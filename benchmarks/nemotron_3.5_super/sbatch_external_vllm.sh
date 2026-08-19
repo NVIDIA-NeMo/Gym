@@ -122,11 +122,11 @@ if (( SLURM_PROCID == 0 )); then
     )
 
     for (( i = 0; i < $NUM_PREFILL_NODES; i++ )); do
-        router_args+=(--prefill "http://\${nodes[i]}:$PREFILL_SERVER_PORT")
+        router_args+=(--prefill "http://\${nodes[i]}:$WORKER_SERVER_PORT")
     done
     for (( i = 0; i < $NUM_DECODE_NODES; i++ )); do
         node_idx=\$(( $NUM_PREFILL_NODES + i ))
-        router_args+=(--decode "http://\${nodes[node_idx]}:$DECODE_SERVER_PORT")
+        router_args+=(--decode "http://\${nodes[node_idx]}:$WORKER_SERVER_PORT")
     done
 
     vllm-router "\${router_args[@]}" &
@@ -136,7 +136,7 @@ if (( SLURM_PROCID == 0 )); then
 fi
 
 # Split nodes here by index
-if (( SLURM_PROCID <= $NUM_PREFILL_NODES )); then
+if (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
     # Prefill
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
