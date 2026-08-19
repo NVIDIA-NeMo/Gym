@@ -148,6 +148,57 @@ class TestApp:
         }
         assert payload["crawl_timeout"] == 42
 
+    def test_search_payload_eco_is_query_and_count_only(self, config: YouSearchResourcesServerConfig) -> None:
+        """eco_search ignores extraction, crawl budget, and exclude_domains."""
+        config.search_mode = "eco"
+        config.num_results = 4
+        server = YouSearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+        payload = server._search_payload("nvidia gpus")
+        assert payload == {"query": "nvidia gpus", "count": 4}
+        assert server._search_endpoint() == "/v1/eco_search"
+
+    def test_search_endpoint_defaults_to_unified_search(self, server: YouSearchResourcesServer) -> None:
+        assert server._search_endpoint() == "/v1/search"
+
+    async def test_web_search_eco_uses_eco_endpoint(self, config: YouSearchResourcesServerConfig) -> None:
+        """eco returns the same envelope, minus `contents` and the news section."""
+        config.search_mode = "eco"
+        server = YouSearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        server._post = AsyncMock(
+            return_value={"results": {"web": [_web_result("https://example.com/p", "Eco Result")]}}
+        )
+
+        response = await server.web_search(self._create_dummy_request(), YouSearchRequest(query="q"))
+
+        endpoint, payload = server._post.call_args.args
+        assert endpoint == "/v1/eco_search"
+        assert "extraction" not in payload
+        assert "exclude_domains" not in payload
+        assert "Eco Result" in response.results_string
+        assert "Snippet about Eco Result" in response.results_string
+
+    async def test_eco_still_filters_excluded_domains_client_side(
+        self, config: YouSearchResourcesServerConfig
+    ) -> None:
+        """The API ignores exclude_domains on eco, so the client-side pass is load-bearing."""
+        config.search_mode = "eco"
+        server = YouSearchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        server._post = AsyncMock(
+            return_value={
+                "results": {
+                    "web": [
+                        _web_result("https://blacklisteddomain.com/p", "Blocked"),
+                        _web_result("https://example.com/p", "Allowed"),
+                    ]
+                }
+            }
+        )
+
+        response = await server.web_search(self._create_dummy_request(), YouSearchRequest(query="q"))
+        assert "Blocked" not in response.results_string
+        assert "[1] Allowed (example.com)" in response.results_string
+
     def test_search_payload_sends_exclude_domains(self, server: YouSearchResourcesServer) -> None:
         assert server._search_payload("q")["exclude_domains"] == ["blacklisteddomain.com"]
 

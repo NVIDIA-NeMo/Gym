@@ -17,6 +17,13 @@ provider A/B.
   | `snippets` (default) | keyword excerpts + description | cheapest; fewest tokens per call |
   | `highlights` | query-relevant passages extracted per page | middle ground on tokens |
   | `full_page` | the whole page as markdown | billed per page crawled; raise `max_result_chars` or the crawl is truncated away |
+  | `eco` | titles, snippets, descriptions from `/v1/eco_search` | smallest corpus of any arm; no extraction, no news section |
+
+  `eco` is a separate, lighter endpoint rather than an extraction level, so it takes
+  only `query` and `count` — `crawl_timeout` and the API-side `exclude_domains` list do
+  not apply. Client-side domain exclusion still runs, so an opt-out registry is honoured
+  either way. Measured on one query: 2762 chars over 8 results, against 12823 chars over
+  10 for `snippets`.
 
 - `include_news` (default `false`) adds You.com's news section ahead of the web results.
   Turn it on for recency-sensitive benchmarks (LiveBench-style), where web-only retrieval

@@ -67,7 +67,7 @@ from resources_servers.you_search.judge_prompt import JUDGE_PROMPT_TEMPLATE
 # opt-out registries are truncated for the wire call and enforced client-side instead.
 MAX_EXCLUDE_DOMAINS = 500
 
-SearchMode = Literal["snippets", "highlights", "full_page"]
+SearchMode = Literal["snippets", "highlights", "full_page", "eco"]
 
 
 class YouSearchResourcesServerConfig(BaseResourcesServerConfig):
@@ -76,6 +76,8 @@ class YouSearchResourcesServerConfig(BaseResourcesServerConfig):
     #   snippets   — keyword excerpts + description only (cheapest, fewest tokens)
     #   highlights — query-relevant passages extracted per page
     #   full_page  — the whole page as markdown (most tokens, billed per page crawled)
+    #   eco        — the /v1/eco_search endpoint: query + count only, no extraction,
+    #                no news section. Smallest corpus of any arm.
     search_mode: SearchMode = "snippets"
     base_url: str = "https://ydc-index.io"
     num_results: int = 10
@@ -288,8 +290,18 @@ class YouSearchResourcesServer(SimpleResourcesServer):
                 YouSearchSingleAPICallMetrics(function=function, status=status, start_time=start_time, end_time=time())
             )
 
+    def _search_endpoint(self) -> str:
+        """eco is a separate, lighter endpoint rather than an extraction level."""
+        return "/v1/eco_search" if self.config.search_mode == "eco" else "/v1/search"
+
     def _search_payload(self, query: str) -> Dict[str, Any]:
         payload: Dict[str, Any] = {"query": query, "count": self.config.num_results}
+
+        # eco_search takes query and count only -- extraction, crawl budget and
+        # exclude_domains are all ignored there. Exclusions are still enforced
+        # client-side in _postprocess_search_results, so the registry still holds.
+        if self.config.search_mode == "eco":
+            return payload
 
         if self.config.search_mode == "highlights":
             payload["extraction"] = {"extraction_mode": "highlights"}
@@ -318,7 +330,9 @@ class YouSearchResourcesServer(SimpleResourcesServer):
         if len(body.query) > 400:
             return YouSearchResponse(results_string="Query is too long")
 
-        results = await self._tracked_post("search", metrics, "/v1/search", self._search_payload(body.query))
+        results = await self._tracked_post(
+            "search", metrics, self._search_endpoint(), self._search_payload(body.query)
+        )
 
         postprocessed_results = self._postprocess_search_results(results)
         return YouSearchResponse(results_string="".join(postprocessed_results))
