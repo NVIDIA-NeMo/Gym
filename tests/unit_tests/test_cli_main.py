@@ -1432,26 +1432,16 @@ class TestListEnvironmentsRouting:
         assert overrides == ["+json=true"]
 
     def test_list_benchmarks_unknown_name_uses_benchmark_noun(self, monkeypatch: MonkeyPatch, capsys) -> None:
-        # Exercise the real router and listing target rather than only asserting the dispatch tuple.
+        # One end-to-end smoke over the real router and catalog; the kind-scoping rules themselves are
+        # asserted against a synthetic catalog in tests/unit_tests/test_cli.py::TestListEnvironments.
+        # Substring, not equality: rich wraps to the console width and colorizes when FORCE_COLOR is set.
         monkeypatch.setattr(sys, "argv", ["gym", "list", "benchmarks", "gsm8kk"])
 
         with pytest.raises(SystemExit) as error:
             main()
 
         assert error.value.code == 1
-        assert capsys.readouterr().out == "Unknown benchmark 'gsm8kk'. Did you mean `gsm8k`?\n"
-
-    def test_list_benchmarks_rejects_an_environment_name(self, monkeypatch: MonkeyPatch, capsys) -> None:
-        # `blackjack` is an environment, not a benchmark: the error must not suggest it back.
-        monkeypatch.setattr(sys, "argv", ["gym", "list", "benchmarks", "blackjack"])
-
-        with pytest.raises(SystemExit) as error:
-            main()
-
-        assert error.value.code == 1
-        out = capsys.readouterr().out
-        assert "Unknown benchmark 'blackjack'" in out
-        assert "Did you mean" not in out
+        assert "Unknown benchmark 'gsm8kk'" in " ".join(capsys.readouterr().out.split())
 
     def test_catalog_filters_translate_to_reserved_keys(self, monkeypatch: MonkeyPatch) -> None:
         target, overrides = _dispatch_for(
