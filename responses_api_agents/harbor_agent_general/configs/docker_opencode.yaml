@@ -27,6 +27,10 @@ harbor_agent_general:
         name: opencode
         ## TIP: Directly use Gym's native expected variable name.
         model_name: ${policy_model_name}
+        ##
+        # TIP: Escape $ so that secret variables are not exposed in the written Harbor configuration, and resolved directly within Harbor.
+        # If the variables are unlikely to change and exposure is not a concern, use immediate resolution via Hydra. e.g. ${oc.env:NVINF_API_KEY}
+        #
         # env:
           # NVINF_API_KEY: \${NVINF_API_KEY}
           # VLLM_API_BASE: \${VLLM_API_BASE}
