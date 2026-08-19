@@ -112,7 +112,8 @@ if (( SLURM_PROCID == 0 )); then
     # Set a super long request timeout since some reasoning requests may take a long time to generate.
     # Don't manually wait as vllm-router will wait for the URLs to come up
     router_args=( \
-        --policy consistent_hash \
+        --prefill-policy consistent_hash \
+        --decode-policy power_of_two \
         --vllm-pd-disaggregation \
         --host \$this_node_hostname \
         --port $ROUTER_SERVER_PORT \
