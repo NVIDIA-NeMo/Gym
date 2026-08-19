@@ -77,6 +77,7 @@ class TestRunnerTemplate:
         # Must be syntactically valid Python and reference the agent class.
         compile(rendered, "<runner>", "exec")
         assert "HermesAgent(config=config" in rendered
+        assert 'Request({"type": "http", "path_params": {}})' in rendered
         assert 'object.__setattr__(agent, "resolve_model_base_url"' in rendered
 
     def test_response_is_written_back(self) -> None:
