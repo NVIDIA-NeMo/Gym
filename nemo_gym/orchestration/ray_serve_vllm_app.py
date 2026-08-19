@@ -100,8 +100,11 @@ def build_app(args: dict) -> Any:
     class VLLMReplica:
         def __init__(self) -> None:
             self.engine_client = AsyncLLMEngine.from_engine_args(engine_args)
-            init_app_state(
-                self.engine_client, self.engine_client.engine.get_model_config(), fastapi_app.state, vllm_args
-            )
+            # vLLM's V1 engine (AsyncLLM, what from_engine_args returns by default) exposes
+            # model_config directly; the legacy V0 AsyncLLMEngine nests it under .engine instead.
+            model_config = getattr(self.engine_client, "model_config", None)
+            if model_config is None:
+                model_config = self.engine_client.engine.get_model_config()
+            init_app_state(self.engine_client, model_config, fastapi_app.state, vllm_args)
 
     return VLLMReplica.bind()
