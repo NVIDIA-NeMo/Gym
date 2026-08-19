@@ -38,5 +38,16 @@ def test_build_app_requires_vllm_and_ray():
     pytest.importorskip("ray.serve")
     from nemo_gym.orchestration.ray_serve_vllm_app import build_app
 
-    app = build_app(model="org/model", tensor_parallel_size="2", number_of_instances="4")
+    # Mirrors serve run's builder-function convention: args always arrive as a single dict of
+    # strings, never as individual keyword parameters.
+    app = build_app({"model": "org/model", "tensor_parallel_size": "2", "number_of_instances": "4"})
     assert app is not None
+
+
+def test_build_app_requires_model_key():
+    pytest.importorskip("vllm")
+    pytest.importorskip("ray.serve")
+    from nemo_gym.orchestration.ray_serve_vllm_app import build_app
+
+    with pytest.raises(KeyError):
+        build_app({})

@@ -20,8 +20,11 @@ vLLM service container (e.g. vllm/vllm-openai) that the `distributed_backend: {t
 Slurm command installs nemo_gym into and runs against, via:
 
     serve run nemo_gym.orchestration.ray_serve_vllm_app:build_app \\
-        model=... tensor_parallel_size=... pipeline_parallel_size=... \\
+        model=... port=... tensor_parallel_size=... pipeline_parallel_size=... \\
         number_of_instances=... trust_remote_code=...
+
+`build_app` takes a single dict parameter (Ray Serve's builder-function convention for CLI args),
+not individual keyword parameters.
 
 Each replica runs its own vLLM engine sized to tensor_parallel_size x pipeline_parallel_size GPUs
 (vLLM's default in-process executor, not Ray) and exposes the same routes as `vllm serve`
@@ -38,15 +41,12 @@ def _to_bool(value: bool | str) -> bool:
     return value.strip().lower() in ("1", "true", "yes")
 
 
-def build_app(
-    model: str,
-    port: int | str = 8000,
-    tensor_parallel_size: int | str = 1,
-    pipeline_parallel_size: int | str = 1,
-    number_of_instances: int | str = 1,
-    trust_remote_code: bool | str = False,
-) -> Any:
-    """Build the Ray Serve application. Args arrive as strings when invoked via `serve run`."""
+def build_app(args: dict) -> Any:
+    """Build the Ray Serve application.
+
+    `serve run module:build_app key=val ...` requires the builder to take exactly one parameter: a
+    dict of the passed args (always strings, since they arrive from the CLI).
+    """
     from ray import serve
     from ray.serve.exceptions import RayServeException
     from vllm.engine.arg_utils import AsyncEngineArgs
@@ -56,11 +56,12 @@ def build_app(
     from vllm.entrypoints.openai.cli_args import make_arg_parser
     from vllm.utils import FlexibleArgumentParser
 
-    port = int(port)
-    tensor_parallel_size = int(tensor_parallel_size)
-    pipeline_parallel_size = int(pipeline_parallel_size)
-    number_of_instances = int(number_of_instances)
-    trust_remote_code = _to_bool(trust_remote_code)
+    model = args["model"]
+    port = int(args.get("port", 8000))
+    tensor_parallel_size = int(args.get("tensor_parallel_size", 1))
+    pipeline_parallel_size = int(args.get("pipeline_parallel_size", 1))
+    number_of_instances = int(args.get("number_of_instances", 1))
+    trust_remote_code = _to_bool(args.get("trust_remote_code", False))
 
     # `serve run`'s own CLI flags for the HTTP proxy's host/port aren't consistently available
     # across Ray versions for import-path apps, so set them here instead. `serve run` may have
