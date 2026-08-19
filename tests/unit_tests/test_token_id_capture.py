@@ -70,6 +70,7 @@ from nemo_gym.token_id_capture import (
     set_token_sink,
     stamp_lineage,
 )
+from nemo_gym.token_id_capture.config import token_id_capture_enabled_for_agent
 from nemo_gym.token_id_capture.lineage import (
     FileLineageStore,
     LineageIndex,
@@ -77,7 +78,6 @@ from nemo_gym.token_id_capture.lineage import (
     assistant_fingerprint,
     conversation_digest,
 )
-from nemo_gym.token_id_capture.config import token_id_capture_enabled_for_agent
 from nemo_gym.token_id_capture.protocols import TokenSource
 from nemo_gym.token_id_capture.store import make_token_store
 
