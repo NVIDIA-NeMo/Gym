@@ -1370,7 +1370,9 @@ def _inspect_environment(
 ) -> None:
     """Render one entry from the unified environment catalog."""
     kind = global_config_dict.get("catalog_kind")
-    matching_names = {entry.name: entry for entry in entries}
+    # Restrict both the membership check and the did-you-mean pool to the requested kind, so the
+    # suggestion can never name an entry of the kind the user did not ask for.
+    matching_names = {entry.name: entry for entry in entries if kind is None or entry.kind == kind}
     if name not in matching_names:
         exit_unknown_component(name, matching_names, kind or "environment")
         return
