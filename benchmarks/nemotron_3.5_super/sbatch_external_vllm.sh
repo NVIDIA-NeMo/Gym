@@ -106,19 +106,30 @@ source "$VLLM_CONFIG"
 
 this_node_hostname=\$(hostname)
 if (( SLURM_PROCID == 0 )); then
+    read -r -a nodes <<< "\$ALL_NODES"
+
     # @bxyu-nvidia: for --intra-node-data-parallel-size: Not sure what to set this to other than 1. I can't tell from the docs what is appropriate and 1 seems to work fine.
     # Set a super long request timeout since some reasoning requests may take a long time to generate.
     # Don't manually wait as vllm-router will wait for the URLs to come up
-    vllm-router \
-        --policy consistent_hash \
+    router_args=( \
+        --policy round_robin \
         --vllm-pd-disaggregation \
-        --prefill http://\$PREFILL_HEAD:$PREFILL_SERVER_PORT \
-        --decode http://\$DECODE_HEAD:$DECODE_SERVER_PORT \
         --host \$this_node_hostname \
         --port $ROUTER_SERVER_PORT \
         --intra-node-data-parallel-size 1 \
         --request-timeout-secs 86400 \
         --log-level error
+    )
+
+    for (( i = 0; i < $NUM_PREFILL_NODES; i++ )); do
+        router_args+=(--prefill "http://\${nodes[i]}:$PREFILL_SERVER_PORT")
+    done
+    for (( i = 0; i < $NUM_DECODE_NODES; i++ )); do
+        node_idx=\$(( $NUM_PREFILL_NODES + i ))
+        router_args+=(--decode "http://\${nodes[node_idx]}:$DECODE_SERVER_PORT")
+    done
+
+    vllm-router "\${router_args[@]}" &
 
     router_pid=\$!
     trap 'kill "\$router_pid" 2>/dev/null || true' EXIT
@@ -181,6 +192,7 @@ if (( $should_run_eval )); then
 
     # @bxyu-nvidia: We need --cpus-per-task=SLURM_CPUS_ON_NODE, otherwise we run into a lot of ServerDisconnectedError and ConnectionResetByPeer errors from Gym servers and vLLM. Not sure what the correlation is
     eval_status=0
+    ALL_NODES="\${nodes[*]}" \
     ROUTER_NODE="\${nodes[0]}" \
     srun --overlap --exact --nodes=1 --ntasks=1 --cpus-per-task=\$SLURM_CPUS_ON_NODE --nodelist="\$EVAL_NODE" --gpus=0 \
         --container-image=$CONTAINER \
