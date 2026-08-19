@@ -14,7 +14,6 @@
 # limitations under the License.
 import logging
 import re
-from math import isfinite
 from os import environ
 from time import time
 from typing import Any, ClassVar, Iterator, Optional
@@ -178,8 +177,8 @@ class MLflowExporter(BaseExporter):
         client, run_id = self._active()
         timestamp = int(time() * 1000)
 
-        # MLflow metrics must be numeric and finite. Strings become tags so they aren't lost;
-        # None and NaN/inf (e.g. the std of a single-rollout task) are dropped.
+        # MLflow metrics must be numeric, so strings become tags rather than being lost and None is
+        # dropped.
         numeric: list[Metric] = []
         tags: list[RunTag] = []
         for key, value in metrics.items():
@@ -187,8 +186,7 @@ class MLflowExporter(BaseExporter):
             if name is None:
                 continue
             if isinstance(value, bool) or isinstance(value, (int, float)):
-                if isfinite(value):
-                    numeric.append(Metric(name, float(value), timestamp, step or 0))
+                numeric.append(Metric(name, float(value), timestamp, step or 0))
             elif isinstance(value, str):
                 tags.append(RunTag(name, value[:MAX_PARAM_VAL_LENGTH]))
 
