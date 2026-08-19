@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Set, Tuple, Union
 
 import rich
-from omegaconf import DictConfig, ListConfig, OmegaConf, open_dict
+from omegaconf import DictConfig, OmegaConf
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -736,33 +736,6 @@ def is_almost_server(server_type_config_dict: Any) -> bool:
 ########################################
 
 AGENT_REF_KEY = "agent_ref"
-
-
-########################################
-# Secrets
-########################################
-
-
-def recursively_hide_secrets(dict_config: DictConfig) -> None:
-    """Mask every token/key leaf in place with '****' so a config can be printed or exported."""
-    with open_dict(dict_config):
-        _recursively_hide_secrets_helper(dict_config)
-
-
-def _recursively_hide_secrets_helper(dict_config: DictConfig) -> None:
-    for k, v in list(dict_config.items()):
-        if isinstance(v, (DictConfig, dict)):
-            _recursively_hide_secrets_helper(v)
-        elif isinstance(v, (ListConfig, list)):
-            if "token" in k or "key" in k:
-                dict_config[k] = ["****"] * len(v)
-            else:
-                for inner_v in v:
-                    if isinstance(inner_v, (DictConfig, dict)):
-                        _recursively_hide_secrets_helper(inner_v)
-        else:
-            if "token" in k or "key" in k:
-                dict_config[k] = "****"
 
 
 ########################################

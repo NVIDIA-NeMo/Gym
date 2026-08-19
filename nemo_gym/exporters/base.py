@@ -19,7 +19,7 @@ from typing import Any, ClassVar, Optional
 
 from omegaconf import DictConfig
 
-from nemo_gym.config_types import recursively_hide_secrets
+from nemo_gym.secret_utils import recursively_hide_secrets
 
 
 logger = logging.getLogger(__name__)

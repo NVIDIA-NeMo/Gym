@@ -50,9 +50,9 @@ from nemo_gym.config_types import (
     is_almost_server,
     is_server_ref,
     maybe_get_server_instance_config,
-    recursively_hide_secrets,
 )
 from nemo_gym.exporters import setup_exporters
+from nemo_gym.secret_utils import recursively_hide_secrets
 
 
 _GLOBAL_CONFIG_DICT = None
@@ -510,9 +510,6 @@ For example, on the command line:
 {override_examples}"""
         )
 
-    def _recursively_hide_secrets(self, dict_config: DictConfig) -> None:
-        recursively_hide_secrets(dict_config)
-
     def _recursively_swap_keys(self, dict_config: DictConfig) -> None:
         frozen_dict_config = deepcopy(dict_config)
         with open_dict(dict_config):
@@ -717,7 +714,7 @@ Pass each config with --config (it builds the list for you), e.g.:
             error_on_almost_servers = global_config_dict.get("error_on_almost_servers", True)
             if error_on_almost_servers:
                 config_dict_to_log = deepcopy(global_config_dict)
-                self._recursively_hide_secrets(config_dict_to_log)
+                recursively_hide_secrets(config_dict_to_log)
                 config_to_log_yaml = OmegaConf.to_yaml(config_dict_to_log)
 
                 error_msg = f"""Found {len(almost_servers)} almost-server(s) with validation errors. Fix the issues above or set error_on_almost_servers=false to bypass this error.
@@ -846,7 +843,7 @@ Found global config dict yaml:
             global_config_dict.setdefault(UV_VENV_DIR_KEY_NAME, str(WORKING_DIR))
 
         if parse_config.hide_secrets:  # pragma: no cover
-            self._recursively_hide_secrets(global_config_dict)
+            recursively_hide_secrets(global_config_dict)
 
         # Set up exporters and log config. This must happen at the very last step.
         if not parse_config.offline:  # pragma: no cover
