@@ -30,28 +30,26 @@ xCOMET-XXL judge script at `nemo_skills/evaluation/evaluator/comet.py`.
 > so the Tier 1 pass@k template in `migrate-benchmark` doesn't apply.
 > Parity with NeMo-Skills is on the corpus aggregates.
 
-## Per-sample reward + per-row COMET
+## Per-sample reward + batched COMET
 
 `verify()` returns `sentence_bleu(generation, [reference]) / 100` as the
 `reward` field. This is a useful dense RL signal but it is NOT the
 parity target — corpus-level BLEU in `compute_metrics()` is.
 
-When `compute_comet: true`, `verify()` also dispatches a per-row score
-request to the persistent xCOMET-XXL actor pool and awaits the result
-before returning. Each rollout in `rollouts.jsonl` therefore carries
-its own `comet_score` (or `None` when the model produced an empty
-generation), and `compute_metrics()` aggregates those per-row scores
-into per-pair / cross-pair means and std-dev keys.
+When `compute_comet: true`, `verify()` leaves `comet_score` unset.
+`compute_metrics()` then fills missing scores with batched xCOMET-XXL
+`predict` calls (`comet_batch_size` triples per extra_gpu actor, one
+wave of `comet_num_shards` actors at a time) and checkpoints
+`evaluator_rollouts.jsonl` after each wave. Already-scored resume rows
+are skipped; empty generations stay `None`.
 
 ## COMET actor pool
 
 When `compute_comet: true`, `_ensure_comet_actors()` lazily spawns
 `comet_num_shards` Ray actors (one per GPU on the extra_gpu node) on the
-first `verify()` call. Each actor loads `Unbabel/XCOMET-XXL` once in
-`__init__` and serves score requests from the resident model — no
-per-call cold-load. `verify()` round-robins requests across the pool
-under a small lock and awaits the future inline so per-row scoring is
-interleaved with rollout collection.
+first `compute_metrics()` call that still has unscored rows. Each actor
+loads `Unbabel/XCOMET-XXL` once in `__init__` and serves score requests
+from the resident model — no per-call cold-load.
 
 The checkpoint and its xlm-roberta-xxl tokenizer are resolved via
 `comet.download_model()` and `load_from_checkpoint()`, both of which hit

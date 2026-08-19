@@ -6,7 +6,7 @@
 
 This benchmark uses the `mcqa` resource server with the `mcqa_simple_agent`.
 
-- **Grading mode**: `null` — each row supplies its own language-specific extraction regex via `template_metadata.output_regex`
+- **Grading mode**: language-specific answer extraction with the MCQA parser as fallback
 - **Prompt**: Passthrough (`{question}` only) — the complete formatted question including options is baked into the data during preparation
 
 ## Usage
