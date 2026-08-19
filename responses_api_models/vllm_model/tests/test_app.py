@@ -794,6 +794,108 @@ class TestApp:
         }
         assert model._resolve_client(first_request) is first_client
 
+    def test_preprocess_adds_session_affinity_body_without_mutating_config(self) -> None:
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            base_url="http://router/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            entrypoint="",
+            name="",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            extra_body={
+                "session_params": {
+                    "session_id": "static-value-must-not-win",
+                    "keep": "value",
+                }
+            },
+            forward_session_id_in_body=True,
+        )
+        model = VLLMModel(
+            config=config,
+            server_client=MagicMock(spec=ServerClient, global_config_dict={}),
+        )
+        request = MagicMock(session={SESSION_ID_KEY: "session-0"})
+
+        result = model._preprocess_chat_completion_create_params(
+            request,
+            {"messages": [{"role": "user", "content": "hello"}]},
+        )
+
+        assert result["session_params"] == {
+            "session_id": "session-0",
+            "keep": "value",
+        }
+        assert config.extra_body == {
+            "session_params": {
+                "session_id": "static-value-must-not-win",
+                "keep": "value",
+            }
+        }
+
+    def test_preprocess_adds_session_affinity_body_without_existing_params(self) -> None:
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            base_url="http://router/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            entrypoint="",
+            name="",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            forward_session_id_in_body=True,
+        )
+        model = VLLMModel(
+            config=config,
+            server_client=MagicMock(spec=ServerClient, global_config_dict={}),
+        )
+
+        result = model._preprocess_chat_completion_create_params(
+            MagicMock(session={SESSION_ID_KEY: "session-0"}),
+            {"messages": [{"role": "user", "content": "hello"}]},
+        )
+
+        assert result["session_params"] == {"session_id": "session-0"}
+        assert config.extra_body is None
+
+    def test_preprocess_rejects_non_mapping_session_affinity_body(self) -> None:
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            base_url="http://router/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            entrypoint="",
+            name="",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            extra_body={"session_params": "invalid"},
+            forward_session_id_in_body=True,
+        )
+        model = VLLMModel(
+            config=config,
+            server_client=MagicMock(spec=ServerClient, global_config_dict={}),
+        )
+
+        with raises(ValueError, match="requires session_params to be a mapping"):
+            model._preprocess_chat_completion_create_params(
+                MagicMock(session={SESSION_ID_KEY: "session-0"}),
+                {"messages": [{"role": "user", "content": "hello"}]},
+            )
+
+    def test_preprocess_does_not_add_session_affinity_body_by_default(self, monkeypatch: MonkeyPatch) -> None:
+        model = self._setup_server(monkeypatch)
+
+        result = model._preprocess_chat_completion_create_params(
+            MagicMock(session={SESSION_ID_KEY: "session-0"}),
+            {"messages": [{"role": "user", "content": "hello"}]},
+        )
+
+        assert "session_params" not in result
+
     def test_responses_multistep(self, monkeypatch: MonkeyPatch):
         server = self._setup_server(monkeypatch)
         app = server.setup_webserver()

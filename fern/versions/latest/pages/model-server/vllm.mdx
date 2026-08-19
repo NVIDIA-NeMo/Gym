@@ -244,6 +244,9 @@ Make sure your input JSONL respects the selected mode in the [Constraint matrix]
 | `replace_developer_role_with_system` | `bool` | `false` | Convert "developer" role to "system" for models that don't support developer role. |
 | `chat_template_kwargs` | `dict` | `null` | Override chat template parameters. Forwarded to upstream chat completions when `use_completions_api: false`, or to `apply_chat_template` when `use_completions_api: true` and `render_chat_template: true`. |
 | `extra_body` | `dict` | `null` | Pass additional vLLM-specific parameters (e.g., `guided_json`). |
+| `default_headers` | `dict[str, str]` | `{}` | Headers included in every upstream model request. |
+| `session_affinity_header` | `str` | `null` | Forward each NeMo Gym session ID in this header, for routers that use header-based session affinity. |
+| `forward_session_id_in_body` | `bool` | `false` | On Chat Completions requests, also forward the session ID as `session_params.session_id`, for cache-aware routers that read their routing key from the request body. |
 | `use_completions_api` | `bool` | `false` | When `true`, drives vLLM's `/v1/completions` instead of `/v1/chat/completions`. See [Two upstream backends](#two-upstream-backends). |
 | `render_chat_template` | `bool` | `false` | Only consulted when `use_completions_api: true`. When `true`, renders messages to the `prompt` string client-side via `AutoTokenizer.apply_chat_template`. Lifts the multi-turn restriction. See [Render modes](#render-modes). |
 | `tokenizer` | `str` | `null` | Only consulted when `use_completions_api: true` and `render_chat_template: true`. HF identifier or local path passed to `AutoTokenizer.from_pretrained`. When `null`, falls back to `model`. Use this to borrow a chat template from a different model. |
@@ -267,6 +270,21 @@ extra_body:
   min_tokens: 10
   repetition_penalty: 1.1
 ```
+
+### Advanced: router session affinity
+
+Routers differ in where they read a session key. Header-based policies can use
+`session_affinity_header`; cache-aware Chat Completions policies that inspect
+`session_params.session_id` additionally need `forward_session_id_in_body`:
+
+```yaml
+session_affinity_header: X-Session-ID
+forward_session_id_in_body: true
+```
+
+Both settings are opt-in. When body forwarding is enabled, the live Gym session
+ID overrides any static `session_params.session_id` from `extra_body`, while
+other `session_params` fields are preserved.
 
 ## Use VLLMModel with multiple replicas of a model endpoint
 

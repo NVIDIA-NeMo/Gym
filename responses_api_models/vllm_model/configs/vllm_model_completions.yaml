@@ -18,3 +18,6 @@ policy_model:
       use_completions_api: true
       chat_template_kwargs: null
       extra_body: null
+      default_headers: {}
+      session_affinity_header: null
+      forward_session_id_in_body: false

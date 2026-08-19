@@ -359,6 +359,10 @@ def _attach_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> No
         _strip_capture_payloads(result)
 
 
+# Public integration point for callers that use ``run_examples`` directly.
+attach_trajectory_record = _attach_trajectory_record
+
+
 def _get_max_rollout_attempts() -> int:
     """Read ``NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`` (positive int) or default to 3."""
     raw = os.environ.get("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS")

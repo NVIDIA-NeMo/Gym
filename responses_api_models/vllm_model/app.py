@@ -175,6 +175,14 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
         default=None,
         description="Header used to forward the NeMo Gym session ID to an upstream router.",
     )
+    forward_session_id_in_body: bool = Field(
+        default=False,
+        description=(
+            "Also forward the NeMo Gym session ID as "
+            "session_params.session_id for upstream routers whose "
+            "cache-aware Chat Completions policy reads the request body."
+        ),
+    )
     # Optional prefix for resolving relative ``metadata.audio_path`` (or
     # entries in ``metadata.audio_paths``) against. Absolute paths are used
     # as-is. When unset, relative paths raise. Audio is always inlined as a
@@ -552,6 +560,21 @@ class VLLMModel(SimpleResponsesAPIModel):
             else:
                 # No user message found — create one with just the audio blocks.
                 body_dict.setdefault("messages", []).append({"role": "user", "content": list(audio_blocks)})
+
+        if self.config.forward_session_id_in_body:
+            configured_session_params = body_dict.get("session_params")
+            if configured_session_params is None:
+                session_params = {}
+            elif isinstance(configured_session_params, dict):
+                # Do not mutate config.extra_body or a per-request metadata dict.
+                session_params = deepcopy(configured_session_params)
+            else:
+                raise ValueError(
+                    "forward_session_id_in_body requires session_params to be a mapping "
+                    f"when it is also supplied through extra_body; got {type(configured_session_params).__name__}."
+                )
+            session_params["session_id"] = request.session[SESSION_ID_KEY]
+            body_dict["session_params"] = session_params
 
         return body_dict
 
