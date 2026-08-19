@@ -1,0 +1,79 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Portable wire and integrity contracts for framework-owned token staging.
+
+This namespace is separate from Gym's complete-record ``TokenSink`` and
+``TokenSource`` APIs. It carries per-call deltas between inference workers and
+framework storage without importing serving or framework dependencies.
+"""
+
+from nemo_gym.token_id_capture.staging.conformance import assert_golden_vectors, load_golden_vectors
+from nemo_gym.token_id_capture.staging.digest import (
+    EMPTY_EXTRAS_DIGEST,
+    EXTRAS_DIGEST_VERSION,
+    STAGING_DIGEST_VERSION,
+    STAGING_SCHEMA_VERSION,
+    build_staging_delta,
+    compute_extras_digest,
+    compute_staging_digest,
+    encode_token_ids,
+    hash_token_ids,
+)
+from nemo_gym.token_id_capture.staging.protocols import StagingSink, StagingSource, WeightVersionProvider
+from nemo_gym.token_id_capture.staging.records import (
+    DIGEST_VERSION,
+    SCHEMA_VERSION,
+    CallRecord,
+    CaptureAdmission,
+    CaptureDisposition,
+    CaptureMode,
+    CommitCoords,
+    RolloutReceipt,
+    StagedCallRecord,
+    StagedCallSnapshot,
+    StageResult,
+    staging_key,
+)
+
+
+__all__ = [
+    "DIGEST_VERSION",
+    "EMPTY_EXTRAS_DIGEST",
+    "EXTRAS_DIGEST_VERSION",
+    "SCHEMA_VERSION",
+    "STAGING_DIGEST_VERSION",
+    "STAGING_SCHEMA_VERSION",
+    "CallRecord",
+    "CaptureAdmission",
+    "CaptureDisposition",
+    "CaptureMode",
+    "CommitCoords",
+    "RolloutReceipt",
+    "StagedCallRecord",
+    "StagedCallSnapshot",
+    "StageResult",
+    "StagingSink",
+    "StagingSource",
+    "WeightVersionProvider",
+    "assert_golden_vectors",
+    "build_staging_delta",
+    "compute_extras_digest",
+    "compute_staging_digest",
+    "encode_token_ids",
+    "hash_token_ids",
+    "load_golden_vectors",
+    "staging_key",
+]
