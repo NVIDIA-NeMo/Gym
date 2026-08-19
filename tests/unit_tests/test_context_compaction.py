@@ -1,9 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from nemo_gym.context_history import (
+import subprocess
+import sys
+
+from nemo_gym.context_compaction import (
     ContextGuardConfig,
-    ContextHistoryConfig,
     ContextMeasurements,
     HistoryController,
     HistoryPolicyConfig,
@@ -14,19 +16,35 @@ from nemo_gym.context_history import (
     RecencyHistoryPolicyConfig,
     SemanticHistory,
     TurnChunkedHistoryController,
-    assert_identity_shadow_matches,
     build_guard_outcome_records,
     build_history_policy,
     capture_observed_completion,
     descriptor_is_append_compatible,
     evaluate_context_guards,
     materialize_history_view,
+    normalize_semantic_items,
     ordered_media_is_append_compatible,
     register_history_policy,
     register_semantic_part_kind,
     unregister_history_policy,
     unregister_semantic_part_kind,
 )
+
+
+def test_context_compaction_modules_import_independently() -> None:
+    for module_name in (
+        "nemo_gym.context_compaction",
+        "nemo_gym.context_compaction.config",
+        "nemo_gym.context_compaction.controller",
+        "nemo_gym.context_compaction.history",
+        "nemo_gym.context_compaction.materialization",
+        "nemo_gym.context_compaction.policies",
+        "nemo_gym.context_compaction.session",
+    ):
+        subprocess.run(
+            [sys.executable, "-c", f"import {module_name}"],
+            check=True,
+        )
 
 
 def _observation(text: str, *images: str) -> dict:
@@ -507,8 +525,8 @@ def test_media_arena_deduplicates_repeated_payload_across_linear_events():
     }
 
 
-def test_identity_shadow_compares_normalized_legacy_items():
-    history = SemanticHistory("rollout-shadow")
+def test_identity_view_matches_normalized_source_items():
+    history = SemanticHistory("rollout-identity")
     initial = _observation("initial", "data:image/png;base64,A")
     completion = {
         "role": "assistant",
@@ -522,42 +540,7 @@ def test_identity_shadow_compares_normalized_legacy_items():
     history.append_items([completion], turn_id=1)
     view = materialize_history_view(history, IdentityHistoryPolicy().plan(history, decision_turn=1))
 
-    assert_identity_shadow_matches([initial, completion], view)
-
-
-def test_identity_shadow_mismatch_has_bounded_diagnostics():
-    history = SemanticHistory("rollout-mismatch")
-    history.append_items([_observation("expected")], turn_id=0, is_initial_context=True)
-    view = materialize_history_view(history, IdentityHistoryPolicy().plan(history, decision_turn=0))
-
-    try:
-        assert_identity_shadow_matches([_observation("different")], view)
-    except RuntimeError as exc:
-        message = str(exc)
-        assert "legacy_digest=" in message
-        assert "shadow_digest=" in message
-        assert "expected" not in message
-        assert "different" not in message
-    else:  # pragma: no cover
-        raise AssertionError("identity mismatch must fail closed")
-
-
-def test_shadow_configuration_rejects_non_identity_policy():
-    try:
-        ContextHistoryConfig.model_validate(
-            {
-                "enabled": True,
-                "shadow_only": True,
-                "policy": {
-                    "type": "recency",
-                    "config": {"images": {"enabled": True}},
-                },
-            }
-        )
-    except ValueError:
-        pass
-    else:  # pragma: no cover
-        raise AssertionError("shadow-only mode must use identity policy")
+    assert normalize_semantic_items([initial, completion]) == view.items
 
 
 def test_identity_controller_emits_no_boundary_for_append_only_turns():
@@ -913,6 +896,6 @@ def test_hundred_turn_chunked_recency_stays_bounded_and_accounts_for_every_actio
     # One protected initial image, three historical image groups, and at most
     # one image appended inside the current two-action chunk.
     assert max(active_image_counts) <= 5
-    # The semantic shadow retains every unique payload for validation even
-    # though the materialized model view remains bounded.
+    # Semantic history retains every unique payload even though the
+    # materialized model view remains bounded.
     assert len(history.media_arena) == 100
