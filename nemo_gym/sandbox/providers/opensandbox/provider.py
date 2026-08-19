@@ -338,6 +338,12 @@ def _to_platform_spec(platform: dict[str, Any]) -> Any:
     return PlatformSpec(**platform)
 
 
+def _to_network_policy(network_policy: Mapping[str, Any]) -> Any:
+    from opensandbox.models.sandboxes import NetworkPolicy
+
+    return NetworkPolicy.model_validate(network_policy)
+
+
 def _to_volumes(volumes: list[Mapping[str, Any]]) -> list[Any]:
     _, _, _, _, Volume = _require_opensandbox_sdk()
     return [Volume(**dict(volume)) for volume in volumes]
@@ -1050,9 +1056,7 @@ class OpenSandboxProvider:
         if options.platform is not None:
             kwargs["platform"] = _to_platform_spec(options.platform)
         if options.network_policy is not None:
-            from opensandbox.models.sandboxes import NetworkPolicy
-
-            kwargs["network_policy"] = NetworkPolicy.model_validate(options.network_policy)
+            kwargs["network_policy"] = _to_network_policy(options.network_policy)
         if options.volumes:
             kwargs["volumes"] = _to_volumes(list(options.volumes))
         if self._create.skip_health_check:
