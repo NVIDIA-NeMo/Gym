@@ -32,10 +32,6 @@ ROUTER_SERVER_PORT=8000
 PREFILL_SERVER_PORT=8001
 DECODE_SERVER_PORT=8002
 
-PREFILL_DP_RPC_PORT=13345
-DECODE_DP_RPC_PORT=13346
-
-
 EVAL_COMMAND=$(cat <<EOF
 set -euo pipefail
 
@@ -64,7 +60,7 @@ gym eval run \
     ++split=benchmark \
     ++use_absolute_ip=true \
     ++reuse_existing_data_preparation=true \
-    ++policy_base_url=http://\$(getent hosts "\$PREFILL_HEAD" | awk 'NR == 1 {print \$1}'):$ROUTER_SERVER_PORT/v1 \
+    ++policy_base_url=http://\$(getent hosts "\$ROUTER_NODE" | awk 'NR == 1 {print \$1}'):$ROUTER_SERVER_PORT/v1 \
     ++policy_api_key=dummy_api_key \
     ++policy_model_name=$MODEL \
     ++upload_rollouts_to_wandb=false \
@@ -91,10 +87,6 @@ command=$(cat <<EOF
 
 set -euo pipefail
 
-# Input arguments and validation
-PREFILL_HEAD=\$PREFILL_HEAD
-DECODE_HEAD=\$DECODE_HEAD
-
 # Nemotron's three-read Mamba SSM state must use the dimension-sequence layout when KV transfer is enabled.
 # Not used when the model has no Mamba layers.
 export VLLM_SSM_CONV_STATE_LAYOUT=DS
@@ -114,23 +106,7 @@ export UCX_RNDV_THRESH=0
 source "$VLLM_CONFIG"
 
 this_node_hostname=\$(hostname)
-# Split nodes here by index
 if (( SLURM_PROCID == 0 )); then
-    # Prefill head
-
-    VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
-    VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
-        --host \$this_node_hostname \
-        --port $PREFILL_SERVER_PORT \
-        --data-parallel-size $NUM_PREFILL_NODES \
-        --data-parallel-address \$this_node_hostname \
-        --data-parallel-rpc-port $PREFILL_DP_RPC_PORT \
-        --api-server-count 1 \
-        &
-    prefill_pid=\$!
-    trap 'kill "\$prefill_pid" 2>/dev/null || true' EXIT
-
     # @bxyu-nvidia: for --intra-node-data-parallel-size: Not sure what to set this to other than 1. I can't tell from the docs what is appropriate and 1 seems to work fine.
     # Set a super long request timeout since some reasoning requests may take a long time to generate.
     # Don't manually wait as vllm-router will wait for the URLs to come up
@@ -139,44 +115,34 @@ if (( SLURM_PROCID == 0 )); then
         --vllm-pd-disaggregation \
         --prefill http://\$PREFILL_HEAD:$PREFILL_SERVER_PORT \
         --decode http://\$DECODE_HEAD:$DECODE_SERVER_PORT \
-        --host \$PREFILL_HEAD \
+        --host \$this_node_hostname \
         --port $ROUTER_SERVER_PORT \
         --intra-node-data-parallel-size 1 \
         --request-timeout-secs 86400 \
         --log-level error
-elif (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
-    # Prefill worker
+fi
+
+# Split nodes here by index
+if (( SLURM_PROCID <= $NUM_PREFILL_NODES )); then
+    # Prefill head
+
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
     vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
-        --headless \
-        --data-parallel-size $NUM_PREFILL_NODES \
-        --data-parallel-start-rank \$SLURM_PROCID \
-        --data-parallel-address \$PREFILL_HEAD \
-        --data-parallel-rpc-port $PREFILL_DP_RPC_PORT
-elif (( SLURM_PROCID == NUM_PREFILL_NODES )); then
-    # Decode head
-
+        --host \$this_node_hostname \
+        --port $PREFILL_SERVER_PORT \
+        --api-server-count 1 \
+        &
+    prefill_pid=\$!
+    trap 'kill "\$prefill_pid" 2>/dev/null || true' EXIT
+else
+    # Decode worker
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
     vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
         --host \$this_node_hostname \
         --port $DECODE_SERVER_PORT \
-        --data-parallel-size $NUM_DECODE_NODES \
-        --data-parallel-address \$DECODE_HEAD \
-        --data-parallel-rpc-port $DECODE_DP_RPC_PORT \
         --api-server-count 1
-else
-    # Decode worker
-
-    VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
-    VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
-        --headless \
-        --data-parallel-size $NUM_DECODE_NODES \
-        --data-parallel-start-rank \$(( SLURM_PROCID - $NUM_PREFILL_NODES )) \
-        --data-parallel-address \$DECODE_HEAD \
-        --data-parallel-rpc-port $DECODE_DP_RPC_PORT
 fi
 EOF
 )
@@ -186,11 +152,7 @@ batch_command=$(cat <<EOF
 set -euo pipefail
 
 nodes=(\$(scontrol show hostnames "\$SLURM_JOB_NODELIST"))
-PREFILL_HEAD="\${nodes[0]}"
-DECODE_HEAD="\${nodes[$NUM_PREFILL_NODES]}"
 
-PREFILL_HEAD="\$PREFILL_HEAD" \
-DECODE_HEAD="\$DECODE_HEAD" \
 srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 \
     --container-image=$CONTAINER \
     --container-name=container-on-node \
@@ -223,7 +185,7 @@ if (( $should_run_eval )); then
 
     # @bxyu-nvidia: We need --cpus-per-task=SLURM_CPUS_ON_NODE, otherwise we run into a lot of ServerDisconnectedError and ConnectionResetByPeer errors from Gym servers and vLLM. Not sure what the correlation is
     eval_status=0
-    PREFILL_HEAD="\$PREFILL_HEAD" \
+    ROUTER_NODE="\${nodes[0]}" \
     srun --overlap --exact --nodes=1 --ntasks=1 --cpus-per-task=\$SLURM_CPUS_ON_NODE --nodelist="\$EVAL_NODE" --gpus=0 \
         --container-image=$CONTAINER \
         --container-name=eval-container-on-node \
