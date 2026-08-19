@@ -78,6 +78,10 @@ from nemo_gym.token_id_capture.staging.routes import routed_experts_token_count
 from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
 
 
+OPENHANDS_CAPTURE_OVERLAY_DIR = Path(__file__).parent / "openhands_capture_overlay"
+OPENHANDS_CAPTURE_OVERLAY_MOUNT = "/nemo_gym_capture_overlay"
+
+
 ########################################
 # START Configuration
 ########################################
@@ -1868,6 +1872,7 @@ AGENT_FRAMEWORK_COMMIT={commit} \\
             "cp /openhands_setup/miniforge3/bin/jq /usr/local/bin/jq 2>/dev/null || true && "
             # Use pre-built OpenHands
             "cd /openhands_setup/OpenHands && "
+            f"export PYTHONPATH={OPENHANDS_CAPTURE_OVERLAY_MOUNT}:${{PYTHONPATH:-}} && "
             "export RUNTIME=local && "
             f'date +"%s.%N" > {self.config.generation_apptainer_spinup_timestamp_mounted_fpath} && '
             f"{log_cmd}"
@@ -1875,6 +1880,7 @@ AGENT_FRAMEWORK_COMMIT={commit} \\
             f"export NEMO_GYM_METRICS_FPATH={self.config.base_mounted_dir}/nemo_gym_metrics.json && "
             f"export NEMO_GYM_CONFIG_DICT={self.config.ng_global_config_dict_str} && "
             f"export NEMO_GYM_MODEL_SERVER_NAME={self.config.model_server_name} &&"
+            f"export NEMO_GYM_MODEL_SERVER_BASE_URL={shlex.quote(model_server_base_url)} && "
             f"{capture_auth_cmd}"
             "export VIRTUAL_ENV=/openhands_setup/OpenHands/.venv && "
             "export PATH=$PATH:/openhands_setup/OpenHands/.venv/bin && "
@@ -3395,6 +3401,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                     f"--mount type=bind,src={openhands_dir}/logs,dst={openhands_dir}/logs",
                     f"--mount type=bind,src={openhands_dir}/evaluation/oh,dst=/openhands_setup/OpenHands/evaluation/oh",
                     f"--mount type=bind,src={openhands_dir}/evaluation/oh,dst={openhands_dir}/evaluation/oh",
+                    # OpenHands pins its own nemo-gym dependency. Keep that
+                    # dependency intact and inject only the external-process
+                    # capture routing compatibility patch via sitecustomize.
+                    f"--mount type=bind,src={OPENHANDS_CAPTURE_OVERLAY_DIR},dst={OPENHANDS_CAPTURE_OVERLAY_MOUNT},ro",
                     # Data
                     f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl",
                 ]

@@ -72,11 +72,18 @@ from nemo_gym.global_config import (
     get_global_config_dict,
 )
 from nemo_gym.profiling import Profiler
-from nemo_gym.rollout_correlation import current_rollout_id, maybe_rollout_id_from_run_body
+from nemo_gym.rollout_correlation import (
+    DATA_CAPABILITY_HEADER,
+    current_rollout_id,
+    maybe_rollout_id_from_run_body,
+)
 
 
 _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
 _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG: bool = False
+
+NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME = "NEMO_GYM_MODEL_SERVER_NAME"
+NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME = "NEMO_GYM_MODEL_SERVER_BASE_URL"
 
 
 class GlobalAIOHTTPAsyncClientConfig(BaseModel):
@@ -330,7 +337,22 @@ class ServerClient(BaseModel):
         self, server_name: str, url_path: str, method: str, **kwargs: Unpack[_RequestOptions]
     ) -> ClientResponse:
         server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
-        base_url = self._build_server_base_url(server_config_dict)
+        model_server_name = getenv(NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME)
+        model_server_base_url = getenv(NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME)
+        if model_server_base_url and server_name == model_server_name:
+            # External agent processes do not inherit Gym's request-scoped
+            # ContextVars.  Their launcher supplies the already-correlated
+            # model URL explicitly instead.  Preserve that path rather than
+            # resolving the unprefixed host/port from global config.
+            base_url = model_server_base_url.rstrip("/")
+            if f"/{TOKEN_CAPTURE_PATH_SEGMENT}/" in f"{base_url}/":
+                capability = getenv("OPENAI_API_KEY")
+                if capability:
+                    headers = dict(kwargs.get("headers") or {})
+                    headers.setdefault(DATA_CAPABILITY_HEADER, capability)
+                    kwargs["headers"] = headers
+        else:
+            base_url = self._build_server_base_url(server_config_dict)
 
         json_obj = kwargs.get("json")
         if "json" in kwargs:

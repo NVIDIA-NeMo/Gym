@@ -1045,6 +1045,12 @@ class TestOpenHandsHarnessProcessor:
             processor.get_run_command()
             script = self._read_agent_script(config)
             assert "http://test-host:12345/ng-rollout/rollout-1/training-token-capture/v1" in script
+            assert (
+                "NEMO_GYM_MODEL_SERVER_BASE_URL="
+                "http://test-host:12345/ng-rollout/rollout-1/training-token-capture"
+                in script
+            )
+            assert "export PYTHONPATH=/nemo_gym_capture_overlay:${PYTHONPATH:-}" in script
             assert 'OPENAI_API_KEY="$(cat /trajectories_mount/.capture_capability)"' in script
             assert 'api_key = "EMPTY"' not in script
 
@@ -2076,6 +2082,10 @@ class TestSWEBenchWrapperBuildApptainerCommand:
             assert "apptainer exec" in result
             assert "--writable-tmpfs" in result
             assert params.container in result
+            assert (
+                f"src={swe_app.OPENHANDS_CAPTURE_OVERLAY_DIR},"
+                "dst=/nemo_gym_capture_overlay,ro" in result
+            )
 
     def test_eval_mode_swebench_mounts(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
