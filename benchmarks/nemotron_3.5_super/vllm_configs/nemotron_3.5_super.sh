@@ -24,7 +24,7 @@ VLLM_COMMON_ARGS=(
 )
 VLLM_PREFILL_ARGS=(
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}'
-    --max-num-batched-tokens 33920
+    --max-num-batched-tokens 135680
     --max-num-seqs 512
     --data-parallel-size-local 1
     --tensor-parallel-size 4
