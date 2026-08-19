@@ -796,6 +796,39 @@ def _multi_node_config():
     )
 
 
+def test_build_sbatch_script_multi_node_no_backend_config_defaults_to_ray(bench_dir):
+    # Node count alone should be enough to select the ray backend - no distributed_backend needed.
+    config = SubmitConfig.model_validate(
+        {
+            "services": {
+                "vllm_model": {
+                    "type": "vllm",
+                    "container": "vllm:latest",
+                    "model": "org/model",
+                    "tensor_parallel_size": 8,
+                }
+            },
+            "compute": {
+                "cluster": {
+                    "type": "slurm",
+                    "account": "my-account",
+                    "hostname": "foo",
+                    "node_pools": {"main": {"partition": "gpu", "nodes": 4, "ntasks_per_node": 1}},
+                }
+            },
+            "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}},
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )
+    assert config.services["vllm_model"].distributed_backend.type == "ray"
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    vllm_line = next(line for line in script.splitlines() if "vllm:latest" in line)
+    assert "--nodes=4" in vllm_line
+    assert "ray symmetric-run" in script
+
+
 def test_build_sbatch_script_multi_node_vllm_srun_gets_node_flags(bench_dir):
     config = _multi_node_config()
     benchmark = config.driver.benchmarks["gsm8k"]

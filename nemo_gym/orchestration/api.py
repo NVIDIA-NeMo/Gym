@@ -206,16 +206,10 @@ class SubmitConfig(_StrictModel):
                     f"({', '.join(sorted(compute_names))})."
                 )
 
-            if (
-                is_multi_node
-                and isinstance(service, VllmServiceConfig)
-                and (service.distributed_backend is None or service.distributed_backend.type != "ray")
-            ):
-                raise ValueError(
-                    f"Service '{service_name}' is placed on compute '{sole_compute}', which spans multiple nodes "
-                    f"({total_nodes} total). vLLM services on multi-node compute must use "
-                    "distributed_backend: {type: ray}."
-                )
+            if isinstance(service, VllmServiceConfig) and is_multi_node:
+                # Node count is authoritative: multi-node compute always needs the `ray` backend to
+                # span nodes, regardless of what (if anything) was set/defaulted at the service level.
+                service.distributed_backend = RayDistributedBackend()
 
             if (
                 is_multi_node

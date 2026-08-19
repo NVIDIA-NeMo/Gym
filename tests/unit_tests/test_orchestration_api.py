@@ -154,14 +154,16 @@ def test_ray_backend_with_single_instance_accepted():
     assert config.services["svc"].distributed_backend.type == "ray"
 
 
-def test_vllm_service_backend_on_multi_node_compute_raises():
-    with pytest.raises(ValidationError, match="must use distributed_backend"):
-        SubmitConfig.model_validate(_config(services={"svc": _MULTI_SERVICE}, compute=COMPUTE_MULTI_NODE))
+def test_mp_backend_on_multi_node_compute_overridden_to_ray():
+    # Node count is authoritative: an explicit (or auto-defaulted) `mp` backend is overridden to
+    # `ray` on multi-node compute instead of raising, so users don't have to spell it out.
+    config = SubmitConfig.model_validate(_config(services={"svc": _MULTI_SERVICE}, compute=COMPUTE_MULTI_NODE))
+    assert config.services["svc"].distributed_backend.type == "ray"
 
 
-def test_vllm_service_no_backend_on_multi_node_compute_raises():
-    with pytest.raises(ValidationError, match="must use distributed_backend"):
-        SubmitConfig.model_validate(_config(compute=COMPUTE_MULTI_NODE))
+def test_no_backend_on_multi_node_compute_defaults_to_ray():
+    config = SubmitConfig.model_validate(_config(compute=COMPUTE_MULTI_NODE))
+    assert config.services["svc"].distributed_backend.type == "ray"
 
 
 def test_ray_backend_on_multi_node_compute_accepted():
