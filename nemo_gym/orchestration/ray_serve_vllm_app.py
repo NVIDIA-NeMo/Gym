@@ -54,7 +54,12 @@ def build_app(args: dict) -> Any:
     from vllm.entrypoints.openai.api_server import build_app as build_vllm_fastapi_app
     from vllm.entrypoints.openai.api_server import init_app_state
     from vllm.entrypoints.openai.cli_args import make_arg_parser
-    from vllm.utils import FlexibleArgumentParser
+
+    try:
+        # Newer vLLM releases moved FlexibleArgumentParser out of vllm.utils.
+        from vllm.utils.argparse_utils import FlexibleArgumentParser
+    except ImportError:
+        from vllm.utils import FlexibleArgumentParser
 
     model = args["model"]
     port = int(args.get("port", 8000))
