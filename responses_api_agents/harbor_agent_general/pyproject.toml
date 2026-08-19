@@ -1,5 +1,5 @@
 [project]
-name = "harbor-agent-agent"
+name = "harbor-agent-general"
 version = "0.1.0"
 requires-python = ">=3.13.14"
 dependencies = [
