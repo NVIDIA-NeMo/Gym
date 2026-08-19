@@ -42,8 +42,12 @@ Ambiguous matches remain unresolved rather than risking tokens from the wrong ca
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import hashlib
 import json
+import os
+import re
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -60,6 +64,95 @@ FINGERPRINT_VERSION = 1
 
 _FINGERPRINT_DOMAIN = b"nemo-gym-lineage"
 _CONTEXT_DOMAIN = b"nemo-gym-lineage-context"
+
+# Names of the token-free CallRecord custody columns a ledger row carries.
+# ``staging_digest`` is the worker's staged-record digest; the row's ``digest``
+# key remains the lineage digest over the cumulative token IDs.
+_CUSTODY_FIELDS = (
+    "parent_call_id",
+    "staging_key",
+    "weight_version",
+    "prev_len",
+    "delta_len",
+    "cum_len",
+    "staging_digest",
+    "extras_digest",
+    "mode",
+    "logical_request_id",
+)
+
+
+def _custody_columns(
+    parent_call_id: str | None,
+    staging_key: str | None,
+    weight_version: int | None,
+    prev_len: int | None,
+    delta_len: int | None,
+    cum_len: int | None,
+    staging_digest: str | None,
+    extras_digest: str | None,
+    mode: str | None,
+    logical_request_id: str | None,
+) -> dict:
+    """Return the ledger custody columns, or an empty dict for a lineage-only row."""
+    if staging_key is None:
+        return {}
+    return {
+        "parent_call_id": parent_call_id,
+        "staging_key": staging_key,
+        "weight_version": weight_version,
+        "prev_len": prev_len,
+        "delta_len": delta_len,
+        "cum_len": cum_len,
+        "staging_digest": staging_digest,
+        "extras_digest": extras_digest,
+        "mode": mode,
+        "logical_request_id": logical_request_id,
+    }
+
+
+def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
+    """Build the token-free ``RolloutManifest`` payload from ledger rows.
+
+    Committed custody rows become ``CallRecord`` payloads; failure rows become
+    ``failures`` entries. Lineage-only rows (local capture) carry no custody
+    columns and are not part of a capture manifest.
+    """
+    # Deferred: staging.records pulls in the digest module; lineage stays light.
+    from nemo_gym.token_id_capture.staging.records import (
+        CallRecord,
+        ManifestFailure,
+        RolloutManifest,
+    )
+
+    records = []
+    failures = []
+    for row in rows:
+        if row.get("failure_reason") is not None:
+            failures.append(
+                ManifestFailure(
+                    model_call_id=str(row["model_call_id"]),
+                    reason=str(row["failure_reason"]),
+                )
+            )
+        elif row.get("staging_key") is not None:
+            records.append(
+                CallRecord(
+                    model_call_id=str(row["model_call_id"]),
+                    parent_call_id=row.get("parent_call_id"),
+                    prev_len=int(row["prev_len"]),
+                    delta_len=int(row["delta_len"]),
+                    cum_len=int(row["cum_len"]),
+                    weight_version=int(row["weight_version"]),
+                    digest=str(row["staging_digest"]),
+                    extras_digest=str(row["extras_digest"]),
+                    staging_key=str(row["staging_key"]),
+                    mode=str(row["mode"]),
+                    logical_request_id=row.get("logical_request_id"),
+                )
+            )
+    manifest = RolloutManifest(rollout_id=rollout_id, records=records, failures=failures)
+    return manifest.model_dump(mode="json")
 
 
 def _update_field(hasher: Any, tag: bytes, value: str) -> None:
@@ -487,15 +580,20 @@ class InMemoryLineageStore:
     """Reference resolver for in-process framework backends and tests.
 
     Production wiring uses ``FileLineageStore`` when a token store exists.
-    This class supports in-process framework adapters and tests.
     Its index is memory-only.
     Eviction or restart leaves affected continuations unresolved.
     That failure mode is safe but can mask otherwise usable rollouts.
-    Production adapters should back the incremental resolver with durable records.
+    Multi-worker deployments require a shared ``LineageStore``.
+    The resolution index evicts rollouts under memory bounds, so this store
+    cannot serve as an external-staging capture ledger (completeness would
+    break); it remains for unit tests and single-worker development. Its
+    ledger rows are kept in a separate unbounded map so ledger unit tests see
+    file-store semantics.
     """
 
     def __init__(self, max_rollouts: int = 512, max_tokens: int = 8_000_000) -> None:
         self.index = LineageIndex(max_rollouts=max_rollouts, max_tokens=max_tokens)
+        self._ledgers: dict[str, list[dict]] = {}
 
     async def resolve(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
         return self.index.for_rollout(rollout_id).resolve(request_items)
@@ -507,8 +605,68 @@ class InMemoryLineageStore:
     def is_process_shared(self) -> bool:
         return False
 
+    async def record(
+        self,
+        rollout_id: str,
+        model_call_id: str,
+        request_items: list[dict],
+        response_items: list[dict],
+        cumulative_token_ids: list[int],
+        digest: str,
+        *,
+        parent_call_id: str | None = None,
+        staging_key: str | None = None,
+        weight_version: int | None = None,
+        prev_len: int | None = None,
+        delta_len: int | None = None,
+        cum_len: int | None = None,
+        staging_digest: str | None = None,
+        extras_digest: str | None = None,
+        mode: str | None = None,
+        logical_request_id: str | None = None,
+    ) -> None:
+        self.index.for_rollout(rollout_id).record(
+            model_call_id,
+            list(request_items) + list(response_items),
+            cumulative_token_ids,
+            digest,
+            context_len=len(request_items),
+        )
+        custody = _custody_columns(
+            parent_call_id,
+            staging_key,
+            weight_version,
+            prev_len,
+            delta_len,
+            cum_len,
+            staging_digest,
+            extras_digest,
+            mode,
+            logical_request_id,
+        )
+        if custody:
+            rows = self._ledgers.setdefault(rollout_id, [])
+            row = {"model_call_id": model_call_id, **custody}
+            if not any(existing == row for existing in rows):
+                rows.append(row)
+
+    async def record_failure(self, rollout_id: str, model_call_id: str, reason: str) -> None:
+        rows = self._ledgers.setdefault(rollout_id, [])
+        row = {"model_call_id": model_call_id, "failure_reason": reason}
+        if not any(existing == row for existing in rows):
+            rows.append(row)
+
+    async def manifest(self, rollout_id: str) -> dict:
+        return _manifest_from_rows(rollout_id, list(self._ledgers.get(rollout_id) or []))
+
+    async def has_rows(self, rollout_id: str) -> bool:
+        if self._ledgers.get(rollout_id):
+            return True
+        return bool(self.index.for_rollout(rollout_id).by_call_id)
+
     async def close(self) -> None:
         self.index.clear()
+        self._ledgers.clear()
 
 
 class IncrementalLineageStore:
@@ -677,6 +835,12 @@ class FileLineageStore(IncrementalLineageStore):
 
         super().__init__(max_cached_rollouts=max_cached_rollouts)
         self._store = TokenCaptureStore(root)
+        # The capture-ledger rows live beside the token JSONL. Each worker
+        # caches parsed rows through its last byte offset; locked appends
+        # provide read-after-write visibility across workers.
+        self._ledger_root = Path(root)
+        self._ledger_root.mkdir(parents=True, exist_ok=True)
+        self._ledger_cache: dict[str, tuple[int, int, list[dict]]] = {}
 
     def _read_locked(self, rollout_id: str):
         return self._store._locked(rollout_id, shared=True)
@@ -711,3 +875,206 @@ class FileLineageStore(IncrementalLineageStore):
         with self._store.path_for(rollout_id).open("rb") as handle:
             handle.seek(ref)
             return TokenEntry.model_validate(orjson.loads(handle.readline()))
+
+    # --- CaptureLedger surface -------------------------------------------
+    # External staging commits token-bearing ledger rows through ``record``
+    # instead of TokenEntry JSONL, so resolution falls back to those rows
+    # when the incremental entry index has no match.
+
+    @staticmethod
+    def _validate_rollout_id(rollout_id: str) -> None:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", rollout_id):
+            raise ValueError(f"unsafe rollout_id {rollout_id!r}")
+
+    def _ledger_path(self, rollout_id: str) -> Path:
+        self._validate_rollout_id(rollout_id)
+        return self._ledger_root / f"{rollout_id}.lineage.jsonl"
+
+    def _ledger_lock_path(self, rollout_id: str) -> Path:
+        self._validate_rollout_id(rollout_id)
+        return self._ledger_root / f"{rollout_id}.lineage.lock"
+
+    @contextmanager
+    def _locked(self, rollout_id: str):
+        lock_path = self._ledger_lock_path(rollout_id)
+        with lock_path.open("a+b") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    def _read(self, rollout_id: str) -> list[dict]:
+        path = self._ledger_path(rollout_id)
+        if not path.exists():
+            self._ledger_cache.pop(rollout_id, None)
+            return []
+        file_stat = path.stat()
+        inode, offset, cached = self._ledger_cache.get(rollout_id, (file_stat.st_ino, 0, []))
+        if inode != file_stat.st_ino or offset < 0 or offset > file_stat.st_size:
+            inode, offset, cached = file_stat.st_ino, 0, []
+        if offset == file_stat.st_size:
+            return cached
+
+        records = list(cached)
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            for line in handle:
+                payload = line.strip()
+                if not payload:
+                    continue
+                record = json.loads(payload)
+                if not isinstance(record, dict):
+                    raise ValueError(f"lineage record for {rollout_id} is not an object")
+                records.append(record)
+            offset = handle.tell()
+        self._ledger_cache[rollout_id] = (inode, offset, records)
+        return records
+
+    def _append(self, rollout_id: str, record: dict, records: list[dict]) -> None:
+        path = self._ledger_path(rollout_id)
+        created = not path.exists()
+        payload = json.dumps(record, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        with path.open("ab") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+            offset = handle.tell()
+            inode = os.fstat(handle.fileno()).st_ino
+        if created:
+            directory_fd = os.open(self._ledger_root, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        records.append(record)
+        self._ledger_cache[rollout_id] = (inode, offset, records)
+
+    def _resolve(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
+        resolution = super()._resolve(rollout_id, request_items)
+        if resolution.status != ParentResolutionStatus.UNRESOLVED:
+            return resolution
+        match = self._resolve_row(rollout_id, request_items)
+        if match is not None:
+            return LineageResolution(ParentResolutionStatus.RESOLVED, match=match)
+        return resolution
+
+    def _resolve_row(self, rollout_id: str, request_items: list[dict]) -> LineageMatch | None:
+        fingerprint = assistant_fingerprint(request_items)
+        if not fingerprint:
+            return None
+        with self._locked(rollout_id):
+            # Failure rows carry no fingerprint and can never resolve as parents.
+            records = [record for record in self._read(rollout_id) if record.get("fingerprint") == fingerprint]
+        if len(records) != 1:
+            return None
+        record = records[0]
+        context_len = int(record["context_len"])
+        if len(request_items) < context_len:
+            return None
+        if conversation_digest(request_items[:context_len]) != record["context_digest"]:
+            return None
+        return LineageMatch(
+            model_call_id=str(record["model_call_id"]),
+            cumulative_token_ids=tuple(int(token) for token in record["cumulative_token_ids"]),
+            digest=str(record["digest"]),
+        )
+
+    async def record(
+        self,
+        rollout_id: str,
+        model_call_id: str,
+        request_items: list[dict],
+        response_items: list[dict],
+        cumulative_token_ids: list[int],
+        digest: str,
+        *,
+        parent_call_id: str | None = None,
+        staging_key: str | None = None,
+        weight_version: int | None = None,
+        prev_len: int | None = None,
+        delta_len: int | None = None,
+        cum_len: int | None = None,
+        staging_digest: str | None = None,
+        extras_digest: str | None = None,
+        mode: str | None = None,
+        logical_request_id: str | None = None,
+    ) -> None:
+        custody = _custody_columns(
+            parent_call_id,
+            staging_key,
+            weight_version,
+            prev_len,
+            delta_len,
+            cum_len,
+            staging_digest,
+            extras_digest,
+            mode,
+            logical_request_id,
+        )
+        await asyncio.to_thread(
+            self._record,
+            rollout_id,
+            model_call_id,
+            request_items,
+            response_items,
+            cumulative_token_ids,
+            digest,
+            custody,
+        )
+
+    def _record(
+        self,
+        rollout_id: str,
+        model_call_id: str,
+        request_items: list[dict],
+        response_items: list[dict],
+        cumulative_token_ids: list[int],
+        digest: str,
+        custody: dict | None = None,
+    ) -> None:
+        record = {
+            "model_call_id": model_call_id,
+            "fingerprint": assistant_fingerprint(list(request_items) + list(response_items)),
+            "context_len": len(request_items),
+            "context_digest": conversation_digest(request_items),
+            "cumulative_token_ids": list(cumulative_token_ids),
+            "digest": digest,
+            **(custody or {}),
+        }
+        with self._locked(rollout_id):
+            records = self._read(rollout_id)
+            matches = [existing for existing in records if existing["model_call_id"] == model_call_id]
+            if matches:
+                if matches[0] != record:
+                    raise ValueError(f"conflicting lineage record for model call {model_call_id}")
+                return
+            self._append(rollout_id, record, records)
+
+    async def record_failure(self, rollout_id: str, model_call_id: str, reason: str) -> None:
+        await asyncio.to_thread(self._record_failure, rollout_id, model_call_id, reason)
+
+    def _record_failure(self, rollout_id: str, model_call_id: str, reason: str) -> None:
+        # No fingerprint: ``_resolve_row`` filters on it, so a failure row can
+        # never be returned as a parent. Idempotent for the identical reason.
+        record = {"model_call_id": model_call_id, "failure_reason": reason}
+        with self._locked(rollout_id):
+            records = self._read(rollout_id)
+            if any(existing == record for existing in records):
+                return
+            self._append(rollout_id, record, records)
+
+    async def manifest(self, rollout_id: str) -> dict:
+        return await asyncio.to_thread(self._manifest, rollout_id)
+
+    def _manifest(self, rollout_id: str) -> dict:
+        with self._locked(rollout_id):
+            rows = list(self._read(rollout_id))
+        return _manifest_from_rows(rollout_id, rows)
+
+    async def has_rows(self, rollout_id: str) -> bool:
+        return await asyncio.to_thread(self._has_rows, rollout_id)
+
+    def _has_rows(self, rollout_id: str) -> bool:
+        with self._locked(rollout_id):
+            return bool(self._read(rollout_id))

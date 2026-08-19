@@ -124,6 +124,42 @@ class LineageStore(Protocol):
 
 
 @runtime_checkable
+class CaptureLedger(LineageStore, Protocol):
+    """A lineage store that doubles as the per-rollout capture ledger.
+
+    External staging requires this surface: committed rows additionally carry
+    the token-free ``CallRecord`` custody columns (passed to ``record`` as
+    keyword arguments: ``parent_call_id``, ``staging_key``, ``weight_version``,
+    ``prev_len``/``delta_len``/``cum_len``, ``staging_digest``,
+    ``extras_digest``, ``mode``, ``logical_request_id``), poison rows are
+    appended with ``record_failure``, and the framework reads the rollout back
+    token-free through ``manifest``.
+    """
+
+    async def record_failure(self, rollout_id: str, model_call_id: str, reason: str) -> None:
+        """Append a poison row for a call whose capture did not commit.
+
+        Failure rows carry no fingerprint, so ``resolve`` never returns them
+        as parents. Any failure row poisons the rollout's manifest.
+        """
+        ...
+
+    async def manifest(self, rollout_id: str) -> dict:
+        """Return the rollout's token-free ledger as plain wire data.
+
+        The shape validates as ``staging.records.RolloutManifest``:
+        committed rows under ``records`` (each a ``CallRecord`` payload plus
+        ``logical_request_id``) and poison rows under ``failures``.
+        Cumulative token IDs never appear in the manifest.
+        """
+        ...
+
+    async def has_rows(self, rollout_id: str) -> bool:
+        """Return whether any ledger row (committed or failed) exists."""
+        ...
+
+
+@runtime_checkable
 class TokenSink(Protocol):
     """Receive captured records through Gym's file store or a framework transport."""
 

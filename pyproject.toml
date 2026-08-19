@@ -537,6 +537,24 @@ include = [
     "nemo_gym",
     "nemo_gym.*",
 ]
+# SWE harnesses create mutable runtime trees inside their package directory.
+# Package discovery must never race or ship those caches and rollout outputs.
+exclude = [
+    "responses_api_agents.swe_agents.results",
+    "responses_api_agents.swe_agents.results.*",
+    "responses_api_agents.swe_agents.swe_openhands_setup",
+    "responses_api_agents.swe_agents.swe_openhands_setup.*",
+    "responses_api_agents.swe_agents.swe_opencode_setup",
+    "responses_api_agents.swe_agents.swe_opencode_setup.*",
+    "responses_api_agents.swe_agents.swe_r2e_gym_setup",
+    "responses_api_agents.swe_agents.swe_r2e_gym_setup.*",
+    "responses_api_agents.swe_agents.swe_rebench_setup",
+    "responses_api_agents.swe_agents.swe_rebench_setup.*",
+    "responses_api_agents.swe_agents.swe_swebench_multilingual_setup",
+    "responses_api_agents.swe_agents.swe_swebench_multilingual_setup.*",
+    "responses_api_agents.swe_agents.swe_swebench_setup",
+    "responses_api_agents.swe_agents.swe_swebench_setup.*",
+]
 
 ################################################
 # Testing

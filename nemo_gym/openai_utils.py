@@ -861,8 +861,10 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     )
 
     async def _request(self, **request_kwargs: Dict) -> ClientResponse:
+        request_headers = request_kwargs.pop("headers", {})
         request_kwargs = request_kwargs | {
             "headers": self.default_headers
+            | request_headers
             | {
                 "Authorization": f"Bearer {self.api_key}",
             },
