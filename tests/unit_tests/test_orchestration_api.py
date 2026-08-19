@@ -202,6 +202,62 @@ def test_ray_backend_multi_node_dp_uneven_split_raises():
 
 
 # ---------------------------------------------------------------------------
+# GPU footprint vs node pool capacity - multi-node
+# ---------------------------------------------------------------------------
+
+
+def test_multi_node_single_instance_footprint_exact_fit_accepted():
+    # COMPUTE_MULTI_NODE has 2 nodes x 4 GPUs = 8 total; TP8 spans the whole allocation via ray.
+    config = SubmitConfig.model_validate(
+        _config(services={"svc": {**SERVICE, "tensor_parallel_size": 8}}, compute=COMPUTE_MULTI_NODE)
+    )
+    assert config.services["svc"].tensor_parallel_size == 8
+
+
+def test_multi_node_single_instance_footprint_exceeds_total_raises():
+    with pytest.raises(ValidationError, match="exceeds the total GPUs across all nodes"):
+        SubmitConfig.model_validate(
+            _config(services={"svc": {**SERVICE, "tensor_parallel_size": 9}}, compute=COMPUTE_MULTI_NODE)
+        )
+
+
+def test_multi_node_dp_per_node_footprint_exact_fit_accepted():
+    # 4 instances / 2 nodes = 2 local replicas/node; TP2 x 2 local replicas = 4 GPUs, matches gpus_per_node.
+    config = SubmitConfig.model_validate(
+        _config(
+            services={
+                "svc": {
+                    **SERVICE,
+                    "tensor_parallel_size": 2,
+                    "number_of_instances": 4,
+                    "distributed_backend": {"type": "ray"},
+                }
+            },
+            compute=COMPUTE_MULTI_NODE,
+        )
+    )
+    assert config.services["svc"].number_of_instances == 4
+
+
+def test_multi_node_dp_per_node_footprint_exceeds_raises():
+    # 4 instances / 2 nodes = 2 local replicas/node; TP3 x 2 local replicas = 6 GPUs > gpus_per_node (4).
+    with pytest.raises(ValidationError, match="exceeds a single node's gpus_per_node"):
+        SubmitConfig.model_validate(
+            _config(
+                services={
+                    "svc": {
+                        **SERVICE,
+                        "tensor_parallel_size": 3,
+                        "number_of_instances": 4,
+                        "distributed_backend": {"type": "ray"},
+                    }
+                },
+                compute=COMPUTE_MULTI_NODE,
+            )
+        )
+
+
+# ---------------------------------------------------------------------------
 # GPU footprint vs node pool capacity
 # ---------------------------------------------------------------------------
 
@@ -233,7 +289,7 @@ def test_gpu_footprint_exceeds_node_raises():
         "number_of_instances": 8,
         "distributed_backend": {"type": "mp"},
     }
-    with pytest.raises(ValidationError, match="exceeds the largest available"):
+    with pytest.raises(ValidationError, match="exceeds the node pool's gpus_per_node"):
         SubmitConfig.model_validate(_config(services={"svc": service}, compute=COMPUTE_8_GPUS_PER_NODE))
 
 
