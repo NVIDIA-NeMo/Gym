@@ -182,10 +182,22 @@ The reconstruction has been verified to match the upstream algorithm exactly.
 python resources_servers/iheval/prepare_iheval.py
 ```
 
-`data/example.jsonl` (5 mixed rows) is committed for smoke testing;
+`data/example.jsonl` (6 mixed rows) is committed for smoke testing;
 `data/test.jsonl` (~19k rows across all eight tasks, all three settings) and
 `data/test_conflict.jsonl` (the `conflict/*` subset) are generated locally. Use
 `data/test.jsonl` for the full IHEval metric.
+
+Rows are Responses-API-shaped. For a harness that instead forwards a row's
+`input` and `tools` straight to `/chat/completions`, add `--chat-completions`
+to get `*_chat.jsonl` twins carrying the same tasks with the request
+pre-translated to that shape:
+
+```bash
+python resources_servers/iheval/prepare_iheval.py --chat-completions
+```
+
+Only the request shape differs — scoring fields are identical, so either file
+verifies the same way.
 
 ## Test
 
@@ -221,10 +233,10 @@ The IFEval rule-following checkers under `ifeval/` are vendored from upstream
 
 ---
 
-## Appendix: driving IHEval from an external per-row driver (e.g. nel)
+## Appendix: driving IHEval from an external per-row driver
 
 The per-row scoring above is identical no matter what drives the eval. But some
-external drivers (e.g. nemo-evaluator / `nel`) only **mean the per-row reward
+external drivers only **mean the per-row reward
 column** — they read `reward` from `/verify` and never call the gym server's
 `compute_metrics` / `/aggregate_metrics`. None of the following affects the
 gym-native flow above; it only matters if you read a driver's own report instead
