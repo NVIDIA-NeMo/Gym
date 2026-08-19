@@ -140,13 +140,12 @@ def _run_code_check(exec_src: str, working: str) -> Tuple[Any, Optional[str]]:
     try:
         exec_src = _normalize_checker_source(exec_src)
         shared_globals: dict = {}
-        local_vars: dict = {"response": working}
         for stmt in _IMPORT_RE.findall(exec_src):
             exec(stmt, shared_globals)  # noqa: S102
-        exec(exec_src, shared_globals, local_vars)  # noqa: S102
-        if "check_following" not in local_vars:
+        exec(exec_src, shared_globals)  # noqa: S102
+        if "check_following" not in shared_globals:
             return None, "check_following not defined"
-        return local_vars["check_following"](local_vars["response"]), None
+        return shared_globals["check_following"](working), None
     except Exception as exc:  # noqa: BLE001
         return None, f"{type(exc).__name__}: {exc}"
 

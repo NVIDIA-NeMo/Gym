@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_INPUT = _REPO_ROOT / "benchmarks" / "agentif" / "AgentIF" / "data" / "eval.json"
 _DEFAULT_OUTPUT = Path(__file__).resolve().parent / "data" / "train.jsonl"
 

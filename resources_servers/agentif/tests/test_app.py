@@ -153,6 +153,14 @@ def test_run_code_check_no_check_following() -> None:
     assert err == "check_following not defined"
 
 
+def test_run_code_check_helper_function_visible() -> None:
+    """check_following must see sibling top-level helper functions/constants."""
+    src = "MIN_LEN = 2\n\ndef helper(response):\n    return len(response) > MIN_LEN\n\ndef check_following(response):\n    return helper(response)"
+    result, err = _run_code_check(src, "hello")
+    assert result is True
+    assert err is None
+
+
 # ── verify: llm constraints ───────────────────────────────────────────────
 
 
