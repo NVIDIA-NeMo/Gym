@@ -612,7 +612,11 @@ class TestApp:
         assert [record["actual_action_count"] for record in payload["chunk_records"]] == [2, 1]
         assert len(payload["boundary_events"]) == 1
 
-    async def test_run_preserves_authority_contract_across_resource_verification(self) -> None:
+    @pytest.mark.parametrize("skip_verification", [False, True])
+    async def test_run_preserves_authority_contract_with_optional_resource_verification(
+        self,
+        skip_verification: bool,
+    ) -> None:
         context_history = ContextHistoryConfig(enabled=True)
         config = SimpleAgentConfig(
             host="0.0.0.0",
@@ -622,6 +626,8 @@ class TestApp:
             model_server=ModelServerRef(type="responses_api_models", name="model"),
             resources_server=ResourcesServerRef(type="resources_servers", name="resources"),
             context_history=context_history,
+            skip_verification=skip_verification,
+            skip_verification_reward=0.25,
         )
         responses_create_params = NeMoGymResponseCreateParamsNonStreaming(input="task")
         session = ContextCompactionSession(
@@ -677,17 +683,21 @@ class TestApp:
 
         verified_base_response = NeMoGymResponse.model_validate(compacted.model_dump())
         server = SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
-        server.server_client.post.side_effect = [
+        responses = [
             _mock_response(cookies={"resource": "cookie"}),
             _mock_response(compacted.model_dump(mode="json")),
-            _mock_response(
-                {
-                    "responses_create_params": responses_create_params.model_dump(mode="json"),
-                    "response": verified_base_response.model_dump(mode="json"),
-                    "reward": 1.0,
-                }
-            ),
         ]
+        if not skip_verification:
+            responses.append(
+                _mock_response(
+                    {
+                        "responses_create_params": responses_create_params.model_dump(mode="json"),
+                        "response": verified_base_response.model_dump(mode="json"),
+                        "reward": 1.0,
+                    }
+                )
+            )
+        server.server_client.post.side_effect = responses
         request = MagicMock(cookies={})
 
         result = await server.run(request, request_body)
@@ -697,11 +707,18 @@ class TestApp:
         assert result.response.context_compaction_contract.task_id == "task-run"
         assert result.response.context_compaction_contract.rollout_index == 2
         assert result.response.context_compaction_contract.attempt_index == 1
-        assert result.response.context_compaction_contract.schema_version == 3
-        assert len(result.response.model_call_metadata) == 1
-        assert not hasattr(result.response, "completion_evidence")
-        assert not hasattr(result.response, "agent_input")
-        assert not hasattr(result.response, "seed_obs")
+        expected_schema_version = 2 if skip_verification else 3
+        assert result.response.context_compaction_contract.schema_version == expected_schema_version
+        if skip_verification:
+            assert result.reward == 0.25
+            assert result.verification_skipped is True
+            assert len(result.response.completion_evidence) == 1
+            assert result.response.agent_input
+        else:
+            assert len(result.response.model_call_metadata) == 1
+            assert not hasattr(result.response, "completion_evidence")
+            assert not hasattr(result.response, "agent_input")
+            assert not hasattr(result.response, "seed_obs")
         inner_responses_call = server.server_client.post.call_args_list[1]
         assert inner_responses_call.kwargs["cookies"][_CONTEXT_COMPACTION_ROLLOUT_ID_COOKIE] == "rollout-run"
 
