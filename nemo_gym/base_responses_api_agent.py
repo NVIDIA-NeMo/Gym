@@ -12,8 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
 from abc import abstractmethod
 from collections.abc import Mapping
+from contextlib import asynccontextmanager
 from functools import wraps
 from typing import Any, Optional
 from warnings import warn
@@ -43,10 +45,14 @@ from nemo_gym.server_utils import (
     BaseServer,
     SimpleServer,
     apply_rollout_prefix,
+    raise_for_status,
     rollout_path_prefix,
 )
 from nemo_gym.telemetry.endpoints import traced_endpoint, traced_rollout_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
+
+
+logger = logging.getLogger(__name__)
 
 
 class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
@@ -182,6 +188,42 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         server_config = get_first_server_config_dict(self.server_client.global_config_dict, model_server_name)
         base_url = self.server_client._build_server_base_url(server_config)
         return f"{apply_rollout_prefix(base_url, rollout_id, token_capture=self._token_id_capture_enabled())}/v1"
+
+    @asynccontextmanager
+    async def session_scope(self, resources_server_name: str, seed_body: Any, cookies: Any = None):
+        """Seed an environment session and guarantee it is closed.
+
+        Environments release external resources inside ``verify()``, which is exactly the
+        call that does not happen when a rollout raises, is cancelled, or times out. This
+        pairs ``/seed_session`` with ``/close_session`` in a ``finally`` so the guarantee is
+        structural rather than per-environment discipline.
+
+        Yields the cookies that identify the session, which callers pass to every
+        subsequent call. ``/close_session`` defaults to a no-op, so an environment that
+        does not implement it is unaffected.
+        """
+        seed_response = await self.server_client.post(
+            server_name=resources_server_name,
+            url_path="/seed_session",
+            json=seed_body,
+            cookies=cookies,
+        )
+        await raise_for_status(seed_response)
+        session_cookies = seed_response.cookies
+        try:
+            yield session_cookies
+        finally:
+            try:
+                await self.server_client.post(
+                    server_name=resources_server_name,
+                    url_path="/close_session",
+                    json={},
+                    cookies=session_cookies,
+                )
+            except Exception as exc:
+                # Teardown must never mask the original outcome, but a session that could
+                # not be released is a leaked external resource - say so.
+                logger.warning("failed to close the environment session on %s: %r", resources_server_name, exc)
 
     # TODO: right now there is no validation on the TypedDict NeMoGymResponseCreateParamsNonStreaming
     # We should explicitly add validation at this server level or we should explicitly not validate so that there is flexibility in this API.
