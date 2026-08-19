@@ -29,8 +29,8 @@ from nemo_gym.orchestration.api import (
 from nemo_gym.orchestration.executors.script_templates import (
     bash_var,
     render_driver_entrypoint,
+    render_gym_clone_preamble,
     render_gym_cmd,
-    render_gym_install_preamble,
     render_health_check,
 )
 from nemo_gym.orchestration.executors.utils import flatten_run_args
@@ -267,9 +267,16 @@ def _build_vllm_ray_serve_command(
     # Real ray.serve replicas: Ray Serve schedules/bin-packs number_of_instances replicas across
     # whatever nodes/GPUs are free cluster-wide, instead of the manual head/worker split used by
     # _build_vllm_multi_node_dp_command. Each replica's own TP/PP footprint stays within one node.
-    gym_install_preamble = render_gym_install_preamble(
+    #
+    # Uses render_gym_clone_preamble (git-clone only, no `pip install -e .`) rather than
+    # render_gym_install_preamble: ray_serve_vllm_app.py only needs stdlib at import time (vllm/ray
+    # are imported lazily inside build_app itself), so putting the clone on PYTHONPATH is enough -
+    # this avoids nemo_gym's own Python floor (see pyproject.toml), which model-serving images like
+    # vllm/vllm-openai (Python 3.12) don't meet.
+    gym_clone_preamble = render_gym_clone_preamble(
         gym_install.repo if gym_install else None, gym_install.ref if gym_install else None
     )
+    pythonpath_preamble = ['export PYTHONPATH="$PWD:$PYTHONPATH"'] if gym_clone_preamble else []
     # `serve run`'s CLI flags for the HTTP proxy's host/port vary across Ray versions (and some
     # don't expose them at all for import-path apps), so build_app configures serve.start's
     # http_options itself from the `port` builder arg instead of relying on a `serve run` CLI flag.
@@ -282,7 +289,7 @@ def _build_vllm_ray_serve_command(
         f" number_of_instances={service.number_of_instances}"
         f" trust_remote_code={service.trust_remote_code}"
     )
-    body = "\n    ".join([*gym_install_preamble, serve_run_cmd])
+    body = "\n    ".join([*gym_clone_preamble, *pythonpath_preamble, serve_run_cmd])
     inner_cmd = f"bash -c '\n    {_escape_for_single_quotes(body)}\n'"
     return _wrap_in_ray_cluster(inner_cmd, total_nodes, ray_extras="serve,default")
 

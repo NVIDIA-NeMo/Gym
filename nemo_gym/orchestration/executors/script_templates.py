@@ -60,23 +60,38 @@ def render_gym_cmd(subcommand: str, var_name: str, args: list[str]) -> str:
     return f"{var_name}=(\n    " + "\n    ".join(entries) + "\n)"
 
 
-def render_gym_install_preamble(repo: str | None, ref: str | None) -> list[str]:
-    """Render the shell lines that clone and pip-install the gym package, or [] if not requested."""
+def render_gym_clone_preamble(repo: str | None, ref: str | None) -> list[str]:
+    """Render the shell lines that git-clone the gym repo (no dependency install), or [] if not
+    requested. Leaves the shell's cwd inside the clone. Callers that only need to import a single
+    dependency-light module from it - not run `gym` itself or its full dependency set - should use
+    this instead of render_gym_install_preamble, since `pip install -e .` requires a Python version
+    (see pyproject.toml) that not every container ships (e.g. vllm/vllm-openai's Python 3.12).
+    """
     if not (repo and ref):
         return []
     repo_name = repo.rstrip("/").split("/")[-1].removesuffix(".git")
     return [
         # Fail fast: without this, a failed `git clone`/`cd` (e.g. git missing from a minimal
-        # model-serving image) silently falls through to `uv pip install -e .` running against the
+        # model-serving image) silently falls through to subsequent commands running against the
         # wrong directory, producing a confusing unrelated error instead of the real one.
         "set -e",
         # Not every container (e.g. vllm/vllm-openai) bundles git.
         "command -v git >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq git)",
-        "curl -LsSf https://astral.sh/uv/install.sh | sh",
-        'source "$HOME/.local/bin/env"',
         f"git clone {shlex.quote(repo)}",
         f"cd {shlex.quote(repo_name)}",
         f"git checkout {shlex.quote(ref)}",
+    ]
+
+
+def render_gym_install_preamble(repo: str | None, ref: str | None) -> list[str]:
+    """Render the shell lines that clone and pip-install the gym package, or [] if not requested."""
+    clone_preamble = render_gym_clone_preamble(repo, ref)
+    if not clone_preamble:
+        return []
+    return [
+        *clone_preamble,
+        "curl -LsSf https://astral.sh/uv/install.sh | sh",
+        'source "$HOME/.local/bin/env"',
         "uv pip install -e . --system",
     ]
 

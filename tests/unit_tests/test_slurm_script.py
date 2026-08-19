@@ -337,13 +337,19 @@ def test_build_vllm_ray_serve_command_no_gym_install_omits_clone():
     assert "git clone" not in cmd
 
 
-def test_build_vllm_ray_serve_command_with_gym_install_clones_and_installs():
+def test_build_vllm_ray_serve_command_with_gym_install_clones_onto_pythonpath():
+    # Uses render_gym_clone_preamble (git clone only, no `pip install -e .`) rather than
+    # render_gym_install_preamble: nemo_gym's own Python floor (pyproject.toml) is newer than what
+    # model-serving images like vllm/vllm-openai ship, so it can never `pip install` there.
+    # ray_serve_vllm_app.py only needs stdlib at import time, so PYTHONPATH is enough.
     service = _ray_serve_service()
     gym_install = GymInstallConfig(ref="main")
     cmd = _build_vllm_ray_serve_command(service, total_nodes=2, gym_install=gym_install)
     assert "git clone" in cmd
     assert "git checkout main" in cmd
-    assert "uv pip install -e . --system" in cmd
+    assert 'export PYTHONPATH="$PWD:$PYTHONPATH"' in cmd
+    assert "uv pip install -e . --system" not in cmd
+    assert "curl -LsSf https://astral.sh/uv/install.sh" not in cmd
 
 
 def test_build_vllm_ray_serve_command_trust_remote_code():
@@ -1044,7 +1050,8 @@ def test_build_sbatch_script_ray_serve_backend_srun_arg_stays_single_token(bench
     bash_lc_index = words.index("-lc")
     entrypoint_arg = words[bash_lc_index + 1]
     assert "ray symmetric-run" in entrypoint_arg
-    assert "curl -LsSf" in entrypoint_arg
+    assert "git clone" in entrypoint_arg
+    assert 'export PYTHONPATH="$PWD:$PYTHONPATH"' in entrypoint_arg
     assert "serve run nemo_gym.orchestration.ray_serve_vllm_app:build_app" in entrypoint_arg
     # Everything else after the single bash -lc argument should just be the trailing "&".
     assert words[bash_lc_index + 2 :] == ["&"]
