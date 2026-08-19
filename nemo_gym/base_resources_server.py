@@ -12,6 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
+import logging
+import time
 from abc import abstractmethod
 from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Optional
@@ -35,6 +38,9 @@ from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_met
 from nemo_gym.rollout_correlation import RolloutContextMiddleware
 from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.telemetry.endpoints import traced_verify_endpoint
+
+
+logger = logging.getLogger(__name__)
 
 
 NEMO_GYM_MCP_SESSION_TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
@@ -78,6 +84,13 @@ class ReverifyMode(str, Enum):
 class BaseResourcesServerConfig(BaseRunServerInstanceConfig):
     # Opt in to serve this server's tool routes over MCP; default off.
     expose_tools_over_mcp: bool = False
+    # Reclaim a session that has been idle this long, by calling close_session for it.
+    # None (the default) keeps today's behavior: no sweeper, no background task. Set it
+    # when the environment holds an external resource that a crashed or cancelled trainer
+    # would otherwise leave behind.
+    session_ttl_s: Optional[float] = None
+    # How often the sweeper looks; only meaningful when session_ttl_s is set.
+    session_sweep_interval_s: float = 60.0
     # The mode of reverification (for gym eval reverify) of this server.
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.UNKNOWN
 
@@ -126,6 +139,14 @@ class BaseSeedSessionResponse(BaseModel):
     pass
 
 
+class BaseCloseSessionRequest(BaseModel):
+    pass
+
+
+class BaseCloseSessionResponse(BaseModel):
+    pass
+
+
 class MCPServerMetadata(BaseModel):
     """Metadata returned from /seed_session for per-rollout Gym MCP access."""
 
@@ -138,13 +159,28 @@ class MCPServerMetadata(BaseModel):
 class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleServer):
     config: BaseResourcesServerConfig
 
+    # Last activity per session, for the optional idle sweeper. Private (leading underscore)
+    # so pydantic does not try to build a schema for it.
+    _session_last_seen: dict[str, float] = {}
+
+    def model_post_init(self, context: Any) -> None:
+        super().model_post_init(context)
+        self._session_last_seen = {}
+
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
         self.setup_session_middleware(app)
         app.add_middleware(RolloutContextMiddleware)
 
+        if self.config.session_ttl_s is not None:
+
+            @app.on_event("startup")
+            async def _start_session_sweeper() -> None:  # pragma: no cover - exercised via the task
+                asyncio.create_task(self._sweep_idle_sessions())
+
         app.post("/seed_session")(self.seed_session)
+        app.post("/close_session")(self.close_session)
         # Wrapped outside judge_failsafe so the span covers the failsafe's own handling too.
         app.post("/verify")(
             traced_verify_endpoint(
@@ -178,6 +214,54 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
 
     async def seed_session(self, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
         return BaseSeedSessionResponse()
+
+    def touch_session(self, session_id: str) -> None:
+        """Record activity for a session so the sweeper does not reclaim it.
+
+        Environments that opt into ``session_ttl_s`` call this whenever a session does
+        something; the sweeper reclaims the ones that stop.
+        """
+        self._session_last_seen[session_id] = time.monotonic()
+
+    def forget_session(self, session_id: str) -> None:
+        """Stop tracking a session that has already been released."""
+        self._session_last_seen.pop(session_id, None)
+
+    async def _sweep_idle_sessions(self) -> None:
+        """Call ``close_session`` for sessions idle beyond ``session_ttl_s``.
+
+        A backstop, not the primary path: the agent layer closes sessions in a finally.
+        This covers what no call can reach - a killed trainer, a dropped connection.
+        """
+        ttl = self.config.session_ttl_s
+        assert ttl is not None
+        while True:
+            await asyncio.sleep(self.config.session_sweep_interval_s)
+            try:
+                now = time.monotonic()
+                expired = [sid for sid, seen in self._session_last_seen.items() if now - seen > ttl]
+                for session_id in expired:
+                    self.forget_session(session_id)
+                    logger.warning("reclaiming environment session %s after %.0fs idle", session_id, ttl)
+                    await self.close_session(BaseCloseSessionRequest())
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("environment session sweep failed")
+
+    async def close_session(self, body: BaseCloseSessionRequest) -> BaseCloseSessionResponse:
+        """Release whatever this session allocated. Default no-op.
+
+        Environments that hold an external resource - a container, a browser, a provider
+        session - should override this and make it **idempotent**: the caller may time out
+        and retry, and a second call must not produce a different outcome. This is the
+        same contract as ``SandboxProvider.close()``.
+
+        The agent layer calls it in a ``finally`` around the episode, so it also runs when
+        the rollout failed, was cancelled, or timed out - the cases where ``verify()``, the
+        usual place environments release things, never happens.
+        """
+        return BaseCloseSessionResponse()
 
     @abstractmethod
     async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
