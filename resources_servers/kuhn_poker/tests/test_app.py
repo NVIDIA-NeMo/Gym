@@ -70,6 +70,10 @@ async def test_seeded_reset_is_reproducible_and_private() -> None:
 
     assert first_state.cards == second_state.cards
     assert first.active_agent == "player0"
+    assert first.info["seed"] == 7
+    assert "seed" not in first.info["view"]
+    assert "seed" not in environment._latest_public_view
+    assert all(card is None for card in environment._latest_public_view["cards"].values())
     assert f"Your private card: {first_state.cards[0]}" in first.observation
     assert f"Your private card: {first_state.cards[1]}" not in first.observation
 

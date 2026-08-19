@@ -2,24 +2,42 @@
 
 This environment implements seeded, two-player Kuhn Poker using NeMo Gym's
 alternating-turn multi-agent API. The resources server owns the deal, legal
-actions, turn order, invalid-move handling, and zero-sum rewards. Two keyboard
-controllers receive isolated observations and enter actions such as `[check]`,
-`[bet]`, `[fold]`, and `[call]`.
+actions, turn order, invalid-move handling, and zero-sum rewards. Games can be
+played in a pass-and-play browser or through the multi-agent harness.
 
-The initial integration is interactive. One Gym rollout represents one hand and
-stores both seat trajectories in `agent_trajectories`, both chip payoffs in
-`agent_rewards`, and Player 0's payoff in the legacy scalar `reward`.
+One Gym rollout represents one hand and stores both seat trajectories in
+`agent_trajectories`, both chip payoffs in `agent_rewards`, and Player 0's
+payoff in the legacy scalar `reward`.
 
-## Run an interactive hand
+## Play in a browser
 
-Start the resources and agent servers:
+Start the resources server:
 
 ```bash
 gym env start \
   --config resources_servers/kuhn_poker/configs/kuhn_poker.yaml
 ```
 
-In a second terminal, run the single example task:
+In a second terminal, open the web client:
+
+```bash
+python resources_servers/kuhn_poker/client.py
+```
+
+The **Play** tab runs one private pass-and-play hand in the browser session.
+After every action, the screen is hidden before the next player's private card
+is revealed. The **Spectate** tab watches the current or most recently completed
+hand through a server-sent event stream. Spectators see public betting state
+during play and both cards after the hand terminates.
+
+This hackathon client intentionally assumes that only one hand is active on the
+resources server at a time. A browser spectator has a different session cookie
+from an agent, so the spectator stream is server-wide rather than scoped to the
+browser's session.
+
+## Run through the multi-agent harness
+
+Start the same config, then run the single example task:
 
 ```bash
 gym eval run --no-serve \
@@ -31,6 +49,14 @@ gym eval run --no-serve \
 The active player's prompt includes only that player's private card and the
 public betting history. Invalid or ambiguous bracketed actions are retried once
 by default, then the acting player forfeits.
+
+## Future work
+
+- Add server tests for private/public view masking, terminal reveals, and SSE updates.
+- Add browser and launcher smoke tests covering a complete pass-and-play hand.
+- Add reconnect handling and event sequence checks.
+- Add game IDs, bounded retention, and replay when concurrent games are supported.
+- Add model-backed controllers for human-versus-agent and agent-versus-agent play.
 
 ## Upstream behavior
 
