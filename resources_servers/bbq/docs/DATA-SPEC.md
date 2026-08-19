@@ -132,12 +132,3 @@ self-audit prompt and by dataset validation review.
   (completed 2026-07-30: Gemma-4-31B-IT). The `provisional`/`training_eligible`
   stamps on generated rows are generation-pipeline provenance, not a gate.
 
-## Engineer feedback traceability
-
-| Review feedback | Section |
-|---|---|
-| Repeated actor phrases / keyword-shortcut vulnerability | 5 |
-| Conflated-variable false positives (seat placement) | 6 |
-| MCQ format opens reward hacking in RLVR | 2 |
-| ~59% ambiguous-decline mix risks trained hedging | 3 |
-| Pass-rate@K difficulty measurement, per-stratum balance | 7 |
