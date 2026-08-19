@@ -525,11 +525,12 @@ class OpenSandboxOperationConfig:
 class OpenSandboxProviderOptions:
     """Recognized per-sandbox create options read from ``SandboxSpec.provider_options``.
 
-    ``image_auth``, ``platform``, and ``volumes`` entries are passed through to the
+    ``image_auth``, ``network_policy``, ``platform``, and ``volumes`` entries are passed through to the
     OpenSandbox SDK, so their inner fields are validated by the SDK rather than here.
     """
 
     image_auth: Mapping[str, Any] | None = None
+    network_policy: Mapping[str, Any] | None = None
     platform: Mapping[str, Any] | None = None
     snapshot_id: str | None = None
     volumes: tuple[Mapping[str, Any], ...] = ()
@@ -560,6 +561,9 @@ class OpenSandboxProviderOptions:
         image_auth = options.get("image_auth")
         if image_auth is not None and not isinstance(image_auth, Mapping):
             raise TypeError("OpenSandbox provider option 'image_auth' must be a mapping")
+        network_policy = options.get("network_policy")
+        if network_policy is not None and not isinstance(network_policy, Mapping):
+            raise TypeError("OpenSandbox provider option 'network_policy' must be a mapping")
         snapshot_id = options.get("snapshot_id")
         if snapshot_id is not None and not isinstance(snapshot_id, str):
             raise TypeError("OpenSandbox provider option 'snapshot_id' must be a string")
@@ -578,6 +582,7 @@ class OpenSandboxProviderOptions:
 
         return cls(
             image_auth=dict(image_auth) if image_auth is not None else None,
+            network_policy=dict(network_policy) if network_policy is not None else None,
             platform=dict(platform) if platform is not None else None,
             snapshot_id=snapshot_id,
             volumes=tuple(dict(volume) for volume in volumes),
@@ -1044,6 +1049,10 @@ class OpenSandboxProvider:
             kwargs["entrypoint"] = spec.entrypoint
         if options.platform is not None:
             kwargs["platform"] = _to_platform_spec(options.platform)
+        if options.network_policy is not None:
+            from opensandbox.models.sandboxes import NetworkPolicy
+
+            kwargs["network_policy"] = NetworkPolicy.model_validate(options.network_policy)
         if options.volumes:
             kwargs["volumes"] = _to_volumes(list(options.volumes))
         if self._create.skip_health_check:
