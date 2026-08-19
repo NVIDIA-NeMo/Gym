@@ -191,7 +191,6 @@ if (( $should_run_eval )); then
     fi
 
     # @bxyu-nvidia: We need --cpus-per-task=SLURM_CPUS_ON_NODE, otherwise we run into a lot of ServerDisconnectedError and ConnectionResetByPeer errors from Gym servers and vLLM. Not sure what the correlation is
-    eval_status=0
     ALL_NODES="\${nodes[*]}" \
     ROUTER_NODE="\${nodes[0]}" \
     srun --overlap --exact --nodes=1 --ntasks=1 --cpus-per-task=\$SLURM_CPUS_ON_NODE --nodelist="\$EVAL_NODE" --gpus=0 \
@@ -204,11 +203,27 @@ if (( $should_run_eval )); then
             set -euo pipefail
             cd "\$SLURM_SUBMIT_DIR"
             exec bash -lc "\$EVAL_COMMAND"
-        ' || eval_status=\$?
+        ' &
+    eval_step=\$!
+
+    completed_pid=""
+    completed_status=0
+    wait -n -p completed_pid "\$server_step" "\$eval_step" || completed_status=\$?
+
+    if [[ "\$completed_pid" == "\$server_step" ]]; then
+        if (( completed_status == 0 )); then
+            completed_status=1
+        fi
+        echo "vLLM server step exited unexpectedly with status \$completed_status" >&2
+        kill "\$eval_step" 2>/dev/null || true
+        wait "\$eval_step" 2>/dev/null || true
+        trap - EXIT INT TERM
+        exit "\$completed_status"
+    fi
 
     cleanup_server
     trap - EXIT INT TERM
-    exit "\$eval_status"
+    exit "\$completed_status"
 fi
 
 wait "\$server_step"
