@@ -119,6 +119,7 @@ class MLflowExporter(BaseExporter):
     name: ClassVar[str] = "mlflow"
 
     CONFIG_ARTIFACT_FILE: ClassVar[str] = "global_config.json"
+    # Can't write .jsonl: `log_table` accepts only .json/.parquet, and writes one table document.
     ROLLOUTS_ARTIFACT_FILE: ClassVar[str] = "rollouts.json"
 
     def __init__(self, global_config_dict: DictConfig) -> None:
