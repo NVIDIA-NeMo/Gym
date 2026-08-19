@@ -254,6 +254,7 @@ def _items_from_output_metadata(message: ChatMessage, index: int) -> Optional[li
                 NeMoGymResponseOutputMessage(
                     type="message",
                     id=record["id"],
+                    role="assistant",
                     content=[NeMoGymResponseOutputText(type="output_text", annotations=[], text=record["text"])],
                 )
             )
@@ -323,6 +324,7 @@ def chat_messages_to_responses(messages: list[ChatMessage], *, output: bool = Fa
                             NeMoGymResponseOutputMessage(
                                 type="message",
                                 id=message.meta.get("__ng_message_id__", f"msg_{index}"),
+                                role="assistant",
                                 content=[NeMoGymResponseOutputText(type="output_text", annotations=[], text=text)],
                             )
                         )
