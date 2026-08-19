@@ -33,6 +33,9 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from nemo_gym.deliverables import IGNORE_FILES as IGNORE_FILES
+from nemo_gym.deliverables import is_deliverable as is_deliverable
+
 # judge_panel owns the canonical audio/video extension sets and the GDPVal
 # resources server routes tasks to judges from them. Importing rather than
 # redeclaring keeps detection and emission in lockstep: a local copy that missed
@@ -60,28 +63,6 @@ def _bounded_text(text: str, cap: int, marker: str = "\n[...truncated]") -> str:
     if cap <= len(marker):
         return marker[-cap:]
     return text[: cap - len(marker)] + marker
-
-
-# Run state the agent writes into the SAME directory as its deliverables. These
-# are not model output, and `.json` is in TEXT_EXTS, so without this the judge is
-# shown the agent's own transcript and grades it as work product. Single source:
-# every judging path imports it from here.
-IGNORE_FILES = frozenset(
-    {
-        "finish_params.json",
-        "history.json",
-        "history.pkl",
-        "inprogress_history.json",
-        "metadata.json",
-        "log.txt",
-        "reference_files",
-    }
-)
-
-
-def is_deliverable(path: Path) -> bool:
-    """True if *path* is agent-produced output rather than run state."""
-    return path.is_file() and path.name not in IGNORE_FILES
 
 
 def read_deliverable_files(output_dir: str) -> str:

@@ -41,6 +41,7 @@ from nemo_gym.base_responses_api_model import (
     model_call_capture_dirs_from_config,
 )
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig, ConfigError, ConfigPathNotFoundError
+from nemo_gym.deliverables import is_deliverable
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
@@ -307,11 +308,6 @@ def _migrate_invalid_judge_main_rows(output_fpath: Path) -> int:
             row.get(ROLLOUT_INDEX_KEY_NAME),
             int(row.get(ATTEMPT_INDEX_KEY_NAME, 0) or 0),
         )
-
-    # Keep this dependency local to the legacy GDPVal migration path. Importing
-    # a responses API agent from the core rollout module at import time creates
-    # an unnecessary core/agent dependency for every Gym command.
-    from responses_api_agents.stirrup_agent.file_reader import is_deliverable
 
     failures_fpath = failures_path_for(output_fpath)
     failures_fpath.parent.mkdir(parents=True, exist_ok=True)
