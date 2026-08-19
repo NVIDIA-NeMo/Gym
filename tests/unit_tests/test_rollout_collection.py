@@ -25,7 +25,12 @@ import yaml
 import nemo_gym.rollout_collection
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
-from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.global_config import (
+    AGENT_REF_KEY_NAME,
+    ORCHESTRATOR_REF_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+)
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.rollout_collection import (
@@ -343,6 +348,28 @@ class TestRolloutCollection:
         else:
             assert "[rollout_collection] /run failed" not in captured.out
 
+    async def test_run_examples_prefers_orchestrator_ref(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        row = {
+            ORCHESTRATOR_REF_KEY_NAME: {"name": "turn_orchestrator"},
+            AGENT_REF_KEY_NAME: {"name": "legacy_agent"},
+        }
+        response = MagicMock()
+        response.read = AsyncMock(return_value=orjson.dumps({"reward": 1.0}))
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(return_value=response)
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "setup_server_client_utils",
+            lambda *args, **kwargs: mock_server_client,
+        )
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
+
+        returned_row, result = await next(RolloutCollectionHelper().run_examples([row]))
+
+        assert returned_row is row
+        assert result == {"reward": 1.0}
+        assert mock_server_client.post.await_args.kwargs["server_name"] == "turn_orchestrator"
+
     def test_preprocess_rows_with_prompt_config(self, tmp_path: Path) -> None:
         """prompt_config builds responses_create_params.input from template."""
         prompt_path = tmp_path / "prompt.yaml"
@@ -622,6 +649,27 @@ class TestRolloutCollection:
             NeMoGymResponseCreateParamsNonStreaming.model_validate(rcp)
         # Seeds should track rollout index within each task (0, 1, 2 per task).
         assert seeds_seen == [0, 1, 2, 0, 1, 2]
+
+    def test_preprocess_rows_accepts_orchestrator_without_agent_ref(self, tmp_path: Path) -> None:
+        fpath = tmp_path / "input.jsonl"
+        fpath.write_text(
+            json.dumps(
+                {
+                    "responses_create_params": {"input": []},
+                    ORCHESTRATOR_REF_KEY_NAME: {"name": "turn_orchestrator"},
+                }
+            )
+            + "\n"
+        )
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+        )
+
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+        assert rows[0][ORCHESTRATOR_REF_KEY_NAME]["name"] == "turn_orchestrator"
+        assert AGENT_REF_KEY_NAME not in rows[0]
 
     def test_preprocess_rows_num_repeats_dict_form(self, tmp_path: Path) -> None:
         """Dict-form num_repeats applies the per-agent value to each row."""

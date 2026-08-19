@@ -29,12 +29,14 @@ from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import BaseRunRequest
 from nemo_gym.config_types import (
     AGENT_REF_KEY,
+    ORCHESTRATOR_REF_KEY,
     AgentServerRef,
     BaseNeMoGymCLIConfig,
     DatasetConfig,
     DatasetType,
     DownloadJsonlDatasetGitlabConfig,
     DownloadJsonlDatasetHuggingFaceConfig,
+    RolloutOrchestratorServerRef,
     ServerInstanceConfig,
 )
 from nemo_gym.gitlab_utils import download_jsonl_dataset
@@ -360,60 +362,66 @@ class TrainDataProcessor(BaseModel):
         parser = GlobalConfigDictParser()
         server_instance_configs = parser.filter_for_server_instance_configs(global_config_dict)
 
-        agent_configs: List[ServerInstanceConfig] = [
-            c for c in server_instance_configs if c.SERVER_TYPE == "responses_api_agents"
+        rollout_configs: List[ServerInstanceConfig] = [
+            c for c in server_instance_configs if c.SERVER_TYPE in {"responses_api_agents", "rollout_orchestrators"}
         ]
 
         server_names_list_str = "\n- ".join([""] + [f"{c.name} ({c.SERVER_TYPE})" for c in server_instance_configs])
         print(
-            f"Found {len(server_instance_configs)} server instance configs ({len(agent_configs)} agent configs):{server_names_list_str}\n\n"
+            f"Found {len(server_instance_configs)} server instance configs "
+            f"({len(rollout_configs)} rollout configs):{server_names_list_str}\n\n"
         )
 
-        agent_configs_with_data: List[ServerInstanceConfig] = []
-        agent_configs_without_data: List[ServerInstanceConfig] = []
-        for agent_config in agent_configs:
-            if agent_config.datasets:
-                agent_configs_with_data.append(agent_config)
+        rollout_configs_with_data: List[ServerInstanceConfig] = []
+        rollout_configs_without_data: List[ServerInstanceConfig] = []
+        for rollout_config in rollout_configs:
+            if rollout_config.datasets:
+                rollout_configs_with_data.append(rollout_config)
             else:
-                agent_configs_without_data.append(agent_config)
+                rollout_configs_without_data.append(rollout_config)
 
-        server_names_list_str = "\n- ".join([""] + [f"{c.name} ({c.SERVER_TYPE})" for c in agent_configs_without_data])
+        server_names_list_str = "\n- ".join(
+            [""] + [f"{c.name} ({c.SERVER_TYPE})" for c in rollout_configs_without_data]
+        )
         print(
-            f"Found {len(agent_configs_without_data)} agent server instance configs WITHOUT datasets:{server_names_list_str}\n\n"
+            f"Found {len(rollout_configs_without_data)} rollout server instance configs "
+            f"WITHOUT datasets:{server_names_list_str}\n\n"
         )
 
         server_names_list_str = ""
-        for c in agent_configs_with_data:
+        for c in rollout_configs_with_data:
             server_str = f"\n- {c.name}"
             datasets_str = "\n  - ".join([""] + [f"{d.name} ({d.type})" for d in c.datasets])
             server_names_list_str += f"{server_str}{datasets_str}"
         print(
-            f"Found {len(agent_configs_with_data)} agent server instance configs WITH datasets:{server_names_list_str}\n\n"
+            f"Found {len(rollout_configs_with_data)} rollout server instance configs "
+            f"WITH datasets:{server_names_list_str}\n\n"
         )
 
         # Filter for in scope depending on the mode.
         in_scope_dataset_types = config.in_scope_dataset_types
-        agent_configs_with_in_scope_datasets: List[ServerInstanceConfig] = []
-        for agent_config in agent_configs_with_data:
-            in_scope_datasets = [d for d in agent_config.datasets if d.type in in_scope_dataset_types]
+        rollout_configs_with_in_scope_datasets: List[ServerInstanceConfig] = []
+        for rollout_config in rollout_configs_with_data:
+            in_scope_datasets = [d for d in rollout_config.datasets if d.type in in_scope_dataset_types]
             if not in_scope_datasets:
                 continue
 
-            inner_config = agent_config.get_inner_run_server_config()
+            inner_config = rollout_config.get_inner_run_server_config()
             inner_config.datasets = in_scope_datasets
-            agent_configs_with_in_scope_datasets.append(agent_config)
+            rollout_configs_with_in_scope_datasets.append(rollout_config)
 
         server_names_list_str = ""
-        for c in agent_configs_with_in_scope_datasets:
+        for c in rollout_configs_with_in_scope_datasets:
             server_str = f"\n- {c.name}"
             datasets_str = "\n  - ".join([""] + [f"{d.name} ({d.type})" for d in c.datasets])
             server_names_list_str += f"{server_str}{datasets_str}"
         print(f"In scope dataset types for `{config.mode}` mode: {in_scope_dataset_types}")
         print(
-            f"Found {len(agent_configs_with_in_scope_datasets)} agent server instance configs with in-scope datasets:{server_names_list_str}"
+            f"Found {len(rollout_configs_with_in_scope_datasets)} rollout server instance configs "
+            f"with in-scope datasets:{server_names_list_str}"
         )
 
-        return agent_configs_with_in_scope_datasets
+        return rollout_configs_with_in_scope_datasets
 
     def load_datasets(
         self,
@@ -723,7 +731,18 @@ This could be due to a change in how metrics are calculated, leading to outdated
                             validate_prompt_compatibility([d], prompt_cfg)
                             d = apply_prompt_to_row(d, prompt_cfg)
 
-                        d[AGENT_REF_KEY] = AgentServerRef(type="responses_api_agents", name=c.name).model_dump()
+                        if c.SERVER_TYPE == "rollout_orchestrators":
+                            d[ORCHESTRATOR_REF_KEY] = RolloutOrchestratorServerRef(
+                                type="rollout_orchestrators",
+                                name=c.name,
+                            ).model_dump()
+                            d.pop(AGENT_REF_KEY, None)
+                        else:
+                            d[AGENT_REF_KEY] = AgentServerRef(
+                                type="responses_api_agents",
+                                name=c.name,
+                            ).model_dump()
+                            d.pop(ORCHESTRATOR_REF_KEY, None)
                         target.write(f"{json.dumps(d)}\n")
 
                 paths_to_collate.append(prepare_path)

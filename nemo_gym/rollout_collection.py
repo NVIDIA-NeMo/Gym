@@ -45,6 +45,7 @@ from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig, Config
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
+    ORCHESTRATOR_REF_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
@@ -508,12 +509,24 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         return output_fpath.with_stem(output_fpath.stem + "_materialized_inputs").with_suffix(".jsonl")
 
 
+def _rollout_target(row: Dict[str, Any]) -> Tuple[str, str]:
+    """Return the rollout server name and the row key that selected it."""
+    for ref_key in (ORCHESTRATOR_REF_KEY_NAME, AGENT_REF_KEY_NAME):
+        ref = row.get(ref_key)
+        if isinstance(ref, dict) and ref.get("name"):
+            return ref["name"], ref_key
+    raise ValueError("A rollout row must include orchestrator_ref or agent_ref with a name.")
+
+
 def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
-    agent_ref = row.get(AGENT_REF_KEY_NAME) or {}
+    try:
+        target_name, target_ref_key = _rollout_target(row)
+    except ValueError:
+        target_name, target_ref_key = None, None
     summary = {
         TASK_INDEX_KEY_NAME: row.get(TASK_INDEX_KEY_NAME),
         ROLLOUT_INDEX_KEY_NAME: row.get(ROLLOUT_INDEX_KEY_NAME),
-        "agent_name": agent_ref.get("name") if isinstance(agent_ref, dict) else None,
+        ("orchestrator_name" if target_ref_key == ORCHESTRATOR_REF_KEY_NAME else "agent_name"): target_name,
     }
     return {k: v for k, v in summary.items() if v is not None}
 
@@ -592,18 +605,19 @@ class RolloutCollectionHelper(BaseModel):
         # For gym eval profile to match rollouts to tasks
         row_to_task_idx: Dict[str, int] = dict()
         task_idx_to_rollout_idx: Dict[int, int] = Counter()
-        row_idxs_missing_agent_ref: List[int] = []
+        row_idxs_missing_rollout_ref: List[int] = []
         agents_missing_from_num_repeats: set[str] = set()
         rows: List[Dict] = []
         for row_idx, row_str, row in raw_rows:
             # Resolve agent name. Missing agent_ref is a hard error reported in
             # bulk after the loop; skip the row immediately so the rest of the
             # body can assume agent_name is non-None.
-            if config.agent_name:
+            if config.agent_name and not row.get(ORCHESTRATOR_REF_KEY_NAME):
                 row.setdefault(AGENT_REF_KEY_NAME, {"name": config.agent_name})
-            agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
-            if agent_name is None:
-                row_idxs_missing_agent_ref.append(row_idx)
+            try:
+                agent_name, _ = _rollout_target(row)
+            except ValueError:
+                row_idxs_missing_rollout_ref.append(row_idx)
                 continue
             agents_seen.add(agent_name)
 
@@ -651,9 +665,10 @@ class RolloutCollectionHelper(BaseModel):
 
                 rows.append(row)
 
-        if row_idxs_missing_agent_ref:
+        if row_idxs_missing_rollout_ref:
             raise ValueError(
-                f"No agent specified for rows {row_idxs_missing_agent_ref}. Either provide +agent_name config or include agent_ref in data."
+                f"No rollout target specified for rows {row_idxs_missing_rollout_ref}. "
+                "Either provide +agent_name config or include orchestrator_ref or agent_ref in data."
             )
 
         if agents_missing_from_num_repeats:
@@ -801,7 +816,7 @@ class RolloutCollectionHelper(BaseModel):
         pcts_to_print = list(range(1, 100)) + [99.5]
         agent_name_to_metrics = defaultdict(Counter)
         agent_name_to_counts = defaultdict(int)
-        counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
+        counts_left = Counter(_rollout_target(r)[0] for r in input_rows)
         start_time = time()
 
         results_file = output_fpath.open("ab")
@@ -811,7 +826,8 @@ class RolloutCollectionHelper(BaseModel):
 
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
             result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
-            result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
+            _, rollout_ref_key = _rollout_target(row)
+            result[rollout_ref_key] = row[rollout_ref_key]
             if SKILLS_REF_KEY_NAME in row:
                 result[SKILLS_REF_KEY_NAME] = row[SKILLS_REF_KEY_NAME]
             if ATTEMPT_INDEX_KEY_NAME in row:
@@ -852,11 +868,12 @@ class RolloutCollectionHelper(BaseModel):
                 persisted_rows.append(row)
                 persisted_results.append(result)
 
-            counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
-            if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
-                counts_left.pop(row[AGENT_REF_KEY_NAME]["name"])
+            rollout_target_name, _ = _rollout_target(row)
+            counts_left[rollout_target_name] -= 1
+            if counts_left[rollout_target_name] <= 0:
+                counts_left.pop(rollout_target_name)
 
-            agent_name = result["agent_ref"]["name"]
+            agent_name, _ = _rollout_target(result)
             metrics = agent_name_to_metrics[agent_name]
             metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float)) and not k.startswith("_")})
             agent_name_to_counts[agent_name] += 1
@@ -927,7 +944,7 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         rows: List[Dict],
         output_fpath: Path,
     ) -> Optional[Path]:
-        """Call /aggregate_metrics on each agent server after rollouts complete.
+        """Call /aggregate_metrics on each rollout target after rollouts complete.
 
         Writes a single _aggregate_metrics.json with one entry per agent (same shape
         as the old _agent_metrics.json). Returns the file path.
@@ -935,20 +952,25 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         if not results:
             return None
 
-        # Group results by agent name
-        agent_results: Dict[str, List[Dict]] = {}
+        # Group results by rollout target and preserve the selecting reference key.
+        target_results: Dict[Tuple[str, str], List[Dict]] = {}
         for row, result in zip(rows, results):
-            agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
-            if not agent_name:
+            try:
+                target_name, target_ref_key = _rollout_target(row)
+            except ValueError:
                 continue
-            agent_results.setdefault(agent_name, []).append(result)
+            target_results.setdefault((target_name, target_ref_key), []).append(result)
 
         server_client = self.setup_server_client()
 
-        async def _fetch_agent_metrics(agent_name: str, agent_result_list: List[Dict]) -> Dict:
+        async def _fetch_target_metrics(
+            target_name: str,
+            target_ref_key: str,
+            target_result_list: List[Dict],
+        ) -> Dict:
             # Strip heavyweight fields before sending, but preserve response.usage
             stripped = []
-            for r in agent_result_list:
+            for r in target_result_list:
                 entry = {
                     k: v
                     for k, v in r.items()
@@ -968,7 +990,7 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
 
             agg_request = AggregateMetricsRequest(verify_responses=stripped)
             agg_response = await server_client.post(
-                server_name=agent_name,
+                server_name=target_name,
                 url_path="/aggregate_metrics",
                 json=agg_request,
             )
@@ -976,7 +998,7 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
             agg_result = AggregateMetrics.model_validate(await get_response_json(agg_response))
 
             agent_entry = {
-                AGENT_REF_KEY_NAME: {"name": agent_name},
+                target_ref_key: {"name": target_name},
                 "agent_metrics": agg_result.agent_metrics,
                 "key_metrics": agg_result.key_metrics,
                 "group_level_metrics": agg_result.group_level_metrics,
@@ -984,19 +1006,22 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
             return agent_entry
 
         all_agent_metrics: List[Dict] = []
-        tasks = [_fetch_agent_metrics(name, results_list) for name, results_list in agent_results.items()]
+        tasks = [
+            _fetch_target_metrics(name, ref_key, results_list)
+            for (name, ref_key), results_list in target_results.items()
+        ]
         for coro in asyncio.as_completed(tasks):
             agent_entry = await coro
             all_agent_metrics.append(agent_entry)
 
-            agent_name = agent_entry[AGENT_REF_KEY_NAME]["name"]
+            agent_name, _ = _rollout_target(agent_entry)
             key_metrics = agent_entry.get("key_metrics", {})
             print(f"\nKey metrics for {agent_name}:\n" + json.dumps(key_metrics, indent=4))
 
         primitive_types = (bool, int, float, str, type(None))
         metrics_to_log = dict()
         for agent_entry in all_agent_metrics:
-            agent_name = agent_entry[AGENT_REF_KEY_NAME]["name"]
+            agent_name, _ = _rollout_target(agent_entry)
             metrics_to_log.update(
                 {
                     f"{agent_name}/{k}": v
@@ -1035,7 +1060,8 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
 
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:
-                res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
+                target_name, _ = _rollout_target(row)
+                res = await server_client.post(server_name=target_name, url_path="/run", json=row)
                 try:
                     await raise_for_status(res)
                 except Exception:

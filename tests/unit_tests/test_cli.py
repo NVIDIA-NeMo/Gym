@@ -37,6 +37,7 @@ from nemo_gym.cli.env import (
     _delete_server_venv,
     _resolve_server_dir,
     _select_shard,
+    _server_instance_parts,
     _test_single,
     dump_config,
     init_environment,
@@ -89,6 +90,40 @@ class TestSelectShard:
         paths = [Path("resources_servers/s0")]
         with raises(AssertionError):
             _select_shard(paths, shard_index=4, num_shards=4)
+
+
+class TestServerInstanceParts:
+    def test_extracts_configured_instance(self) -> None:
+        config = OmegaConf.create(
+            {
+                "kuhn_player0": {
+                    "responses_api_agents": {
+                        "keyboard_agent": {
+                            "entrypoint": "app.py",
+                        }
+                    }
+                }
+            }
+        )
+
+        server_type, server_name, server_config, directory = _server_instance_parts(config, "kuhn_player0")
+
+        assert server_type == "responses_api_agents"
+        assert server_name == "keyboard_agent"
+        assert server_config.entrypoint == "app.py"
+        assert directory.name == "keyboard_agent"
+
+    @pytest.mark.parametrize(
+        "config",
+        [
+            {},
+            {"bad": {"responses_api_agents": {}}},
+            {"bad": {"responses_api_agents": {"keyboard_agent": {}}}},
+        ],
+    )
+    def test_rejects_non_server_entries(self, config: dict) -> None:
+        with raises(ConfigError):
+            _server_instance_parts(OmegaConf.create(config), "bad")
 
 
 class TestServerJunitReports:
@@ -264,6 +299,85 @@ class TestResolveServerDir:
         monkeypatch.chdir(tmp_path)
         cfg = EnvironmentTestConfig(entrypoint="resources_servers/arc_agi")
         assert cfg.resolved_dir_path == PARENT_DIR / "resources_servers" / "arc_agi"
+
+
+class TestRunHelperSelectedInstances:
+    @staticmethod
+    def _config():
+        return OmegaConf.create(
+            {
+                "dry_run": False,
+                "model_endpoint_readiness_timeout_seconds": 0,
+                "first": {
+                    "resources_servers": {
+                        "first_server": {
+                            "entrypoint": "app.py",
+                            "host": "127.0.0.1",
+                            "port": 12001,
+                        }
+                    }
+                },
+                "second": {
+                    "responses_api_agents": {
+                        "second_server": {
+                            "entrypoint": "app.py",
+                            "host": "127.0.0.1",
+                            "port": 12002,
+                        }
+                    }
+                },
+            }
+        )
+
+    def test_starts_only_selected_instances(self, monkeypatch: MonkeyPatch) -> None:
+        config = self._config()
+        monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda **_: config)
+        monkeypatch.setattr(nemo_gym.cli.env, "initialize_ray", MagicMock())
+        monkeypatch.setattr(nemo_gym.cli.env, "_resolve_server_dir", lambda path: Path("/tmp") / path)
+        monkeypatch.setattr(nemo_gym.cli.env, "setup_env_command", lambda *_: "setup")
+
+        process = MagicMock(pid=123)
+        run_command_mock = MagicMock(return_value=process)
+        monkeypatch.setattr(nemo_gym.cli.env, "run_command", run_command_mock)
+
+        head_server = MagicMock()
+        head_thread = MagicMock()
+        head_instance = MagicMock()
+        monkeypatch.setattr(
+            nemo_gym.cli.env.HeadServer,
+            "run_webserver",
+            MagicMock(return_value=(head_server, head_thread, head_instance)),
+        )
+
+        client = MagicMock(global_config_dict=config)
+        client.poll_for_status.return_value = "success"
+        server_client_cls = MagicMock(return_value=client)
+        server_client_cls.load_head_server_config.return_value = MagicMock()
+        monkeypatch.setattr(nemo_gym.cli.env, "ServerClient", server_client_cls)
+
+        helper = RunHelper()
+        helper.wait_for_spinup = MagicMock()
+        helper.wait_for_model_endpoints = MagicMock()
+        helper.start(MagicMock(), instance_names=["first", "first"])
+
+        assert [call.kwargs["server_name"] for call in run_command_mock.call_args_list] == ["first"]
+        assert set(helper._processes) == {"first"}
+        displayed = head_instance.set_server_instances.call_args.args[0]
+        assert [instance["config_path"] for instance in displayed] == ["first"]
+        endpoint_config = helper.wait_for_model_endpoints.call_args.args[0]
+        assert "first" in endpoint_config
+        assert "second" not in endpoint_config
+
+    def test_rejects_unknown_instance_before_initializing_ray(self, monkeypatch: MonkeyPatch) -> None:
+        config = self._config()
+        initialize_ray_mock = MagicMock()
+        monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda **_: config)
+        monkeypatch.setattr(nemo_gym.cli.env, "initialize_ray", initialize_ray_mock)
+
+        with raises(ConfigError, match="missing"):
+            RunHelper().start(MagicMock(), instance_names=["missing"])
+
+        initialize_ray_mock.assert_not_called()
 
 
 class TestRunHelperDryRunSpinup:

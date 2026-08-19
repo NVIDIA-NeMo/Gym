@@ -47,7 +47,7 @@ from nemo_gym.cli.utils import (
     print_rich_table,
     render_component_inspection,
 )
-from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError
+from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig, ConfigError
 from nemo_gym.environment.manifest import EnvironmentKind, IntegrationProfile
 from nemo_gym.environment.onboarding import (
     EnvironmentOnboardingError,
@@ -365,12 +365,21 @@ class RunHelper:  # pragma: no cover
     _server_instance_display_configs: List[ServerInstanceDisplayConfig]
     _server_client: ServerClient
 
-    def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
+    def start(
+        self,
+        global_config_dict_parser_config: GlobalConfigDictParserConfig,
+        instance_names: Optional[List[str]] = None,
+    ) -> None:
         global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
 
         # Fail fast before starting Ray if nothing is configured to run (covers env run and the
         # e2e rollout-collection path, which both start servers via this method).
         GlobalConfigDictParser().raise_on_no_server_instances(global_config_dict)
+
+        if instance_names is not None:
+            instance_names = list(dict.fromkeys(instance_names))
+            for instance_name in instance_names:
+                _server_instance_parts(global_config_dict, instance_name)
 
         # Initialize Ray cluster in the main process
         # Note: This function will modify the global config dict - update `ray_head_node_address`
@@ -382,7 +391,11 @@ class RunHelper:  # pragma: no cover
         # We always run the head server in this `run` command.
         self._head_server, self._head_server_thread, self._head_server_instance = HeadServer.run_webserver()
 
-        top_level_paths = [k for k in global_config_dict.keys() if k not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS]
+        top_level_paths = (
+            instance_names
+            if instance_names is not None
+            else [k for k in global_config_dict.keys() if k not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS]
+        )
 
         self._processes: Dict[str, Popen] = dict()
         self._server_instance_display_configs: List[ServerInstanceDisplayConfig] = []
@@ -475,7 +488,19 @@ class RunHelper:  # pragma: no cover
             self.wait_for_dry_run_spinup()
         else:
             self.wait_for_spinup()
-            self.wait_for_model_endpoints(global_config_dict)
+            endpoint_config = (
+                global_config_dict
+                if instance_names is None
+                else OmegaConf.create(
+                    {
+                        MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME: global_config_dict[
+                            MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME
+                        ],
+                        **{name: global_config_dict[name] for name in instance_names},
+                    }
+                )
+            )
+            self.wait_for_model_endpoints(endpoint_config)
 
     def display_server_instance_info(self) -> None:
         if not self._server_instance_display_configs:
@@ -791,6 +816,125 @@ def run(
     rh.run_forever()
 
 
+class ServeInstanceConfig(BaseNeMoGymCLIConfig):
+    instance: str = Field(description="Top-level server instance name to run in this terminal.")
+
+
+class RunHeadConfig(BaseNeMoGymCLIConfig):
+    instances: List[str] = Field(default_factory=list)
+
+
+def _server_instance_parts(
+    global_config_dict: DictConfig,
+    instance: str,
+) -> tuple[str, str, DictConfig, Path]:
+    entry = global_config_dict.get(instance)
+    if not isinstance(entry, DictConfig) or len(entry) != 1:
+        raise ConfigError(f"`{instance}` is not a configured server instance.")
+    server_type = next(iter(entry))
+    servers = entry[server_type]
+    if not isinstance(servers, DictConfig) or len(servers) != 1:
+        raise ConfigError(f"`{instance}` is not a configured server instance.")
+    server_name = next(iter(servers))
+    server_config = servers[server_name]
+    if not isinstance(server_config, DictConfig) or "entrypoint" not in server_config:
+        raise ConfigError(f"`{instance}` has no server entrypoint.")
+    return server_type, server_name, server_config, _resolve_server_dir(Path(server_type, server_name))
+
+
+@exit_cleanly_on_config_error
+def run_head(
+    global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
+):  # pragma: no cover
+    """Run only the shared NeMo Gym head server in the foreground."""
+    global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
+    BaseNeMoGymCLIConfig.model_validate(global_config_dict)
+    command_config = RunHeadConfig.model_validate(global_config_dict)
+    if command_config.instances:
+        rh = RunHelper()
+        rh.start(global_config_dict_parser_config, instance_names=command_config.instances)
+        rh.run_forever()
+        return
+
+    initialize_ray()
+
+    head_server, head_thread, head_instance = HeadServer.run_webserver()
+    instances = []
+    for instance in global_config_dict:
+        if instance in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS:
+            continue
+        try:
+            server_type, server_name, server_config, dir_path = _server_instance_parts(global_config_dict, instance)
+        except ConfigError:
+            continue
+        instances.append(
+            ServerInstanceDisplayConfig(
+                config_path=instance,
+                dir_path=dir_path,
+                entrypoint=server_config.entrypoint,
+                host=server_config.get("host"),
+                name=server_name,
+                port=server_config.get("port"),
+                process_name=instance,
+                server_type=server_type,
+                url=(
+                    f"http://{server_config.host}:{server_config.port}"
+                    if server_config.get("host") and server_config.get("port")
+                    else None
+                ),
+            ).model_dump(mode="json")
+        )
+    head_instance.set_server_instances(instances)
+    print(f"Head server ready at http://{head_instance.config.host}:{head_instance.config.port}")
+    print("Start each configured server in another terminal with `gym env serve --instance NAME ...`.")
+
+    try:
+        while head_thread.is_alive():
+            sleep(1)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        head_server.should_exit = True
+        head_thread.join()
+
+
+@exit_cleanly_on_config_error
+def serve_instance(
+    global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
+):  # pragma: no cover
+    """Run one configured server instance in the foreground using the head server's resolved config."""
+    local_config = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
+    command_config = ServeInstanceConfig.model_validate(local_config)
+    head_config = BaseServerConfig.model_validate(local_config[HEAD_SERVER_KEY_NAME])
+    shared_config = ServerClient.load_from_global_config(head_config).global_config_dict
+    _, _, server_config, dir_path = _server_instance_parts(shared_config, command_config.instance)
+
+    escaped_config = shlex.quote(OmegaConf.to_yaml(shared_config))
+    command = (
+        f"{setup_env_command(dir_path, shared_config, command_config.instance)} && "
+        f"{NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME}={escaped_config} "
+        f"{NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME}={shlex.quote(command_config.instance)} "
+        f"python {shlex.quote(str(server_config.entrypoint))}"
+    )
+    process = run_command(
+        command,
+        Path.cwd(),
+        server_name=command_config.instance,
+        global_config_dict=shared_config,
+    )
+    try:
+        returncode = process.wait()
+    except KeyboardInterrupt:
+        process.send_signal(SIGINT)
+        try:
+            returncode = process.wait(timeout=_GRACEFUL_SHUTDOWN_TIMEOUT_SEC)
+        except TimeoutExpired:
+            process.kill()
+            returncode = process.wait()
+    if returncode != 0:
+        raise SystemExit(returncode)
+
+
 def _validate_data_single(test_config: TestConfig) -> None:  # pragma: no cover
     if not test_config.should_validate_data:
         return
@@ -982,7 +1126,12 @@ def test_all():  # pragma: no cover
     # (a user's project), and the Gym install root (built-ins, under PARENT_DIR in editable and wheel
     # installs). Entrypoints are kept relative; earlier roots shadow later ones for same-named modules. This
     # lets `gym env test` discover and run built-in and plugin servers from any cwd, not only a repo checkout.
-    server_type_dirs = ("resources_servers", "responses_api_agents", "responses_api_models")
+    server_type_dirs = (
+        "resources_servers",
+        "responses_api_agents",
+        "responses_api_models",
+        "rollout_orchestrators",
+    )
     seen_rel_paths: set[str] = set()
     candidate_dir_paths: List[str] = []
     for root in component_search_roots():
@@ -1392,6 +1541,8 @@ def _inspect_environment(
         details["resources servers"] = ", ".join(parsed["resources_servers"])
     if parsed["agent"]:
         details["agent"] = parsed["agent"]
+    if parsed["orchestrator"]:
+        details["orchestrator"] = parsed["orchestrator"]
     if parsed["datasets"]:
         details["datasets"] = ", ".join(parsed["datasets"])
 

@@ -52,6 +52,15 @@ class TestRewardProfile:
             "reward": reward,
         }
 
+    def test_profile_accepts_orchestrator_ref(self) -> None:
+        row = self._row(0, 0)
+        row["orchestrator_ref"] = {"name": "turn_orchestrator"}
+        row.pop("agent_ref")
+
+        _, rollout_metrics = RewardProfiler().profile_from_data([row], [self._result(0, 0)])
+
+        assert rollout_metrics[0]["agent_ref"]["name"] == "turn_orchestrator"
+
     def test_profile_from_data(self) -> None:
         rows = [
             {

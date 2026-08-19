@@ -137,6 +137,7 @@ ATTEMPT_INDEX_KEY_NAME = "_ng_attempt_index"
 RESPONSES_CREATE_PARAMS_KEY_NAME = "responses_create_params"
 RESPONSE_KEY_NAME = "response"
 AGENT_REF_KEY_NAME = "agent_ref"
+ORCHESTRATOR_REF_KEY_NAME = "orchestrator_ref"
 SKILLS_REF_KEY_NAME = "skills_ref"
 
 POLICY_BASE_URL_KEY_NAME = "policy_base_url"
@@ -1049,7 +1050,12 @@ def format_almost_server_warning(server_name: str, error: ValidationError) -> st
     errors = error.errors()
 
     # Identify the actual server type from the error (excluding Union discriminator noise)
-    server_type_keys = ["responses_api_models", "resources_servers", "responses_api_agents"]
+    server_type_keys = [
+        "responses_api_models",
+        "resources_servers",
+        "responses_api_agents",
+        "rollout_orchestrators",
+    ]
     actual_server_type = None
 
     # Example error structure: ('ResponsesAPIAgentServerInstanceConfig', 'responses_api_agents', 'simple_agent', 'datasets', 0, 'license')
