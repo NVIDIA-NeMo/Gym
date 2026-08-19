@@ -34,11 +34,13 @@ from nemo_gym.config_types import (
     ConfigPathNotFoundError,
     MalformedConfigPathsError,
     NoServerInstancesError,
+    RolloutOrchestratorServerInstanceConfig,
     ServerRefNotFoundError,
     UnsupportedAgentOverrideError,
     UnsupportedAgentPairingError,
     UnsupportedModelPairingError,
     WANDBConfig,
+    maybe_get_server_instance_config,
 )
 from nemo_gym.global_config import (
     ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
@@ -60,6 +62,24 @@ from nemo_gym.server_utils import (
 
 
 class TestGlobalConfig:
+    def test_rollout_orchestrator_is_a_server_instance(self) -> None:
+        server, error = maybe_get_server_instance_config(
+            "turn_orchestrator",
+            OmegaConf.create(
+                {
+                    "rollout_orchestrators": {
+                        "alternating_turn": {
+                            "entrypoint": "app.py",
+                        }
+                    }
+                }
+            ),
+        )
+
+        assert error is None
+        assert isinstance(server, RolloutOrchestratorServerInstanceConfig)
+        assert server.SERVER_TYPE == "rollout_orchestrators"
+
     def _mock_versions_for_testing(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(nemo_gym.global_config, "openai_version", "test openai version")
         monkeypatch.setattr(nemo_gym.global_config, "ray_version", "test ray version")

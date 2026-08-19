@@ -126,7 +126,12 @@ class AgentServerRef(BaseModel):
     name: str
 
 
-ServerRef = Union[ModelServerRef, ResourcesServerRef, AgentServerRef]
+class RolloutOrchestratorServerRef(BaseModel):
+    type: Literal["rollout_orchestrators"]
+    name: str
+
+
+ServerRef = Union[ModelServerRef, ResourcesServerRef, AgentServerRef, RolloutOrchestratorServerRef]
 ServerRefTypeAdapter = TypeAdapter(ServerRef)
 
 
@@ -625,6 +630,7 @@ class BaseServerTypeConfig(BaseModel):
             Literal["responses_api_models"],
             Literal["resources_servers"],
             Literal["responses_api_agents"],
+            Literal["rollout_orchestrators"],
         ]
     ]
 
@@ -653,10 +659,19 @@ class ResponsesAPIAgentServerTypeConfig(BaseServerTypeConfig):
     responses_api_agents: Dict[str, BaseRunServerTypeConfig] = Field(min_length=1, max_length=1)
 
 
+class RolloutOrchestratorServerTypeConfig(BaseServerTypeConfig):
+    SERVER_TYPE: ClassVar[Literal["rollout_orchestrators"]] = "rollout_orchestrators"
+
+    model_config = ConfigDict(extra="allow")
+
+    rollout_orchestrators: Dict[str, BaseRunServerTypeConfig] = Field(min_length=1, max_length=1)
+
+
 ServerTypeConfig = Union[
     ResponsesAPIModelServerTypeConfig,
     ResourcesServerTypeConfig,
     ResponsesAPIAgentServerTypeConfig,
+    RolloutOrchestratorServerTypeConfig,
 ]
 
 
@@ -704,10 +719,15 @@ class ResponsesAPIAgentServerInstanceConfig(ResponsesAPIAgentServerTypeConfig, B
     pass
 
 
+class RolloutOrchestratorServerInstanceConfig(RolloutOrchestratorServerTypeConfig, BaseServerInstanceConfig):
+    pass
+
+
 ServerInstanceConfig = Union[
     ResponsesAPIModelServerInstanceConfig,
     ResourcesServerInstanceConfig,
     ResponsesAPIAgentServerInstanceConfig,
+    RolloutOrchestratorServerInstanceConfig,
 ]
 ServerInstanceConfigTypeAdapter = TypeAdapter(ServerInstanceConfig)
 
@@ -739,7 +759,12 @@ def is_almost_server(server_type_config_dict: Any) -> bool:
         return False
 
     # Check for server type.
-    server_type_keys = ["responses_api_models", "resources_servers", "responses_api_agents"]
+    server_type_keys = [
+        "responses_api_models",
+        "resources_servers",
+        "responses_api_agents",
+        "rollout_orchestrators",
+    ]
     has_server_type = any(key in server_type_config_dict for key in server_type_keys)
 
     if not has_server_type:
@@ -762,6 +787,7 @@ def is_almost_server(server_type_config_dict: Any) -> bool:
 ########################################
 
 AGENT_REF_KEY = "agent_ref"
+ORCHESTRATOR_REF_KEY = "orchestrator_ref"
 
 
 ########################################

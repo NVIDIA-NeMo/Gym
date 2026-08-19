@@ -193,6 +193,7 @@ AGENT_REF_KEY_NAME = "agent_ref"
 # itself for self-contained environments). Stamped into derived artifacts at collate/load time;
 # resolved to an agent at dispatch time. See the dataset-decoupling RFC.
 TASK_SOURCE_KEY_NAME = "task_source"
+ORCHESTRATOR_REF_KEY_NAME = "orchestrator_ref"
 SKILLS_REF_KEY_NAME = "skills_ref"
 REWARD_KEY_NAME = "reward"
 
@@ -1750,7 +1751,12 @@ def format_almost_server_warning(server_name: str, error: ValidationError) -> st
     errors = error.errors()
 
     # Identify the actual server type from the error (excluding Union discriminator noise)
-    server_type_keys = ["responses_api_models", "resources_servers", "responses_api_agents"]
+    server_type_keys = [
+        "responses_api_models",
+        "resources_servers",
+        "responses_api_agents",
+        "rollout_orchestrators",
+    ]
     actual_server_type = None
 
     # Example error structure: ('ResponsesAPIAgentServerInstanceConfig', 'responses_api_agents', 'simple_agent', 'datasets', 0, 'license')

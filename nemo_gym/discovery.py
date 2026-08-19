@@ -68,7 +68,12 @@ _UNSET_VALUE_PLACEHOLDER = "__unset_for_listing__"
 
 # Server groups a component's `domain`/`description` may be declared on. `domain` can sit on a
 # resources server (e.g. `aime24`), an agent (e.g. `tau2`), or in principle a model server.
-_SERVER_GROUP_KEYS = ("resources_servers", "responses_api_agents", "responses_api_models")
+_SERVER_GROUP_KEYS = (
+    "resources_servers",
+    "responses_api_agents",
+    "responses_api_models",
+    "rollout_orchestrators",
+)
 
 
 def _parse_no_environment_tolerating_unset_values(initial_config_dict: DictConfig) -> DictConfig:
@@ -103,9 +108,9 @@ def _parse_no_environment_tolerating_unset_values(initial_config_dict: DictConfi
 def iter_server_configs(container):
     """Yield ``(group_key, server_name, server_config)`` for every server across all instances in a config.
 
-    Walks a loaded config mapping (each top-level instance -> its ``resources_servers``/
-    ``responses_api_agents``/``responses_api_models`` group -> each server). Defensive against malformed
-    shapes, so it never raises. The shared primitive behind metadata reads and the inspect deep-parse.
+    Walks a loaded config mapping (each top-level instance -> its server-type group -> each server).
+    Defensive against malformed shapes, so it never raises. The shared primitive behind metadata reads
+    and the inspect deep-parse.
     """
     if not isinstance(container, (dict, DictConfig)):
         return

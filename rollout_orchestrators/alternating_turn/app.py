@@ -13,65 +13,47 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Generic alternating-turn orchestrator with keyboard-controlled agents."""
+"""Alternating-turn rollout orchestration for independently hosted agents."""
 
 import asyncio
 import json
 from time import time
-from typing import Any, Literal, Optional, Protocol
+from typing import Any, Optional
 from uuid import uuid4
 
-from fastapi import Body, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+from fastapi import Request
+from pydantic import ConfigDict, Field, PrivateAttr, model_validator
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.config_types import ResourcesServerRef
-from nemo_gym.multi_agent import MultiAgentResetResponse, MultiAgentStepResponse
+from nemo_gym.base_rollout_orchestrator import BaseRolloutOrchestratorConfig, SimpleRolloutOrchestrator
+from nemo_gym.config_types import AgentServerRef, ResourcesServerRef
+from nemo_gym.multi_agent import AgentActResponse, AgentTurn, MultiAgentResetResponse, MultiAgentStepResponse
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
-class AgentTurn(BaseModel):
-    observation: str
-    action: str
-
-
-class AgentController(Protocol):
-    async def act(self, agent_id: str, observation: str, history: list[AgentTurn]) -> str: ...
-
-
-class KeyboardControllerConfig(BaseModel):
-    type: Literal["keyboard"] = "keyboard"
-    display_name: Optional[str] = None
-
-
-class KeyboardController:
-    def __init__(self, display_name: str) -> None:
-        self.display_name = display_name
-
-    async def act(self, agent_id: str, observation: str, history: list[AgentTurn]) -> str:
-        prompt = f"\n--- {self.display_name} ({agent_id}) ---\n{observation}\n{self.display_name}> "
-        return await asyncio.to_thread(input, prompt)
-
-
-class MultiAgentAgentConfig(BaseResponsesAPIAgentConfig):
+class AlternatingTurnOrchestratorConfig(BaseRolloutOrchestratorConfig):
     resources_server: ResourcesServerRef
-    controllers: dict[str, KeyboardControllerConfig]
+    agents: dict[str, AgentServerRef] = Field(min_length=2)
     focal_agent: str
     max_turns: int = Field(16, ge=1)
 
+    @model_validator(mode="after")
+    def validate_focal_agent(self) -> "AlternatingTurnOrchestratorConfig":
+        if self.focal_agent not in self.agents:
+            raise ValueError(f"focal_agent {self.focal_agent!r} must be present in agents")
+        return self
 
-class MultiAgentRunRequest(BaseRunRequest):
+
+class AlternatingTurnRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
 
 
-class MultiAgentRunResponse(BaseVerifyResponse):
+class AlternatingTurnRunResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
     focal_agent: str
@@ -88,9 +70,9 @@ def _episode_response(trajectories: dict[str, list[AgentTurn]]) -> NeMoGymRespon
         sort_keys=True,
     )
     return NeMoGymResponse(
-        id=f"keyboard-{uuid4()}",
+        id=f"multi-agent-{uuid4()}",
         created_at=time(),
-        model="keyboard",
+        model="multi-agent",
         object="response",
         output=[
             NeMoGymResponseOutputMessage(
@@ -107,30 +89,18 @@ def _episode_response(trajectories: dict[str, list[AgentTurn]]) -> NeMoGymRespon
     )
 
 
-class MultiAgentAgent(SimpleResponsesAPIAgent):
-    config: MultiAgentAgentConfig
-    _interactive_lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
+class AlternatingTurnOrchestrator(SimpleRolloutOrchestrator):
+    config: AlternatingTurnOrchestratorConfig
+    _episode_lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
 
-    async def responses(
-        self,
-        body: NeMoGymResponseCreateParamsNonStreaming = Body(),
-    ) -> NeMoGymResponse:
-        raise HTTPException(status_code=405, detail="Use /run for multi-agent episodes.")
-
-    def _controllers(self) -> dict[str, AgentController]:
-        return {
-            agent_id: KeyboardController(controller.display_name or agent_id)
-            for agent_id, controller in self.config.controllers.items()
-        }
-
-    async def run(self, request: Request, body: MultiAgentRunRequest) -> MultiAgentRunResponse:
-        async with self._interactive_lock:
+    async def run(self, request: Request, body: AlternatingTurnRunRequest) -> AlternatingTurnRunResponse:
+        async with self._episode_lock:
             return await self._run_episode(request, body)
 
-    async def _run_episode(self, request: Request, body: MultiAgentRunRequest) -> MultiAgentRunResponse:
-        controllers = self._controllers()
-        trajectories: dict[str, list[AgentTurn]] = {agent_id: [] for agent_id in controllers}
-        rewards: dict[str, float] = {agent_id: 0.0 for agent_id in controllers}
+    async def _run_episode(self, request: Request, body: AlternatingTurnRunRequest) -> AlternatingTurnRunResponse:
+        trajectories: dict[str, list[AgentTurn]] = {agent_id: [] for agent_id in self.config.agents}
+        rewards: dict[str, float] = {agent_id: 0.0 for agent_id in self.config.agents}
+        agent_cookies: dict[str, Any] = {agent_id: None for agent_id in self.config.agents}
         env_cookies = request.cookies
 
         reset_resp = await self.server_client.post(
@@ -150,16 +120,24 @@ class MultiAgentAgent(SimpleResponsesAPIAgent):
 
         try:
             for _ in range(self.config.max_turns):
-                if active_agent not in controllers:
-                    raise RuntimeError(f"No controller configured for active agent {active_agent!r}.")
+                if active_agent not in self.config.agents:
+                    raise RuntimeError(f"No agent server configured for active agent {active_agent!r}.")
                 if observation is None:
                     raise RuntimeError(f"Environment returned no observation for active agent {active_agent!r}.")
 
-                action = await controllers[active_agent].act(
-                    active_agent,
-                    observation,
-                    trajectories[active_agent],
+                act_resp = await self.server_client.post(
+                    server_name=self.config.agents[active_agent].name,
+                    url_path="/act",
+                    json={
+                        "agent_id": active_agent,
+                        "observation": observation,
+                        "history": [turn.model_dump() for turn in trajectories[active_agent]],
+                    },
+                    cookies=agent_cookies[active_agent],
                 )
+                await raise_for_status(act_resp)
+                action = AgentActResponse.model_validate(await get_response_json(act_resp)).action
+                agent_cookies[active_agent] = act_resp.cookies
                 trajectories[active_agent].append(AgentTurn(observation=observation, action=action))
 
                 step_resp = await self.server_client.post(
@@ -193,11 +171,8 @@ class MultiAgentAgent(SimpleResponsesAPIAgent):
                 )
                 await raise_for_status(close_resp)
 
-        if self.config.focal_agent not in rewards:
-            raise RuntimeError(f"Focal agent {self.config.focal_agent!r} is not configured.")
-
         response = _episode_response(trajectories)
-        return MultiAgentRunResponse(
+        return AlternatingTurnRunResponse(
             responses_create_params=body.responses_create_params,
             response=response,
             reward=rewards[self.config.focal_agent],
@@ -211,4 +186,4 @@ class MultiAgentAgent(SimpleResponsesAPIAgent):
 
 
 if __name__ == "__main__":
-    MultiAgentAgent.run_webserver()
+    AlternatingTurnOrchestrator.run_webserver()

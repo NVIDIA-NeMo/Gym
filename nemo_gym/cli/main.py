@@ -163,6 +163,16 @@ CONFIG = Flag(
     translate_to_hydra=lambda args: [f"+config_paths=[{','.join(args.config)}]"] if args.config else [],
 )
 
+HEAD_INSTANCES = Flag(
+    register=lambda p: p.add_argument(
+        "--instance",
+        action="append",
+        metavar="NAME",
+        help="Configured server instance to launch with the head server; repeatable.",
+    ),
+    translate_to_hydra=lambda args: [f"+instances={json.dumps(args.instance)}"] if args.instance else [],
+)
+
 # Shared flag: select the storage backend. Reused by `dataset upload` and `dataset download`.
 STORAGE = Flag(
     register=lambda p: p.add_argument(
@@ -890,6 +900,32 @@ COMMANDS = {
             MODEL,
             MODEL_URL,
             MODEL_API_KEY,
+        ),
+    ),
+    "env head": Command(
+        target="nemo_gym.cli.env:run_head",
+        summary="Start the shared head server and optional selected instances.",
+        flags=(
+            CONFIG,
+            BENCHMARK,
+            ENVIRONMENT,
+            RESOURCES_SERVER_CONFIG,
+            MODEL_TYPE,
+            SEARCH_DIR,
+            HEAD_INSTANCES,
+        ),
+    ),
+    "env serve": Command(
+        target="nemo_gym.cli.env:serve_instance",
+        summary="Start one configured server instance in the foreground.",
+        flags=(
+            CONFIG,
+            BENCHMARK,
+            ENVIRONMENT,
+            RESOURCES_SERVER_CONFIG,
+            MODEL_TYPE,
+            SEARCH_DIR,
+            _value_flag("instance", "instance", "Top-level server instance name.", quote=True),
         ),
     ),
     "env prefetch": Command(
