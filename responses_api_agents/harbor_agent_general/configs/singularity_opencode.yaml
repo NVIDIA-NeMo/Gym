@@ -22,8 +22,8 @@ harbor_agent_general:
         kwargs:
           singularity_image_cache_dir: ${oc.env:SINGULARITY_CACHEDIR}/harbor
           singularity_force_pull: ${oc.env:SINGULARITY_FORCE_PULL,false}
-          ## CAUTION: DO NOT use bind-paths, to avoid broken network access.
-          singularity_no_mount: home,tmp
+          ## TIP: Skip bind-paths if broken network access.
+          # singularity_no_mount: home,tmp
 
       ##
       # Follows harbor.models.trial.config:AgentConfig spec.
