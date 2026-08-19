@@ -55,6 +55,7 @@ from nemo_gym.openai_utils import (
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from responses_api_models.vllm_model.app import (
     VLLMConverter,
+    VLLMContextCompactionResponseCreateParams,
     VLLMModel,
     VLLMModelConfig,
     _append_transport_io,
@@ -4585,6 +4586,18 @@ def _make_top_logprobs_model(
 
 
 class TestTopLogprobsHandling:
+    def test_context_compaction_conversion_keeps_prefix_out_of_shared_schema(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        standard_body, chat_params = model._context_compaction_chat_params(
+            VLLMContextCompactionResponseCreateParams(
+                input="hi",
+                required_prefix_token_ids=[10, 11],
+            )
+        )
+
+        assert "required_prefix_token_ids" not in standard_body.model_dump()
+        assert chat_params.required_prefix_token_ids == [10, 11]
+
     def test_tokenize_endpoint_forwards_exact_prefix_without_sampling(self) -> None:
         model = _make_top_logprobs_model(return_token_id_information=True)
         app = model.setup_webserver()

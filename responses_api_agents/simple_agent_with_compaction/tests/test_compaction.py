@@ -4,7 +4,7 @@
 import subprocess
 import sys
 
-from nemo_gym.context_compaction import (
+from responses_api_agents.simple_agent_with_compaction.compaction import (
     ContextGuardConfig,
     ContextMeasurements,
     HistoryController,
@@ -33,13 +33,13 @@ from nemo_gym.context_compaction import (
 
 def test_context_compaction_modules_import_independently() -> None:
     for module_name in (
-        "nemo_gym.context_compaction",
-        "nemo_gym.context_compaction.config",
-        "nemo_gym.context_compaction.controller",
-        "nemo_gym.context_compaction.history",
-        "nemo_gym.context_compaction.materialization",
-        "nemo_gym.context_compaction.policies",
-        "nemo_gym.context_compaction.session",
+        "responses_api_agents.simple_agent_with_compaction.compaction",
+        "responses_api_agents.simple_agent_with_compaction.compaction.config",
+        "responses_api_agents.simple_agent_with_compaction.compaction.controller",
+        "responses_api_agents.simple_agent_with_compaction.compaction.history",
+        "responses_api_agents.simple_agent_with_compaction.compaction.materialization",
+        "responses_api_agents.simple_agent_with_compaction.compaction.policies",
+        "responses_api_agents.simple_agent_with_compaction.compaction.session",
     ):
         subprocess.run(
             [sys.executable, "-c", f"import {module_name}"],

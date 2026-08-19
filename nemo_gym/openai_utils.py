@@ -523,12 +523,6 @@ class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
     user: Optional[str] = None
     stream: Optional[Literal[False]] = None
 
-    # NeMo-RL training extension. When supplied, the serving worker replaces
-    # the re-rendered prefix through the latest assistant turn with these exact
-    # generation-observed IDs. This field is transport control, not semantic
-    # conversation content.
-    required_prefix_token_ids: Optional[List[int]] = None
-
 
 ########################################
 # Responses API outputs
@@ -832,9 +826,6 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     user: Optional[str] = None
     web_search_options: Optional[WebSearchOptions] = None
     stream: Optional[Literal[False]] = None
-
-    # Private NeMo-RL serving extension; see the Responses counterpart above.
-    required_prefix_token_ids: Optional[List[int]] = None
 
     # Disallow deprecated args
     # function_call: FunctionCall

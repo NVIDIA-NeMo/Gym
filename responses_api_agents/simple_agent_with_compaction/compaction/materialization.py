@@ -8,7 +8,11 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Mapping, Sequence
 
-from nemo_gym.context_compaction.history import HistoryViewPlan, MaterializedHistoryView, SemanticHistory
+from responses_api_agents.simple_agent_with_compaction.compaction.history import (
+    HistoryViewPlan,
+    MaterializedHistoryView,
+    SemanticHistory,
+)
 
 
 def _marker_part_for(image_part: Mapping[str, Any], text: str) -> dict[str, str]:

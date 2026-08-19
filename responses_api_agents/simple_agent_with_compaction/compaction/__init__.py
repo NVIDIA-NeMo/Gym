@@ -3,7 +3,7 @@
 
 """Semantic context compaction for multi-turn Gym rollouts."""
 
-from nemo_gym.context_compaction.config import (
+from responses_api_agents.simple_agent_with_compaction.compaction.config import (
     CompactionScheduleConfig,
     ContextGuardConfig,
     ContextHistoryConfig,
@@ -12,14 +12,14 @@ from nemo_gym.context_compaction.config import (
     ReasoningRecencyConfig,
     RecencyHistoryPolicyConfig,
 )
-from nemo_gym.context_compaction.controller import (
+from responses_api_agents.simple_agent_with_compaction.compaction.controller import (
     HistoryController,
     TurnChunkedHistoryController,
     build_guard_outcome_records,
     evaluate_context_guards,
     pending_observation_group_ids,
 )
-from nemo_gym.context_compaction.history import (
+from responses_api_agents.simple_agent_with_compaction.compaction.history import (
     CanonicalHistory,
     ContextMeasurements,
     FinalizedChunkRecord,
@@ -44,12 +44,12 @@ from nemo_gym.context_compaction.history import (
     stable_id,
     unregister_semantic_part_kind,
 )
-from nemo_gym.context_compaction.materialization import (
+from responses_api_agents.simple_agent_with_compaction.compaction.materialization import (
     descriptor_is_append_compatible,
     materialize_history_view,
     ordered_media_is_append_compatible,
 )
-from nemo_gym.context_compaction.policies import (
+from responses_api_agents.simple_agent_with_compaction.compaction.policies import (
     HistoryPolicy,
     IdentityHistoryPolicy,
     RecencyHistoryPolicy,
@@ -57,7 +57,7 @@ from nemo_gym.context_compaction.policies import (
     register_history_policy,
     unregister_history_policy,
 )
-from nemo_gym.context_compaction.session import (
+from responses_api_agents.simple_agent_with_compaction.compaction.session import (
     ContextCompactedResponse,
     ContextCompactedTransportResponse,
     ContextCompactionContract,

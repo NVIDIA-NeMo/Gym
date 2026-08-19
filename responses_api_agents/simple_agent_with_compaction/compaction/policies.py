@@ -10,8 +10,11 @@ from typing import Any, Callable, Mapping, Protocol
 
 from pydantic import BaseModel
 
-from nemo_gym.context_compaction.config import HistoryPolicyConfig, RecencyHistoryPolicyConfig
-from nemo_gym.context_compaction.history import (
+from responses_api_agents.simple_agent_with_compaction.compaction.config import (
+    HistoryPolicyConfig,
+    RecencyHistoryPolicyConfig,
+)
+from responses_api_agents.simple_agent_with_compaction.compaction.history import (
     HistoryViewPlan,
     KeepPartRef,
     LineageDisposition,
