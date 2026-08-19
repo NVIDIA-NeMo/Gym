@@ -29,8 +29,7 @@ PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT=5600
 DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT=5700
 
 ROUTER_SERVER_PORT=8000
-PREFILL_SERVER_PORT=8001
-DECODE_SERVER_PORT=8002
+WORKER_SERVER_PORT=8001
 
 EVAL_COMMAND=$(cat <<EOF
 set -euo pipefail
@@ -120,29 +119,26 @@ if (( SLURM_PROCID == 0 )); then
         --intra-node-data-parallel-size 1 \
         --request-timeout-secs 86400 \
         --log-level error
+
+    router_pid=\$!
+    trap 'kill "\$router_pid" 2>/dev/null || true' EXIT
 fi
 
 # Split nodes here by index
 if (( SLURM_PROCID <= $NUM_PREFILL_NODES )); then
-    # Prefill head
-
+    # Prefill
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
     vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
         --host \$this_node_hostname \
-        --port $PREFILL_SERVER_PORT \
-        --api-server-count 1 \
-        &
-    prefill_pid=\$!
-    trap 'kill "\$prefill_pid" 2>/dev/null || true' EXIT
+        --port $WORKER_SERVER_PORT
 else
-    # Decode worker
+    # Decode
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
     vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
         --host \$this_node_hostname \
-        --port $DECODE_SERVER_PORT \
-        --api-server-count 1
+        --port $WORKER_SERVER_PORT
 fi
 EOF
 )
