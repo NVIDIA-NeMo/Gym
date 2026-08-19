@@ -5,6 +5,11 @@ config_paths:
 opencode_swebench_verified_resources_server:
   _inherit_from: swebench_resources_server
 
+  resources_servers:
+    swebench:
+      # For SWE Bench Verified, the repos are already clean.
+      apply_anti_cheating: false
+
 opencode_sandboxed_agent_swebench_verified:
   _inherit_from: opencode_sandboxed_agent
   responses_api_agents:

@@ -195,3 +195,57 @@ def test_ray_backend_multi_node_dp_uneven_split_raises():
                 compute=COMPUTE_MULTI_NODE,
             )
         )
+
+
+# ---------------------------------------------------------------------------
+# GPU footprint vs node pool capacity
+# ---------------------------------------------------------------------------
+
+COMPUTE_8_GPUS_PER_NODE = {
+    "cluster": {
+        "type": "slurm",
+        "account": "my-account",
+        "hostname": "foo",
+        "node_pools": {"compute": {"partition": "batch", "gpus_per_node": 8}},
+    }
+}
+
+
+def test_gpu_footprint_exact_fit_accepted():
+    service = {
+        **SERVICE,
+        "tensor_parallel_size": 2,
+        "number_of_instances": 4,
+        "distributed_backend": {"type": "vllm_service"},
+    }
+    config = SubmitConfig.model_validate(_config(services={"svc": service}, compute=COMPUTE_8_GPUS_PER_NODE))
+    assert config.services["svc"].number_of_instances == 4
+
+
+def test_gpu_footprint_exceeds_node_raises():
+    service = {
+        **SERVICE,
+        "tensor_parallel_size": 2,
+        "number_of_instances": 8,
+        "distributed_backend": {"type": "vllm_service"},
+    }
+    with pytest.raises(ValidationError, match="exceeds the largest available"):
+        SubmitConfig.model_validate(_config(services={"svc": service}, compute=COMPUTE_8_GPUS_PER_NODE))
+
+
+def test_gpu_footprint_underutilized_warns():
+    service = {
+        **SERVICE,
+        "tensor_parallel_size": 2,
+        "number_of_instances": 2,
+        "distributed_backend": {"type": "vllm_service"},
+    }
+    with pytest.warns(UserWarning, match="leaving 4 GPU"):
+        config = SubmitConfig.model_validate(_config(services={"svc": service}, compute=COMPUTE_8_GPUS_PER_NODE))
+    assert config.services["svc"].number_of_instances == 2
+
+
+def test_gpu_footprint_no_node_pools_skips_validation():
+    # Default COMPUTE fixture has no node_pools, so nothing to validate against.
+    config = SubmitConfig.model_validate(_config(services={"svc": _MULTI_SERVICE}))
+    assert config.services["svc"].number_of_instances == 4
