@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Set, Tuple, Union
 
 import rich
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, ListConfig, OmegaConf, open_dict
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -739,11 +739,52 @@ AGENT_REF_KEY = "agent_ref"
 
 
 ########################################
-# Weights and Biases
+# Secrets
 ########################################
 
 
-class WANDBConfig(BaseModel):
+def recursively_hide_secrets(dict_config: DictConfig) -> None:
+    """Mask every token/key leaf in place with '****' so a config can be printed or exported."""
+    with open_dict(dict_config):
+        _recursively_hide_secrets_helper(dict_config)
+
+
+def _recursively_hide_secrets_helper(dict_config: DictConfig) -> None:
+    for k, v in list(dict_config.items()):
+        if isinstance(v, (DictConfig, dict)):
+            _recursively_hide_secrets_helper(v)
+        elif isinstance(v, (ListConfig, list)):
+            if "token" in k or "key" in k:
+                dict_config[k] = ["****"] * len(v)
+            else:
+                for inner_v in v:
+                    if isinstance(inner_v, (DictConfig, dict)):
+                        _recursively_hide_secrets_helper(inner_v)
+        else:
+            if "token" in k or "key" in k:
+                dict_config[k] = "****"
+
+
+########################################
+# Exporter backends
+########################################
+
+
+class ExporterConfig(BaseModel):
+    """Credentials and run identity for one exporter backend.
+
+    The exporter registry validates these against the global config to decide which backends to
+    open, which is why they live here rather than next to the backend: checking availability must
+    not require importing a tracking SDK.
+    """
+
+    @property
+    def is_available(self) -> bool:
+        """Whether every field the backend needs to connect is set."""
+        raise NotImplementedError
+
+
+class WANDBConfig(ExporterConfig):
     wandb_project: Optional[str] = None
     wandb_name: Optional[str] = None
     wandb_api_key: Optional[str] = None
@@ -752,6 +793,25 @@ class WANDBConfig(BaseModel):
     def is_available(self) -> bool:
         # If global_config recursively hide secrets is called, the api key will be set to ****
         return self.wandb_project and self.wandb_name and self.wandb_api_key and self.wandb_api_key != "****"
+
+
+class MLFlowConfig(ExporterConfig):
+    """Also used for the GitLab model registry, which needs only the URI and token."""
+
+    mlflow_tracking_uri: Optional[str] = None
+    mlflow_tracking_token: Optional[str] = None
+    mlflow_experiment_name: Optional[str] = None
+    mlflow_run_name: Optional[str] = None
+
+    @property
+    def is_available(self) -> bool:
+        return (
+            self.mlflow_tracking_uri
+            and self.mlflow_tracking_token
+            and self.mlflow_experiment_name
+            and self.mlflow_run_name
+            and self.mlflow_tracking_token != "****"
+        )
 
 
 ########################################

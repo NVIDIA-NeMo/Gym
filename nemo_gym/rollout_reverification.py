@@ -25,17 +25,16 @@ import orjson
 from omegaconf import DictConfig
 from pydantic import BaseModel, Field, model_validator
 from tqdm.asyncio import tqdm
-from wandb import Table
 
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest, ReverifyMode
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError
+from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
-    get_wandb_run,
 )
 from nemo_gym.path_utils import failures_path_for
 from nemo_gym.rollout_collection import (
@@ -619,8 +618,7 @@ async def _call_aggregate_metrics(
                 if isinstance(v, primitive_types)
             }
         )
-    if get_wandb_run():  # pragma: no cover
-        get_wandb_run().log(metrics_to_log)
+    export_metrics(metrics_to_log)
 
     # Write single file with all agents
     metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
@@ -772,14 +770,12 @@ class RolloutReverificationHelper(BaseModel):
             failures_file.close()
 
         # Read the full main jsonl (cached + newly re-verified successes) ONCE — the source of truth,
-        # reused for both the W&B rollouts export and aggregate metrics so the file is never re-read.
+        # reused for both the rollouts export and aggregate metrics so the file is never re-read.
         results, agg_rows = _load_reverified_results(output_fpaths.output)
 
-        if config.upload_rollouts_to_wandb and (wandb_run := get_wandb_run()):  # pragma: no cover
-            print("Uploading rollouts to W&B. This may take a few minutes if your data is large.")
-            wandb_run.log(
-                {"Rollouts": Table(data=[[orjson.dumps(_rollout_for_wandb(r))] for r in results], columns=["Rollout"])}
-            )
+        if config.upload_rollouts_to_wandb and get_exporters():  # pragma: no cover
+            print("Uploading rollouts. This may take a few minutes if your data is large.")
+            export_rollouts([_rollout_for_wandb(r) for r in results])
 
         # Compute and write aggregate metrics via /aggregate_metrics on each agent server
         if config.disable_aggregation:

@@ -32,7 +32,6 @@ import orjson
 from omegaconf import OmegaConf
 from pydantic import BaseModel, Field, field_validator, model_validator
 from tqdm.asyncio import tqdm
-from wandb import Table
 
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
@@ -42,6 +41,7 @@ from nemo_gym.base_responses_api_model import (
     model_call_capture_dirs_from_config,
 )
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig, ConfigError, ConfigPathNotFoundError
+from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
@@ -50,7 +50,6 @@ from nemo_gym.global_config import (
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     get_global_config_dict,
-    get_wandb_run,
 )
 from nemo_gym.path_utils import failures_path_for
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
@@ -767,7 +766,6 @@ class RolloutCollectionHelper(BaseModel):
 
             rows: List[Dict] = []
             results: List[Dict] = []
-            result_strs: List[List[str]] = []
             persisted_rows: List[Dict] = []
             persisted_results: List[Dict] = []
 
@@ -887,11 +885,9 @@ class RolloutCollectionHelper(BaseModel):
         results_file.close()
         failures_file.close()
 
-        if config.upload_rollouts_to_wandb and (wandb_run := get_wandb_run()):  # pragma: no cover
-            print("Uploading rollouts to W&B. This may take a few minutes if your data is large.")
-            result_strs = [[orjson.dumps(_rollout_for_wandb(result))] for result in results]
-            wandb_run.log({"Rollouts": Table(data=result_strs, columns=["Rollout"])})
-        del result_strs
+        if config.upload_rollouts_to_wandb and get_exporters():  # pragma: no cover
+            print("Uploading rollouts. This may take a few minutes if your data is large.")
+            export_rollouts([_rollout_for_wandb(result) for result in results])
 
         print("Sorting results to ensure consistent ordering")
         rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
@@ -1012,8 +1008,7 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
                 }
             )
 
-        if get_wandb_run():  # pragma: no cover
-            get_wandb_run().log(metrics_to_log)
+        export_metrics(metrics_to_log)
 
         # Write single file with all agents
         metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
