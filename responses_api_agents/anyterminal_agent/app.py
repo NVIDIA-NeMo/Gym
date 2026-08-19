@@ -185,9 +185,9 @@ if MODEL_URL:
     if hasattr(agent, "resolve_model_base_url"):
         object.__setattr__(agent, "resolve_model_base_url", lambda *args, **kwargs: _v1)
     if hasattr(agent, "_resolve_model_base_url"):
-        agent._resolve_model_base_url = lambda: _v1
+        agent._resolve_model_base_url = lambda *args, **kwargs: _v1
     if hasattr(agent, "_resolve_base_url"):
-        agent._resolve_base_url = lambda: MODEL_URL
+        agent._resolve_base_url = lambda *args, **kwargs: MODEL_URL
 
 body = NeMoGymResponseCreateParamsNonStreaming(
     input=[NeMoGymEasyInputMessage(role="user", content=INSTRUCTION)],
