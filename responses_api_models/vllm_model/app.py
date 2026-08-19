@@ -663,9 +663,12 @@ class VLLMModel(SimpleResponsesAPIModel):
 
     def _verify_generation_prefix(self, body_dict: dict, response: dict) -> list[int] | None:
         """Require generation-time proof that the engine applied the requested prefix."""
+        context = current_capture_context()
+        if context is None or not context.prefix_requested:
+            return None
         required = body_dict.get("required_prefix_token_ids")
         if not required:
-            return None
+            raise RuntimeError("A requested token prefix was removed before generation.")
         tokens = response.get("prompt_token_ids")
         if not isinstance(tokens, list):
             raise RuntimeError(
@@ -678,9 +681,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 f"`{self.config.name}` returned generation prompt_token_ids that do not start "
                 "with required_prefix_token_ids"
             )
-        context = current_capture_context()
-        if context is not None:
-            context.prefix_supplied = True
+        context.prefix_supplied = True
         with self._prefix_supply_lock:
             self._prefix_supply_counts[0] += 1
             supplied, total = self._prefix_supply_counts
