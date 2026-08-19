@@ -489,6 +489,30 @@ input:focus {
   color: var(--muted);
 }
 
+.handoff-move {
+  display: flex;
+  gap: 6px;
+  margin: 0 0 22px;
+  padding: 12px 14px;
+  border: 1px solid rgba(245, 201, 106, 0.32);
+  border-radius: 10px;
+  flex-direction: column;
+  background: rgba(245, 201, 106, 0.08);
+}
+
+.handoff-move span {
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.handoff-move strong {
+  color: var(--gold);
+  text-transform: capitalize;
+}
+
 .hidden {
   display: none;
 }

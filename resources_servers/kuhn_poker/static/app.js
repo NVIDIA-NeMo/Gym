@@ -7,6 +7,8 @@ const elements = {
   connectionLabel: document.querySelector("#connection-label"),
   gameStatus: document.querySelector("#game-status"),
   handoff: document.querySelector("#handoff"),
+  handoffMove: document.querySelector("#handoff-move"),
+  handoffMoveText: document.querySelector("#handoff-move-text"),
   handoffTitle: document.querySelector("#handoff-title"),
   history: document.querySelector("#history"),
   message: document.querySelector("#message"),
@@ -182,6 +184,11 @@ function queueHandoff(view) {
   pendingView = view;
   renderView(maskedView(view), false);
   elements.handoffTitle.textContent = `Pass to ${playerLabel(view.active_agent)}`;
+  const previousMove = view.history[view.history.length - 1];
+  elements.handoffMove.classList.toggle("hidden", !previousMove);
+  elements.handoffMoveText.textContent = previousMove
+    ? `${playerLabel(previousMove.agent)} chose ${previousMove.action}`
+    : "";
   elements.handoff.classList.remove("hidden");
 }
 
