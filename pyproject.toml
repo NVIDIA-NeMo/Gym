@@ -416,7 +416,7 @@ exclude-dependencies = [
 # files. (Adding `environments` to packages.find above is what makes that tree ship at all.) Bulk
 # train/validation JSONL is intentionally not committed to git, so it is excluded automatically.
 # Only nemo_gym's own non-package resource scripts need an explicit entry here.
-nemo_gym = ["resources/*.py"]
+nemo_gym = ["resources/*.py", "token_id_capture/staging/conformance/*.json"]
 
 [tool.setuptools.dynamic]
 version = {attr = "nemo_gym.__version__"}
@@ -536,6 +536,24 @@ include = [
     "environments.*",
     "nemo_gym",
     "nemo_gym.*",
+]
+# SWE harnesses create mutable runtime trees inside their package directory.
+# Package discovery must never race or ship those caches and rollout outputs.
+exclude = [
+    "responses_api_agents.swe_agents.results",
+    "responses_api_agents.swe_agents.results.*",
+    "responses_api_agents.swe_agents.swe_openhands_setup",
+    "responses_api_agents.swe_agents.swe_openhands_setup.*",
+    "responses_api_agents.swe_agents.swe_opencode_setup",
+    "responses_api_agents.swe_agents.swe_opencode_setup.*",
+    "responses_api_agents.swe_agents.swe_r2e_gym_setup",
+    "responses_api_agents.swe_agents.swe_r2e_gym_setup.*",
+    "responses_api_agents.swe_agents.swe_rebench_setup",
+    "responses_api_agents.swe_agents.swe_rebench_setup.*",
+    "responses_api_agents.swe_agents.swe_swebench_multilingual_setup",
+    "responses_api_agents.swe_agents.swe_swebench_multilingual_setup.*",
+    "responses_api_agents.swe_agents.swe_swebench_setup",
+    "responses_api_agents.swe_agents.swe_swebench_setup.*",
 ]
 
 ################################################

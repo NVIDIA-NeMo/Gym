@@ -30,6 +30,13 @@ from nemo_gym.global_config import (
 
 
 _ROLLOUT_ID: ContextVar[Optional[str]] = ContextVar("nemo_gym_rollout_id", default=None)
+_CAPTURE_DATA_CAPABILITY: ContextVar[Optional[str]] = ContextVar(
+    "nemo_gym_capture_data_capability",
+    default=None,
+)
+
+DATA_CAPABILITY_HEADER = "x-nemo-gym-capture-capability"
+LOGICAL_REQUEST_HEADER = "x-nemo-gym-logical-request-id"
 
 # A capture id is a path segment in ``/ng-rollout/<id>/...``.
 # Restrict it to characters that survive a path round trip.
@@ -52,7 +59,11 @@ def maybe_rollout_id_from_run_body(body: BaseModel | Mapping[str, Any] | None) -
         return None
 
     def field(key: str) -> Any:
-        return body.get(key) if isinstance(body, Mapping) else getattr(body, key, None)
+        if isinstance(body, Mapping):
+            return body.get(key)
+        if key == ROLLOUT_ID_KEY_NAME and hasattr(body, "capture_rollout_id"):
+            return body.capture_rollout_id
+        return getattr(body, key, None)
 
     explicit = field(ROLLOUT_ID_KEY_NAME)
     if explicit is not None:
@@ -81,12 +92,29 @@ def current_rollout_id() -> Optional[str]:
     return _ROLLOUT_ID.get()
 
 
+def current_capture_data_capability() -> Optional[str]:
+    """Return the request-scoped rollout capability without logging it."""
+    return _CAPTURE_DATA_CAPABILITY.get()
+
+
+def model_capture_headers() -> dict[str, str]:
+    """Return trusted headers for an in-process agent's model request."""
+    capability = current_capture_data_capability()
+    return {DATA_CAPABILITY_HEADER: capability} if capability else {}
+
+
 @contextmanager
-def rollout_context(rollout_id: Optional[str]) -> Iterator[None]:
+def rollout_context(
+    rollout_id: Optional[str],
+    *,
+    data_capability: Optional[str] = None,
+) -> Iterator[None]:
     token = _ROLLOUT_ID.set(rollout_id)
+    capability_token = _CAPTURE_DATA_CAPABILITY.set(data_capability)
     try:
         yield
     finally:
+        _CAPTURE_DATA_CAPABILITY.reset(capability_token)
         _ROLLOUT_ID.reset(token)
 
 

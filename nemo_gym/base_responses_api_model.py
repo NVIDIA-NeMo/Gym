@@ -41,9 +41,9 @@ from typing import Any, Mapping, Optional
 from uuid import uuid4
 
 import orjson
-from fastapi import Body, FastAPI, Request
+from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from nemo_gym.anthropic_converter import AnthropicConverter
@@ -71,6 +71,7 @@ from nemo_gym.server_utils import (
 from nemo_gym.token_id_capture import (
     CaptureContext,
     capture_tokens,
+    current_capture_context,
     installed_lineage_store,
     installed_token_sink,
     reset_token_sink,
@@ -81,11 +82,33 @@ from nemo_gym.token_id_capture import (
 # The store factory needs Gym's server stack.
 # The leaf package does not re-export it.
 from nemo_gym.token_id_capture.config import token_id_capture_config
+from nemo_gym.token_id_capture.control_routes import install_rollout_control_routes
+from nemo_gym.token_id_capture.gate import (
+    DATA_CAPABILITY_HEADER,
+    LOGICAL_REQUEST_HEADER,
+    DataCapabilityError,
+    GateError,
+    GateStateError,
+    OperationConflictError,
+    RolloutCaptureGate,
+    UnknownRolloutError,
+)
+from nemo_gym.token_id_capture.gate_store import FileGateStateStore
 from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore
 from nemo_gym.token_id_capture.store import make_token_store
 
 
 logger = logging.getLogger(__name__)
+
+
+def _reject_gate_streaming(body: dict[str, Any]) -> None:
+    """Reject streaming before sanitization can hide it from worker capture."""
+    context = current_capture_context()
+    if context is not None and context.staging_gate is not None and body.get("stream") is True:
+        raise HTTPException(
+            status_code=422,
+            detail="worker-owned token capture does not support streaming requests",
+        )
 
 
 # Stateless; shared by every model server's default /v1/messages handler.
@@ -209,6 +232,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         into a terminal ``response.failed`` event rather than an HTTP 500 (bad-request validation
         still fails eagerly, before the stream is committed).
         """
+        _reject_gate_streaming(body)
         if not body.get("stream"):
             params = _validate_responses_params(body)
             return await self._invoke_responses(request, params)
@@ -253,6 +277,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         (e.g. ``"false"`` or ``1``) stays on the strict non-streaming path, which rejects the
         malformed ``stream`` with the same 422 as before.
         """
+        _reject_gate_streaming(body)
         if body.get("stream") is not True:
             params = _validate_chat_params(body)
             return await self._invoke_chat_completions(request, params)
@@ -294,6 +319,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         (the Claude Code CLI always does), the complete response is re-emitted as a synthesized
         Anthropic SSE event stream. Servers may override this for native Messages handling.
         """
+        _reject_gate_streaming(body)
         params = _ANTHROPIC_CONVERTER.anthropic_request_to_responses(body)
         response = await self._invoke_responses(request, params)
         model_name = body.get("model") or response.model
@@ -1119,6 +1145,37 @@ def _record(
             logger.warning("Could not mark rollout %s capture as incomplete.", rollout_id, exc_info=True)
 
 
+def _scope_header(scope: dict[str, Any], name: str) -> str | None:
+    """Read one unambiguous ASGI header value."""
+    encoded_name = name.lower().encode("ascii")
+    values = {value.decode("latin-1") for key, value in scope.get("headers", []) if key.lower() == encoded_name}
+    if not values:
+        return None
+    if len(values) == 1:
+        return values.pop()
+    # A joined value cannot authenticate and contains a character rejected by
+    # logical-id validation. Preserve fail-closed behavior without logging it.
+    return ",".join(sorted(values))
+
+
+async def _fail_uncommitted_gate_call(context: CaptureContext | None) -> None:
+    """Poison an admitted call that returned without a durable worker ack."""
+    if context is None or context.staging_gate is None or context.capture_admission is None or context.committed:
+        return
+    try:
+        await context.staging_gate.fail_call(
+            context.rollout_id,
+            context.model_call_id,
+            reason="request_finished_without_staged_coordinates",
+        )
+    except Exception:
+        logger.exception(
+            "Could not fail uncommitted gate call %s for rollout %s.",
+            context.model_call_id,
+            context.rollout_id,
+        )
+
+
 class _CaptureMiddleware:
     """Pure-ASGI per-rollout capture.
 
@@ -1141,6 +1198,7 @@ class _CaptureMiddleware:
         token_store: Any = None,
         configured_sink: Any = None,
         lineage_store: Any = None,
+        staging_gate: RolloutCaptureGate | None = None,
         token_capture_enabled: bool = False,
     ) -> None:
         self._app = app
@@ -1151,6 +1209,7 @@ class _CaptureMiddleware:
         # Built from token_id_capture.sink, once, in this process.
         self._configured_sink = configured_sink
         self._lineage_store = lineage_store
+        self._staging_gate = staging_gate
         # Capture may have no destination in this process.
         # A framework may stage records from its inference worker.
         # This process still resolves the capture identity.
@@ -1172,6 +1231,9 @@ class _CaptureMiddleware:
             scope = {**scope, "path": path, "raw_path": path.encode("utf-8")}
 
         dialect = _OBSERVED_PATHS.get(path)
+
+        if self._staging_gate is not None and dialect is not None and prefix_match is None:
+            await self._staging_gate.note_unattributed_call()
 
         # Forward when no active store needs this correlated endpoint.
         # The prefix is already stripped.
@@ -1197,15 +1259,23 @@ class _CaptureMiddleware:
         # The context exists even without a local destination.
         # External staging uses the identity resolved here.
         sink_token = None
+        capture_context = None
         if capture_wanted:
-            sink_token = set_token_sink(
-                CaptureContext(
-                    rollout_id=rollout_id,
-                    model_call_id=model_call_id,
-                    token_sink=token_sink,
-                    lineage_store=self._lineage_store,
-                )
+            data_capability = _scope_header(scope, DATA_CAPABILITY_HEADER)
+            if data_capability is None:
+                authorization = _scope_header(scope, "authorization") or ""
+                if authorization.startswith("Bearer "):
+                    data_capability = authorization.removeprefix("Bearer ")
+            capture_context = CaptureContext(
+                rollout_id=rollout_id,
+                model_call_id=model_call_id,
+                token_sink=token_sink,
+                lineage_store=self._lineage_store,
+                staging_gate=self._staging_gate,
+                data_capability=data_capability or "",
+                logical_request_id=_scope_header(scope, LOGICAL_REQUEST_HEADER),
             )
+            sink_token = set_token_sink(capture_context)
 
         # Training-only capture has no evaluation record.
         # Forward without buffering while the sink is active.
@@ -1213,6 +1283,7 @@ class _CaptureMiddleware:
             try:
                 await self._app(scope, receive, send)
             finally:
+                await _fail_uncommitted_gate_call(capture_context)
                 if sink_token is not None:
                     reset_token_sink(sink_token)
             return
@@ -1300,6 +1371,7 @@ class _CaptureMiddleware:
             raise
         finally:
             # The sink is only needed while the model server produces the response.
+            await _fail_uncommitted_gate_call(capture_context)
             if sink_token is not None:
                 reset_token_sink(sink_token)
 
@@ -1406,6 +1478,37 @@ def install_model_call_capture(
                 "token_id_capture.lineage_store is required with num_workers > 1 "
                 "when capture is not using Gym's shared file store"
             )
+    staging_gate = None
+    if capture_settings is not None and capture_settings.token_id_capture.gate.enabled:
+        if lineage_store is None:
+            raise ValueError("token_id_capture.gate requires a LineageStore")
+        gate_settings = capture_settings.token_id_capture.gate
+        assert gate_settings.state_store_path is not None  # validated by TokenIdCaptureConfig
+        staging_gate = RolloutCaptureGate(
+            lineage_store=lineage_store,
+            state_store=FileGateStateStore(gate_settings.state_store_path),
+            registration_ttl_s=gate_settings.registration_ttl_s,
+            tombstone_ttl_s=gate_settings.tombstone_ttl_s,
+        )
+        install_rollout_control_routes(
+            app,
+            staging_gate,
+            auth_token=gate_settings.resolve_control_auth_token(),
+            expiry_sweep_interval_s=gate_settings.expiry_sweep_interval_s,
+        )
+
+        @app.exception_handler(GateError)
+        async def _gate_error_handler(_request: Request, error: GateError) -> JSONResponse:
+            if isinstance(error, DataCapabilityError):
+                status_code = 403
+            elif isinstance(error, UnknownRolloutError):
+                status_code = 404
+            elif isinstance(error, (GateStateError, OperationConflictError)):
+                status_code = 409
+            else:
+                status_code = 400
+            return JSONResponse(status_code=status_code, content={"detail": str(error)})
+
     owned_endpoints = [
         endpoint
         for endpoint in (configured_sink, token_store, configured_lineage, default_lineage)
@@ -1435,6 +1538,7 @@ def install_model_call_capture(
         token_store=token_store,
         configured_sink=configured_sink,
         lineage_store=lineage_store,
+        staging_gate=staging_gate,
         token_capture_enabled=capture_settings.enabled if capture_settings is not None else False,
     )
 

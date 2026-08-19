@@ -111,6 +111,7 @@ from openai.types.shared_params import FunctionDefinition
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 from typing_extensions import TypedDict
 
+from nemo_gym.rollout_correlation import model_capture_headers
 from nemo_gym.server_utils import (
     _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG,
     MAX_NUM_TRIES,
@@ -861,8 +862,11 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     )
 
     async def _request(self, **request_kwargs: Dict) -> ClientResponse:
+        request_headers = request_kwargs.pop("headers", {})
         request_kwargs = request_kwargs | {
             "headers": self.default_headers
+            | request_headers
+            | model_capture_headers()
             | {
                 "Authorization": f"Bearer {self.api_key}",
             },

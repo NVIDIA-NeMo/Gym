@@ -21,7 +21,7 @@ import sys
 import time
 from abc import abstractmethod
 from contextlib import asynccontextmanager
-from os import environ, getenv
+from os import environ, getenv, getpid
 from pathlib import Path
 from threading import Thread
 from traceback import format_exc, print_exc
@@ -542,6 +542,59 @@ def set_nemo_gym_fastapi_num_workers(num_workers: int) -> None:  # pragma: no co
     environ[NEMO_GYM_FASTAPI_NUM_WORKERS] = str(num_workers)
 
 
+class HttpByteCounterMiddleware:
+    """Write one aggregate byte-counter file per serving worker process."""
+
+    flush_every = 25
+
+    def __init__(self, app: Any, *, server_name: str, out_dir: str) -> None:
+        self._app = app
+        self._counts: dict[str, list[int]] = {}
+        self._events = 0
+        directory = Path(out_dir)
+        directory.mkdir(parents=True, exist_ok=True)
+        self._path = directory / f"{server_name}_{getpid()}.json"
+
+    def _flush(self) -> None:
+        payload = {
+            path: {
+                "requests": counts[0],
+                "request_bytes": counts[1],
+                "response_bytes": counts[2],
+            }
+            for path, counts in self._counts.items()
+        }
+        temporary_path = self._path.with_suffix(".json.pending")
+        temporary_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        temporary_path.replace(self._path)
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self._app(scope, receive, send)
+            return
+        path = str(scope.get("path", ""))
+        counts = self._counts.setdefault(path, [0, 0, 0])
+        counts[0] += 1
+
+        async def counting_receive() -> dict[str, Any]:
+            message = await receive()
+            if message.get("type") == "http.request":
+                counts[1] += len(message.get("body", b"") or b"")
+            return message
+
+        async def counting_send(message: dict[str, Any]) -> None:
+            if message.get("type") == "http.response.body":
+                counts[2] += len(message.get("body", b"") or b"")
+            await send(message)
+
+        try:
+            await self._app(scope, counting_receive, counting_send)
+        finally:
+            self._events += 1
+            if self._events % self.flush_every == 0:
+                self._flush()
+
+
 class SimpleServer(BaseServer):
     server_client: ServerClient
 
@@ -723,6 +776,16 @@ Full body: {json.dumps(exc.body, indent=4)}
         profiling_config = ProfilingMiddlewareConfig.model_validate(global_config_dict)
         if profiling_config.profiling_enabled:
             server.setup_profiling(app, profiling_config)
+
+        byte_counter_dir = getenv("NG_HTTP_BYTES_DIR")
+        if byte_counter_dir:
+            # Registered in every imported worker process. Separate PID files
+            # make the observed total the sum over the actual worker topology.
+            app.add_middleware(
+                HttpByteCounterMiddleware,
+                server_name=server.config.name,
+                out_dir=byte_counter_dir,
+            )
 
         uvicorn_logging_cfg = UvicornLoggingConfig.model_validate(global_config_dict)
         if not uvicorn_logging_cfg.uvicorn_logging_show_200_ok and is_main_fastapi_proc:
