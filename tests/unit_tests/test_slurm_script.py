@@ -22,6 +22,7 @@ from nemo_gym.orchestration.executors.script_templates import render_driver_entr
 from nemo_gym.orchestration.executors.slurm_script import (
     _build_vllm_command,
     _build_vllm_ray_command,
+    _build_vllm_ray_serve_command,
     _node_totals,
     _render_directives,
     _render_pool_directives,
@@ -278,6 +279,73 @@ def test_build_vllm_ray_command_dp_uneven_split_raises():
     )
     with pytest.raises(ValueError, match="evenly divisible"):
         _build_vllm_ray_command(service, total_nodes=2)
+
+
+# ---------------------------------------------------------------------------
+# _build_vllm_ray_serve_command
+# ---------------------------------------------------------------------------
+
+
+def _ray_serve_service(**overrides):
+    return VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        distributed_backend={"type": "ray_serve"},
+        **overrides,
+    )
+
+
+def test_build_vllm_ray_serve_command_runs_serve_run():
+    service = _ray_serve_service(tensor_parallel_size=2, number_of_instances=4)
+    cmd = _build_vllm_ray_serve_command(service, total_nodes=2, gym_install=None)
+    assert "serve run --host 0.0.0.0 --port 8000" in cmd
+    assert "nemo_gym.orchestration.ray_serve_vllm_app:build_app" in cmd
+    assert "model=org/model" in cmd
+    assert "tensor_parallel_size=2" in cmd
+    assert "number_of_instances=4" in cmd
+
+
+def test_build_vllm_ray_serve_command_bootstraps_ray_cluster():
+    service = _ray_serve_service()
+    cmd = _build_vllm_ray_serve_command(service, total_nodes=2, gym_install=None)
+    assert "ray symmetric-run" in cmd
+    assert "--min-nodes 2" in cmd
+    assert '--address "$RAY_HEAD_NODE_IP"' in cmd
+
+
+def test_build_vllm_ray_serve_command_installs_ray_serve_extra():
+    service = _ray_serve_service()
+    cmd = _build_vllm_ray_serve_command(service, total_nodes=2, gym_install=None)
+    assert 'pip install -q "ray[serve,default]"' in cmd
+
+
+def test_build_vllm_ray_serve_command_no_gym_install_omits_clone():
+    service = _ray_serve_service()
+    cmd = _build_vllm_ray_serve_command(service, total_nodes=2, gym_install=None)
+    assert "git clone" not in cmd
+
+
+def test_build_vllm_ray_serve_command_with_gym_install_clones_and_installs():
+    service = _ray_serve_service()
+    gym_install = GymInstallConfig(ref="main")
+    cmd = _build_vllm_ray_serve_command(service, total_nodes=2, gym_install=gym_install)
+    assert "git clone" in cmd
+    assert "git checkout main" in cmd
+    assert "uv pip install -e . --system" in cmd
+
+
+def test_build_vllm_ray_serve_command_trust_remote_code():
+    service = _ray_serve_service(trust_remote_code=True)
+    cmd = _build_vllm_ray_serve_command(service, total_nodes=2, gym_install=None)
+    assert "trust_remote_code=True" in cmd
+
+
+def test_build_vllm_ray_serve_command_single_instance_valid():
+    # A single Ray Serve replica is valid too, unlike the "ray" DP-spanning path.
+    service = _ray_serve_service(number_of_instances=1)
+    cmd = _build_vllm_ray_serve_command(service, total_nodes=2, gym_install=None)
+    assert "number_of_instances=1" in cmd
 
 
 # ---------------------------------------------------------------------------
@@ -875,11 +943,49 @@ def test_build_sbatch_script_vllm_service_backend_omits_ray_prelude(submit_confi
     assert "ray symmetric-run" not in script
 
 
+def _ray_serve_multi_node_config():
+    return SubmitConfig.model_validate(
+        {
+            "services": {
+                "vllm_model": {
+                    "type": "vllm",
+                    "container": "vllm:latest",
+                    "model": "org/model",
+                    "tensor_parallel_size": 2,
+                    "number_of_instances": 4,
+                    "distributed_backend": {"type": "ray_serve"},
+                }
+            },
+            "compute": {
+                "cluster": {
+                    "type": "slurm",
+                    "account": "my-account",
+                    "hostname": "foo",
+                    "node_pools": {"main": {"partition": "gpu", "nodes": 2, "ntasks_per_node": 1}},
+                }
+            },
+            "driver": {"container": "python:3.12", "gym_install": {"ref": "main"}, "benchmarks": {"gsm8k": {}}},
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )
+
+
+def test_build_sbatch_script_ray_serve_backend_adds_head_node_prelude(bench_dir):
+    config = _ray_serve_multi_node_config()
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    assert "scontrol show hostnames" in script
+    assert "ray symmetric-run" in script
+    assert "serve run --host 0.0.0.0 --port 8000" in script
+    assert "git checkout main" in script
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
-from nemo_gym.orchestration.api import NodePool, SlurmComputeConfig, VllmServiceConfig
+from nemo_gym.orchestration.api import GymInstallConfig, NodePool, SlurmComputeConfig, VllmServiceConfig
 
 
 @pytest.fixture

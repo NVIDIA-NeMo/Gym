@@ -249,3 +249,99 @@ def test_gpu_footprint_no_node_pools_skips_validation():
     # Default COMPUTE fixture has no node_pools, so nothing to validate against.
     config = SubmitConfig.model_validate(_config(services={"svc": _MULTI_SERVICE}))
     assert config.services["svc"].number_of_instances == 4
+
+
+# ---------------------------------------------------------------------------
+# ray_serve distributed_backend
+# ---------------------------------------------------------------------------
+
+DRIVER_WITH_GYM_INSTALL = {**DRIVER, "gym_install": {"ref": "main"}}
+
+
+def test_ray_serve_backend_requires_gym_install():
+    with pytest.raises(ValidationError, match="driver.gym_install"):
+        SubmitConfig.model_validate(
+            _config(services={"svc": {**SERVICE, "distributed_backend": {"type": "ray_serve"}}})
+        )
+
+
+def test_ray_serve_backend_single_node_with_gym_install_accepted():
+    config = SubmitConfig.model_validate(
+        _config(
+            services={"svc": {**SERVICE, "distributed_backend": {"type": "ray_serve"}}},
+            driver=DRIVER_WITH_GYM_INSTALL,
+        )
+    )
+    assert config.services["svc"].distributed_backend.type == "ray_serve"
+
+
+def test_ray_serve_backend_on_multi_node_compute_accepted():
+    config = SubmitConfig.model_validate(
+        _config(
+            services={"svc": {**SERVICE, "distributed_backend": {"type": "ray_serve"}}},
+            compute=COMPUTE_MULTI_NODE,
+            driver=DRIVER_WITH_GYM_INSTALL,
+        )
+    )
+    assert config.services["svc"].distributed_backend.type == "ray_serve"
+
+
+def test_ray_serve_backend_multi_node_uneven_split_accepted():
+    # Unlike "ray", "ray_serve" doesn't require number_of_instances to divide evenly across nodes -
+    # Ray Serve bin-packs replicas across the cluster's free GPUs itself.
+    config = SubmitConfig.model_validate(
+        _config(
+            services={
+                "svc": {
+                    **SERVICE,
+                    "number_of_instances": 3,
+                    "distributed_backend": {"type": "ray_serve"},
+                },
+            },
+            compute=COMPUTE_MULTI_NODE,
+            driver=DRIVER_WITH_GYM_INSTALL,
+        )
+    )
+    assert config.services["svc"].number_of_instances == 3
+
+
+def test_ray_serve_gpu_footprint_per_replica_exceeds_node_raises():
+    # COMPUTE_MULTI_NODE has 4 GPUs/node; a single replica needing TP=8 can't fit on one node.
+    service = {
+        **SERVICE,
+        "tensor_parallel_size": 8,
+        "distributed_backend": {"type": "ray_serve"},
+    }
+    with pytest.raises(ValidationError, match="exceeds the largest available"):
+        SubmitConfig.model_validate(
+            _config(services={"svc": service}, compute=COMPUTE_MULTI_NODE, driver=DRIVER_WITH_GYM_INSTALL)
+        )
+
+
+def test_ray_serve_gpu_footprint_cluster_total_exceeds_raises():
+    # COMPUTE_MULTI_NODE has 2 nodes x 4 GPUs = 8 total; 3 replicas x TP2 = 6 fits per-node (<=4)
+    # but 5 replicas x TP2 = 10 exceeds the 8-GPU cluster total.
+    service = {
+        **SERVICE,
+        "tensor_parallel_size": 2,
+        "number_of_instances": 5,
+        "distributed_backend": {"type": "ray_serve"},
+    }
+    with pytest.raises(ValidationError, match="exceeds the total GPUs available"):
+        SubmitConfig.model_validate(
+            _config(services={"svc": service}, compute=COMPUTE_MULTI_NODE, driver=DRIVER_WITH_GYM_INSTALL)
+        )
+
+
+def test_ray_serve_gpu_footprint_fits_accepted():
+    # COMPUTE_MULTI_NODE has 2 nodes x 4 GPUs = 8 total; 4 replicas x TP2 = 8 fits exactly.
+    service = {
+        **SERVICE,
+        "tensor_parallel_size": 2,
+        "number_of_instances": 4,
+        "distributed_backend": {"type": "ray_serve"},
+    }
+    config = SubmitConfig.model_validate(
+        _config(services={"svc": service}, compute=COMPUTE_MULTI_NODE, driver=DRIVER_WITH_GYM_INSTALL)
+    )
+    assert config.services["svc"].number_of_instances == 4

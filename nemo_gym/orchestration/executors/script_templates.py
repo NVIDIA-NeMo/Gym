@@ -60,6 +60,21 @@ def render_gym_cmd(subcommand: str, var_name: str, args: list[str]) -> str:
     return f"{var_name}=(\n    " + "\n    ".join(entries) + "\n)"
 
 
+def render_gym_install_preamble(repo: str | None, ref: str | None) -> list[str]:
+    """Render the shell lines that clone and pip-install the gym package, or [] if not requested."""
+    if not (repo and ref):
+        return []
+    repo_name = repo.rstrip("/").split("/")[-1].removesuffix(".git")
+    return [
+        "curl -LsSf https://astral.sh/uv/install.sh | sh",
+        'source "$HOME/.local/bin/env"',
+        f"git clone {shlex.quote(repo)}",
+        f"cd {shlex.quote(repo_name)}",
+        f"git checkout {shlex.quote(ref)}",
+        "uv pip install -e . --system",
+    ]
+
+
 def render_driver_entrypoint(
     repo: str | None,
     ref: str | None,
@@ -70,18 +85,7 @@ def render_driver_entrypoint(
     When either gym_install or prepare is needed, wraps everything in a single
     bash -c so prepare and run happen in the same srun step and container.
     """
-    preamble: list[str] = []
-
-    if repo and ref:
-        repo_name = repo.rstrip("/").split("/")[-1].removesuffix(".git")
-        preamble += [
-            "curl -LsSf https://astral.sh/uv/install.sh | sh",
-            'source "$HOME/.local/bin/env"',
-            f"git clone {shlex.quote(repo)}",
-            f"cd {shlex.quote(repo_name)}",
-            f"git checkout {shlex.quote(ref)}",
-            "uv pip install -e . --system",
-        ]
+    preamble: list[str] = render_gym_install_preamble(repo, ref)
 
     if prepare_cmd:
         preamble.append(prepare_cmd)

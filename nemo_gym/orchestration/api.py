@@ -59,15 +59,29 @@ class RayDistributedBackend(_StrictModel):
     """Use vLLM's Ray executor (--distributed-executor-backend ray) so a single vLLM service can
     span multiple physical Slurm nodes. This does not use the ray.serve library.
 
-    Named "ray" for now; a separate "ray_serve" backend (using the actual ray.serve library) may
-    be added later.
+    Named "ray" for now, to distinguish it from the "ray_serve" backend below (which does use the
+    actual ray.serve library).
     """
 
     type: Literal["ray"] = "ray"
 
 
+class RayServeDistributedBackend(_StrictModel):
+    """Use the real ray.serve library to run each vLLM instance as a Serve replica.
+
+    Unlike the "ray" backend, instances (number_of_instances) are scheduled as Ray Serve replicas
+    across the cluster rather than manually split across nodes - Serve handles replica placement
+    and bin-packing across whatever GPUs are free, so number_of_instances does not need to divide
+    evenly across nodes.
+    """
+
+    type: Literal["ray_serve"] = "ray_serve"
+
+
 DistributedBackendConfig = Annotated[
-    Annotated[VllmServiceDistributedBackend, Tag("vllm_service")] | Annotated[RayDistributedBackend, Tag("ray")],
+    Annotated[VllmServiceDistributedBackend, Tag("vllm_service")]
+    | Annotated[RayDistributedBackend, Tag("ray")]
+    | Annotated[RayServeDistributedBackend, Tag("ray_serve")],
     Discriminator("type"),
 ]
 
@@ -210,17 +224,26 @@ class SubmitConfig(_StrictModel):
             if (
                 is_multi_node
                 and isinstance(service, VllmServiceConfig)
-                and (service.distributed_backend is None or service.distributed_backend.type != "ray")
+                and (
+                    service.distributed_backend is None or service.distributed_backend.type not in ("ray", "ray_serve")
+                )
             ):
                 raise ValueError(
                     f"Service '{service_name}' is placed on compute '{sole_compute}', which spans multiple nodes "
                     f"({total_nodes} total). vLLM services on multi-node compute must use "
-                    "distributed_backend: {type: ray}."
+                    "distributed_backend: {type: ray} or {type: ray_serve}."
                 )
+
+            is_ray_serve_backend = (
+                isinstance(service, VllmServiceConfig)
+                and service.distributed_backend is not None
+                and service.distributed_backend.type == "ray_serve"
+            )
 
             if (
                 is_multi_node
                 and isinstance(service, VllmServiceConfig)
+                and not is_ray_serve_backend
                 and service.number_of_instances > 1
                 and service.number_of_instances % total_nodes != 0
             ):
@@ -235,7 +258,16 @@ class SubmitConfig(_StrictModel):
                 and service.distributed_backend is not None
                 and service.distributed_backend.type == "ray"
             )
-            if isinstance(service, VllmServiceConfig) and not (is_multi_node and is_ray_backend):
+            if is_ray_serve_backend and self.driver.gym_install is None:
+                raise ValueError(
+                    f"Service '{service_name}' uses distributed_backend: {{type: ray_serve}}, which runs the "
+                    "nemo_gym.orchestration.ray_serve_vllm_app module inside the service container. Set "
+                    "driver.gym_install so it's available there."
+                )
+
+            if isinstance(service, VllmServiceConfig) and is_multi_node and is_ray_serve_backend:
+                self._validate_ray_serve_gpu_footprint(service_name, service, total_nodes)
+            elif isinstance(service, VllmServiceConfig) and not (is_multi_node and is_ray_backend):
                 self._validate_vllm_gpu_footprint(service_name, service)
 
         if self.driver.policy_model is not None:
@@ -295,4 +327,47 @@ class SubmitConfig(_StrictModel):
                 f"nodes with {max_gpus_per_node} GPUs each, leaving {max_gpus_per_node - gpus_needed} GPU(s) idle. "
                 "Increase number_of_instances/tensor_parallel_size or reduce gpus_per_node to use the full node.",
                 stacklevel=2,
+            )
+
+    def _validate_ray_serve_gpu_footprint(
+        self, service_name: str, service: "VllmServiceConfig", total_nodes: int
+    ) -> None:
+        # Each replica's TP/PP footprint runs within a single Ray Serve replica actor (no Ray
+        # executor spanning nodes per replica), so it must fit on one node; Ray Serve then bin-packs
+        # replicas across whatever nodes/GPUs are free cluster-wide.
+        compute = self.compute[service.placement]
+        if not isinstance(compute, SlurmComputeConfig):
+            return
+
+        gpus_per_node_values = [
+            pool.gpus_per_node for pool in compute.node_pools.values() if pool.gpus_per_node is not None
+        ]
+        if not gpus_per_node_values:
+            return
+
+        max_gpus_per_node = max(gpus_per_node_values)
+        gpus_per_replica = service.tensor_parallel_size * service.pipeline_parallel_size
+        total_gpus_needed = gpus_per_replica * service.number_of_instances
+        total_cluster_gpus = sum(
+            pool.nodes * pool.gpus_per_node for pool in compute.node_pools.values() if pool.gpus_per_node is not None
+        )
+
+        if gpus_per_replica > max_gpus_per_node:
+            raise ValueError(
+                f"Service '{service_name}' requires {gpus_per_replica} GPUs per replica "
+                f"(tensor_parallel_size={service.tensor_parallel_size} x "
+                f"pipeline_parallel_size={service.pipeline_parallel_size}), which exceeds the largest available "
+                f"node pool's gpus_per_node ({max_gpus_per_node}) on compute '{service.placement}'. "
+                "The 'ray_serve' distributed backend runs each replica within a single node; reduce "
+                "tensor_parallel_size/pipeline_parallel_size to fit on a single node."
+            )
+
+        if total_gpus_needed > total_cluster_gpus:
+            raise ValueError(
+                f"Service '{service_name}' requires {total_gpus_needed} GPUs total "
+                f"(tensor_parallel_size={service.tensor_parallel_size} x "
+                f"pipeline_parallel_size={service.pipeline_parallel_size} x "
+                f"number_of_instances={service.number_of_instances}), which exceeds the total GPUs available on "
+                f"compute '{service.placement}' ({total_cluster_gpus} across {total_nodes} nodes). Reduce "
+                "number_of_instances/tensor_parallel_size/pipeline_parallel_size or add more nodes."
             )

@@ -19,6 +19,7 @@ from pathlib import Path
 
 from nemo_gym.orchestration.api import (
     BenchmarkRunConfig,
+    GymInstallConfig,
     NodePool,
     RayServiceConfig,
     SlurmComputeConfig,
@@ -29,6 +30,7 @@ from nemo_gym.orchestration.executors.script_templates import (
     bash_var,
     render_driver_entrypoint,
     render_gym_cmd,
+    render_gym_install_preamble,
     render_health_check,
 )
 from nemo_gym.orchestration.executors.utils import flatten_run_args
@@ -155,39 +157,46 @@ def _build_vllm_command(service: VllmServiceConfig) -> str:
     return cmd
 
 
-def _build_vllm_multi_node_tp_command(service: VllmServiceConfig, total_nodes: int) -> str:
-    # A single instance's tensor/pipeline-parallel footprint spans nodes. Uses vLLM's own Ray
-    # *core* executor (--distributed-executor-backend ray) - not the ray.serve library, no Serve
-    # deployment/ingress/HTTP proxy is involved.
-    inner_cmd = _build_vllm_command(service) + " --distributed-executor-backend ray"
+def _wrap_in_ray_cluster(entrypoint_cmd: str, total_nodes: int, ray_extras: str = "default") -> str:
+    # Bootstraps a Ray cluster across every task and runs entrypoint_cmd only on the elected head
+    # node, mirroring scripts/sbatch_base.sh.
     resource_flags = (
         "--num-cpus=${SLURM_CPUS_PER_TASK:-$SLURM_CPUS_ON_NODE} --num-gpus=${SLURM_GPUS_PER_TASK:-$SLURM_GPUS_ON_NODE}"
     )
     # ray symmetric-run starts/joins a Ray cluster across every task and runs the entrypoint
-    # only on the elected head node, mirroring scripts/sbatch_base.sh. It requires Ray >= 2.50, so
-    # containers with an older pin fall back to manually starting head/worker Ray processes, keyed
-    # on Slurm's per-node task rank ($SLURM_NODEID). vLLM's Ray executor blocks on placement-group
-    # scheduling until every node's GPUs join, so the fallback needs no separate cluster-ready wait.
-    # Model-serving images (e.g. vllm/vllm-openai) don't necessarily bundle the ray CLI - vLLM only
-    # needs ray as a runtime dependency when the ray executor backend is actually selected - so
+    # only on the elected head node. It requires Ray >= 2.50, so containers with an older pin fall
+    # back to manually starting head/worker Ray processes, keyed on Slurm's per-node task rank
+    # ($SLURM_NODEID). Callers that block on cluster-wide scheduling (e.g. vLLM's Ray executor
+    # waiting on placement groups, or Ray Serve replicas being placed) need no separate
+    # cluster-ready wait in the fallback path.
+    # Model-serving images (e.g. vllm/vllm-openai) don't necessarily bundle the ray CLI - it's only
+    # needed as a runtime dependency when a ray-based distributed backend is actually selected - so
     # install it on the fly if it's missing before relying on either code path above.
     return (
         "bash -lc '\n"
-        '    command -v ray >/dev/null 2>&1 || pip install -q "ray[default]"\n'
+        f'    command -v ray >/dev/null 2>&1 || pip install -q "ray[{ray_extras}]"\n'
         "    if ray symmetric-run --help >/dev/null 2>&1; then\n"
         "        ray symmetric-run \\\n"
         '            --address "$RAY_HEAD_NODE_IP" \\\n'
         f"            --min-nodes {total_nodes} \\\n"
         f"            {resource_flags} \\\n"
-        f"            -- {inner_cmd}\n"
+        f"            -- {entrypoint_cmd}\n"
         '    elif [ "$SLURM_NODEID" = "0" ]; then\n'
         f"        ray start --head --port=6379 {resource_flags}\n"
-        f"        {inner_cmd}\n"
+        f"        {entrypoint_cmd}\n"
         "    else\n"
         f'        ray start --address="$RAY_HEAD_NODE_IP" {resource_flags} --block\n'
         "    fi\n"
         "'"
     )
+
+
+def _build_vllm_multi_node_tp_command(service: VllmServiceConfig, total_nodes: int) -> str:
+    # A single instance's tensor/pipeline-parallel footprint spans nodes. Uses vLLM's own Ray
+    # *core* executor (--distributed-executor-backend ray) - not the ray.serve library, no Serve
+    # deployment/ingress/HTTP proxy is involved.
+    inner_cmd = _build_vllm_command(service) + " --distributed-executor-backend ray"
+    return _wrap_in_ray_cluster(inner_cmd, total_nodes)
 
 
 def _build_vllm_multi_node_dp_command(service: VllmServiceConfig, total_nodes: int) -> str:
@@ -237,6 +246,29 @@ def _build_vllm_ray_command(service: VllmServiceConfig, total_nodes: int) -> str
     return _build_vllm_multi_node_tp_command(service, total_nodes)
 
 
+def _build_vllm_ray_serve_command(
+    service: VllmServiceConfig, total_nodes: int, gym_install: GymInstallConfig | None
+) -> str:
+    # Real ray.serve replicas: Ray Serve schedules/bin-packs number_of_instances replicas across
+    # whatever nodes/GPUs are free cluster-wide, instead of the manual head/worker split used by
+    # _build_vllm_multi_node_dp_command. Each replica's own TP/PP footprint stays within one node.
+    gym_install_preamble = render_gym_install_preamble(
+        gym_install.repo if gym_install else None, gym_install.ref if gym_install else None
+    )
+    serve_run_cmd = (
+        f"serve run --host 0.0.0.0 --port {service.port}"
+        " nemo_gym.orchestration.ray_serve_vllm_app:build_app"
+        f" model={shlex.quote(service.model)}"
+        f" tensor_parallel_size={service.tensor_parallel_size}"
+        f" pipeline_parallel_size={service.pipeline_parallel_size}"
+        f" number_of_instances={service.number_of_instances}"
+        f" trust_remote_code={service.trust_remote_code}"
+    )
+    body = "\n    ".join([*gym_install_preamble, serve_run_cmd])
+    inner_cmd = f"bash -c '\n    {body}\n'"
+    return _wrap_in_ray_cluster(inner_cmd, total_nodes, ray_extras="serve,default")
+
+
 def _build_ray_command(_service: RayServiceConfig) -> str:
     return "ray start --head"
 
@@ -247,14 +279,23 @@ _BUILDERS = {
 }
 
 
-def _uses_ray_distributed_backend(service: VllmServiceConfig | RayServiceConfig) -> bool:
-    return isinstance(service, VllmServiceConfig) and (
-        service.distributed_backend is not None and service.distributed_backend.type == "ray"
-    )
+def _distributed_backend_type(service: VllmServiceConfig | RayServiceConfig) -> str | None:
+    if isinstance(service, VllmServiceConfig) and service.distributed_backend is not None:
+        return service.distributed_backend.type
+    return None
 
 
-def _build_service_command(service: VllmServiceConfig | RayServiceConfig, total_nodes: int) -> str:
-    if _uses_ray_distributed_backend(service):
+def _uses_ray_cluster_bootstrap(service: VllmServiceConfig | RayServiceConfig) -> bool:
+    return _distributed_backend_type(service) in ("ray", "ray_serve")
+
+
+def _build_service_command(
+    service: VllmServiceConfig | RayServiceConfig, total_nodes: int, gym_install: GymInstallConfig | None = None
+) -> str:
+    backend_type = _distributed_backend_type(service)
+    if backend_type == "ray_serve":
+        return _build_vllm_ray_serve_command(service, total_nodes, gym_install)
+    if backend_type == "ray":
         return _build_vllm_ray_command(service, total_nodes)
     return _BUILDERS[type(service)](service)
 
@@ -277,13 +318,13 @@ def build_sbatch_script(
     total_nodes, total_ntasks = _node_totals(compute)
     is_multi_node = total_nodes > 1
 
-    ray_prelude = _RAY_PRELUDE if any(_uses_ray_distributed_backend(s) for s in config.services.values()) else ""
+    ray_prelude = _RAY_PRELUDE if any(_uses_ray_cluster_bootstrap(s) for s in config.services.values()) else ""
 
     service_commands = "\n\n".join(
         _render_service_command(
             name,
             service.container,
-            _build_service_command(service, total_nodes),
+            _build_service_command(service, total_nodes, config.driver.gym_install),
             service.env or None,
             service.mounts or None,
             nodes=total_nodes if is_multi_node else None,

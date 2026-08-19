@@ -1,0 +1,46 @@
+compute:
+  cluster:
+    type: slurm
+    hostname: myslurmcluster
+    walltime: "01:00:00"
+    account: myaccount
+    node_pools:
+      compute:
+        partition: batch
+        nodes: 2
+        ntasks_per_node: 1
+        gpus_per_node: 8
+
+services:
+  vllm_model:
+    container: vllm/vllm-openai:v0.9.0
+    type: vllm
+    model: Qwen/Qwen2.5-72B-Instruct
+    trust_remote_code: true
+    tensor_parallel_size: 2      # each replica needs 2 GPUs; must fit within a single node
+    number_of_instances: 8       # 8 replicas x TP2 = 16 GPUs total, spans both nodes (2 x 8 GPUs)
+    distributed_backend:
+      type: ray_serve            # Real ray.serve library: Ray Serve schedules/bin-packs replicas
+                                  # across the cluster's free GPUs, unlike the "ray" backend's
+                                  # manual head/worker --headless split for multi-node DP.
+    port: 8000
+    health_check:
+      timeout_seconds: 1200
+    mounts:
+      - /lustre/datasets:/data
+
+driver:
+  policy_model: vllm_model
+  container: python:3.13
+  gym_install:
+    ref: main   # required for distributed_backend: {type: ray_serve} - installed into the vLLM
+                # service container so it can import nemo_gym.orchestration.ray_serve_vllm_app
+  benchmarks:
+    gpqa:
+      run:
+        split: benchmark
+        config_paths:
+          - benchmarks/gpqa/config.yaml
+
+job:
+  output_path: /lustre/fsw/my-path
