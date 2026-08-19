@@ -175,7 +175,7 @@ async def capture_tokens(
             output_items=content_items,
             token_item_index=token_item_index,
             created_at=time.time(),
-            prefix_supplied=sink.prefix_supplied,
+            prefix_supplied=context.prefix_supplied,
         )
     except Exception:
         await _capture_failed(context, "build")
