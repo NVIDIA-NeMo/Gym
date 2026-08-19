@@ -117,26 +117,34 @@ def update_metrics(metrics_fpath: Path, update_dict: Dict[str, Any]) -> None:
     metrics_fpath.write_text(json.dumps(existing | update))
 
 
-def _safe_config_json(params: "AnyTerminalInstanceConfig", indent: Optional[int] = None) -> str:
-    """Serialize config without secrets."""
-
-    def redact(value: Any) -> Any:
-        if isinstance(value, dict):
-            return {
-                key: (
-                    "***"
-                    if any(secret in key.lower() for secret in ("api_key", "secret", "password", "token"))
-                    else redact(item)
-                )
-                for key, item in value.items()
-            }
-        if isinstance(value, list):
-            return [redact(item) for item in value]
-        return value
-
+def _full_config_dict(params: "AnyTerminalInstanceConfig") -> Dict[str, Any]:
+    """Config as a dict, unredacted. For internal round-tripping — see _redact_secrets for logs/display."""
     d = json.loads(params.model_dump_json())
     d.pop("agent_command_str", None)
-    return json.dumps(redact(d), indent=indent)
+    return d
+
+
+def _redact_secrets(value: Any) -> Any:
+    """Redact dict values under a key containing api_key/secret/password/token, for logs/display only. Only
+    ever call this on data about to leave the process (an HTTP response, a file) — never on params used to
+    instantiate/run the agent, and never round-trip redacted output back into a real config."""
+    if isinstance(value, dict):
+        return {
+            key: (
+                "***"
+                if any(secret in key.lower() for secret in ("api_key", "secret", "password", "token"))
+                else _redact_secrets(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_secrets(item) for item in value]
+    return value
+
+
+def _safe_config_json(params: "AnyTerminalInstanceConfig", indent: Optional[int] = None) -> str:
+    """Serialize config without secrets, for logs/display only."""
+    return json.dumps(_redact_secrets(_full_config_dict(params)), indent=indent)
 
 
 ### Agent runner template
@@ -725,11 +733,11 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
 
     async def _responses(
         self, body: NeMoGymResponseCreateParamsNonStreaming, rollout_id: Optional[str] = None
-    ) -> NeMoGymResponse:
+    ) -> tuple[NeMoGymResponse, AnyTerminalInstanceConfig]:
         params = self._setup_params(body, rollout_id)
         (params.persistent_dir / "params.json").write_text(_safe_config_json(params, indent=2))
         try:
-            return await self._inner_responses(params)
+            return await self._inner_responses(params), params
         except Exception:
             tb_path = params.persistent_dir / "traceback.err"
             tb_path.write_text(format_exc())
@@ -737,7 +745,8 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
             raise
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
-        return await self._responses(body)
+        response, _ = await self._responses(body)
+        return response
 
     async def _inner_responses(self, params: AnyTerminalInstanceConfig) -> NeMoGymResponse:
         await _run_remote.options(**self._ray_resource_opts(params)).remote(params.model_dump())
@@ -783,7 +792,7 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
         async with self._sem:
             body.responses_create_params.parallel_tool_calls = True
             body.responses_create_params.tool_choice = "auto"
-            response = await self._responses(body.responses_create_params, self.rollout_id_from_run(body))
+            response, params = await self._responses(body.responses_create_params, self.rollout_id_from_run(body))
 
             meta, response.metadata = response.metadata, None
             metrics = TerminalBenchMetrics.model_validate_json(meta["metrics"])
@@ -798,7 +807,9 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
                 response=response,
                 reward=1.0 if metrics.resolved else 0.0,
                 **metrics.model_dump(),
-                instance_config=AnyTerminalInstanceConfig.model_validate_json(meta["instance_config"]).model_dump(),
+                # Redact from the live params object directly — no JSON round-trip, so no risk of
+                # _redact_secrets' lossy substring match (e.g. max_output_tokens) breaking re-parsing.
+                instance_config=_redact_secrets(_full_config_dict(params)),
             )
 
 
