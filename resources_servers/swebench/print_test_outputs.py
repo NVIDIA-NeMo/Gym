@@ -23,6 +23,13 @@ parser.add_argument("--rollout-jsonl", type=str, required=True)
 parser.add_argument("--instance-id", type=str, required=True)
 args = parser.parse_args()
 
+instance_id_to_row = dict()
+with open("benchmarks/swebench/data/swebench_multilingual_benchmark.jsonl") as f:
+    for line in f:
+        row = orjson.loads(line)
+        instance_id_to_row[row["instance_id"]] = row
+
+
 num = 0
 with open(args.rollout_jsonl) as f_in:
     for line in tqdm(f_in):
@@ -35,6 +42,11 @@ with open(args.rollout_jsonl) as f_in:
             # to_write = f"Reward: {row['reward']}\n\nTest output:\n{row['test_output']}\n\nModel patch:\n{row['model_patch']}\n\nOpencode stdout:\n{row['opencode_run_stdout']}"
         else:
             to_write = f"Reward: {row['reward']}\n\nOpencode stdout:\n{row['opencode_run_stdout']}"
+
+        sample = instance_id_to_row[args.instance_id]
+        sample["patch"] = row["model_patch"]
+        with open("temp.jsonl", "wb") as f:
+            f.write(orjson.dumps(instance_id_to_row[args.instance_id]) + b"\n")
 
         with open(f"temp_{num}.log", "w") as f_out:
             f_out.write(to_write)
