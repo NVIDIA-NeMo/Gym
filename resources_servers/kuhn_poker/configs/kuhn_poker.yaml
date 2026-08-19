@@ -1,0 +1,33 @@
+kuhn_poker:
+  resources_servers:
+    kuhn_poker:
+      entrypoint: app.py
+      domain: games
+      verified: false
+      description: Seeded two-player Kuhn Poker with alternating private observations.
+      value: Example reusable multi-agent environment with keyboard-controlled players.
+      invalid_retries: 1
+      agent_ids:
+      - player0
+      - player1
+
+kuhn_poker_keyboard_agent:
+  responses_api_agents:
+    multi_agent_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: kuhn_poker
+      controllers:
+        player0:
+          type: keyboard
+          display_name: Player 0
+        player1:
+          type: keyboard
+          display_name: Player 1
+      focal_agent: player0
+      max_turns: 8
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/kuhn_poker/data/example.jsonl
