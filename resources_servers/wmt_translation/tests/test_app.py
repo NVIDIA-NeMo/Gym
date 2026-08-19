@@ -640,6 +640,25 @@ class TestBuildCometActorClass:
         # Mirror was performed on first invocation.
         assert (mirror_root / "cpython-3.12.12-linux-x86_64-gnu" / "bin" / "python3.12").exists()
 
+    def test_worker_python_skips_python_mirror(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        import shutil as shutil_mod
+
+        import app as app_module
+
+        monkeypatch.setattr(sys, "executable", str(tmp_path / "does_not_exist"))
+        monkeypatch.setenv("HF_HOME", "/tmp/hf_home")
+        captured = {}
+        monkeypatch.setattr(app_module, "ray", MagicMock(remote=self._stub_ray_remote(captured)))
+
+        with patch.object(shutil_mod, "copytree") as mock_copy:
+            _build_comet_actor_class(use_worker_python=True)
+            mock_copy.assert_not_called()
+
+        runtime_env = captured["decorator_kwargs"]["runtime_env"]
+        assert "py_executable" not in runtime_env
+        assert runtime_env["env_vars"]["HF_HOME"] == "/tmp/hf_home"
+        assert "PYTHONPATH" not in runtime_env["env_vars"]
+
     def test_reuses_existing_mirror_without_recopy(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """Second invocation must skip copytree when the mirror already exists."""
         import app as app_module

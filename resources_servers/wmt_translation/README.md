@@ -58,6 +58,12 @@ pre-populates the cache so actors initialize fully offline; if the cache
 is missing, the first actor falls back to fetching from HF Hub on
 startup.
 
+By default each actor sets `py_executable` to a mirrored copy of the
+resources-server uv Python so remote workers can import the same
+packages. Set `comet_use_worker_python: true` when the extra_gpu worker
+already has the COMET runtime on its process Python and should inherit
+that interpreter instead.
+
 ## Example usage
 
 The xCOMET-XXL actor pool requires the `extra_gpu` Ray resource, which
@@ -94,6 +100,7 @@ COMET actor pool) and launches Gym in one shot, see the
 | `comet_model`       | `Unbabel/XCOMET-XXL`  | HF repo passed to `comet.download_model`                        |
 | `comet_batch_size`  | `16`                  | Batch size for `model.predict`                                  |
 | `comet_num_shards`  | `8`                   | Number of CometActors in the pool; cap at the extra node's GPU count |
+| `comet_use_worker_python` | `false`          | Inherit the extra_gpu worker process Python instead of mirroring uv Python |
 | `strip_reasoning`   | `true`                | Drop a `<think>...</think>` preamble before scoring             |
 
 ## Licensing

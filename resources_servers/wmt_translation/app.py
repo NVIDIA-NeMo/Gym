@@ -111,6 +111,9 @@ class WmtTranslationResourcesServerConfig(BaseResourcesServerConfig):
             xCOMET-XXL once and serves score requests from the persistent
             actor pool. Each actor requests one ``extra_gpu`` Ray resource,
             so the upper limit is the extra node(s)' GPU count.
+        comet_use_worker_python: Use the Python environment of the Ray worker
+            process instead of mirroring the resources-server Python. Enable
+            when the worker node pre-installs the COMET runtime.
         strip_reasoning: When True, drop a ``<think>...</think>`` preamble
             before scoring. Required for reasoning models; safe to leave on
             for instruction-tuned models that don't emit reasoning traces.
@@ -120,6 +123,7 @@ class WmtTranslationResourcesServerConfig(BaseResourcesServerConfig):
     comet_model: str = "Unbabel/XCOMET-XXL"
     comet_batch_size: int = 16
     comet_num_shards: int = 8
+    comet_use_worker_python: bool = False
     strip_reasoning: bool = True
 
 
@@ -149,7 +153,7 @@ class WmtTranslationVerifyResponse(WmtTranslationVerifyRequest, BaseVerifyRespon
 # --- Ray COMET scoring --------------------------------------------------------
 
 
-def _build_comet_actor_class():
+def _build_comet_actor_class(use_worker_python: bool = False):
     """Build the persistent CometActor class.
 
     Each actor is a Ray actor that loads xCOMET-XXL once in ``__init__`` and
@@ -165,64 +169,11 @@ def _build_comet_actor_class():
     import uuid
     from pathlib import Path
 
-    # Cross-node Python setup. The server's venv python may be a symlink into
-    # a container-local uv install dir that doesn't exist on remote Ray
-    # workers. Stock python on remote workers is ABI-incompatible with the
-    # venv's compiled extensions. Fix: mirror the uv-installed python (which
-    # ships relocatable python-build-standalone binaries) to a path Ray
-    # workers can reach, and hand that to runtime_env as py_executable.
-    # One-time copy on first invocation; subsequent calls are a no-op.
-    venv_python = Path(sys.executable).resolve()
-    if not venv_python.exists():
-        raise RuntimeError(
-            f"Server-side sys.executable doesn't exist? {venv_python}. "
-            "Expected the venv's python to resolve into the local uv install."
-        )
-    uv_python_root = venv_python.parent.parent
-
-    # Default cache root assumes the canonical container mount at /opt/Gym
-    # (cluster deployments). For local dev or non-standard mounts, override
-    # via the WMT_TRANSLATION_COMET_PY_CACHE env var to any user-writable
-    # path; on multi-node clusters the override must point at a shared
-    # filesystem path so cross-node Ray actors find the mirror.
-    cache_root = Path(os.environ.get("WMT_TRANSLATION_COMET_PY_CACHE", "/opt/Gym/.cache/comet-python"))
-    mirrored_python_root = cache_root / uv_python_root.name
-    mirrored_python_bin = mirrored_python_root / "bin" / venv_python.name
-    if not mirrored_python_bin.exists():
-        LOG.info(
-            "Mirroring uv Python install %s -> %s for cross-node Ray tasks",
-            uv_python_root,
-            mirrored_python_root,
-        )
-        mirrored_python_root.parent.mkdir(parents=True, exist_ok=True)
-        # Stage per-writer; a shared staging path races on rmtree and on the final rename.
-        tmp: Path = (
-            mirrored_python_root.parent
-            / f".{mirrored_python_root.name}.tmp.{socket.gethostname()}.{os.getpid()}.{uuid.uuid4().hex[:8]}"
-        )
-        try:
-            shutil.copytree(uv_python_root, tmp, symlinks=True)
-            try:
-                tmp.rename(mirrored_python_root)
-            except OSError:
-                # Another builder won the publish; adopt their mirror if it's valid, else re-raise.
-                if not mirrored_python_bin.exists():
-                    raise
-        finally:
-            if tmp.exists():
-                shutil.rmtree(tmp, ignore_errors=True)
-
-    venv_dir = Path(sys.executable).parent.parent
-    site_packages = venv_dir / "lib" / "python3.12" / "site-packages"
-
     env_vars = {
         # Keep CUDA_VISIBLE_DEVICES untouched: when an extra node joins Ray
         # with --num-gpus=0 to hide GPUs from accounting, Ray would zero out
         # CUDA_VISIBLE_DEVICES on the actor. We need physical GPUs visible.
         "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
-        # Site-packages (comet, torch, …) is on the shared filesystem; merge
-        # with whatever PYTHONPATH the inherited env has.
-        "PYTHONPATH": f"{site_packages}:{os.environ.get('PYTHONPATH', '')}",
     }
     # Propagate HF_HOME so actors find the cache populated by the
     # benchmark prepare step. Other HF env vars (HF_HUB_OFFLINE,
@@ -232,6 +183,49 @@ def _build_comet_actor_class():
     if os.environ.get("HF_HOME"):
         env_vars["HF_HOME"] = os.environ["HF_HOME"]
 
+    runtime_env = {"env_vars": env_vars}
+    if not use_worker_python:
+        # Cross-node Python setup. The server's venv python may be a symlink into
+        # a container-local uv install dir that doesn't exist on remote Ray
+        # workers. Mirror the relocatable uv Python to a shared path.
+        venv_python = Path(sys.executable).resolve()
+        if not venv_python.exists():
+            raise RuntimeError(
+                f"Server-side sys.executable doesn't exist? {venv_python}. "
+                "Expected the venv's python to resolve into the local uv install."
+            )
+        uv_python_root = venv_python.parent.parent
+        cache_root = Path(os.environ.get("WMT_TRANSLATION_COMET_PY_CACHE", "/opt/Gym/.cache/comet-python"))
+        mirrored_python_root = cache_root / uv_python_root.name
+        mirrored_python_bin = mirrored_python_root / "bin" / venv_python.name
+        if not mirrored_python_bin.exists():
+            LOG.info(
+                "Mirroring uv Python install %s -> %s for cross-node Ray tasks",
+                uv_python_root,
+                mirrored_python_root,
+            )
+            mirrored_python_root.parent.mkdir(parents=True, exist_ok=True)
+            # Stage per-writer; a shared staging path races on rmtree and on the final rename.
+            tmp: Path = (
+                mirrored_python_root.parent
+                / f".{mirrored_python_root.name}.tmp.{socket.gethostname()}.{os.getpid()}.{uuid.uuid4().hex[:8]}"
+            )
+            try:
+                shutil.copytree(uv_python_root, tmp, symlinks=True)
+                try:
+                    tmp.rename(mirrored_python_root)
+                except OSError:
+                    # Another builder won the publish; adopt their mirror if it's valid, else re-raise.
+                    if not mirrored_python_bin.exists():
+                        raise
+            finally:
+                if tmp.exists():
+                    shutil.rmtree(tmp, ignore_errors=True)
+        venv_dir = Path(sys.executable).parent.parent
+        site_packages = venv_dir / "lib" / "python3.12" / "site-packages"
+        env_vars["PYTHONPATH"] = f"{site_packages}:{os.environ.get('PYTHONPATH', '')}"
+        runtime_env["py_executable"] = str(mirrored_python_bin)
+
     # Schedule on the dedicated COMET node via the custom `extra_gpu` Ray
     # resource. num_gpus=0 because the node hides its GPUs from Ray accounting
     # (advertising them under `extra_gpu` instead); the env_vars flag above
@@ -239,7 +233,7 @@ def _build_comet_actor_class():
     @ray.remote(
         num_gpus=0,
         resources={"extra_gpu": 1},
-        runtime_env={"py_executable": str(mirrored_python_bin), "env_vars": env_vars},
+        runtime_env=runtime_env,
     )
     class _CometActor:  # pragma: no cover - needs live Ray cluster + CUDA + unbabel-comet checkpoint
         def __init__(self, gpu_idx: int, model_name: str):
@@ -312,7 +306,7 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
             return
         self._comet_init_attempted = True
 
-        actor_class = _build_comet_actor_class()
+        actor_class = _build_comet_actor_class(use_worker_python=self.config.comet_use_worker_python)
         n = max(1, self.config.comet_num_shards)
         actors = [actor_class.remote(gpu_idx=i, model_name=self.config.comet_model) for i in range(n)]
         # Block for actor readiness so init failures surface here instead
