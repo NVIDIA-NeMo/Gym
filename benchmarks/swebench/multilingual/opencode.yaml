@@ -9,6 +9,8 @@ opencode_sandboxed_agent_swebench_multilingual:
   _inherit_from: opencode_sandboxed_agent
   responses_api_agents:
     opencode_sandboxed_agent:
+      remote_opencode_install_script_path: /mnt/s3-data/data/bxyu/opencode/install.sh
+      remote_opencode_binary_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64
       resources_server:
         type: resources_servers
         name: opencode_swebench_multilingual_resources_server
