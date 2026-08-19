@@ -1,6 +1,8 @@
 # MMLU-ProX
 
-[MMLU-ProX](https://arxiv.org/abs/2503.04861) is a multilingual extension of MMLU-Pro with 10 answer choices (A–J) across 6 languages: English, German, Spanish, French, Italian, and Japanese. Questions are professionally translated and include language-specific answer extraction patterns.
+[MMLU-ProX](https://arxiv.org/abs/2503.10497) is a multilingual extension of MMLU-Pro with 10 answer choices (A–J) across 29 languages. Questions are professionally translated and include language-specific answer extraction patterns.
+
+The supported language codes are: Afrikaans (`af`), Arabic (`ar`), Bengali (`bn`), Czech (`cs`), German (`de`), English (`en`), Spanish (`es`), French (`fr`), Hindi (`hi`), Hungarian (`hu`), Indonesian (`id`), Italian (`it`), Japanese (`ja`), Korean (`ko`), Marathi (`mr`), Nepali (`ne`), Portuguese (`pt`), Russian (`ru`), Serbian (`sr`), Swahili (`sw`), Telugu (`te`), Thai (`th`), Ukrainian (`uk`), Urdu (`ur`), Vietnamese (`vi`), Wolof (`wo`), Yoruba (`yo`), Chinese (`zh`), and Zulu (`zu`).
 
 ## Configuration
 

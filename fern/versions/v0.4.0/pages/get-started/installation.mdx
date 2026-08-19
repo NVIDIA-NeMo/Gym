@@ -41,7 +41,13 @@ uv sync
 
 Container choice depends on your NeMo Gym version and model recipe. See [RL Framework Compatibility](/reference/rl-framework-compatibility) for the full mapping.
 
-For NeMo Gym **v0.3.0** with the Nemotron 3 Ultra recipe, build the container from the NeMo RL `ultra-v3` branch (there is no pre-built NGC tag for this pairing):
+For NeMo Gym **v0.4.0** with the Nemotron 3 Super recipe, pull the NeMo RL v0.7.0 container. This container includes NeMo Gym v0.4.0:
+
+```bash
+docker pull nvcr.io/nvidia/nemo-rl:v0.7.0
+```
+
+For the historical NeMo Gym **v0.3.0** and Nemotron 3 Ultra pairing, build the container from the NeMo RL `ultra-v3` branch (there is no pre-built NGC tag for this pairing):
 
 This command uses Docker Buildx and Docker 23+ syntax. By default, Docker builds for your host platform; add `--platform` only if you need to target a different architecture.
 
@@ -59,7 +65,7 @@ docker buildx build \
   .
 ```
 
-For other recipes (for example Nemotron 3 Nano or Super), use the NGC container listed in the compatibility table for that recipe.
+For other Gym versions and recipes (for example Nemotron 3 Nano), use the container listed in the compatibility table for that pairing.
 
 </Tab>
 </Tabs>

@@ -2,6 +2,8 @@
 
 Runs Claude Code CLI (`claude -p`) as a NeMo Gym agent server.
 
+Docs: [Anthropic Messages](https://docs.nvidia.com/nemo/gym/main/model-server/anthropic-messages) — how every Gym model server exposes `/v1/messages`, and how to wire this agent to any `model_server`.
+
 ## Quick start
 
 ### env.yaml
