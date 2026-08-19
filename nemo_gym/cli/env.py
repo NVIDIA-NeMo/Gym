@@ -1372,7 +1372,7 @@ def _inspect_environment(
     kind = global_config_dict.get("catalog_kind")
     matching_names = {entry.name: entry for entry in entries}
     if name not in matching_names:
-        exit_unknown_component(name, matching_names, "environment")
+        exit_unknown_component(name, matching_names, kind or "environment")
         return
     entry = resolve_catalog_entry(name, kind, entries=entries)
     parsed = read_environment_details(entry.config_path)

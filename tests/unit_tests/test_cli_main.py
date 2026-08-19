@@ -1431,6 +1431,16 @@ class TestListEnvironmentsRouting:
         assert target == "nemo_gym.cli.env:list_environments"
         assert overrides == ["+json=true"]
 
+    def test_list_benchmarks_unknown_name_uses_benchmark_noun(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        # Exercise the real router and listing target rather than only asserting the dispatch tuple.
+        monkeypatch.setattr(sys, "argv", ["gym", "list", "benchmarks", "gsm8kk"])
+
+        with pytest.raises(SystemExit) as error:
+            main()
+
+        assert error.value.code == 1
+        assert capsys.readouterr().out == "Unknown benchmark 'gsm8kk'. Did you mean `gsm8k`?\n"
+
     def test_catalog_filters_translate_to_reserved_keys(self, monkeypatch: MonkeyPatch) -> None:
         target, overrides = _dispatch_for(
             monkeypatch,
