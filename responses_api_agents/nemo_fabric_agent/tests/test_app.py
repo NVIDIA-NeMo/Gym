@@ -257,7 +257,7 @@ def test_harness_presets_pass_fabric_planning(preset_name: str, tmp_path: Path) 
     assert Fabric().plan(config, base_dir=tmp_path).adapter.adapter_id == merged["adapter_id"]
 
 
-def test_hermes_gym_config_composes_with_nested_settings() -> None:
+def test_hermes_math_environment_composes_with_nested_settings() -> None:
     repo_root = Path(__file__).parents[3]
     config = GlobalConfigDictParser().parse(
         GlobalConfigDictParserConfig(
@@ -265,10 +265,7 @@ def test_hermes_gym_config_composes_with_nested_settings() -> None:
                 {
                     "config_paths": [
                         str(repo_root / "responses_api_models/vllm_model/configs/vllm_model.yaml"),
-                        str(
-                            repo_root
-                            / "resources_servers/math_with_judge/configs/math_with_judge_nemo_fabric_hermes.yaml"
-                        ),
+                        str(repo_root / "environments/nemo_fabric_hermes_math/config.yaml"),
                     ],
                     "policy_base_url": "http://127.0.0.1:8000/v1",
                     "policy_api_key": "test",  # pragma: allowlist secret
@@ -282,7 +279,7 @@ def test_hermes_gym_config_composes_with_nested_settings() -> None:
         )
     )
 
-    agent = config.math_with_judge_nemo_fabric_hermes.responses_api_agents.nemo_fabric_agent
+    agent = config.nemo_fabric_hermes_math_agent.responses_api_agents.nemo_fabric_agent
     assert agent.harness_settings.reasoning_config.effort == "medium"
     assert agent.fabric_config.runtime.max_turns == 30
 
