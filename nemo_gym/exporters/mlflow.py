@@ -58,8 +58,8 @@ def _chunked(items: list[Any], size: int) -> Iterator[list[Any]]:
 class MLflowExporter(BaseExporter):
     """MLflow backend.
 
-    Configured by `mlflow_tracking_uri`, `mlflow_tracking_token`, `mlflow_experiment_name` and
-    `mlflow_run_name` in the global config.
+    Configured by `mlflow_tracking_uri`, `mlflow_experiment_name` and `mlflow_run_name` in the
+    global config, plus `mlflow_tracking_token` for servers that require authentication.
 
     Uses `MlflowClient` with an explicit run id rather than the fluent `mlflow.*` API, which
     tracks the active run in thread-local state that Gym's async call sites don't share.
@@ -78,7 +78,9 @@ class MLflowExporter(BaseExporter):
 
     def setup(self) -> None:
         # The MLflow SDK reads the bearer token from the environment, not from client kwargs.
-        environ["MLFLOW_TRACKING_TOKEN"] = self.config.mlflow_tracking_token
+        # Left unset for unauthenticated servers so no stray Authorization header is sent.
+        if self.config.mlflow_tracking_token:
+            environ["MLFLOW_TRACKING_TOKEN"] = self.config.mlflow_tracking_token
         self.client = MlflowClient(tracking_uri=self.config.mlflow_tracking_uri)
         experiment_id = self._experiment_id(self.config.mlflow_experiment_name)
         self.run_id = self.client.create_run(experiment_id, run_name=self.config.mlflow_run_name).info.run_id

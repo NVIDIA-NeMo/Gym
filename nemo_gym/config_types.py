@@ -805,9 +805,9 @@ class MLFlowConfig(ExporterConfig):
 
     @property
     def is_available(self) -> bool:
+        # The token is optional: unauthenticated tracking servers are possible.
         return (
             self.mlflow_tracking_uri
-            and self.mlflow_tracking_token
             and self.mlflow_experiment_name
             and self.mlflow_run_name
             and self.mlflow_tracking_token != "****"
