@@ -62,7 +62,7 @@ jobs:
           curl -LsSf "$UV_INSTALL_URL" | sh
           uv venv
           source .venv/bin/activate
-          uv sync --extra dev --extra sandbox --extra openshell
+          uv sync --extra dev --extra sandbox --extra openshell --extra idegym
 
       - name: Test
         run: |

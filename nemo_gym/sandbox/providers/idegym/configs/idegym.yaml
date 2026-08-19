@@ -1,0 +1,152 @@
+# IdeGYM sandbox provider config.
+#
+# `sandbox` is the instance name an agent references via `sandbox_provider: sandbox`;
+# the child key `idegym` selects the provider class and its value is passed to the
+# provider constructor.
+#
+# Every shipped provider config binds the same name `sandbox`, so swapping providers is
+# swapping this config path in `+config_paths` (no agent edit):
+#
+#   AGENT=responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml
+#   MODEL=responses_api_models/vllm_model/configs/vllm_model.yaml
+#   gym env start \
+#       --config $AGENT \
+#       --config nemo_gym/sandbox/providers/idegym/configs/idegym.yaml \
+#       --config $MODEL
+#
+# Requires a reachable IdeGYM orchestrator (github.com/JetBrains-Research/idegym) and
+# the SDK: `uv pip install 'nemo-gym[idegym]'`. See ../README.md for the image
+# requirement -- the sandbox image must be an IdeGYM *server* image, not a plain
+# benchmark image.
+#
+# `default_metadata` (optional) is merged into every sandbox's spec metadata
+# (SandboxSpec.metadata); an agent's own sandbox_spec.metadata overrides it. IdeGYM has
+# no per-server label API, so metadata is used for naming and diagnostics rather than
+# becoming queryable Kubernetes labels.
+sandbox:
+  default_metadata:
+    sandbox-api: idegym-client
+  idegym:
+    connection:
+      # Orchestrator URL. A bare host gets an https:// scheme; the literal
+      # `idegym.test` is the SDK's unauthenticated local-testing host.
+      orchestrator_url: ${oc.env:IDEGYM_ORCHESTRATOR_URL,idegym.test}
+      # Kubernetes namespace the client and its server pods live in.
+      namespace: ${oc.env:IDEGYM_NAMESPACE,idegym}
+      # Basic auth. Left null, the SDK falls back to IDEGYM_AUTH_USERNAME /
+      # IDEGYM_AUTH_PASSWORD, which is the preferred way to pass credentials.
+      username: ${oc.env:IDEGYM_AUTH_USERNAME,null}
+      password: ${oc.env:IDEGYM_AUTH_PASSWORD,null}
+      # IdeGYM registers ONE client per process and shares it across every sandbox
+      # created from this config. Resource quotas are matched by regex against this
+      # name, so pin it to whatever your deployment's rule expects. Left null, it is
+      # derived from job attribution (see `attribution` below).
+      client_name: ${oc.env:IDEGYM_CLIENT_NAME,null}
+      # Dedicated nodes requested at registration; 0 uses the shared pool.
+      nodes_count: 0
+      heartbeat_interval_s: 60
+      request_timeout_s: 60
+      # "aiohttp" routes the SDK's httpx client through the httpx-aiohttp bridge,
+      # falling back to httpx with a warning when it is not installed.
+      transport_backend: aiohttp
+      # Bounds in-flight HTTP to the orchestrator across ALL sandboxes sharing this
+      # connection. null for no cap.
+      max_connections: 64
+      max_keepalive_connections: 20
+      keepalive_expiry_s: 5.0
+      connect_retries: 2
+      # The IdeGYM SDK traces to a JetBrains-hosted collector unless an endpoint is
+      # given here, so tracing stays off by default. Set an OTLP HTTP endpoint to
+      # opt in.
+      tracing_endpoint: ${oc.env:IDEGYM_OTEL_TRACING_ENDPOINT,null}
+    create:
+      # Bounds the whole start-server call: pod scheduling, image pull, the IdeGYM
+      # server coming up, and the orchestrator's own retries of its 429 back-pressure.
+      # An agent's sandbox_spec.ready_timeout_s overrides this per sandbox.
+      ready_timeout_s: 1200
+      # Retries of the whole start-server call for transient control-plane failures
+      # (429/502/503/504 and connection errors). Each retry takes a fresh server name.
+      retries: 3
+      retry_delay_s: 5.0
+      retry_max_delay_s: 60.0
+      # Delay the SDK waits between its own in-call retries of a 429.
+      busy_retry_delay_s: 15.0
+      # RFC-1035 prefix of the generated server name, which becomes the pod name.
+      server_name_prefix: nemo-gym
+      # Metadata keys folded into that name so a pod is traceable to its task from
+      # `kubectl get pods` and the IdeGYM dashboard.
+      server_name_metadata_keys: [instance_id]
+      # NONE recreates from scratch. Names are unique per sandbox, so there is nothing
+      # to reuse unless provider_options.server_name pins one.
+      reuse_strategy: NONE
+      # Run the server container as UID 0. SWE-bench style images generally need this,
+      # and it is also what makes exec(user="root") a no-op rather than a warning.
+      run_as_root: true
+      service_port: 80
+      container_port: 8000
+      # Pod restarts tolerated before IdeGYM tears the server down. 0 surfaces the
+      # first crash instead of looping restarts.
+      max_restarts: 0
+      # Backoff for the orchestrator's async-operation polling, which every mutating
+      # call goes through. Raising the delays trades latency for orchestrator load.
+      polling:
+        initial_delay_s: 0.25
+        # 0 selects the exponential schedule below.
+        interval_s: 0.0
+        backoff_factor: 1.5
+        max_delay_s: 30.0
+    exec:
+      default_timeout_s: 180
+      # Grace period the sandbox gives a timed-out process group before SIGKILL.
+      graceful_termination_timeout_s: 2.0
+      # Client-side budget on top of the command timeout, covering the orchestrator
+      # round trip. Keep it non-zero so the sandbox's timeout fires first and the
+      # caller gets the partial output instead of a transport error.
+      request_overhead_s: 60
+      # IdeGYM's bash tool has no user field: commands run as the container's user.
+      # "ignore" drops exec(user=...) with one warning; "runuser"/"su" wrap the script
+      # for images that ship those tools.
+      user_mode: ignore
+    probe:
+      # Verification after the orchestrator reports the pod up: a scheduled pod is not
+      # yet a sandbox that can run commands.
+      command: printf idegym-sandbox-ready
+      expected_stdout: idegym-sandbox-ready
+      timeout_s: 30
+      deadline_s: 180
+      stable_count: 1
+      stable_delay_s: 2.0
+      # Fail create when sandbox_spec.workdir is missing in the image, instead of
+      # letting every later command fail on `cd`.
+      verify_workdir: true
+    files:
+      # Uploads and downloads ride base64 over the bash tool. Upload chunks are capped
+      # by the sandbox shell's 128 KiB argument limit; download chunks by how much text
+      # the orchestrator stores per async operation.
+      upload_chunk_bytes: 49152
+      download_chunk_bytes: 196608
+      # null for no cap. Guards against pulling a base64-inflated multi-gigabyte tree
+      # through the orchestrator.
+      max_download_bytes: 67108864
+      timeout_s: 300
+    operations:
+      # A failing teardown can take up to (retries + 1) * close_timeout_s in total.
+      close_timeout_s: 180
+      status_timeout_s: 60
+      retries: 2
+      retry_delay_s: 1.0
+      retry_max_delay_s: 15.0
+    # Job attribution. IdeGYM has no per-server label API, so unlike OpenSandbox this
+    # cannot become Kubernetes labels; instead it names the registered client, which is
+    # what the IdeGYM dashboard groups by and what resource-limit rules match. Unset
+    # fields auto-detect from NEMO_GYM_TEAM / NEMO_GYM_USER / NEMO_GYM_WORKLOAD, then
+    # Slurm job env vars, then the OS login name for `user` and the gym CLI's
+    # NEMO_GYM_CONFIG_PATH server instance name for `workload`. `run` is resolved and
+    # logged but kept out of the name, which has to stay stable across launches for
+    # quota matching to work. An explicit connection.client_name always wins.
+    attribution:
+      enabled: true
+      client_name_prefix: nemo-gym
+      # team: my-team
+      # user: my-user
+      # workload: my-benchmark

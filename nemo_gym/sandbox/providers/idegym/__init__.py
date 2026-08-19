@@ -13,3 +13,59 @@
 # limitations under the License.
 
 """IdeGYM sandbox provider package."""
+
+from nemo_gym.sandbox.providers.idegym.config import (
+    IdeGymAttributionConfig,
+    IdeGymConnectionConfig,
+    IdeGymCreateConfig,
+    IdeGymExecConfig,
+    IdeGymFilesConfig,
+    IdeGymOperationsConfig,
+    IdeGymPollingConfig,
+    IdeGymProbeConfig,
+    TransportBackend,
+    UserMode,
+)
+from nemo_gym.sandbox.providers.idegym.errors import (
+    IdeGymCommandTooLongError,
+    IdeGymCreateError,
+    IdeGymCreateVerificationError,
+    IdeGymError,
+    IdeGymOperationError,
+    IdeGymTransferError,
+    IdeGymUnknownServerError,
+)
+from nemo_gym.sandbox.providers.idegym.provider import IdeGymProvider
+from nemo_gym.sandbox.providers.idegym.session import IdeGymBashResult, IdeGymServerRef, IdeGymSession
+from nemo_gym.sandbox.providers.idegym.shell import BashScriptBuilder
+from nemo_gym.sandbox.providers.idegym.spec import IdeGymProviderOptions, ServerRequestTranslator
+from nemo_gym.sandbox.providers.idegym.transfer import Base64BashFileTransfer
+
+
+__all__ = [
+    "BashScriptBuilder",
+    "Base64BashFileTransfer",
+    "IdeGymAttributionConfig",
+    "IdeGymBashResult",
+    "IdeGymCommandTooLongError",
+    "IdeGymConnectionConfig",
+    "IdeGymCreateConfig",
+    "IdeGymCreateError",
+    "IdeGymCreateVerificationError",
+    "IdeGymError",
+    "IdeGymExecConfig",
+    "IdeGymFilesConfig",
+    "IdeGymOperationError",
+    "IdeGymOperationsConfig",
+    "IdeGymPollingConfig",
+    "IdeGymProbeConfig",
+    "IdeGymProvider",
+    "IdeGymProviderOptions",
+    "IdeGymServerRef",
+    "IdeGymSession",
+    "IdeGymTransferError",
+    "IdeGymUnknownServerError",
+    "ServerRequestTranslator",
+    "TransportBackend",
+    "UserMode",
+]

@@ -288,6 +288,29 @@ openshell = [
     "openshell>=0.0.92,<0.1",
 ]
 
+# Keep IdeGYM opt-in: it is a third-party control plane, so its SDK should not be
+# pulled into installs that will never talk to one.
+idegym = [
+    # IdeGYM client SDK: used by the IdeGYM sandbox provider for client registration and
+    # server start/exec/stop against an IdeGYM orchestrator. Pulls in idegym-api and
+    # idegym-common-utils (its request/response models and logging helpers).
+    # Lower bound 0.11.1: the first release whose start-server API carries the pod_spec
+    # overrides and max_restarts fields the provider passes through. Upper bound <0.12:
+    # the SDK is pre-1.0, and the provider depends on the shape of its client and server
+    # operation classes; the SDK-conformance unit test guards raising this ceiling.
+    # Updated: Wed Aug 19, 2026 with idegym-client>=0.11.1,<0.12
+    # License: Apache 2.0 https://github.com/JetBrains-Research/idegym/blob/main/LICENSE
+    "idegym-client>=0.11.1,<0.12",
+
+    # httpx-aiohttp: the IdeGYM provider swaps the SDK's httpx transport for this
+    # aiohttp-backed one. Without it the provider falls back to raw httpx, whose
+    # connection pool is O(n^2) at high concurrency. Also in the `sandbox` extra, but
+    # repeated here so `nemo-gym[idegym]` alone is a working install.
+    # Updated: Wed Aug 19, 2026 with httpx-aiohttp>=0.2.0
+    # License: MIT https://github.com/karpetrosyan/httpx-aiohttp/blob/master/LICENSE
+    "httpx-aiohttp>=0.2.0",
+]
+
 # We include dev dependencies as an extra since technically each server module is a consumer (which means we cannot use dependency groups, which are intended to be within a project).
 dev = [
     # gprof2dot: Used for outputting dot graphs for profiling.
