@@ -505,7 +505,7 @@ class TestRoutedExpertsWireFormats:
             TokenIDLogProbMixin.model_validate({**self._BASE, "routed_experts": 42})
 
 
-def _usage(*, cached_tokens: int, reasoning_tokens: int) -> NeMoGymResponseUsage:
+def _usage(*, cached_tokens: int | None, reasoning_tokens: int | None) -> NeMoGymResponseUsage:
     return NeMoGymResponseUsage(
         input_tokens=10,
         input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=cached_tokens),
@@ -526,6 +526,21 @@ def test_accumulate_response_usage_preserves_all_counts_and_missing_values() -> 
     assert (result.input_tokens_details.cached_tokens, result.output_tokens_details.reasoning_tokens) == (7, 5)
     assert first.input_tokens_details.cached_tokens == 0
     assert accumulate_response_usage(result, None) == result
+
+
+def test_accumulate_response_usage_keeps_unknown_details_unknown() -> None:
+    known = _usage(cached_tokens=7, reasoning_tokens=4)
+    unknown = _usage(cached_tokens=None, reasoning_tokens=None)
+
+    forward = accumulate_response_usage(known, unknown)
+    reverse = accumulate_response_usage(unknown, known)
+
+    assert forward is not None
+    assert reverse is not None
+    assert forward.input_tokens_details.cached_tokens is None
+    assert forward.output_tokens_details.reasoning_tokens is None
+    assert reverse.input_tokens_details.cached_tokens is None
+    assert reverse.output_tokens_details.reasoning_tokens is None
 
 
 def test_accumulate_response_usage_tolerates_missing_detail_objects() -> None:

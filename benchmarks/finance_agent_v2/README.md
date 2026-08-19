@@ -4,8 +4,9 @@ A NeMo Gym integration of the official
 [Vals Finance Agent Benchmark v2](https://github.com/vals-ai/finance-agent-v2)
 that **reuses Vals's own tool code directly** (tools-only wrap): the upstream
 `finance_agent.tools.*` classes are imported and exposed as HTTP endpoints, and
-the `finance_agent_v2` agent loop drives them. The public FABv2 release ships no
-official grader, so scoring uses our own per-criterion rubric judge.
+the `finance_agent_v2` instance of the shared `responses_api_agents/finance_agent`
+loop drives them. The public FABv2 release ships no official grader, so scoring
+uses our own per-criterion rubric judge.
 
 This package is the public **evaluation recipe**: it downloads and converts the
 public question set and wires the run via the gym CLI. The server code, tests, and
