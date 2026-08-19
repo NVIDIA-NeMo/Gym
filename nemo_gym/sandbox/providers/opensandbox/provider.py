@@ -61,9 +61,8 @@ class OpenSandboxCreateVerificationError(SandboxCreateVerificationError):
 class SandboxBackendUnreachableError(RuntimeError):
     """Raised when the server proxy cannot open a TCP connection to a sandbox's exec daemon.
 
-    The proxy's 502 is a connect failure, so the submitted command never
-    started. Persistent 502s mean the backend is gone (e.g. the container was
-    OOM-killed and sandbox pods never restart); retrying cannot revive it.
+    A submission 502 means the command never started. A status or log polling
+    502 can mean the backend died while the command was running.
     """
 
 
@@ -1230,16 +1229,50 @@ class OpenSandboxProvider:
         # Backstop for wedges the inner deadlines miss. Background exec polls, so
         # sdk_timeout_s bounds a single request rather than the command: without
         # timeout_s there is nothing to cap against.
-        if sdk_timeout_s is None or (self._operations.background_exec and timeout_s is None):
-            return await _dispatch()
-        hard_cap_s = 2.0 * float(sdk_timeout_s) + 30.0
         try:
-            return await asyncio.wait_for(_dispatch(), timeout=hard_cap_s)
-        except asyncio.TimeoutError as e:
-            raise TimeoutError(
-                f"OpenSandbox exec exceeded hard cap of {hard_cap_s:g}s; the command wedged "
-                f"(sandbox_id={handle.sandbox_id!r})"
-            ) from e
+            if sdk_timeout_s is None or (self._operations.background_exec and timeout_s is None):
+                return await _dispatch()
+            hard_cap_s = 2.0 * float(sdk_timeout_s) + 30.0
+            try:
+                return await asyncio.wait_for(_dispatch(), timeout=hard_cap_s)
+            except asyncio.TimeoutError as e:
+                raise TimeoutError(
+                    f"OpenSandbox exec exceeded hard cap of {hard_cap_s:g}s; the command wedged "
+                    f"(sandbox_id={handle.sandbox_id!r})"
+                ) from e
+        except Exception as error:
+            if not isinstance(error, SandboxBackendUnreachableError) and _exception_status_code(error) != 502:
+                raise
+
+            get_info = getattr(handle.raw, "get_info", None)
+            if get_info is not None:
+                deadline = asyncio.get_running_loop().time() + 5.0
+                while (remaining_s := deadline - asyncio.get_running_loop().time()) > 0:
+                    try:
+                        info = await self._await_sdk_call(
+                            get_info(),
+                            operation="get_info after exec 502",
+                            sandbox_id=handle.sandbox_id,
+                            timeout_s=min(2.0, remaining_s),
+                        )
+                    except Exception:
+                        break
+                    raw_status = getattr(info, "status", None)
+                    state = getattr(raw_status, "state", None)
+                    reason = getattr(raw_status, "reason", None)
+                    message = getattr(raw_status, "message", None)
+                    status_text = f"{reason} {message}"
+                    if re.search(r"\boom[\s_-]*killed\b|\bout of memory\b", status_text, re.IGNORECASE):
+                        message = str(message or "")[:500]
+                        raise SandboxBackendUnreachableError(
+                            "Sandbox was OOM-killed. "
+                            f"OpenSandbox status: state={state!r}, reason={reason!r}, message={message!r}; "
+                            f"sandbox_id={handle.sandbox_id!r}"
+                        ) from error
+                    if message and _to_sandbox_status(state) in {SandboxStatus.ERROR, SandboxStatus.STOPPED}:
+                        break
+                    await asyncio.sleep(min(0.5, max(0.0, deadline - asyncio.get_running_loop().time())))
+            raise
 
     async def _exec_background(
         self,
