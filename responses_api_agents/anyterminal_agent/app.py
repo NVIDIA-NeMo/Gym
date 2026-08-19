@@ -149,6 +149,7 @@ _RUNNER_TEMPLATE = """\
 #!/usr/bin/env python3
 import asyncio, json, os, sys
 from pathlib import Path
+from fastapi import Request
 
 sys.path.insert(0, "/nemo_gym_mount")
 # Append (not prepend) agent-deps bin so the task's own python/pip win — else the agent's
@@ -197,7 +198,7 @@ body = NeMoGymResponseCreateParamsNonStreaming(
     model=MODEL_NAME,
     **SAMPLING,
 )
-response = asyncio.run(agent.responses(request=None, body=body))
+response = asyncio.run(agent.responses(request=Request({{"type": "http", "path_params": {{}}}}), body=body))
 Path("/trajectories_mount/response.json").write_text(response.model_dump_json())
 print(f"agent finished: {{len(response.output)}} output items", flush=True)
 """

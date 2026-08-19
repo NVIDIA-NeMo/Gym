@@ -1,0 +1,29 @@
+config_paths:
+  - responses_api_agents/nemo_fabric_agent/configs/nemo_fabric_agent.yaml
+
+reasoning_gym:
+  resources_servers:
+    reasoning_gym:
+      entrypoint: app.py
+      domain: knowledge
+      verified: true
+      description: Reasoning Gym evaluated through NeMo Fabric and DeepAgents.
+      value: Evaluate a Fabric-selected harness across reasoning tasks.
+
+reasoning_gym_nemo_fabric_deepagents:
+  _inherit_from: nemo_fabric_agent
+  responses_api_agents:
+    nemo_fabric_agent:
+      resources_server:
+        type: resources_servers
+        name: reasoning_gym
+      adapter_id: nvidia.fabric.langchain.deepagents
+      timeout: 1800
+      system_prompt: |
+        Solve the problem carefully and return only the answer in the exact format requested.
+      harness_settings: {}
+      fabric_config: {}
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/reasoning_gym/data/example.jsonl
