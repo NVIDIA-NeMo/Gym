@@ -12,7 +12,12 @@ from nemo_gym.config_types import ConfigError
 from nemo_gym.environment.manifest import EnvironmentKind, load_manifest
 from nemo_gym.environment.onboarding import VerifierReport
 from nemo_gym.environment.validation import EnvironmentValidationReport
-from nemo_gym.registry import EnvironmentCatalogEntry, discover_environment_catalog
+from nemo_gym.registry import (
+    EnvironmentCatalogEntry,
+    RegistryError,
+    discover_environment_catalog_report,
+    resolve_catalog_entry,
+)
 
 
 class EnvironmentPublicationError(ConfigError):
@@ -77,21 +82,21 @@ def finalize_publication(
     if verifier.name != entry.name or verifier.kind != entry.kind or not verifier.cases:
         raise EnvironmentPublicationError("Verifier report does not describe a passing fixture for this workload.")
 
-    entries = tuple(discover_environment_catalog() if catalog_entries is None else catalog_entries)
     selected_manifest = Path(entry.manifest_path).resolve()
-    matches = [
-        candidate
-        for candidate in entries
-        if candidate.name == entry.name
-        and candidate.kind == entry.kind
-        and candidate.manifest_path is not None
-        and candidate.manifest_path.resolve() == selected_manifest
-    ]
-    if len(matches) != 1:
+    try:
+        published = (
+            resolve_catalog_entry(entry.name, entry.kind, report=discover_environment_catalog_report())
+            if catalog_entries is None
+            else resolve_catalog_entry(entry.name, entry.kind, entries=catalog_entries)
+        )
+    except RegistryError as error:
+        raise EnvironmentPublicationError(
+            f"Catalog did not resolve {entry.kind} {entry.name!r} after publication checks: {error}"
+        ) from error
+    if published.manifest_path is None or published.manifest_path.resolve() != selected_manifest:
         raise EnvironmentPublicationError(
             f"Catalog did not resolve {entry.kind} {entry.name!r} to its exact manifest after publication checks."
         )
-    published = matches[0]
     if published.status != "experimental":
         raise EnvironmentPublicationError(
             f"Newly published workloads must enter as experimental, observed {published.status!r}."

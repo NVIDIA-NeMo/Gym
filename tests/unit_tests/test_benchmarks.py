@@ -57,6 +57,10 @@ class TestListBenchmarks:
 
         (tmp_path / "standard").mkdir()
         (tmp_path / "standard" / "config.yaml").write_text("x:\n  datasets:\n  - type: benchmark\n")
+        # A benchmark manifest mirrors its benchmark dataset, but it is metadata rather than a runnable config.
+        (tmp_path / "standard" / "manifest.yaml").write_text(
+            "name: standard\ndatasets:\n  - {name: test, type: benchmark}\n"
+        )
         (tmp_path / "flavored" / "configs").mkdir(parents=True)
         (tmp_path / "flavored" / "configs" / "myflavor.yaml").write_text("x:\n  datasets:\n  - type: benchmark\n")
         (tmp_path / "notbench").mkdir()

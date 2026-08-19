@@ -56,7 +56,12 @@ from nemo_gym.cli.env import (
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config_types import ConfigError, NoServerInstancesError, ResourcesServerInstanceConfig
 from nemo_gym.environment.scaffold import ScaffoldError
-from nemo_gym.registry import EnvironmentCatalogEntry
+from nemo_gym.registry import (
+    CatalogDiagnostic,
+    EnvironmentCatalogEntry,
+    EnvironmentCatalogReport,
+    RegistryError,
+)
 
 
 class TestSelectShard:
@@ -497,6 +502,14 @@ class TestOnboardingCommandAdapters:
         manifest_path=Path("environments/alpha/manifest.yaml"),
     )
 
+    @pytest.fixture(autouse=True)
+    def _catalog_report(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            nemo_gym.cli.env,
+            "discover_environment_catalog_report",
+            lambda: EnvironmentCatalogReport(entries=(self._ENTRY,), diagnostics=()),
+        )
+
     def test_init_environment_forwards_typed_scaffold_options(self, monkeypatch: MonkeyPatch, capsys) -> None:
         monkeypatch.setattr(
             nemo_gym.cli.env,
@@ -552,8 +565,35 @@ class TestOnboardingCommandAdapters:
 
         assert resolver.call_args.args[0] == "alpha"
         assert resolver.call_args.args[1].value == "environment"
+        assert resolver.call_args.kwargs["report"].entries == (self._ENTRY,)
         validator.assert_called_once_with(self._ENTRY.manifest_path, self._ENTRY.config_path, sync=True)
         assert json.loads(capsys.readouterr().out) == {"name": "alpha", "kind": "environment"}
+
+    def test_manifest_command_rejects_selected_catalog_diagnostic(self, monkeypatch: MonkeyPatch) -> None:
+        degraded = EnvironmentCatalogEntry(
+            name=self._ENTRY.name,
+            kind=self._ENTRY.kind,
+            path=self._ENTRY.path,
+            config_path=self._ENTRY.config_path,
+        )
+        diagnostic = CatalogDiagnostic(
+            kind="environment",
+            name="alpha",
+            manifest_path=self._ENTRY.manifest_path,
+            message="Malformed YAML in environment manifest.",
+        )
+        monkeypatch.setattr(
+            nemo_gym.cli.env,
+            "discover_environment_catalog_report",
+            lambda: EnvironmentCatalogReport(
+                entries=(degraded,),
+                diagnostics=(diagnostic,),
+            ),
+        )
+        config = nemo_gym.cli.env.ManifestCommandConfig(onboarding_name="alpha")
+
+        with raises(RegistryError, match="unusable manifest"):
+            nemo_gym.cli.env._manifest_entry(config)
 
     def test_validation_human_report(self, capsys) -> None:
         report = SimpleNamespace(
@@ -773,6 +813,7 @@ class TestListEnvironments:
         *,
         overrides: dict | None = None,
         entries: tuple[EnvironmentCatalogEntry, ...] | None = None,
+        diagnostics: tuple[CatalogDiagnostic, ...] = (),
     ) -> None:
         monkeypatch.setattr(
             nemo_gym.cli.env,
@@ -781,8 +822,11 @@ class TestListEnvironments:
         )
         monkeypatch.setattr(
             nemo_gym.cli.env,
-            "discover_environment_catalog",
-            lambda: (self._ALPHA, self._BETA) if entries is None else entries,
+            "discover_environment_catalog_report",
+            lambda: EnvironmentCatalogReport(
+                entries=(self._ALPHA, self._BETA) if entries is None else entries,
+                diagnostics=diagnostics,
+            ),
         )
 
     def test_lists_discovered_environments(self, monkeypatch: MonkeyPatch, capsys) -> None:
@@ -821,6 +865,51 @@ class TestListEnvironments:
                 "lifecycle": "active",
             }
         ]
+
+    def test_invalid_manifest_diagnostic_is_visible_without_corrupting_json(
+        self, monkeypatch: MonkeyPatch, capsys
+    ) -> None:
+        diagnostic = CatalogDiagnostic(
+            kind="benchmark",
+            name="broken",
+            manifest_path=Path("benchmarks/broken/manifest.yaml"),
+            message="Malformed YAML in environment manifest 'benchmarks/broken/manifest.yaml' at line 2, column 1.",
+        )
+        self._mock_catalog(
+            monkeypatch,
+            overrides={"json": True},
+            entries=(self._ALPHA,),
+            diagnostics=(diagnostic,),
+        )
+
+        list_environments()
+
+        captured = capsys.readouterr()
+        assert json.loads(captured.out)[0]["name"] == "alpha"
+        assert "could not use the manifest for benchmark 'broken'" in captured.err
+        assert "Malformed YAML" in captured.err
+
+    def test_inspection_rejects_the_selected_degraded_manifest(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        diagnostic = CatalogDiagnostic(
+            kind="benchmark",
+            name="beta",
+            manifest_path=Path("benchmarks/beta/manifest.yaml"),
+            message="Malformed YAML in environment manifest.",
+        )
+        self._mock_catalog(
+            monkeypatch,
+            overrides={"component_name": "beta", "catalog_kind": "benchmark"},
+            entries=(self._BETA,),
+            diagnostics=(diagnostic,),
+        )
+
+        with raises(SystemExit) as error:
+            list_environments()
+
+        captured = capsys.readouterr()
+        assert error.value.code == 1
+        assert "unusable manifest" in captured.out
+        assert captured.err == ""
 
     def test_query_filters_environments(self, monkeypatch: MonkeyPatch, capsys) -> None:
         self._mock_catalog(monkeypatch, overrides={"query": "alpha"})

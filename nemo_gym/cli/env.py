@@ -72,7 +72,8 @@ from nemo_gym.global_config import (
 )
 from nemo_gym.registry import (
     EnvironmentCatalogEntry,
-    discover_environment_catalog,
+    EnvironmentCatalogReport,
+    discover_environment_catalog_report,
     read_environment_details,
     resolve_catalog_entry,
 )
@@ -1202,7 +1203,8 @@ def _manifest_entry(config: ManifestCommandConfig) -> Optional[EnvironmentCatalo
         raise ConfigError("--kind is only valid when selecting a catalog name")
     if config.onboarding_name is None:
         return None
-    return resolve_catalog_entry(config.onboarding_name, config.catalog_kind)
+    report = discover_environment_catalog_report()
+    return resolve_catalog_entry(config.onboarding_name, config.catalog_kind, report=report)
 
 
 def _print_validation_report(report: EnvironmentValidationReport, *, json_output: bool) -> None:
@@ -1365,16 +1367,22 @@ def _run_manifest_verifier(
 
 def _inspect_environment(
     name: str,
-    entries: Tuple[EnvironmentCatalogEntry, ...],
+    report: EnvironmentCatalogReport,
     global_config_dict: DictConfig,
 ) -> None:
     """Render one entry from the unified environment catalog."""
     kind = global_config_dict.get("catalog_kind")
+    entries = report.entries
     matching_names = {entry.name: entry for entry in entries}
     if name not in matching_names:
+        if any(
+            diagnostic.name == name and (kind is None or diagnostic.kind == str(getattr(kind, "value", kind)))
+            for diagnostic in report.diagnostics
+        ):
+            resolve_catalog_entry(name, kind, report=report)
         exit_unknown_component(name, matching_names, "environment")
         return
-    entry = resolve_catalog_entry(name, kind, entries=entries)
+    entry = resolve_catalog_entry(name, kind, report=report)
     parsed = read_environment_details(entry.config_path)
     details = {"config": str(entry.config_path.resolve()), "status": entry.status}
     if entry.manifest_path is not None:
@@ -1435,13 +1443,23 @@ def list_environments() -> None:
     global_config_dict = _command_overrides()
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
-    discovered = discover_environment_catalog()
+    catalog_report = discover_environment_catalog_report()
+    discovered = catalog_report.entries
     entries = list(discovered)
 
     name = global_config_dict.get(COMPONENT_NAME_KEY_NAME)
     if name:
-        _inspect_environment(name, discovered, global_config_dict)
+        _inspect_environment(name, catalog_report, global_config_dict)
         return
+
+    for diagnostic in catalog_report.diagnostics:
+        identity = f"{diagnostic.kind} {diagnostic.name!r}" if diagnostic.name is not None else diagnostic.kind
+        print(
+            f"Warning: catalog could not use the manifest for {identity}; "
+            "a runnable legacy config remains listed as no-manifest when present.\n"
+            f"{diagnostic.message}",
+            file=sys.stderr,
+        )
 
     query = global_config_dict.get(QUERY_KEY_NAME)
     if query:

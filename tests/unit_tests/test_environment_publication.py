@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import nemo_gym.environment.publication as publication_module
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
 from nemo_gym.environment.manifest import dump_manifest, load_manifest
 from nemo_gym.environment.onboarding import verify_environment
@@ -17,7 +18,13 @@ from nemo_gym.environment.publication import (
 )
 from nemo_gym.environment.scaffold import scaffold_environment
 from nemo_gym.environment.validation import validate_environment
-from nemo_gym.registry import EnvironmentCatalogEntry, discover_environment_catalog, resolve_catalog_entry
+from nemo_gym.registry import (
+    CatalogDiagnostic,
+    EnvironmentCatalogEntry,
+    EnvironmentCatalogReport,
+    discover_environment_catalog,
+    resolve_catalog_entry,
+)
 
 
 def _entry(tmp_path: Path, **manifest_updates: object) -> EnvironmentCatalogEntry:
@@ -126,6 +133,46 @@ def test_publication_report_serializes() -> None:
     )
 
     assert report.to_dict()["verifier_cases"] == 3
+
+
+def test_publication_ignores_unrelated_catalog_diagnostics(tmp_path: Path, monkeypatch) -> None:
+    entry = _entry(tmp_path)
+    validation, verifier = _reports()
+    unrelated = CatalogDiagnostic(
+        kind="environment",
+        name="other",
+        manifest_path=tmp_path / "environments/other/manifest.yaml",
+        message="Malformed YAML in environment manifest.",
+    )
+    monkeypatch.setattr(
+        publication_module,
+        "discover_environment_catalog_report",
+        lambda: EnvironmentCatalogReport(entries=(entry,), diagnostics=(unrelated,)),
+    )
+
+    report = finalize_publication(entry, validation, verifier)
+
+    assert report.name == "sample"
+
+
+def test_publication_rejects_a_diagnostic_for_the_selected_manifest(tmp_path: Path, monkeypatch) -> None:
+    entry = _entry(tmp_path)
+    assert entry.manifest_path is not None
+    validation, verifier = _reports()
+    selected = CatalogDiagnostic(
+        kind="environment",
+        name=entry.name,
+        manifest_path=entry.manifest_path,
+        message="Malformed YAML in environment manifest.",
+    )
+    monkeypatch.setattr(
+        publication_module,
+        "discover_environment_catalog_report",
+        lambda: EnvironmentCatalogReport(entries=(), diagnostics=(selected,)),
+    )
+
+    with pytest.raises(EnvironmentPublicationError, match="unusable manifest"):
+        finalize_publication(entry, validation, verifier)
 
 
 @pytest.mark.parametrize(

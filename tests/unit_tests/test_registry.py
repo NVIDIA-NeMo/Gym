@@ -23,6 +23,7 @@ from nemo_gym.registry import (
     RegistryError,
     _discover_environments_in_dir,
     discover_environment_catalog,
+    discover_environment_catalog_report,
     discover_environments,
     resolve_catalog_entry,
 )
@@ -249,7 +250,15 @@ class TestEnvironmentCatalog:
         manifest: dict,
     ) -> None:
         _write_manifest(tmp_path, tree, path_name, manifest)
+        _write_manifest(tmp_path, "environments", "valid_neighbor", _manifest("valid_neighbor"))
         monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
+
+        report = discover_environment_catalog_report()
+        assert resolve_catalog_entry("valid_neighbor", "environment", report=report).status == "experimental"
+        assert len(report.diagnostics) == 1
+        assert report.diagnostics[0].code == "invalid-catalog-entry"
+        assert report.diagnostics[0].name == path_name
+        assert "catalog path" in report.diagnostics[0].message
 
         with pytest.raises(RegistryError, match="catalog path"):
             discover_environment_catalog()
@@ -262,7 +271,14 @@ class TestEnvironmentCatalog:
             _manifest("missing_config"),
             with_config=False,
         )
+        _write_manifest(tmp_path, "environments", "valid_neighbor", _manifest("valid_neighbor"))
         monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
+
+        report = discover_environment_catalog_report()
+        assert resolve_catalog_entry("valid_neighbor", "environment", report=report).status == "experimental"
+        assert len(report.diagnostics) == 1
+        assert report.diagnostics[0].code == "invalid-catalog-entry"
+        assert "sibling config.yaml" in report.diagnostics[0].message
 
         with pytest.raises(RegistryError, match="sibling config.yaml"):
             discover_environment_catalog()
@@ -272,25 +288,112 @@ class TestEnvironmentCatalog:
         directory.mkdir(parents=True)
         (directory / "manifest.yaml").write_text("name: [invalid\n", encoding="utf-8")
         (directory / "config.yaml").write_text("{}\n", encoding="utf-8")
+        _write_manifest(tmp_path, "environments", "valid_neighbor", _manifest("valid_neighbor"))
         monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
 
-        entries = discover_environment_catalog()
+        report = discover_environment_catalog_report()
 
-        assert resolve_catalog_entry("draft", "environment", entries=entries).status == "no-manifest"
+        assert resolve_catalog_entry("draft", "environment", entries=report.entries).status == "no-manifest"
+        with pytest.raises(RegistryError, match="unusable manifest"):
+            resolve_catalog_entry("draft", "environment", report=report)
+        assert resolve_catalog_entry("valid_neighbor", "environment", report=report).status == "experimental"
+        assert len(report.diagnostics) == 1
+        diagnostic = report.diagnostics[0]
+        assert diagnostic.code == "invalid-manifest"
+        assert diagnostic.kind == "environment"
+        assert diagnostic.name == "draft"
+        assert diagnostic.manifest_path == directory / "manifest.yaml"
+        assert "Malformed YAML" in diagnostic.message
+
+        # The original tuple-returning API remains source compatible.
+        assert discover_environment_catalog() == report.entries
+
+    def test_schema_invalid_manifest_is_diagnosed(self, tmp_path: Path, monkeypatch) -> None:
+        directory = tmp_path / "benchmarks" / "draft"
+        directory.mkdir(parents=True)
+        (directory / "manifest.yaml").write_text("name: draft\nkind: benchmark\n", encoding="utf-8")
+        (directory / "config.yaml").write_text(
+            "agent:\n  responses_api_agents:\n    simple_agent:\n"
+            "      datasets:\n      - {name: test, type: benchmark}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
+
+        report = discover_environment_catalog_report()
+
+        assert resolve_catalog_entry("draft", "benchmark", entries=report.entries).status == "no-manifest"
+        assert len(report.diagnostics) == 1
+        assert report.diagnostics[0].code == "invalid-manifest"
+        assert "Invalid environment manifest" in report.diagnostics[0].message
+
+    def test_tree_root_manifest_is_diagnosed_without_hiding_neighbors(self, tmp_path: Path, monkeypatch) -> None:
+        tree = tmp_path / "environments"
+        tree.mkdir(parents=True)
+        (tree / "manifest.yaml").write_text(dump_manifest(_manifest("misplaced")), encoding="utf-8")
+        _write_manifest(tmp_path, "environments", "valid_neighbor", _manifest("valid_neighbor"))
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
+
+        report = discover_environment_catalog_report()
+
+        assert resolve_catalog_entry("valid_neighbor", "environment", report=report).status == "experimental"
+        assert len(report.diagnostics) == 1
+        diagnostic = report.diagnostics[0]
+        assert diagnostic.code == "invalid-catalog-entry"
+        assert diagnostic.name is None
+        assert "named catalog directory" in diagnostic.message
+        with pytest.raises(RegistryError, match="named catalog directory"):
+            discover_environment_catalog()
 
     def test_root_precedence_wins_before_manifest_precedence(self, tmp_path: Path, monkeypatch) -> None:
         high = tmp_path / "high"
         low = tmp_path / "low"
         _make_env(high / "environments", "shared", _ENV_CONFIG.format(name="shared"))
+        (high / "environments" / "shared" / "manifest.yaml").write_text("name: [invalid\n", encoding="utf-8")
         _write_manifest(low, "environments", "shared", _manifest("shared"))
         _write_manifest(high, "environments", "manifest_wins", _manifest("manifest_wins"))
         monkeypatch.setattr(registry_module, "component_search_roots", lambda: [high, low])
 
-        entries = {(entry.kind, entry.name): entry for entry in discover_environment_catalog()}
+        report = discover_environment_catalog_report()
+        entries = {(entry.kind, entry.name): entry for entry in report.entries}
 
         assert entries[("environment", "shared")].status == "no-manifest"
         assert entries[("environment", "shared")].path == high / "environments" / "shared"
         assert entries[("environment", "manifest_wins")].status == "experimental"
+        assert [(diagnostic.kind, diagnostic.name) for diagnostic in report.diagnostics] == [("environment", "shared")]
+
+    def test_invalid_higher_root_does_not_mask_healthy_lower_manifest(self, tmp_path: Path, monkeypatch) -> None:
+        high = tmp_path / "high"
+        low = tmp_path / "low"
+        invalid = high / "environments" / "shared" / "manifest.yaml"
+        invalid.parent.mkdir(parents=True)
+        invalid.write_text("name: [invalid\n", encoding="utf-8")
+        _write_manifest(low, "environments", "shared", _manifest("shared"))
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [high, low])
+
+        report = discover_environment_catalog_report()
+        entry = resolve_catalog_entry("shared", "environment", report=report)
+
+        assert entry.status == "experimental"
+        assert entry.manifest_path == low / "environments" / "shared" / "manifest.yaml"
+        assert [(diagnostic.kind, diagnostic.name) for diagnostic in report.diagnostics] == [("environment", "shared")]
+
+    def test_nested_benchmark_fallback_is_linked_to_its_sibling_diagnostic(self, tmp_path: Path, monkeypatch) -> None:
+        directory = tmp_path / "benchmarks" / "suite" / "draft"
+        directory.mkdir(parents=True)
+        (directory / "manifest.yaml").write_text("name: [invalid\n", encoding="utf-8")
+        (directory / "config.yaml").write_text(
+            "agent:\n  responses_api_agents:\n    simple_agent:\n"
+            "      datasets:\n      - {name: test, type: benchmark}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
+
+        report = discover_environment_catalog_report()
+
+        assert report.diagnostics[0].name == "suite/draft"
+        assert resolve_catalog_entry("suite/draft/config", "benchmark", entries=report.entries).status == "no-manifest"
+        with pytest.raises(RegistryError, match="unusable manifest"):
+            resolve_catalog_entry("suite/draft/config", "benchmark", report=report)
 
     def test_benchmark_manifest_suppresses_only_its_sibling_config(self, tmp_path: Path, monkeypatch) -> None:
         _write_manifest(tmp_path, "benchmarks", "suite", _manifest("suite", "benchmark"))
