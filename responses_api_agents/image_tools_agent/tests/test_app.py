@@ -216,18 +216,14 @@ async def test_image_tools_agent_runs_tool_loop_and_delegates_reward(
     assert payload["base_reward"] == 1.0
     assert payload["image_tools_aux_reward"] == 0.02
     assert payload["reward"] == 1.02
-    assert payload["image_tool_call_count"] == 1
-    assert payload["image_tool_error_count"] == 0
-    assert len(payload["image_tools_crop_paths"]) == 1
-    assert Path(payload["image_tools_crop_paths"][0]).exists()
-    assert payload["image_tools_generation_image_paths"][0] == []
-    assert payload["image_tools_generation_image_paths"][1] == payload["image_tools_crop_paths"]
-    assert payload["image_tools_aux_reward"] == 0.02
     assert payload["image_tools_call_count"] == 1
     assert payload["image_tools_error_count"] == 0
-    assert payload["image_tools_output_paths"] == payload["image_tools_crop_paths"]
-    assert payload["image_tools_base_agent_ref"]["name"] == ("string_match_simple_agent")
-    assert payload["image_tools_generation_image_paths"] == payload["image_tools_generation_image_paths"]
+    assert len(payload["image_tools_output_paths"]) == 1
+    assert Path(payload["image_tools_output_paths"][0]).exists()
+    # Generation 0 produced no images; generation 1 carries the crop the tool wrote.
+    assert payload["image_tools_generation_image_paths"][0] == []
+    assert payload["image_tools_generation_image_paths"][1] == payload["image_tools_output_paths"]
+    assert payload["image_tools_base_agent_ref"]["name"] == "string_match_simple_agent"
 
     output = payload["response"]["output"]
     assert len(output) == 3

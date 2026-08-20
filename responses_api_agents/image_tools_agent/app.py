@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import base64
 import json
 from io import BytesIO
@@ -308,7 +309,14 @@ class ImageToolsAgent(SimpleResponsesAPIAgent):
             tool_calls = parse_image_tool_calls(assistant_text)
             malformed_tool_attempt = has_malformed_image_tool_markup(assistant_text)
 
-            observation, reward, done, _, next_metadata, answer, _ = self._logic.process_nonterminal_turn(
+            # process_nonterminal_turn executes the image tool: it decodes images,
+            # runs PIL transforms and writes crops to disk, and for http(s) image
+            # refs _open_image does a blocking requests.get. Calling it directly
+            # from this async loop would stall the event loop for every other
+            # concurrent rollout, so hand the whole synchronous call to a thread.
+            # Keeping base.py synchronous matters -- the verifier imports it too.
+            observation, reward, done, _, next_metadata, answer, _ = await asyncio.to_thread(
+                self._logic.process_nonterminal_turn,
                 [{"role": "assistant", "content": assistant_text}],
                 metadata,
             )
