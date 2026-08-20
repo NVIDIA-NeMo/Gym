@@ -67,6 +67,7 @@ _CUSTODY_FIELDS = (
     "extras_digest",
     "mode",
     "logical_request_id",
+    "admitted_at",
 )
 
 
@@ -81,6 +82,7 @@ def _custody_columns(
     extras_digest: str | None,
     mode: str | None,
     logical_request_id: str | None,
+    admitted_at: float | None,
 ) -> dict:
     """Return the ledger custody columns, or an empty dict for a lineage-only row."""
     if staging_key is None:
@@ -96,6 +98,7 @@ def _custody_columns(
         "extras_digest": extras_digest,
         "mode": mode,
         "logical_request_id": logical_request_id,
+        "admitted_at": admitted_at,
     }
 
 
@@ -137,6 +140,7 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
                     staging_key=str(row["staging_key"]),
                     mode=str(row["mode"]),
                     logical_request_id=row.get("logical_request_id"),
+                    admitted_at=row.get("admitted_at"),
                 )
             )
     manifest = RolloutManifest(rollout_id=rollout_id, records=records, failures=failures)
@@ -477,6 +481,7 @@ class InMemoryLineageStore:
         extras_digest: str | None = None,
         mode: str | None = None,
         logical_request_id: str | None = None,
+        admitted_at: float | None = None,
     ) -> None:
         self.index.for_rollout(rollout_id).record(
             model_call_id,
@@ -496,6 +501,7 @@ class InMemoryLineageStore:
             extras_digest,
             mode,
             logical_request_id,
+            admitted_at,
         )
         if custody:
             rows = self._ledgers.setdefault(rollout_id, [])
@@ -647,6 +653,7 @@ class FileLineageStore:
         extras_digest: str | None = None,
         mode: str | None = None,
         logical_request_id: str | None = None,
+        admitted_at: float | None = None,
     ) -> None:
         custody = _custody_columns(
             parent_call_id,
@@ -659,6 +666,7 @@ class FileLineageStore:
             extras_digest,
             mode,
             logical_request_id,
+            admitted_at,
         )
         await asyncio.to_thread(
             self._record,

@@ -94,6 +94,10 @@ class CaptureContext:
     # strict tri-state of the lineage result.
     external_staging: bool = False
     logical_request_id: str | None = None
+    # Stamped once when the middleware admits the call. The ledger row reuses
+    # this value on every commit retry so idempotent re-records stay
+    # byte-identical.
+    admitted_at: float | None = None
     capture_admission: CaptureAdmission | None = None
     # The request items as received from the harness, stashed by
     # ``resolve_parent`` so the commit hook can publish the ledger row with
