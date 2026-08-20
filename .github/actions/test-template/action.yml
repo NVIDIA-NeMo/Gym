@@ -1,0 +1,53 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Test Template
+description: Run a Gym CPU or GPU test script in the CI container
+
+inputs:
+  script:
+    description: Path to the test script inside the Gym repository
+    required: true
+  test-type:
+    description: Test hardware type (cpu or gpu)
+    required: true
+  container-image:
+    description: Gym container image to use for the test
+    required: true
+  test-data-path:
+    description: Test data path selected by CI pre-flight
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Run test
+      shell: bash -e -u -o pipefail {0}
+      env:
+        CONTAINER_IMAGE: ${{ inputs.container-image }}
+        TEST_DATA_PATH: ${{ inputs.test-data-path }}
+        TEST_SCRIPT: ${{ inputs.script }}
+        TEST_TYPE: ${{ inputs.test-type }}
+      run: |
+        case "$TEST_TYPE" in
+          cpu)
+            gpu_args=()
+            ;;
+          gpu)
+            gpu_args=(--runtime=nvidia --gpus all)
+            ;;
+          *)
+            echo "Unsupported test type: $TEST_TYPE (expected cpu or gpu)"
+            exit 1
+            ;;
+        esac
+
+        docker pull "$CONTAINER_IMAGE"
+        docker run --rm \
+          "${gpu_args[@]}" \
+          --shm-size=64g \
+          --env TEST_DATA_PATH="$TEST_DATA_PATH" \
+          --volume "$TEST_DATA_PATH:$TEST_DATA_PATH" \
+          --entrypoint bash \
+          "$CONTAINER_IMAGE" \
+          -e -u -o pipefail "$TEST_SCRIPT"
