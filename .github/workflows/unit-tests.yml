@@ -127,6 +127,7 @@ jobs:
     needs: detect
     if: needs.detect.outputs.run_full == 'true' || needs.detect.outputs.run_servers == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -145,9 +146,13 @@ jobs:
             uv-${{ runner.os }}-
 
       - name: Install system test dependencies
+        timeout-minutes: 20
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends git curl ca-certificates
+          for i in 1 2 3 4; do
+            timeout 5m sudo bash -c "apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates" && exit 0
+            echo "apt-get attempt $i/4 failed or timed out after 5m; retrying"
+          done
+          exit 1
 
       - name: Core unit tests
         if: needs.detect.outputs.run_full == 'true'
@@ -206,6 +211,7 @@ jobs:
     needs: detect
     if: needs.detect.outputs.run_full == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -228,9 +234,13 @@ jobs:
             uv-${{ runner.os }}-
 
       - name: Install system test dependencies
+        timeout-minutes: 20
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends git curl ca-certificates
+          for i in 1 2 3 4; do
+            timeout 5m sudo bash -c "apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates" && exit 0
+            echo "apt-get attempt $i/4 failed or timed out after 5m; retrying"
+          done
+          exit 1
 
       - name: Server tests (shard ${{ matrix.shard }}/${{ env.NUM_SHARDS }})
         run: ./scripts/ci/server_tests.sh "${{ matrix.shard }}" "${{ env.NUM_SHARDS }}"
