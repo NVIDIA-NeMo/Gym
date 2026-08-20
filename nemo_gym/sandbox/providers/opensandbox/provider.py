@@ -775,15 +775,11 @@ class OpenSandboxProvider:
 
     async def pause(self, handle: SandboxHandle) -> None:
         """Pause a sandbox and wait until its snapshot-backed state is ready."""
-        request_timeout_s = (
-            float(self._connection.request_timeout_s) if self._connection.request_timeout_s is not None else None
-        )
-        await self._await_sdk_operation(
-            lambda: handle.raw.pause(),
+        await self._await_sdk_call(
+            handle.raw.pause(),
             operation="pause",
             sandbox_id=handle.sandbox_id,
-            timeout_s=request_timeout_s,
-            retries=0,
+            timeout_s=self._connection.request_timeout_s,
         )
 
         # Pause replaces the runtime and invalidates its WebSockets. Detach
@@ -816,22 +812,16 @@ class OpenSandboxProvider:
                 )
             await asyncio.sleep(self._create.connect_poll_s)
 
-    async def resume(self, handle: SandboxHandle) -> SandboxHandle:
+    async def resume(self, handle: SandboxHandle) -> None:
         """Resume a paused sandbox and rebuild its SDK clients and endpoints."""
         Sandbox, _, _, _, _ = _require_opensandbox_sdk()
         timeout_s = self._operations.pause_resume_timeout_s
-        resumed = await self._await_sdk_operation(
-            lambda: Sandbox.resume(
-                handle.sandbox_id,
-                connection_config=self._connection_config(),
-                resume_timeout=timedelta(seconds=timeout_s),
-                health_check_polling_interval=timedelta(seconds=self._create.connect_poll_s),
-                skip_health_check=self._create.skip_health_check,
-            ),
-            operation="resume",
-            sandbox_id=handle.sandbox_id,
-            timeout_s=None,
-            retries=0,
+        resumed = await Sandbox.resume(
+            handle.sandbox_id,
+            connection_config=self._connection_config(),
+            resume_timeout=timedelta(seconds=timeout_s),
+            health_check_polling_interval=timedelta(seconds=self._create.connect_poll_s),
+            skip_health_check=self._create.skip_health_check,
         )
 
         try:
@@ -843,7 +833,7 @@ class OpenSandboxProvider:
             )
         except Exception as e:
             LOGGER.warning("Failed to close pre-resume OpenSandbox handle %r: %r", handle.sandbox_id, e)
-        return SandboxHandle(sandbox_id=str(resumed.id), provider_name=self.name, raw=resumed)
+        handle.raw = resumed
 
     async def _await_sdk_call(
         self,
