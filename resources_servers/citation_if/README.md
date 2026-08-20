@@ -118,13 +118,38 @@ Two grammars — `curly_double` and `angle_pipe` — are marked `holdout: True` 
 assigned to training rows. They exist to detect grid overfitting: a model that has learned
 "citation" rather than "these nine templates" should handle them.
 
-## Rollout wiring
+## Rollout wiring and tool-call bounds
 
-Rows keep `tools` and `tool_choice="auto"`, so the policy *can* emit a tool call. The agent
-config sets `max_steps: 1`, and the server exposes a catch-all `POST /{tool_name}` returning
-`TERMINAL_TOOL_RESPONSE` — so a tool-calling rollout terminates immediately and gate 0 scores
-it 0, rather than 404-looping. This mirrors how citation evaluations treat a model that keeps
-calling tools instead of synthesising an answer.
+**⚠ This server does NOT cap tool calls. Whether a tool call is a failure is decided entirely by
+your data.** If you build a dataset for this reward, read this section first.
+
+What the server does on a tool call: the catch-all `POST /{tool_name}` returns
+`TERMINAL_TOOL_RESPONSE` ("No further tool results are available. Provide your final answer.") and
+gate 0 scores the rollout **0**. There is no `max_tool_calls` in the rows and no cap enforced in
+`app.py` — the rows keep `tools` and `tool_choice="auto"`, so the policy is free to call a tool.
+
+**Why that is safe for THIS dataset, and the risk if you copy it.** Every row here ends with a
+final user turn that closes retrieval — "Research is complete, provide your final answer now."
+A compliant model, trained or not, should not call a tool at that point, so a tool call is
+genuine instruction-following failure and scoring it 0 is correct.
+
+**If your rows do not carry that closing instruction, this reward is wrong for them.** Scoring
+every tool call 0 would teach the policy to terminate tool-call trajectories immediately — a real
+capability regression, not the citation behaviour you wanted. In that case either:
+
+- keep a closing instruction in every row, as this dataset does; or
+- set an explicit `max_tool_calls` in `responses_create_params`; or
+- remove `tools` / set `tool_choice: "none"` so the policy cannot call at all.
+
+**Also note the step bound lives in the agent config, not in the rows.**
+`configs/citation_if.yaml` sets `max_steps: 1`, so the policy never gets a second turn. Run these
+rows under a multi-step agent and that bound disappears — the catch-all becomes the only backstop.
+The bound is on *steps*, not individual calls: rows set `parallel_tool_calls: true`, so one step
+may emit several calls at once (`extract_response_shape` returns the count; see
+`test_counts_function_calls`). One or many, any call scores 0.
+
+Tests `test_verify_tool_call_scores_zero` and `test_tool_catchall_returns_terminal_response` lock
+the scoring and the catch-all respectively.
 
 ## Tests
 
