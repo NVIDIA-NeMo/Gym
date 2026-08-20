@@ -6,7 +6,7 @@
     "gitlab_identifier": null,
     "huggingface_identifier": null,
     "license": "Apache 2.0",
-    "Number of examples": 6,
+    "Number of examples": 5,
     "Number of tools": {
         "Total # non-null values": 0,
         "Average": 0.0,
@@ -15,14 +15,14 @@
         "Standard deviation": 0.0
     },
     "Json-dumped number of words (proxy for token count)": {
-        "Total # non-null values": 6,
-        "Average": 963.67,
+        "Total # non-null values": 5,
+        "Average": 964.0,
         "Min": 962.0,
         "Max": 967.0,
-        "Standard deviation": 1.97
+        "Standard deviation": 2.0
     },
     "Number of turns": {
-        "Total # non-null values": 6,
+        "Total # non-null values": 5,
         "Average": 1.0,
         "Min": 1.0,
         "Max": 1.0,
