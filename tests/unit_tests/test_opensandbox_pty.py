@@ -692,6 +692,48 @@ async def test_provider_aclose_closes_live_pty_sessions(monkeypatch: pytest.Monk
     await session.close()
 
 
+async def test_provider_pause_detaches_only_the_target_sandbox_pty_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
+    pytest.importorskip("opensandbox", reason="opensandbox SDK is not installed")
+    from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
+
+    class FakeRaw:
+        def __init__(self, sandbox_id: str) -> None:
+            self.sandbox_id = sandbox_id
+
+        async def get_endpoint(self, port: int) -> SimpleNamespace:
+            return SimpleNamespace(endpoint=f"server/{self.sandbox_id}", headers={})
+
+        async def pause(self) -> None:
+            return None
+
+        async def get_info(self) -> SimpleNamespace:
+            return SimpleNamespace(status=SimpleNamespace(state="PAUSED"))
+
+    provider = OpenSandboxProvider(connection={"domain": "server", "protocol": "http"})
+    target_client = FakeHttpClient(ws=FakeWs([CONNECTED]))
+    other_client = FakeHttpClient(ws=FakeWs([CONNECTED]))
+    clients = iter([target_client, other_client])
+    monkeypatch.setattr(provider, "_pty_http_client", lambda: next(clients))
+    target_handle = SandboxHandle(sandbox_id="sb-target", provider_name="opensandbox", raw=FakeRaw("sb-target"))
+    other_handle = SandboxHandle(sandbox_id="sb-other", provider_name="opensandbox", raw=FakeRaw("sb-other"))
+    target_session = await provider.create_pty(target_handle, SandboxPtySpec())
+    other_session = await provider.create_pty(other_handle, SandboxPtySpec())
+
+    await provider.pause(target_handle)
+
+    assert target_session.closed
+    assert target_client.closed
+    assert target_client.delete_calls == [], "pause must detach without ending the suspended process"
+    assert target_session not in provider._pty_sessions
+    assert not other_session.closed
+    assert not other_client.closed
+    assert other_session in provider._pty_sessions
+    await provider.aclose()
+
+
 async def test_provider_tracks_sessions_strongly_and_prunes_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
     pytest.importorskip("opensandbox", reason="opensandbox SDK is not installed")

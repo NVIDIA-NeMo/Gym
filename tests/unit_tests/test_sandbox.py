@@ -23,6 +23,7 @@ from uuid import uuid4
 
 import pytest
 
+import nemo_gym.sandbox as sandbox_api
 import nemo_gym.sandbox.providers.registry as provider_registry
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -94,6 +95,8 @@ class FakeSandboxProvider:
         self.endpoint_calls: list[tuple[SandboxHandle, int]] = []
         self.upload_calls: list[tuple[SandboxHandle, Path, str]] = []
         self.download_calls: list[tuple[SandboxHandle, str, Path]] = []
+        self.pause_calls: list[SandboxHandle] = []
+        self.resume_calls: list[SandboxHandle] = []
         self.closed: list[SandboxHandle] = []
         self.aclosed = False
         FakeSandboxProvider.last_instance = self
@@ -145,6 +148,17 @@ class FakeSandboxProvider:
     async def endpoint(self, handle: SandboxHandle, port: int) -> SandboxEndpoint:
         self.endpoint_calls.append((handle, port))
         return SandboxEndpoint(endpoint=f"http://127.0.0.1:{port}", headers={"x-route": "fake"})
+
+    async def pause(self, handle: SandboxHandle) -> None:
+        self.pause_calls.append(handle)
+
+    async def resume(self, handle: SandboxHandle) -> SandboxHandle:
+        self.resume_calls.append(handle)
+        return SandboxHandle(
+            sandbox_id=handle.sandbox_id,
+            provider_name=handle.provider_name,
+            raw={"resumed_from": handle.raw},
+        )
 
     async def close(self, handle: SandboxHandle) -> None:
         self.closed.append(handle)
@@ -307,9 +321,18 @@ async def _assert_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> Non
     assert provider.download_calls == [(handle, "/remote/source.txt", target_path)]
     assert target_path.read_bytes() == b"downloaded"
 
+    await sandbox.pause()
+    await sandbox.resume()
+    assert provider.pause_calls == [handle]
+    assert provider.resume_calls == [handle]
+    await sandbox.exec("after resume")
+    resumed_handle = provider.exec_calls[-1]["handle"]
+    assert resumed_handle.sandbox_id == handle.sandbox_id
+    assert resumed_handle is not handle
+
     await sandbox.stop()
     await sandbox.stop()
-    assert provider.closed[-1] == handle
+    assert provider.closed[-1] == resumed_handle
     assert await sandbox.status() == SandboxStatus.STOPPED
     assert provider.aclosed is True
 
@@ -370,6 +393,10 @@ async def _assert_async_sandbox_requires_spec_and_reports_unknown_status() -> No
         await plain.endpoint(9000)
     with pytest.raises(ValueError, match="between 1 and 65535"):
         await plain.endpoint(0)
+    with pytest.raises(NotImplementedError, match="does not support pause/resume"):
+        await plain.pause()
+    with pytest.raises(NotImplementedError, match="does not support pause/resume"):
+        await plain.resume()
     await plain.stop()
 
 
@@ -398,6 +425,11 @@ def test_sandbox_resources_validation() -> None:
 def test_sandbox_endpoint_is_an_optional_provider_capability() -> None:
     assert isinstance(FakeSandboxProvider(), SupportsSandboxEndpoint)
     assert not isinstance(PlainSandboxProvider(), SupportsSandboxEndpoint)
+
+
+def test_sandbox_pause_resume_is_an_optional_provider_capability() -> None:
+    assert isinstance(FakeSandboxProvider(), sandbox_api.SupportsSandboxPauseResume)
+    assert not isinstance(PlainSandboxProvider(), sandbox_api.SupportsSandboxPauseResume)
 
 
 def test_sandbox_spec_keeps_legacy_positional_provider_options() -> None:
@@ -656,8 +688,16 @@ def test_sync_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> None:
         sandbox.upload(upload_path, "/tmp/sync-upload.txt")
         sandbox.download("/tmp/sync-download.txt", download_path)
         assert download_path.read_bytes() == b"downloaded"
+        sandbox.pause()
+        sandbox.resume()
+        assert provider.pause_calls == [handle]
+        assert provider.resume_calls == [handle]
+        sandbox.exec("after resume")
+        resumed_handle = provider.exec_calls[-1]["handle"]
+        assert resumed_handle.sandbox_id == handle.sandbox_id
+        assert resumed_handle is not handle
         sandbox.stop()
-        assert provider.closed[-1] == handle
+        assert provider.closed[-1] == resumed_handle
         assert sandbox.status() == SandboxStatus.STOPPED
         assert provider.aclosed is True
         try:

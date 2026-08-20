@@ -96,6 +96,7 @@ class OpenSandboxPtySession:
         self._client = client
         self._ws = ws
         self.session_id = session_id
+        self._sandbox_id: str | None = None
         self._session_url = session_url
         self._headers = headers
         self._request_timeout_s = request_timeout_s
