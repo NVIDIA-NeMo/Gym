@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Build the AgentIF Gym dataset from the upstream ``THU-KEG/AgentIF`` eval.json.
+"""Build the AgentIF Gym dataset from ``THU-KEG/AgentIF`` on Hugging Face.
 
 The upstream ``eval.json`` is a JSON array; each row carries an ``input`` list
 already in Responses-API ``{"role", "content"}`` form plus a list of scored
@@ -25,20 +25,41 @@ verifier re-derives it from the model's own generation.
 Usage::
 
     python resources_servers/agentif/prepare_agentif.py
-    python resources_servers/agentif/prepare_agentif.py --input eval.json --output train.jsonl
+    # or read a pre-downloaded local file:
+    AGENTIF_LOCAL_JSON=/path/eval.json python .../prepare_agentif.py
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, List
 
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_DEFAULT_INPUT = _REPO_ROOT / "benchmarks" / "agentif" / "AgentIF" / "data" / "eval.json"
+_HF_DATASET = "THU-KEG/AgentIF"
+_HF_FILE = "eval.json"
+_LOCAL_PATH_ENV = "AGENTIF_LOCAL_JSON"
+
 _DEFAULT_OUTPUT = Path(__file__).resolve().parent / "data" / "train.jsonl"
+
+
+def _load_agentif() -> List[Dict[str, Any]]:
+    """Load upstream AgentIF rows, from a local override or Hugging Face."""
+    local = os.environ.get(_LOCAL_PATH_ENV)
+    if local and os.path.isfile(local):
+        with open(local, encoding="utf-8") as fh:
+            rows = json.load(fh)
+        print(f"AgentIF: loaded {len(rows)} rows from {local}")
+        return rows
+
+    from datasets import load_dataset
+
+    ds = load_dataset(_HF_DATASET, data_files=_HF_FILE, split="train")
+    rows = [dict(row) for row in ds]
+    print(f"AgentIF: loaded {len(rows)} rows from hf://{_HF_DATASET}/{_HF_FILE}")
+    return rows
 
 
 def _strip_scores(constraints: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -66,12 +87,10 @@ def build_row(row: Dict[str, Any]) -> Dict[str, Any]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prepare the AgentIF Gym dataset.")
-    parser.add_argument("--input", type=Path, default=_DEFAULT_INPUT, help="Upstream eval.json path.")
     parser.add_argument("--output", type=Path, default=_DEFAULT_OUTPUT, help="Output JSONL path.")
     args = parser.parse_args()
 
-    with open(args.input, "r", encoding="utf-8") as reader:
-        data = json.load(reader)
+    data = _load_agentif()
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with open(args.output, "w", encoding="utf-8") as writer:

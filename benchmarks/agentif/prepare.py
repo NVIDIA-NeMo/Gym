@@ -36,7 +36,7 @@ _RESOURCES_SERVER_DIR = Path(__file__).resolve().parents[2] / "resources_servers
 if str(_RESOURCES_SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(_RESOURCES_SERVER_DIR))
 
-from prepare_agentif import _DEFAULT_INPUT, build_row  # noqa: E402
+from prepare_agentif import _load_agentif, build_row  # noqa: E402
 
 
 BENCHMARK_DIR = Path(__file__).parent
@@ -44,11 +44,10 @@ DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "agentif_benchmark.jsonl"
 
 
-def prepare(input_fpath: Path = _DEFAULT_INPUT) -> Path:
+def prepare() -> Path:
     """Build the whole-dataset AgentIF benchmark JSONL."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    with open(input_fpath, encoding="utf-8") as reader:
-        data = json.load(reader)
+    data = _load_agentif()
     with open(OUTPUT_FPATH, "w", encoding="utf-8") as writer:
         for row in data:
             writer.write(json.dumps(build_row(row), ensure_ascii=False) + "\n")
