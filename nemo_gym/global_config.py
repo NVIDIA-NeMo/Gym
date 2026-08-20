@@ -537,7 +537,6 @@ Duplicate config paths:
             if AGENT_SERVER_TYPE_KEY_NAME not in value:
                 continue
             agents = value[AGENT_SERVER_TYPE_KEY_NAME]
-            # A server instance declares exactly one agent type.
             # Not our error to report: the type config pins exactly one, and almost-server detection flags it.
             if not isinstance(agents, DictConfig) or len(agents) != 1:
                 continue
@@ -785,7 +784,7 @@ Pass each config with --config (it builds the list for you), e.g.:
         self._recursively_swap_keys(global_config_dict)
 
         # Must run after the swap above (inherited bindings must exist to carry over) and before the
-        # missing-value check below (it fills the selected agent's unset `resources_server`).
+        # missing-value check below (it removes the unbound agent instance that still carries '???').
         self.compose_unbound_agent(global_config_dict)
 
         # Fail fast with one actionable error if any required value is still '???'. Runs *after*
