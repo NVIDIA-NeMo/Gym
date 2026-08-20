@@ -93,7 +93,11 @@ from nemo_gym.token_id_capture import (
     token_id_capture_dirs_from_config,
 )
 from nemo_gym.token_id_capture.config import token_id_capture_enabled_for_agent
-from nemo_gym.token_id_capture.delivery import finalize_rollout_token_capture, retire_rollout_token_capture
+from nemo_gym.token_id_capture.delivery import (
+    capture_build_can_retire,
+    finalize_rollout_token_capture,
+    retire_rollout_token_capture,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -911,12 +915,7 @@ class RolloutCollectionHelper(BaseModel):
                 persisted_rows.append(row)
                 persisted_results.append(result)
                 rollout_id = maybe_rollout_id_from_run_body(result)
-                if (
-                    rollout_id is not None
-                    and token_capture_build is not None
-                    and token_capture_build.get("rebuilt_response") is not None
-                    and not token_capture_build.get("mask_sample")
-                ):
+                if rollout_id is not None and capture_build_can_retire(token_capture_build):
                     os.fsync(results_file.fileno())
                     await retire_rollout_token_capture(rollout_id, token_source, token_capture_build)
 

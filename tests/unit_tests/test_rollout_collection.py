@@ -57,6 +57,7 @@ from nemo_gym.token_id_capture import (
 from nemo_gym.token_id_capture.delivery import (
     MASK_SAMPLE_KEY,
     TOKEN_CAPTURE_KEY,
+    capture_build_can_retire,
     finalize_rollout_token_capture,
     retire_rollout_token_capture,
     rollout_carries_token_ids,
@@ -1979,11 +1980,14 @@ class TestFinalizeRolloutTokenCapture:
 
         with warnings.catch_warnings():
             warnings.simplefilter("error")  # Existing ids are not an error.
-            assert await finalize_rollout_token_capture(result, store) is None
+            built = await finalize_rollout_token_capture(result, store)
 
         assert result["response"]["output"] == native
         assert TOKEN_CAPTURE_KEY not in result
-        assert len(store.read_entries("0-0")) == 1  # These captures were not consumed.
+        assert capture_build_can_retire(built)
+        assert len(store.read_entries("0-0")) == 1
+        assert await retire_rollout_token_capture("0-0", store, built) is True
+        assert store.read_entries("0-0") == []
 
     async def test_native_and_external_rollouts_are_handled_in_one_batch(self, tmp_path: Path) -> None:
         """Finalize native and external rollouts through the same call."""
@@ -1996,11 +2000,12 @@ class TestFinalizeRolloutTokenCapture:
 
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            assert await finalize_rollout_token_capture(native, store) is None
+            native_build = await finalize_rollout_token_capture(native, store)
         built = await finalize_rollout_token_capture(external, store)
 
         assert native["response"]["output"][0]["generation_token_ids"] == [7]
         assert external["response"]["output"][0]["generation_token_ids"] == [4, 5]
+        assert capture_build_can_retire(native_build)
         assert built is not None
 
     async def test_a_second_call_is_a_no_op(self, tmp_path: Path) -> None:

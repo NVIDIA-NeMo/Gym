@@ -47,6 +47,7 @@ TOKEN_CAPTURE_KEY = "_ng_token_capture"
 # A consumer reads this top-level field to exclude a rollout from the loss.
 # The field stays outside TOKEN_CAPTURE_KEY for direct access.
 MASK_SAMPLE_KEY = "mask_sample"
+_REDUNDANT_CAPTURE_KEY = "_redundant_capture"
 
 
 def rollout_carries_token_ids(result: dict) -> bool:
@@ -89,19 +90,39 @@ async def finalize_rollout_token_capture(result: dict, source: TokenSource | Non
     It never retires the snapshot.
     A ``None`` source means this caller does not rebuild.
     A rollout that already carries token ids is left unchanged.
+    Its redundant frozen capture remains eligible for retirement after handoff.
 
     The function never raises.
     Missing or ambiguous tokens cause masking.
     Failed or masked builds retain their frozen evidence.
 
     Return the build with its rebuilt response, metrics, and optional error.
-    Return ``None`` when no source exists or the rollout already carries token ids.
+    Return ``None`` when no source exists.
     An unusable build has no rebuilt response and sets ``mask_sample``.
     """
-    if source is None or rollout_carries_token_ids(result):
+    if source is None:
         return None
 
     rollout_id = maybe_rollout_id_from_run_body(result)
+    if rollout_carries_token_ids(result):
+        # A second finalization of a rebuilt rollout reuses the first build.
+        if TOKEN_CAPTURE_KEY in result or rollout_id is None:
+            return None
+        try:
+            snapshot = await source.freeze(rollout_id)
+        except Exception:
+            warnings.warn(f"could not freeze redundant records for rollout {rollout_id}.", stacklevel=2)
+            return None
+        return {
+            "rebuilt_response": None,
+            MASK_SAMPLE_KEY: False,
+            _REDUNDANT_CAPTURE_KEY: True,
+            "_capture_snapshot": {
+                "snapshot_id": snapshot.snapshot_id,
+                "version": snapshot.version,
+            },
+        }
+
     if rollout_id is None:
         # No correlation key was preserved on the finished record.
         return _unusable(
@@ -171,7 +192,7 @@ async def retire_rollout_token_capture(
     Retirement uses the frozen ``snapshot_id`` and version.
     Failed or masked builds remain as diagnostic evidence.
     """
-    if source is None or built is None or built.get("rebuilt_response") is None or built.get(MASK_SAMPLE_KEY):
+    if source is None or not capture_build_can_retire(built):
         return False
     snapshot = built.get("_capture_snapshot")
     if not isinstance(snapshot, dict):
@@ -186,3 +207,10 @@ async def retire_rollout_token_capture(
     except Exception:
         warnings.warn(f"could not retire the records for rollout {rollout_id}.", stacklevel=2)
         return False
+
+
+def capture_build_can_retire(built: dict | None) -> bool:
+    """Whether a successful build consumed a frozen snapshot."""
+    if built is None or built.get(MASK_SAMPLE_KEY):
+        return False
+    return built.get("rebuilt_response") is not None or bool(built.get(_REDUNDANT_CAPTURE_KEY))
