@@ -226,8 +226,6 @@ upstream copyright header and adds an NVIDIA modifications block.
 
 The following components are **not vendored** in this repository but are cloned
 from upstream at container image build time and patched by NVIDIA before use.
-The patch is checked into this repository. The upstream source is unmodified
-except where the patch is applied.
 
 | Component | Version | License | Upstream | Patch location | Files modified |
 |-----------|---------|---------|----------|----------------|----------------|
