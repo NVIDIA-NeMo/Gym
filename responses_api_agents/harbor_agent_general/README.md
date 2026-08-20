@@ -10,6 +10,38 @@ file, allowing easy translation from `harbor run` commands.
 > NeMo Gym provides an incompatible [older implementation](../harbor_agent/README.md). 
 > See [Implementation Notes](#implementation-notes) below for more details.
 
+## Configuration
+
+The general configuration structure relies on `HarborAgentConfig` in [app.py](./app.py).
+
+```yaml
+harbor_agent_general:
+  responses_api_agents:
+    harbor_agent_general:
+      entrypoint: app.py
+      domain: agent
+
+      harbor_jobs_dir: ${harbor_jobs_dir}
+
+      ## Follows harbor.models.job.config:DatasetConfig spec.
+      harbor_dataset:
+        ...
+
+      ## Follows harbor.models.trial.config:EnvironmentConfig spec.
+      harbor_environment:
+        ...
+
+      ## Follows harbor.models.trial.config:AgentConfig spec.
+      harbor_agent:
+        ...
+
+      ## Follows harbor.models.trial.config:VerifierConfig spec.
+      harbor_verifier:
+        ...
+```
+
+See [configs](./configs) for specific examples.
+
 ## Example
 
 This example uses the Scientific Computing subset of [nvidia/Nemotron-Terminal-Synthetic-Tasks](https://huggingface.co/datasets/nvidia/Nemotron-Terminal-Synthetic-Tasks) to show a fully working end-to-end example.
@@ -27,7 +59,7 @@ tar -xzf ./data/skill_based/mixed/scientific_computing.tar.gz -C ./data
 
 The commands will create the directory `data/scientific_computing` which contains Harbor task folders.
 
-### Input File
+### Inputs
 
 The Gym input JSONL file must have each row following the specification of `HarborRunRequest` in [app.py](./app.py):
 ```json
@@ -41,10 +73,6 @@ We will use a single task from the benchmark for this example, with the input fi
 > [!warning]
 > Ensure that you have [Singularity](https://docs.sylabs.io/guides/3.0/user-guide/index.html) installed on the system and it has credentials pre-configured for private container registries. See [docs](https://docs.sylabs.io/guides/3.0/user-guide/singularity_and_docker.html#making-use-of-private-images-from-private-registries). An example Docker environment configuration is also provided in [configs](./configs/docker_opencode.yaml)
 
-> [!tip]
-> The `--model` argument is directly passed to the underlying Harbor agent and should be compatible.
-> For instance, when using `opencode` agent, it must follow the [OpenCode provider specification](https://opencode.ai/docs/providers/).
-
 Start the environment:
 ```shell
 gym env start \
@@ -53,6 +81,10 @@ gym env start \
   ++harbor_dataset_path="$(pwd)/data/scientific_computing" \
   ++harbor_jobs_dir="$(pwd)/logs/harbor"
 ```
+
+> [!tip]
+> The `--model` argument is directly passed to the underlying Harbor agent and should be compatible.
+> For instance, when using `opencode` agent, it must follow the [OpenCode provider specification](https://opencode.ai/docs/providers/).
 
 Run the tasks:
 ```shell
@@ -72,7 +104,6 @@ A few notable details make it more general than the [older implementation](../ha
 - All parsing of the Harbor trajectory into a Gym rollout trajectory now uses Harbor APIs instead of custom dictionary parsing.
 - Reasoning text is correctly handled via `NeMoGymResponseReasoningItem` objects.
 - A minimum harbor version sets to `0.20.0` in [pyproject.toml](./pyproject.toml) with a supporting lockfile.
-
 
 > [!caution]
 > Using this agent for training is currently not supported because underlying Harbor agents may not return
