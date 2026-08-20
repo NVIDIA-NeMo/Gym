@@ -118,6 +118,69 @@ Two grammars — `curly_double` and `angle_pipe` — are marked `holdout: True` 
 assigned to training rows. They exist to detect grid overfitting: a model that has learned
 "citation" rather than "these nine templates" should handle them.
 
+## Building your own data
+
+The training corpus this reward was developed against is internal and not published, so this
+section documents the row schema and how rows are generated. `data/example.jsonl` is a working
+5-row instance of everything below — read it alongside this.
+
+### Row schema — four top-level keys
+
+```json
+{
+  "responses_create_params": { "input": ["..."], "tools": ["..."], "tool_choice": "auto" },
+  "verifier":  { "type": "citation_if", "mode": "cite", "grammar": "ascii_brackets" },
+  "agent_ref": { "type": "responses_api_agents", "name": "citation_if_simple_agent" },
+  "_gen_config": { "placement": "system", "n_documents": 3 }
+}
+```
+
+| key | required | what it is |
+|---|---|---|
+| `responses_create_params` | yes | the frozen conversation, in Responses API form. This is the prompt. |
+| `verifier` | yes | what the reward checks — full schema above under "Row verifier schema" |
+| `agent_ref` | yes | must name an agent with `max_steps: 1` (see the tool-call section) |
+| `_gen_config` | no | build metadata only. **The reward never reads it.** Anything here — including any `expected_answer_patterns` — is dataset tooling, not scoring input. |
+
+### Trajectory shape
+
+`responses_create_params.input` is a retrieval conversation that has already happened, ending at
+the point where the model must answer. In order:
+
+1. **system** — the assistant's system prompt, carrying the citation instruction if
+   `placement: system`
+2. **user** — the question
+3. **`function_call` / `function_call_output` pairs** — one per search round. Each output carries
+   the retrieved documents and their citation IDs; this is where the ID space comes from.
+4. **user** — the closing turn that ends retrieval
+
+The citation instruction can sit in the system prompt, before or after the question, or in the
+final turn. Varying that placement matters: instructions far from the answer point are
+substantially harder to follow, so a pool weighted to one placement measures something narrower
+than it appears to.
+
+### Generation procedure
+
+Per row:
+
+1. Pick the axes — grammar (9 available), `id_kind` (`full_source` or `snippet`), `mode`
+   (`cite` / `no_cite`), instruction placement, and how many distractor documents to include.
+2. Assemble documents — one or more gold documents that answer the question, plus distractors.
+   Same-topic distractors are much harder than random ones; the example rows use unrelated
+   distractors and are correspondingly easy.
+3. Assign each document a citation ID matching the row's `id_regex`, and render the search
+   rounds as `function_call` / `function_call_output` pairs.
+4. Write the citation instruction into the chosen placement, rendering the grammar's syntax and
+   using `citation_xmpl` for any example ID — `RESERVED_EXAMPLE_ID` is never valid in any row, so
+   a model that copies the example scores 0.
+5. Append the closing user turn.
+6. Derive the verifier from what actually landed in the prompt: `valid_id_set` is every ID present
+   in the retrieved documents, and `expected_ids` is the subset the answer must cite.
+
+Step 6 is the one to get right. `valid_id_set` must be derived from the rendered prompt, not from
+the source corpus — if it contains an ID the model never saw, gate 3 will fail rows for
+hallucinating something that was legitimately unavailable.
+
 ## Rollout wiring and tool-call bounds
 
 **⚠ This server does NOT cap tool calls. Whether a tool call is a failure is decided entirely by
