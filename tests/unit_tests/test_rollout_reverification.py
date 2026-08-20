@@ -1532,7 +1532,7 @@ class TestRolloutReverificationRunFromConfig:
         )
         monkeypatch.setattr("nemo_gym.rollout_reverification._call_aggregate_metrics", AsyncMock(return_value=None))
         monkeypatch.setattr("nemo_gym.rollout_reverification._guard_reverify_mode", AsyncMock(return_value=None))
-        monkeypatch.setattr("nemo_gym.rollout_reverification.get_wandb_run", lambda: None)
+        monkeypatch.setattr("nemo_gym.rollout_reverification.get_exporters", list)
         # run_from_config resolves the input paths for real; the files don't exist in these tests, so stub it out.
         monkeypatch.setattr("nemo_gym.rollout_reverification._resolve_under_cwd_or_install", lambda p: Path(p))
 
@@ -1746,7 +1746,7 @@ class TestRolloutReverificationRunFromConfig:
         agg_mock = AsyncMock(return_value=None)
         monkeypatch.setattr("nemo_gym.rollout_reverification._call_aggregate_metrics", agg_mock)
         monkeypatch.setattr("nemo_gym.rollout_reverification._guard_reverify_mode", AsyncMock(return_value=None))
-        monkeypatch.setattr("nemo_gym.rollout_reverification.get_wandb_run", lambda: None)
+        monkeypatch.setattr("nemo_gym.rollout_reverification.get_exporters", list)
         monkeypatch.setattr("nemo_gym.rollout_reverification._resolve_under_cwd_or_install", lambda p: Path(p))
         config = self._make_config(tmp_path)
 
@@ -1817,7 +1817,7 @@ class TestRunFromConfigForceFlag:
             lambda *_a, **_kw: [fake_future()],
         )
         monkeypatch.setattr("nemo_gym.rollout_reverification._call_aggregate_metrics", AsyncMock(return_value=None))
-        monkeypatch.setattr("nemo_gym.rollout_reverification.get_wandb_run", lambda: None)
+        monkeypatch.setattr("nemo_gym.rollout_reverification.get_exporters", list)
         monkeypatch.setattr("nemo_gym.rollout_reverification._resolve_under_cwd_or_install", lambda p: Path(p))
 
     async def test_no_unsafe_prefix_when_all_rs_stateless(
@@ -1893,7 +1893,7 @@ class TestRunFromConfigResumeFromCache:
         monkeypatch.setattr("nemo_gym.rollout_reverification._run_verification_payloads", fake_run)
         monkeypatch.setattr("nemo_gym.rollout_reverification._guard_reverify_mode", AsyncMock(return_value=None))
         monkeypatch.setattr("nemo_gym.rollout_reverification._call_aggregate_metrics", AsyncMock(return_value=None))
-        monkeypatch.setattr("nemo_gym.rollout_reverification.get_wandb_run", lambda: None)
+        monkeypatch.setattr("nemo_gym.rollout_reverification.get_exporters", list)
 
     def _read_jsonl(self, path: Path) -> list[dict]:
         return [orjson.loads(line) for line in path.read_bytes().splitlines() if line.strip()]
@@ -2136,7 +2136,7 @@ class TestRunFromConfigJudgeFailedOnly:
         monkeypatch.setattr("nemo_gym.rollout_reverification._guard_reverify_mode", guard_mock)
         agg_mock = AsyncMock(return_value=None)
         monkeypatch.setattr("nemo_gym.rollout_reverification._call_aggregate_metrics", agg_mock)
-        monkeypatch.setattr("nemo_gym.rollout_reverification.get_wandb_run", lambda: None)
+        monkeypatch.setattr("nemo_gym.rollout_reverification.get_exporters", list)
         return guard_mock, agg_mock
 
     def _patch(self, monkeypatch: pytest.MonkeyPatch, dispatched: list, recovered_reward: float = 0.9):
