@@ -180,6 +180,10 @@ class AlmostServerError(ConfigError, ValueError):
     `error_on_almost_servers` is set, so the run is aborted."""
 
 
+class AgentCompositionError(ConfigError, ValueError):
+    """A standalone agent config could not be composed onto the merged config's agent instances."""
+
+
 ########################################
 # Dataset configs for handling and upload/download
 ########################################
