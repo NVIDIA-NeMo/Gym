@@ -12,7 +12,7 @@ After rollout collection, NeMo Gym computes **aggregate metrics** for each agent
 1. **Rollouts complete** — `gym eval run --no-serve` gathers verify responses (reward + custom fields) for every task/rollout pair.
 2. **Group by agent** — responses are partitioned by agent name.
 3. **Call `/aggregate_metrics`** — for each agent, the stripped verify responses are POSTed to the agent's `/aggregate_metrics` endpoint.
-4. **Compute stats** — per-task and overall statistics (`mean`, `max`, `min`, `median`, `std`) are computed for every numeric field. If the resources server overrides `compute_metrics()` or `get_key_metrics()`, those are called to add additional metrics.
+4. **Compute stats** — per-task and overall statistics (`mean`, `max`, `min`, `median`, `std`) are computed for every numeric field. Reward confidence intervals are computed across problems, and any resources-server overrides of `compute_metrics()` or `get_key_metrics()` add benchmark-specific metrics.
 5. **Write results** — all per-agent metrics are written to `<output>_aggregate_metrics.json`.
 
 ## Output Format
@@ -28,7 +28,16 @@ The output file is a JSON array with one entry per agent:
       "max/reward": 1.0,
       "min/reward": 0.0,
       "median/reward": 1.0,
-      "std/reward": 0.433
+      "std/reward": 0.433,
+      "stats": {
+        "pass@1": {
+          "value": 0.75,
+          "ci_lower": 0.68,
+          "ci_upper": 0.82,
+          "bootstrap_ci_lower": 0.66,
+          "bootstrap_ci_upper": 0.83
+        }
+      }
     },
     "key_metrics": {
       "mean/reward": 0.75
@@ -47,6 +56,16 @@ The output file is a JSON array with one entry per agent:
 | `agent_metrics` | Overall stats across all rollouts, plus any custom metrics from `compute_metrics()` |
 | `key_metrics` | Headline numbers (default: all `mean/*` entries from `agent_metrics`) |
 | `group_level_metrics` | Per-task breakdown — one entry per task with stats across that task's rollouts |
+
+### Reward confidence intervals
+
+`agent_metrics.stats` uses the same score-entry field names as NeMo Evaluator. Rewards are always grouped by task before aggregation; repeats are never treated as independent problems.
+
+- Fractional rewards emit `mean_reward` with `value`, `ci_lower`, and `ci_upper` from a 10,000-resample percentile bootstrap over per-task mean rewards.
+- Binary rewards emit `pass@1` with `ci_lower` and `ci_upper` from within-task binomial variance, plus `bootstrap_ci_lower` and `bootstrap_ci_upper` from a bootstrap over per-task pass@1 values.
+- Binary runs with multiple repeats also emit `pass@n`, where `n` is the number of repeats, with bootstrap confidence bounds.
+
+Bootstrap results are deterministic (seed 42). With one repeat per task, the sample-level binomial interval cannot be estimated, so `pass@1` contains only the value and bootstrap bounds.
 
 ---
 

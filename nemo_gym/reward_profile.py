@@ -20,6 +20,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
 import orjson
 from pandas import DataFrame, Series, notna
 from pandas.core.groupby.generic import DataFrameGroupBy
@@ -620,6 +621,106 @@ def _group_by_task(verify_responses: List[Dict[str, Any]]) -> List[List[Dict[str
     return [groups[k] for k in sorted(groups)]
 
 
+def _bootstrap_mean_ci(
+    values: List[float],
+    n_bootstrap: int = 10_000,
+    seed: Optional[int] = 42,
+) -> Tuple[float, float, float]:
+    """Return the mean and a 95% percentile bootstrap confidence interval."""
+    samples = np.asarray(values, dtype=np.float64)
+    mean = float(samples.mean())
+    if len(samples) < 2:
+        return mean, mean, mean
+
+    rng = np.random.default_rng(seed)
+    bootstrap_means = np.array(
+        [rng.choice(samples, size=len(samples), replace=True).mean() for _ in range(n_bootstrap)]
+    )
+    return mean, float(np.percentile(bootstrap_means, 2.5)), float(np.percentile(bootstrap_means, 97.5))
+
+
+def _pass_at_k(n_attempts: int, n_correct: int, k: int) -> float:
+    """Return the unbiased pass@k estimate for one problem."""
+    if n_correct == 0:
+        return 0.0
+    if n_correct >= n_attempts:
+        return 1.0
+    return 1.0 - math.comb(n_attempts - n_correct, k) / math.comb(n_attempts, k)
+
+
+def _sample_level_pass_at_1_ci(problem_results: List[Tuple[int, int]]) -> Optional[Tuple[float, float]]:
+    """Return the 95% sample-level binomial interval for pass@1.
+
+    Problems with one attempt still contribute to pass@1, but not to the
+    variance estimate because their within-problem variance is not estimable.
+    """
+    total_variance = 0.0
+    any_estimable = False
+    for n_attempts, n_correct in problem_results:
+        if n_attempts <= 1:
+            continue
+        any_estimable = True
+        p_hat = n_correct / n_attempts
+        total_variance += p_hat * (1.0 - p_hat) / (n_attempts - 1)
+
+    if not any_estimable:
+        return None
+
+    mean = sum(n_correct / n_attempts for n_attempts, n_correct in problem_results) / len(problem_results)
+    standard_error = math.sqrt(total_variance) / len(problem_results)
+    return mean - 1.96 * standard_error, mean + 1.96 * standard_error
+
+
+def compute_reward_confidence_metrics(tasks: List[List[Dict[str, Any]]]) -> Dict[str, Dict[str, float]]:
+    """Compute nel-next-compatible reward metrics and confidence intervals.
+
+    Rewards are reduced within each problem before any cross-problem
+    statistics are computed. Fractional rewards emit ``mean_reward`` with a
+    bootstrap interval over per-problem means. Binary rewards emit ``pass@1``
+    with sample-level and bootstrap intervals, plus ``pass@n`` with a
+    bootstrap interval when the run contains multiple repeats.
+    """
+    per_problem_rewards = [
+        [float(rollout["reward"]) for rollout in rollouts if rollout.get("reward") is not None] for rollouts in tasks
+    ]
+    per_problem_rewards = [rewards for rewards in per_problem_rewards if rewards]
+    if not per_problem_rewards:
+        return {}
+
+    all_rewards = [reward for rewards in per_problem_rewards for reward in rewards]
+    if any(reward not in (0.0, 1.0) for reward in all_rewards):
+        per_problem_means = [sum(rewards) / len(rewards) for rewards in per_problem_rewards]
+        mean, lower, upper = _bootstrap_mean_ci(per_problem_means)
+        return {
+            "mean_reward": {
+                "value": round(mean, 4),
+                "ci_lower": round(lower, 4),
+                "ci_upper": round(upper, 4),
+            }
+        }
+
+    problem_results = [(len(rewards), sum(1 for reward in rewards if reward > 0)) for rewards in per_problem_rewards]
+    n_repeats = max(n_attempts for n_attempts, _ in problem_results)
+    metrics: Dict[str, Dict[str, float]] = {}
+    for k in [1] + ([n_repeats] if n_repeats > 1 else []):
+        valid_results = [(n_attempts, n_correct) for n_attempts, n_correct in problem_results if n_attempts >= k]
+        pass_values = [_pass_at_k(n_attempts, n_correct, k) for n_attempts, n_correct in valid_results]
+        entry = {"value": round(sum(pass_values) / len(pass_values), 4)}
+
+        if k == 1:
+            sample_ci = _sample_level_pass_at_1_ci(valid_results)
+            if sample_ci is not None:
+                entry["ci_lower"] = round(sample_ci[0], 4)
+                entry["ci_upper"] = round(sample_ci[1], 4)
+
+        _, bootstrap_lower, bootstrap_upper = _bootstrap_mean_ci(pass_values)
+        entry["bootstrap_ci_lower"] = round(bootstrap_lower, 4)
+        entry["bootstrap_ci_upper"] = round(bootstrap_upper, 4)
+        metrics[f"pass@{k}"] = entry
+
+    return metrics
+
+
 def compute_aggregate_metrics(
     verify_responses: List[Dict[str, Any]],
     compute_metrics_fn=None,
@@ -671,9 +772,15 @@ def compute_aggregate_metrics(
 
     serialized_agent = rp.prepare_for_serialization([agent_metrics])[0] if agent_metrics else {}
 
+    # Reward confidence intervals are shared by every benchmark, including
+    # benchmarks that override compute_metrics().
+    tasks = _group_by_task(verify_responses)
+    reward_stats = compute_reward_confidence_metrics(tasks)
+    if reward_stats:
+        serialized_agent["stats"] = reward_stats
+
     # Custom metrics computed from all raw verify responses grouped by task
     if compute_metrics_fn:
-        tasks = _group_by_task(verify_responses)
         custom = compute_metrics_fn(tasks)
 
         # Merge per_task_metrics into group_level_metrics (keyed by task_index)

@@ -28,6 +28,7 @@ from nemo_gym.reward_profile import (
     add_avg_sample_std_dev,
     compute_aggregate_metrics,
     compute_pass_majority_metrics,
+    compute_reward_confidence_metrics,
     compute_subset_metrics,
     highest_k_metrics,
 )
@@ -132,6 +133,102 @@ class TestAggregateMetricsRoute:
         assert not any(k.startswith("histogram") for k in result.agent_metrics)
 
 
+class TestRewardConfidenceMetrics:
+    def test_empty_input(self) -> None:
+        assert compute_reward_confidence_metrics([]) == {}
+        assert compute_reward_confidence_metrics([[]]) == {}
+        assert compute_reward_confidence_metrics([[{"response": {}}]]) == {}
+
+    def test_fractional_rewards_bootstrap_per_problem_means(self) -> None:
+        tasks = [
+            [{"reward": 0.7}, {"reward": 0.8}],
+            [{"reward": 0.5}, {"reward": 0.6}],
+            [{"reward": 0.0}, {"reward": 1.0}],
+            [{"reward": 0.3}, {"reward": 0.4}],
+        ]
+
+        metrics = compute_reward_confidence_metrics(tasks)
+
+        assert set(metrics) == {"mean_reward"}
+        assert metrics["mean_reward"]["value"] == pytest.approx(0.5375)
+        assert set(metrics["mean_reward"]) == {"value", "ci_lower", "ci_upper"}
+        assert metrics["mean_reward"]["ci_lower"] <= metrics["mean_reward"]["value"]
+        assert metrics["mean_reward"]["value"] <= metrics["mean_reward"]["ci_upper"]
+        assert metrics == compute_reward_confidence_metrics(tasks)
+
+    def test_fractional_rewards_are_not_pooled_across_problems(self) -> None:
+        responses = [
+            {TASK_INDEX_KEY_NAME: 10, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.5},
+            *[
+                {TASK_INDEX_KEY_NAME: 20, ROLLOUT_INDEX_KEY_NAME: rollout_idx, "reward": 0.0}
+                for rollout_idx in range(3)
+            ],
+        ]
+
+        result = compute_aggregate_metrics(responses)
+
+        assert result.agent_metrics["stats"]["mean_reward"]["value"] == pytest.approx(0.25)
+
+    def test_binary_rewards_emit_sample_and_bootstrap_intervals(self) -> None:
+        tasks = [
+            [{"reward": 1.0}, {"reward": 1.0}],
+            [{"reward": 1.0}, {"reward": 0.0}],
+            [{"reward": 0.0}, {"reward": 0.0}],
+            [{"reward": 1.0}, {"reward": 1.0}],
+        ]
+
+        metrics = compute_reward_confidence_metrics(tasks)
+
+        assert set(metrics) == {"pass@1", "pass@2"}
+        assert metrics["pass@1"]["value"] == pytest.approx(0.625)
+        assert set(metrics["pass@1"]) == {
+            "value",
+            "ci_lower",
+            "ci_upper",
+            "bootstrap_ci_lower",
+            "bootstrap_ci_upper",
+        }
+        assert metrics["pass@2"]["value"] == pytest.approx(0.75)
+        assert set(metrics["pass@2"]) == {"value", "bootstrap_ci_lower", "bootstrap_ci_upper"}
+
+    def test_single_repeat_omits_unestimable_sample_interval(self) -> None:
+        tasks = [[{"reward": 1.0}], [{"reward": 0.0}], [{"reward": 1.0}]]
+
+        metrics = compute_reward_confidence_metrics(tasks)
+
+        assert set(metrics) == {"pass@1"}
+        assert set(metrics["pass@1"]) == {"value", "bootstrap_ci_lower", "bootstrap_ci_upper"}
+        assert metrics["pass@1"]["value"] == pytest.approx(2.0 / 3.0, abs=1e-4)
+
+    def test_binary_rewards_are_not_pooled_across_problems(self) -> None:
+        responses = [
+            {TASK_INDEX_KEY_NAME: 10, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0},
+            *[
+                {TASK_INDEX_KEY_NAME: 20, ROLLOUT_INDEX_KEY_NAME: rollout_idx, "reward": 0.0}
+                for rollout_idx in range(9)
+            ],
+        ]
+
+        result = compute_aggregate_metrics(responses)
+
+        assert result.agent_metrics["stats"]["pass@1"]["value"] == pytest.approx(0.5)
+
+    def test_integration_97_problems_five_binary_repeats(self) -> None:
+        tasks = [[{"reward": float(rollout_idx < task_idx % 6)} for rollout_idx in range(5)] for task_idx in range(97)]
+
+        metrics = compute_reward_confidence_metrics(tasks)
+
+        expected_pass_at_1 = sum(min(task_idx % 6, 5) / 5 for task_idx in range(97)) / 97
+        assert metrics["pass@1"]["value"] == pytest.approx(expected_pass_at_1, abs=1e-4)
+        for metric in metrics.values():
+            for lower_name, upper_name in (
+                ("ci_lower", "ci_upper"),
+                ("bootstrap_ci_lower", "bootstrap_ci_upper"),
+            ):
+                if lower_name in metric:
+                    assert metric[lower_name] <= metric["value"] <= metric[upper_name]
+
+
 class TestComputeMetricsHook:
     @pytest.mark.asyncio
     async def test_compute_metrics_receives_grouped_responses(self) -> None:
@@ -176,6 +273,7 @@ class TestComputeMetricsHook:
         assert result.agent_metrics["pass@k"] == pytest.approx(2.0 / 3.0)
         assert "pass@k" in result.key_metrics
         assert "pass@1_avg_of_k" in result.key_metrics
+        assert result.agent_metrics["stats"]["pass@1"]["value"] == pytest.approx(0.5)
 
     @pytest.mark.asyncio
     async def test_compute_metrics_sees_custom_verify_fields(self) -> None:
