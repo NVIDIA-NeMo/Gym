@@ -1,0 +1,27 @@
+# SWE-bench wrapper configuration for the Cline CLI harness.
+swe_agents:
+  responses_api_agents:
+    swe_agents:
+      entrypoint: app.py
+      domain: coding
+      description: SWE-bench driven by the headless Cline CLI.
+      value: Evaluate software-engineering capabilities on SWE-bench using Cline.
+
+      agent_framework: cline
+      agent_max_turns: 100
+      swebench_agent_timeout: 1800
+      swebench_tests_timeout: 900
+      apptainer_memory_limit_mb: 32768
+      command_exec_timeout: 300
+
+      container_formatter: ???
+      dataset_path: ???
+
+      model_server:
+        name: policy_model
+        type: responses_api_models
+
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/swe_agents/data/example.jsonl
