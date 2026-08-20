@@ -269,8 +269,7 @@ class TestApp:
 
         _, server = self._dummy_server()
 
-        with patch("responses_api_agents.tau2.app.ensure_tau2_data_dir"):
-            app = server.setup_webserver()
+        app = server.setup_webserver()
         client = TestClient(app)
 
         async_openai_mock = MagicMock()
