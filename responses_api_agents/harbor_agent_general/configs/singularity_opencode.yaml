@@ -5,8 +5,7 @@ harbor_agent_general:
       domain: agent
       description: Harbor integration for agent harnesses with Singularity environments.
 
-      ## NOTE: Optional fallback to co-locate jobs directory with the output_jsonl_fpath.
-      harbor_jobs_dir: ${oc.select:harbor_jobs_dir,${output_jsonl_fpath}}
+      harbor_jobs_dir: ${harbor_jobs_dir}
 
       ##
       # Follows harbor.models.job.config:DatasetConfig spec.
@@ -37,8 +36,7 @@ harbor_agent_general:
         # If the variables are unlikely to change and exposure is not a concern, use immediate resolution via Hydra. e.g. ${oc.env:NVINF_API_KEY}
         #
         # env:
-          # NVINF_API_KEY: \${NVINF_API_KEY}
-          # VLLM_API_BASE: \${VLLM_API_BASE}
+          # MY_ENV: \${MY_ENV}
 
       ##
       # Follows harbor.models.trial.config:VerifierConfig spec.
