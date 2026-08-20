@@ -12,6 +12,7 @@ import sys
 import tempfile
 from copy import deepcopy
 from dataclasses import dataclass
+from math import ceil
 from pathlib import Path
 from time import monotonic
 from traceback import format_exc
@@ -64,6 +65,8 @@ class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
     tasks_dir: Path
     expected_task_count: int = Field(default=EXPECTED_TASK_COUNT, ge=1)
     is_verifying_golden_patch: bool = False
+    task_cpu_multiplier: float = Field(default=2.0, gt=0)
+    task_memory_multiplier: float = Field(default=2.0, gt=0)
 
     sandbox_provider: str
     sandbox_config: dict[str, Any]
@@ -229,6 +232,8 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
 
         current_task_id = task_id(task)
         resources = task_sandbox_resources(task, phase=phase)
+        resources["cpu"] *= self.config.task_cpu_multiplier
+        resources["memory_mib"] = ceil(resources["memory_mib"] * self.config.task_memory_multiplier)
         resources.update(self.config.sandbox_config.get("resources", {}))
         spec = SandboxSpec(
             image=task_image(task),

@@ -19,7 +19,10 @@ remain in the resources server's gitignored control-plane cache.
 
 Task definitions are parsed with a narrow local adapter for the pinned Pier 0.3.1 task schema, without installing
 Pier's unrelated agent/model-provider stack. Agent and verifier CPU, memory, and storage requests are resolved
-independently from their corresponding `task.toml` environment sections.
+independently from their corresponding `task.toml` environment sections. By default, Gym requests twice the task's
+declared CPU and memory for each sandbox while preserving its storage request. The `task_cpu_multiplier` and
+`task_memory_multiplier` resources-server settings can override that scaling; explicit `sandbox_config.resources`
+values take final precedence.
 
 ## Oracle checkpoint
 

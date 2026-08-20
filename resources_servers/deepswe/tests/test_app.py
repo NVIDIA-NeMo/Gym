@@ -111,11 +111,11 @@ def test_network_policy_is_scoped_to_agent_sandbox(task_assets: Path, tmp_path: 
 @pytest.mark.parametrize(
     ("phase", "expected_resources"),
     [
-        ("agent", SandboxResources(cpu=2, memory_mib=8192, disk_gib=20)),
-        ("verifier", SandboxResources(cpu=3, memory_mib=12288, disk_gib=25)),
+        ("agent", SandboxResources(cpu=4, memory_mib=16384, disk_gib=20)),
+        ("verifier", SandboxResources(cpu=6, memory_mib=24576, disk_gib=25)),
     ],
 )
-async def test_create_sandbox_uses_phase_limits_from_task_toml(
+async def test_create_sandbox_scales_phase_limits_from_task_toml(
     task_assets: Path,
     monkeypatch: MonkeyPatch,
     phase: str,
@@ -137,6 +137,30 @@ async def test_create_sandbox_uses_phase_limits_from_task_toml(
     spec = sandbox.start.await_args.args[0]
     assert spec.resources == expected_resources
     assert spec.image == UPSTREAM_IMAGE
+
+
+async def test_create_sandbox_allows_resource_multiplier_and_explicit_overrides(
+    task_assets: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    config = _config(task_assets)
+    config.task_cpu_multiplier = 1.5
+    config.task_memory_multiplier = 1.25
+    config.sandbox_config = {"resources": {"memory_mib": 20000}}
+    server = DeepSWEResourcesServer(
+        config=config,
+        server_client=MagicMock(spec=ServerClient),
+    )
+    sandbox = AsyncMock()
+    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
+    monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
+    monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
+
+    await server._create_sandbox(server._task_store.get("example-task"), phase="agent")
+
+    spec = sandbox.start.await_args.args[0]
+    assert spec.resources == SandboxResources(cpu=3, memory_mib=20000, disk_gib=20)
 
 
 async def test_golden_verify_passes_structured_result(
