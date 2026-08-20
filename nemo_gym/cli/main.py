@@ -78,6 +78,15 @@ def dispatch(target: str, overrides: list[str]) -> None:
     func()
 
 
+def _hydra_quote(value: str) -> str:
+    """Quote a value for Hydra's override grammar.
+
+    `ensure_ascii=False` because Hydra does not decode `\\uXXXX` escapes: letting json.dumps emit
+    them turns a path like `runs/café` into the literal characters `runs/caf\\u00e9`.
+    """
+    return json.dumps(value, ensure_ascii=False)
+
+
 def _value_flag(
     name: str,
     hydra_key: str,
@@ -92,7 +101,7 @@ def _value_flag(
     return Flag(
         register=lambda p: p.add_argument(f"--{name}", *aliases, dest=dest, choices=choices, help=flag_help),
         translate_to_hydra=lambda args: (
-            [f"+{hydra_key}={json.dumps(getattr(args, dest)) if quote else getattr(args, dest)}"]
+            [f"+{hydra_key}={_hydra_quote(getattr(args, dest)) if quote else getattr(args, dest)}"]
             if getattr(args, dest) is not None
             else []
         ),
@@ -105,6 +114,28 @@ def _bool_flag(name: str, hydra_key: str, flag_help: str) -> Flag:
     return Flag(
         register=lambda p: p.add_argument(f"--{name}", action="store_true", help=flag_help),
         translate_to_hydra=lambda args: [f"+{hydra_key}=true"] if getattr(args, dest) else [],
+    )
+
+
+def _comma_list_flag(name: str, hydra_key: str, flag_help: str, *, metavar: str) -> Flag:
+    """A `--name "A,B"` flag that maps to the Hydra override `+<hydra_key>=["A","B"]` (omitted when unset).
+
+    Each element is quoted because Hydra's unquoted list grammar rejects values containing a space,
+    `=` or `[`. A single flag taking a list (rather than a repeatable one) keeps a future N-valued
+    form identical to today's single-valued one.
+    """
+    dest = name.replace("-", "_")
+
+    def to_hydra(args: argparse.Namespace) -> list[str]:
+        raw = getattr(args, dest)
+        if raw is None:
+            return []
+        items = [item.strip() for item in raw.split(",") if item.strip()]
+        return [f"+{hydra_key}=[{','.join(_hydra_quote(item) for item in items)}]"]
+
+    return Flag(
+        register=lambda p: p.add_argument(f"--{name}", dest=dest, metavar=metavar, help=flag_help),
+        translate_to_hydra=to_hydra,
     )
 
 
@@ -881,6 +912,45 @@ COMMANDS = {
                 register=lambda p: p.add_argument(
                     "--dry-run", action="store_true", help="Print generated job scripts without submitting."
                 ),
+            ),
+        ),
+    ),
+    "compare": Command(
+        target="nemo_gym.cli.compare:compare",
+        summary="Compare a baseline eval run against a candidate run.",
+        flags=(
+            _value_flag(
+                "baseline",
+                "baseline_rollouts_jsonl_fpath",
+                "Baseline run's rollouts JSONL (its *_aggregate_metrics.json sibling is what gets read).",
+                quote=True,
+            ),
+            _comma_list_flag(
+                "candidates",
+                "candidate_rollouts_jsonl_fpaths",
+                "Candidate run's rollouts JSONL. Comma-separated list; one candidate is supported today.",
+                metavar="PATH[,PATH...]",
+            ),
+            _value_flag("agent", "agent_name", "Agent to compare on both sides (default: all shared agents)."),
+            _value_flag("baseline-agent", "baseline_agent_name", "Agent to read from the baseline's metrics."),
+            _comma_list_flag(
+                "candidate-agents",
+                "candidate_agent_names",
+                "Agent to read from each candidate's metrics, in --candidates order.",
+                metavar="NAME[,NAME...]",
+            ),
+            _value_flag(
+                "output-dir",
+                "output_dirpath",
+                "Where to write the report (default: the candidate run's own directory).",
+                aliases=("-o",),
+                quote=True,
+            ),
+            _value_flag(
+                "report-format",
+                "report_format",
+                "Report artifacts to write (default: both).",
+                choices=("md", "json", "both"),
             ),
         ),
     ),

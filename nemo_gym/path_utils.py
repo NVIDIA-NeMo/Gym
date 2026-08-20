@@ -17,3 +17,12 @@ from pathlib import Path
 
 def failures_path_for(output_fpath: Path) -> Path:
     return output_fpath.with_name(output_fpath.stem + "_failures.jsonl")
+
+
+def aggregate_metrics_path_for(output_fpath: Path) -> Path:
+    """`results/rollouts.jsonl` -> `results/rollouts_aggregate_metrics.json`.
+
+    Mirrors how rollout collection and reverification name the file they write, so consumers
+    (e.g. `gym compare`) derive the same path the writers produced.
+    """
+    return output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")

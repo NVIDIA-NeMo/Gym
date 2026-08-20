@@ -52,6 +52,9 @@ gym eval aggregate            # merge sharded rollout results
 gym eval profile              # compute a reward profile from rollouts
 gym eval reverify             # recompute rewards from existing rollouts without re-running inference
 
+# Compare
+gym compare                   # compare a baseline eval run against a candidate run
+
 # Contributor helpers
 gym dev test                  # run NeMo Gym's unit tests
 ```
@@ -728,6 +731,41 @@ Writes three files next to the rollouts, named from its stem:
 | `<rollouts>_repeat_level_metrics.json` | One entry per repeat. |
 
 See [Repeat-Level Metrics](/evaluation/aggregate-metrics#repeat-level-metrics) for the full field list and how to read the variability statistics.
+
+### `gym compare`
+
+Compare a baseline eval run against a candidate run and write a report. Reads only each run's `*_aggregate_metrics.json`, derived from the rollouts JSONL path you pass — the rollouts file itself is never opened.
+
+The report contains a metric table (the change, plus each side's value and confidence interval), split into key metrics and all other metrics, and a per-task sample-flips table. Confidence intervals are read verbatim from what each run recorded; this command performs no statistical tests and issues no pass/fail verdict.
+
+| Option | Description |
+| --- | --- |
+| `--baseline PATH` | Baseline run's rollouts JSONL. |
+| `--candidates PATH[,PATH...]` | Candidate run's rollouts JSONL. Comma-separated; one candidate is supported today. |
+| `--agent NAME` | Agent to compare on both sides. Defaults to every agent present in both runs. |
+| `--baseline-agent NAME` | Agent to read from the baseline. Takes precedence over `--agent`. |
+| `--candidate-agents NAME[,NAME...]` | Agent to read from each candidate, in `--candidates` order. Takes precedence over `--agent`. |
+| `--output-dir DIR`, `-o` | Where to write the report. Defaults to the candidate run's own directory. |
+| `--report-format` | `md`, `json`, or `both` (default). |
+
+```bash
+gym compare \
+    --baseline runs/baseline/rollouts.jsonl \
+    --candidates runs/candidate/rollouts.jsonl
+```
+
+Writes into the output directory:
+
+| File | Contents |
+| --- | --- |
+| `compare_report.md` | Human-readable report. |
+| `compare_report.json` | Machine-readable result (`schema_version` 1). |
+
+<Note>
+Confidence intervals are only present for `mean/*` metrics on runs collected with `--num-repeats` of 2 or more; `pass@k` metrics never carry one, and those cells render as `—`. Metric names embed the repeat count (`pass@1[avg-of-3]` versus `pass@1[avg-of-5]`), so comparing runs collected with different `--num-repeats` leaves whole metric families reported by only one run. Tasks are matched on `_ng_task_index` alone, which assumes both runs used the same dataset, split, `--limit` and ordering.
+</Note>
+
+If a run was collected with `--disable-aggregation` it has no `*_aggregate_metrics.json`; run [`gym eval aggregate`](#gym-eval-aggregate) first, or point at the file directly with `+baseline_aggregate_metrics_fpath=` / `+candidate_aggregate_metrics_fpaths=[...]`.
 
 ### `gym eval reverify`
 
