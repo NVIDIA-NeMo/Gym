@@ -316,8 +316,8 @@ class SupportsSandboxPauseResume(Protocol):
         """Pause a sandbox while preserving its state."""
         ...
 
-    async def resume(self, handle: SandboxHandle) -> SandboxHandle:
-        """Resume a paused sandbox and return its ready handle."""
+    async def resume(self, handle: SandboxHandle) -> None:
+        """Resume a paused sandbox and refresh its handle."""
         ...
 
 
