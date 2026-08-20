@@ -17,3 +17,7 @@ from pathlib import Path
 
 def failures_path_for(output_fpath: Path) -> Path:
     return output_fpath.with_name(output_fpath.stem + "_failures.jsonl")
+
+
+def population_status_path_for(output_fpath: Path) -> Path:
+    return output_fpath.with_name(output_fpath.stem + "_population_status.json")

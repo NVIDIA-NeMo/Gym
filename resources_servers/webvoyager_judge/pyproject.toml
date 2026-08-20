@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[project]
+name = "webvoyager-judge-resources-server"
+version = "0.0.0"
+requires-python = ">=3.12"
+dependencies = ["nemo-gym[dev]"]
+
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = ["setuptools>=61"]
+
+[tool.setuptools.packages.find]
+where = ["../.."]
+include = ["resources_servers.webvoyager_judge*"]
+
+[tool.uv.sources]
+nemo-gym = { path = "../..", editable = true }
