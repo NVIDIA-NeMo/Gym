@@ -764,12 +764,29 @@ class TestRolloutCollection:
             rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
         assert len(rows) == 2
 
+    def test_progress_file_default_is_derived_from_output(self, tmp_path: Path) -> None:
+        shard_0_config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(tmp_path / "input.jsonl"),
+            output_jsonl_fpath=str(tmp_path / "rollouts-chunk0.jsonl"),
+        )
+        shard_1_config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(tmp_path / "input.jsonl"),
+            output_jsonl_fpath=str(tmp_path / "rollouts-chunk1.jsonl"),
+        )
+
+        assert shard_0_config.resolved_progress_file_fpath == tmp_path / "rollouts-chunk0_progress"
+        assert shard_1_config.resolved_progress_file_fpath == tmp_path / "rollouts-chunk1_progress"
+
+        override_fpath = tmp_path / "artifacts" / "progress"
+        shard_0_config.progress_file_fpath = str(override_fpath)
+        assert shard_0_config.resolved_progress_file_fpath == override_fpath
+
     async def test_run_from_config_sanity(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
     ) -> None:
         progress_values = []
         real_replace = os.replace
-        progress_fpath = tmp_path / "progress"
+        progress_fpath = tmp_path / "output_progress"
 
         def track_progress_replace(src, dst):
             real_replace(src, dst)
@@ -951,7 +968,7 @@ class TestRolloutCollection:
         assert len(results) == 2
         assert progress_values[0] == 1
         assert progress_values[-1] == 2
-        assert int((tmp_path / "progress").read_text()) == 2
+        assert int((tmp_path / "rollouts_progress").read_text()) == 2
 
     async def test_progress_write_failure_does_not_fail_collection(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture, empty_global_config: MagicMock
@@ -1028,7 +1045,7 @@ class TestRolloutCollection:
         assert config.materialized_jsonl_fpath.exists()
         assert output_jsonl_fpath.exists()
         assert _failures_path_for(output_jsonl_fpath).exists()
-        assert output_jsonl_fpath.with_name("progress").exists()
+        assert output_jsonl_fpath.with_name("rollouts_progress").exists()
         assert output_jsonl_fpath.with_name("rollouts_aggregate_metrics.json").exists()
 
     @pytest.mark.parametrize("resume_from_cache", [False, True])

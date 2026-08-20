@@ -442,7 +442,8 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
         default=None,
         description=(
             "Path for the machine-readable rollout progress counter. "
-            "Defaults to a file named 'progress' alongside output_jsonl_fpath."
+            "Defaults to '<output_jsonl_fpath stem>_progress' alongside output_jsonl_fpath. "
+            "An explicitly configured path must have a single writer."
         ),
     )
     num_samples_in_parallel: Optional[int] = Field(
@@ -475,7 +476,8 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
     def resolved_progress_file_fpath(self) -> Path:
         if self.progress_file_fpath is not None:
             return Path(self.progress_file_fpath)
-        return Path(self.output_jsonl_fpath).parent / "progress"
+        output_fpath = Path(self.output_jsonl_fpath)
+        return output_fpath.with_name(f"{output_fpath.stem}_progress")
 
 
 class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
