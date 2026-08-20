@@ -143,8 +143,7 @@ class TestEvalRunFlags:
     @pytest.mark.parametrize(
         "flag_argv, expected_override",
         [
-            (["--agent", "my_agent"], "+agent_name=my_agent"),
-            (["-a", "my_agent"], "+agent_name=my_agent"),
+            # --agent is mode-dependent, so it is covered in TestAgentSelector rather than here.
             (["--input", "in.jsonl"], "+input_jsonl_fpath=in.jsonl"),
             (["-i", "in.jsonl"], "+input_jsonl_fpath=in.jsonl"),
             (["--output", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
@@ -169,7 +168,7 @@ class TestEvalRunFlags:
         assert overrides == [expected_override]
 
     def test_unset_flags_contribute_nothing(self, monkeypatch: MonkeyPatch) -> None:
-        _, overrides = _dispatch_for(monkeypatch, ["eval", "run", "--agent", "x"])
+        _, overrides = _dispatch_for(monkeypatch, ["eval", "run", "--no-serve", "--agent", "x"])
         assert overrides == ["+agent_name=x"]
 
     def test_default_dispatches_e2e(self, monkeypatch: MonkeyPatch) -> None:
@@ -953,7 +952,7 @@ class TestVerboseFlag:
         assert overrides == []
 
     def test_verbose_prepended_before_other_overrides(self, monkeypatch: MonkeyPatch) -> None:
-        _, overrides = _dispatch_for(monkeypatch, ["eval", "run", "--verbose", "--agent", "a", "+x=1"])
+        _, overrides = _dispatch_for(monkeypatch, ["eval", "run", "--no-serve", "--verbose", "--agent", "a", "+x=1"])
         assert "+verbose=true" in overrides
         assert "+agent_name=a" in overrides
         assert "+x=1" in overrides
@@ -1231,6 +1230,82 @@ class TestAssetSelectors:
         err = capsys.readouterr().err
         assert "resources_servers/mcqa/configs/nope.yaml" in err
         assert "resources_servers/mcqa/configs/" in err
+
+
+class TestAgentSelector:
+    """`--agent NAME[/FLAVOR]` resolves a named harness to its config and adds it to `+config_paths`."""
+
+    HERMES = "responses_api_agents/hermes_agent/configs/hermes_agent.yaml"
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            ["env", "start"],
+            ["env", "validate"],
+            ["env", "prefetch"],
+            ["eval", "run"],
+        ],
+    )
+    def test_name_resolves_to_config_path(self, monkeypatch: MonkeyPatch, command) -> None:
+        _, overrides = _dispatch_for(monkeypatch, [*command, "--agent", "hermes_agent"])
+        assert overrides == [f"+config_paths=[{WORKING_DIR / self.HERMES}]"]
+
+    def test_agent_is_interchangeable_with_config(self, monkeypatch: MonkeyPatch) -> None:
+        COMMAND = ["env", "start"]
+        by_name = _dispatch_for(monkeypatch, [*COMMAND, "--agent", "hermes_agent"])
+        by_path = _dispatch_for(monkeypatch, [*COMMAND, "--config", str(WORKING_DIR / self.HERMES)])
+        assert by_name == by_path
+
+    def test_flavor_resolves_to_flavor_file(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["env", "start", "--agent", "cvdp_agent/cvdp_agent_generic_hermes"])
+        expected = WORKING_DIR / "responses_api_agents/cvdp_agent/configs/cvdp_agent_generic_hermes.yaml"
+        assert overrides == [f"+config_paths=[{expected}]"]
+
+    def test_composes_with_benchmark_into_one_config_paths_token(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(
+            monkeypatch,
+            ["eval", "run", "--agent", "hermes_agent", "--benchmark", "gpqa", "--model-type", "vllm_model"],
+        )
+        paths, others = _split_overrides(overrides)
+        assert paths == {
+            str(WORKING_DIR / self.HERMES),
+            str(WORKING_DIR / "benchmarks/gpqa/config.yaml"),
+            str(WORKING_DIR / "responses_api_models/vllm_model/configs/vllm_model.yaml"),
+        }
+        assert others == set()
+
+    def test_composes_with_explicit_config(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["env", "start", "--config", "mine.yaml", "--agent", "hermes_agent"])
+        paths, others = _split_overrides(overrides)
+        assert paths == {"mine.yaml", str(WORKING_DIR / self.HERMES)}
+        assert others == set()
+
+    def test_unset_flag_contributes_nothing(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["env", "start", "--benchmark", "gpqa"])
+        assert overrides == [f"+config_paths=[{WORKING_DIR / 'benchmarks/gpqa/config.yaml'}]"]
+
+    def test_eval_run_no_serve_names_a_running_instance(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch, ["eval", "run", "--no-serve", "--agent", "gpqa_mcqa_simple_agent"]
+        )
+        assert target == "nemo_gym.cli.eval:collect_rollouts"
+        assert overrides == ["+agent_name=gpqa_mcqa_simple_agent"]
+
+    def test_eval_run_no_serve_accepts_a_name_that_is_not_an_agent_config(self, monkeypatch: MonkeyPatch) -> None:
+        # Instance names are per-environment and never resolve as agent configs; --no-serve must not try.
+        _, overrides = _dispatch_for(monkeypatch, ["eval", "run", "--no-serve", "-a", "not_an_agent_dir"])
+        assert overrides == ["+agent_name=not_an_agent_dir"]
+
+    def test_eval_run_short_alias_composes_in_serve_mode(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["eval", "run", "-a", "hermes_agent"])
+        assert overrides == [f"+config_paths=[{WORKING_DIR / self.HERMES}]"]
+
+    def test_unknown_name_suggests_a_close_one(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        monkeypatch.setattr(cli_main, "dispatch", lambda target, overrides: None)
+        monkeypatch.setattr(sys, "argv", ["gym", "env", "start", "--agent", "hermes_agnt"])
+        with pytest.raises(SystemExit):
+            main()
+        assert "Did you mean `hermes_agent`?" in capsys.readouterr().err
 
 
 class TestDidYouMean:
