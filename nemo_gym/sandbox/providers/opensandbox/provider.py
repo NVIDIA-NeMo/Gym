@@ -810,7 +810,17 @@ class OpenSandboxProvider:
                 return handle
         except Exception:
             if sandbox is not None:
-                await sandbox.close()
+                try:
+                    await asyncio.wait_for(
+                        sandbox.close(),
+                        timeout=min(timeout_s, self._operations.close_timeout_s or timeout_s),
+                    )
+                except Exception as cleanup_error:
+                    LOGGER.warning(
+                        "Failed to close OpenSandbox handle after connect failure; sandbox_id=%r: %r",
+                        sandbox_id,
+                        cleanup_error,
+                    )
             raise
 
     async def pause(self, handle: SandboxHandle) -> None:

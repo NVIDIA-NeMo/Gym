@@ -1680,6 +1680,24 @@ async def test_connect_honours_skip_health_check_opt_out(fake_opensandbox_sdk: N
     assert FakeSandbox.ready_calls == 0
 
 
+async def test_connect_preserves_failure_when_cleanup_stalls(
+    fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(FakeSandbox, "check_ready", AsyncMock(side_effect=ConnectionError("readiness failed")))
+    close = AsyncMock(side_effect=asyncio.Event().wait)
+    monkeypatch.setattr(FakeSandbox, "close", close)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        create={"connect_attempt_timeout_s": 0.05},
+        operations={"close_timeout_s": 0.05},
+        probe={"command": None},
+    )
+
+    with pytest.raises(ConnectionError, match="readiness failed"):
+        async with asyncio.timeout(0.5):
+            await provider.connect({"sandbox_id": "sandbox-9"})
+    close.assert_awaited_once_with()
+
+
 async def test_pause_waits_until_opensandbox_reports_paused(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(asyncio, "sleep", _no_sleep)
     provider = opensandbox_provider.OpenSandboxProvider(
