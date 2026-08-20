@@ -15,7 +15,6 @@ should_run_eval=$(( $# > 0 ))
 if (( should_run_eval )); then
     EXPERIMENT_NAME=$EXPERIMENT_NAME
 
-    # 
     EXPORT_TO_CSV=${EXPORT_TO_CSV:-0}
     EXPORT_CSV_TO_MODEL_DIR=${EXPORT_CSV_TO_MODEL_DIR:-0}
 else
