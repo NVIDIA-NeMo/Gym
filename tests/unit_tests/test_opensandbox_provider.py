@@ -60,7 +60,8 @@ class FakeVolume:
 class FakeSandbox:
     created_kwargs: dict[str, Any] = {}
     connected_args: tuple[Any, ...] = ()
-    connected_kwargs: dict[str, Any] = {}
+    connected_state = "RUNNING"
+    ready_calls = 0
     resumed_args: tuple[Any, ...] = ()
     resumed_kwargs: dict[str, Any] = {}
 
@@ -75,8 +76,13 @@ class FakeSandbox:
     @classmethod
     async def connect(cls, *args: Any, **kwargs: Any) -> "FakeSandbox":
         cls.connected_args = args
-        cls.connected_kwargs = kwargs
-        return cls()
+        sandbox = cls(str(args[0]))
+        if not kwargs.get("skip_health_check", False):
+            await sandbox.check_ready(
+                kwargs["connect_timeout"],
+                kwargs.get("health_check_polling_interval", timedelta(milliseconds=200)),
+            )
+        return sandbox
 
     @classmethod
     async def resume(cls, *args: Any, **kwargs: Any) -> "FakeSandbox":
@@ -84,9 +90,23 @@ class FakeSandbox:
         cls.resumed_kwargs = kwargs
         return cls(str(args[0]))
 
+    async def get_info(self) -> Any:
+        return SimpleNamespace(status=SimpleNamespace(state=type(self).connected_state))
+
+    async def check_ready(self, _timeout: timedelta, _polling_interval: timedelta) -> None:
+        if type(self).connected_state == "PAUSED":
+            raise RuntimeError("a paused sandbox has no exec daemon")
+        type(self).ready_calls += 1
+
+    async def close(self) -> None:
+        return None
+
 
 @pytest.fixture
 def fake_opensandbox_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
+    FakeSandbox.connected_state = "RUNNING"
+    FakeSandbox.ready_calls = 0
+
     def require_sdk() -> tuple[Any, Any, Any, Any, Any]:
         return FakeSandbox, FakeConnectionConfig, object, FakePlatformSpec, object
 
@@ -1481,9 +1501,20 @@ async def test_connect_health_checks_by_default(fake_opensandbox_sdk: None) -> N
     """An unchecked handle would defer the exec-daemon startup gap to the first call."""
     provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
 
-    await provider.connect({"sandbox_id": "sandbox-9"})
+    handle = await provider.connect({"sandbox_id": "sandbox-9"})
 
-    assert FakeSandbox.connected_kwargs["skip_health_check"] is False
+    assert handle.sandbox_id == "sandbox-9"
+    assert FakeSandbox.ready_calls == 1
+
+
+async def test_connect_accepts_a_paused_sandbox_without_health_checking_execd(fake_opensandbox_sdk: None) -> None:
+    FakeSandbox.connected_state = "PAUSED"
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+
+    handle = await provider.connect({"sandbox_id": "sandbox-9"})
+
+    assert handle.sandbox_id == "sandbox-9"
+    assert FakeSandbox.ready_calls == 0
 
 
 async def test_connect_honours_skip_health_check_opt_out(fake_opensandbox_sdk: None) -> None:
@@ -1495,7 +1526,7 @@ async def test_connect_honours_skip_health_check_opt_out(fake_opensandbox_sdk: N
 
     await provider.connect({"sandbox_id": "sandbox-9"})
 
-    assert FakeSandbox.connected_kwargs["skip_health_check"] is True
+    assert FakeSandbox.ready_calls == 0
 
 
 async def test_pause_waits_until_opensandbox_reports_paused(monkeypatch: pytest.MonkeyPatch) -> None:

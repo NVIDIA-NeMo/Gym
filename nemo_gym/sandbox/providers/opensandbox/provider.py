@@ -755,23 +755,33 @@ class OpenSandboxProvider:
     async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
         """Rebuild a live handle from an OpenSandbox sandbox id via the SDK.
 
-        Health-checks unless the caller opts out: a sandbox id only proves the
-        workload exists, not that its exec daemon is listening yet, so an
-        unchecked handle turns that gap into a 502 on the first call.
+        Running sandboxes are health-checked unless the caller opts out. A
+        paused sandbox has no exec daemon to check; resume rebuilds its
+        endpoints and performs the health check instead.
         """
         Sandbox, _, _, _, _ = _require_opensandbox_sdk()
         sandbox_id = str(descriptor["sandbox_id"])
         timeout_s = self._create.connect_attempt_timeout_s
-        sandbox = await asyncio.wait_for(
-            Sandbox.connect(
-                sandbox_id,
-                connection_config=self._connection_config(request_timeout_s=timeout_s),
-                connect_timeout=timedelta(seconds=timeout_s),
-                skip_health_check=self._create.skip_health_check,
-            ),
-            timeout=timeout_s,
-        )
-        return SandboxHandle(sandbox_id=str(sandbox.id), provider_name=self.name, raw=sandbox)
+        sandbox = None
+        try:
+            async with asyncio.timeout(timeout_s):
+                sandbox = await Sandbox.connect(
+                    sandbox_id,
+                    connection_config=self._connection_config(request_timeout_s=timeout_s),
+                    connect_timeout=timedelta(seconds=timeout_s),
+                    skip_health_check=True,
+                )
+                handle = SandboxHandle(sandbox_id=str(sandbox.id), provider_name=self.name, raw=sandbox)
+                if not self._create.skip_health_check and await self.status(handle) != SandboxStatus.PAUSED:
+                    await sandbox.check_ready(
+                        timedelta(seconds=timeout_s),
+                        timedelta(seconds=self._create.connect_poll_s),
+                    )
+                return handle
+        except Exception:
+            if sandbox is not None:
+                await sandbox.close()
+            raise
 
     async def pause(self, handle: SandboxHandle) -> None:
         """Pause a sandbox and wait until its snapshot-backed state is ready."""
