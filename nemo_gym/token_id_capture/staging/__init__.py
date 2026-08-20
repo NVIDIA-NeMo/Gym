@@ -73,6 +73,7 @@ from nemo_gym.token_id_capture.staging.routes import (
     decode_routed_experts,
     routed_experts_token_count,
 )
+from nemo_gym.token_id_capture.staging.terminal import TerminalSelection, select_terminal_call
 
 
 __all__ = [
@@ -103,6 +104,7 @@ __all__ = [
     "StagingSink",
     "StagingSource",
     "StreamingUnsupportedError",
+    "TerminalSelection",
     "WeightVersionProvider",
     "WeightVersionSpan",
     "assert_golden_vectors",
@@ -116,6 +118,7 @@ __all__ = [
     "linearize",
     "load_golden_vectors",
     "routed_experts_token_count",
+    "select_terminal_call",
     "staging_key",
     "verify_and_linearize",
 ]
