@@ -174,7 +174,7 @@ def _resolve_parent(
     if claimed is not None:
         parent = by_call_id.get(claimed)
         if parent is None:
-            inferred, ambiguous = _infer_parent(prompt, candidates)
+            inferred, ambiguous = _infer_parent(prompt, prefix_index)
             return inferred, ambiguous, "parent_call_id_missing"
         cum_len = parent.entry.cum_len
         if cum_len is None:
