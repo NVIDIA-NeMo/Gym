@@ -2,7 +2,7 @@ spartqa:
   resources_servers:
     spartqa:
       entrypoint: app.py
-      domain: reasoning
+      domain: other
       verified: false
       description: SpartQA spatial reasoning, CO (choose-object) question type; four candidate answers per question (two story objects, "both of them", "none of them"); reward = 1 iff the answer resolves to the single gold label.
       value: Improve spatial and relational reasoning over described scenes.
