@@ -529,16 +529,13 @@ class AsyncSandbox:
         await provider.pause(handle)
 
     async def resume(self) -> None:
-        """Resume this sandbox and replace its provider handle once ready."""
+        """Resume this sandbox and wait until it is ready."""
         handle = self._require_handle()
         provider = self._provider
         if not isinstance(provider, SupportsSandboxPauseResume):
             name = getattr(provider, "name", type(provider).__name__)
             raise NotImplementedError(f"Sandbox provider {name!r} does not support pause/resume")
-        resumed = await provider.resume(handle)
-        if not isinstance(resumed, SandboxHandle):
-            raise TypeError(f"Sandbox provider resume() must return SandboxHandle, got {type(resumed).__name__}")
-        self._handle = resumed
+        await provider.resume(handle)
 
     async def stop(self) -> None:
         if self._closed:

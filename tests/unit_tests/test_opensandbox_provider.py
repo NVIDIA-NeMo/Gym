@@ -22,6 +22,7 @@ from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -1648,145 +1649,86 @@ async def test_connect_honours_skip_health_check_opt_out(fake_opensandbox_sdk: N
     assert FakeSandbox.connected_kwargs["skip_health_check"] is True
 
 
-async def test_pause_waits_until_opensandbox_reports_paused(
-    fake_opensandbox_sdk: None,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class FakeRaw:
-        def __init__(self) -> None:
-            self.pause_calls = 0
-            self.info_calls = 0
-            self.info_states = iter(["PAUSING", "PAUSED"])
-
-        async def pause(self) -> None:
-            self.pause_calls += 1
-
-        async def get_info(self) -> Any:
-            self.info_calls += 1
-            return SimpleNamespace(status=SimpleNamespace(state=next(self.info_states)))
-
+async def test_pause_waits_until_opensandbox_reports_paused(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(asyncio, "sleep", _no_sleep)
     provider = opensandbox_provider.OpenSandboxProvider(
-        connection={"request_timeout_s": 5, "keepalive_expiry_s": None},
-        create={"connect_attempt_timeout_s": 0.000001, "connect_poll_s": 0.01},
+        create={"connect_attempt_timeout_s": 0.000001},
         operations={"pause_resume_timeout_s": 1},
     )
-    raw = FakeRaw()
-    handle = opensandbox_provider.SandboxHandle(
-        sandbox_id="sandbox-paused",
-        provider_name="opensandbox",
-        raw=raw,
+    raw = SimpleNamespace(
+        pause=AsyncMock(),
+        get_info=AsyncMock(
+            side_effect=[
+                SimpleNamespace(status=SimpleNamespace(state="PAUSING")),
+                SimpleNamespace(status=SimpleNamespace(state="PAUSED")),
+            ]
+        ),
     )
+    handle = opensandbox_provider.SandboxHandle("sandbox-paused", "opensandbox", raw)
 
     await provider.pause(handle)
 
-    assert raw.pause_calls == 1
-    assert raw.info_calls == 2
+    raw.pause.assert_awaited_once_with()
+    assert raw.get_info.await_count == 2
 
 
 async def test_pause_failure_is_not_retried() -> None:
-    class FakeRaw:
-        def __init__(self) -> None:
-            self.pause_calls = 0
-
-        async def pause(self) -> None:
-            self.pause_calls += 1
-            raise ConnectionError("pause request outcome is unknown")
-
-    provider = opensandbox_provider.OpenSandboxProvider(
-        connection={"request_timeout_s": 5, "keepalive_expiry_s": None},
-        operations={"retries": 5},
+    provider = opensandbox_provider.OpenSandboxProvider(operations={"retries": 5})
+    raw = SimpleNamespace(
+        pause=AsyncMock(side_effect=ConnectionError("pause request outcome is unknown")),
     )
-    raw = FakeRaw()
-    handle = opensandbox_provider.SandboxHandle(
-        sandbox_id="sandbox-paused",
-        provider_name="opensandbox",
-        raw=raw,
-    )
+    handle = opensandbox_provider.SandboxHandle("sandbox-paused", "opensandbox", raw)
 
     with pytest.raises(ConnectionError, match="outcome is unknown"):
         await provider.pause(handle)
 
-    assert raw.pause_calls == 1
+    raw.pause.assert_awaited_once_with()
 
 
 async def test_resume_rebuilds_the_sdk_handle_after_readiness(fake_opensandbox_sdk: None) -> None:
-    class FakeRaw:
-        def __init__(self) -> None:
-            self.closed = False
-
-        async def close(self) -> None:
-            self.closed = True
-
     FakeSandbox.resumed_args = ()
     FakeSandbox.resumed_kwargs = {}
     provider = opensandbox_provider.OpenSandboxProvider(
         connection={"request_timeout_s": 5, "keepalive_expiry_s": None},
         create={
-            "connect_attempt_timeout_s": 1,
             "connect_poll_s": 0.25,
             "skip_health_check": False,
         },
         operations={"pause_resume_timeout_s": 7},
     )
-    raw = FakeRaw()
-    handle = opensandbox_provider.SandboxHandle(
-        sandbox_id="sandbox-paused",
-        provider_name="opensandbox",
-        raw=raw,
-    )
+    raw = SimpleNamespace(close=AsyncMock())
+    handle = opensandbox_provider.SandboxHandle("sandbox-paused", "opensandbox", raw)
 
-    resumed = await provider.resume(handle)
+    await provider.resume(handle)
 
-    assert resumed.sandbox_id == handle.sandbox_id
-    assert resumed.raw is not raw
-    assert raw.closed is True
+    assert handle.raw is not raw
+    raw.close.assert_awaited_once_with()
     assert FakeSandbox.resumed_args == ("sandbox-paused",)
     assert FakeSandbox.resumed_kwargs["resume_timeout"] == timedelta(seconds=7)
     assert FakeSandbox.resumed_kwargs["health_check_polling_interval"] == timedelta(seconds=0.25)
     assert FakeSandbox.resumed_kwargs["skip_health_check"] is False
-    assert isinstance(FakeSandbox.resumed_kwargs["connection_config"], FakeConnectionConfig)
     assert FakeSandbox.resumed_kwargs["connection_config"].kwargs["request_timeout"] == timedelta(seconds=5)
 
 
 async def test_resume_failure_keeps_the_paused_handle(monkeypatch: pytest.MonkeyPatch) -> None:
-    class FailingResumeSandbox:
-        attempts = 0
-
-        @classmethod
-        async def resume(cls, *_args: Any, **_kwargs: Any) -> Any:
-            cls.attempts += 1
-            raise ConnectionError("resume request outcome is unknown")
-
-    class FakeRaw:
-        def __init__(self) -> None:
-            self.closed = False
-
-        async def close(self) -> None:
-            self.closed = True
-
+    resume = AsyncMock(side_effect=ConnectionError("resume request outcome is unknown"))
     monkeypatch.setattr(
         opensandbox_provider,
         "_require_opensandbox_sdk",
-        lambda: (FailingResumeSandbox, FakeConnectionConfig, object, FakePlatformSpec, FakeVolume),
+        lambda: (SimpleNamespace(resume=resume), FakeConnectionConfig, object, FakePlatformSpec, FakeVolume),
     )
     provider = opensandbox_provider.OpenSandboxProvider(
-        connection={"request_timeout_s": 5, "keepalive_expiry_s": None},
-        create={"connect_attempt_timeout_s": 1},
+        connection={"keepalive_expiry_s": None},
         operations={"retries": 5},
     )
-    raw = FakeRaw()
-    handle = opensandbox_provider.SandboxHandle(
-        sandbox_id="sandbox-paused",
-        provider_name="opensandbox",
-        raw=raw,
-    )
+    raw = SimpleNamespace(close=AsyncMock())
+    handle = opensandbox_provider.SandboxHandle("sandbox-paused", "opensandbox", raw)
 
     with pytest.raises(ConnectionError, match="outcome is unknown"):
         await provider.resume(handle)
 
-    assert FailingResumeSandbox.attempts == 1
-    assert raw.closed is False
+    assert resume.await_count == 1
+    raw.close.assert_not_awaited()
 
 
 @pytest.mark.asyncio

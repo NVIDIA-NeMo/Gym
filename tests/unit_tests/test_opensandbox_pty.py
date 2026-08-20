@@ -18,6 +18,7 @@ import json
 import struct
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import aiohttp
 import pytest
@@ -977,26 +978,20 @@ async def test_provider_pause_detaches_only_the_target_sandbox_pty_sessions(
     pytest.importorskip("opensandbox", reason="opensandbox SDK is not installed")
     from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
 
-    class FakeRaw:
-        def __init__(self, sandbox_id: str) -> None:
-            self.sandbox_id = sandbox_id
-
-        async def get_endpoint(self, port: int) -> SimpleNamespace:
-            return SimpleNamespace(endpoint=f"server/{self.sandbox_id}", headers={})
-
-        async def pause(self) -> None:
-            return None
-
-        async def get_info(self) -> SimpleNamespace:
-            return SimpleNamespace(status=SimpleNamespace(state="PAUSED"))
-
     provider = OpenSandboxProvider(connection={"domain": "server", "protocol": "http"})
     target_client = FakeHttpClient(ws=FakeWs([CONNECTED]))
     other_client = FakeHttpClient(ws=FakeWs([CONNECTED]))
     clients = iter([target_client, other_client])
     monkeypatch.setattr(provider, "_pty_http_client", lambda: next(clients))
-    target_handle = SandboxHandle(sandbox_id="sb-target", provider_name="opensandbox", raw=FakeRaw("sb-target"))
-    other_handle = SandboxHandle(sandbox_id="sb-other", provider_name="opensandbox", raw=FakeRaw("sb-other"))
+    endpoint = SimpleNamespace(endpoint="server/base", headers={})
+    target_raw = SimpleNamespace(
+        get_endpoint=AsyncMock(return_value=endpoint),
+        pause=AsyncMock(),
+        get_info=AsyncMock(return_value=SimpleNamespace(status=SimpleNamespace(state="PAUSED"))),
+    )
+    other_raw = SimpleNamespace(get_endpoint=AsyncMock(return_value=endpoint))
+    target_handle = SandboxHandle("sb-target", "opensandbox", target_raw)
+    other_handle = SandboxHandle("sb-other", "opensandbox", other_raw)
     target_session = await provider.create_pty(target_handle, SandboxPtySpec())
     other_session = await provider.create_pty(other_handle, SandboxPtySpec())
 
@@ -1005,10 +1000,9 @@ async def test_provider_pause_detaches_only_the_target_sandbox_pty_sessions(
     assert target_session.closed
     assert target_client.closed
     assert target_client.delete_calls == [], "pause must detach without ending the suspended process"
-    assert target_session not in provider._pty_sessions
     assert not other_session.closed
     assert not other_client.closed
-    assert other_session in provider._pty_sessions
+    assert provider._pty_sessions == {other_session}
     await provider.aclose()
 
 
