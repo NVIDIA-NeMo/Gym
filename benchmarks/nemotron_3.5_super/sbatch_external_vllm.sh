@@ -241,7 +241,7 @@ sbatch \
     --job-name=gym-$EXPERIMENT_NAME-$USER \
     --output=slurm-logs/%j-%x.log \
     --ntasks-per-node=1 \
-    --comment=$SLURM_COMMENT \
+    --comment="$SLURM_COMMENT" \
     --exclusive \
     --segment=$NUM_NODES \
     --wrap 'exec bash -lc "$VLLM_PD_BATCH_COMMAND"'
