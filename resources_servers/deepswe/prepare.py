@@ -16,6 +16,8 @@ from resources_servers.deepswe.task_store import (
     DEEPSWE_SOURCE_REVISION,
     REQUIRED_TASK_FILES,
     DeepSWETaskStore,
+    task_id,
+    task_image,
 )
 
 
@@ -91,13 +93,14 @@ def _write_jsonl(
         tasks = tasks[:limit]
     with output_path.open("w", encoding="utf-8") as stream:
         for task in tasks:
+            current_task_id = task_id(task)
             row = {
-                "task_id": task.task_id,
-                "image": task.image,
+                "task_id": current_task_id,
+                "image": task_image(task),
                 "responses_create_params": {
                     "input": [{"role": "user", "content": task.instruction}],
                 },
-                "verifier_metadata": {"task_id": task.task_id},
+                "verifier_metadata": {"task_id": current_task_id},
                 "subset": "deepswe-v1.1",
                 "split": "test",
             }

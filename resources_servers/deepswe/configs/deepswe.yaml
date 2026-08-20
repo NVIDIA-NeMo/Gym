@@ -14,10 +14,8 @@ deepswe_resources_server:
       sandbox_model_base_url: ${oc.env:NEMO_GYM_SANDBOX_MODEL_BASE_URL,null}
       sandbox_model_server_name: null
       sandbox_config:
-        resources:
-          cpu: 2
-          memory_mib: 8192
-          disk_gib: 20
+        ttl_s: 18000
+        ready_timeout_s: 1200
         metadata:
           benchmark: deepswe-v1-1
           istio.io/dataplane-mode: none

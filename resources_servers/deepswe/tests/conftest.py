@@ -15,6 +15,11 @@ def task_assets(tmp_path: Path) -> Path:
 
     (task_dir / "task.toml").write_text(
         """schema_version = "1.3"
+[task]
+name = "datacurve/example-task"
+description = ""
+authors = []
+keywords = []
 [metadata]
 task_id = "example-task"
 repository_url = "https://github.com/example/repo"
@@ -25,9 +30,9 @@ network_mode = "no-network"
 environment_mode = "separate"
 timeout_sec = 1800.0
 [verifier.environment]
-cpus = 2
-memory_mb = 8192
-storage_mb = 20480
+cpus = 3
+memory_mb = 12288
+storage_mb = 25600
 [[verifier.collect]]
 command = "cd /app && mkdir -p /logs/artifacts && git config --global --add safe.directory /app && git diff --binary 0123456789abcdef0123456789abcdef01234567 HEAD > /logs/artifacts/model.patch"
 timeout_sec = 300.0

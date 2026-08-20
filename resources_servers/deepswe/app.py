@@ -19,6 +19,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from fastapi import Request
+from pier.models.task.task import Task
 from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
@@ -34,7 +35,16 @@ from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import SESSION_ID_KEY, get_first_server_config_dict, is_nemo_gym_fastapi_entrypoint
-from resources_servers.deepswe.task_store import EXPECTED_TASK_COUNT, DeepSWETask, DeepSWETaskStore
+from resources_servers.deepswe.task_store import (
+    EXPECTED_TASK_COUNT,
+    DeepSWETaskStore,
+    task_collect_hook,
+    task_id,
+    task_image,
+    task_sandbox_resources,
+    task_solution_patch_path,
+    task_verifier_files,
+)
 
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -149,11 +159,11 @@ def _resolve_task_id(body: DeepSWEInstanceRequest) -> str:
     return task_id
 
 
-def _resolve_task(body: DeepSWEInstanceRequest, task_store: DeepSWETaskStore) -> DeepSWETask:
-    task_id = _resolve_task_id(body)
-    task = task_store.get(task_id)
-    if body.image != task.image:
-        raise ValueError(f"DeepSWE request image does not match the pinned image for task {task_id!r}")
+def _resolve_task(body: DeepSWEInstanceRequest, task_store: DeepSWETaskStore) -> Task:
+    requested_task_id = _resolve_task_id(body)
+    task = task_store.get(requested_task_id)
+    if body.image != task_image(task):
+        raise ValueError(f"DeepSWE request image does not match the pinned image for task {requested_task_id!r}")
     return task
 
 
@@ -212,19 +222,16 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             )
         return target
 
-    async def _create_sandbox(self, task: DeepSWETask, *, phase: str) -> AsyncSandbox:
+    async def _create_sandbox(self, task: Task, *, phase: str) -> AsyncSandbox:
         global_config = get_global_config_dict()
         provider = resolve_provider_config(self.config.sandbox_provider, global_config)
         provider_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config)
 
-        resources = {
-            "cpu": task.cpu,
-            "memory_mib": task.memory_mib,
-            "disk_gib": task.disk_gib,
-        }
+        current_task_id = task_id(task)
+        resources = task_sandbox_resources(task, phase=phase)
         resources.update(self.config.sandbox_config.get("resources", {}))
         spec = SandboxSpec(
-            image=task.image,
+            image=task_image(task),
             ttl_s=self.config.sandbox_config.get("ttl_s"),
             ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s"),
             workdir="/app",
@@ -234,7 +241,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             | dict(self.config.sandbox_config.get("metadata", {}))
             | {
                 "benchmark": "deepswe-v1-1",
-                "deepswe-task": task.task_id[:63],
+                "deepswe-task": current_task_id[:63],
                 "deepswe-phase": phase,
                 "nemo_gym_agent": self.config.name or "deepswe",
             },
@@ -251,8 +258,9 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
         except Exception:
             print(f"Failed to stop DeepSWE {phase} sandbox for {task_id}: {format_exc()}", file=sys.stderr)
 
-    async def _collect_model_patch(self, sandbox: AsyncSandbox, task: DeepSWETask) -> bytes:
-        result = await sandbox.exec(task.collect_command, timeout_s=task.collect_timeout_s)
+    async def _collect_model_patch(self, sandbox: AsyncSandbox, task: Task) -> bytes:
+        collect = task_collect_hook(task)
+        result = await sandbox.exec(collect.command, timeout_s=collect.timeout_sec)
         if result.return_code != 0:
             details = ((result.stderr or "") + (result.stdout or "")).strip()
             raise RuntimeError(f"DeepSWE collect hook exited with code {result.return_code}: {details[-4000:]}")
@@ -262,7 +270,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             await sandbox.download("/logs/artifacts/model.patch", local_patch_path)
             return local_patch_path.read_bytes()
 
-    async def _stage_verifier(self, sandbox: AsyncSandbox, task: DeepSWETask, model_patch: bytes) -> None:
+    async def _stage_verifier(self, sandbox: AsyncSandbox, task: Task, model_patch: bytes) -> None:
         mkdir_result = await sandbox.exec(
             "mkdir -p /tests /logs/artifacts /logs/verifier",
             timeout_s=60,
@@ -271,7 +279,8 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             raise RuntimeError(f"Failed to create DeepSWE verifier directories: {mkdir_result.stderr or ''}")
 
         uploads = [
-            sandbox.upload(local_path, f"/tests/{filename}") for filename, local_path in task.verifier_files.items()
+            sandbox.upload(local_path, f"/tests/{filename}")
+            for filename, local_path in task_verifier_files(task).items()
         ]
         with tempfile.TemporaryDirectory(prefix="nemo-gym-deepswe-patch-") as temporary_dir:
             patch_path = Path(temporary_dir) / "model.patch"
@@ -293,7 +302,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
     async def _run_verifier(
         self,
         sandbox: AsyncSandbox,
-        task: DeepSWETask,
+        task: Task,
         model_patch: bytes,
         log_dir: Path,
     ) -> VerifierResult:
@@ -302,13 +311,13 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             command_result = await sandbox.exec(
                 "bash /tests/test.sh",
                 cwd="/app",
-                timeout_s=task.verifier_timeout_s,
+                timeout_s=task.config.verifier.timeout_sec,
             )
         except TimeoutError:
             return VerifierResult(
                 evaluation_completed=False,
                 reward=0.0,
-                verifier_error=f"Verifier timed out after {task.verifier_timeout_s:g} seconds",
+                verifier_error=f"Verifier timed out after {task.config.verifier.timeout_sec:g} seconds",
             )
 
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -390,14 +399,16 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
         sandbox: AsyncSandbox | None = None
         try:
             sandbox = await self._create_sandbox(task, phase="agent")
+            current_task_id = task_id(task)
+            current_task_image = task_image(task)
             descriptor = await sandbox.serialize()
             sandbox_handle = descriptor.get("sandbox_id") if isinstance(descriptor, dict) else None
             if not isinstance(sandbox_handle, str) or not sandbox_handle:
                 raise RuntimeError("DeepSWE sandbox provider did not return a sandbox_id")
             sandbox_descriptor = dict(descriptor)
             self._agent_sessions[session_id] = AgentSandboxSession(
-                task_id=task.task_id,
-                image=task.image,
+                task_id=current_task_id,
+                image=current_task_image,
                 sandbox=sandbox,
                 sandbox_handle=sandbox_handle,
                 sandbox_descriptor=sandbox_descriptor,
@@ -408,18 +419,20 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             )
         except Exception:
             if sandbox is not None:
-                await self._stop_sandbox(sandbox, task_id=task.task_id, phase="failed-agent-seed")
+                await self._stop_sandbox(sandbox, task_id=task_id(task), phase="failed-agent-seed")
             raise
 
     async def verify(self, request: Request, body: DeepSWEVerifyRequest) -> DeepSWEVerifyResponse:
         task = _resolve_task(body, self._task_store)
+        current_task_id = task_id(task)
+        current_task_image = task_image(task)
         session_id = str(request.session.get(SESSION_ID_KEY, "golden"))
         sandbox_handle = body.sandbox_handle
         patch_collection_time_s = 0.0
         patch_error: str | None = None
 
         if self.config.is_verifying_golden_patch:
-            model_patch = task.solution_patch_path.read_bytes()
+            model_patch = task_solution_patch_path(task).read_bytes()
         else:
             model_patch = b""
             agent_session = self._agent_sessions.pop(session_id, None)
@@ -429,24 +442,29 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 sandbox_handle = agent_session.sandbox_handle
                 started = monotonic()
                 try:
-                    if agent_session.task_id != task.task_id:
+                    if agent_session.task_id != current_task_id:
                         raise RuntimeError(
-                            f"DeepSWE session task {agent_session.task_id!r} does not match verify task {task.task_id!r}"
+                            f"DeepSWE session task {agent_session.task_id!r} does not match verify task "
+                            f"{current_task_id!r}"
                         )
-                    if agent_session.image != task.image:
+                    if agent_session.image != current_task_image:
                         raise RuntimeError(
-                            f"DeepSWE session image {agent_session.image!r} does not match verify image {task.image!r}"
+                            f"DeepSWE session image {agent_session.image!r} does not match verify image "
+                            f"{current_task_image!r}"
                         )
                     model_patch = await self._collect_model_patch(agent_session.sandbox, task)
                 except Exception as error:
-                    print(f"Failed to collect DeepSWE model patch for {task.task_id}: {format_exc()}", file=sys.stderr)
+                    print(
+                        f"Failed to collect DeepSWE model patch for {current_task_id}: {format_exc()}",
+                        file=sys.stderr,
+                    )
                     patch_error = f"{type(error).__name__}: {error}"
                 finally:
                     patch_collection_time_s = monotonic() - started
-                    await self._stop_sandbox(agent_session.sandbox, task_id=task.task_id, phase="agent")
+                    await self._stop_sandbox(agent_session.sandbox, task_id=current_task_id, phase="agent")
 
         patch_sha256 = hashlib.sha256(model_patch).hexdigest()
-        log_dir = _resolve_repo_path(self.config.logs_dir) / task.task_id / session_id
+        log_dir = _resolve_repo_path(self.config.logs_dir) / current_task_id / session_id
 
         sandbox: AsyncSandbox | None = None
         sandbox_start_time_s = 0.0
@@ -462,7 +480,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 result = await self._run_verifier(sandbox, task, model_patch, log_dir)
                 verification_time_s = monotonic() - started
             except Exception as error:
-                print(f"DeepSWE verifier failed for {task.task_id}: {format_exc()}", file=sys.stderr)
+                print(f"DeepSWE verifier failed for {current_task_id}: {format_exc()}", file=sys.stderr)
                 result = VerifierResult(
                     evaluation_completed=False,
                     reward=0.0,
@@ -470,7 +488,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 )
             finally:
                 if sandbox is not None:
-                    await self._stop_sandbox(sandbox, task_id=task.task_id, phase="verifier")
+                    await self._stop_sandbox(sandbox, task_id=current_task_id, phase="verifier")
 
         if self.config.clear_verifier_logs and result.evaluation_completed:
             for path in log_dir.glob("*"):
@@ -481,7 +499,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             body.model_dump()
             | {
                 "reward": result.reward,
-                "task_id": task.task_id,
+                "task_id": current_task_id,
                 "sandbox_handle": sandbox_handle,
                 "evaluation_completed": result.evaluation_completed,
                 "apply_failed": result.apply_failed,

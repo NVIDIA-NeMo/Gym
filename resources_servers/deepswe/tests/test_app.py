@@ -7,6 +7,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pytest import MonkeyPatch
 
+import resources_servers.deepswe.app as app_module
+from nemo_gym.sandbox import SandboxResources
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.deepswe.app import (
     DeepSWEResourcesServer,
@@ -17,6 +19,7 @@ from resources_servers.deepswe.app import (
     _resolve_task,
     _resolve_task_id,
 )
+from resources_servers.deepswe.task_store import task_collect_hook, task_id, task_image
 
 
 UPSTREAM_IMAGE = "public.example/project/example-task:v1.1"
@@ -105,6 +108,37 @@ def test_network_policy_is_scoped_to_agent_sandbox(task_assets: Path, tmp_path: 
     assert server._provider_options(phase="verifier") == {}
 
 
+@pytest.mark.parametrize(
+    ("phase", "expected_resources"),
+    [
+        ("agent", SandboxResources(cpu=2, memory_mib=8192, disk_gib=20)),
+        ("verifier", SandboxResources(cpu=3, memory_mib=12288, disk_gib=25)),
+    ],
+)
+async def test_create_sandbox_uses_phase_limits_from_task_toml(
+    task_assets: Path,
+    monkeypatch: MonkeyPatch,
+    phase: str,
+    expected_resources: SandboxResources,
+) -> None:
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    sandbox = AsyncMock()
+    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
+    monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
+    monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
+
+    created = await server._create_sandbox(server._task_store.get("example-task"), phase=phase)
+
+    assert created is sandbox
+    spec = sandbox.start.await_args.args[0]
+    assert spec.resources == expected_resources
+    assert spec.image == UPSTREAM_IMAGE
+
+
 async def test_golden_verify_passes_structured_result(
     task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
@@ -142,7 +176,7 @@ async def test_golden_verify_passes_structured_result(
     assert body["reward"] == 1.0
     assert body["f2p_passed"] == body["f2p_total"] == 2
     assert body["model_patch"] == "golden patch\n"
-    assert create_sandbox.await_args.args[0].image == UPSTREAM_IMAGE
+    assert task_image(create_sandbox.await_args.args[0]) == UPSTREAM_IMAGE
     assert create_sandbox.await_args.kwargs == {"phase": "golden-verifier"}
     fake_sandbox.stop.assert_awaited_once()
 
@@ -174,9 +208,9 @@ async def test_rollout_collects_committed_patch_and_verifies_in_fresh_sandbox(
     assert seed.sandbox_handle == "agent-sandbox"
     assert seed.sandbox_descriptor == {"sandbox_id": "agent-sandbox", "workdir": "/app"}
     captured_task = collect_model_patch.await_args.args[1]
-    assert captured_task.image == UPSTREAM_IMAGE
+    assert task_image(captured_task) == UPSTREAM_IMAGE
     assert collect_model_patch.await_args.args == (agent_sandbox, captured_task)
-    assert [call.args[0].image for call in server._create_sandbox.await_args_list] == [
+    assert [task_image(call.args[0]) for call in server._create_sandbox.await_args_list] == [
         UPSTREAM_IMAGE,
         UPSTREAM_IMAGE,
     ]
@@ -207,8 +241,9 @@ async def test_collect_model_patch_executes_upstream_hook(task_assets: Path) -> 
     model_patch = await server._collect_model_patch(sandbox, task)
 
     assert model_patch == expected_patch
-    sandbox.exec.assert_awaited_once_with(task.collect_command, timeout_s=task.collect_timeout_s)
-    assert task.collect_command.endswith(
+    collect = task_collect_hook(task)
+    sandbox.exec.assert_awaited_once_with(collect.command, timeout_s=collect.timeout_sec)
+    assert collect.command.endswith(
         "git diff --binary 0123456789abcdef0123456789abcdef01234567 HEAD > /logs/artifacts/model.patch"
     )
 
@@ -275,8 +310,8 @@ def test_request_image_matches_pinned_task_image(task_assets: Path) -> None:
 
     task = _resolve_task(DeepSWEVerifyRequest.model_validate(_request()), server._task_store)
 
-    assert task.task_id == "example-task"
-    assert task.image == UPSTREAM_IMAGE
+    assert task_id(task) == "example-task"
+    assert task_image(task) == UPSTREAM_IMAGE
 
 
 def test_request_image_must_match_pinned_task_image(task_assets: Path) -> None:

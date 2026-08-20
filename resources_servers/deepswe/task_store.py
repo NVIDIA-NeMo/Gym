@@ -1,15 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Validated DeepSWE v1.1 task metadata and verifier assets."""
+"""DeepSWE-specific validation and lookup around Pier's upstream task model."""
 
 from __future__ import annotations
 
 import math
-import tomllib
-from dataclasses import dataclass
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+
+from pier.models.task.config import (
+    MAIN_SERVICE_NAME,
+    NetworkMode,
+    VerifierCollectConfig,
+    VerifierEnvironmentMode,
+)
+from pier.models.task.task import Task
+from pier.models.task.verifier_mode import resolve_effective_verifier_env_config
 
 
 EXPECTED_TASK_COUNT = 113
@@ -25,127 +32,135 @@ REQUIRED_TASK_FILES = (
 )
 
 
-@dataclass(frozen=True)
-class DeepSWETask:
-    """One authoritative task definition, kept entirely on the control plane."""
+def task_id(task: Task) -> str:
+    """Return the DeepSWE task ID carried by Pier's validated metadata."""
 
-    task_id: str
-    task_dir: Path
-    image: str
-    instruction: str
-    repository_url: str
-    base_commit: str
-    language: str
-    verifier_timeout_s: float
-    collect_command: str
-    collect_timeout_s: float
-    agent_timeout_s: float
-    cpu: float
-    memory_mib: int
-    disk_gib: int
-
-    @property
-    def verifier_files(self) -> dict[str, Path]:
-        return {
-            "test.sh": self.task_dir / "tests" / "test.sh",
-            "test.patch": self.task_dir / "tests" / "test.patch",
-            "grader.py": self.task_dir / "tests" / "grader.py",
-            "config.json": self.task_dir / "tests" / "config.json",
-        }
-
-    @property
-    def solution_patch_path(self) -> Path:
-        return self.task_dir / "solution" / "solution.patch"
-
-
-def _required_mapping(value: Any, *, field: str, task_id: str) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise ValueError(f"DeepSWE task {task_id!r} must define a [{field}] table")
+    value = task.config.metadata.get("task_id")
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"Pier task {task.task_dir.name!r} is missing metadata.task_id")
     return value
 
 
-def _load_task(task_dir: Path) -> DeepSWETask:
-    task_toml_path = task_dir / "task.toml"
-    with task_toml_path.open("rb") as stream:
-        raw = tomllib.load(stream)
+def task_image(task: Task) -> str:
+    """Return the immutable agent image declared by the upstream task."""
 
-    metadata = _required_mapping(raw.get("metadata"), field="metadata", task_id=task_dir.name)
-    task_id = str(metadata.get("task_id") or "")
-    if task_id != task_dir.name:
-        raise ValueError(f"DeepSWE task directory {task_dir.name!r} disagrees with metadata.task_id {task_id!r}")
+    value = task.config.environment.docker_image
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"DeepSWE task {task_id(task)!r} is missing environment.docker_image")
+    return value
 
-    missing = [relative_path for relative_path in REQUIRED_TASK_FILES if not (task_dir / relative_path).is_file()]
+
+def task_collect_hook(task: Task) -> VerifierCollectConfig:
+    """Return the single upstream commit-only verifier collect hook."""
+
+    hooks = task.config.verifier.collect
+    if len(hooks) != 1:
+        raise ValueError(f"DeepSWE task {task_id(task)!r} must define exactly one [[verifier.collect]] hook")
+    return hooks[0]
+
+
+def task_sandbox_resources(task: Task, *, phase: str) -> dict[str, float | int]:
+    """Resolve Pier's phase-specific task resources into a Gym sandbox request."""
+
+    if phase == "agent":
+        environment = task.config.environment
+    elif phase in {"verifier", "golden-verifier"}:
+        environment = resolve_effective_verifier_env_config(task.config, None)
+        if environment is None:
+            raise ValueError(f"DeepSWE task {task_id(task)!r} must use a separate verifier environment")
+    else:
+        raise ValueError(f"Unknown DeepSWE sandbox phase: {phase!r}")
+
+    cpu = environment.cpus
+    memory_mib = environment.memory_mb
+    storage_mib = environment.storage_mb
+    if cpu is None or cpu <= 0 or memory_mib is None or memory_mib <= 0 or storage_mib <= 0:
+        raise ValueError(f"DeepSWE task {task_id(task)!r} has invalid {phase} sandbox resource limits")
+    return {
+        "cpu": cpu,
+        "memory_mib": memory_mib,
+        "disk_gib": math.ceil(storage_mib / 1024),
+    }
+
+
+def task_verifier_files(task: Task) -> dict[str, Path]:
+    """Return the held-out files staged into the fresh verifier sandbox."""
+
+    return {
+        "test.sh": task.paths.tests_dir / "test.sh",
+        "test.patch": task.paths.tests_dir / "test.patch",
+        "grader.py": task.paths.tests_dir / "grader.py",
+        "config.json": task.paths.tests_dir / "config.json",
+    }
+
+
+def task_solution_patch_path(task: Task) -> Path:
+    """Return the held-out oracle patch path."""
+
+    return task.paths.solution_dir / "solution.patch"
+
+
+def _validate_deepswe_task(task: Task, *, directory_name: str) -> None:
+    """Enforce the fixed DeepSWE v1.1 contract beyond Pier's generic schema."""
+
+    current_task_id = task_id(task)
+    if current_task_id != directory_name:
+        raise ValueError(
+            f"DeepSWE task directory {directory_name!r} disagrees with metadata.task_id {current_task_id!r}"
+        )
+
+    missing = [relative_path for relative_path in REQUIRED_TASK_FILES if not (task.task_dir / relative_path).is_file()]
     if missing:
-        raise FileNotFoundError(f"DeepSWE task {task_id!r} is missing required files: {', '.join(missing)}")
-    symlinks = [relative_path for relative_path in REQUIRED_TASK_FILES if (task_dir / relative_path).is_symlink()]
+        raise FileNotFoundError(f"DeepSWE task {current_task_id!r} is missing required files: {', '.join(missing)}")
+    symlinks = [relative_path for relative_path in REQUIRED_TASK_FILES if (task.task_dir / relative_path).is_symlink()]
     if symlinks:
-        raise ValueError(f"DeepSWE task {task_id!r} contains unsupported symlink assets: {', '.join(symlinks)}")
+        raise ValueError(
+            f"DeepSWE task {current_task_id!r} contains unsupported symlink assets: {', '.join(symlinks)}"
+        )
 
-    verifier = _required_mapping(raw.get("verifier"), field="verifier", task_id=task_id)
-    agent = _required_mapping(raw.get("agent"), field="agent", task_id=task_id)
-    environment = _required_mapping(raw.get("environment"), field="environment", task_id=task_id)
-    verifier_environment = _required_mapping(
-        verifier.get("environment"), field="verifier.environment", task_id=task_id
-    )
-    collect_hooks = verifier.get("collect")
-    if not isinstance(collect_hooks, list) or len(collect_hooks) != 1:
-        raise ValueError(f"DeepSWE task {task_id!r} must define exactly one [[verifier.collect]] hook")
-    collect = _required_mapping(collect_hooks[0], field="verifier.collect", task_id=task_id)
+    config = task.config
+    if config.schema_version != "1.3":
+        raise ValueError(f"DeepSWE task {current_task_id!r} must use schema_version 1.3")
+    if task.has_steps:
+        raise ValueError(f"DeepSWE task {current_task_id!r} must be a single-step task")
+    if config.verifier.environment_mode != VerifierEnvironmentMode.SEPARATE:
+        raise ValueError(f"DeepSWE task {current_task_id!r} must use a separate verifier environment")
+    if config.verifier.network_mode != NetworkMode.NO_NETWORK or config.agent.network_mode != NetworkMode.NO_NETWORK:
+        raise ValueError(f"DeepSWE task {current_task_id!r} must disable agent and verifier internet access")
 
-    if raw.get("schema_version") != "1.3":
-        raise ValueError(f"DeepSWE task {task_id!r} must use schema_version 1.3")
-    if verifier.get("environment_mode") != "separate":
-        raise ValueError(f"DeepSWE task {task_id!r} must use a separate verifier environment")
-    if verifier.get("network_mode") != "no-network" or agent.get("network_mode") != "no-network":
-        raise ValueError(f"DeepSWE task {task_id!r} must disable agent and verifier internet access")
+    base_commit = config.metadata.get("base_commit_hash")
+    repository_url = config.metadata.get("repository_url")
+    language = config.metadata.get("language")
+    if (
+        not isinstance(base_commit, str)
+        or not 7 <= len(base_commit) <= 40
+        or any(character not in "0123456789abcdef" for character in base_commit)
+    ):
+        raise ValueError(f"DeepSWE task {current_task_id!r} has an invalid base commit: {base_commit!r}")
+    if not isinstance(repository_url, str) or not repository_url or not isinstance(language, str) or not language:
+        raise ValueError(f"DeepSWE task {current_task_id!r} is missing repository_url or language")
 
-    base_commit = str(metadata.get("base_commit_hash") or "")
-    repository_url = str(metadata.get("repository_url") or "")
-    language = str(metadata.get("language") or "")
-    if not 7 <= len(base_commit) <= 40 or any(character not in "0123456789abcdef" for character in base_commit):
-        raise ValueError(f"DeepSWE task {task_id!r} has an invalid base commit: {base_commit!r}")
-    if not repository_url or not language:
-        raise ValueError(f"DeepSWE task {task_id!r} is missing repository_url or language")
-    collect_command = str(collect.get("command") or "")
+    collect = task_collect_hook(task)
     expected_collect_command = (
         "cd /app && mkdir -p /logs/artifacts && git config --global --add safe.directory /app "
         f"&& git diff --binary {base_commit} HEAD > /logs/artifacts/model.patch"
     )
-    if collect_command != expected_collect_command:
-        raise ValueError(f"DeepSWE task {task_id!r} has an unexpected verifier collect command")
-    collect_timeout_s = float(collect.get("timeout_sec", 0))
-    if collect_timeout_s <= 0:
-        raise ValueError(f"DeepSWE task {task_id!r} has an invalid verifier collect timeout")
-    selected_image = str(environment.get("docker_image") or "")
-    if not selected_image:
-        raise ValueError(f"DeepSWE task {task_id!r} is missing environment.docker_image")
+    if collect.service != MAIN_SERVICE_NAME or collect.command != expected_collect_command:
+        raise ValueError(f"DeepSWE task {current_task_id!r} has an unexpected verifier collect hook")
+    if collect.timeout_sec <= 0:
+        raise ValueError(f"DeepSWE task {current_task_id!r} has an invalid verifier collect timeout")
+    if config.verifier.timeout_sec <= 0:
+        raise ValueError(f"DeepSWE task {current_task_id!r} has an invalid verifier timeout")
+    if config.agent.timeout_sec is None or config.agent.timeout_sec <= 0:
+        raise ValueError(f"DeepSWE task {current_task_id!r} has an invalid agent timeout")
 
-    cpu = float(verifier_environment.get("cpus", environment.get("cpus", 0)))
-    memory_mib = int(verifier_environment.get("memory_mb", environment.get("memory_mb", 0)))
-    storage_mb = int(verifier_environment.get("storage_mb", environment.get("storage_mb", 0)))
-    if cpu <= 0 or memory_mib <= 0 or storage_mb <= 0:
-        raise ValueError(f"DeepSWE task {task_id!r} has invalid sandbox resource limits")
-
-    return DeepSWETask(
-        task_id=task_id,
-        task_dir=task_dir,
-        image=selected_image,
-        instruction=(task_dir / "instruction.md").read_text(encoding="utf-8"),
-        repository_url=repository_url,
-        base_commit=base_commit,
-        language=language,
-        verifier_timeout_s=float(verifier.get("timeout_sec", 1800)),
-        collect_command=collect_command,
-        collect_timeout_s=collect_timeout_s,
-        agent_timeout_s=float(agent.get("timeout_sec", 5400)),
-        cpu=cpu,
-        memory_mib=memory_mib,
-        disk_gib=math.ceil(storage_mb / 1024),
-    )
+    task_image(task)
+    task_sandbox_resources(task, phase="agent")
+    task_sandbox_resources(task, phase="verifier")
 
 
 class DeepSWETaskStore:
-    """Immutable, exhaustively validated DeepSWE task lookup."""
+    """Immutable ID index over upstream ``pier.models.task.Task`` objects."""
 
     def __init__(
         self,
@@ -163,20 +178,23 @@ class DeepSWETaskStore:
                 f"Expected {expected_task_count} DeepSWE tasks in {self.tasks_dir}, found {len(task_dirs)}"
             )
 
-        self._tasks = {task_dir.name: _load_task(task_dir) for task_dir in task_dirs}
+        tasks = [Task(task_dir) for task_dir in task_dirs]
+        for task, task_dir in zip(tasks, task_dirs, strict=True):
+            _validate_deepswe_task(task, directory_name=task_dir.name)
+        self._tasks = {task_id(task): task for task in tasks}
 
     def __len__(self) -> int:
         return len(self._tasks)
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[Task]:
         return iter(self._tasks.values())
 
     @property
     def task_ids(self) -> tuple[str, ...]:
         return tuple(self._tasks)
 
-    def get(self, task_id: str) -> DeepSWETask:
+    def get(self, current_task_id: str) -> Task:
         try:
-            return self._tasks[task_id]
+            return self._tasks[current_task_id]
         except KeyError as error:
-            raise KeyError(f"Unknown DeepSWE task id: {task_id!r}") from error
+            raise KeyError(f"Unknown DeepSWE task id: {current_task_id!r}") from error

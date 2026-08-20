@@ -15,6 +15,7 @@ opencode_sandboxed_agent_deepswe:
   _inherit_from: opencode_sandboxed_agent
   responses_api_agents:
     opencode_sandboxed_agent:
+      sandbox_timeout: 10800  # DeepSWE agent timeout override: 3 hours.
       remote_opencode_install_script_path: /mnt/s3-data/data/bxyu/opencode/install.sh
       remote_opencode_binary_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64
       resources_server:

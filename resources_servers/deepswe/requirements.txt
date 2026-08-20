@@ -1,1 +1,2 @@
 -e nemo-gym[dev,sandbox] @ ../..
+datacurve-pier==0.3.1
