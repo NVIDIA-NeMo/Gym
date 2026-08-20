@@ -32,7 +32,6 @@ import orjson
 from omegaconf import OmegaConf
 from pydantic import BaseModel, Field, field_validator, model_validator
 from tqdm.asyncio import tqdm
-from wandb import Table
 
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
@@ -41,7 +40,14 @@ from nemo_gym.base_responses_api_model import (
     merge_model_call_capture_into_record,
     model_call_capture_dirs_from_config,
 )
-from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig, ConfigError, ConfigPathNotFoundError
+from nemo_gym.config_types import (
+    BaseNeMoGymCLIConfig,
+    BaseServerConfig,
+    ConfigError,
+    ConfigPathNotFoundError,
+    UploadRolloutsConfigMixin,
+)
+from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
@@ -50,7 +56,6 @@ from nemo_gym.global_config import (
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     get_global_config_dict,
-    get_wandb_run,
 )
 from nemo_gym.path_utils import failures_path_for
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
@@ -306,8 +311,8 @@ def _strip_capture_payloads(result: dict[str, Any]) -> None:
                 call.pop(key, None)
 
 
-def _rollout_for_wandb(result: dict[str, Any]) -> dict[str, Any]:
-    """Return a W&B view without the complete trajectory or raw capture payloads."""
+def _rollout_for_export(result: dict[str, Any]) -> dict[str, Any]:
+    """Return an exporter view without the complete trajectory or raw capture payloads."""
     sanitized = dict(result)
     sanitized.pop(NG_TRAJECTORY_KEY, None)
     sanitized.pop("ng_model_call_capture", None)
@@ -380,7 +385,7 @@ def _get_max_rollout_attempts() -> int:
         return _DEFAULT_MAX_ROLLOUT_ATTEMPTS
 
 
-class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
+class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
     num_samples_in_parallel: Optional[int] = Field(
         default=None, description="Limit the number of concurrent samples running at once."
@@ -388,10 +393,6 @@ class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
     responses_create_params: Dict[str, Any] = Field(
         default_factory=dict,
         description="Overrides for the responses_create_params e.g. temperature, max_output_tokens, etc.",
-    )
-    upload_rollouts_to_wandb: bool = Field(
-        default=True,
-        description="Upload the rollouts to W&B. Sometimes this should be off because the rollouts are massive. Default: True",
     )
     disable_aggregation: bool = Field(
         default=False,
@@ -767,7 +768,6 @@ class RolloutCollectionHelper(BaseModel):
 
             rows: List[Dict] = []
             results: List[Dict] = []
-            result_strs: List[List[str]] = []
             persisted_rows: List[Dict] = []
             persisted_results: List[Dict] = []
 
@@ -889,11 +889,9 @@ class RolloutCollectionHelper(BaseModel):
         results_file.close()
         failures_file.close()
 
-        if config.upload_rollouts_to_wandb and (wandb_run := get_wandb_run()):  # pragma: no cover
-            print("Uploading rollouts to W&B. This may take a few minutes if your data is large.")
-            result_strs = [[orjson.dumps(_rollout_for_wandb(result))] for result in results]
-            wandb_run.log({"Rollouts": Table(data=result_strs, columns=["Rollout"])})
-        del result_strs
+        if config.upload_rollouts and get_exporters():  # pragma: no cover
+            print("Uploading rollouts. This may take a few minutes if your data is large.")
+            export_rollouts([_rollout_for_export(result) for result in results])
 
         print("Sorting results to ensure consistent ordering")
         rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
@@ -1014,8 +1012,7 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
                 }
             )
 
-        if get_wandb_run():  # pragma: no cover
-            get_wandb_run().log(metrics_to_log)
+        export_metrics(metrics_to_log)
 
         # Write single file with all agents
         metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
