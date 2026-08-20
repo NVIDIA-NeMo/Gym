@@ -40,7 +40,6 @@ from nemo_gym.base_responses_api_model import (
 from nemo_gym.config_types import BaseServerConfig
 from nemo_gym.rollout_correlation import (
     maybe_rollout_id_from_run_body,
-    rollout_context,
 )
 from nemo_gym.server_utils import ServerClient, get_response_json
 
