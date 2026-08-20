@@ -261,6 +261,12 @@ def test_test_template_runs_cpu_or_gpu_script_in_container() -> None:
     assert 'docker pull "$CONTAINER_IMAGE"' in action
     assert '--volume "$TEST_DATA_PATH:$TEST_DATA_PATH"' in action
     assert '-e -u -o pipefail "$TEST_SCRIPT"' in action
+    assert "continue-on-error: true" in action
+    assert "      if: always()" in action
+    assert "TEST_OUTCOME: ${{ steps.test.outcome }}" in action
+    assert 'echo "::notice title=Test result::$TEST_SCRIPT — PASSED"' in action
+    assert 'echo "::error title=Test result::$TEST_SCRIPT — FAILED"' in action
+    assert '} >> "$GITHUB_STEP_SUMMARY"' in action
     assert action.count("required: true") == 4
 
 

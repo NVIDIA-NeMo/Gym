@@ -34,6 +34,8 @@ runs:
   using: composite
   steps:
     - name: Run test
+      id: test
+      continue-on-error: true
       shell: bash -e -u -o pipefail {0}
       env:
         CONTAINER_IMAGE: ${{ inputs.container-image }}
@@ -54,6 +56,12 @@ runs:
             ;;
         esac
 
+        printf '\033[1;34m============================================================\n'
+        printf '  Running: %s\n' "$TEST_SCRIPT"
+        printf '  Type:    %s\n' "$TEST_TYPE"
+        printf '  Image:   %s\n' "$CONTAINER_IMAGE"
+        printf '============================================================\033[0m\n'
+
         docker pull "$CONTAINER_IMAGE"
         docker run --rm \
           "${gpu_args[@]}" \
@@ -63,3 +71,43 @@ runs:
           --entrypoint bash \
           "$CONTAINER_IMAGE" \
           -e -u -o pipefail "$TEST_SCRIPT"
+
+    - name: Report result
+      if: always()
+      shell: bash -e -u -o pipefail {0}
+      env:
+        CONTAINER_IMAGE: ${{ inputs.container-image }}
+        TEST_OUTCOME: ${{ steps.test.outcome }}
+        TEST_SCRIPT: ${{ inputs.script }}
+        TEST_TYPE: ${{ inputs.test-type }}
+      run: |
+        if [[ "$TEST_OUTCOME" == "success" ]]; then
+          status="PASSED"
+          color='\033[1;32m'
+          symbol="✅"
+        else
+          status="FAILED"
+          color='\033[1;31m'
+          symbol="❌"
+        fi
+
+        printf '%b============================================================\n' "$color"
+        printf '  %s: %s\n' "$status" "$TEST_SCRIPT"
+        printf '============================================================\033[0m\n'
+
+        {
+          echo "### $symbol $TEST_SCRIPT — $status"
+          echo ""
+          echo "| Field | Value |"
+          echo "|---|---|"
+          echo "| Type | \`$TEST_TYPE\` |"
+          echo "| Image | \`$CONTAINER_IMAGE\` |"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        if [[ "$TEST_OUTCOME" == "success" ]]; then
+          echo "::notice title=Test result::$TEST_SCRIPT — PASSED"
+          exit 0
+        fi
+
+        echo "::error title=Test result::$TEST_SCRIPT — FAILED"
+        exit 1
