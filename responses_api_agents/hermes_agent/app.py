@@ -30,11 +30,7 @@ from fastapi import Request
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import (
-    BaseResponsesAPIAgentConfig,
-    Body,
-    SimpleResponsesAPIAgent,
-)
+from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -164,6 +160,7 @@ class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     model: Optional[str] = None
     concurrency: int = 32
     max_turns: int = 90
+    max_tokens: Optional[int] = None
     enabled_toolsets: Optional[list[str]] = None
     disabled_toolsets: Optional[list[str]] = None
     temperature: float | None = None
@@ -296,6 +293,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             temperature=self.config.temperature,
             insert_reasoning=True,
             max_iterations=self.config.max_turns,
+            max_tokens=self.config.max_tokens,
             enabled_toolsets=self.config.enabled_toolsets,
             disabled_toolsets=self.config.disabled_toolsets,
             quiet_mode=True,

@@ -9,5 +9,6 @@ policy_model:
       uses_reasoning_parser: true
       uses_interleaved_reasoning: true
       chat_template_kwargs: null
+      sampling_overrides: null
       extra_body: null
       default_headers: {}
