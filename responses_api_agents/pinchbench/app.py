@@ -38,6 +38,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.failure_routing import build_failure_result, minimal_failure_response
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -52,7 +53,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
-from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
 from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, get_provider_class
 from responses_api_agents.openclaw_agent.app import openclaw_session_conversation
@@ -737,23 +737,12 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
 
     def _empty_response(self, task_id: str) -> NeMoGymResponse:
         """Minimal valid response for the failure path when no transcript was produced."""
-        return NeMoGymResponse(
-            id=task_id,
-            created_at=1.0,
-            model=self.config.model_name,
-            object="response",
-            output=[
-                {
-                    "type": "message",
-                    "role": "assistant",
-                    "status": "completed",
-                    "id": "msg_0",
-                    "content": [{"type": "output_text", "text": "", "annotations": []}],
-                }
-            ],
-            parallel_tool_calls=False,
-            tools=[],
-            tool_choice="auto",
+        return NeMoGymResponse.model_validate(
+            minimal_failure_response(
+                response_id=task_id,
+                created_at=1.0,
+                model=self.config.model_name,
+            )
         )
 
     def _build_observations(
@@ -842,7 +831,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         out_dir = Path(self.config.work_root) / run_id
         out_dir.mkdir(parents=True, exist_ok=True)
         result = {"reward": 0.0, "grading_type": "unknown", "breakdown": {}, "notes": "", "status": "error"}
-        routing: dict = {}
+        failure_class: str | None = None
         response = self._empty_response(task_id)
         transcript_events: list = []
         archive_path = ""
@@ -866,11 +855,6 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
                 "notes": f"run failed: {type(exc).__name__}: {exc}",
                 "status": "error",
             }
-            routing[NG_FAILURE_CLASS_KEY] = failure_class
-            if failure_class == "kill_shaped":
-                routing[NG_NO_PERSIST_KEY] = True
-            elif failure_class == "timeout_exceeded":
-                routing[NG_TERMINAL_KEY] = True
         finally:
             if observe:
                 observations = self._build_observations(
@@ -890,18 +874,33 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         if non_clean_exit_rc is not None:
             raw_rollout["non_clean_exit_rc"] = non_clean_exit_rc
 
+        extra = {
+            "task_id": task_id,
+            "grading_type": result["grading_type"],
+            "grading_breakdown": result["breakdown"],
+            "status": result["status"],
+            "raw_rollout": raw_rollout,
+            **({"ng_agent_observations": observations.model_dump(mode="json")} if observations is not None else {}),
+        }
+        if failure_class is not None:
+            return PinchBenchVerifyResponse.model_validate(
+                build_failure_result(
+                    record,
+                    failure_class=failure_class,
+                    error=result["notes"],
+                    response=response.model_dump(mode="json"),
+                    terminal=failure_class == "timeout_exceeded",
+                    no_persist=failure_class == "kill_shaped",
+                    error_key="grading_notes",
+                    extra=extra,
+                )
+            )
         return PinchBenchVerifyResponse(
             **record,
             reward=result["reward"],
             response=response,
-            task_id=task_id,
-            grading_type=result["grading_type"],
-            grading_breakdown=result["breakdown"],
             grading_notes=result["notes"],
-            status=result["status"],
-            raw_rollout=raw_rollout,
-            **({"ng_agent_observations": observations.model_dump(mode="json")} if observations is not None else {}),
-            **routing,
+            **extra,
         )
 
 
