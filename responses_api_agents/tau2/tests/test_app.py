@@ -158,7 +158,7 @@ class TestApp:
             patch.object(tau2_llm_utils, "NeMoGymAsyncOpenAI"),
         ):
             server.setup_webserver()
-            client = tau2_llm_utils.NeMoGymAsyncOpenAI(base_url="http://model/v1", api_key="dummy")
+            client = tau2_llm_utils.NeMoGymAsyncOpenAI(base_url="http://model/v1", api_key="dummy")  # pragma: allowlist secret
 
         assert isinstance(client, Tau2ToolValidatingAsyncOpenAI)
         assert client.malformed_tool_call_max_retries == 2
@@ -167,7 +167,7 @@ class TestApp:
         malformed = self._chat_completion('{"account_id": "123"')
         messages = [{"role": "user", "content": "look it up"}]
         original_messages = deepcopy(messages)
-        client = Tau2ToolValidatingAsyncOpenAI(base_url="http://model/v1", api_key="dummy")
+        client = Tau2ToolValidatingAsyncOpenAI(base_url="http://model/v1", api_key="dummy")  # pragma: allowlist secret
 
         with patch(
             "nemo_gym.openai_utils.NeMoGymAsyncOpenAI.create_chat_completion",
@@ -182,7 +182,7 @@ class TestApp:
 
     async def test_tool_argument_validation_stops_after_first_malformed_response(self) -> None:
         malformed = self._chat_completion('{"account_id": "123"')
-        client = Tau2ToolValidatingAsyncOpenAI(base_url="http://model/v1", api_key="dummy")
+        client = Tau2ToolValidatingAsyncOpenAI(base_url="http://model/v1", api_key="dummy")  # pragma: allowlist secret
 
         with patch(
             "nemo_gym.openai_utils.NeMoGymAsyncOpenAI.create_chat_completion",
@@ -198,7 +198,7 @@ class TestApp:
         valid = self._chat_completion('{"account_id": "123"}')
         client = Tau2ToolValidatingAsyncOpenAI(
             base_url="http://model/v1",
-            api_key="dummy",
+            api_key="dummy",  # pragma: allowlist secret
             malformed_tool_call_max_retries=1,
         )
 
@@ -214,7 +214,7 @@ class TestApp:
     @pytest.mark.parametrize("arguments", ['["not", "an", "object"]', '"not an object"', "null"])
     async def test_tool_argument_validation_rejects_valid_json_that_is_not_an_object(self, arguments: str) -> None:
         response = self._chat_completion(arguments)
-        client = Tau2ToolValidatingAsyncOpenAI(base_url="http://model/v1", api_key="dummy")
+        client = Tau2ToolValidatingAsyncOpenAI(base_url="http://model/v1", api_key="dummy")  # pragma: allowlist secret
 
         with patch(
             "nemo_gym.openai_utils.NeMoGymAsyncOpenAI.create_chat_completion",
@@ -230,7 +230,7 @@ class TestApp:
         self, arguments: Optional[str]
     ) -> None:
         expected = self._chat_completion(arguments)
-        client = Tau2ToolValidatingAsyncOpenAI(base_url="http://model/v1", api_key="dummy")
+        client = Tau2ToolValidatingAsyncOpenAI(base_url="http://model/v1", api_key="dummy")  # pragma: allowlist secret
 
         with patch(
             "nemo_gym.openai_utils.NeMoGymAsyncOpenAI.create_chat_completion",
