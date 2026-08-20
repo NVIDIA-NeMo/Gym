@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Reading `*_aggregate_metrics.json` for `gym compare`, and picking which agent to compare.
+"""Reading `*_aggregate_metrics.json` for `gym eval compare`, and picking which agent to compare.
 
 All filesystem I/O for the compare feature lives here. The rollouts JSONL a user points at is
 never opened: it is the run's identity and the handle its `_aggregate_metrics.json` sibling is

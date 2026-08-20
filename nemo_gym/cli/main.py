@@ -915,7 +915,7 @@ COMMANDS = {
             ),
         ),
     ),
-    "compare": Command(
+    "eval compare": Command(
         target="nemo_gym.cli.compare:compare",
         summary="Compare a baseline eval run against a candidate run.",
         flags=(

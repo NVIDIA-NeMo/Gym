@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Config and result schema for `gym compare`.
+"""Config and result schema for `gym eval compare`.
 
 Every candidate-varying field is a list, positionally parallel to `ComparisonResult.candidates`.
 v0 only ever compares one candidate, but keeping the shape list-valued means lifting that
@@ -43,7 +43,7 @@ class CompareConfig(BaseNeMoGymCLIConfig):
     Examples:
 
     ```bash
-    gym compare \
+    gym eval compare \
         --baseline outputs/run_a/rollouts.jsonl \
         --candidates outputs/run_b/rollouts.jsonl
     ```

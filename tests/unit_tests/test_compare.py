@@ -526,7 +526,7 @@ class TestCliFlagTranslation:
 
     def test_paths_round_trip_through_hydra(self, tmp_path):
         config = self._config(
-            ["compare", "--baseline", "runs/a/rollouts.jsonl", "--candidates", "runs/b/rollouts.jsonl"]
+            ["eval", "compare", "--baseline", "runs/a/rollouts.jsonl", "--candidates", "runs/b/rollouts.jsonl"]
         )
         assert config.baseline_rollouts_jsonl_fpath == "runs/a/rollouts.jsonl"
         assert config.candidate_rollouts_jsonl_fpaths == ["runs/b/rollouts.jsonl"]
@@ -541,18 +541,19 @@ class TestCliFlagTranslation:
         ],
     )
     def test_awkward_paths_survive_verbatim(self, path):
-        config = self._config(["compare", "--baseline", path, "--candidates", path, "--output-dir", path])
+        config = self._config(["eval", "compare", "--baseline", path, "--candidates", path, "--output-dir", path])
         assert config.baseline_rollouts_jsonl_fpath == path
         assert config.candidate_rollouts_jsonl_fpaths == [path]
         assert config.output_dirpath == path
 
     def test_comma_separated_candidates_split_into_a_list(self):
-        overrides = self._overrides(["compare", "--baseline", "a.jsonl", "--candidates", "b.jsonl, c.jsonl"])
+        overrides = self._overrides(["eval", "compare", "--baseline", "a.jsonl", "--candidates", "b.jsonl, c.jsonl"])
         assert '+candidate_rollouts_jsonl_fpaths=["b.jsonl","c.jsonl"]' in overrides
 
     def test_report_format_and_agent_flags_translate(self):
         overrides = self._overrides(
             [
+                "eval",
                 "compare",
                 "--baseline",
                 "a.jsonl",
@@ -571,7 +572,7 @@ class TestCliFlagTranslation:
         assert '+candidate_agent_names=["other_agent"]' in overrides
 
     def test_unset_flags_contribute_no_overrides(self):
-        overrides = self._overrides(["compare", "--baseline", "a.jsonl", "--candidates", "b.jsonl"])
+        overrides = self._overrides(["eval", "compare", "--baseline", "a.jsonl", "--candidates", "b.jsonl"])
         assert not [token for token in overrides if "output_dirpath" in token or "agent" in token]
 
 
@@ -641,8 +642,12 @@ class TestEndToEnd:
     )
     def test_report_format_selects_the_artifacts(self, tmp_path, report_format, expected):
         _, result = self._result(tmp_path)
-        written = write_reports(result, tmp_path / "report", report_format)
+        output_dir = tmp_path / f"report_{report_format}"
+        written = write_reports(result, output_dir, report_format)
         assert [path.name for path in written] == expected
+        assert all(path.exists() and path.stat().st_size > 0 for path in written)
+        # Only the requested artifacts are written.
+        assert sorted(path.name for path in output_dir.iterdir()) == sorted(expected)
 
     def test_json_report_round_trips(self, tmp_path):
         _, result = self._result(tmp_path)
@@ -652,6 +657,7 @@ class TestEndToEnd:
         # Candidate-varying fields stay list-shaped so a second candidate needs no schema change.
         assert isinstance(payload["candidates"], list)
         assert isinstance(payload["comparisons"][0]["metrics"][0]["candidates"], list)
+        assert payload == orjson.loads(result.model_dump_json())
 
     def test_output_dir_cannot_be_a_file(self, tmp_path):
         _, result = self._result(tmp_path)
@@ -670,7 +676,7 @@ class TestEndToEnd:
     def test_markdown_report_renders_the_expected_sections(self, tmp_path):
         _, result = self._result(tmp_path)
         markdown = render_markdown(result)
-        assert "# gym compare" in markdown
+        assert "# gym eval compare" in markdown
         assert "### Key metrics" in markdown
         assert (
             "| Metric | Drop (cand − base) | Baseline | Baseline 95% CI | Candidate | Candidate 95% CI |" in markdown

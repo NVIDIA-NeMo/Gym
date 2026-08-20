@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""`gym compare`: diff a baseline eval run's aggregate metrics against a candidate run."""
+"""`gym eval compare`: diff a baseline eval run's aggregate metrics against a candidate run."""
 
 import shlex
 import sys
@@ -132,14 +132,19 @@ def write_reports(result: ComparisonResult, output_dir: Path, report_format: str
         raise ConfigError(f"Cannot write to --output-dir '{output_dir}': {e}") from e
 
     written: List[Path] = []
-    if report_format in ("md", "both"):
-        markdown_fpath = output_dir / MARKDOWN_REPORT_NAME
-        markdown_fpath.write_text(render_markdown(result))
-        written.append(markdown_fpath)
-    if report_format in ("json", "both"):
-        json_fpath = output_dir / JSON_REPORT_NAME
-        json_fpath.write_bytes(orjson.dumps(result.model_dump(mode="json"), option=orjson.OPT_INDENT_2))
-        written.append(json_fpath)
+    try:
+        if report_format in ("md", "both"):
+            markdown_fpath = output_dir / MARKDOWN_REPORT_NAME
+            # Explicit encoding: the report uses an em dash for absent values, which a non-UTF-8
+            # locale would otherwise fail to write.
+            markdown_fpath.write_text(render_markdown(result), encoding="utf-8")
+            written.append(markdown_fpath)
+        if report_format in ("json", "both"):
+            json_fpath = output_dir / JSON_REPORT_NAME
+            json_fpath.write_bytes(orjson.dumps(result.model_dump(mode="json"), option=orjson.OPT_INDENT_2))
+            written.append(json_fpath)
+    except OSError as e:
+        raise ConfigError(f"Cannot write the report into '{output_dir}': {e}") from e
     return written
 
 
@@ -206,7 +211,7 @@ def compare() -> None:  # pragma: no cover
     )
     config = CompareConfig.model_validate(global_config_dict)
 
-    result = build_comparison_result(config, command=shlex.join(["gym", "compare", *sys.argv[1:]]))
+    result = build_comparison_result(config, command=shlex.join(["gym", "eval", "compare", *sys.argv[1:]]))
     written = write_reports(result, resolve_output_dir(config), config.report_format)
 
     _print_key_metrics_table(result)
