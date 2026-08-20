@@ -36,6 +36,7 @@ from nemo_gym.sandbox.providers import (
     SandboxSpec,
     SandboxStatus,
     SupportsSandboxEndpoint,
+    SupportsSandboxPauseResume,
     SupportsSandboxPty,
     SupportsSandboxPtyAttach,
     create_provider,
@@ -518,6 +519,27 @@ class AsyncSandbox:
             raise TypeError(f"Sandbox provider endpoint() must return SandboxEndpoint, got {type(resolved).__name__}")
         return resolved
 
+    async def pause(self) -> None:
+        """Pause this sandbox while preserving its state."""
+        handle = self._require_handle()
+        provider = self._provider
+        if not isinstance(provider, SupportsSandboxPauseResume):
+            name = getattr(provider, "name", type(provider).__name__)
+            raise NotImplementedError(f"Sandbox provider {name!r} does not support pause/resume")
+        await provider.pause(handle)
+
+    async def resume(self) -> None:
+        """Resume this sandbox and replace its provider handle once ready."""
+        handle = self._require_handle()
+        provider = self._provider
+        if not isinstance(provider, SupportsSandboxPauseResume):
+            name = getattr(provider, "name", type(provider).__name__)
+            raise NotImplementedError(f"Sandbox provider {name!r} does not support pause/resume")
+        resumed = await provider.resume(handle)
+        if not isinstance(resumed, SandboxHandle):
+            raise TypeError(f"Sandbox provider resume() must return SandboxHandle, got {type(resumed).__name__}")
+        self._handle = resumed
+
     async def stop(self) -> None:
         if self._closed:
             return
@@ -717,6 +739,12 @@ class Sandbox:
 
     def endpoint(self, port: int) -> SandboxEndpoint:
         return self._runner.run("endpoint", lambda: self._async_sandbox.endpoint(port))
+
+    def pause(self) -> None:
+        self._runner.run("pause", self._async_sandbox.pause)
+
+    def resume(self) -> None:
+        self._runner.run("resume", self._async_sandbox.resume)
 
     def stop(self) -> None:
         if self._closed:
