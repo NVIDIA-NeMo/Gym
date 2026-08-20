@@ -18,6 +18,7 @@ import sys
 from argparse import ArgumentParser
 from collections import defaultdict
 from copy import deepcopy
+from dataclasses import dataclass
 from difflib import get_close_matches
 from importlib import import_module
 from os import environ, getenv
@@ -37,6 +38,7 @@ from ray import __version__ as ray_version
 
 from nemo_gym import CACHE_DIR, RESULTS_DIR, WORKING_DIR, _resolve_under_cwd_or_install, component_search_roots
 from nemo_gym.config_types import (
+    AgentCompositionError,
     AlmostServerError,
     ConfigError,
     ConfigInterpolationError,
@@ -137,6 +139,20 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     SKIP_VERIFICATION_KEY_NAME,
     SKIP_VERIFICATION_REWARD_KEY_NAME,
 ]
+
+AGENT_SERVER_TYPE_KEY_NAME = "responses_api_agents"
+# Carried over from the environment's agent instance onto the composed agent; every other key is dropped.
+_COMPOSED_AGENT_CARRY_OVER_KEYS = ("resources_server", "model_server", "datasets")
+
+
+@dataclass(frozen=True)
+class _AgentInstance:
+    """A top-level agent instance, with its single agent type already unwrapped."""
+
+    name: str
+    agent_type: str
+    server_config: DictConfig
+
 
 # Data keys
 TASK_INDEX_KEY_NAME = "_ng_task_index"
@@ -512,6 +528,77 @@ Duplicate config paths:
                     missing_paths.extend(self._walk_missing_value_paths(value, path))
         return missing_paths
 
+    def _agent_instances(self, global_config_dict: DictConfig) -> List[_AgentInstance]:
+        """Return every top-level agent instance in the config."""
+        instances: List[_AgentInstance] = []
+        for name, value in global_config_dict.items_ex(resolve=False):
+            if name in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS or not isinstance(value, DictConfig):
+                continue
+            if AGENT_SERVER_TYPE_KEY_NAME not in value:
+                continue
+            agents = value[AGENT_SERVER_TYPE_KEY_NAME]
+            # A server instance declares exactly one agent type.
+            # Not our error to report: the type config pins exactly one, and almost-server detection flags it.
+            if not isinstance(agents, DictConfig) or len(agents) != 1:
+                continue
+            agent_type = str(next(iter(agents)))
+            instances.append(
+                _AgentInstance(
+                    name=str(name),
+                    agent_type=agent_type,
+                    server_config=agents[agent_type],
+                )
+            )
+        return instances
+
+    @staticmethod
+    def _is_unbound_agent(server_config: DictConfig) -> bool:
+        """True when the agent declares a `resources_server` but leaves its name unset, marking it a swap source."""
+        # Absent is not unset: self-contained agents omit the key entirely and must never match.
+        reference = server_config._get_node("resources_server")
+        return isinstance(reference, DictConfig) and OmegaConf.is_missing(reference, "name")
+
+    def compose_unbound_agent(self, global_config_dict: DictConfig) -> None:
+        """Rehost every other agent instance on the config's unbound agent, then drop that agent."""
+        instances = self._agent_instances(global_config_dict)
+        sources = [instance for instance in instances if self._is_unbound_agent(instance.server_config)]
+        if not sources:
+            return
+
+        if len(sources) > 1:
+            raise AgentCompositionError(
+                f"{len(sources)} agent instances leave their 'resources_server' unset, so there is no single "
+                f"agent to compose onto the others: {', '.join(sorted(repr(s.name) for s in sources))}. "
+                f"Load exactly one standalone agent config, or bind the others in your own config."
+            )
+
+        source = sources[0]
+        targets = [instance for instance in instances if instance.name != source.name]
+        if not targets:
+            raise AgentCompositionError(
+                f"Agent instance '{source.name}' leaves its 'resources_server' unset, but the merged config "
+                f"defines no other agent instance to rehost it on. Select an environment, benchmark, or "
+                f"resources server alongside the agent so there is a task for it to run."
+            )
+
+        # Struct mode would reject the key removals below - we need open_dict to allow it.
+        with open_dict(global_config_dict):
+            for target in targets:
+                composed = deepcopy(source.server_config)
+                self._carry_over_agent_bindings(target.server_config, composed)
+                # Instance names are kept: `agent_ref` is baked into prepared data, so renaming breaks collection.
+                agents = global_config_dict[target.name][AGENT_SERVER_TYPE_KEY_NAME]
+                agents.pop(target.agent_type)
+                agents[source.agent_type] = composed
+            global_config_dict.pop(source.name)
+
+    @staticmethod
+    def _carry_over_agent_bindings(original: DictConfig, composed: DictConfig) -> None:
+        """Move the environment's bindings onto the composed agent config, in place."""
+        for key in _COMPOSED_AGENT_CARRY_OVER_KEYS:
+            if key in original:
+                composed[key] = deepcopy(original[key])
+
     def raise_on_missing_values(self, global_config_dict: DictConfig) -> None:
         """Fail fast with one actionable error listing every unset '???' value.
 
@@ -696,6 +783,10 @@ Pass each config with --config (it builds the list for you), e.g.:
                 global_config_dict[CONFIG_PATHS_KEY_NAME] = config_paths
 
         self._recursively_swap_keys(global_config_dict)
+
+        # Must run after the swap above (inherited bindings must exist to carry over) and before the
+        # missing-value check below (it fills the selected agent's unset `resources_server`).
+        self.compose_unbound_agent(global_config_dict)
 
         # Fail fast with one actionable error if any required value is still '???'. Runs *after*
         # _recursively_swap_keys so that _delete_key/_inherit_from/_copy have been applied first —
