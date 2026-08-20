@@ -37,35 +37,19 @@ python resources_servers/deepswe/validate_golden.py +concurrency=113
 ## Run OpenCode rollouts
 
 Use the benchmark config with a model and sandbox-provider config. Launch Gym with `+use_absolute_ip=true` when
-OpenSandbox needs a host-routable model-server address. Add the registry-interception overlay when OpenCode must
-download its CLI in the agent sandbox.
+OpenSandbox needs a host-routable model-server address.
 
 ```bash
 gym env start \
   --config benchmarks/deepswe/opencode.yaml \
   --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
-  --config resources_servers/deepswe/configs/deepswe_registry_interception.yaml \
   --config responses_api_models/<model>/configs/<model>.yaml
 ```
 
-The resources server snapshots the initial logical Git tree before the agent runs. At verification time it captures
-committed, staged, unstaged, deleted, binary, and non-ignored untracked changes, then applies only those changes to
-the task base commit in a fresh verifier sandbox. Harness-owned workspace paths can be excluded by resources-server
-configuration; the OpenCode benchmark excludes its `export.json` session export, so the shared agent needs no
-DeepSWE-specific behavior. The untrusted agent sandbox defaults to deny-all egress, and the OpenCode benchmark adds
-only the resolved Gym model-server host to that policy. The trusted fresh verifier keeps the canonical container
-network stack because the current egress sidecar disables IPv6 loopback required by upstream test suites; verifier
-assets and the submitted patch are supplied only by the resources server.
-
-## Optional registry interception
-
-TODO: Remove this overlay once OpenCode is preinstalled in or mounted into the agent sandbox, then run with the
-base deny-all agent egress policy instead of allow-all pass-through.
-
-On a cluster with the registry-interception sidecar installed, add
-`resources_servers/deepswe/configs/deepswe_registry_interception.yaml` after the base DeepSWE config. The overlay
-sets both required activation controls: an OpenSandbox `network_policy` and
-`OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT=true`. Its allow-all policy preserves pass-through behavior for
-unintercepted hosts in the agent sandbox; consequently, it intentionally replaces the agent's no-network policy
-and must be used only when that egress policy is acceptable for the evaluation. The policy is not copied into the
-fresh verifier sandbox.
+As in upstream DeepSWE v1.1, the agent must commit its work. At verification time the resources server executes the
+task's pinned `[[verifier.collect]]` hook, which writes `git diff --binary <base_commit> HEAD` to
+`/logs/artifacts/model.patch`. That patch is applied and graded in a fresh verifier sandbox. The untrusted agent
+sandbox defaults to deny-all egress, and the OpenCode benchmark adds only the resolved Gym model-server host to that
+policy. The trusted fresh verifier keeps the canonical container network stack because the current egress sidecar
+disables IPv6 loopback required by upstream test suites; verifier assets and the submitted patch are supplied only
+by the resources server.

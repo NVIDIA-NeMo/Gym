@@ -357,15 +357,6 @@ def _to_image_spec(image: str, image_auth: Mapping[str, Any] | None) -> Any:
     return SandboxImageSpec(image, auth=SandboxImageAuth(**dict(image_auth)))
 
 
-def _to_network_policy(policy: Mapping[str, Any]) -> Any:
-    """Build the SDK NetworkPolicy model from an API-shaped mapping."""
-
-    _require_opensandbox_sdk()
-    from opensandbox.models.sandboxes import NetworkPolicy
-
-    return NetworkPolicy.model_validate(dict(policy))
-
-
 def _to_sandbox_status(state: Any) -> SandboxStatus:
     normalized = str(state or "").lower()
     if normalized in {"active", "ready", "running"}:
@@ -554,10 +545,6 @@ class OpenSandboxProviderOptions:
     # Scheduling requests (same keys as SandboxSpec.resources, which become the
     # limits). Unset, the server applies the single resources map as both.
     resource_requests: Mapping[str, Any] | None = None
-    # A policy also enables the server-side egress sidecar. An allow-all policy
-    # can therefore activate transparent registry interception without blocking
-    # unrelated destinations.
-    network_policy: Mapping[str, Any] | None = None
 
     @classmethod
     def from_mapping(cls, options: Mapping[str, Any] | None) -> "OpenSandboxProviderOptions":
@@ -598,9 +585,6 @@ class OpenSandboxProviderOptions:
         resource_requests = options.get("resource_requests")
         if resource_requests is not None and not isinstance(resource_requests, Mapping):
             raise TypeError("OpenSandbox provider option 'resource_requests' must be a mapping")
-        network_policy = options.get("network_policy")
-        if network_policy is not None and not isinstance(network_policy, Mapping):
-            raise TypeError("OpenSandbox provider option 'network_policy' must be a mapping")
 
         return cls(
             image_auth=dict(image_auth) if image_auth is not None else None,
@@ -611,7 +595,6 @@ class OpenSandboxProviderOptions:
             skip_health_check=skip_health_check,
             extensions=_string_map(dict(extensions)),
             resource_requests=dict(resource_requests) if resource_requests is not None else None,
-            network_policy=dict(network_policy) if network_policy is not None else None,
         )
 
 

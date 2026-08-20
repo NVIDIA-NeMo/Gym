@@ -9,14 +9,11 @@ from pytest import MonkeyPatch
 
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.deepswe.app import (
-    WORKSPACE_HELPER_LOCAL_PATH,
-    WORKSPACE_HELPER_REMOTE_PATH,
     DeepSWEResourcesServer,
     DeepSWEResourcesServerConfig,
     DeepSWESeedSessionRequest,
     DeepSWEVerifyRequest,
     VerifierResult,
-    WorkspacePatchMetadata,
     _resolve_task,
     _resolve_task_id,
 )
@@ -150,7 +147,7 @@ async def test_golden_verify_passes_structured_result(
     fake_sandbox.stop.assert_awaited_once()
 
 
-async def test_rollout_captures_workspace_and_verifies_in_fresh_sandbox(
+async def test_rollout_collects_committed_patch_and_verifies_in_fresh_sandbox(
     task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
     server = DeepSWEResourcesServer(
@@ -161,20 +158,8 @@ async def test_rollout_captures_workspace_and_verifies_in_fresh_sandbox(
     agent_sandbox.serialize.return_value = {"sandbox_id": "agent-sandbox", "workdir": "/app"}
     verifier_sandbox = AsyncMock()
     monkeypatch.setattr(server, "_create_sandbox", AsyncMock(side_effect=[agent_sandbox, verifier_sandbox]))
-    monkeypatch.setattr(server, "_capture_initial_tree", AsyncMock(return_value="1" * 40))
-    capture_model_patch = AsyncMock(
-        return_value=(
-            "agent patch\n",
-            WorkspacePatchMetadata(
-                initial_tree="1" * 40,
-                final_tree="2" * 40,
-                synthetic_tree="3" * 40,
-                changed_paths=4,
-                patch_bytes=12,
-            ),
-        )
-    )
-    monkeypatch.setattr(server, "_capture_model_patch", capture_model_patch)
+    collect_model_patch = AsyncMock(return_value=b"agent patch\n")
+    monkeypatch.setattr(server, "_collect_model_patch", collect_model_patch)
     monkeypatch.setattr(
         server,
         "_run_verifier",
@@ -188,10 +173,9 @@ async def test_rollout_captures_workspace_and_verifies_in_fresh_sandbox(
 
     assert seed.sandbox_handle == "agent-sandbox"
     assert seed.sandbox_descriptor == {"sandbox_id": "agent-sandbox", "workdir": "/app"}
-    assert seed.initial_tree == "1" * 40
-    captured_task = capture_model_patch.await_args.args[1]
+    captured_task = collect_model_patch.await_args.args[1]
     assert captured_task.image == UPSTREAM_IMAGE
-    assert capture_model_patch.await_args.args == (agent_sandbox, captured_task, "1" * 40)
+    assert collect_model_patch.await_args.args == (agent_sandbox, captured_task)
     assert [call.args[0].image for call in server._create_sandbox.await_args_list] == [
         UPSTREAM_IMAGE,
         UPSTREAM_IMAGE,
@@ -199,70 +183,37 @@ async def test_rollout_captures_workspace_and_verifies_in_fresh_sandbox(
     assert response.reward == 1.0
     assert response.evaluation_completed is True
     assert response.model_patch == "agent patch\n"
-    assert response.changed_paths == 4
-    assert response.initial_tree == "1" * 40
-    assert response.final_tree == "2" * 40
-    assert response.synthetic_tree == "3" * 40
     agent_sandbox.stop.assert_awaited_once()
     verifier_sandbox.stop.assert_awaited_once()
     assert server._agent_sessions == {}
 
 
-async def test_workspace_exclusions_are_forwarded_to_patch_capture(
-    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch
-) -> None:
-    server = DeepSWEResourcesServer(
-        config=_config(task_assets, golden=False),
-        server_client=MagicMock(spec=ServerClient),
-    )
-    server.config.workspace_excluded_paths = ("export.json", ".opencode")
-    initial_tree = "1" * 40
-    helper = AsyncMock(
-        return_value={
-            "initial_tree": initial_tree,
-            "final_tree": "2" * 40,
-            "synthetic_tree": "3" * 40,
-            "changed_paths": 0,
-            "patch_bytes": 0,
-        }
-    )
-    monkeypatch.setattr(server, "_workspace_helper_payload", helper)
-    sandbox = AsyncMock()
-
-    async def download_empty_patch(_remote_path: str, local_path: Path) -> None:
-        local_path.write_bytes(b"")
-
-    sandbox.download.side_effect = download_empty_patch
-
-    await server._capture_model_patch(sandbox, server._task_store.get("example-task"), initial_tree)
-
-    arguments = helper.await_args.args[1]
-    assert arguments[-4:] == ["--exclude-path", "export.json", "--exclude-path", ".opencode"]
-
-
-async def test_workspace_helper_uses_isolated_python(
-    task_assets: Path,
-    tmp_path: Path,
-) -> None:
+async def test_collect_model_patch_executes_upstream_hook(task_assets: Path) -> None:
     server = DeepSWEResourcesServer(
         config=_config(task_assets, golden=False),
         server_client=MagicMock(spec=ServerClient),
     )
     sandbox = AsyncMock()
-    sandbox.exec.return_value = MagicMock(return_code=0, stdout='{"initial_tree": "tree"}', stderr="")
+    sandbox.exec.return_value = MagicMock(return_code=0, stdout="", stderr="")
+    expected_patch = b"binary patch\x00bytes"
 
-    payload = await server._workspace_helper_payload(sandbox, ["snapshot", "--repo", "/app"])
+    async def download_patch(remote_path: str, local_path: Path) -> None:
+        assert remote_path == "/logs/artifacts/model.patch"
+        local_path.write_bytes(expected_patch)
 
-    assert payload == {"initial_tree": "tree"}
-    sandbox.upload.assert_awaited_once_with(WORKSPACE_HELPER_LOCAL_PATH, WORKSPACE_HELPER_REMOTE_PATH)
-    sandbox.exec.assert_awaited_once_with(
-        f"python3 -I {WORKSPACE_HELPER_REMOTE_PATH} snapshot --repo /app",
-        cwd="/app",
-        timeout_s=server.config.workspace_capture_timeout_s,
+    sandbox.download.side_effect = download_patch
+    task = server._task_store.get("example-task")
+
+    model_patch = await server._collect_model_patch(sandbox, task)
+
+    assert model_patch == expected_patch
+    sandbox.exec.assert_awaited_once_with(task.collect_command, timeout_s=task.collect_timeout_s)
+    assert task.collect_command.endswith(
+        "git diff --binary 0123456789abcdef0123456789abcdef01234567 HEAD > /logs/artifacts/model.patch"
     )
 
 
-async def test_rollout_workspace_capture_failure_is_structured_and_cleans_up(
+async def test_rollout_collect_failure_is_structured_and_cleans_up(
     task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
     server = DeepSWEResourcesServer(
@@ -273,8 +224,7 @@ async def test_rollout_workspace_capture_failure_is_structured_and_cleans_up(
     agent_sandbox.serialize.return_value = {"sandbox_id": "agent-sandbox"}
     create_sandbox = AsyncMock(return_value=agent_sandbox)
     monkeypatch.setattr(server, "_create_sandbox", create_sandbox)
-    monkeypatch.setattr(server, "_capture_initial_tree", AsyncMock(return_value="1" * 40))
-    monkeypatch.setattr(server, "_capture_model_patch", AsyncMock(side_effect=RuntimeError("broken git repo")))
+    monkeypatch.setattr(server, "_collect_model_patch", AsyncMock(side_effect=RuntimeError("broken git repo")))
     request = MagicMock()
     request.session = {SESSION_ID_KEY: "test-session"}
 

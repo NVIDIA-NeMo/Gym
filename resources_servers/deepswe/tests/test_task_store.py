@@ -13,6 +13,10 @@ def test_load_task_store(task_assets: Path) -> None:
     assert len(store) == 1
     assert task.image == "public.example/project/example-task:v1.1"
     assert task.base_commit == "0123456789abcdef0123456789abcdef01234567"
+    assert task.collect_command.endswith(
+        "git diff --binary 0123456789abcdef0123456789abcdef01234567 HEAD > /logs/artifacts/model.patch"
+    )
+    assert task.collect_timeout_s == 300
     assert task.memory_mib == 8192
     assert task.disk_gib == 20
     assert set(task.verifier_files) == {"test.sh", "test.patch", "grader.py", "config.json"}

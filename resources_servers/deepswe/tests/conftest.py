@@ -28,6 +28,9 @@ timeout_sec = 1800.0
 cpus = 2
 memory_mb = 8192
 storage_mb = 20480
+[[verifier.collect]]
+command = "cd /app && mkdir -p /logs/artifacts && git config --global --add safe.directory /app && git diff --binary 0123456789abcdef0123456789abcdef01234567 HEAD > /logs/artifacts/model.patch"
+timeout_sec = 300.0
 [agent]
 network_mode = "no-network"
 timeout_sec = 5400.0

@@ -37,6 +37,8 @@ class DeepSWETask:
     base_commit: str
     language: str
     verifier_timeout_s: float
+    collect_command: str
+    collect_timeout_s: float
     agent_timeout_s: float
     cpu: float
     memory_mib: int
@@ -85,6 +87,10 @@ def _load_task(task_dir: Path) -> DeepSWETask:
     verifier_environment = _required_mapping(
         verifier.get("environment"), field="verifier.environment", task_id=task_id
     )
+    collect_hooks = verifier.get("collect")
+    if not isinstance(collect_hooks, list) or len(collect_hooks) != 1:
+        raise ValueError(f"DeepSWE task {task_id!r} must define exactly one [[verifier.collect]] hook")
+    collect = _required_mapping(collect_hooks[0], field="verifier.collect", task_id=task_id)
 
     if raw.get("schema_version") != "1.3":
         raise ValueError(f"DeepSWE task {task_id!r} must use schema_version 1.3")
@@ -100,6 +106,16 @@ def _load_task(task_dir: Path) -> DeepSWETask:
         raise ValueError(f"DeepSWE task {task_id!r} has an invalid base commit: {base_commit!r}")
     if not repository_url or not language:
         raise ValueError(f"DeepSWE task {task_id!r} is missing repository_url or language")
+    collect_command = str(collect.get("command") or "")
+    expected_collect_command = (
+        "cd /app && mkdir -p /logs/artifacts && git config --global --add safe.directory /app "
+        f"&& git diff --binary {base_commit} HEAD > /logs/artifacts/model.patch"
+    )
+    if collect_command != expected_collect_command:
+        raise ValueError(f"DeepSWE task {task_id!r} has an unexpected verifier collect command")
+    collect_timeout_s = float(collect.get("timeout_sec", 0))
+    if collect_timeout_s <= 0:
+        raise ValueError(f"DeepSWE task {task_id!r} has an invalid verifier collect timeout")
     selected_image = str(environment.get("docker_image") or "")
     if not selected_image:
         raise ValueError(f"DeepSWE task {task_id!r} is missing environment.docker_image")
@@ -119,6 +135,8 @@ def _load_task(task_dir: Path) -> DeepSWETask:
         base_commit=base_commit,
         language=language,
         verifier_timeout_s=float(verifier.get("timeout_sec", 1800)),
+        collect_command=collect_command,
+        collect_timeout_s=collect_timeout_s,
         agent_timeout_s=float(agent.get("timeout_sec", 5400)),
         cpu=cpu,
         memory_mib=memory_mib,

@@ -13,12 +13,10 @@ import tempfile
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from shlex import join as shell_join
 from time import monotonic
 from traceback import format_exc
 from typing import Any
 from urllib.parse import urlparse
-from uuid import uuid4
 
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -41,8 +39,6 @@ from resources_servers.deepswe.task_store import EXPECTED_TASK_COUNT, DeepSWETas
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 NEMO_GYM_ROOT = PACKAGE_DIR.parents[1]
-WORKSPACE_HELPER_LOCAL_PATH = PACKAGE_DIR / "workspace_patch.py"
-WORKSPACE_HELPER_REMOTE_PATH = "/tmp/nemo-gym-deepswe-workspace-patch.py"
 
 
 def _resolve_repo_path(path: Path) -> Path:
@@ -64,10 +60,6 @@ class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
     enforce_agent_no_network: bool = True
     sandbox_model_base_url: str | None = None
     sandbox_model_server_name: str | None = None
-    max_concurrent_verifications: int = Field(default=128, ge=1)
-    workspace_capture_timeout_s: float = Field(default=300, gt=0)
-    max_model_patch_bytes: int = Field(default=64 * 1024 * 1024, ge=1)
-    workspace_excluded_paths: tuple[str, ...] = ()
 
     logs_dir: Path = Path("resources_servers/deepswe/logs")
     clear_verifier_logs: bool = False
@@ -89,12 +81,10 @@ class DeepSWESeedSessionRequest(DeepSWEInstanceRequest, BaseSeedSessionRequest):
 class DeepSWESeedSessionResponse(BaseSeedSessionResponse):
     sandbox_handle: str
     sandbox_descriptor: dict[str, Any]
-    initial_tree: str
 
 
 class DeepSWEVerifyRequest(DeepSWEInstanceRequest, BaseVerifyRequest):
     sandbox_handle: str | None = None
-    initial_tree: str | None = None
 
 
 class DeepSWEVerifyResponse(BaseVerifyResponse):
@@ -117,11 +107,8 @@ class DeepSWEVerifyResponse(BaseVerifyResponse):
     model_patch: str | None = None
     model_patch_sha256: str
     model_patch_bytes: int
-    changed_paths: int | None = None
-    final_tree: str | None = None
-    synthetic_tree: str | None = None
     log_dir: str
-    workspace_capture_time_s: float
+    patch_collection_time_s: float
     sandbox_start_time_s: float
     verification_time_s: float
 
@@ -141,14 +128,6 @@ class VerifierResult(BaseModel):
     partial: float = 0.0
 
 
-class WorkspacePatchMetadata(BaseModel):
-    initial_tree: str
-    final_tree: str
-    synthetic_tree: str
-    changed_paths: int = Field(ge=0)
-    patch_bytes: int = Field(ge=0)
-
-
 @dataclass
 class AgentSandboxSession:
     task_id: str
@@ -156,7 +135,6 @@ class AgentSandboxSession:
     sandbox: AsyncSandbox
     sandbox_handle: str
     sandbox_descriptor: dict[str, Any]
-    initial_tree: str
 
 
 def _resolve_task_id(body: DeepSWEInstanceRequest) -> str:
@@ -188,7 +166,6 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             _resolve_repo_path(self.config.tasks_dir),
             expected_task_count=self.config.expected_task_count,
         )
-        self._verification_semaphore = asyncio.Semaphore(self.config.max_concurrent_verifications)
         self._agent_sessions: dict[str, AgentSandboxSession] = {}
 
     def _provider_options(self, *, phase: str) -> dict[str, Any]:
@@ -274,80 +251,18 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
         except Exception:
             print(f"Failed to stop DeepSWE {phase} sandbox for {task_id}: {format_exc()}", file=sys.stderr)
 
-    async def _workspace_helper_payload(self, sandbox: AsyncSandbox, arguments: list[str]) -> dict[str, Any]:
-        await sandbox.upload(WORKSPACE_HELPER_LOCAL_PATH, WORKSPACE_HELPER_REMOTE_PATH)
-        # Isolate imports from agent-created modules next to the helper in /tmp.
-        result = await sandbox.exec(
-            shell_join(["python3", "-I", WORKSPACE_HELPER_REMOTE_PATH, *arguments]),
-            cwd="/app",
-            timeout_s=self.config.workspace_capture_timeout_s,
-        )
+    async def _collect_model_patch(self, sandbox: AsyncSandbox, task: DeepSWETask) -> bytes:
+        result = await sandbox.exec(task.collect_command, timeout_s=task.collect_timeout_s)
         if result.return_code != 0:
             details = ((result.stderr or "") + (result.stdout or "")).strip()
-            raise RuntimeError(f"DeepSWE workspace helper exited with code {result.return_code}: {details[-4000:]}")
-        try:
-            payload = json.loads((result.stdout or "").strip())
-        except json.JSONDecodeError as error:
-            raise RuntimeError(f"DeepSWE workspace helper returned invalid JSON: {error}") from error
-        if not isinstance(payload, dict):
-            raise RuntimeError("DeepSWE workspace helper must return a JSON object")
-        return payload
+            raise RuntimeError(f"DeepSWE collect hook exited with code {result.return_code}: {details[-4000:]}")
 
-    async def _capture_initial_tree(self, sandbox: AsyncSandbox) -> str:
-        payload = await self._workspace_helper_payload(sandbox, ["snapshot", "--repo", "/app"])
-        initial_tree = payload.get("initial_tree")
-        if not isinstance(initial_tree, str) or not initial_tree:
-            raise RuntimeError("DeepSWE workspace helper did not return an initial tree")
-        return initial_tree
-
-    async def _capture_model_patch(
-        self,
-        sandbox: AsyncSandbox,
-        task: DeepSWETask,
-        initial_tree: str,
-    ) -> tuple[str, WorkspacePatchMetadata]:
-        remote_patch_path = f"/tmp/nemo-gym-deepswe-model-{uuid4().hex}.patch"
-        arguments = [
-            "patch",
-            "--repo",
-            "/app",
-            "--initial-tree",
-            initial_tree,
-            "--base-commit",
-            task.base_commit,
-            "--output",
-            remote_patch_path,
-        ]
-        for path in self.config.workspace_excluded_paths:
-            arguments.extend(["--exclude-path", path])
-        payload = await self._workspace_helper_payload(
-            sandbox,
-            arguments,
-        )
-        metadata = WorkspacePatchMetadata.model_validate(payload)
-        if metadata.initial_tree != initial_tree:
-            raise RuntimeError("DeepSWE workspace helper returned a mismatched initial tree")
-        if metadata.patch_bytes > self.config.max_model_patch_bytes:
-            raise RuntimeError(
-                f"DeepSWE model patch is {metadata.patch_bytes} bytes, exceeding the "
-                f"{self.config.max_model_patch_bytes}-byte limit"
-            )
-
-        with tempfile.TemporaryDirectory(prefix="nemo-gym-deepswe-workspace-") as temporary_dir:
+        with tempfile.TemporaryDirectory(prefix="nemo-gym-deepswe-collect-") as temporary_dir:
             local_patch_path = Path(temporary_dir) / "model.patch"
-            await sandbox.download(remote_patch_path, local_patch_path)
-            patch_bytes = local_patch_path.read_bytes()
-        if len(patch_bytes) != metadata.patch_bytes:
-            raise RuntimeError(
-                f"DeepSWE model patch size changed during download: "
-                f"expected {metadata.patch_bytes}, received {len(patch_bytes)}"
-            )
-        try:
-            return patch_bytes.decode("utf-8"), metadata
-        except UnicodeDecodeError as error:
-            raise RuntimeError("DeepSWE model patch is not valid UTF-8") from error
+            await sandbox.download("/logs/artifacts/model.patch", local_patch_path)
+            return local_patch_path.read_bytes()
 
-    async def _stage_verifier(self, sandbox: AsyncSandbox, task: DeepSWETask, model_patch: str) -> None:
+    async def _stage_verifier(self, sandbox: AsyncSandbox, task: DeepSWETask, model_patch: bytes) -> None:
         mkdir_result = await sandbox.exec(
             "mkdir -p /tests /logs/artifacts /logs/verifier",
             timeout_s=60,
@@ -360,7 +275,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
         ]
         with tempfile.TemporaryDirectory(prefix="nemo-gym-deepswe-patch-") as temporary_dir:
             patch_path = Path(temporary_dir) / "model.patch"
-            patch_path.write_text(model_patch, encoding="utf-8", errors="surrogateescape")
+            patch_path.write_bytes(model_patch)
             uploads.append(sandbox.upload(patch_path, "/logs/artifacts/model.patch"))
             await asyncio.gather(*uploads)
 
@@ -379,7 +294,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
         self,
         sandbox: AsyncSandbox,
         task: DeepSWETask,
-        model_patch: str,
+        model_patch: bytes,
         log_dir: Path,
     ) -> VerifierResult:
         await self._stage_verifier(sandbox, task, model_patch)
@@ -475,7 +390,6 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
         sandbox: AsyncSandbox | None = None
         try:
             sandbox = await self._create_sandbox(task, phase="agent")
-            initial_tree = await self._capture_initial_tree(sandbox)
             descriptor = await sandbox.serialize()
             sandbox_handle = descriptor.get("sandbox_id") if isinstance(descriptor, dict) else None
             if not isinstance(sandbox_handle, str) or not sandbox_handle:
@@ -487,12 +401,10 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 sandbox=sandbox,
                 sandbox_handle=sandbox_handle,
                 sandbox_descriptor=sandbox_descriptor,
-                initial_tree=initial_tree,
             )
             return DeepSWESeedSessionResponse(
                 sandbox_handle=sandbox_handle,
                 sandbox_descriptor=sandbox_descriptor,
-                initial_tree=initial_tree,
             )
         except Exception:
             if sandbox is not None:
@@ -502,21 +414,18 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
     async def verify(self, request: Request, body: DeepSWEVerifyRequest) -> DeepSWEVerifyResponse:
         task = _resolve_task(body, self._task_store)
         session_id = str(request.session.get(SESSION_ID_KEY, "golden"))
-        initial_tree = body.initial_tree
         sandbox_handle = body.sandbox_handle
-        workspace_metadata: WorkspacePatchMetadata | None = None
-        workspace_capture_time_s = 0.0
+        patch_collection_time_s = 0.0
         patch_error: str | None = None
 
         if self.config.is_verifying_golden_patch:
-            model_patch = task.solution_patch_path.read_text(encoding="utf-8", errors="replace")
+            model_patch = task.solution_patch_path.read_bytes()
         else:
-            model_patch = ""
+            model_patch = b""
             agent_session = self._agent_sessions.pop(session_id, None)
             if agent_session is None:
                 patch_error = f"No DeepSWE agent sandbox exists for session {session_id!r}"
             else:
-                initial_tree = agent_session.initial_tree
                 sandbox_handle = agent_session.sandbox_handle
                 started = monotonic()
                 try:
@@ -528,20 +437,15 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                         raise RuntimeError(
                             f"DeepSWE session image {agent_session.image!r} does not match verify image {task.image!r}"
                         )
-                    model_patch, workspace_metadata = await self._capture_model_patch(
-                        agent_session.sandbox,
-                        task,
-                        agent_session.initial_tree,
-                    )
+                    model_patch = await self._collect_model_patch(agent_session.sandbox, task)
                 except Exception as error:
-                    print(f"Failed to capture DeepSWE workspace for {task.task_id}: {format_exc()}", file=sys.stderr)
+                    print(f"Failed to collect DeepSWE model patch for {task.task_id}: {format_exc()}", file=sys.stderr)
                     patch_error = f"{type(error).__name__}: {error}"
                 finally:
-                    workspace_capture_time_s = monotonic() - started
+                    patch_collection_time_s = monotonic() - started
                     await self._stop_sandbox(agent_session.sandbox, task_id=task.task_id, phase="agent")
 
-        patch_bytes = model_patch.encode("utf-8", errors="surrogateescape")
-        patch_sha256 = hashlib.sha256(patch_bytes).hexdigest()
+        patch_sha256 = hashlib.sha256(model_patch).hexdigest()
         log_dir = _resolve_repo_path(self.config.logs_dir) / task.task_id / session_id
 
         sandbox: AsyncSandbox | None = None
@@ -549,25 +453,24 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
         verification_time_s = 0.0
         result = VerifierResult(evaluation_completed=False, reward=0.0, verifier_error=patch_error)
         if patch_error is None:
-            async with self._verification_semaphore:
-                try:
-                    started = monotonic()
-                    phase = "golden-verifier" if self.config.is_verifying_golden_patch else "verifier"
-                    sandbox = await self._create_sandbox(task, phase=phase)
-                    sandbox_start_time_s = monotonic() - started
-                    started = monotonic()
-                    result = await self._run_verifier(sandbox, task, model_patch, log_dir)
-                    verification_time_s = monotonic() - started
-                except Exception as error:
-                    print(f"DeepSWE verifier failed for {task.task_id}: {format_exc()}", file=sys.stderr)
-                    result = VerifierResult(
-                        evaluation_completed=False,
-                        reward=0.0,
-                        verifier_error=f"{type(error).__name__}: {error}",
-                    )
-                finally:
-                    if sandbox is not None:
-                        await self._stop_sandbox(sandbox, task_id=task.task_id, phase="verifier")
+            try:
+                started = monotonic()
+                phase = "golden-verifier" if self.config.is_verifying_golden_patch else "verifier"
+                sandbox = await self._create_sandbox(task, phase=phase)
+                sandbox_start_time_s = monotonic() - started
+                started = monotonic()
+                result = await self._run_verifier(sandbox, task, model_patch, log_dir)
+                verification_time_s = monotonic() - started
+            except Exception as error:
+                print(f"DeepSWE verifier failed for {task.task_id}: {format_exc()}", file=sys.stderr)
+                result = VerifierResult(
+                    evaluation_completed=False,
+                    reward=0.0,
+                    verifier_error=f"{type(error).__name__}: {error}",
+                )
+            finally:
+                if sandbox is not None:
+                    await self._stop_sandbox(sandbox, task_id=task.task_id, phase="verifier")
 
         if self.config.clear_verifier_logs and result.evaluation_completed:
             for path in log_dir.glob("*"):
@@ -580,7 +483,6 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 "reward": result.reward,
                 "task_id": task.task_id,
                 "sandbox_handle": sandbox_handle,
-                "initial_tree": initial_tree,
                 "evaluation_completed": result.evaluation_completed,
                 "apply_failed": result.apply_failed,
                 "verifier_exit_code": result.verifier_exit_code,
@@ -592,14 +494,13 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 "f2p": result.f2p,
                 "p2p": result.p2p,
                 "partial": result.partial,
-                "model_patch": model_patch if self.config.include_model_patch_in_response else None,
+                "model_patch": model_patch.decode("utf-8", errors="replace")
+                if self.config.include_model_patch_in_response
+                else None,
                 "model_patch_sha256": patch_sha256,
-                "model_patch_bytes": len(patch_bytes),
-                "changed_paths": workspace_metadata.changed_paths if workspace_metadata is not None else None,
-                "final_tree": workspace_metadata.final_tree if workspace_metadata is not None else None,
-                "synthetic_tree": workspace_metadata.synthetic_tree if workspace_metadata is not None else None,
+                "model_patch_bytes": len(model_patch),
                 "log_dir": str(log_dir),
-                "workspace_capture_time_s": workspace_capture_time_s,
+                "patch_collection_time_s": patch_collection_time_s,
                 "sandbox_start_time_s": sandbox_start_time_s,
                 "verification_time_s": verification_time_s,
             }
