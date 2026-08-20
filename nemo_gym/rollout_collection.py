@@ -17,6 +17,7 @@ import glob as glob_module
 import json
 import logging
 import os
+import tempfile
 import warnings
 from asyncio import Future, Semaphore
 from collections import Counter, defaultdict
@@ -25,7 +26,7 @@ from copy import deepcopy
 from datetime import timedelta
 from itertools import repeat
 from pathlib import Path
-from time import time
+from time import monotonic, time
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
@@ -121,6 +122,56 @@ NG_TRAJECTORY_KEY = "ng_trajectory"
 _MODEL_CALL_PAYLOAD_KEYS = ("request", "response", "request_raw", "response_raw")
 
 _DEFAULT_MAX_ROLLOUT_ATTEMPTS = 3
+_PROGRESS_UPDATE_INTERVAL_SECONDS = 5.0
+
+
+class _RolloutProgressWriter:
+    """Best-effort, atomic publisher for machine-readable rollout progress."""
+
+    def __init__(self, fpath: Path, min_interval_seconds: float = _PROGRESS_UPDATE_INTERVAL_SECONDS):
+        self._fpath = fpath
+        self._min_interval_seconds = min_interval_seconds
+        self._last_write_time: Optional[float] = None
+        self._disabled = False
+
+    def update(self, completed: int, *, force: bool = False) -> None:
+        if self._disabled:
+            return
+
+        now = monotonic()
+        if (
+            not force
+            and self._last_write_time is not None
+            and now - self._last_write_time < self._min_interval_seconds
+        ):
+            return
+
+        tmp_fpath: Optional[Path] = None
+        try:
+            self._fpath.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self._fpath.parent,
+                prefix=f".{self._fpath.name}.",
+                delete=False,
+            ) as tmp_file:
+                tmp_file.write(f"{completed}\n")
+                tmp_fpath = Path(tmp_file.name)
+            os.replace(tmp_fpath, self._fpath)
+            self._last_write_time = now
+        except Exception:
+            self._disabled = True
+            logger.debug(
+                "Could not update rollout progress file %s; disabling progress updates.",
+                self._fpath,
+                exc_info=True,
+            )
+            if tmp_fpath is not None:
+                try:
+                    tmp_fpath.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
 
 def _nonnegative_int(value: Any) -> Optional[int]:
@@ -387,6 +438,13 @@ def _get_max_rollout_attempts() -> int:
 
 class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
+    progress_file_fpath: Optional[str] = Field(
+        default=None,
+        description=(
+            "Path for the machine-readable rollout progress counter. "
+            "Defaults to a file named 'progress' alongside output_jsonl_fpath."
+        ),
+    )
     num_samples_in_parallel: Optional[int] = Field(
         default=None, description="Limit the number of concurrent samples running at once."
     )
@@ -412,6 +470,12 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
             "When unset, the standard single-pass collection runs."
         ),
     )
+
+    @property
+    def resolved_progress_file_fpath(self) -> Path:
+        if self.progress_file_fpath is not None:
+            return Path(self.progress_file_fpath)
+        return Path(self.output_jsonl_fpath).parent / "progress"
 
 
 class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
@@ -780,6 +844,12 @@ class RolloutCollectionHelper(BaseModel):
 
             output_fpath.unlink(missing_ok=True)
 
+        progress_writer = _RolloutProgressWriter(
+            config.resolved_progress_file_fpath,
+            min_interval_seconds=_PROGRESS_UPDATE_INTERVAL_SECONDS,
+        )
+        progress_writer.update(len(results), force=True)
+
         semaphore = nullcontext()
         if config.num_samples_in_parallel:
             print(f"Querying with {config.num_samples_in_parallel} concurrent requests")
@@ -852,6 +922,8 @@ class RolloutCollectionHelper(BaseModel):
                 persisted_rows.append(row)
                 persisted_results.append(result)
 
+            progress_writer.update(len(results))
+
             counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
             if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
                 counts_left.pop(row[AGENT_REF_KEY_NAME]["name"])
@@ -888,6 +960,7 @@ class RolloutCollectionHelper(BaseModel):
 
         results_file.close()
         failures_file.close()
+        progress_writer.update(len(results), force=True)
 
         if config.upload_rollouts and get_exporters():  # pragma: no cover
             print("Uploading rollouts. This may take a few minutes if your data is large.")
@@ -917,6 +990,7 @@ class RolloutCollectionHelper(BaseModel):
         print(f"""Finished rollout collection! View results at:
 Fully materialized inputs: {config.materialized_jsonl_fpath}
 Rollouts: {output_fpath}
+Progress: {config.resolved_progress_file_fpath}
 Aggregate metrics: {aggregate_metrics_fpath}""")
 
         return results

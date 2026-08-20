@@ -149,6 +149,7 @@ class TestEvalRunFlags:
             (["-i", "in.jsonl"], "+input_jsonl_fpath=in.jsonl"),
             (["--output", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
             (["-o", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
+            (["--progress-file", "artifacts/progress"], "+progress_file_fpath=artifacts/progress"),
             (["--limit", "1024"], "+limit=1024"),
             (["--num-repeats", "4"], "+num_repeats=4"),
             (["--concurrency", "10"], "+num_samples_in_parallel=10"),
