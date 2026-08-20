@@ -14,6 +14,8 @@
 # limitations under the License.
 import asyncio
 import json
+import logging
+import os
 import pickle
 import warnings
 from asyncio import Future
@@ -1737,6 +1739,17 @@ class TestRolloutCollection:
     async def test_run_from_config_sanity(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
     ) -> None:
+        progress_values = []
+        real_replace = os.replace
+        progress_fpath = tmp_path / "progress"
+
+        def track_progress_replace(src, dst):
+            real_replace(src, dst)
+            if Path(dst) == progress_fpath:
+                progress_values.append(int(progress_fpath.read_text()))
+
+        monkeypatch.setattr(nemo_gym.rollout_collection, "_PROGRESS_UPDATE_INTERVAL_SECONDS", 0)
+        monkeypatch.setattr(nemo_gym.rollout_collection.os, "replace", track_progress_replace)
         clear_captures = MagicMock()
         merge_capture = MagicMock()
         monkeypatch.setattr(nemo_gym.rollout_collection, "clear_model_call_captures_for_rollouts", clear_captures)
@@ -1829,6 +1842,9 @@ class TestRolloutCollection:
         ]
 
         assert expected_results == actual_returned_results
+        assert progress_values[:7] == list(range(7))
+        assert progress_values == sorted(progress_values)
+        assert int(progress_fpath.read_text()) == len(expected_results)
 
         expected_materialized_inputs_len = 6
         with (tmp_path / "output_materialized_inputs.jsonl").open() as f:
@@ -2055,6 +2071,90 @@ class TestRolloutCollection:
 
         assert failures_fpath.read_bytes() == b""
 
+    async def test_progress_file_is_resume_aware(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        input_rows = [
+            {
+                "responses_create_params": {"input": []},
+                AGENT_REF_KEY_NAME: {"name": "agent"},
+                TASK_INDEX_KEY_NAME: index,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+            }
+            for index in range(2)
+        ]
+        output_fpath = tmp_path / "rollouts.jsonl"
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(tmp_path / "unused.jsonl"),
+            output_jsonl_fpath=str(output_fpath),
+            resume_from_cache=True,
+            disable_aggregation=True,
+        )
+        config.materialized_jsonl_fpath.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in input_rows))
+        cached_result = {
+            "response": {"usage": {}},
+            AGENT_REF_KEY_NAME: {"name": "agent"},
+            TASK_INDEX_KEY_NAME: 0,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+        }
+        output_fpath.write_bytes(orjson.dumps(cached_result) + b"\n")
+
+        progress_values = []
+        real_replace = os.replace
+
+        def track_progress_replace(src, dst):
+            real_replace(src, dst)
+            progress_values.append(int(Path(dst).read_text()))
+
+        monkeypatch.setattr(nemo_gym.rollout_collection, "_PROGRESS_UPDATE_INTERVAL_SECONDS", 0)
+        monkeypatch.setattr(nemo_gym.rollout_collection.os, "replace", track_progress_replace)
+
+        class Helper(RolloutCollectionHelper):
+            def run_examples(self, examples, *args, **kwargs):
+                [example] = examples
+                future = Future()
+                future.set_result((example, {"response": {"usage": {}}}))
+                return [future]
+
+        results = await Helper().run_from_config(config)
+
+        assert len(results) == 2
+        assert progress_values[0] == 1
+        assert progress_values[-1] == 2
+        assert int((tmp_path / "progress").read_text()) == 2
+
+    async def test_progress_write_failure_does_not_fail_collection(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture, empty_global_config: MagicMock
+    ) -> None:
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_text(
+            json.dumps({"responses_create_params": {"input": []}, AGENT_REF_KEY_NAME: {"name": "agent"}}) + "\n"
+        )
+        non_directory = tmp_path / "not-a-directory"
+        non_directory.write_text("blocking parent creation")
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
+            progress_file_fpath=str(non_directory / "progress"),
+            disable_aggregation=True,
+        )
+
+        class Helper(RolloutCollectionHelper):
+            def run_examples(self, examples, *args, **kwargs):
+                futures = []
+                for example in examples:
+                    future = Future()
+                    future.set_result((example, {"response": {"usage": {}}}))
+                    futures.append(future)
+                return futures
+
+        with caplog.at_level(logging.DEBUG, logger=nemo_gym.rollout_collection.__name__):
+            results = await Helper().run_from_config(config)
+
+        assert len(results) == 1
+        assert not (non_directory / "progress").exists()
+        assert sum("Could not update rollout progress file" in record.message for record in caplog.records) == 1
+
     @pytest.mark.parametrize("resume_from_cache", [False, True])
     async def test_run_from_config_creates_missing_output_dir(
         self, tmp_path: Path, empty_global_config: MagicMock, resume_from_cache: bool
@@ -2094,10 +2194,11 @@ class TestRolloutCollection:
 
         await Helper().run_from_config(config)
 
-        # All four artifacts share output_fpath's parent, so one mkdir has to cover all of them.
+        # All default artifacts share output_fpath's parent, so one mkdir has to cover all of them.
         assert config.materialized_jsonl_fpath.exists()
         assert output_jsonl_fpath.exists()
         assert _failures_path_for(output_jsonl_fpath).exists()
+        assert output_jsonl_fpath.with_name("progress").exists()
         assert output_jsonl_fpath.with_name("rollouts_aggregate_metrics.json").exists()
 
     @pytest.mark.parametrize("resume_from_cache", [False, True])

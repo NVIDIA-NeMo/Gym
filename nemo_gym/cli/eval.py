@@ -409,6 +409,7 @@ def e2e_rollout_collection():  # pragma: no cover
 1. Preprocessed datasets: {data_processor_config_dict["output_dirpath"]}
 2. Dataset file used for rollout collection: {rollout_collection_config_dict["input_jsonl_fpath"]}
 3. Rollout collection results file: {output_fpath}
+4. Rollout progress file: {rollout_collection_config.resolved_progress_file_fpath}
 {f"Rollout collection driver: {driver_path}" if driver_path else ""}
 """
     )
