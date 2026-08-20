@@ -773,7 +773,10 @@ class AggregateMetricsRequest(BaseModel):
 class AggregateMetrics(BaseModel):
     """Response from /aggregate_metrics.
 
-    Flat string keys for direct logging to W&B/MLflow.
+    Metric values use flat string keys for direct logging to W&B/MLflow.
+    ``agent_metrics.stats`` is reserved for structured score metadata that is
+    preserved in the aggregate-metrics artifact but omitted from primitive-only
+    tracking logs.
     """
 
     group_level_metrics: List[Dict[str, Any]] = Field(
@@ -782,7 +785,7 @@ class AggregateMetrics(BaseModel):
     )
     agent_metrics: Dict[str, Any] = Field(
         default_factory=dict,
-        description="Overall metrics across all rollouts (RewardProfiler baseline + compute_metrics).",
+        description="Overall flat metrics plus the reserved structured stats bundle.",
     )
     key_metrics: Dict[str, Any] = Field(
         default_factory=dict,
