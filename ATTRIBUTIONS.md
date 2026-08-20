@@ -222,6 +222,14 @@ upstream copyright header and adds an NVIDIA modifications block.
 
 ---
 
+## Cloned and Modified Components
+
+| Component | License | Upstream | Notes |
+|-----------|---------|----------|-------|
+| PinchBench skill | MIT | https://github.com/pinchbench/skill | Cloned and patched at image build (modification). |
+
+---
+
 ## Full License Texts
 
 The complete license text for each Python package dependency follows.
