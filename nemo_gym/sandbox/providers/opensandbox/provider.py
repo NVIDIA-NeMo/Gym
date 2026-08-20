@@ -805,42 +805,47 @@ class OpenSandboxProvider:
 
     async def pause(self, handle: SandboxHandle) -> None:
         """Pause a sandbox and wait until its snapshot-backed state is ready."""
-        await self._await_sdk_call(
-            handle.raw.pause(),
-            operation="pause",
-            sandbox_id=handle.sandbox_id,
-            timeout_s=self._connection.request_timeout_s,
-        )
-
-        # Pause replaces the runtime and invalidates its WebSockets. Detach
-        # local PTY clients without deleting the server sessions so running
-        # processes remain part of the state being suspended.
-        for session in [s for s in self._pty_sessions if s._sandbox_id == handle.sandbox_id]:
-            try:
-                session._owned = False
-                await session.close()
-            except Exception:
-                LOGGER.warning(
-                    "Failed to detach PTY session %r while pausing sandbox %r",
-                    getattr(session, "session_id", "?"),
-                    handle.sandbox_id,
-                    exc_info=True,
-                )
-            self._pty_sessions.discard(session)
-
         timeout_s = self._operations.pause_resume_timeout_s
-        deadline = asyncio.get_running_loop().time() + timeout_s
-        while True:
-            status = await self.status(handle)
-            if status == SandboxStatus.PAUSED:
-                return
-            if status in {SandboxStatus.ERROR, SandboxStatus.STOPPED}:
-                raise RuntimeError(f"OpenSandbox sandbox {handle.sandbox_id!r} entered {status.value} while pausing")
-            if asyncio.get_running_loop().time() >= deadline:
-                raise TimeoutError(
-                    f"Timed out waiting for OpenSandbox sandbox {handle.sandbox_id!r} to pause after {timeout_s:g}s"
+        lifecycle_timeout = asyncio.timeout(timeout_s)
+        try:
+            async with lifecycle_timeout:
+                await self._await_sdk_call(
+                    handle.raw.pause(),
+                    operation="pause",
+                    sandbox_id=handle.sandbox_id,
+                    timeout_s=self._connection.request_timeout_s,
                 )
-            await asyncio.sleep(self._create.connect_poll_s)
+
+                # Pause invalidates its WebSockets. Detach local PTY clients
+                # without ending the server sessions being suspended.
+                for session in [s for s in self._pty_sessions if s._sandbox_id == handle.sandbox_id]:
+                    try:
+                        session._owned = False
+                        await session.close()
+                    except Exception:
+                        LOGGER.warning(
+                            "Failed to detach PTY session %r while pausing sandbox %r",
+                            getattr(session, "session_id", "?"),
+                            handle.sandbox_id,
+                            exc_info=True,
+                        )
+                    self._pty_sessions.discard(session)
+
+                while True:
+                    status = await self.status(handle)
+                    if status == SandboxStatus.PAUSED:
+                        return
+                    if status in {SandboxStatus.ERROR, SandboxStatus.STOPPED}:
+                        raise RuntimeError(
+                            f"OpenSandbox sandbox {handle.sandbox_id!r} entered {status.value} while pausing"
+                        )
+                    await asyncio.sleep(self._create.connect_poll_s)
+        except TimeoutError as e:
+            if not lifecycle_timeout.expired():
+                raise
+            raise TimeoutError(
+                f"Timed out waiting for OpenSandbox sandbox {handle.sandbox_id!r} to pause after {timeout_s:g}s"
+            ) from e
 
     async def resume(self, handle: SandboxHandle) -> None:
         """Resume a paused sandbox and rebuild its SDK clients and endpoints."""
