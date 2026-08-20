@@ -7,24 +7,8 @@ exactly one of eight bounded tool calls. The resource server validates the
 call, the causal `replay` backend applies a deterministic synthetic transition,
 and the environment computes a decomposed KPI reward without an LLM judge.
 
-The default `replay` path is self-contained: it needs neither a 5G lab nor a
-GPU. It is a controlled training and evaluation environment, not a live
-OpenAirInterface or FlexRIC deployment.
-
-For the code-level verification map, see
-[REVIEWER-EVIDENCE.md](REVIEWER-EVIDENCE.md).
-
-## Component map
-
-| Component | Responsibility |
-|---|---|
-| Model or policy | Reads rendered KPI telemetry and eight tool schemas, then emits one tool call. |
-| Gymnasium agent | Runs the reset/model-step loop and conditionally sends `/close` when the loop exits if the server advertises explicit-close support. |
-| Resource server | Owns session and episode state and enforces the one-call protocol. |
-| Guardrail | Validates tool names, arguments, topology references, and safety bounds. |
-| `replay` backend | Applies causal, persistent synthetic setpoints with modeled parameter effects. |
-| Verifier | `compute_breakdown` scores KPI changes and rejected actions programmatically. |
-| `dataset_replay` backend | Replays recorded next states for ingestion and reward diagnostics only. |
+The default `replay` path is self-contained and synthetic: it needs neither a
+5G lab nor a GPU and does not claim live OpenAirInterface or FlexRIC control.
 
 ## Agent-environment contract
 
@@ -164,7 +148,7 @@ gym eval profile \
 
 These commands evaluate a hosted policy; they do not train it.
 
-## Checked-in and derived evidence
+## Reproducible artifacts
 
 The package includes:
 
@@ -173,12 +157,7 @@ The package includes:
 - `data/example_rollouts.jsonl`: five scripted trajectories through the real
   resource-server API.
 
-The checked-in rollouts provide reviewable scripted records of wiring,
-lifecycle behavior, reward decomposition, and bounded completion. They are
-labeled `resource_server_wiring_not_model_quality` and do not establish SFT
-or GRPO quality.
-
-Regenerate them with:
+Regenerate the scripted wiring checks with:
 
 ```bash
 python resources_servers/openair_congestion/generate_example_rollouts.py
@@ -191,10 +170,8 @@ python resources_servers/openair_congestion/golden_set.py \
   --out results/openair_congestion_golden_set.jsonl
 ```
 
-For each deterministic decision state, the script exhaustively evaluates a
-bounded action grid, applies one candidate, and then coasts with `noop`. The
-result is a reproducible reward-and-dynamics sanity oracle for that grid and
-horizon. It is not a universal multi-step optimum or real-model evidence.
+The golden set evaluates a bounded action grid at deterministic decision
+states. It is a dynamics sanity check, not a universal optimum.
 
 ## Diagnose recorded data with `dataset_replay`
 
@@ -231,51 +208,12 @@ validation, start, and evaluation commands shown above. The workflow validates
 ingestion and reward diagnostics; it cannot supply the counterfactual next
 state for a different action and remains diagnostic-only.
 
-## Extend the environment
-
-When adding a KPI:
-
-1. Add and validate it in `openair_congestion/schemas.py`.
-2. Parse or derive it in `dataset_backend.py` and record honest provenance.
-3. Populate it in `openair_congestion/replay_env.py`.
-4. Render it only if the policy should observe it.
-5. If it changes scoring, add an auditable term and version the reward contract.
-6. Update fixtures, documentation, and focused tests.
-
-When adding a tool:
-
-1. Define its OpenAI function schema and bounds in `openair_congestion/tools.py`.
-2. Add topology and safety checks in `openair_congestion/guardrail.py`.
-3. Give it deterministic, parameter-sensitive, persistent replay effects, or
-   reject it when the synthetic topology cannot represent it honestly.
-4. Update prompts, examples, fixtures, baselines, and focused tests.
-
-## Training and checkpoint evaluation
-
-Use causal `replay` for GRPO. The model, tokenizer, optimizer, and SFT/GRPO
-settings belong in the NeMo RL training YAML, not the resource-server YAML.
-Set the base model or checkpoint in the NeMo RL model section and use
-disjoint training and evaluation manifests. This package does not ship a
-validated OpenAir-specific NeMo RL job YAML; use the current NeMo RL GRPO
-tutorial as the schema authority.
-
-Evaluate a trained checkpoint by serving it through an OpenAI-compatible model
-endpoint and rerunning the `gym env start`, `gym eval run`, and
-`gym eval profile` workflow above. Some checkpoints need a model-specific chat
-template or tool-call parser. Keep the task rows, backend, reward version,
-horizon, decoding settings, and repeat count fixed when comparing policies.
-
 ## Tests
 
 ```bash
 pytest resources_servers/openair_congestion/tests -q
 pytest responses_api_agents/gymnasium_agent/tests/test_app.py -q
 ```
-
-The suite covers configuration and schemas, representative deterministic
-action effects, guardrails, reward ordering and decomposition, dataset
-ingestion, session cleanup, HTTP behavior, checked-in artifacts, and
-golden-set self-validation.
 
 ## Limitations
 
@@ -284,9 +222,7 @@ golden-set self-validation.
 - Dataset replay is non-causal and diagnostic-only.
 - The finite-grid golden set is a scripted sanity oracle, not a universal
   optimum or evidence of policy quality.
-- Checked-in scripted rollouts do not establish SFT or GRPO quality.
-- Hosted-model evaluation and NeMo RL training are optional empirical work,
-  separate from resource-server correctness.
+- Checked-in rollouts and the golden set do not establish model quality.
 
 ## License
 

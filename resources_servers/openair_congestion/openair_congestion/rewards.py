@@ -15,17 +15,8 @@
       - w_action    * action_l1_norm * 1{not guardrail_rejected}
       - w_reject    * 1{guardrail_rejected}
 
-Delta terms are computed against the **previous** observation. Level terms
-score the current observation so persistent improvements keep earning credit
-by avoiding congestion penalties. The first step's reward uses zero-deltas
-(``prev is None``), but level penalties can still fire if the episode starts
-in a congested state.
-
-The ``action_l1_norm`` term discourages the policy from churning every
-step. We use a coarse "one knob changed" approximation: ``noop`` is 0,
-any actuator is 1.0 (independent of how big the parameter swing was).
-The intent is to penalise *any* change, not its magnitude — magnitudes
-are hard to compare across heterogeneous tools (PRB count vs. dB).
+Delta terms compare consecutive observations; level terms charge persistent
+congestion. Action magnitude is binary because the tools use incomparable units.
 """
 
 from __future__ import annotations
@@ -35,13 +26,13 @@ from dataclasses import dataclass
 from .schemas import Observation, ToolCall
 
 
+REWARD_VERSION = "openair_v1"
+PRB_PRESSURE_THRESHOLD = 0.85
+
+
 @dataclass(frozen=True)
 class RewardWeights:
-    """Per-step reward coefficients.
-
-    Delta and level terms balance short-term improvement with persistent
-    congestion cost. Values are part of the versioned ``openair_v1`` contract.
-    """
+    """Versioned per-step reward coefficients."""
 
     w_sla: float = 1.0
     w_tput: float = 2.0
@@ -136,7 +127,7 @@ def compute_breakdown(
     weights: RewardWeights = DEFAULT_WEIGHTS,
     cell_capacity_mbps: float = 60.0,
     buffer_capacity_kb: float = 1024.0,
-    prb_pressure_threshold: float = 0.85,
+    prb_pressure_threshold: float = PRB_PRESSURE_THRESHOLD,
 ) -> dict[str, dict[str, float] | float]:
     """Return raw KPI measurements, weighted reward terms, and total."""
     d_sla, d_tput, d_fair = _delta_terms(prev_obs, curr_obs, rejected=rejected)
@@ -187,60 +178,8 @@ def compute_breakdown(
     return {"measurements": measurements, "terms": terms, "total": total}
 
 
-def compute_terms(
-    prev_obs: Observation | None,
-    curr_obs: Observation,
-    action: ToolCall,
-    *,
-    rejected: bool = False,
-    weights: RewardWeights = DEFAULT_WEIGHTS,
-    cell_capacity_mbps: float = 60.0,
-    buffer_capacity_kb: float = 1024.0,
-    prb_pressure_threshold: float = 0.85,
-) -> dict[str, float]:
-    """Return per-term reward components for calibration diagnostics."""
-    breakdown = compute_breakdown(
-        prev_obs,
-        curr_obs,
-        action,
-        rejected=rejected,
-        weights=weights,
-        cell_capacity_mbps=cell_capacity_mbps,
-        buffer_capacity_kb=buffer_capacity_kb,
-        prb_pressure_threshold=prb_pressure_threshold,
-    )
-    return breakdown["terms"]  # type: ignore[return-value]
-
-
-def compute(
-    prev_obs: Observation | None,
-    curr_obs: Observation,
-    action: ToolCall,
-    *,
-    rejected: bool = False,
-    weights: RewardWeights = DEFAULT_WEIGHTS,
-    cell_capacity_mbps: float = 60.0,
-    buffer_capacity_kb: float = 1024.0,
-    prb_pressure_threshold: float = 0.85,
-) -> float:
-    """Compute the per-step reward. See the module formula."""
-    terms = compute_terms(
-        prev_obs,
-        curr_obs,
-        action,
-        rejected=rejected,
-        weights=weights,
-        cell_capacity_mbps=cell_capacity_mbps,
-        buffer_capacity_kb=buffer_capacity_kb,
-        prb_pressure_threshold=prb_pressure_threshold,
-    )
-    return terms["total"]
-
-
 __all__ = [
     "RewardWeights",
     "DEFAULT_WEIGHTS",
-    "compute",
     "compute_breakdown",
-    "compute_terms",
 ]

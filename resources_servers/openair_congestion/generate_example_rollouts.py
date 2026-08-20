@@ -51,10 +51,6 @@ _STEP_INFO_KEYS = (
 )
 
 
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-
-
 def _validate_model_inputs(rows: list[dict[str, Any]]) -> None:
     """Reject example prompts that reveal evaluator-only scenario labels."""
 
@@ -171,7 +167,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     args = parser.parse_args()
 
-    rows = _read_jsonl(args.input)
+    rows = [json.loads(line) for line in args.input.read_text(encoding="utf-8").splitlines() if line.strip()]
     if len(rows) != 5:
         raise ValueError(f"expected exactly five example rows, got {len(rows)}")
     rollouts = asyncio.run(_generate(rows))

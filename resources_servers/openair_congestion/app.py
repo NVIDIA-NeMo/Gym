@@ -13,22 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""5G RAN congestion control, gymnasium style.
+"""Gymnasium resource server for synthetic 5G congestion control.
 
-Multi-turn: the model observes rolling 5s cell/UE KPIs each turn and issues
-exactly one tool call from an 8-tool action space (7 actuators + noop; tool
-schemas ride in each task row's responses_create_params.tools). /step applies
-the action through the selected Backend and returns the next KPIs plus the
-per-step reward computed inside the env (rewards.compute_breakdown), passed
-through unchanged; the shared gymnasium_agent sums step rewards into the
-episode return, like blackjack.
-
-Backends (backends.py): ``replay`` is the causal, deterministic training
-environment. ``dataset_replay`` serves recorded transitions for diagnostics
-only because policy actions cannot change a pre-recorded next state.
-
-The ``openair_congestion`` domain package is colocated with this resource
-server, so a clean NeMo Gym checkout is self-contained.
+The causal replay backend supports training; dataset replay is diagnostic-only.
 """
 
 from __future__ import annotations
@@ -98,21 +85,6 @@ _TOOL_ARGUMENT_VALIDATORS = {
 }
 
 _DEFAULT_OBSERVATION_RENDER = "openair_natural_language_v1"
-
-
-def _episode_contract(
-    capabilities: dict[str, Any],
-    reward_contract: dict[str, Any],
-) -> dict[str, Any]:
-    """Return the explicit contract consumed by external rollout trainers."""
-
-    return {
-        **capabilities,
-        **reward_contract,
-        "observation_render": _DEFAULT_OBSERVATION_RENDER,
-        "supports_explicit_close": True,
-        "supports_step_idempotency": True,
-    }
 
 
 class OpenAirCongestionResourcesServerConfig(BaseResourcesServerConfig):
@@ -189,8 +161,6 @@ def _strict_json_object(raw: str) -> dict[str, Any]:
 
 
 class OpenAirCongestionEnv(GymnasiumServer):
-    """GymnasiumServer subclass: /reset + /step, driven by gymnasium_agent."""
-
     config: OpenAirCongestionResourcesServerConfig
 
     # Backend built once at startup so an unknown backend fails at boot, not
@@ -217,10 +187,6 @@ class OpenAirCongestionEnv(GymnasiumServer):
     def backend(self) -> Backend:
         assert self._backend is not None, "Backend not initialized (model_post_init)"
         return self._backend
-
-    def _live_episode_ids(self) -> set[str]:
-        """Episode ids currently owned by live sessions (for the leak reaper)."""
-        return {state["episode_id"] for state in self.session_state.values()}
 
     async def _reap_expired_sessions(self) -> None:
         """Release state left behind by clients that can no longer call /close."""
@@ -295,13 +261,16 @@ class OpenAirCongestionEnv(GymnasiumServer):
             first_obs, meta = await asyncio.to_thread(
                 self.backend.reset,
                 task_params,
-                live_episode_ids=self._live_episode_ids(),
+                live_episode_ids={state["episode_id"] for state in self.session_state.values()},
             )
             try:
-                contract = _episode_contract(
-                    self.backend.capabilities(),
-                    self.backend.reward_contract(meta.tier),
-                )
+                contract = {
+                    **self.backend.capabilities(),
+                    **self.backend.reward_contract(meta.tier),
+                    "observation_render": _DEFAULT_OBSERVATION_RENDER,
+                    "supports_explicit_close": True,
+                    "supports_step_idempotency": True,
+                }
                 self.session_state[session_id] = {
                     "episode_id": meta.episode_id,
                     "contract": contract,

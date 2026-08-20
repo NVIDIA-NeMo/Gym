@@ -13,22 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Reward-correctness oracle for the replay backend: scripted policies of
-# known quality must land in the right order (better play reaches higher
-# return, the floor is reachable), and per-step rewards must move in the
-# right direction when a KPI improves or an action is rejected.
-#
-# A reward normalization is pending, so every assertion here is a relative
-# ordering or a directional property -- never an absolute threshold. A
-# rescale of the reward must not invalidate this file.
-#
-# The scripted policies are test oracles, not shipped baselines; they live
-# here on purpose.
+# Reward tests assert policy ordering and directional KPI properties rather
+# than absolute values, so a later normalization does not invalidate them.
 import json
 import random
 from typing import Callable
 
-from openair_congestion.rewards import compute, compute_breakdown, compute_terms
+from openair_congestion.rewards import compute_breakdown
 from openair_congestion.schemas import Observation, ToolCall
 
 from resources_servers.openair_congestion.backends import ReplayBackend
@@ -265,14 +256,6 @@ class TestPerStepRewardProperties:
         accepted = compute_breakdown(prev, curr, self._ACTION, rejected=False)["total"]
         rejected = compute_breakdown(prev, curr, self._ACTION, rejected=True)["total"]
         assert rejected < accepted
-
-    def test_reward_wrappers_match_breakdown(self):
-        prev = self._first_obs()
-        action = ToolCall(name="noop", arguments={})
-        expected = compute_breakdown(prev, prev, action)
-
-        assert compute_terms(prev, prev, action) == expected["terms"]
-        assert compute(prev, prev, action) == expected["total"]
 
     def test_rejected_step_scores_below_accepted_step_through_the_env(self):
         # Same seed, two fresh episodes, one step each: an accepted relief

@@ -31,7 +31,6 @@ from .env import (
     _sample_scenario,
     _ScenarioFingerprint,
 )
-from .reward_profiles import select_reward_profile
 from .schemas import EpisodeMeta, Observation, ToolCall
 from .telemetry import KpiSnapshot
 from .tools import P0_DBM_RANGE, PRB_MAX, TTT_MS_VALUES
@@ -67,66 +66,8 @@ class ReplayActionState(ReplayActionBias):
     last_prb_cap_diagnostics: dict[int, dict[str, Any]] = field(default_factory=dict)
 
 
-def action_effect_version() -> str:
-    """Return the replay action-effect model identifier for provenance."""
-
-    return ACTION_EFFECT_VERSION
-
-
 def _clip(value: float, lo: float, hi: float) -> float:
     return float(max(lo, min(hi, value)))
-
-
-def _regime_weight(fingerprint: _ScenarioFingerprint, regime: str) -> float:
-    return float((fingerprint.regime_mix or {}).get(regime, 0.0))
-
-
-def _cell_payload(data: dict[str, Any], cell_id: int) -> dict[str, Any] | None:
-    for cell in data.get("cells", []):
-        if int(cell.get("cell_id", -1)) == cell_id:
-            return cell
-    return None
-
-
-def _ue_payload(cell: dict[str, Any], ue_id: int) -> dict[str, Any] | None:
-    for ue in cell.get("ues", []):
-        if int(ue.get("ue_id", -1)) == ue_id:
-            return ue
-    return None
-
-
-def _set_cell_delta(
-    cell: dict[str, Any],
-    field_name: str,
-    delta: float,
-    *,
-    integer: bool = False,
-) -> None:
-    current = float(cell.get(field_name, 0.0))
-    value = current + float(delta)
-    if integer:
-        cell[field_name] = int(round(value))
-    else:
-        cell[field_name] = value
-
-
-def _set_ue_delta(
-    ue: dict[str, Any],
-    field_name: str,
-    delta: float,
-    *,
-    integer: bool = False,
-) -> None:
-    current = float(ue.get(field_name, 0.0))
-    value = current + float(delta)
-    if integer:
-        ue[field_name] = int(round(value))
-    else:
-        ue[field_name] = value
-
-
-def _add_bias(mapping: dict[Any, float], key: Any, delta: float) -> None:
-    mapping[key] = float(mapping.get(key, 0.0) + delta)
 
 
 def _add_cell_bias(
@@ -135,7 +76,8 @@ def _add_cell_bias(
     field_name: str,
     delta: float,
 ) -> None:
-    _add_bias(state.cell_biases, (cell_id, field_name), delta)
+    key = (cell_id, field_name)
+    state.cell_biases[key] = float(state.cell_biases.get(key, 0.0) + delta)
 
 
 def _add_ue_bias(
@@ -145,37 +87,31 @@ def _add_ue_bias(
     field_name: str,
     delta: float,
 ) -> None:
-    _add_bias(state.ue_biases, (cell_id, ue_id, field_name), delta)
+    key = (cell_id, ue_id, field_name)
+    state.ue_biases[key] = float(state.ue_biases.get(key, 0.0) + delta)
 
 
 def _apply_action_biases(data: dict[str, Any], state: ReplayActionBias) -> None:
-    cell_integer_fields = {"rrc_connected_ues", "sla_violations_last_window"}
-    ue_integer_fields = {"pdb_violations"}
+    cells = {int(cell.get("cell_id", -1)): cell for cell in data.get("cells", [])}
 
     for (cell_id, field_name), delta in state.cell_biases.items():
-        cell = _cell_payload(data, cell_id)
+        cell = cells.get(cell_id)
         if cell is None:
             continue
-        _set_cell_delta(
-            cell,
-            field_name,
-            delta,
-            integer=field_name in cell_integer_fields,
+        value = float(cell.get(field_name, 0.0)) + delta
+        cell[field_name] = (
+            int(round(value)) if field_name in {"rrc_connected_ues", "sla_violations_last_window"} else value
         )
 
     for (cell_id, ue_id, field_name), delta in state.ue_biases.items():
-        cell = _cell_payload(data, cell_id)
+        cell = cells.get(cell_id)
         if cell is None:
             continue
-        ue = _ue_payload(cell, ue_id)
+        ue = next((item for item in cell.get("ues", []) if int(item.get("ue_id", -1)) == ue_id), None)
         if ue is None:
             continue
-        _set_ue_delta(
-            ue,
-            field_name,
-            delta,
-            integer=field_name in ue_integer_fields,
-        )
+        value = float(ue.get(field_name, 0.0)) + delta
+        ue[field_name] = int(round(value)) if field_name == "pdb_violations" else value
 
 
 def _jain_fairness(values: list[float]) -> float:
@@ -307,20 +243,6 @@ def _apply_collective_prb_caps(
             "unredistributed_shed_mbps": unredistributed,
             "final_delivered_mbps": final_total,
         }
-
-
-def _apply_state_biases(
-    data: dict[str, Any],
-    state: ReplayActionState,
-    *,
-    cell_capacity_mbps: float,
-) -> None:
-    _apply_action_biases(data, state)
-    _apply_collective_prb_caps(
-        data,
-        state,
-        cell_capacity_mbps=cell_capacity_mbps,
-    )
 
 
 def _synthetic_replay_guardrail(
@@ -680,7 +602,8 @@ def apply_action_effect(
         _record_action_effect(state=state, prev_obs=prev_obs, action=action)
     _rebuild_action_biases(state=state, prev_obs=prev_obs)
     data = base_next_obs.model_dump(by_alias=True)
-    _apply_state_biases(
+    _apply_action_biases(data, state)
+    _apply_collective_prb_caps(
         data,
         state,
         cell_capacity_mbps=cell_capacity_mbps,
@@ -760,7 +683,7 @@ def _synthesize_kpi_snapshot(
             sinr_db = float(8.0 + 2.0 * ue_id + sub.normal(0.0, 1.5))
             bler = float(np.clip(0.05 + 0.10 * prb_util + sub.normal(0.0, 0.02), 0.0, 1.0))
 
-            interference = _regime_weight(fingerprint, "interference")
+            interference = float((fingerprint.regime_mix or {}).get("interference", 0.0))
             if interference > 0.0:
                 # The scenario sampler records NLOS pulses, but the replay
                 # fingerprint intentionally keeps only the slim fields needed
@@ -975,14 +898,12 @@ class ReplayEnv:
                 cell_capacity_mbps=episode.fingerprint.cell_capacity_mbps,
             )
 
-            reward_profile = select_reward_profile(episode.fingerprint.tier)
             reward_breakdown = _rewards.compute_breakdown(
                 prev_obs=prev_obs,
                 curr_obs=new_obs,
                 action=action,
                 rejected=rejected,
                 cell_capacity_mbps=episode.fingerprint.cell_capacity_mbps,
-                prb_pressure_threshold=(reward_profile.prb_pressure_threshold),
             )
             reward = float(reward_breakdown["total"])
 
@@ -1028,7 +949,7 @@ class ReplayEnv:
                 "dynamics_mode": ACTION_EFFECT_VERSION,
                 "reward_measurements": reward_breakdown["measurements"],
                 "reward_terms": reward_breakdown["terms"],
-                "reward_version": reward_profile.version,
+                "reward_version": _rewards.REWARD_VERSION,
                 "prb_cap_dynamics": candidate_state.last_prb_cap_diagnostics,
             }
             return new_obs, reward, done, info
@@ -1055,7 +976,6 @@ __all__ = [
     "ReplayActionBias",
     "ReplayActionState",
     "ACTION_EFFECT_VERSION",
-    "action_effect_version",
     "apply_action_effect",
     "build_trajectory",
     "_synthesize_kpi_snapshot",

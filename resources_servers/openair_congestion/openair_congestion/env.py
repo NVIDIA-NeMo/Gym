@@ -67,7 +67,9 @@ def _sample_scenario(
     This stays dependency-free so identical task rows produce identical
     episodes regardless of unrelated packages in the host environment.
     """
-    n_cells, n_ues_total = _tier_dims(tier)
+    if tier != "replay":
+        raise ValueError(f"unsupported tier {tier!r}")
+    n_cells, n_ues_total = 2, 4
     fp = _ScenarioFingerprint(
         n_cells=n_cells,
         n_ues_total=n_ues_total,
@@ -96,15 +98,6 @@ def _sample_scenario(
             fp.offered_mbps[key] = offered
             fp.qos_5qi[key] = 1 if qos_weight > 0.0 and ue_idx % 2 == 0 else 9
     return fp
-
-
-def _tier_dims(tier: str) -> tuple[int, int]:
-    """Return the synthetic topology for a supported task tier."""
-
-    try:
-        return {"replay": (2, 4)}[tier]
-    except KeyError as exc:
-        raise ValueError(f"unsupported tier {tier!r}") from exc
 
 
 # --- Observation builder ---------------------------------------------------
@@ -247,5 +240,4 @@ __all__ = [
     "_ScenarioFingerprint",
     "_build_observation",
     "_sample_scenario",
-    "_tier_dims",
 ]

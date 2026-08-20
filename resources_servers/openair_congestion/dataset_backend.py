@@ -13,24 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Dataset-replay backend: serve recorded KPI snapshots through the Backend
-contract.
+"""Replay recorded KPI snapshots for ingestion and reward diagnostics.
 
-``ReplayBackend`` synthesizes trajectories from seeds; this backend replays a
-dataset file instead. Same reset/step/close contract, so switching is
-config-only (``backend: dataset_replay``).
-
-The accepted format is JSONL with one nested ``cells[]`` / ``ues[]`` KPI
-snapshot per timestep. Missing optional KPI fields are synthesized with the
-same heuristics the live env uses (``openair_congestion/env.py``), so a sparse
-dataset still yields the stable observation contract used by diagnostics and
-conversion tooling.
-
-Actions are pass-through: the data is pre-recorded, so
-``step()`` advances a pointer and does not mutate KPIs. The guardrail still
-runs (rejected actions earn the same penalty semantics as ReplayEnv) and the
-reward is computed over the served observation pair via the unchanged
-``rewards.compute_breakdown(prev_obs, curr_obs, action, rejected=...)``.
+Actions are validated and scored but cannot change prerecorded next states.
 """
 
 from __future__ import annotations
@@ -52,7 +37,6 @@ from resources_servers.openair_congestion.backends import Backend
 # isort: split
 from openair_congestion import guardrail as _guardrail
 from openair_congestion import rewards as _rewards
-from openair_congestion.reward_profiles import select_reward_profile
 from openair_congestion.schemas import (
     AgentAux,
     EpisodeMeta,
@@ -657,7 +641,6 @@ class DatasetReplayBackend(Backend):
             new_obs = episode.trajectory[next_idx]
             recorded_action = episode.recorded_actions[episode.step_idx]
 
-            reward_profile = select_reward_profile(episode.meta.tier)
             reward_breakdown = _rewards.compute_breakdown(
                 prev_obs=prev_obs,
                 curr_obs=new_obs,
@@ -665,7 +648,6 @@ class DatasetReplayBackend(Backend):
                 rejected=rejected,
                 cell_capacity_mbps=self.cell_capacity_mbps,
                 weights=self.reward_weights,
-                prb_pressure_threshold=reward_profile.prb_pressure_threshold,
             )
             reward = float(reward_breakdown["total"])
 
@@ -694,7 +676,7 @@ class DatasetReplayBackend(Backend):
                 "kpi_source": "dataset_replay",
                 "reward_measurements": reward_breakdown["measurements"],
                 "reward_terms": reward_breakdown["terms"],
-                "reward_version": reward_profile.version,
+                "reward_version": _rewards.REWARD_VERSION,
                 "recorded_action": (None if recorded_action is None else recorded_action.model_dump()),
                 **self.reward_contract(episode.meta.tier),
                 **self.capabilities(),

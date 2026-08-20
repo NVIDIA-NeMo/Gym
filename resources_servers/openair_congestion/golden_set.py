@@ -13,46 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Derived-oracle golden set: an objective per-state action benchmark.
+"""Derive a deterministic best-single-intervention benchmark.
 
-No public benchmark exists for this telco control task, so we derive one from
-the environment itself. The replay backend is deterministic, so for any state
-the best single intervention is *computable*: reconstruct the state, try every
-action in a finite grid, and keep the one whose value (below) is highest. The
-label is derived from the dynamics, not opined by a model -- any reviewer can
-recompute it, which is the whole point.
-
-Each golden row is a decision point drawn from the do-nothing (noop)
-trajectory of a fixed evaluation seed -- "the network has been left alone for k steps
-and is now congested; what is the best single action?" -- scored by
-*episode-level value*: apply the candidate now, then coast (noop) to the end,
-and sum the reward from the action onward. Coasting after the action, not just
-its one-step reward, is what makes the margin meaningful in this environment,
-where a single control move has a small immediate delta but a compounding
-effect over the horizon. Each row carries:
-
-    golden action + value, the noop (all-coast) value, and their margin.
-
-Margin is the opportunity: how much the best single action beats inaction
-here. Near-zero margin means the state is not a real decision point, so
-evaluation focuses on the positive-margin subset. The set spans all five
-congestion regimes, which also surfaces *where* actions matter. Treat the
-regime breakdown from each regenerated benchmark as the evidence for that run.
-
-Scoring a policy is one intervention: at each golden state, apply the policy's
-action, coast to the end, and measure how much of the golden margin it
-recovers, `(policy_value - noop_value) / (golden_value - noop_value)`, clipped
-to [0, 1]. The validity checks are intentionally minimal: an oracle that
-replays the golden action recovers ~all the margin and noop recovers none.
-The hand-written relief rule is reported descriptively, not used as a gate.
-
-This is a v0: best-single-intervention value over a finite action grid, not
-multi-step optimal control, on a fixed evaluation seed band. This contribution
-does not establish that those seeds are disjoint from an external training run.
-
-Usage:
-    python resources_servers/openair_congestion/golden_set.py
-    python resources_servers/openair_congestion/golden_set.py --out golden_set_v0.jsonl
+Each candidate acts once and then coasts with ``noop``; scoring measures how
+much of the best candidate's advantage over no-op a policy recovers.
 """
 
 from __future__ import annotations
@@ -251,13 +215,6 @@ def generate_golden_set(
 PolicyFn = Callable[[str], dict[str, Any]]
 
 
-def _recovery(policy_value: float, noop_value: float, golden_value: float) -> float:
-    span = golden_value - noop_value
-    if span <= 0:
-        return 1.0  # nothing to recover: any action ties the (already optimal) noop
-    return max(0.0, min(1.0, (policy_value - noop_value) / span))
-
-
 def score_policy_against_golden(rows: list[GoldenRow], policy: PolicyFn, *, opportunities_only: bool = True) -> dict:
     backend = ReplayBackend(pool_size=8, max_steps_default=_MAX_STEPS)
     exact_hits, recoveries, scored_rows = 0, [], 0
@@ -277,7 +234,8 @@ def score_policy_against_golden(rows: list[GoldenRow], policy: PolicyFn, *, oppo
             scored_rows += 1
             if chosen["name"] == row.golden_action["name"] and chosen["arguments"] == row.golden_action["arguments"]:
                 exact_hits += 1
-            recoveries.append(_recovery(value, row.noop_value, row.golden_value))
+            span = row.golden_value - row.noop_value
+            recoveries.append(1.0 if span <= 0 else max(0.0, min(1.0, (value - row.noop_value) / span)))
         finally:
             backend.close(episode_id)
     return {

@@ -13,40 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Backend abstraction for the openair_congestion resources server.
-
-The gymnasium-style server in ``app.py`` talks to a :class:`Backend`, which
-owns episode lifecycles:
-
-    reset(task_params, live_episode_ids=...) -> (Observation, EpisodeMeta)
-    step(episode_id, tool_call)              -> (Observation, reward, terminated, info)
-    close(episode_id)                        -> summary dict
-
-Two drivers implement the contract:
-
-- :class:`ReplayBackend` ('replay', the default): offline and deterministic.
-  Wraps the colocated ``openair_congestion.replay_env.ReplayEnv``; no 5G
-  lab, no GPU, no KPI exporter, no wall-clock sleeps.
-- ``DatasetReplayBackend`` ('dataset_replay', in ``dataset_backend.py``):
-  offline replay of recorded KPI snapshots instead of seed-synthesized
-  trajectories.
-The unfinished live OAI collector is deliberately not selectable. Live
-control belongs in a later contribution with its own lab evidence.
-
-Selection is via :func:`select_backend`. The YAML ``backend:`` field is the
-canonical switch; the ``OPENAIR_CONGESTION_BACKEND`` env var overrides it for
-local development.
-
-Episode slots are finite (``pool_size``) and normally free via close(). If a
-rollout dies between /reset and its terminal /step the slot would leak, so
-``reset()`` accepts ``live_episode_ids`` — the episode ids still owned by
-live sessions — and backends reap orphaned episodes when the pool is
-exhausted.
-
-Rewards are not touched here: ``ReplayEnv.step()`` computes the per-step
-reward internally via ``rewards.compute_breakdown()`` and this layer passes
-its total through unchanged.
-"""
+"""Replay and recorded-data backends for OpenAir congestion episodes."""
 
 from __future__ import annotations
 
@@ -70,73 +37,48 @@ except ModuleNotFoundError as exc:  # pragma: no cover - exercised only when unp
         "is present in this checkout."
     ) from exc
 
-from openair_congestion.replay_env import ReplayEnv, action_effect_version  # noqa: E402
-from openair_congestion.reward_profiles import select_reward_profile  # noqa: E402
-from openair_congestion.rewards import DEFAULT_WEIGHTS  # noqa: E402
+from openair_congestion.replay_env import ACTION_EFFECT_VERSION, ReplayEnv  # noqa: E402
+from openair_congestion.rewards import (  # noqa: E402
+    DEFAULT_WEIGHTS,
+    PRB_PRESSURE_THRESHOLD,
+    REWARD_VERSION,
+)
 from openair_congestion.schemas import EpisodeMeta, Observation, ToolCall  # noqa: E402
 
 
 class Backend(ABC):
-    """Episode-oriented environment driver behind the gymnasium server.
-
-    ``task_params`` is the plain dict of scenario controls taken from the
-    task row (seed / difficulty / regime_mix / scenario_id / tier /
-    max_steps); keys map 1:1 onto ``ReplayEnv.reset()`` keyword arguments.
-    """
-
     @abstractmethod
     def reset(
         self, task_params: dict[str, Any], *, live_episode_ids: Optional[set[str]] = None
     ) -> tuple[Observation, EpisodeMeta]:
-        """Start a new episode; returns (first Observation, EpisodeMeta).
-
-        ``meta.episode_id`` is the handle for subsequent step()/close() calls.
-        ``live_episode_ids`` is the set of episode ids still owned by live
-        sessions; backends may use it to reap orphaned episodes when their
-        pool is exhausted.
-        """
+        """Start an episode, reaping allocations not owned by live sessions."""
 
     @abstractmethod
     def step(self, episode_id: str, tool_call: ToolCall) -> tuple[Observation, float, bool, dict[str, Any]]:
-        """Apply one action; returns (next_obs, reward, terminated, info).
-
-        ``reward`` is the per-step total already computed inside the env
-        (rewards.compute_breakdown), passed through unchanged. ``info``
-        carries guardrail_accepted / rejection_reason / step_idx /
-        reward_terms / reward_measurements / kpi_source / dynamics_mode.
-        """
+        """Apply one action and return its transition."""
 
     @abstractmethod
     def close(self, episode_id: str) -> dict[str, Any]:
-        """Release the episode slot; returns a summary like {ok, n_steps}."""
+        """Release an episode slot."""
 
     @abstractmethod
     def capabilities(self) -> dict[str, Any]:
-        """Describe whether actions causally affect served transitions."""
+        """Describe the backend's training guarantees."""
 
     def reward_contract(self, tier: str) -> dict[str, Any]:
         """Return the effective scoring configuration exposed to clients."""
 
-        profile = select_reward_profile(tier)
+        if tier != "replay":
+            raise ValueError(f"tier {tier!r} is not supported by this contribution")
         return {
-            "reward_profile": profile.version,
+            "reward_profile": REWARD_VERSION,
             "reward_weights": asdict(DEFAULT_WEIGHTS),
-            "prb_pressure_threshold": profile.prb_pressure_threshold,
+            "prb_pressure_threshold": PRB_PRESSURE_THRESHOLD,
         }
 
 
 class ReplayBackend(Backend):
-    """Offline deterministic driver wrapping ``ReplayEnv`` (the default).
-
-    Standalone: no lab, no GPU, no exporter. One shared ReplayEnv instance
-    manages all episodes by episode_id; it is internally locked (per-episode
-    threading.RLock), so a single instance is safe across concurrent sessions.
-
-    Leak safety: this backend tracks every episode id it creates. If
-    ``ReplayEnv.reset()`` raises its pool-exhausted RuntimeError, episodes not
-    referenced by any live session (``live_episode_ids``) are closed as leaked
-    and the reset is retried exactly once.
-    """
+    """Deterministic synthetic backend with orphaned-episode reclamation."""
 
     def __init__(
         self,
@@ -206,7 +148,7 @@ class ReplayBackend(Backend):
     def capabilities(self) -> dict[str, Any]:
         return {
             "backend": "replay",
-            "dynamics_mode": action_effect_version(),
+            "dynamics_mode": ACTION_EFFECT_VERSION,
             "action_affects_observation": True,
             "causal_action_effects": True,
             "training_usable": True,
@@ -215,12 +157,7 @@ class ReplayBackend(Backend):
 
 
 def select_backend(config: Any) -> Backend:
-    """Build the configured Backend (dependency injection point for app.py).
-
-    Precedence: OPENAIR_CONGESTION_BACKEND env var > config.backend > 'replay'.
-    ``config`` is duck-typed (the app's config object) so this module never
-    imports app.py.
-    """
+    """Build the configured backend, honoring the environment override."""
     name = os.environ.get("OPENAIR_CONGESTION_BACKEND") or getattr(config, "backend", None) or "replay"
     name = name.strip().lower()
     if name == "replay":
