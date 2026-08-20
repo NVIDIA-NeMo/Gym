@@ -244,7 +244,14 @@ def test_token_store_freeze_is_atomic_and_conditional_drop_is_race_safe(tmp_path
     assert updated.incomplete
     assert asyncio.run(store.drop("r0", snapshot_id=updated.snapshot_id, version=updated.version))
     assert store.read_entries("r0") == []
-    assert orjson.loads(store.state_path_for("r0").read_bytes())["retired"] is True
+    state = orjson.loads(store.state_path_for("r0").read_bytes())
+    assert state["retired"] is True
+    assert state["indexed_size"] == 0
+    assert state["entry_digests"] == {}
+    retired = asyncio.run(store.freeze("r0"))
+    assert retired.entries == ()
+    assert retired.snapshot_id == updated.snapshot_id
+    assert retired.version == updated.version
     with pytest.raises(RuntimeError, match="already frozen"):
         asyncio.run(store.put(entry.model_copy(update={"model_call_id": "late-after-drop"})))
 

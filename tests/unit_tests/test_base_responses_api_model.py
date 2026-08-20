@@ -803,11 +803,17 @@ def test_base_agent_resolve_model_base_url(monkeypatch):
         server_client=SimpleNamespace(
             global_config_dict={},
             _build_server_base_url=lambda _config: "http://h:1",
-        )
+        ),
+        _token_id_capture_enabled=lambda: False,
     )
 
     assert SimpleResponsesAPIAgent.resolve_model_base_url(agent, "model", "rid") == "http://h:1/ng-rollout/rid/v1"
     assert SimpleResponsesAPIAgent.resolve_model_base_url(agent, "model", None) == "http://h:1/v1"
+    agent._token_id_capture_enabled = lambda: True
+    assert (
+        SimpleResponsesAPIAgent.resolve_model_base_url(agent, "model", "rid")
+        == "http://h:1/ng-rollout/rid/training-token-capture/v1"
+    )
 
 
 def _make_base_agent(global_config, *, token_id_capture=False):

@@ -286,6 +286,8 @@ class TokenCaptureStore:
             self.incomplete_path_for(rollout_id).unlink(missing_ok=True)
             # Keep a frozen tombstone until explicit pre-dispatch cleanup.
             # A late writer from this attempt must still observe the freeze.
+            state["indexed_size"] = 0
+            state["entry_digests"] = {}
             state["retired"] = True
             self._write_state(rollout_id, state)
             self._fsync_root()
