@@ -16,6 +16,7 @@
 import json
 from collections import defaultdict
 from collections.abc import Mapping
+from functools import partial
 from os import environ
 from pathlib import Path
 from time import time
@@ -59,7 +60,6 @@ from tau2.utils.llm_utils import to_litellm_messages
 TAU2_MALFORMED_TOOL_CALL_FAILURE_CLASS = "tau2_malformed_tool_call"
 TAU2_AGENT_FAILURE_CLASS = "tau2_agent_error"
 
-_TAU2_MODEL_MAX_ATTEMPTS = 5
 _RESERVED_RESULT_KEYS = (
     "reward",
     "response",
@@ -115,24 +115,25 @@ def _validate_tool_call_arguments(response: Mapping[str, Any]) -> None:
 
 
 class Tau2ToolValidatingAsyncOpenAI(NeMoGymAsyncOpenAI):
-    """Retry only chat completions whose raw tool arguments Tau2 cannot parse."""
+    """Reject chat completions whose raw tool arguments Tau2 cannot parse."""
+
+    malformed_tool_call_max_retries: int = Field(default=0, ge=0)
 
     async def create_chat_completion(self, **kwargs: Any) -> Dict[str, Any]:
-        for attempt in range(1, _TAU2_MODEL_MAX_ATTEMPTS + 1):
+        max_attempts = self.malformed_tool_call_max_retries + 1
+        for attempt in range(1, max_attempts + 1):
             response = await super().create_chat_completion(**kwargs)
             try:
                 _validate_tool_call_arguments(response)
             except Tau2MalformedToolCallError as error:
-                event = "retry" if attempt < _TAU2_MODEL_MAX_ATTEMPTS else "hard_fail"
+                event = "retry" if attempt < max_attempts else "hard_fail"
                 print(
-                    f"TAU2_MALFORMED_TOOL_CALL event={event} "
-                    f"attempt={attempt}/{_TAU2_MODEL_MAX_ATTEMPTS} error={error}",
+                    f"TAU2_MALFORMED_TOOL_CALL event={event} attempt={attempt}/{max_attempts} error={error}",
                     flush=True,
                 )
-                if attempt == _TAU2_MODEL_MAX_ATTEMPTS:
+                if attempt == max_attempts:
                     raise Tau2MalformedToolCallError(
-                        f"model returned malformed tool arguments in "
-                        f"{_TAU2_MODEL_MAX_ATTEMPTS} consecutive attempts: {error}"
+                        f"model returned malformed tool arguments in {max_attempts} consecutive attempts: {error}"
                     ) from error
                 continue
             return response
@@ -175,6 +176,7 @@ class Tau2Config(BaseResponsesAPIAgentConfig):
     max_steps: int = 200
     max_agent_steps: Optional[int] = None
     turns_remaining_interval: int = 1
+    malformed_tool_call_max_retries: int = Field(default=0, ge=0)
 
 
 class Tau2RunRequest(BaseRunRequest):
@@ -225,7 +227,10 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         # Tau2 resolves this module-global class each time it generates an agent or
         # simulated-user turn. Override it only inside this Tau2 server process so
         # malformed tool arguments can be regenerated before Tau2 parses them.
-        tau2_llm_utils.NeMoGymAsyncOpenAI = Tau2ToolValidatingAsyncOpenAI
+        tau2_llm_utils.NeMoGymAsyncOpenAI = partial(
+            Tau2ToolValidatingAsyncOpenAI,
+            malformed_tool_call_max_retries=self.config.malformed_tool_call_max_retries,
+        )
 
         if not self.config.debug:
             print("Removing loguru logging since `debug=False`")
