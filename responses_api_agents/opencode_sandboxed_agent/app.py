@@ -45,9 +45,16 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
+from nemo_gym.responses_converter import ResponsesConverter
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, get_server_url, raise_for_status
+from nemo_gym.server_utils import (
+    SESSION_ID_KEY,
+    get_response_json,
+    get_server_url,
+    is_nemo_gym_fastapi_entrypoint,
+    raise_for_status,
+)
 
 
 class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
@@ -58,6 +65,7 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     remote_opencode_install_script_path: Optional[str] = None
     remote_opencode_binary_path: Optional[str] = None
     opencode_config: Dict[str, Any] = Field(default_factory=dict)
+    opencode_max_context_window: int
 
     # Sandbox config
     sandbox_provider: str
@@ -145,16 +153,16 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     "options": {
                         "baseURL": f"{get_server_url(self.config.model_server.name)}/v1",
                         "apiKey": "dummy_key",  # pragma: allowlist secret
+                        "timeout": False,
+                        "chunkTimeout": 600000,  # in milliseconds, 10 min
                     },
                     "models": {
                         "dummy_model": {
                             "limit": {
-                                "context": 0,
-                                "input": 0,
-                                # @bxyu-nvidia: OpenCode defaults to 32k here https://github.com/anomalyco/opencode/blob/58a99916bb96edf5cf605dc03e1be1e4bacf9ff7/packages/opencode/src/provider/transform.ts#L21
-                                # and there is no way to set it to null.
-                                # We set it here to explicitly acknowledge that this parameter is set.
-                                "output": 32_000,
+                                "context": self.config.opencode_max_context_window,
+                                "input": self.config.opencode_max_context_window,
+                                # See the OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX flag below for more information.
+                                "output": self.config.opencode_max_context_window,
                             },
                         },
                     },
@@ -197,14 +205,20 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
                 messages.append(NeMoGymEasyInputMessage(content=message_parts, role="user"))
             elif message["info"]["role"] == "assistant":
-                from nemo_gym.responses_converter import ResponsesConverter
-
                 converter = ResponsesConverter(return_token_id_information=True)
                 for part in message["parts"]:
                     if part["type"] == "text":
                         output_items = converter.postprocess_assistant_message_dict(
                             message_dict={
                                 "content": part["text"],
+                                "role": "assistant",
+                            }
+                        )
+                        messages.extend(output_items)
+                    elif part["type"] == "reasoning":
+                        output_items = converter.postprocess_assistant_message_dict(
+                            message_dict={
+                                "content": converter._wrap_reasoning_in_think_tags([part["text"]]),
                                 "role": "assistant",
                             }
                         )
@@ -285,7 +299,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && {install_str} \
         && export PATH=$HOME/.opencode/bin:$PATH \
         && echo "Installed OpenCode" \
-        && opencode run {opencode_debug_str} {opencode_thinking_str} {quote(query)} \
+        && opencode run {opencode_debug_str} {opencode_thinking_str} -- {quote(query)} \
         && echo "OpenCode run finished"
         """
 
@@ -299,7 +313,14 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             result = await sandbox.exec(
                 command=command,
                 timeout_s=self.config.sandbox_timeout,
-                env={"OPENCODE_CONFIG_CONTENT": opencode_config_content},
+                env={
+                    "OPENCODE_CONFIG_CONTENT": opencode_config_content,
+                    # @bxyu-nvidia: OpenCode defaults to 32k here https://github.com/anomalyco/opencode/blob/58a99916bb96edf5cf605dc03e1be1e4bacf9ff7/packages/opencode/src/provider/transform.ts#L21
+                    # and there is no way to set it to null.
+                    # Here, we set an exorbitantly high number that cannot ever be reached.
+                    # In future versions of OpenCode, this can be directly passed via maxOutputTokens in the limit config above https://github.com/anomalyco/opencode/blob/1b18a50418f730aca32630ccfcde850f2b5fc360/packages/opencode/src/provider/transform.ts#L1418
+                    "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": str(1_000_000_000),
+                },
             )
         except:
             result = None
@@ -313,6 +334,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         try:
             export_result = await sandbox.exec(
                 command=f"""export PATH=$HOME/.opencode/bin:$PATH \
+            && (command -v jq >/dev/null 2>&1 || (apt-get update && apt-get install -y --no-install-recommends jq)) \
             && session_id=$(opencode session list --format json | jq -r '.[0].id') \
             && opencode export $session_id > {export_fname}"""
             )
@@ -340,6 +362,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 await sandbox.download(str(results_remote_fpath), results_local_fpath)
             except:
                 print(f"Failed to download export results to {results_local_fpath}", format_exc(), file=sys.stderr)
+                if export_result:
+                    print("Export stdout:\n", export_result.stdout, file=sys.stderr)
+                    print("Export stderr:\n", export_result.stderr, file=sys.stderr)
 
         opencode_export = dict()
         if results_local_fpath.exists():
@@ -359,7 +384,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             "opencode_run_stdout": (result.stdout if result else "") or "",
             "opencode_run_stderr": (result.stderr if result else "") or "",
             "opencode_export_found": opencode_export_found,
-            "opencode_finished": ("OpenCode run finished" in result.stdout if result else False),
+            "opencode_finished": ("OpenCode run finished" in (result.stdout or "") if result else False),
         }
 
         return NeMoGymResponse(
@@ -397,18 +422,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # Propagating the sandbox handle
         cookies["sandbox_id"] = request.session[SESSION_ID_KEY]
 
-        response = await self.server_client.post(
-            server_name=self.config.name,
-            url_path=self.url_path_for_run("/v1/responses", body),
-            json=body.responses_create_params,
-            cookies=cookies,
-        )
-        await raise_for_status(response)
-        cookies = cookies | response.cookies
+        request._cookies = cookies
+        response = await self.responses(request, body.responses_create_params)
 
-        verify_request = OpenCodeSandboxedAgentVerifyRequest.model_validate(
-            body.model_dump() | {"response": await get_response_json(response)}
-        )
+        verify_request = OpenCodeSandboxedAgentVerifyRequest.model_validate(body.model_dump() | {"response": response})
 
         verify_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
@@ -438,3 +455,5 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     OpenCodeSandboxedAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = OpenCodeSandboxedAgent.run_webserver()  # noqa: F401

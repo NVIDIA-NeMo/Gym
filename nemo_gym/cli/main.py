@@ -14,6 +14,7 @@
 # limitations under the License.
 import argparse
 import importlib
+import json
 import logging
 import os
 import re
@@ -78,14 +79,22 @@ def dispatch(target: str, overrides: list[str]) -> None:
 
 
 def _value_flag(
-    name: str, hydra_key: str, flag_help: str, *, aliases: tuple[str, ...] = (), choices: tuple[str, ...] | None = None
+    name: str,
+    hydra_key: str,
+    flag_help: str,
+    *,
+    aliases: tuple[str, ...] = (),
+    choices: tuple[str, ...] | None = None,
+    quote: bool = False,
 ) -> Flag:
     """A `--name VALUE` flag that maps to the Hydra override `+<hydra_key>=VALUE` (omitted when unset)."""
     dest = name.replace("-", "_")
     return Flag(
         register=lambda p: p.add_argument(f"--{name}", *aliases, dest=dest, choices=choices, help=flag_help),
         translate_to_hydra=lambda args: (
-            [f"+{hydra_key}={getattr(args, dest)}"] if getattr(args, dest) is not None else []
+            [f"+{hydra_key}={json.dumps(getattr(args, dest)) if quote else getattr(args, dest)}"]
+            if getattr(args, dest) is not None
+            else []
         ),
     )
 
@@ -154,7 +163,7 @@ NAME = Flag(
 
 # `gym search [<type>] <query>`: an optional component type plus the query. The query is surfaced to the
 # chosen listing command as the reserved `query` config key; the type only picks which command to run
-# (see `_search`). A lone positional is the query, defaulting to benchmarks — backward compatible.
+# (see `_search`). A lone positional is the query, defaulting to the unified environment catalog.
 _SEARCHABLE_TYPES = {
     "benchmarks": "nemo_gym.cli.eval:list_benchmarks",
     "environments": "nemo_gym.cli.env:list_environments",
@@ -169,7 +178,7 @@ SEARCH_TERMS = Flag(
             "component_type",
             nargs="?",
             choices=list(_SEARCHABLE_TYPES),
-            help="Component type to search (default: benchmarks).",
+            help="Component type to search (default: environments).",
         ),
         p.add_argument(
             "query",
@@ -177,14 +186,103 @@ SEARCH_TERMS = Flag(
             help="Text matched (substring or fuzzy) against a component's name, description, and key metadata.",
         ),
     ),
-    translate_to_hydra=lambda args: [f'+query="{args.query}"'] if getattr(args, "query", None) else [],
+    translate_to_hydra=lambda args: [f"+query={json.dumps(args.query)}"] if getattr(args, "query", None) else [],
 )
 
 
 def _search(args: argparse.Namespace, overrides: list[str]) -> None:
-    """`gym search [<type>] <query>`: dispatch to the chosen type's listing command (default benchmarks),
+    """`gym search [<type>] <query>`: dispatch to the chosen type's listing command (default environments),
     which filters itself to the `query` config key already in `overrides`."""
-    dispatch(_SEARCHABLE_TYPES[getattr(args, "component_type", None) or "benchmarks"], overrides)
+    component_type = getattr(args, "component_type", None)
+    if component_type in {"environments", "benchmarks"}:
+        kind = component_type.removesuffix("s")
+        dispatch("nemo_gym.cli.env:list_environments", [f"+catalog_kind={kind}", *overrides])
+        return
+    dispatch(_SEARCHABLE_TYPES[component_type or "environments"], overrides)
+
+
+def _list_benchmarks(_args: argparse.Namespace, overrides: list[str]) -> None:
+    """List the benchmark view of the unified workload catalog."""
+    dispatch("nemo_gym.cli.env:list_environments", ["+catalog_kind=benchmark", *overrides])
+
+
+def _parsed_onboarding_name(args: argparse.Namespace) -> str | None:
+    value = getattr(args, "onboarding_name", None)
+    return value if value and "=" not in value else None
+
+
+ONBOARDING_NAME = Flag(
+    register=lambda p: p.add_argument("onboarding_name", nargs="?", metavar="NAME", help="Workload name."),
+    translate_to_hydra=lambda args: (
+        [f"+onboarding_name={json.dumps(name)}"]
+        if (name := _parsed_onboarding_name(args))
+        else ([args.onboarding_name] if getattr(args, "onboarding_name", None) else [])
+    ),
+)
+
+CATALOG_KIND = _value_flag(
+    "kind",
+    "catalog_kind",
+    "Workload kind.",
+    choices=("environment", "benchmark"),
+)
+
+
+def _register_init_target(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--resources-server", metavar="NAME", help="Name of the resources server.")
+    group.add_argument("--environment", dest="scaffold_environment", metavar="NAME", help="Environment name.")
+    group.add_argument("--benchmark", dest="scaffold_benchmark", metavar="NAME", help="Benchmark name.")
+
+
+def _translate_init_target(args: argparse.Namespace) -> list[str]:
+    if args.scaffold_environment:
+        return ["+scaffold_kind=environment", f"+scaffold_name={json.dumps(args.scaffold_environment)}"]
+    if args.scaffold_benchmark:
+        return ["+scaffold_kind=benchmark", f"+scaffold_name={json.dumps(args.scaffold_benchmark)}"]
+    return [f"+entrypoint=resources_servers/{args.resources_server}"] if args.resources_server else []
+
+
+INIT_TARGET = Flag(register=_register_init_target, translate_to_hydra=_translate_init_target)
+
+REWARD_RANGE = Flag(
+    register=lambda p: p.add_argument(
+        "--reward-range",
+        nargs=2,
+        type=float,
+        metavar=("LOW", "HIGH"),
+        help="Declared inclusive reward range.",
+    ),
+    translate_to_hydra=lambda args: (
+        [f"+reward_range=[{args.reward_range[0]},{args.reward_range[1]}]"] if args.reward_range else []
+    ),
+)
+
+
+def _register_reward_direction(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--higher-is-better",
+        dest="higher_is_better",
+        action="store_const",
+        const=True,
+        help="Declare that larger rewards are better.",
+    )
+    group.add_argument(
+        "--lower-is-better",
+        dest="higher_is_better",
+        action="store_const",
+        const=False,
+        help="Declare that smaller rewards are better.",
+    )
+
+
+REWARD_DIRECTION = Flag(
+    register=_register_reward_direction,
+    translate_to_hydra=lambda args: (
+        [f"+higher_is_better={str(args.higher_is_better).lower()}"] if args.higher_is_better is not None else []
+    ),
+)
 
 
 # Asset selector flag -> (parent dir, configs subdir, default config flavor). All accept `name` or `name/flavor`,
@@ -215,6 +313,22 @@ def _asset_config_path(flag: str, value: str) -> str:
 
     roots = component_search_roots()
     matches: list[Path] = []
+
+    if "/" in value and flag in {"benchmark", "environment"}:
+        nested_matches: list[Path] = []
+        for root in roots:
+            candidate = root / parent / value / "config.yaml"
+            resolved = candidate.resolve()
+            if candidate.is_file() and resolved not in nested_matches:
+                nested_matches.append(resolved)
+        if nested_matches:
+            if len(nested_matches) > 1:
+                shadowed = ", ".join(f"`{path}`" for path in nested_matches[1:])
+                logger.warning(
+                    f"`--{flag} {value}` matches multiple configs; using `{nested_matches[0]}` from the "
+                    f"highest-priority root and ignoring {shadowed}. Pass `--config <path>` to select a different one."
+                )
+            return str(nested_matches[0])
 
     for root in roots:
         candidate = root / path
@@ -338,12 +452,43 @@ def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
     dispatch(target, overrides)
 
 
+def _has_override(overrides: list[str], key: str) -> bool:
+    return any(override.lstrip("+").split("=", 1)[0] == key for override in overrides)
+
+
+def _env_init(args: argparse.Namespace, overrides: list[str]) -> None:
+    scaffold_selected = bool(
+        args.scaffold_environment or args.scaffold_benchmark or _has_override(overrides, "scaffold_kind")
+    )
+    legacy_selected = _has_override(overrides, "entrypoint")
+    scaffold_options = any(
+        _has_override(overrides, key) for key in ("profile", "reuse_verifier", "reward_range", "higher_is_better")
+    )
+    if scaffold_selected and legacy_selected:
+        args._parser.error("select a resources server or a manifest-backed workload, not both")
+    if scaffold_options and not scaffold_selected:
+        args._parser.error("--profile, --reuse-verifier, and reward options require --environment or --benchmark")
+    target = "nemo_gym.cli.env:init_environment" if scaffold_selected else "nemo_gym.cli.env:init_resources_server"
+    dispatch(target, overrides)
+
+
 def _env_test(args: argparse.Namespace, overrides: list[str]) -> None:
+    manifest_selected = bool(_parsed_onboarding_name(args) or _has_override(overrides, "onboarding_name"))
+    legacy_selected = _has_override(overrides, "entrypoint")
+    manifest_options = any(_has_override(overrides, key) for key in ("catalog_kind", "update_expected", "json"))
+    if manifest_selected and legacy_selected:
+        args._parser.error("select a workload name or --resources-server, not both")
+    if manifest_options and not manifest_selected:
+        args._parser.error("--kind, --update-expected, and --json require a workload name")
+    if manifest_selected:
+        dispatch("nemo_gym.cli.env:test_environment_manifest", overrides)
+        return
+
     # Run a single server's tests if +entrypoint was passed. No need to check for
     # --resources-server because it is translated to +entrypoint in the flag definition.
-
-    has_entrypoint = any(override.lstrip("+").split("=", 1)[0] == "entrypoint" for override in overrides)
-    dispatch("nemo_gym.cli.env:test" if has_entrypoint else "nemo_gym.cli.env:test_all", overrides)
+    dispatch(
+        "nemo_gym.cli.env:test" if _has_override(overrides, "entrypoint") else "nemo_gym.cli.env:test_all", overrides
+    )
 
 
 def _dataset_upload(args: argparse.Namespace, overrides: list[str]) -> None:
@@ -375,14 +520,29 @@ GROUPS = {
 # NOTE: none of the flags are argparse-required (every value can also be supplied as a Hydra `+key=value` override).
 COMMANDS = {
     "list benchmarks": Command(
-        target="nemo_gym.cli.eval:list_benchmarks",
+        target=_list_benchmarks,
         summary="List or inspect available benchmarks.",
         flags=(NAME, JSON, SEARCH_DIR),
     ),
     "list environments": Command(
         target="nemo_gym.cli.env:list_environments",
-        summary="List or inspect available environments.",
-        flags=(NAME, JSON, SEARCH_DIR),
+        summary="List or inspect the environment and benchmark catalog.",
+        flags=(
+            NAME,
+            _value_flag("domain", "domain", "Filter by domain."),
+            CATALOG_KIND,
+            _value_flag("modality", "modality", "Filter by modality.", quote=True),
+            _value_flag("licensing", "licensing", "Filter by licensing.", quote=True),
+            _value_flag(
+                "status",
+                "status",
+                "Filter by validation status.",
+                choices=("experimental", "no-manifest"),
+            ),
+            _value_flag("lifecycle", "lifecycle", "Filter by lifecycle.", choices=("active", "deprecated")),
+            JSON,
+            SEARCH_DIR,
+        ),
     ),
     "list agents": Command(
         target="nemo_gym.cli.agents:list_agents",
@@ -401,7 +561,7 @@ COMMANDS = {
     ),
     "search": Command(
         target=_search,
-        summary="Search a component type (default benchmarks) by name; like `list` filtered to a query.",
+        summary="Search a component type (default environments) by name; like `list` filtered to a query.",
         flags=(SEARCH_TERMS, JSON, SEARCH_DIR),
     ),
     "dataset upload": Command(
@@ -485,9 +645,25 @@ COMMANDS = {
         ),
     ),
     "env init": Command(
-        target="nemo_gym.cli.env:init_resources_server",
-        summary="Scaffold config for a new server, benchmark, or agent.",
-        flags=(RESOURCES_SERVER,),
+        target=_env_init,
+        summary="Scaffold a resources server, environment, or benchmark.",
+        flags=(
+            INIT_TARGET,
+            _value_flag(
+                "profile",
+                "profile",
+                "Integration profile for a manifest-backed scaffold.",
+                choices=(
+                    "custom-gym-verifier",
+                    "custom-gym-agent-loop",
+                    "external-agent-loop",
+                    "external-rollout-driver",
+                ),
+            ),
+            _value_flag("reuse-verifier", "reuse_verifier", "Existing verifier to reuse.", quote=True),
+            REWARD_RANGE,
+            REWARD_DIRECTION,
+        ),
     ),
     "env resolve": Command(
         target="nemo_gym.cli.env:dump_config",
@@ -496,8 +672,13 @@ COMMANDS = {
     ),
     "env validate": Command(
         target="nemo_gym.cli.env:validate",
-        summary="Validate a config (paths, cross-refs, ??? values, servers) fast — no Ray, no servers.",
+        summary="Validate a manifest-backed workload or config without starting services.",
         flags=(
+            ONBOARDING_NAME,
+            CATALOG_KIND,
+            _value_flag("manifest", "manifest_path", "Manifest path to validate.", quote=True),
+            _bool_flag("sync", "sync", "Synchronize composition mirrors after validation."),
+            JSON,
             CONFIG,
             BENCHMARK,
             ENVIRONMENT,
@@ -526,8 +707,20 @@ COMMANDS = {
     ),
     "env test": Command(
         target=_env_test,
-        summary="Test the resources server(s); runs all if no resources server is given.",
-        flags=(RESOURCES_SERVER, SEARCH_DIR),
+        summary="Test a manifest-backed workload or resources server.",
+        flags=(
+            ONBOARDING_NAME,
+            CATALOG_KIND,
+            _bool_flag("update-expected", "update_expected", "Update verifier fixture expectations."),
+            JSON,
+            RESOURCES_SERVER,
+            SEARCH_DIR,
+        ),
+    ),
+    "env publish": Command(
+        target="nemo_gym.cli.env:publish_environment_manifest",
+        summary="Run local publication checks and confirm catalog discovery.",
+        flags=(ONBOARDING_NAME, CATALOG_KIND, JSON, SEARCH_DIR),
     ),
     "env start": Command(
         target="nemo_gym.cli.env:run",
