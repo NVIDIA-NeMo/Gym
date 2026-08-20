@@ -115,10 +115,6 @@ def per_request(entries: list[TokenEntry]) -> BuildOutput:
     return BuildOutput(chains=chains, notes=BuildNotes(builder="per_request", chains=len(chains)))
 
 
-def _is_prefix(a: list[int], b: list[int]) -> bool:
-    return len(a) <= len(b) and b[: len(a)] == a
-
-
 @dataclass(eq=False)  # Identity-based equality keeps nodes hashable.
 class _Node:
     entry: TokenEntry
@@ -128,19 +124,45 @@ class _Node:
     quarantined: bool = False
 
 
-def _infer_parent(prompt: list[int], candidates: list["_Node"]) -> tuple["_Node | None", bool]:
+@dataclass
+class _PrefixTrieNode:
+    children: dict[int, "_PrefixTrieNode"] = field(default_factory=dict)
+    candidates: list[_Node] = field(default_factory=list)
+
+
+class _PrefixIndex:
+    """Index cumulative token sequences for linear-time parent lookup."""
+
+    def __init__(self) -> None:
+        self._root = _PrefixTrieNode()
+
+    def add(self, candidate: _Node) -> None:
+        current = self._root
+        for token_id in candidate.cumulative:
+            current = current.children.setdefault(token_id, _PrefixTrieNode())
+        current.candidates.append(candidate)
+
+    def infer_parent(self, prompt: list[int]) -> tuple[_Node | None, bool]:
+        best: list[_Node] = []
+        current = self._root
+        for token_id in prompt:
+            next_node = current.children.get(token_id)
+            if next_node is None:
+                break
+            current = next_node
+            if current.candidates:
+                best = current.candidates
+        return (best[0], len(best) > 1) if best else (None, False)
+
+
+def _infer_parent(prompt: list[int], index: _PrefixIndex) -> tuple["_Node | None", bool]:
     """Infer the parent from the longest cumulative prefix.
 
     This is the fallback when no verified parent link exists.
     Identical cumulative sequences are ambiguous.
     The caller quarantines an ambiguous subtree.
     """
-    matches = [n for n in candidates if _is_prefix(n.cumulative, prompt)]
-    if not matches:
-        return None, False
-    best_len = max(len(n.cumulative) for n in matches)
-    best = [n for n in matches if len(n.cumulative) == best_len]
-    return best[0], len(best) > 1
+    return index.infer_parent(prompt)
 
 
 def prefix_merging(entries: list[TokenEntry]) -> BuildOutput:
@@ -164,11 +186,12 @@ def prefix_merging(entries: list[TokenEntry]) -> BuildOutput:
     nodes: list[_Node] = []
     roots: list[_Node] = []
     quarantined: list[str] = []
+    prefix_index = _PrefixIndex()
 
     for entry in ordered:
         prompt = list(entry.prompt_token_ids)
         node = _Node(entry=entry, cumulative=prompt + list(entry.generation_token_ids))
-        parent, ambiguous = _infer_parent(prompt, nodes)
+        parent, ambiguous = _infer_parent(prompt, prefix_index)
         if parent is not None:
             node.parent = parent
             if ambiguous:
@@ -179,6 +202,7 @@ def prefix_merging(entries: list[TokenEntry]) -> BuildOutput:
         else:
             roots.append(node)
         nodes.append(node)
+        prefix_index.add(node)
 
     # Resolve retry siblings.
     # A harness can retry after a timeout, server error, or dropped stream.
@@ -219,25 +243,25 @@ def prefix_merging(entries: list[TokenEntry]) -> BuildOutput:
 
     chains: list[Chain] = []
 
-    def walk(node: _Node, path: list[_Node]) -> None:
-        path = path + [node]
-        if not node.children:
-            if any(p.quarantined for p in path):
-                return
-            root = path[0]
-            chain = Chain(chain_id="", root_prompt=list(root.entry.prompt_token_ids))
-            prev_cumulative = list(root.entry.prompt_token_ids)
-            for step, p in enumerate(path):
-                interstitial = [] if step == 0 else list(p.entry.prompt_token_ids[len(prev_cumulative) :])
-                chain.links.append(ChainLink(entry=p.entry, interstitial=interstitial))
-                prev_cumulative = list(p.entry.prompt_token_ids) + list(p.entry.generation_token_ids)
-            chains.append(chain)
-            return
-        for child in node.children:
-            walk(child, path)
-
-    for root in roots:
-        walk(root, [])
+    # Materialize root-to-leaf chains without recursion.
+    # Agent rollouts can exceed Python's recursion limit.
+    for leaf in (node for node in nodes if not node.children):
+        reverse_path: list[_Node] = []
+        current: _Node | None = leaf
+        while current is not None:
+            reverse_path.append(current)
+            current = current.parent
+        path = list(reversed(reverse_path))
+        if any(node.quarantined for node in path):
+            continue
+        root = path[0]
+        chain = Chain(chain_id="", root_prompt=list(root.entry.prompt_token_ids))
+        prev_cumulative = list(root.entry.prompt_token_ids)
+        for step, node in enumerate(path):
+            interstitial = [] if step == 0 else list(node.entry.prompt_token_ids[len(prev_cumulative) :])
+            chain.links.append(ChainLink(entry=node.entry, interstitial=interstitial))
+            prev_cumulative = list(node.entry.prompt_token_ids) + list(node.entry.generation_token_ids)
+        chains.append(chain)
 
     # Deliver only one chain per rollout.
     # Choose the chain whose root call completed first.

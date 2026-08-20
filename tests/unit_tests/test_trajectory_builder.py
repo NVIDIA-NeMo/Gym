@@ -15,6 +15,7 @@
 """Test trajectory building and contiguous Responses projection."""
 
 import asyncio
+import threading
 
 import pytest
 
@@ -80,6 +81,22 @@ def test_prefix_merging_builds_one_contiguous_main_chain():
     assert [i["generation_token_ids"] for i in response["output"]] == [[10, 11], [12], [13, 14]]
     # Every sampled token has a log probability.
     assert [len(i["generation_log_probs"]) for i in response["output"]] == [2, 1, 2]
+
+
+def test_prefix_merging_handles_a_thousand_turns_without_recursive_traversal():
+    entries = []
+    prompt = [1]
+    for turn in range(1_100):
+        generation = [10_000 + turn]
+        entries.append(_entry(f"call-{turn:04d}", list(prompt), generation))
+        prompt.extend(generation)
+        prompt.append(20_000 + turn)
+
+    out = prefix_merging(entries)
+
+    assert len(out.chains) == 1
+    assert len(out.chains[0].links) == len(entries)
+    assert out.notes.delivered_fraction == 1.0
 
 
 def test_order_independent():
@@ -275,6 +292,46 @@ def test_consumer_reads_and_freezes_an_external_source():
         "snapshot_id": "snapshot-1",
         "version": 4,
     }
+
+
+def test_external_source_offloads_trajectory_assembly(monkeypatch):
+    import nemo_gym.token_id_capture.consumer as consumer_module
+
+    assemble_threads = []
+    original_assemble = consumer_module._assemble
+
+    def recording_assemble(*args, **kwargs):
+        assemble_threads.append(threading.get_ident())
+        return original_assemble(*args, **kwargs)
+
+    monkeypatch.setattr(consumer_module, "_assemble", recording_assemble)
+
+    class Source:
+        async def freeze(self, rollout_id):
+            return TokenCaptureSnapshot(
+                rollout_id=rollout_id,
+                entries=tuple(APPEND_ONLY),
+                incomplete=False,
+                snapshot_id="snapshot-thread",
+                version=1,
+            )
+
+        async def drop(self, rollout_id, *, snapshot_id, version):
+            return True
+
+        async def close(self):
+            return None
+
+    async def consume():
+        event_loop_thread = threading.get_ident()
+        built = await trajectories_from_source("t0-r0", Source())
+        return event_loop_thread, built
+
+    event_loop_thread, built = asyncio.run(consume())
+
+    assert built["mask_sample"] is False
+    assert assemble_threads
+    assert assemble_threads[0] != event_loop_thread
 
 
 def test_consumer_masks_an_incomplete_external_snapshot():

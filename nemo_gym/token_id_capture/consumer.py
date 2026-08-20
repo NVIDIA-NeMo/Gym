@@ -29,6 +29,7 @@ The result includes metrics that describe the build.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 
@@ -211,7 +212,7 @@ async def trajectories_from_source(
     if not snapshot.entries:
         built = _failed_build(rollout_id, builder, "capture contains no token records")
     else:
-        built = _assemble(rollout_id, list(snapshot.entries), builder, model)
+        built = await asyncio.to_thread(_assemble, rollout_id, list(snapshot.entries), builder, model)
     if snapshot.incomplete:
         built["mask_sample"] = True
         built.setdefault("metrics", {})["capture_incomplete"] = True
