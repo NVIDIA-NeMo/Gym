@@ -81,10 +81,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             body = kwargs.get("body")
             if body is None:
                 body = next((arg for arg in args if isinstance(arg, BaseRunRequest)), None)
-            with rollout_context(
-                self.rollout_id_from_run(body),
-                data_capability=getattr(body, "capture_data_capability", None),
-            ):
+            with rollout_context(self.rollout_id_from_run(body)):
                 return await run(*args, **kwargs)
 
         app.post("/run")(run_with_rollout_context)

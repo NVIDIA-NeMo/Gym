@@ -69,10 +69,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.profiling import Profiler
-from nemo_gym.rollout_correlation import (
-    current_capture_data_capability,
-    current_rollout_id,
-)
+from nemo_gym.rollout_correlation import current_rollout_id
 from nemo_gym.server_utils import apply_rollout_prefix, get_first_server_config_dict
 from nemo_gym.token_id_capture.staging.routes import routed_experts_token_count
 from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
@@ -263,7 +260,9 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
     resolved_diversify_tool_names: Optional[bool] = False
     resolved_camel_case_tool_names: Optional[bool] = False
     ng_rollout_id: Optional[str] = None
-    capture_capability_path: Optional[Path] = Field(default=None, repr=False)
+    # Route the sandboxed agent's model traffic through the token-capture URL
+    # prefix so the capture middleware attributes every call to the rollout.
+    token_capture_enabled: bool = False
 
     # Set later
     eval_command: Optional[ExecuteContainerCommandArgs] = None
@@ -1730,7 +1729,7 @@ AGENT_FRAMEWORK_COMMIT={commit} \\
         model_server_base_url = apply_rollout_prefix(
             self.config.model_server_base_url,
             self.config.ng_rollout_id,
-            token_capture=self.config.capture_capability_path is not None,
+            token_capture=self.config.token_capture_enabled,
         )
         llm_model_config = {
             "model": self.config.body.model or "",
@@ -1743,11 +1742,6 @@ AGENT_FRAMEWORK_COMMIT={commit} \\
             llm_model_config["max_output_tokens"] = max_output_tokens
 
         config["llm"]["model"] |= llm_model_config
-        if self.config.capture_capability_path is not None:
-            # Do not serialize the rollout-scoped capability into the generated
-            # OpenHands config. With no explicit key, the OpenAI client reads
-            # OPENAI_API_KEY from the mounted capability file at process start.
-            config["llm"]["model"].pop("api_key", None)
 
         config_str = tomlkit.dumps(config)
 
@@ -1841,11 +1835,6 @@ AGENT_FRAMEWORK_COMMIT={commit} \\
         else:
             camel_case_tool_names_cmd = ""
 
-        capture_auth_cmd = (
-            f'export OPENAI_API_KEY="$(cat {self.config.capture_capability_path})" && '
-            if self.config.capture_capability_path is not None
-            else ""
-        )
 
         workspace_check_cmd = ""
 
@@ -1881,7 +1870,6 @@ AGENT_FRAMEWORK_COMMIT={commit} \\
             f"export NEMO_GYM_CONFIG_DICT={self.config.ng_global_config_dict_str} && "
             f"export NEMO_GYM_MODEL_SERVER_NAME={self.config.model_server_name} &&"
             f"export NEMO_GYM_MODEL_SERVER_BASE_URL={shlex.quote(model_server_base_url)} && "
-            f"{capture_auth_cmd}"
             "export VIRTUAL_ENV=/openhands_setup/OpenHands/.venv && "
             "export PATH=$PATH:/openhands_setup/OpenHands/.venv/bin && "
             # CRITICAL: Configure poetry to only use the OpenHands venv (ignore external venvs)
@@ -2119,7 +2107,7 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
         model_server_base_url = apply_rollout_prefix(
             self.config.model_server_base_url,
             self.config.ng_rollout_id,
-            token_capture=self.config.capture_capability_path is not None,
+            token_capture=self.config.token_capture_enabled,
         )
 
         # Falls back to the policy model so opencode doesn't POST model=default.
@@ -2203,11 +2191,6 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
                 "} && "
             )
 
-        capture_auth_cmd = (
-            f'export OPENAI_API_KEY="$(cat {self.config.capture_capability_path})" && '
-            if self.config.capture_capability_path is not None
-            else ""
-        )
         agent_main_cmd = (
             "mkdir -p /tmp/ && "
             "export PATH=/opencode_setup/bun/bin:$PATH && "
@@ -2217,7 +2200,6 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             f"export NEMO_GYM_CONFIG_DICT={self.config.ng_global_config_dict_str} && "
             f"export NEMO_GYM_MODEL_SERVER_NAME={self.config.model_server_name} && "
             f"export NEMO_GYM_MODEL_SERVER_BASE_URL={shlex.quote(model_server_base_url)} && "
-            f"{capture_auth_cmd}"
             f"export COMMAND_EXEC_TIMEOUT={self.config.command_exec_timeout} && "
             f"export ENABLE_SUBAGENTS={'1' if self.config.opencode_subagents_enabled else '0'} && "
             "export OPENCODE_DISABLE_MODELS_FETCH=1 && "
@@ -3703,13 +3685,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         # persistent_dir is mounted here in each container
         base_mounted_dir = Path("/trajectories_mount")
         ng_rollout_id = current_rollout_id()
-        capture_capability_path = None
-        capture_capability = current_capture_data_capability()
-        if capture_capability is not None:
-            capability_host_path = persistent_dir / ".capture_capability"
-            capability_host_path.write_text(capture_capability)
-            capability_host_path.chmod(0o600)
-            capture_capability_path = base_mounted_dir / capability_host_path.name
 
         params: SWEBenchWrapperInstanceConfig = SWEBenchWrapperInstanceConfig(
             **self.config.model_dump(),
@@ -3720,7 +3695,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             metrics_fpath=persistent_dir / "nemo_gym_metrics.json",
             base_mounted_dir=base_mounted_dir,
             ng_rollout_id=ng_rollout_id,
-            capture_capability_path=capture_capability_path,
+            token_capture_enabled=self._token_id_capture_enabled(),
             profiling_dir=persistent_dir / "profiling",
             profiling_mounted_dir=base_mounted_dir / "profiling",
             ray_queue_timestamp=time.time(),
@@ -3805,9 +3780,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             print(f"Hit an exception in {self.config.name}! See {traceback_file} for more details", file=sys.stderr)
 
             raise e
-        finally:
-            if params.capture_capability_path is not None:
-                (params.persistent_dir / ".capture_capability").unlink(missing_ok=True)
 
     async def _inner_responses(
         self, params: SWEBenchWrapperInstanceConfig, dataset_processor: BaseDatasetHarnessProcessor

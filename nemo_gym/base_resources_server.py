@@ -94,12 +94,6 @@ class BaseRunRequest(BaseModel):
         alias="_ng_rollout_id",
         exclude=True,
     )
-    capture_data_capability: Optional[str] = Field(
-        default=None,
-        alias="_ng_capture_capability",
-        exclude=True,
-        repr=False,
-    )
 
 
 class BaseVerifyRequest(BaseRunRequest):

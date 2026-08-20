@@ -313,32 +313,37 @@ def test_config_keeps_settings_when_capture_is_off(tmp_path):
     assert cfg.build_sink() is None
 
 
-def test_gate_requires_an_explicit_absolute_shared_state_path(tmp_path):
-    with pytest.raises(ValueError, match="state_store_path"):
-        TokenIdCaptureConfig.model_validate(_block(gate={"enabled": True}))
-    with pytest.raises(ValueError, match="absolute"):
-        TokenIdCaptureConfig.model_validate(_block(gate={"enabled": True, "state_store_path": "relative.json"}))
-
-    config = TokenIdCaptureConfig.model_validate(
-        _block(gate={"enabled": True, "state_store_path": str(tmp_path / "gate.json")})
-    )
-    assert config.token_id_capture.gate.state_store_path == tmp_path / "gate.json"
+def test_removed_gate_config_fails_loudly(tmp_path):
+    """Configs that still set the deleted ``gate`` block must not be silently ignored."""
+    with pytest.raises(ValueError, match="gate"):
+        TokenIdCaptureConfig.model_validate(
+            _block(gate={"enabled": True, "state_store_path": str(tmp_path / "gate.json")})
+        )
 
 
-def test_gate_requires_framework_owned_rebuild_and_active_capture(tmp_path):
-    gate = {"enabled": True, "state_store_path": str(tmp_path / "gate.json")}
+def test_external_staging_requires_framework_owned_rebuild_and_active_capture():
     with pytest.raises(ValueError, match="rebuild_response=false"):
-        TokenIdCaptureConfig.model_validate({"token_id_capture": {"enabled": True, "gate": gate}})
+        TokenIdCaptureConfig.model_validate({"token_id_capture": {"enabled": True, "external_staging": True}})
     with pytest.raises(ValueError, match="requires token_id_capture.enabled"):
         TokenIdCaptureConfig.model_validate(
             {
                 "token_id_capture": {
                     "enabled": False,
                     "rebuild_response": False,
-                    "gate": gate,
+                    "external_staging": True,
                 }
             }
         )
+    config = TokenIdCaptureConfig.model_validate(
+        {
+            "token_id_capture": {
+                "enabled": True,
+                "rebuild_response": False,
+                "external_staging": True,
+            }
+        }
+    )
+    assert config.token_id_capture.external_staging is True
 
 
 def test_agent_capture_selection_uses_static_agent_config_or_all_agents():

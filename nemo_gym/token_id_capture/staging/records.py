@@ -216,7 +216,7 @@ class CommitCoords(_DigestWireModel):
 
 
 class CallRecord(_DigestWireModel):
-    """One token-free call manifest row in a sealed rollout receipt."""
+    """One token-free call manifest row in a rollout's capture ledger."""
 
     model_call_id: Identifier
     parent_call_id: Identifier | None = None
@@ -230,6 +230,9 @@ class CallRecord(_DigestWireModel):
     mode: CaptureMode = "token_in"
     chain_hash: DigestHex | None = None
     cumulative_hash: DigestHex | None = None
+    # The commit-time request binding (client header when present, else the
+    # response id). Receipt assembly selects the terminal row by this value.
+    logical_request_id: Identifier | None = None
 
     @model_validator(mode="after")
     def _validate_lengths(self) -> Self:
@@ -246,8 +249,23 @@ class CallRecord(_DigestWireModel):
         return self
 
 
+class ManifestFailure(_WireModel):
+    """One poison row in a rollout's capture ledger."""
+
+    model_call_id: Identifier
+    reason: Identifier
+
+
+class RolloutManifest(_WireModel):
+    """The token-free ledger read returned by the manifest control route."""
+
+    rollout_id: Identifier
+    records: list[CallRecord] = Field(default_factory=list)
+    failures: list[ManifestFailure] = Field(default_factory=list)
+
+
 class RolloutReceipt(_DigestWireModel):
-    """Token-free immutable manifest produced when the gate seals a rollout."""
+    """Token-free immutable manifest the framework assembles at rollout end."""
 
     rollout_id: Identifier
     reward: float | None = None

@@ -61,6 +61,7 @@ from nemo_gym.token_id_capture.lineage import (
     canonicalize_tool_arguments,
 )
 from nemo_gym.token_id_capture.protocols import (
+    CaptureLedger,
     LineageMatch,
     LineageStore,
     TokenCaptureSnapshot,
@@ -83,6 +84,10 @@ from nemo_gym.token_id_capture.records import (
     stamp_lineage,
 )
 from nemo_gym.token_id_capture.sink import (
+    NG_CAPTURE_FIELD,
+    NG_COMMIT_COORDS_FIELD,
+    UNCOMMITTED_CALL_REASON,
+    UNRESOLVED_PARENT_REASON,
     CaptureContext,
     capture_tokens,
     commit_entry,
@@ -110,6 +115,7 @@ __all__ = [
     "make_token_store",
     "TokenSink",
     "TokenSource",
+    "CaptureLedger",
     "LineageMatch",
     "LineageStore",
     "install_lineage_store",
@@ -120,6 +126,10 @@ __all__ = [
     "installed_token_sink",
     "installed_token_source",
     "CaptureContext",
+    "NG_CAPTURE_FIELD",
+    "NG_COMMIT_COORDS_FIELD",
+    "UNCOMMITTED_CALL_REASON",
+    "UNRESOLVED_PARENT_REASON",
     "set_token_sink",
     "reset_token_sink",
     "resolve_parent",

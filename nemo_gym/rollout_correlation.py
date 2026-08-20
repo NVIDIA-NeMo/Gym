@@ -30,12 +30,7 @@ from nemo_gym.global_config import (
 
 
 _ROLLOUT_ID: ContextVar[Optional[str]] = ContextVar("nemo_gym_rollout_id", default=None)
-_CAPTURE_DATA_CAPABILITY: ContextVar[Optional[str]] = ContextVar(
-    "nemo_gym_capture_data_capability",
-    default=None,
-)
 
-DATA_CAPABILITY_HEADER = "x-nemo-gym-capture-capability"
 LOGICAL_REQUEST_HEADER = "x-nemo-gym-logical-request-id"
 
 # A capture id is a path segment in ``/ng-rollout/<id>/...``.
@@ -92,29 +87,12 @@ def current_rollout_id() -> Optional[str]:
     return _ROLLOUT_ID.get()
 
 
-def current_capture_data_capability() -> Optional[str]:
-    """Return the request-scoped rollout capability without logging it."""
-    return _CAPTURE_DATA_CAPABILITY.get()
-
-
-def model_capture_headers() -> dict[str, str]:
-    """Return trusted headers for an in-process agent's model request."""
-    capability = current_capture_data_capability()
-    return {DATA_CAPABILITY_HEADER: capability} if capability else {}
-
-
 @contextmanager
-def rollout_context(
-    rollout_id: Optional[str],
-    *,
-    data_capability: Optional[str] = None,
-) -> Iterator[None]:
+def rollout_context(rollout_id: Optional[str]) -> Iterator[None]:
     token = _ROLLOUT_ID.set(rollout_id)
-    capability_token = _CAPTURE_DATA_CAPABILITY.set(data_capability)
     try:
         yield
     finally:
-        _CAPTURE_DATA_CAPABILITY.reset(capability_token)
         _ROLLOUT_ID.reset(token)
 
 

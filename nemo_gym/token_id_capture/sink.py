@@ -46,8 +46,18 @@ from nemo_gym.token_id_capture.records import (
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from nemo_gym.token_id_capture.gate import RolloutCaptureGate
     from nemo_gym.token_id_capture.staging.records import CaptureAdmission
+
+# Wire field names between the Gym model server and a framework inference
+# worker: the typed admission rides the engine-bound request under
+# ``NG_CAPTURE_FIELD``; the worker's token-light acknowledgement rides the
+# response under ``NG_COMMIT_COORDS_FIELD``.
+NG_CAPTURE_FIELD = "ng_capture"
+NG_COMMIT_COORDS_FIELD = "ng_commit_coords"
+
+# Ledger poison reasons written by the model server.
+UNRESOLVED_PARENT_REASON = "unresolved_parent"
+UNCOMMITTED_CALL_REASON = "request_finished_without_staged_coordinates"
 
 
 @dataclass
@@ -79,12 +89,16 @@ class CaptureContext:
     parent_resolved: bool = False
     parent_call_id: str | None = None
     parent_tokens: list[int] = field(default_factory=list)
-    # Gate state is process-shared; each worker's request context carries only
-    # this call's authenticated inputs and typed admission result.
-    staging_gate: RolloutCaptureGate | None = None
-    data_capability: str = ""
+    # A framework inference worker stages this call's tokens; the lineage
+    # store doubles as the rollout's capture ledger and admission is the
+    # strict tri-state of the lineage result.
+    external_staging: bool = False
     logical_request_id: str | None = None
     capture_admission: CaptureAdmission | None = None
+    # The request items as received from the harness, stashed by
+    # ``resolve_parent`` so the commit hook can publish the ledger row with
+    # the exact representation the next request will echo.
+    request_items: list[dict] | None = None
 
 
 _CAPTURE_CONTEXT: ContextVar[CaptureContext | None] = ContextVar("nemo_gym_capture_context", default=None)
@@ -133,30 +147,68 @@ async def resolve_parent(request_messages: list | None) -> None:
     Resolve once before dialect conversion or dispatch.
     Prefix supply and capture then share one parent decision.
     Return without work for untagged traffic.
-    A miss leaves the parent link unset.
+    On the local capture path a miss leaves the parent link unset.
+
+    With external staging the lineage result is a strict tri-state admission:
+    a unique verified match admits ``token_in``; an empty fingerprint (or an
+    unmatched one on a rollout with no ledger rows — seeded assistant history)
+    admits a ``text`` root; anything else writes a poison row and leaves the
+    call unadmitted. An unresolved request is never silently converted into a
+    new root: the earlier policy-generated tokens would train as mask-zero
+    prompt tokens.
     """
     context = _CAPTURE_CONTEXT.get()
     if context is None or request_messages is None:
         return
     context.parent_resolved = True
-    if context.lineage_store is not None:
-        try:
-            parent = await context.lineage_store.resolve(context.rollout_id, request_messages)
-        except Exception as error:
-            if context.staging_gate is not None:
-                raise RuntimeError(f"gate lineage resolution failed for rollout {context.rollout_id}") from error
-            logger.warning("Could not resolve a parent for rollout %s.", context.rollout_id, exc_info=True)
-            return
-        if parent is not None:
-            context.parent_call_id = parent.model_call_id
-            context.parent_tokens = list(parent.cumulative_token_ids)
-    if context.staging_gate is not None and context.capture_admission is None:
-        context.capture_admission = await context.staging_gate.admit_context(
-            context,
-            data_capability=context.data_capability,
-            request_items=list(request_messages),
-            logical_request_id=context.logical_request_id,
+    context.request_items = list(request_messages)
+    if context.lineage_store is None:
+        return
+    try:
+        parent = await context.lineage_store.resolve(context.rollout_id, request_messages)
+    except Exception as error:
+        if context.external_staging:
+            raise RuntimeError(f"ledger lineage resolution failed for rollout {context.rollout_id}") from error
+        logger.warning("Could not resolve a parent for rollout %s.", context.rollout_id, exc_info=True)
+        return
+    if parent is not None:
+        context.parent_call_id = parent.model_call_id
+        context.parent_tokens = list(parent.cumulative_token_ids)
+    if not context.external_staging or context.capture_admission is not None:
+        return
+
+    # Deferred: staging.records pulls in the digest module.
+    from nemo_gym.token_id_capture.lineage import assistant_fingerprint
+    from nemo_gym.token_id_capture.staging.records import CaptureAdmission
+
+    if parent is not None:
+        context.capture_admission = CaptureAdmission(
+            rollout_id=context.rollout_id,
+            model_call_id=context.model_call_id,
+            parent_call_id=parent.model_call_id,
+            prev_len=len(context.parent_tokens),
+            mode="token_in",
+            required_prefix_token_ids=list(context.parent_tokens),
         )
+        return
+    fingerprint = assistant_fingerprint(list(request_messages))
+    if not fingerprint or not await context.lineage_store.has_rows(context.rollout_id):
+        context.capture_admission = CaptureAdmission(
+            rollout_id=context.rollout_id,
+            model_call_id=context.model_call_id,
+            mode="text",
+        )
+        return
+    logger.warning(
+        "Unresolved parent for model call %s of rollout %s; poisoning the call.",
+        context.model_call_id,
+        context.rollout_id,
+    )
+    await context.lineage_store.record_failure(
+        context.rollout_id,
+        context.model_call_id,
+        UNRESOLVED_PARENT_REASON,
+    )
 
 
 async def capture_tokens(
@@ -174,9 +226,9 @@ async def capture_tokens(
     context = _CAPTURE_CONTEXT.get()
     if context is None:
         return
-    # Worker custody has already staged and committed through the gate-specific
+    # Worker custody has already staged and committed through the external
     # response hook. It must never fall back to a local/no-op token sink.
-    if context.staging_gate is not None:
+    if context.external_staging:
         return
     # Guard response decoding and record validation.
     # Either failure leaves the rollout short one call.

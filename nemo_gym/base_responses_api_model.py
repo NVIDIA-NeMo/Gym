@@ -43,7 +43,7 @@ from uuid import uuid4
 import orjson
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from nemo_gym.anthropic_converter import AnthropicConverter
@@ -61,7 +61,7 @@ from nemo_gym.responses_streaming import (
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+from nemo_gym.rollout_correlation import LOGICAL_REQUEST_HEADER, maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap, join_model_call_observations
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
@@ -69,6 +69,7 @@ from nemo_gym.server_utils import (
     SimpleServer,
 )
 from nemo_gym.token_id_capture import (
+    UNCOMMITTED_CALL_REASON,
     CaptureContext,
     capture_tokens,
     current_capture_context,
@@ -83,28 +84,18 @@ from nemo_gym.token_id_capture import (
 # The leaf package does not re-export it.
 from nemo_gym.token_id_capture.config import token_id_capture_config
 from nemo_gym.token_id_capture.control_routes import install_rollout_control_routes
-from nemo_gym.token_id_capture.gate import (
-    DATA_CAPABILITY_HEADER,
-    LOGICAL_REQUEST_HEADER,
-    DataCapabilityError,
-    GateError,
-    GateStateError,
-    OperationConflictError,
-    RolloutCaptureGate,
-    UnknownRolloutError,
-)
-from nemo_gym.token_id_capture.gate_store import FileGateStateStore
 from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore
+from nemo_gym.token_id_capture.protocols import CaptureLedger
 from nemo_gym.token_id_capture.store import make_token_store
 
 
 logger = logging.getLogger(__name__)
 
 
-def _reject_gate_streaming(body: dict[str, Any]) -> None:
+def _reject_external_capture_streaming(body: dict[str, Any]) -> None:
     """Reject streaming before sanitization can hide it from worker capture."""
     context = current_capture_context()
-    if context is not None and context.staging_gate is not None and body.get("stream") is True:
+    if context is not None and context.external_staging and body.get("stream") is True:
         raise HTTPException(
             status_code=422,
             detail="worker-owned token capture does not support streaming requests",
@@ -232,7 +223,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         into a terminal ``response.failed`` event rather than an HTTP 500 (bad-request validation
         still fails eagerly, before the stream is committed).
         """
-        _reject_gate_streaming(body)
+        _reject_external_capture_streaming(body)
         if not body.get("stream"):
             params = _validate_responses_params(body)
             return await self._invoke_responses(request, params)
@@ -277,7 +268,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         (e.g. ``"false"`` or ``1``) stays on the strict non-streaming path, which rejects the
         malformed ``stream`` with the same 422 as before.
         """
-        _reject_gate_streaming(body)
+        _reject_external_capture_streaming(body)
         if body.get("stream") is not True:
             params = _validate_chat_params(body)
             return await self._invoke_chat_completions(request, params)
@@ -319,7 +310,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         (the Claude Code CLI always does), the complete response is re-emitted as a synthesized
         Anthropic SSE event stream. Servers may override this for native Messages handling.
         """
-        _reject_gate_streaming(body)
+        _reject_external_capture_streaming(body)
         params = _ANTHROPIC_CONVERTER.anthropic_request_to_responses(body)
         response = await self._invoke_responses(request, params)
         model_name = body.get("model") or response.model
@@ -1158,19 +1149,25 @@ def _scope_header(scope: dict[str, Any], name: str) -> str | None:
     return ",".join(sorted(values))
 
 
-async def _fail_uncommitted_gate_call(context: CaptureContext | None) -> None:
+async def _fail_uncommitted_external_call(context: CaptureContext | None) -> None:
     """Poison an admitted call that returned without a durable worker ack."""
-    if context is None or context.staging_gate is None or context.capture_admission is None or context.committed:
+    if (
+        context is None
+        or not context.external_staging
+        or context.capture_admission is None
+        or context.committed
+        or context.lineage_store is None
+    ):
         return
     try:
-        await context.staging_gate.fail_call(
+        await context.lineage_store.record_failure(
             context.rollout_id,
             context.model_call_id,
-            reason="request_finished_without_staged_coordinates",
+            UNCOMMITTED_CALL_REASON,
         )
     except Exception:
         logger.exception(
-            "Could not fail uncommitted gate call %s for rollout %s.",
+            "Could not poison uncommitted call %s for rollout %s.",
             context.model_call_id,
             context.rollout_id,
         )
@@ -1198,7 +1195,7 @@ class _CaptureMiddleware:
         token_store: Any = None,
         configured_sink: Any = None,
         lineage_store: Any = None,
-        staging_gate: RolloutCaptureGate | None = None,
+        external_staging: bool = False,
         token_capture_enabled: bool = False,
     ) -> None:
         self._app = app
@@ -1209,7 +1206,9 @@ class _CaptureMiddleware:
         # Built from token_id_capture.sink, once, in this process.
         self._configured_sink = configured_sink
         self._lineage_store = lineage_store
-        self._staging_gate = staging_gate
+        # A framework inference worker owns record staging; the lineage store
+        # doubles as the per-rollout capture ledger.
+        self._external_staging = external_staging
         # Capture may have no destination in this process.
         # A framework may stage records from its inference worker.
         # This process still resolves the capture identity.
@@ -1231,9 +1230,6 @@ class _CaptureMiddleware:
             scope = {**scope, "path": path, "raw_path": path.encode("utf-8")}
 
         dialect = _OBSERVED_PATHS.get(path)
-
-        if self._staging_gate is not None and dialect is not None and prefix_match is None:
-            await self._staging_gate.note_unattributed_call()
 
         # Forward when no active store needs this correlated endpoint.
         # The prefix is already stripped.
@@ -1261,18 +1257,12 @@ class _CaptureMiddleware:
         sink_token = None
         capture_context = None
         if capture_wanted:
-            data_capability = _scope_header(scope, DATA_CAPABILITY_HEADER)
-            if data_capability is None:
-                authorization = _scope_header(scope, "authorization") or ""
-                if authorization.startswith("Bearer "):
-                    data_capability = authorization.removeprefix("Bearer ")
             capture_context = CaptureContext(
                 rollout_id=rollout_id,
                 model_call_id=model_call_id,
                 token_sink=token_sink,
                 lineage_store=self._lineage_store,
-                staging_gate=self._staging_gate,
-                data_capability=data_capability or "",
+                external_staging=self._external_staging,
                 logical_request_id=_scope_header(scope, LOGICAL_REQUEST_HEADER),
             )
             sink_token = set_token_sink(capture_context)
@@ -1283,7 +1273,7 @@ class _CaptureMiddleware:
             try:
                 await self._app(scope, receive, send)
             finally:
-                await _fail_uncommitted_gate_call(capture_context)
+                await _fail_uncommitted_external_call(capture_context)
                 if sink_token is not None:
                     reset_token_sink(sink_token)
             return
@@ -1371,7 +1361,7 @@ class _CaptureMiddleware:
             raise
         finally:
             # The sink is only needed while the model server produces the response.
-            await _fail_uncommitted_gate_call(capture_context)
+            await _fail_uncommitted_external_call(capture_context)
             if sink_token is not None:
                 reset_token_sink(sink_token)
 
@@ -1478,36 +1468,28 @@ def install_model_call_capture(
                 "token_id_capture.lineage_store is required with num_workers > 1 "
                 "when capture is not using Gym's shared file store"
             )
-    staging_gate = None
-    if capture_settings is not None and capture_settings.token_id_capture.gate.enabled:
+    external_staging = capture_settings is not None and capture_settings.token_id_capture.external_staging
+    if external_staging:
         if lineage_store is None:
-            raise ValueError("token_id_capture.gate requires a LineageStore")
-        gate_settings = capture_settings.token_id_capture.gate
-        assert gate_settings.state_store_path is not None  # validated by TokenIdCaptureConfig
-        staging_gate = RolloutCaptureGate(
-            lineage_store=lineage_store,
-            state_store=FileGateStateStore(gate_settings.state_store_path),
-            registration_ttl_s=gate_settings.registration_ttl_s,
-            tombstone_ttl_s=gate_settings.tombstone_ttl_s,
-        )
+            raise ValueError("token_id_capture.external_staging requires a LineageStore")
+        if isinstance(lineage_store, InMemoryLineageStore):
+            # The in-memory index evicts rollouts under memory bounds, which is
+            # acceptable for a resolution cache but not for a completeness
+            # ledger. External staging requires a non-evicting store.
+            raise ValueError(
+                "token_id_capture.external_staging requires a non-evicting lineage store "
+                "(e.g. FileLineageStore); InMemoryLineageStore cannot serve as the capture ledger"
+            )
+        if not isinstance(lineage_store, CaptureLedger):
+            raise ValueError(
+                "token_id_capture.external_staging requires the lineage store to implement "
+                "the CaptureLedger protocol (record_failure, manifest, has_rows)"
+            )
         install_rollout_control_routes(
             app,
-            staging_gate,
-            auth_token=gate_settings.resolve_control_auth_token(),
-            expiry_sweep_interval_s=gate_settings.expiry_sweep_interval_s,
+            lineage_store,
+            auth_token=capture_settings.token_id_capture.resolve_control_auth_token(),
         )
-
-        @app.exception_handler(GateError)
-        async def _gate_error_handler(_request: Request, error: GateError) -> JSONResponse:
-            if isinstance(error, DataCapabilityError):
-                status_code = 403
-            elif isinstance(error, UnknownRolloutError):
-                status_code = 404
-            elif isinstance(error, (GateStateError, OperationConflictError)):
-                status_code = 409
-            else:
-                status_code = 400
-            return JSONResponse(status_code=status_code, content={"detail": str(error)})
 
     owned_endpoints = [
         endpoint
@@ -1538,7 +1520,7 @@ def install_model_call_capture(
         token_store=token_store,
         configured_sink=configured_sink,
         lineage_store=lineage_store,
-        staging_gate=staging_gate,
+        external_staging=external_staging,
         token_capture_enabled=capture_settings.enabled if capture_settings is not None else False,
     )
 

@@ -1034,12 +1034,12 @@ class TestOpenHandsHarnessProcessor:
             processor.get_run_command()
             assert "LOG_LEVEL=DEBUG" in self._read_agent_script(config)
 
-    def test_get_run_command_routes_capture_with_mounted_capability(self) -> None:
+    def test_get_run_command_routes_capture_when_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _make_instance_config(
                 tmpdir,
                 ng_rollout_id="rollout-1",
-                capture_capability_path=Path("/trajectories_mount/.capture_capability"),
+                token_capture_enabled=True,
             )
             processor = OpenHandsHarnessProcessor(config=config)
             processor.get_run_command()
@@ -1051,8 +1051,6 @@ class TestOpenHandsHarnessProcessor:
                 in script
             )
             assert "export PYTHONPATH=/nemo_gym_capture_overlay:${PYTHONPATH:-}" in script
-            assert 'OPENAI_API_KEY="$(cat /trajectories_mount/.capture_capability)"' in script
-            assert 'api_key = "EMPTY"' not in script
 
     def test_get_run_command_nv_internal(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1267,7 +1265,7 @@ class TestOpenCodeHarnessProcessor:
             assert "--max-turns" not in script  # max_turns is positional
             assert str(config.agent_max_turns) in script
 
-    def test_get_run_command_routes_capture_with_mounted_capability(
+    def test_get_run_command_routes_capture_when_enabled(
         self,
         _stub_model_server_lookup,
     ) -> None:
@@ -1275,12 +1273,11 @@ class TestOpenCodeHarnessProcessor:
             config = self._opencode_config(
                 tmpdir,
                 ng_rollout_id="rollout-1",
-                capture_capability_path=Path("/trajectories_mount/.capture_capability"),
+                token_capture_enabled=True,
             )
             OpenCodeHarnessProcessor(config=config).get_run_command()
             script = self._read_agent_script(config)
             assert "http://test-host:12345/ng-rollout/rollout-1/training-token-capture" in script
-            assert 'OPENAI_API_KEY="$(cat /trajectories_mount/.capture_capability)"' in script
 
     def test_get_run_command_subagents_disabled_by_default(self, _stub_model_server_lookup) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2399,7 +2396,7 @@ class TestSWEBenchWrapperSetupParams:
             assert params.agent_command is not None
             assert params.metrics_fpath.exists()
 
-    def test_capture_capability_is_mounted_and_not_serialized(self, monkeypatch) -> None:
+    def test_token_capture_flag_rides_setup_params(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
         with tempfile.TemporaryDirectory() as tmpdir:
             container_file = Path(tmpdir) / "django__django-12345.sif"
@@ -2421,15 +2418,13 @@ class TestSWEBenchWrapperSetupParams:
                 },
             )
 
-            with rollout_context("rollout-1", data_capability="data-secret"):
+            monkeypatch.setattr(type(wrapper), "_token_id_capture_enabled", lambda self: True)
+            with rollout_context("rollout-1"):
                 params, _ = wrapper._setup_params(body)
 
-            capability_file = params.persistent_dir / ".capture_capability"
-            assert capability_file.read_text() == "data-secret"
-            assert capability_file.stat().st_mode & 0o777 == 0o600
-            assert params.capture_capability_path == Path("/trajectories_mount/.capture_capability")
-            assert "data-secret" not in params.model_dump_json()
-            assert "data-secret" not in params.agent_script
+            assert params.token_capture_enabled is True
+            # The sandboxed agent reaches the model through the capture-prefixed URL.
+            assert "/training-token-capture/" in params.agent_script
 
     def test_setup_params_nv_internal(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
@@ -2579,10 +2574,9 @@ class TestSWEBenchWrapperResponses:
             )
 
             with patch.object(wrapper, "_inner_responses", new_callable=AsyncMock, return_value=mock_response):
-                with rollout_context("rollout-1", data_capability="data-secret"):
+                with rollout_context("rollout-1"):
                     result = await wrapper.responses(body)
                 assert result.id == "swebench-django__django-12345"
-                assert not list(wrapper._swe_bench_wrapper_server_config.base_results_dir.rglob(".capture_capability"))
 
     @pytest.mark.asyncio
     async def test_responses_exception_writes_traceback(self, monkeypatch) -> None:
@@ -2616,9 +2610,8 @@ class TestSWEBenchWrapperResponses:
                 side_effect=RuntimeError("test error"),
             ):
                 with pytest.raises(RuntimeError, match="test error"):
-                    with rollout_context("rollout-1", data_capability="data-secret"):
+                    with rollout_context("rollout-1"):
                         await wrapper.responses(body)
-                assert not list(wrapper._swe_bench_wrapper_server_config.base_results_dir.rglob(".capture_capability"))
 
 
 class TestSWEBenchWrapperRun:

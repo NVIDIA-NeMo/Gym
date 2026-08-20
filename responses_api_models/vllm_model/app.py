@@ -54,11 +54,13 @@ from nemo_gym.responses_converter import (
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 from nemo_gym.token_id_capture import (
+    NG_CAPTURE_FIELD,
+    NG_COMMIT_COORDS_FIELD,
+    compute_digest,
     current_capture_context,
     mark_external_staging_committed,
 )
 from nemo_gym.token_id_capture.config import token_id_capture_config
-from nemo_gym.token_id_capture.gate import NG_CAPTURE_FIELD, NG_COMMIT_COORDS_FIELD
 from nemo_gym.token_id_capture.records import (
     TOKEN_FIELDS,
     response_to_output_items,
@@ -271,7 +273,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         "mm_processor_kwargs",
         "required_prefix_token_ids",
     )
-    _gate_capture_enabled: bool = PrivateAttr(default=False)
+    _external_capture_enabled: bool = PrivateAttr(default=False)
 
     def get_converter(self) -> "VLLMConverter":
         """Return the converter used for Responses API <-> Chat Completions mapping.
@@ -311,15 +313,17 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         global_config = getattr(self.server_client, "global_config_dict", None)
         capture_config = token_id_capture_config(global_config) if global_config is not None else None
-        self._gate_capture_enabled = bool(capture_config is not None and capture_config.token_id_capture.gate.enabled)
-        if self._gate_capture_enabled:
+        self._external_capture_enabled = bool(
+            capture_config is not None and capture_config.token_id_capture.external_staging
+        )
+        if self._external_capture_enabled:
             if self.config.use_completions_api:
-                raise ValueError("token_id_capture.gate does not support use_completions_api=true")
+                raise ValueError("token_id_capture.external_staging does not support use_completions_api=true")
             if self.config.is_responses_native:
-                raise ValueError("token_id_capture.gate requires the chat-backed Responses API path")
+                raise ValueError("token_id_capture.external_staging requires the chat-backed Responses API path")
             if self.config.return_token_id_information:
                 raise ValueError(
-                    "token_id_capture.gate requires return_token_id_information=false; "
+                    "token_id_capture.external_staging requires return_token_id_information=false; "
                     "worker custody replaces the token echo"
                 )
 
@@ -648,21 +652,26 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         self._apply_sampling_overrides(body_dict)
         self._validate_single_choice_token_request(body_dict)
-        if self._gate_capture_enabled:
-            body_dict = self._apply_gate_capture(body_dict)
+        if self._external_capture_enabled:
+            body_dict = self._apply_external_capture(body_dict)
         else:
             body_dict = self._apply_prefix_supply(body_dict)
 
         return body_dict
 
-    def _apply_gate_capture(self, body_dict: Dict[str, Any]) -> Dict[str, Any]:
-        """Attach the typed admission to this worker-bound chat request."""
+    def _apply_external_capture(self, body_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Attach the typed admission to this worker-bound chat request.
+
+        An unadmitted call (``UNRESOLVED`` — already poisoned in the ledger)
+        is forwarded as plain traffic: the worker stages nothing and the
+        completion still serves the agent.
+        """
         context = current_capture_context()
-        if context is None or context.staging_gate is None:
+        if context is None or not context.external_staging:
             return body_dict
         admission = context.capture_admission
         if admission is None:
-            raise RuntimeError("gate admission must complete before vLLM preprocessing")
+            return body_dict
         body_dict[NG_CAPTURE_FIELD] = admission.model_dump(mode="json")
         body_dict.update(
             logprobs=True,
@@ -874,8 +883,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                 f"NeMo Gym server `{self.config.name}` config has explicitly been set to not use a reasoning parser i.e. `uses_reasoning_parser: false`. Please do not use a reasoning parser in your vLLM endpoint, or fix the `{self.config.name}` server config!"
             )
 
-        if self._gate_capture_enabled:
-            await self._finalize_gate_capture(chat_completion_dict)
+        if self._external_capture_enabled:
+            await self._finalize_external_capture(chat_completion_dict)
 
         if self.config.return_token_id_information:
             message_dict = choice_dict["message"]
@@ -943,32 +952,73 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
 
-    async def _finalize_gate_capture(self, payload: Dict[str, Any]) -> None:
-        """Commit worker coordinates, then remove every custody-only field."""
+    async def _finalize_external_capture(self, payload: Dict[str, Any]) -> None:
+        """Publish the worker's coordinates as a ledger row, then strip custody fields.
+
+        The ordering invariant the external sink requires — a call must not
+        become a lineage parent until its staged record is durable — holds
+        structurally: the worker stages before acknowledging, so the ledger
+        row (which is what makes the call resolvable) is written only after
+        the coordinates arrive.
+        """
         context = current_capture_context()
-        if context is None or context.staging_gate is None:
+        if context is None or not context.external_staging or context.lineage_store is None:
             return
         coords_payload = payload.pop(NG_COMMIT_COORDS_FIELD, None)
+        admission = context.capture_admission
+        if admission is None:
+            # UNRESOLVED — the ledger already carries this call's poison row.
+            self._strip_capture_transport_fields(payload)
+            return
         try:
             if coords_payload is None:
-                await context.staging_gate.fail_call(
+                await context.lineage_store.record_failure(
                     context.rollout_id,
                     context.model_call_id,
-                    reason="worker_response_missing_commit_coordinates",
+                    "worker_response_missing_commit_coordinates",
                 )
                 return
             coords = CommitCoords.model_validate(coords_payload)
+            if coords.rollout_id != context.rollout_id or coords.model_call_id != context.model_call_id:
+                raise ValueError(
+                    f"coordinates for {coords.rollout_id}/{coords.model_call_id} do not match the "
+                    f"active capture context {context.rollout_id}/{context.model_call_id}"
+                )
+            if coords.disposition == "capture_failed":
+                await context.lineage_store.record_failure(
+                    context.rollout_id,
+                    context.model_call_id,
+                    "worker_capture_failed",
+                )
+                return
+            if coords.parent_call_id != admission.parent_call_id or coords.prev_len != admission.prev_len:
+                raise ValueError(f"coordinates for {coords.model_call_id} diverge from admission")
+            cumulative = list(context.parent_tokens) + [int(token) for token in coords.token_ids_delta]
+            if len(cumulative) != coords.cum_len:
+                raise ValueError(f"coordinates for {coords.model_call_id} diverge from cumulative length")
             response_items, _ = strip_token_fields(response_to_output_items(payload))
-            committed = await context.staging_gate.commit_coords(
-                coords,
-                response_items=response_items,
+            await context.lineage_store.record(
+                context.rollout_id,
+                context.model_call_id,
+                list(context.request_items or []),
+                response_items,
+                cumulative,
+                compute_digest(cumulative),
+                parent_call_id=coords.parent_call_id,
+                staging_key=coords.staging_key,
+                weight_version=coords.weight_version,
+                prev_len=coords.prev_len,
+                delta_len=coords.delta_len,
+                cum_len=coords.cum_len,
+                staging_digest=coords.digest,
+                extras_digest=coords.extras_digest,
+                mode=admission.mode,
                 logical_request_id=context.logical_request_id or (str(payload["id"]) if payload.get("id") else None),
             )
-            if committed:
-                mark_external_staging_committed(
-                    rollout_id=coords.rollout_id,
-                    model_call_id=coords.model_call_id,
-                )
+            mark_external_staging_committed(
+                rollout_id=coords.rollout_id,
+                model_call_id=coords.model_call_id,
+            )
         except Exception:
             # Worker/framework payloads are an external integrity boundary.
             # Poison capture without turning a valid model completion into a
@@ -978,16 +1028,23 @@ class VLLMModel(SimpleResponsesAPIModel):
                 context.rollout_id,
                 context.model_call_id,
             )
-            await context.staging_gate.fail_call(
-                context.rollout_id,
-                context.model_call_id,
-                reason="invalid_worker_commit_coordinates",
-            )
+            try:
+                await context.lineage_store.record_failure(
+                    context.rollout_id,
+                    context.model_call_id,
+                    "invalid_worker_commit_coordinates",
+                )
+            except Exception:
+                LOG.exception(
+                    "Could not poison rollout %s call %s after a failed acknowledgement",
+                    context.rollout_id,
+                    context.model_call_id,
+                )
         finally:
-            self._strip_gate_transport_fields(payload)
+            self._strip_capture_transport_fields(payload)
 
     @staticmethod
-    def _strip_gate_transport_fields(payload: Dict[str, Any]) -> None:
+    def _strip_capture_transport_fields(payload: Dict[str, Any]) -> None:
         """Keep token IDs, logprobs, routes, and coordinates off the agent hop."""
         payload.pop(NG_COMMIT_COORDS_FIELD, None)
         payload.pop("prompt_token_ids", None)
@@ -1116,8 +1173,8 @@ class VLLMModel(SimpleResponsesAPIModel):
 
     def _validate_single_choice_token_request(self, body_dict: Dict[str, Any]) -> None:
         context = current_capture_context()
-        gate_capture = context is not None and context.staging_gate is not None
-        if (self.config.return_token_id_information or gate_capture) and body_dict.get("n") not in (None, 1):
+        external_capture = context is not None and context.external_staging
+        if (self.config.return_token_id_information or external_capture) and body_dict.get("n") not in (None, 1):
             raise ValueError(f"NeMo Gym server `{self.config.name}` requires n=1 for token capture.")
 
     async def _chat_completions_via_completions_api(

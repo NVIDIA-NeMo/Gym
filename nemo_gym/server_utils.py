@@ -73,7 +73,6 @@ from nemo_gym.global_config import (
 )
 from nemo_gym.profiling import Profiler
 from nemo_gym.rollout_correlation import (
-    DATA_CAPABILITY_HEADER,
     current_rollout_id,
     maybe_rollout_id_from_run_body,
 )
@@ -345,12 +344,6 @@ class ServerClient(BaseModel):
             # model URL explicitly instead.  Preserve that path rather than
             # resolving the unprefixed host/port from global config.
             base_url = model_server_base_url.rstrip("/")
-            if f"/{TOKEN_CAPTURE_PATH_SEGMENT}/" in f"{base_url}/":
-                capability = getenv("OPENAI_API_KEY")
-                if capability:
-                    headers = dict(kwargs.get("headers") or {})
-                    headers.setdefault(DATA_CAPABILITY_HEADER, capability)
-                    kwargs["headers"] = headers
         else:
             base_url = self._build_server_base_url(server_config_dict)
 
