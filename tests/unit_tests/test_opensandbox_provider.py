@@ -1534,6 +1534,44 @@ async def test_pause_failure_is_not_retried() -> None:
     raw.pause.assert_awaited_once_with()
 
 
+async def test_pause_timeout_bounds_the_full_transition() -> None:
+    opensandbox_provider._require_tenacity()
+    status_started = asyncio.Event()
+
+    async def slow_pause() -> None:
+        await asyncio.sleep(0.05)
+
+    async def stalled_status() -> None:
+        status_started.set()
+        await asyncio.Event().wait()
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 1},
+        operations={"pause_resume_timeout_s": 0.1, "retries": 0},
+    )
+    raw = SimpleNamespace(
+        pause=slow_pause,
+        get_info=stalled_status,
+    )
+    handle = opensandbox_provider.SandboxHandle("sandbox-paused", "opensandbox", raw)
+
+    with pytest.raises(TimeoutError, match=r"waiting .* to pause after 0\.1s"):
+        await asyncio.wait_for(provider.pause(handle), timeout=0.14)
+    assert status_started.is_set()
+
+
+async def test_pause_preserves_a_shorter_request_timeout() -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 0.001},
+        operations={"pause_resume_timeout_s": 0.05},
+    )
+    raw = SimpleNamespace(pause=AsyncMock(side_effect=asyncio.Event().wait))
+    handle = opensandbox_provider.SandboxHandle("sandbox-paused", "opensandbox", raw)
+
+    with pytest.raises(TimeoutError, match="OpenSandbox pause after 0.001s"):
+        await provider.pause(handle)
+
+
 async def test_resume_rebuilds_the_sdk_handle_after_readiness(fake_opensandbox_sdk: None) -> None:
     FakeSandbox.resumed_args = ()
     FakeSandbox.resumed_kwargs = {}
