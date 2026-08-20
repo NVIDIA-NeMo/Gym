@@ -13,9 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import warnings
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Discriminator, Tag, model_validator
+from pydantic import BaseModel, ConfigDict, Discriminator, Tag, field_validator, model_validator
 
 
 # Reject unknown fields on all config models so typos in YAML surface immediately.
@@ -48,11 +49,41 @@ class BaseModelServiceConfig(BaseServiceConfig):
     port: int = 8000
 
 
+class VllmServiceDistributedBackend(_StrictModel):
+    """Use vLLM's native data-parallel multi-instance (--data-parallel-size N)."""
+
+    type: Literal["mp"] = "mp"
+
+
+# Future backends: add Annotated[RayServeDistributedBackend, Tag("ray_serve")], etc.
+DistributedBackendConfig = Annotated[
+    Annotated[VllmServiceDistributedBackend, Tag("mp")],
+    Discriminator("type"),
+]
+
+
 class VllmServiceConfig(BaseModelServiceConfig):
     type: Literal["vllm"]
     tensor_parallel_size: int = 1
     pipeline_parallel_size: int = 1
     trust_remote_code: bool = False
+    number_of_instances: int = 1
+    distributed_backend: DistributedBackendConfig | None = None
+
+    @field_validator("number_of_instances")
+    @classmethod
+    def _validate_number_of_instances(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"number_of_instances must be >= 1, got {v}")
+        return v
+
+    @model_validator(mode="after")
+    def _validate_distributed_backend(self) -> "VllmServiceConfig":
+        if self.number_of_instances == 1 and self.distributed_backend is not None:
+            raise ValueError("distributed_backend should not be set when number_of_instances == 1")
+        if self.number_of_instances > 1 and self.distributed_backend is None:
+            self.distributed_backend = VllmServiceDistributedBackend()
+        return self
 
     @model_validator(mode="after")
     def _default_health_check(self) -> "VllmServiceConfig":
@@ -160,6 +191,9 @@ class SubmitConfig(_StrictModel):
                     f"({', '.join(sorted(compute_names))})."
                 )
 
+            if isinstance(service, VllmServiceConfig):
+                self._validate_vllm_gpu_footprint(service_name, service)
+
         if self.driver.policy_model is not None:
             if self.driver.policy_model not in self.services:
                 raise ValueError(
@@ -183,3 +217,38 @@ class SubmitConfig(_StrictModel):
                     benchmark.run["policy_api_key"] = "dummy"  # pragma: allowlist secret
 
         return self
+
+    def _validate_vllm_gpu_footprint(self, service_name: str, service: "VllmServiceConfig") -> None:
+        compute = self.compute[service.placement]
+        if not isinstance(compute, SlurmComputeConfig):
+            return
+
+        gpus_per_node_values = [
+            pool.gpus_per_node for pool in compute.node_pools.values() if pool.gpus_per_node is not None
+        ]
+        if not gpus_per_node_values:
+            return
+
+        max_gpus_per_node = max(gpus_per_node_values)
+        gpus_needed = service.tensor_parallel_size * service.pipeline_parallel_size * service.number_of_instances
+
+        if gpus_needed > max_gpus_per_node:
+            raise ValueError(
+                f"Service '{service_name}' requires {gpus_needed} GPUs "
+                f"(tensor_parallel_size={service.tensor_parallel_size} x "
+                f"pipeline_parallel_size={service.pipeline_parallel_size} x "
+                f"number_of_instances={service.number_of_instances}), which exceeds the largest available "
+                f"node pool's gpus_per_node ({max_gpus_per_node}) on compute '{service.placement}'. "
+                "Multi-node vLLM services are not supported yet by the 'mp' distributed backend; "
+                "reduce number_of_instances/tensor_parallel_size/pipeline_parallel_size to fit on a single node."
+            )
+        elif gpus_needed < max_gpus_per_node:
+            warnings.warn(
+                f"Service '{service_name}' requires {gpus_needed} GPUs "
+                f"(tensor_parallel_size={service.tensor_parallel_size} x "
+                f"pipeline_parallel_size={service.pipeline_parallel_size} x "
+                f"number_of_instances={service.number_of_instances}) but compute '{service.placement}' allocates "
+                f"nodes with {max_gpus_per_node} GPUs each, leaving {max_gpus_per_node - gpus_needed} GPU(s) idle. "
+                "Increase number_of_instances/tensor_parallel_size or reduce gpus_per_node to use the full node.",
+                stacklevel=2,
+            )

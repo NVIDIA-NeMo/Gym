@@ -319,6 +319,46 @@ class TestRolloutCorrelation:
         assert episode.observations.records[0].invocation_id == "root"
 
 
+class TestMaxTokens:
+    def _agent_and_seen(self, monkeypatch, **config_kwargs) -> tuple[HermesAgent, dict]:
+        import nemo_gym.base_responses_api_agent as base_agent
+
+        monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _gc, _name: {"host": "h", "port": 1})
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {}
+        server_client._build_server_base_url = lambda _cfg: "http://h:1"
+        agent = HermesAgent(config=_config(**config_kwargs), server_client=server_client)
+        monkeypatch.setattr(agent, "_ensure_sigterm_handler", lambda: None)
+
+        seen: dict = {}
+
+        class _StubAIAgent:
+            def __init__(self, **kwargs) -> None:
+                seen["max_tokens"] = kwargs.get("max_tokens")
+                self._build_api_kwargs = lambda _messages: {}
+                self.compression_enabled = True
+
+            def run_conversation(self, *args, **kwargs) -> dict:
+                return {"messages": [{"role": "assistant", "content": "ok"}]}
+
+        monkeypatch.setattr("run_agent.AIAgent", _StubAIAgent)
+        return agent, seen
+
+    def test_max_tokens_passed_to_ai_agent(self, monkeypatch) -> None:
+        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+
+        agent, seen = self._agent_and_seen(monkeypatch, max_tokens=4096)
+        asyncio.run(agent.responses(request=None, body=NeMoGymResponseCreateParamsNonStreaming(input="hi")))
+        assert seen["max_tokens"] == 4096
+
+    def test_max_tokens_defaults_to_none(self, monkeypatch) -> None:
+        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+
+        agent, seen = self._agent_and_seen(monkeypatch)
+        asyncio.run(agent.responses(request=None, body=NeMoGymResponseCreateParamsNonStreaming(input="hi")))
+        assert seen["max_tokens"] is None
+
+
 class TestObservability:
     @pytest.mark.parametrize(
         ("terminal_backend", "runtime_gap"),
