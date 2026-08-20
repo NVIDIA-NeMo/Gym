@@ -267,6 +267,9 @@ def test_test_template_runs_cpu_or_gpu_script_in_container() -> None:
     assert 'echo "::notice title=Test result::$TEST_SCRIPT — PASSED"' in action
     assert 'echo "::error title=Test result::$TEST_SCRIPT — FAILED"' in action
     assert '} >> "$GITHUB_STEP_SUMMARY"' in action
+    assert "┌─ launching test ─" in action
+    assert "║   ✅  PASSED" in action
+    assert "║   ❌  FAILED" in action
     assert action.count("required: true") == 4
 
 
