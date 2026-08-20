@@ -5,11 +5,14 @@
 
 from pathlib import Path
 
-from resources_servers.deepswe.prepare import prepare as prepare_deepswe
-
 
 def prepare() -> Path:
     """Materialize private verifier assets and return the model-visible JSONL."""
+
+    # Pier is isolated to the DeepSWE resources-server environment. Import it
+    # only when preparation is actually needed so cached evals stay runnable
+    # from Gym's base launcher environment.
+    from resources_servers.deepswe.prepare import prepare as prepare_deepswe
 
     _, jsonl_path = prepare_deepswe()
     return jsonl_path
