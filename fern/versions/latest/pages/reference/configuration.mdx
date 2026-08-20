@@ -13,6 +13,23 @@ Complete syntax and field specifications for NeMo Gym configuration files.
 | Server configs | `<server_type>/<implementation>/configs/*.yaml` | ✅ Committed |
 | env.yaml | Repository root (`./env.yaml`) | ❌ Gitignored (user creates) |
 
+### Artifact Roots (`results_dir`, `cache_dir`)
+
+Two **opt-in** top-level config keys that servers can consult for state that outlives a request:
+
+| Key | Default | Read today by |
+|-----|---------|---------------|
+| `results_dir` | `<working dir>/results` | the `swe_agents` server (per-run results) and the W&B run directory |
+| `cache_dir` | `<working dir>/cache` | the `swe_agents` server (setup trees) and the `uv_cache_dir` default |
+
+These are opt-in settings, not a global redirect: components that don't consult them (profiling output, rollout capture, logs, Hugging Face caches, other agents) keep their own locations, and the module-level `RESULTS_DIR`/`CACHE_DIR` constants remain unchanged defaults for such consumers. New artifact producers are encouraged to read these keys.
+
+Both are independently overridable (`results_dir=/shared/results cache_dir=/shared/cache`), and relative values are normalized to absolute paths at parse time so all server processes agree. `uv_venv_dir` keeps its own key and default.
+
+On multi-node deployments, the `swe_agents` server embeds these paths in commands executed from **other nodes**, so both roots must resolve to the same content at the same path on every node that runs rollout workers: use a shared filesystem, or pre-stage identical trees at the same path on each node (for example, baked into the container image). A cache that exists only on the head node breaks remote rollouts.
+
+Servers that pre-staged setup trees next to the package (the layout before `cache_dir` existed, for example baked container images) keep using those trees **only while `cache_dir` is left at its default** — explicitly configuring `cache_dir` opts out, and removing the pre-staged trees migrates a default-config deployment. Contents accumulate across runs; both directories are safe to delete when no run is active.
+
 ---
 
 ## Path Resolution and External Roots
