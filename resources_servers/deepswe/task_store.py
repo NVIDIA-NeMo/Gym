@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""DeepSWE-specific validation and lookup around Pier's upstream task model."""
+"""DeepSWE-specific validation and lookup around its Pier-compatible task model."""
 
 from __future__ import annotations
 
@@ -9,14 +9,14 @@ import math
 from collections.abc import Iterator
 from pathlib import Path
 
-from pier.models.task.config import (
+from resources_servers.deepswe.task_schema import (
     MAIN_SERVICE_NAME,
     NetworkMode,
+    Task,
     VerifierCollectConfig,
     VerifierEnvironmentMode,
+    resolve_effective_verifier_env_config,
 )
-from pier.models.task.task import Task
-from pier.models.task.verifier_mode import resolve_effective_verifier_env_config
 
 
 EXPECTED_TASK_COUNT = 113
@@ -33,11 +33,11 @@ REQUIRED_TASK_FILES = (
 
 
 def task_id(task: Task) -> str:
-    """Return the DeepSWE task ID carried by Pier's validated metadata."""
+    """Return the DeepSWE task ID carried by validated metadata."""
 
     value = task.config.metadata.get("task_id")
     if not isinstance(value, str) or not value:
-        raise ValueError(f"Pier task {task.task_dir.name!r} is missing metadata.task_id")
+        raise ValueError(f"DeepSWE task {task.task_dir.name!r} is missing metadata.task_id")
     return value
 
 
@@ -160,7 +160,7 @@ def _validate_deepswe_task(task: Task, *, directory_name: str) -> None:
 
 
 class DeepSWETaskStore:
-    """Immutable ID index over upstream ``pier.models.task.Task`` objects."""
+    """Immutable ID index over validated DeepSWE task objects."""
 
     def __init__(
         self,

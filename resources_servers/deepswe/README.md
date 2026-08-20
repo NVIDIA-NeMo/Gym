@@ -17,8 +17,9 @@ the Gym JSONL alongside the instruction and task ID. The resources server reject
 pinned task definition, and both the agent and fresh verifier consume that same image. Test assets and oracle patches
 remain in the resources server's gitignored control-plane cache.
 
-Task definitions are parsed with the pinned upstream `datacurve-pier` task model. Agent and verifier CPU, memory, and
-storage requests are resolved independently from their corresponding `task.toml` environment sections.
+Task definitions are parsed with a narrow local adapter for the pinned Pier 0.3.1 task schema, without installing
+Pier's unrelated agent/model-provider stack. Agent and verifier CPU, memory, and storage requests are resolved
+independently from their corresponding `task.toml` environment sections.
 
 ## Oracle checkpoint
 

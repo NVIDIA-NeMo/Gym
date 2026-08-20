@@ -19,7 +19,6 @@ from typing import Any
 from urllib.parse import urlparse
 
 from fastapi import Request
-from pier.models.task.task import Task
 from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
@@ -38,6 +37,7 @@ from nemo_gym.server_utils import SESSION_ID_KEY, get_first_server_config_dict, 
 from resources_servers.deepswe.task_store import (
     EXPECTED_TASK_COUNT,
     DeepSWETaskStore,
+    Task,
     task_collect_hook,
     task_id,
     task_image,

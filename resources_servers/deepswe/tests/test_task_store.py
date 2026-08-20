@@ -3,10 +3,9 @@
 
 from pathlib import Path
 
-from pier.models.task.task import Task
-
 from resources_servers.deepswe.task_store import (
     DeepSWETaskStore,
+    Task,
     task_collect_hook,
     task_id,
     task_image,
