@@ -9,6 +9,7 @@ MODEL=$MODEL
 CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
 VLLM_CONFIG=$VLLM_CONFIG
+SLURM_COMMENT=${SLURM_COMMENT:-""}
 
 should_run_eval=$(( $# > 0 ))
 if (( should_run_eval )); then
@@ -241,6 +242,7 @@ sbatch \
     --job-name=gym-$EXPERIMENT_NAME-$USER \
     --output=slurm-logs/%j-%x.log \
     --ntasks-per-node=1 \
+    --comment=$SLURM_COMMENT \
     --exclusive \
     --segment=$NUM_NODES \
     --wrap 'exec bash -lc "$VLLM_PD_BATCH_COMMAND"'
