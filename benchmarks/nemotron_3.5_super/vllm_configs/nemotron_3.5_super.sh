@@ -1,6 +1,7 @@
 #!/bin/bash
 
 VLLM_COMMON_ARGS=(
+    --trust-remote-code
     --disable-uvicorn-access-log
     --gpu-memory-utilization 0.9
     --distributed-executor-backend mp
@@ -18,10 +19,12 @@ VLLM_COMMON_ARGS=(
     --mamba-ssm-cache-dtype float32
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
     --enable-expert-parallel
+    --data-parallel-size 1
+    --api-server-count 1
 )
 VLLM_PREFILL_ARGS=(
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}'
-    --max-num-batched-tokens 33920
+    --max-num-batched-tokens 135680
     --max-num-seqs 1024
     --data-parallel-size-local 1
     --tensor-parallel-size 4
