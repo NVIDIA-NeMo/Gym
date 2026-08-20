@@ -7,9 +7,10 @@ tenacity>=9.1.4
 
 # JeffPengCoder/OSWorld nv-gym at an immutable commit: upstream main
 # 83e85344 plus the nv-gym provider overlay, proxy-runtime repair, and VLC
-# gateway-auth fallback. Use an archive because uv recursively initializes
-# git submodules, while optional SurferH submodules are not needed here.
-osworld @ https://github.com/JeffPengCoder/OSWorld/archive/dc23424e9f6316b181bde149e0dc9bc3c5ff78c9.tar.gz
+# gateway-auth fallback, plus the restricted-guest fixture repairs. Use an
+# archive because uv recursively initializes git submodules, while optional
+# SurferH submodules are not needed here.
+osworld @ https://github.com/JeffPengCoder/OSWorld/archive/4858905d1ddfecc1cee979742d0f113a6d19728e.tar.gz
 
 numkong==7.7.0
 docker==7.1.0
@@ -31,7 +32,9 @@ chardet<6
 # install_optional_runtime_deps.sh and benchmarks/osworld/README.md.
 cffi
 scipy
-numpy<2
+# NumPy 1.26 has no CPython 3.13 wheel. Keep this role on the NumPy 2 line
+# already exercised by Gym, while avoiding the NumPy 2.5/Numba boundary.
+numpy>=2.1,<2.5
 pynput
 ag2
 

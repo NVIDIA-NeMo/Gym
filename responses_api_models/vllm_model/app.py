@@ -56,12 +56,37 @@ LOG = logging.getLogger("nemo_gym.vllm_model")
 _TRANSPORT_LOG_CONTEXT_HEADERS = {
     "run_id": "x-nemo-gym-log-run-id",
     "adapter": "x-nemo-gym-log-adapter",
+    "sampling_event_id": "x-nemo-gym-log-sampling-event-id",
+    "source_group_id": "x-nemo-gym-log-source-group-id",
+    "execution_id": "x-nemo-gym-log-execution-id",
+    "rollout_id": "x-nemo-gym-log-rollout-id",
+    "group_id": "x-nemo-gym-log-group-id",
+    "rollout_index": "x-nemo-gym-log-rollout-index",
+    "attempt_index": "x-nemo-gym-log-attempt-index",
     "task_id": "x-nemo-gym-log-task-id",
     "domain": "x-nemo-gym-log-domain",
     "task_attempt": "x-nemo-gym-log-task-attempt",
     "step": "x-nemo-gym-log-step",
     "parse_attempt": "x-nemo-gym-log-parse-attempt",
 }
+
+
+def _emit_vllm_proxy_purpose_marker(
+    *,
+    metadata_rollout_purpose: Any,
+    forwarded_rollout_purpose: Any,
+    temperature: Any,
+    top_p: Any,
+) -> None:
+    """Emit a payload-free trace for the final vLLM proxy request contract."""
+
+    print(
+        "NEMO_GYM_VLLM_PROXY_PURPOSE|"
+        f"metadata={metadata_rollout_purpose or 'none'}|"
+        f"forwarded={forwarded_rollout_purpose or 'none'}|"
+        f"temperature={temperature}|top_p={top_p}",
+        flush=True,
+    )
 
 
 def _transport_log_context(request: Request) -> Dict[str, Any]:
@@ -72,7 +97,13 @@ def _transport_log_context(request: Request) -> Dict[str, Any]:
         value = request.headers.get(header)
         if not value:
             continue
-        if field in {"task_attempt", "step", "parse_attempt"}:
+        if field in {
+            "rollout_index",
+            "attempt_index",
+            "task_attempt",
+            "step",
+            "parse_attempt",
+        }:
             try:
                 context[field] = int(value)
             except ValueError:
@@ -533,6 +564,15 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         if extra_body:
             body_dict = extra_body | body_dict
+
+        metadata_rollout_purpose = extra_body.get("nemo_rl_rollout_purpose")
+        forwarded_rollout_purpose = body_dict.get("nemo_rl_rollout_purpose")
+        _emit_vllm_proxy_purpose_marker(
+            metadata_rollout_purpose=metadata_rollout_purpose,
+            forwarded_rollout_purpose=forwarded_rollout_purpose,
+            temperature=body_dict.get("temperature"),
+            top_p=body_dict.get("top_p"),
+        )
 
         # Audio sidechannel: rows can carry audio on
         # ``responses_create_params.metadata`` via three mutually exclusive

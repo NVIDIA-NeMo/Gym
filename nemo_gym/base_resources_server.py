@@ -13,11 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from abc import abstractmethod
+from collections.abc import Mapping
 from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Optional
 
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, PrivateAttr, model_validator
 
 
 if TYPE_CHECKING:
@@ -26,6 +27,7 @@ if TYPE_CHECKING:
     from nemo_gym.mcp_auto_exposure import MCPTool
 
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.global_config import EXECUTION_ID_KEY_NAME
 from nemo_gym.judge import judge_failsafe
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
@@ -86,7 +88,28 @@ class BaseResourcesServer(BaseServer):
 
 
 class BaseRunRequest(BaseModel):
+    # Capture the scheduler-owned transport extension in a private slot. This
+    # makes it available to every typed /run endpoint without adding a public
+    # model field, changing JSON schema, or serializing a null/default key.
+    _nemo_gym_execution_id: Optional[str] = PrivateAttr(default=None)
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _capture_execution_id(cls, value: Any, handler: Any) -> "BaseRunRequest":
+        if isinstance(value, Mapping):
+            execution_id = value.get(EXECUTION_ID_KEY_NAME)
+            if EXECUTION_ID_KEY_NAME in value:
+                # Subclasses such as OSWorldRunRequest allow domain-specific
+                # extras. Remove this transport-only extension before normal
+                # validation so it cannot leak back through model_dump().
+                value = dict(value)
+                value.pop(EXECUTION_ID_KEY_NAME)
+        else:
+            execution_id = getattr(value, "_nemo_gym_execution_id", None)
+        model = handler(value)
+        model._nemo_gym_execution_id = execution_id
+        return model
 
 
 class BaseVerifyRequest(BaseRunRequest):

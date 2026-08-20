@@ -8,10 +8,23 @@ osworld_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
+      resources_server: null       # set to {type: resources_servers, name: osworld} for remote_docker
       concurrency: 4
       provider_name: docker
       container_image: docker://happysixd/osworld-docker@sha256:0e6497a9295647cf05bf2b2af522fdd79bdeba2737595259cab310a3bcf6baa9
       sandbox_provider: null      # named nemo_gym.sandbox config; when set, Sandbox owns VM container lifecycle
+      # OSWorld pool admission is normally seconds. Bound this workload's VM
+      # create phase so a transient control-plane outage cannot consume the
+      # complete 30-minute rollout budget before any model action occurs.
+      sandbox_provider_overrides:
+        opensandbox:
+          create:
+            request_timeout_s: 180
+            timeout_s: 180
+            connect_attempt_timeout_s: 30
+            retries: 1
+            retry_delay_s: 5.0
+            retry_max_delay_s: 10.0
       sandbox_spec:
         image: docker://happysixd/osworld-docker@sha256:0e6497a9295647cf05bf2b2af522fdd79bdeba2737595259cab310a3bcf6baa9
         ttl_s: null
@@ -43,7 +56,12 @@ osworld_simple_agent:
       require_a11y_tree: false    # a11y_tree gives precise UI coords from OS AT-SPI — info a human user wouldn't have. Set false for pure-VLM evaluation (matches OSWorld paper's vision-only baseline + OpenAI/Anthropic computer-use benchmarks). Set true if you want max accuracy on small-UI clicks at the cost of much larger prompts (one a11y dump can be 100s of KB of XML, which blows the context window quickly with max_trajectory_length>1).
       client_password: password  # pragma: allowlist secret
       enable_proxy: false        # global opt-in; only tasks with proxy: true use it
+      allow_direct_proxy_tasks: true   # preserve benchmark behavior; set false in strict training/deployment profiles
       proxy_config_file: null    # local JSON path; PROXY_CONFIG_FILE overrides this value
+      resources_server_token_env: OSWORLD_RESOURCES_TOKEN
+      resources_request_timeout: 900.0
+      resources_connect_timeout: 10.0
+      resources_request_retries: 3
       max_steps: 15
       max_trajectory_length: 3
       sleep_after_execution: 10.0   # Generous post-action wait. pyautogui clicks actuate immediately but page nav/render can take 5-8s under software emulation (TCG) — 1.5s catches mid-render screenshots that look "unchanged" and trigger broken-record re-clicks. Under KVM (hardware-accelerated qemu) 0.5-1.5s usually suffices.
@@ -61,7 +79,8 @@ osworld_simple_agent:
       agent_kwargs: {}            # extra kwargs merged into the runner's native mm_agent constructor.
       mem_limit_mb: 0           # upstream Docker owns QEMU/container limits; nonzero only emits a warning
       step_timeout: 60          # per-action subprocess timeout
-      task_timeout: 1800        # whole-rollout wall-clock cap; trips mask_sample=True
+      task_timeout: 1800        # end-to-end attempt deadline: VM create/setup + agent steps + evaluation
+      task_cancel_grace_s: 30.0 # graceful env.close()/sandbox release before force-cancelling the Ray worker
       docker_port_lock_timeout: 300.0  # infrastructure-only wait for concurrent Docker VM port allocation
       evaluator_disable_gpu: true  # keep EasyOCR from reserving rollout GPU memory
       reward_mode: binary          # raw preserves OSWorld partial scores; binary keeps the historical Gym training convention
@@ -76,6 +95,11 @@ osworld_sandbox:
       # --init wrapper while preserving its entrypoint.
       use_init: false
       start_timeout_s: 600
+      # A remote Docker transport can lose a response after the daemon has
+      # already created the named container. Retry with the same name and
+      # reconcile exact label/image ownership before creating again.
+      transport_retries: 4
+      transport_retry_delay_s: 1.0
       apply_resource_limits: true
       publish_host: ${oc.env:OSWORLD_SANDBOX_PUBLISH_HOST,127.0.0.1}
     exec:

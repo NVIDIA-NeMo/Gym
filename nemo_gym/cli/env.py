@@ -419,7 +419,16 @@ class RunHelper:  # pragma: no cover
     {NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME}={shlex.quote(top_level_path)} \\
     python {str(entrypoint_fpath)}"""
 
-            process = run_command(command, dir_path, server_name=top_level_path)
+            # Server entrypoints are executed as files (``python app.py``). Put the
+            # component root on PYTHONPATH as well as the server directory so package-
+            # qualified imports such as ``responses_api_agents.foo.helpers`` resolve
+            # from the same checkout instead of an older installed Gym distribution.
+            process = run_command(
+                command,
+                dir_path,
+                server_name=top_level_path,
+                project_root=dir_path.parent.parent,
+            )
             self._processes[top_level_path] = process
             # In dry run mode, wait for each setup command to finish before starting the next.
             # This installs uv virtual environments serially, which significantly reduces uv

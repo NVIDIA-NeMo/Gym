@@ -38,7 +38,14 @@ from nemo_gym.base_responses_api_model import (
     merge_model_call_capture_into_record,
 )
 from nemo_gym.config_types import BaseServerConfig
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+from nemo_gym.rollout_correlation import (
+    current_execution_id,
+    execution_context,
+    maybe_execution_id_from_run_body,
+    maybe_explicit_execution_id_from_run_body,
+    maybe_rollout_id_from_run_body,
+    new_execution_id,
+)
 from nemo_gym.server_utils import ServerClient, get_response_json
 
 
@@ -199,6 +206,7 @@ async def test_verify_correlates_policy_and_judge_calls_and_preserves_raw_captur
         server_name="agent",
         url_path="/run",
         json={
+            "_ng_execution_id": "execution-test",
             "_ng_task_index": 4,
             "_ng_rollout_index": 2,
             "responses_create_params": {"input": "solve"},
@@ -207,15 +215,20 @@ async def test_verify_correlates_policy_and_judge_calls_and_preserves_raw_captur
     assert orjson.loads(await verify.read())["reward"] == 1.0
 
     store = CaptureStore(capture_dir)
-    capture_path = store.path_for("4-2")
+    capture_path = store.path_for("execution-test")
     assert capture_path.is_file()
-    exchanges = store.read("4-2")
+    exchanges = store.read("execution-test")
     assert [exchange["model_ref"]["name"] for exchange in exchanges] == ["policy", "tool_model", "judge"]
     assert all(exchange.get("request") is not None or exchange.get("request_raw") for exchange in exchanges)
     assert all(exchange.get("response") is not None or exchange.get("response_raw") for exchange in exchanges)
 
-    rollout = {"_ng_task_index": 4, "_ng_rollout_index": 2}
+    rollout = {
+        "_ng_execution_id": "execution-test",
+        "_ng_task_index": 4,
+        "_ng_rollout_index": 2,
+    }
     merge_model_call_capture_into_record(rollout, [capture_dir])
+    assert rollout["ng_model_call_capture"]["execution_id"] == "execution-test"
     assert capture_path.is_file()
     assert len(capture_path.read_bytes()) > 0
 
@@ -234,3 +247,38 @@ def test_rollout_id_does_not_serialize_run_body() -> None:
     )
 
     assert maybe_rollout_id_from_run_body(body) == "4-2"
+
+
+def test_execution_id_is_explicit_bounded_and_wins_over_legacy_indices() -> None:
+    execution_id = new_execution_id()
+    body = {
+        "_ng_execution_id": execution_id,
+        "_ng_task_index": 4,
+        "_ng_rollout_index": 2,
+    }
+
+    assert maybe_execution_id_from_run_body(body) == execution_id
+    assert maybe_rollout_id_from_run_body(body) == execution_id
+    with execution_context(execution_id):
+        assert current_execution_id() == execution_id
+    assert current_execution_id() is None
+
+    with pytest.raises(ValueError, match="_ng_execution_id"):
+        maybe_execution_id_from_run_body({**body, "_ng_execution_id": "contains/a/path"})
+
+
+def test_base_run_request_default_json_shape_is_unchanged() -> None:
+    body = BaseRunRequest.model_validate({"responses_create_params": {"input": "solve"}})
+
+    assert set(BaseRunRequest.model_fields) == {"responses_create_params"}
+    assert body.model_dump(exclude_unset=True) == {"responses_create_params": {"input": "solve"}}
+    assert body.model_dump_json(exclude_unset=True) == ('{"responses_create_params":{"input":"solve"}}')
+    execution_body = BaseRunRequest.model_validate(
+        {
+            "_ng_execution_id": "execution-private-slot",
+            "responses_create_params": {"input": "solve"},
+        }
+    )
+    assert maybe_explicit_execution_id_from_run_body(execution_body) == ("execution-private-slot")
+    assert "_ng_execution_id" not in execution_body.model_dump()
+    assert execution_body.model_dump(exclude_unset=True) == body.model_dump(exclude_unset=True)

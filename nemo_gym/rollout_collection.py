@@ -45,6 +45,7 @@ from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig, Config
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
+    EXECUTION_ID_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
@@ -54,7 +55,10 @@ from nemo_gym.global_config import (
 )
 from nemo_gym.path_utils import failures_path_for
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+from nemo_gym.rollout_correlation import (
+    maybe_legacy_rollout_id_from_run_body,
+    new_execution_id,
+)
 from nemo_gym.rollout_observability import (
     AgentInvocation,
     AgentObservationBundle,
@@ -72,7 +76,6 @@ _failures_path_for = failures_path_for  # Backwards-compatible alias
 from nemo_gym.server_utils import (
     ServerClient,
     get_response_json,
-    is_global_aiohttp_client_request_debug_enabled,
     raise_for_status,
 )
 from nemo_gym.server_utils import (
@@ -132,11 +135,19 @@ def _has_observation_gap(result: dict[str, Any], code: str) -> bool:
 
 
 def _trajectory_identity(row: dict[str, Any]) -> tuple[str, str]:
+    identity = row.get("trajectory_identity")
+    if isinstance(identity, dict):
+        task_id = identity.get("task_id")
+        rollout_id = identity.get("rollout_id")
+        if isinstance(task_id, str) and task_id and isinstance(rollout_id, str) and rollout_id:
+            return task_id, rollout_id
     task_id = next(
         (str(row[key]) for key in ("task_id", "problem_id", "instance_id") if row.get(key) is not None),
         str(row[TASK_INDEX_KEY_NAME]),
     )
-    rollout_id = maybe_rollout_id_from_run_body(row) or f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
+    rollout_id = maybe_legacy_rollout_id_from_run_body(row) or (
+        f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
+    )
     return task_id, rollout_id
 
 
@@ -510,10 +521,22 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
 
 def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
     agent_ref = row.get(AGENT_REF_KEY_NAME) or {}
+    responses_create_params = row.get("responses_create_params") or {}
+    metadata = responses_create_params.get("metadata") if isinstance(responses_create_params, dict) else {}
+    metadata_purpose = metadata.get("nemo_rl_rollout_purpose") if isinstance(metadata, dict) else None
+    trajectory_identity = row.get("trajectory_identity")
+    if not isinstance(trajectory_identity, dict):
+        trajectory_identity = {}
     summary = {
         TASK_INDEX_KEY_NAME: row.get(TASK_INDEX_KEY_NAME),
         ROLLOUT_INDEX_KEY_NAME: row.get(ROLLOUT_INDEX_KEY_NAME),
+        EXECUTION_ID_KEY_NAME: row.get(EXECUTION_ID_KEY_NAME),
+        "sampling_event_id": trajectory_identity.get("sampling_event_id"),
+        "group_id": trajectory_identity.get("group_id"),
+        "rollout_id": trajectory_identity.get("rollout_id"),
         "agent_name": agent_ref.get("name") if isinstance(agent_ref, dict) else None,
+        "rollout_purpose": row.get("rollout_purpose"),
+        "metadata_rollout_purpose": metadata_purpose,
     }
     return {k: v for k, v in summary.items() if v is not None}
 
@@ -816,6 +839,8 @@ class RolloutCollectionHelper(BaseModel):
                 result[SKILLS_REF_KEY_NAME] = row[SKILLS_REF_KEY_NAME]
             if ATTEMPT_INDEX_KEY_NAME in row:
                 result[ATTEMPT_INDEX_KEY_NAME] = row[ATTEMPT_INDEX_KEY_NAME]
+            if EXECUTION_ID_KEY_NAME in row:
+                result[EXECUTION_ID_KEY_NAME] = row[EXECUTION_ID_KEY_NAME]
 
             # Fold this rollout's captured model calls into its record (uniform across agents; no-op
             # when capture is off). Never alters the harness output/reward already in `result`.
@@ -831,6 +856,13 @@ class RolloutCollectionHelper(BaseModel):
 
             no_persist = bool(result.get(NG_NO_PERSIST_KEY))
             failure_class = result.get(NG_FAILURE_CLASS_KEY)
+            if not no_persist and failure_class is None and result.get("mask_sample"):
+                # mask_sample is the cross-agent contract that this rollout is
+                # unsafe for training/evaluation. Treat an unclassified masked
+                # response as a retryable failure instead of silently caching
+                # it as a completed zero-reward sample in the main JSONL.
+                failure_class = "masked_sample"
+                result[NG_FAILURE_CLASS_KEY] = failure_class
 
             rows.append(row)
             results.append(result)
@@ -1034,28 +1066,66 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         """
         server_client = self.setup_server_client(head_server_config)
         semaphore = semaphore or nullcontext()
+        dispatch_rows = []
+        for source_row in examples:
+            row = deepcopy(source_row)
+            row[EXECUTION_ID_KEY_NAME] = new_execution_id()
+            dispatch_rows.append(row)
 
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:
-                res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
+                print(
+                    "[rollout_collection] /run dispatch "
+                    f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
+                    flush=True,
+                )
+                res = await server_client.post(
+                    server_name=row["agent_ref"]["name"],
+                    url_path="/run",
+                    json=row,
+                    # /run may already have created a VM and acted before a
+                    # disconnect is observed. Replaying this HTTP request with
+                    # the same execution ID would create two physical runs.
+                    # Let the outer scheduler retry as a fresh dispatch instead.
+                    retry_transport_errors=False,
+                )
                 try:
                     await raise_for_status(res)
                 except Exception:
-                    if is_global_aiohttp_client_request_debug_enabled():
-                        print(
-                            "[rollout_collection] /run failed "
-                            f"status={getattr(res, 'status', None)} "
-                            f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
-                            flush=True,
-                        )
+                    # This summary is payload-free and safe to emit even when
+                    # global HTTP debugging is disabled.  In particular it
+                    # proves whether scheduler intent survived the Ray actor
+                    # and reached the exact row submitted to /run.
+                    print(
+                        "[rollout_collection] /run failed "
+                        f"status={getattr(res, 'status', None)} "
+                        f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
+                        flush=True,
+                    )
                     raise
-                return row, await get_response_json(res)
+                result = await get_response_json(res)
+                if not isinstance(result, dict):
+                    raise TypeError("Gym /run response must be a mapping")
+                execution_id = row[EXECUTION_ID_KEY_NAME]
+                observed_execution_id = result.get(EXECUTION_ID_KEY_NAME)
+                if observed_execution_id is not None and observed_execution_id != execution_id:
+                    raise ValueError(
+                        "Gym /run returned the wrong physical execution: "
+                        f"expected={execution_id!r}, "
+                        f"observed={observed_execution_id!r}"
+                    )
+                # The dispatching client owns physical execution identity. The
+                # server's execution_context/verifier metadata are independent
+                # echoes; this top-level field joins direct run_examples users
+                # (including NeMo-RL), not only run_from_config persistence.
+                result[EXECUTION_ID_KEY_NAME] = execution_id
+                return row, result
 
         return tqdm.as_completed(
-            map(_post_subroutine, examples),
+            map(_post_subroutine, dispatch_rows),
             desc="Collecting rollouts",
             miniters=10,
-            total=len(examples),
+            total=len(dispatch_rows),
             maxinterval=60,
         )
 

@@ -33,7 +33,10 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body, rollout_context
+from nemo_gym.rollout_correlation import (
+    execution_context,
+    maybe_execution_id_from_run_body,
+)
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
     BaseServer,
@@ -73,7 +76,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             body = kwargs.get("body")
             if body is None:
                 body = next((arg for arg in args if isinstance(arg, BaseRunRequest)), None)
-            with rollout_context(self.rollout_id_from_run(body)):
+            with execution_context(self.execution_id_from_run(body)):
                 return await run(*args, **kwargs)
 
         app.post("/run")(run_with_rollout_context)
@@ -89,15 +92,19 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             return False
         return bool(global_config.get(OBSERVABILITY_ENABLED_KEY_NAME, False))
 
-    def rollout_id_from_run(self, body: Any) -> Optional[str]:
-        """Per-rollout capture id for a run-request (its task/rollout indices).
+    def execution_id_from_run(self, body: Any) -> Optional[str]:
+        """Physical-execution capture ID for a run request.
 
-        None when model-call capture (observability) is disabled or the body carries no indices,
-        so callers apply no correlation prefix in either case.
+        New dispatches carry ``_ng_execution_id``. Legacy callers fall back to
+        task/rollout indices. None disables the correlation prefix.
         """
         if not self._model_call_capture_enabled():
             return None
-        return maybe_rollout_id_from_run_body(body)
+        return maybe_execution_id_from_run_body(body)
+
+    def rollout_id_from_run(self, body: Any) -> Optional[str]:
+        """Compatibility alias for :meth:`execution_id_from_run`."""
+        return self.execution_id_from_run(body)
 
     def url_path_for_run(self, url_path: str, body: Any) -> str:
         """A downstream url_path with the per-rollout capture-correlation prefix applied.
@@ -107,7 +114,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         handling ``/run`` — both direct model-server calls and self-calls to ``/v1/responses``
         (the prefixed self-call route carries the id into ``responses()``).
         """
-        return f"{rollout_path_prefix(self.rollout_id_from_run(body))}{url_path}"
+        return f"{rollout_path_prefix(self.execution_id_from_run(body))}{url_path}"
 
     def base_url_for_run(self, base_url: str, body: Any) -> str:
         """A model-server base URL with the per-rollout capture-correlation prefix applied.
@@ -116,7 +123,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         harnesses that configure a client once instead of prefixing each call: same gating, applied
         to a server root URL (append the API-version suffix afterwards).
         """
-        return apply_rollout_prefix(base_url, self.rollout_id_from_run(body))
+        return apply_rollout_prefix(base_url, self.execution_id_from_run(body))
 
     def url_path_for_request(self, url_path: str, request: Optional[Request]) -> str:
         """Carry an inbound ``/ng-rollout/<id>`` self-call prefix onto a downstream url_path.

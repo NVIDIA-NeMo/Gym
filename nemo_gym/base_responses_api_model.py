@@ -60,7 +60,10 @@ from nemo_gym.responses_streaming import (
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+from nemo_gym.rollout_correlation import (
+    maybe_explicit_execution_id_from_run_body,
+    maybe_rollout_id_from_run_body,
+)
 from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap, join_model_call_observations
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
@@ -1273,9 +1276,11 @@ def merge_model_call_capture_into_record(
 
     Keyed by the rollout id derived from the record's task/rollout/attempt indices, so the attached
     shape is identical for every agent harness. Adds
-    ``ng_model_call_capture = {rollout_id, metrics, calls}`` where ``calls`` are derived observability
-    records. Raw request and response payloads remain in the capture store and are omitted from the
-    attachment unless ``include_payloads`` is true. Capture/read/join failures are attached as
+    ``ng_model_call_capture = {execution_id?, rollout_id, metrics, calls}``.
+    When supplied, ``execution_id`` is authoritative and the equal
+    ``rollout_id`` is a compatibility alias. Raw request and response payloads remain in the
+    capture store and are omitted from the attachment unless
+    ``include_payloads`` is true. Capture/read/join failures are attached as
     ``gaps``. The harness output and reward are not modified.
     """
     if not capture_dirs:
@@ -1335,6 +1340,9 @@ def merge_model_call_capture_into_record(
         "metrics": aggregate_model_call_records(calls),
         "calls": [call.model_dump(exclude=exclude) for call in calls],
     }
+    execution_id = maybe_explicit_execution_id_from_run_body(record)
+    if execution_id is not None:
+        capture["execution_id"] = execution_id
     if gaps:
         capture["gaps"] = [gap.model_dump(mode="json", exclude_none=True) for gap in gaps]
     record["ng_model_call_capture"] = capture

@@ -142,6 +142,14 @@ ROLLOUT_INDEX_KEY_NAME = "_ng_rollout_index"
 # Resume re-dispatch attempt counter (0 on the first attempt); distinguishes retries of the same
 # (task, rollout) so their captured model calls stay separable.
 ATTEMPT_INDEX_KEY_NAME = "_ng_attempt_index"
+# One physical /run execution. Unlike trajectory_identity.rollout_id, this is
+# deliberately fresh when a logical rollout is re-executed after an ambiguous
+# transport failure.
+EXECUTION_ID_KEY_NAME = "_ng_execution_id"
+# Sandbox providers receive this metadata verbatim. Keep one namespaced key so
+# OpenSandbox/Kubernetes metadata and Docker labels describe the same physical
+# execution without provider-specific translation.
+EXECUTION_ID_SANDBOX_METADATA_KEY = "nemo-gym.execution-id"
 RESPONSES_CREATE_PARAMS_KEY_NAME = "responses_create_params"
 RESPONSE_KEY_NAME = "response"
 AGENT_REF_KEY_NAME = "agent_ref"
