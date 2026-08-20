@@ -36,6 +36,7 @@ from nemo_gym.global_config import (
 
 BENCHMARKS_SUBDIR = "benchmarks"
 BENCHMARKS_DIR = PARENT_DIR / BENCHMARKS_SUBDIR
+MANIFEST_FILENAME = "manifest.yaml"
 
 
 class BenchmarkConfig(BaseModel):
@@ -136,13 +137,18 @@ def _is_benchmark_config(config_path: Path) -> bool:
 def _benchmark_config_paths(benchmarks_dir: Path) -> List[Path]:
     """Sorted config paths under one dir that declare a benchmark, discovered by content.
 
-    A config is a benchmark iff it declares a `type: benchmark` dataset, regardless of filename, so we scan
-    every yaml. :func:`_is_benchmark_config` is a cheap prefilter (pay the resolve cost only on real
-    candidates) that also catches non-`config.yaml` names like tau2's `configs/*.yaml`. Empty if dir missing.
+    A runnable config is a benchmark iff it declares a `type: benchmark` dataset, regardless of its config
+    filename. The environment manifest is metadata rather than runnable config, so it is excluded before
+    the content prefilter. :func:`_is_benchmark_config` keeps the scan format-agnostic and catches names
+    such as tau2's `configs/*.yaml`. Empty if the directory is missing.
     """
     if not benchmarks_dir.is_dir():
         return []
-    config_paths = [benchmarks_dir / p for p in glob("**/*.yaml", root_dir=benchmarks_dir, recursive=True)]
+    config_paths = [
+        benchmarks_dir / p
+        for p in glob("**/*.yaml", root_dir=benchmarks_dir, recursive=True)
+        if Path(p).name != MANIFEST_FILENAME
+    ]
     return sorted(p for p in config_paths if _is_benchmark_config(p))
 
 

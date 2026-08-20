@@ -71,6 +71,25 @@ class EnvironmentEntry(EnvironmentCatalogEntry):
     kind: CatalogKind = field(default="environment", init=False)
 
 
+@dataclass(frozen=True)
+class CatalogDiagnostic:
+    """A non-fatal problem found while building the catalog."""
+
+    kind: CatalogKind
+    name: Optional[str]
+    manifest_path: Path
+    message: str
+    code: Literal["invalid-manifest", "invalid-catalog-entry"] = "invalid-manifest"
+
+
+@dataclass(frozen=True)
+class EnvironmentCatalogReport:
+    """Catalog entries together with non-fatal discovery diagnostics."""
+
+    entries: tuple[EnvironmentCatalogEntry, ...]
+    diagnostics: tuple[CatalogDiagnostic, ...]
+
+
 def _enum_value(value: object) -> Optional[str]:
     if value is None:
         return None
@@ -235,6 +254,8 @@ def _discover_registry_tree(
     kind: CatalogKind,
     *,
     claimed: frozenset[tuple[CatalogKind, str]] = frozenset(),
+    diagnostics: list[CatalogDiagnostic] | None = None,
+    strict_registry_errors: bool = True,
 ) -> Dict[tuple[CatalogKind, str], EnvironmentCatalogEntry]:
     """Discover one catalog tree without importing or resolving runnable components."""
     if not tree_dir.is_dir():
@@ -243,12 +264,37 @@ def _discover_registry_tree(
     entries: Dict[tuple[CatalogKind, str], EnvironmentCatalogEntry] = {}
     manifest_configs: set[Path] = set()
     for manifest_path in sorted(tree_dir.rglob(MANIFEST_FILENAME)):
-        key = (kind, _path_identity(tree_dir, manifest_path))
-        if key in claimed:
-            continue
+        name: Optional[str] = None
         try:
+            name = _path_identity(tree_dir, manifest_path)
+            key = (kind, name)
+            if key in claimed:
+                continue
             entry = _manifest_entry(tree_dir, manifest_path, kind)
-        except ManifestError:
+        except ManifestError as error:
+            if diagnostics is not None:
+                diagnostics.append(
+                    CatalogDiagnostic(
+                        kind=kind,
+                        name=name,
+                        manifest_path=manifest_path,
+                        message=str(error),
+                    )
+                )
+            continue
+        except RegistryError as error:
+            if strict_registry_errors:
+                raise
+            if diagnostics is not None:
+                diagnostics.append(
+                    CatalogDiagnostic(
+                        code="invalid-catalog-entry",
+                        kind=kind,
+                        name=name,
+                        manifest_path=manifest_path,
+                        message=str(error),
+                    )
+                )
             continue
         entries[key] = entry
         manifest_configs.add(entry.config_path.resolve())
@@ -282,15 +328,40 @@ def discover_environments() -> Dict[str, EnvironmentEntry]:
     return environments
 
 
-def discover_environment_catalog() -> tuple[EnvironmentCatalogEntry, ...]:
-    """Discover manifest and legacy runnable units across all workload locations."""
+def _discover_environment_catalog(*, strict_registry_errors: bool) -> EnvironmentCatalogReport:
+    """Build the catalog once, optionally retaining structural entry errors."""
     entries: Dict[tuple[CatalogKind, str], EnvironmentCatalogEntry] = {}
+    diagnostics: list[CatalogDiagnostic] = []
     for root in component_search_roots():
         for kind, subdir in (("environment", ENVIRONMENTS_SUBDIR), ("benchmark", BENCHMARKS_SUBDIR)):
-            discovered = _discover_registry_tree(root / subdir, kind, claimed=frozenset(entries))
+            discovered = _discover_registry_tree(
+                root / subdir,
+                kind,
+                claimed=frozenset(entries),
+                diagnostics=diagnostics,
+                strict_registry_errors=strict_registry_errors,
+            )
             entries.update(discovered)
         entries.update(_discover_resource_workloads(root / RESOURCES_SERVERS_SUBDIR, claimed=frozenset(entries)))
-    return tuple(sorted(entries.values(), key=lambda entry: (entry.name.casefold(), entry.name, entry.kind)))
+    return EnvironmentCatalogReport(
+        entries=tuple(sorted(entries.values(), key=lambda entry: (entry.name.casefold(), entry.name, entry.kind))),
+        diagnostics=tuple(diagnostics),
+    )
+
+
+def discover_environment_catalog_report() -> EnvironmentCatalogReport:
+    """Discover catalog entries and retain non-fatal manifest and structural diagnostics."""
+    return _discover_environment_catalog(strict_registry_errors=False)
+
+
+def discover_environment_catalog() -> tuple[EnvironmentCatalogEntry, ...]:
+    """Discover manifest and legacy runnable units across all workload locations.
+
+    This compatibility surface intentionally returns only entries. Call
+    :func:`discover_environment_catalog_report` when non-fatal diagnostics must
+    be visible.
+    """
+    return _discover_environment_catalog(strict_registry_errors=True).entries
 
 
 def resolve_catalog_entry(
@@ -298,11 +369,25 @@ def resolve_catalog_entry(
     kind: CatalogKind | str | None = None,
     *,
     entries: Iterable[EnvironmentCatalogEntry] | None = None,
+    report: EnvironmentCatalogReport | None = None,
 ) -> EnvironmentCatalogEntry:
     """Resolve a catalog name, requiring its kind only for a cross-kind collision."""
+    if entries is not None and report is not None:
+        raise RegistryError("Pass catalog entries or a catalog report, not both.")
     selected_kind = _enum_value(kind)
     if selected_kind not in (None, "environment", "benchmark"):
         raise RegistryError(f"Unknown catalog kind '{selected_kind}'.")
+
+    report_diagnostics: tuple[CatalogDiagnostic, ...] = ()
+    diagnostics: list[CatalogDiagnostic] = []
+    if report is not None:
+        report_diagnostics = report.diagnostics
+        diagnostics = [
+            diagnostic
+            for diagnostic in report_diagnostics
+            if diagnostic.name == name and (selected_kind is None or diagnostic.kind == selected_kind)
+        ]
+        entries = report.entries
 
     matches = [
         entry
@@ -310,12 +395,35 @@ def resolve_catalog_entry(
         if entry.name == name and (selected_kind is None or entry.kind == selected_kind)
     ]
     if not matches:
+        if diagnostics:
+            diagnostic = diagnostics[0]
+            raise RegistryError(
+                f"Catalog entry '{name}' has an unusable manifest at '{diagnostic.manifest_path}': "
+                f"{diagnostic.message}"
+            )
         suffix = f" with kind '{selected_kind}'" if selected_kind else ""
         raise RegistryError(f"Unknown catalog entry '{name}'{suffix}.")
     if len(matches) > 1:
         kinds = ", ".join(sorted(entry.kind for entry in matches))
         raise RegistryError(f"Catalog name '{name}' is ambiguous ({kinds}); specify a kind.")
-    return matches[0]
+    selected = matches[0]
+    selected_diagnostic = next(
+        (
+            diagnostic
+            for diagnostic in report_diagnostics
+            if diagnostic.kind == selected.kind
+            and selected.manifest_path is None
+            and diagnostic.manifest_path.with_name(ENVIRONMENT_CONFIG_FILENAME).resolve()
+            == selected.config_path.resolve()
+        ),
+        None,
+    )
+    if selected_diagnostic is not None:
+        raise RegistryError(
+            f"Catalog entry '{name}' has an unusable manifest at '{selected_diagnostic.manifest_path}': "
+            f"{selected_diagnostic.message}"
+        )
+    return selected
 
 
 def read_environment_details(config_path: Path) -> Dict[str, object]:
