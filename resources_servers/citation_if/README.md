@@ -128,18 +128,38 @@ What the server does on a tool call: the catch-all `POST /{tool_name}` returns
 gate 0 scores the rollout **0**. There is no `max_tool_calls` in the rows and no cap enforced in
 `app.py` — the rows keep `tools` and `tool_choice="auto"`, so the policy is free to call a tool.
 
-**Why that is safe for THIS dataset, and the risk if you copy it.** Every row here ends with a
-final user turn that closes retrieval — "Research is complete, provide your final answer now."
-A compliant model, trained or not, should not call a tool at that point, so a tool call is
-genuine instruction-following failure and scoring it 0 is correct.
+**What your rows must contain.** Every row has to end with a final user turn that closes
+retrieval, so that a tool call at that point is unambiguously non-compliance rather than
+reasonable behaviour. All five rows in `data/example.jsonl` end exactly like this — the last
+entry of `responses_create_params.input`:
 
-**If your rows do not carry that closing instruction, this reward is wrong for them.** Scoring
-every tool call 0 would teach the policy to terminate tool-call trajectories immediately — a real
-capability regression, not the citation behaviour you wanted. In that case either:
+```json
+{"role": "user", "content": "Research is complete. Provide your final answer now."}
+```
 
-- keep a closing instruction in every row, as this dataset does; or
-- set an explicit `max_tool_calls` in `responses_create_params`; or
-- remove `tools` / set `tool_choice: "none"` so the policy cannot call at all.
+A compliant model, trained or not, should not call a tool after being told that, so scoring the
+call 0 is correct. The wording is not special; any instruction that unambiguously ends retrieval
+works.
+
+**Without that closing turn this reward is wrong for your data.** Scoring every tool call 0 would
+teach the policy to terminate tool-call trajectories immediately — a real capability regression,
+not the citation behaviour you wanted. If your rows cannot carry such a turn, bound tool use in
+the request instead:
+
+Cap the number of calls:
+
+```json
+{"responses_create_params": {"max_tool_calls": 2, "tool_choice": "auto", "tools": ["..."]}}
+```
+
+Or forbid them outright:
+
+```json
+{"responses_create_params": {"tool_choice": "none"}}
+```
+
+Both are inert in `data/example.jsonl` today: it ships `max_tool_calls: null` and
+`tool_choice: "auto"`, relying entirely on the closing turn.
 
 **Also note the step bound lives in the agent config, not in the rows.**
 `configs/citation_if.yaml` sets `max_steps: 1`, so the policy never gets a second turn. Run these
