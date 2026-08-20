@@ -19,11 +19,7 @@ NUM_SAMPLES_IN_PARALLEL_ARG=""
 # requeued or freshly resubmitted jobs continue unfinished rollouts.
 RESUME_EVAL_ON_REQUEUE=${RESUME_EVAL_ON_REQUEUE:-0}
 RESUME_FROM_CACHE_ARG=""
-# coupled preserves the existing multi-node DP/EP deployment. independent runs one
-# TP/EP replica per decode node and registers every replica with the router.
-VLLM_DECODE_MODE=${VLLM_DECODE_MODE:-coupled}
-# Optional PD-router override for decode replicas. When unset, the main
-# consistent-hash policy remains in effect for both prefill and decode.
+# Optionally override main's cache-aware decode routing policy.
 VLLM_DECODE_POLICY=${VLLM_DECODE_POLICY:-}
 # auto uses NUM_NODES when sbatch advertises --segment; none omits it; a positive integer overrides it.
 VLLM_SLURM_SEGMENT=${VLLM_SLURM_SEGMENT:-auto}
@@ -45,15 +41,6 @@ case "$RESUME_EVAL_ON_REQUEUE" in
         ;;
     *)
         echo "ERROR: RESUME_EVAL_ON_REQUEUE must be 0 or 1; got '$RESUME_EVAL_ON_REQUEUE'." >&2
-        exit 1
-        ;;
-esac
-
-case "$VLLM_DECODE_MODE" in
-    coupled|independent)
-        ;;
-    *)
-        echo "ERROR: VLLM_DECODE_MODE must be coupled or independent; got '$VLLM_DECODE_MODE'." >&2
         exit 1
         ;;
 esac
@@ -131,12 +118,7 @@ PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT=5600
 DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT=5700
 
 ROUTER_SERVER_PORT=8000
-PREFILL_SERVER_PORT=8001
-DECODE_SERVER_PORT=8002
-
-PREFILL_DP_RPC_PORT=13345
-DECODE_DP_RPC_PORT=13346
-
+WORKER_SERVER_PORT=8001
 
 EVAL_COMMAND=$(cat <<EOF
 set -euo pipefail
@@ -155,7 +137,7 @@ fi
 # +uv_venv_dir=/opt/uv_venvs is from the container.
 # +skip_venv_if_present=true will reuse the venvs baked into the container if possible.
 # ++use_absolute_ip=true: Necessary for communication between harness in sandbox and Gym model servers
-# ++upload_rollouts_to_wandb=false: Rollouts file is massive. We leave on the cluster.
+# ++upload_rollouts=false: Rollouts file is massive. We leave on the cluster.
 # global_aiohttp_connector_limit_per_host: 16k concurrent requests should be enough. We can raise further if our inference is efficient enough to support.
 # port_range_low, port_range_high: Move into ephemeral ports
 gym eval run \
@@ -171,10 +153,10 @@ gym eval run \
     ++use_absolute_ip=true \
     ++reuse_existing_data_preparation=true \
     $RESUME_FROM_CACHE_ARG \
-    ++policy_base_url=http://\$(getent hosts "\$PREFILL_HEAD" | awk 'NR == 1 {print \$1}'):$ROUTER_SERVER_PORT/v1 \
+    ++policy_base_url=http://\$(getent hosts "\$ROUTER_NODE" | awk 'NR == 1 {print \$1}'):$ROUTER_SERVER_PORT/v1 \
     ++policy_api_key=dummy_api_key \
     ++policy_model_name=$MODEL \
-    ++upload_rollouts_to_wandb=false $NUM_SAMPLES_IN_PARALLEL_ARG \
+    ++upload_rollouts=false $NUM_SAMPLES_IN_PARALLEL_ARG \
     ++global_aiohttp_connector_limit_per_host=16384 \
     ++port_range_low=63000 \
     ++port_range_high=64000
@@ -198,12 +180,6 @@ command=$(cat <<EOF
 
 set -euo pipefail
 
-# Input arguments and validation
-PREFILL_HEAD=\$PREFILL_HEAD
-DECODE_HEAD=\$DECODE_HEAD
-DECODE_HOSTS_CSV=\$DECODE_HOSTS_CSV
-IFS=, read -r -a DECODE_HOSTS <<< "\$DECODE_HOSTS_CSV"
-
 # Nemotron's three-read Mamba SSM state must use the dimension-sequence layout when KV transfer is enabled.
 # Not used when the model has no Mamba layers.
 export VLLM_SSM_CONV_STATE_LAYOUT=DS
@@ -222,121 +198,53 @@ export UCX_RNDV_THRESH=0
 
 source "$VLLM_CONFIG"
 
-wait_for_vllm_health() {
-    local role=\$1
-    local url=\$2
-    local pid=\$3
-
-    until curl -fs "\$url" >/dev/null; do
-        if ! kill -0 "\$pid" 2>/dev/null; then
-            local status=0
-            wait "\$pid" || status=\$?
-            (( status != 0 )) || status=1
-            echo "ERROR: \$role vLLM process exited before becoming healthy (status=\$status)." >&2
-            return "\$status"
-        fi
-        sleep 5
-    done
-}
-
 this_node_hostname=\$(hostname)
-# Split nodes here by index
 if (( SLURM_PROCID == 0 )); then
-    # Prefill head
-
-    VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
-    VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
-        --host \$this_node_hostname \
-        --port $PREFILL_SERVER_PORT \
-        --data-parallel-size $NUM_PREFILL_NODES \
-        --data-parallel-address \$this_node_hostname \
-        --data-parallel-rpc-port $PREFILL_DP_RPC_PORT \
-        --api-server-count 1 \
-        &
-    prefill_pid=\$!
-    trap 'kill "\$prefill_pid" 2>/dev/null || true' EXIT
-
-    wait_for_vllm_health "prefill" "http://\$PREFILL_HEAD:$PREFILL_SERVER_PORT/health" "\$prefill_pid"
-
-    decode_router_args=()
-    if [[ "$VLLM_DECODE_MODE" == independent ]]; then
-        for decode_host in "\${DECODE_HOSTS[@]}"; do
-            wait_for_vllm_health \
-                "decode replica \$decode_host" \
-                "http://\$decode_host:$DECODE_SERVER_PORT/health" \
-                "\$prefill_pid"
-            decode_router_args+=(--decode "http://\$decode_host:$DECODE_SERVER_PORT")
-        done
-    else
-        wait_for_vllm_health "decode" "http://\$DECODE_HEAD:$DECODE_SERVER_PORT/health" "\$prefill_pid"
-        decode_router_args+=(--decode "http://\$DECODE_HEAD:$DECODE_SERVER_PORT")
-    fi
-
-    decode_policy_args=()
-    if [[ -n "$VLLM_DECODE_POLICY" ]]; then
-        decode_policy_args+=(--decode-policy "$VLLM_DECODE_POLICY")
-    fi
+    read -r -a nodes <<< "\$ALL_NODES"
 
     # @bxyu-nvidia: for --intra-node-data-parallel-size: Not sure what to set this to other than 1. I can't tell from the docs what is appropriate and 1 seems to work fine.
     # Set a super long request timeout since some reasoning requests may take a long time to generate.
     # Don't manually wait as vllm-router will wait for the URLs to come up
-    vllm-router \
-        --policy consistent_hash \
+    router_args=( \
+        --prefill-policy cache_aware \
+        --decode-policy "${VLLM_DECODE_POLICY:-cache_aware}" \
         --vllm-pd-disaggregation \
-        --prefill http://\$PREFILL_HEAD:$PREFILL_SERVER_PORT \
-        "\${decode_router_args[@]}" \
-        "\${decode_policy_args[@]}" \
-        --host \$PREFILL_HEAD \
+        --host \$this_node_hostname \
         --port $ROUTER_SERVER_PORT \
         --intra-node-data-parallel-size 1 \
         --request-timeout-secs 86400 \
         --log-level error
-elif (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
-    # Prefill worker
+    )
+
+    for (( i = 0; i < $NUM_PREFILL_NODES; i++ )); do
+        router_args+=(--prefill "http://\${nodes[i]}:$WORKER_SERVER_PORT")
+    done
+    for (( i = 0; i < $NUM_DECODE_NODES; i++ )); do
+        node_idx=\$(( $NUM_PREFILL_NODES + i ))
+        router_args+=(--decode "http://\${nodes[node_idx]}:$WORKER_SERVER_PORT")
+    done
+
+    vllm-router "\${router_args[@]}" &
+
+    router_pid=\$!
+    trap 'kill "\$router_pid" 2>/dev/null || true' EXIT
+fi
+
+# Split nodes here by index
+if (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
+    # Prefill
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
     vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
-        --headless \
-        --data-parallel-size $NUM_PREFILL_NODES \
-        --data-parallel-start-rank \$SLURM_PROCID \
-        --data-parallel-address \$PREFILL_HEAD \
-        --data-parallel-rpc-port $PREFILL_DP_RPC_PORT
-elif [[ "$VLLM_DECODE_MODE" == independent ]]; then
-    # Each decode node is a complete TP/EP replica. This prevents expert-parallel
-    # collectives from crossing nodes while still letting the router use every replica.
-    VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
-    VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
         --host \$this_node_hostname \
-        --port $DECODE_SERVER_PORT \
-        --data-parallel-size 1 \
-        --data-parallel-address \$this_node_hostname \
-        --data-parallel-rpc-port $DECODE_DP_RPC_PORT \
-        --api-server-count 1
-elif (( SLURM_PROCID == NUM_PREFILL_NODES )); then
-    # Decode head
-
-    VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
-    VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
-        --host \$this_node_hostname \
-        --port $DECODE_SERVER_PORT \
-        --data-parallel-size $NUM_DECODE_NODES \
-        --data-parallel-address \$DECODE_HEAD \
-        --data-parallel-rpc-port $DECODE_DP_RPC_PORT \
-        --api-server-count 1
+        --port $WORKER_SERVER_PORT
 else
-    # Decode worker
-
+    # Decode
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
     vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
-        --headless \
-        --data-parallel-size $NUM_DECODE_NODES \
-        --data-parallel-start-rank \$(( SLURM_PROCID - $NUM_PREFILL_NODES )) \
-        --data-parallel-address \$DECODE_HEAD \
-        --data-parallel-rpc-port $DECODE_DP_RPC_PORT
+        --host \$this_node_hostname \
+        --port $WORKER_SERVER_PORT
 fi
 EOF
 )
@@ -365,14 +273,8 @@ batch_command=$(cat <<EOF
 set -euo pipefail
 
 nodes=(\$(scontrol show hostnames "\$SLURM_JOB_NODELIST"))
-PREFILL_HEAD="\${nodes[0]}"
-DECODE_HEAD="\${nodes[$NUM_PREFILL_NODES]}"
-decode_nodes=("\${nodes[@]:$NUM_PREFILL_NODES:$NUM_DECODE_NODES}")
-DECODE_HOSTS_CSV=\$(IFS=,; echo "\${decode_nodes[*]}")
 
-PREFILL_HEAD="\$PREFILL_HEAD" \
-DECODE_HEAD="\$DECODE_HEAD" \
-DECODE_HOSTS_CSV="\$DECODE_HOSTS_CSV" \
+ALL_NODES="\${nodes[*]}" \
 srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 \
     --kill-on-bad-exit=1 \
     --container-image=$CONTAINER \
@@ -405,8 +307,7 @@ if (( $should_run_eval )); then
     fi
 
     # @bxyu-nvidia: We need --cpus-per-task=SLURM_CPUS_ON_NODE, otherwise we run into a lot of ServerDisconnectedError and ConnectionResetByPeer errors from Gym servers and vLLM. Not sure what the correlation is
-    eval_status=0
-    PREFILL_HEAD="\$PREFILL_HEAD" \
+    ROUTER_NODE="\${nodes[0]}" \
     srun --overlap --exact --nodes=1 --ntasks=1 --cpus-per-task=\$SLURM_CPUS_ON_NODE --nodelist="\$EVAL_NODE" --gpus=0 \
         --container-image=$CONTAINER \
         --container-name=eval-container-on-node \
@@ -417,11 +318,27 @@ if (( $should_run_eval )); then
             set -euo pipefail
             cd "\$SLURM_SUBMIT_DIR"
             exec bash -lc "\$EVAL_COMMAND"
-        ' || eval_status=\$?
+        ' &
+    eval_step=\$!
+
+    completed_pid=""
+    completed_status=0
+    wait -n -p completed_pid "\$server_step" "\$eval_step" || completed_status=\$?
+
+    if [[ "\$completed_pid" == "\$server_step" ]]; then
+        if (( completed_status == 0 )); then
+            completed_status=1
+        fi
+        echo "vLLM server step exited unexpectedly with status \$completed_status" >&2
+        kill "\$eval_step" 2>/dev/null || true
+        wait "\$eval_step" 2>/dev/null || true
+        trap - EXIT INT TERM
+        exit "\$completed_status"
+    fi
 
     cleanup_server
     trap - EXIT INT TERM
-    exit "\$eval_status"
+    exit "\$completed_status"
 fi
 
 wait "\$server_step"
