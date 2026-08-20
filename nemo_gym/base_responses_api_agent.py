@@ -16,6 +16,7 @@ from abc import abstractmethod
 from collections.abc import Mapping
 from functools import wraps
 from typing import Any, Optional
+from warnings import warn
 
 from fastapi import Body, FastAPI, Request
 
@@ -43,7 +44,8 @@ from nemo_gym.server_utils import (
 
 
 class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
-    pass
+    skip_verification: bool = False
+    skip_verification_reward: float = 0.0
 
 
 class BaseResponsesAPIAgent(BaseServer):
@@ -145,6 +147,15 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         """Default: same RewardProfiler aggregation as resources server. Override to proxy."""
+        if self.config.skip_verification:
+            warn(
+                "Skipping aggregate metrics because skip_verification=True; "
+                "use disable_aggregation=True to avoid writing aggregate metric files.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return AggregateMetrics()
+
         return compute_aggregate_metrics(
             body.verify_responses,
             compute_metrics_fn=self.compute_metrics,
