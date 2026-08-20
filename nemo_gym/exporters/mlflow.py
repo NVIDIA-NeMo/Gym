@@ -14,6 +14,7 @@
 # limitations under the License.
 import logging
 import re
+from itertools import batched
 from os import environ
 from time import time
 from typing import Any, ClassVar, Iterator, Optional
@@ -47,11 +48,6 @@ def _flatten_config(value: Any, prefix: str = "") -> Iterator[tuple[str, Any]]:
             yield from _flatten_config(inner, f"{prefix}[{index}]")
     elif prefix:
         yield prefix, value
-
-
-def _chunked(items: list[Any], size: int) -> Iterator[list[Any]]:
-    for start in range(0, len(items), size):
-        yield items[start : start + size]
 
 
 _INVALID_KEY_CHARS = re.compile(r"[^/\w.\- :]")
@@ -170,7 +166,7 @@ class MLflowExporter(BaseExporter):
             for key, value in _flatten_config(container)
             if (name := _sanitize_key(key)) is not None
         ]
-        for batch in _chunked(params, MAX_PARAMS_TAGS_PER_BATCH):
+        for batch in batched(params, MAX_PARAMS_TAGS_PER_BATCH):
             client.log_batch(run_id, params=batch)
 
     def _log_metrics(self, metrics: dict[str, Any], step: Optional[int] = None) -> None:
@@ -190,9 +186,9 @@ class MLflowExporter(BaseExporter):
             elif isinstance(value, str):
                 tags.append(RunTag(name, value[:MAX_PARAM_VAL_LENGTH]))
 
-        for batch in _chunked(numeric, MAX_METRICS_PER_BATCH):
+        for batch in batched(numeric, MAX_METRICS_PER_BATCH):
             client.log_batch(run_id, metrics=batch)
-        for batch in _chunked(tags, MAX_PARAMS_TAGS_PER_BATCH):
+        for batch in batched(tags, MAX_PARAMS_TAGS_PER_BATCH):
             client.log_batch(run_id, tags=batch)
 
     def _log_rollouts(self, rollouts: list[dict[str, Any]]) -> None:
