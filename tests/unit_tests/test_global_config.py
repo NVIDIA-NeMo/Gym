@@ -25,6 +25,7 @@ import nemo_gym.global_config
 import nemo_gym.server_utils
 from nemo_gym import CACHE_DIR, NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, RESULTS_DIR, WORKING_DIR
 from nemo_gym.config_types import (
+    AgentCompositionError,
     AlmostServerError,
     ConfigError,
     ConfigMissingValuesError,
@@ -1873,3 +1874,217 @@ class TestOpenAIVersionMatchesNemoGymConstraint:
 
         monkeypatch.setattr(importlib.metadata, "requires", raise_not_found)
         assert _openai_version_matches_nemo_gym_constraint("2.52.0") is True
+
+
+class TestComposeUnboundAgent:
+    """Composition of a standalone agent config onto the environment's agent instances."""
+
+    HARNESS_INSTANCE = "hermes_agent"
+
+    def _harness(self, **overrides) -> dict:
+        """The agent as its standalone config ships it, with `resources_server.name` left unset."""
+        block = {
+            "entrypoint": "app.py",
+            "resources_server": {"type": "resources_servers", "name": "???"},
+            "model_server": {"type": "responses_api_models", "name": "policy_model"},
+            "max_turns": 30,
+            "terminal_backend": "local",
+        }
+        block.update(overrides)
+        return {"responses_api_agents": {"hermes_agent": block}}
+
+    def _environment_agent(self, resources_server: str, **overrides) -> dict:
+        block = {
+            "entrypoint": "app.py",
+            "resources_server": {"type": "resources_servers", "name": resources_server},
+            "model_server": {"type": "responses_api_models", "name": "policy_model"},
+            "max_steps": 6,
+            "datasets": [
+                {
+                    "name": "gpqa",
+                    "type": "benchmark",
+                    "jsonl_fpath": "benchmarks/gpqa/data/gpqa_diamond_benchmark.jsonl",
+                    "prompt_config": "benchmarks/prompts/eval/aai/mcq-4choices.yaml",
+                    "prepare_script": "benchmarks/gpqa/prepare.py",
+                    "num_repeats": 8,
+                    "license": "CC-BY-4.0",
+                }
+            ],
+        }
+        block.update(overrides)
+        return {"responses_api_agents": {"simple_agent": block}}
+
+    def _config(self, **extra) -> DictConfig:
+        config = {
+            self.HARNESS_INSTANCE: self._harness(),
+            "gpqa_mcqa_simple_agent": self._environment_agent("gpqa_mcqa_resources_server"),
+            "gpqa_mcqa_resources_server": {
+                "resources_servers": {"mcqa": {"entrypoint": "app.py", "domain": "knowledge"}}
+            },
+        }
+        config.update(extra)
+        return DictConfig(config)
+
+    def _composed_block(self, config: DictConfig, instance: str) -> DictConfig:
+        agents = config[instance]["responses_api_agents"]
+        assert list(agents) == ["hermes_agent"], f"{instance} was not rehosted on the harness"
+        return agents["hermes_agent"]
+
+    def _parse(self, config: DictConfig) -> DictConfig:
+        return GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=OmegaConf.merge(
+                    GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT, config
+                ),
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+    def _parse_config_paths(self, *paths: str) -> DictConfig:
+        return self._parse(DictConfig({"config_paths": list(paths)}))
+
+    def test_noop_when_no_instance_is_unbound(self) -> None:
+        config = self._config()
+        config.pop(self.HARNESS_INSTANCE)
+        before = OmegaConf.to_container(config, resolve=False, throw_on_missing=False)
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert OmegaConf.to_container(config, resolve=False, throw_on_missing=False) == before
+
+    def test_absent_resources_server_is_not_a_source(self) -> None:
+        # Self-contained agents omit `resources_server` entirely, which is not the same as leaving it unset.
+        self_contained = {
+            "responses_api_agents": {"swe_agents": {"entrypoint": "app.py", "agent_framework": "openhands"}}
+        }
+        config = self._config()
+        config.pop(self.HARNESS_INSTANCE)
+        config["swe_agents"] = self_contained
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert list(config["swe_agents"]["responses_api_agents"]) == ["swe_agents"]
+        assert list(config["gpqa_mcqa_simple_agent"]["responses_api_agents"]) == ["simple_agent"]
+
+    def test_rehosts_environment_instance_on_the_standalone_agent(self) -> None:
+        config = self._config()
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert self.HARNESS_INSTANCE not in config
+        # _composed_block asserts the instance kept its name and now hosts the harness.
+        block = self._composed_block(config, "gpqa_mcqa_simple_agent")
+
+        # The harness's own configuration comes across.
+        assert block["entrypoint"] == "app.py"
+        assert block["terminal_backend"] == "local"
+        assert block["max_turns"] == 30
+
+        # The environment's bindings and data are carried over, its agent parameters are not.
+        assert block["resources_server"] == {"type": "resources_servers", "name": "gpqa_mcqa_resources_server"}
+        assert "max_steps" not in block
+        assert OmegaConf.to_container(block["datasets"]) == [
+            {
+                "name": "gpqa",
+                "type": "benchmark",
+                "jsonl_fpath": "benchmarks/gpqa/data/gpqa_diamond_benchmark.jsonl",
+                "prompt_config": "benchmarks/prompts/eval/aai/mcq-4choices.yaml",
+                "prepare_script": "benchmarks/gpqa/prepare.py",
+                "num_repeats": 8,
+                "license": "CC-BY-4.0",
+            }
+        ]
+
+    def test_preserves_model_server_per_instance(self) -> None:
+        # Two instances differing only by model server, as genrm_compare does.
+        config = self._config(
+            genrm_reasoning_on=self._environment_agent(
+                "genrm_resources_server",
+                model_server={"type": "responses_api_models", "name": "policy_model"},
+            ),
+            genrm_reasoning_off=self._environment_agent(
+                "genrm_resources_server",
+                model_server={"type": "responses_api_models", "name": "policy_model_reasoning_off"},
+            ),
+        )
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert self._composed_block(config, "genrm_reasoning_on")["model_server"]["name"] == "policy_model"
+        assert (
+            self._composed_block(config, "genrm_reasoning_off")["model_server"]["name"] == "policy_model_reasoning_off"
+        )
+
+    def test_replaces_every_agent_instance(self) -> None:
+        # jailbreak_detection declares five agent instances, one per category.
+        categories = [f"jailbreak_{index}" for index in range(5)]
+        config = self._config(**{name: self._environment_agent("jailbreak_resources_server") for name in categories})
+        config.pop("gpqa_mcqa_simple_agent")
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        for name in categories:
+            assert self._composed_block(config, name)["resources_server"]["name"] == "jailbreak_resources_server"
+
+    def test_falls_back_to_harness_model_environment_has_none(self) -> None:
+        # FIXME: policy_model is the default for both resources_server and model_server
+        # call them differently.
+        environment_agent = self._environment_agent("gpqa_mcqa_resources_server")
+        environment_agent["responses_api_agents"]["simple_agent"].pop("model_server")
+        config = self._config(no_model_server_agent=environment_agent)
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert self._composed_block(config, "no_model_server_agent")["model_server"]["name"] == "policy_model"
+
+    def test_raises_when_two_instances_are_unbound(self) -> None:
+        config = self._config(second_harness=self._harness())
+
+        with raises(AgentCompositionError) as exc_info:
+            GlobalConfigDictParser().compose_unbound_agent(config)
+
+        message = str(exc_info.value)
+        assert "2 agent instances leave their 'resources_server' unset" in message
+        assert "'hermes_agent'" in message
+        assert "'second_harness'" in message
+
+    def test_raises_when_there_is_nothing_to_rehost(self) -> None:
+        config = DictConfig({self.HARNESS_INSTANCE: self._harness()})
+
+        with raises(AgentCompositionError) as exc_info:
+            GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert "no other agent instance to rehost it on" in str(exc_info.value)
+
+    def test_parse_fills_unbound_binding_before_missing_value_check(self) -> None:
+        resolved = self._parse(self._config())
+
+        block = resolved["gpqa_mcqa_simple_agent"]["responses_api_agents"]["hermes_agent"]
+        assert block["resources_server"]["name"] == "gpqa_mcqa_resources_server"
+
+    def test_parse_reports_binding_still_unbound_after_composition(self) -> None:
+        environment_agent = self._environment_agent("gpqa_mcqa_resources_server")
+        environment_agent["responses_api_agents"]["simple_agent"].pop("resources_server")
+        config = self._config()
+        config.pop("gpqa_mcqa_simple_agent")
+        config["unbound_agent"] = environment_agent
+
+        with raises(ConfigMissingValuesError) as exc_info:
+            self._parse(config)
+
+        assert "unbound_agent.responses_api_agents.hermes_agent.resources_server.name" in str(exc_info.value)
+
+    def test_real_benchmark_composes_onto_real_harness(self) -> None:
+        resolved = self._parse_config_paths(
+            "benchmarks/gpqa/config.yaml",
+            "responses_api_agents/hermes_agent/configs/hermes_agent.yaml",
+        )
+
+        block = resolved["gpqa_mcqa_simple_agent"]["responses_api_agents"]["hermes_agent"]
+        assert block["resources_server"]["name"] == "gpqa_mcqa_resources_server"
+        assert block["max_turns"] == 30
+        assert "max_steps" not in block
+        assert OmegaConf.to_container(block["datasets"])[0]["num_repeats"] == 8
+        assert "hermes_agent" not in resolved
