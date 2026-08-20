@@ -51,6 +51,7 @@ class TestOpenCodeSandboxedAgent:
             sandbox_provider="",
             sandbox_config=dict(),
             sandbox_timeout=0,
+            opencode_max_context_window=0,
         )
 
     @fixture
