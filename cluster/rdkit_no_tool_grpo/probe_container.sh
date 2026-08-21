@@ -10,7 +10,7 @@ GYM_DIR=${GYM_DIR:-/lustre/fsw/portfolios/healthcareeng/projects/healthcareeng_r
 BUNDLE_DIR="${GYM_DIR}/cluster/rdkit_no_tool_grpo"
 SLURM_ACCOUNT=${SLURM_ACCOUNT:-healthcareeng_research}
 SLURM_PARTITION=${SLURM_PARTITION:-pool0}
-TRAIN_PYTHON=${TRAIN_PYTHON:-/opt/nemo_rl_venv/bin/python}
+TRAIN_PYTHON=${TRAIN_PYTHON:-${BUNDLE_DIR}/venvs/nemo-rl-gym-peft/bin/python}
 PROBE_TIME=${PROBE_TIME:-00:30:00}
 CONTAINER_IMAGE=$1
 

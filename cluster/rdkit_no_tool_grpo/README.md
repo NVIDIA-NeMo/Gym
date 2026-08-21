@@ -45,16 +45,18 @@ From the worktree, with `WANDB_API_KEY` exported:
 
 ```bash
 sbatch cluster/rdkit_no_tool_grpo/import_nemo_rl_sqsh_direct.sbatch
-sbatch cluster/rdkit_no_tool_grpo/setup_peft_venv.sbatch
+sbatch cluster/rdkit_no_tool_grpo/setup_integration_venv.sbatch
 sbatch cluster/rdkit_no_tool_grpo/merge_es_adapter.sbatch
 sbatch cluster/rdkit_no_tool_grpo/preflight_resource_server.sbatch
 sbatch cluster/rdkit_no_tool_grpo/validate_merged_model.sbatch
 cluster/rdkit_no_tool_grpo/submit_smoke.sh
 ```
 
-The PEFT venv is a small `--system-site-packages` overlay because the NeMo-RL
-v0.6 image does not include Hugging Face PEFT; it pins only `peft==0.17.1` and
-reuses the image's Torch, Transformers, Accelerate, and Safetensors packages.
+The integration venv is a small `--system-site-packages` overlay because the
+NeMo-RL v0.6 image lacks both Hugging Face PEFT and the dependencies needed to
+import the pinned Gym checkout. It installs Gym editable without resolving its
+broad dependency set, pins only `openai==2.6.1` and `peft==0.17.1`, and reuses
+the image's Ray, Torch, Transformers, Accelerate, and Safetensors packages.
 Each later job should use an `afterok` dependency on the preceding gate. After
 the one-update 64-GPU smoke completes:
 

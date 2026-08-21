@@ -10,7 +10,7 @@ RAY_SUB="${BUNDLE_DIR}/nemo_rl_assets/ray.sub"
 PREFLIGHT_SUB="${BUNDLE_DIR}/preflight_submission.sbatch"
 RUNNER="${BUNDLE_DIR}/nemo_rl_assets/run_grpo_nemo_gym.py"
 CONFIG="${BUNDLE_DIR}/rdkit_no_tool_grpo.yaml"
-TRAIN_PYTHON=${TRAIN_PYTHON:-/opt/nemo_rl_venv/bin/python}
+TRAIN_PYTHON=${TRAIN_PYTHON:-${BUNDLE_DIR}/venvs/nemo-rl-gym-peft/bin/python}
 
 SLURM_ACCOUNT=${SLURM_ACCOUNT:-healthcareeng_research}
 SLURM_PARTITION=${SLURM_PARTITION:-pool0}

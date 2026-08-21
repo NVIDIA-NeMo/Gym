@@ -56,8 +56,8 @@ known no-gradient Mamba output-projection path.
 ## Gates
 
 1. Import the v0.6.0 container on a CPU Slurm node.
-2. Create a small container-compatible PEFT 0.17.1 overlay on a CPU Slurm node,
-   then merge the validated ES adapter on CPU and write a file-hashed
+2. Create a small container-compatible Gym/OpenAI/PEFT integration overlay on a
+   CPU Slurm node, then merge the validated ES adapter on CPU and write a file-hashed
    manifest atomically.
 3. Install and exercise the pinned RDKit resource server inside that container.
 4. Require top-1 identity on 16 fixed prompts and minimum full-logit cosine

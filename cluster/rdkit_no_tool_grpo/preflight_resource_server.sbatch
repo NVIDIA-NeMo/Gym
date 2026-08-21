@@ -15,7 +15,7 @@ set -euo pipefail
 GYM_DIR=${GYM_DIR:-/lustre/fsw/portfolios/healthcareeng/projects/healthcareeng_research/users/dcorneil/code/Gym-rdkit-es140-lora-grpo}
 CONTAINER=${CONTAINER:-${GYM_DIR}/cluster/rdkit_no_tool_grpo/sqsh/nemo-rl-v0.6.0.sqsh}
 PREFLIGHT=${GYM_DIR}/cluster/rdkit_no_tool_grpo/preflight_resource_server.py
-TRAIN_PYTHON=${TRAIN_PYTHON:-/opt/nemo_rl_venv/bin/python}
+TRAIN_PYTHON=${TRAIN_PYTHON:-${GYM_DIR}/cluster/rdkit_no_tool_grpo/venvs/nemo-rl-gym-peft/bin/python}
 
 mkdir -p "${GYM_DIR}/cluster/rdkit_no_tool_grpo/logs"
 srun \

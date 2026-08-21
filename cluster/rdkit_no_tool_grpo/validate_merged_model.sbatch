@@ -22,7 +22,7 @@ HF_CACHE_DIR=${HF_CACHE_DIR:-${INFERNO_DIR}/.local/cache/huggingface}
 ADAPTER_DIR=${ES_ADAPTER_DIR:-${GYM_MAIN_DIR}/artifacts/inferno-rdkit-nemotron3-nano-post-step-0140-lora-r8}
 MERGED_MODEL_DIR=${ES140_MERGED_MODEL_DIR:-${GYM_MAIN_DIR}/artifacts/nemotron3-nano-rdkit-es140-merged-hf}
 OUTPUT=${MERGE_PARITY_OUTPUT:-${BUNDLE_DIR}/results/es140_lora/merged_model_validation.json}
-MERGE_PYTHON=${MERGE_PYTHON:-${BUNDLE_DIR}/venvs/peft-0.17.1/bin/python}
+MERGE_PYTHON=${MERGE_PYTHON:-${BUNDLE_DIR}/venvs/nemo-rl-gym-peft/bin/python}
 
 if [[ ! -x "${MERGE_PYTHON}" ]]; then
   echo "Missing PEFT merge environment: ${MERGE_PYTHON}" >&2

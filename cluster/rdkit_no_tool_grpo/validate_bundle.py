@@ -403,7 +403,7 @@ def main() -> None:
         bundle / "submit_chain.sh",
         bundle / "merge_es_adapter.py",
         bundle / "merge_es_adapter.sbatch",
-        bundle / "setup_peft_venv.sbatch",
+        bundle / "setup_integration_venv.sbatch",
         bundle / "validate_merged_model.py",
         bundle / "validate_merged_model.sbatch",
         bundle / "submit_baseline.sh",
