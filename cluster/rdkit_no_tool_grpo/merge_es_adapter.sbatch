@@ -14,43 +14,82 @@ set -euo pipefail
 
 GYM_DIR=${GYM_DIR:-/lustre/fsw/portfolios/healthcareeng/projects/healthcareeng_research/users/dcorneil/code/Gym-rdkit-es140-lora-grpo}
 GYM_MAIN_DIR=${GYM_MAIN_DIR:-/lustre/fsw/portfolios/healthcareeng/projects/healthcareeng_research/users/dcorneil/code/Gym}
+INFERNO_DIR=${INFERNO_DIR:-/lustre/fsw/portfolios/healthcareeng/projects/healthcareeng_research/users/dcorneil/code/inferno}
 BUNDLE_DIR="${GYM_DIR}/cluster/rdkit_no_tool_grpo"
-CONTAINER=${CONTAINER_IMAGE_PATH:-${BUNDLE_DIR}/sqsh/nemo-rl-v0.6.0.sqsh}
-HF_CACHE_DIR=${HF_CACHE_DIR:-/lustre/fsw/portfolios/healthcareeng/projects/healthcareeng_research/users/dcorneil/code/inferno/.local/cache/huggingface}
+CONTAINER_IMAGE_PATH=${CONTAINER_IMAGE_PATH:-${BUNDLE_DIR}/sqsh/nemo-rl-v0.6.0-gym-peft.sqsh}
+BASE_MODEL_CACHE_ROOT=${BASE_MODEL_CACHE_ROOT:-${INFERNO_DIR}/.local/cache/huggingface/hub/models--nvidia--NVIDIA-Nemotron-3-Nano-30B-A3B-BF16}
 ADAPTER_DIR=${ES_ADAPTER_DIR:-${GYM_MAIN_DIR}/artifacts/inferno-rdkit-nemotron3-nano-post-step-0140-lora-r8}
 OUTPUT_DIR=${ES140_MERGED_MODEL_DIR:-${GYM_MAIN_DIR}/artifacts/nemotron3-nano-rdkit-es140-merged-hf}
-MERGE_PYTHON=${MERGE_PYTHON:-${BUNDLE_DIR}/venvs/nemo-rl-gym-peft/bin/python}
+MERGE_PYTHON=${MERGE_PYTHON:-/opt/nemo_rl_venv/bin/python}
+PINNED_GYM_COMMIT=1a4912e231bb2795b062f7de97496caaf382c7f6
+SOURCE_GYM_COMMIT=$(git -C "${GYM_DIR}" rev-parse HEAD)
+git -C "${GYM_DIR}" merge-base --is-ancestor "${PINNED_GYM_COMMIT}" "${SOURCE_GYM_COMMIT}"
 
-if [[ ! -x "${MERGE_PYTHON}" ]]; then
-  echo "Missing PEFT merge environment: ${MERGE_PYTHON}" >&2
+if [[ ! -f "${BASE_MODEL_CACHE_ROOT}/refs/main" ]]; then
+  echo "Missing cached base-model ref: ${BASE_MODEL_CACHE_ROOT}/refs/main" >&2
   exit 1
 fi
+BASE_SNAPSHOT_SHA=$(<"${BASE_MODEL_CACHE_ROOT}/refs/main")
+BASE_SNAPSHOT_DIR="${BASE_MODEL_CACHE_ROOT}/snapshots/${BASE_SNAPSHOT_SHA}"
+if [[ ! -d "${BASE_SNAPSHOT_DIR}" ]]; then
+  echo "Missing cached base-model snapshot: ${BASE_SNAPSHOT_DIR}" >&2
+  exit 1
+fi
+if mkdir -p "/raid/scratch/${USER}" 2>/dev/null && [[ -w "/raid/scratch/${USER}" ]]; then
+  NODE_LOCAL_ROOT="/raid/scratch/${USER}/rdkit-es140-merge-${SLURM_JOB_ID}"
+elif [[ -n "${SLURM_TMPDIR:-}" && -w "${SLURM_TMPDIR}" ]]; then
+  NODE_LOCAL_ROOT="${SLURM_TMPDIR}/rdkit-es140-merge-${SLURM_JOB_ID}"
+else
+  NODE_LOCAL_ROOT="/tmp/rdkit-es140-merge-${USER}-${SLURM_JOB_ID}"
+fi
+LOCAL_GYM_DIR="${NODE_LOCAL_ROOT}/Gym"
+LOCAL_CONTAINER="${NODE_LOCAL_ROOT}/container/$(basename "${CONTAINER_IMAGE_PATH}")"
+LOCAL_BASE_MODEL="${NODE_LOCAL_ROOT}/base-model"
+LOCAL_ADAPTER="${NODE_LOCAL_ROOT}/adapter"
+mkdir -p \
+  "${LOCAL_GYM_DIR}/cluster/rdkit_no_tool_grpo" \
+  "${NODE_LOCAL_ROOT}/container" \
+  "${LOCAL_BASE_MODEL}" \
+  "${LOCAL_ADAPTER}" \
+  "${NODE_LOCAL_ROOT}/hf-home"
+
+cleanup() {
+  case "${NODE_LOCAL_ROOT}" in
+    /raid/scratch/*/rdkit-es140-merge-*|/tmp/rdkit-es140-merge-*|*/rdkit-es140-merge-*)
+      rm -rf "${NODE_LOCAL_ROOT}"
+      ;;
+  esac
+}
+trap cleanup EXIT
+
+install -m 0644 "${BUNDLE_DIR}/merge_es_adapter.py" \
+  "${LOCAL_GYM_DIR}/cluster/rdkit_no_tool_grpo/merge_es_adapter.py"
+rsync -a "${CONTAINER_IMAGE_PATH}" "${LOCAL_CONTAINER}"
+rsync -aL "${BASE_SNAPSHOT_DIR}/" "${LOCAL_BASE_MODEL}/"
+rsync -a "${ADAPTER_DIR}/" "${LOCAL_ADAPTER}/"
 
 mkdir -p "${BUNDLE_DIR}/logs" "${GYM_MAIN_DIR}/artifacts"
-export HF_HOME="${HF_CACHE_DIR}"
-export HF_HUB_CACHE="${HF_CACHE_DIR}/hub"
-export HUGGINGFACE_HUB_CACHE="${HF_CACHE_DIR}/hub"
-export HF_HUB_OFFLINE=1
-export TRANSFORMERS_OFFLINE=1
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-16}"
-
 srun \
   --nodes=1 \
   --ntasks=1 \
   --cpus-per-task="${SLURM_CPUS_PER_TASK:-16}" \
   --no-container-mount-home \
-  --container-image="${CONTAINER}" \
-  --container-mounts="/lustre:/lustre" \
-  --container-workdir="${GYM_DIR}" \
-  --chdir="${GYM_DIR}" \
+  --container-image="${LOCAL_CONTAINER}" \
+  --container-mounts="${NODE_LOCAL_ROOT}:${NODE_LOCAL_ROOT},/lustre:/lustre" \
+  --container-workdir="${LOCAL_GYM_DIR}" \
+  --chdir="${LOCAL_GYM_DIR}" \
   /usr/bin/env \
-    HF_HOME="${HF_HOME}" \
-    HF_HUB_CACHE="${HF_HUB_CACHE}" \
-    HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE}" \
+    HF_HOME="${NODE_LOCAL_ROOT}/hf-home" \
+    HF_HUB_CACHE="${NODE_LOCAL_ROOT}/hf-home/hub" \
+    HUGGINGFACE_HUB_CACHE="${NODE_LOCAL_ROOT}/hf-home/hub" \
     HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1 \
     OMP_NUM_THREADS="${OMP_NUM_THREADS}" \
-    "${MERGE_PYTHON}" "${BUNDLE_DIR}/merge_es_adapter.py" \
-      --adapter-dir "${ADAPTER_DIR}" \
+    "${MERGE_PYTHON}" \
+    "${LOCAL_GYM_DIR}/cluster/rdkit_no_tool_grpo/merge_es_adapter.py" \
+      --base-model "${LOCAL_BASE_MODEL}" \
+      --adapter-dir "${LOCAL_ADAPTER}" \
       --output-dir "${OUTPUT_DIR}" \
-      --gym-dir "${GYM_DIR}"
+      --gym-dir "${LOCAL_GYM_DIR}" \
+      --gym-commit "${SOURCE_GYM_COMMIT}"

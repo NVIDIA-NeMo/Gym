@@ -114,7 +114,13 @@ def validate_repeated_validation(data_dir: Path, expected_max_output_tokens: int
         raise ValueError(f"{repeated_path} has the wrong output-token budget")
 
 
-def validate_repository_version(root: Path) -> None:
+def validate_repository_version(root: Path, source_gym_commit: str | None) -> str:
+    if source_gym_commit:
+        if len(source_gym_commit) != 40 or any(
+            character not in "0123456789abcdef" for character in source_gym_commit
+        ):
+            raise ValueError("--source-gym-commit must be a full lowercase Git SHA")
+        return source_gym_commit
     result = subprocess.run(
         ["git", "merge-base", "--is-ancestor", PINNED_GYM_COMMIT, "HEAD"],
         cwd=root,
@@ -132,6 +138,13 @@ def validate_repository_version(root: Path) -> None:
             f"Gym checkout {actual_commit} does not descend from pinned commit "
             f"{PINNED_GYM_COMMIT}"
         )
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
 
 
 def validate_lora_config(bundle: Path) -> None:
@@ -297,7 +310,9 @@ def validate_pinned_gym_setup(root: Path, bundle: Path) -> None:
         raise ValueError("Simple agent import compatibility check failed")
 
 
-def validate_container_preflight(root: Path, bundle: Path) -> None:
+def validate_container_preflight(
+    bundle: Path, *, source_gym_commit: str, container_path: Path
+) -> None:
     stamp_path = bundle / "preflight/resource_server_container.json"
     if not stamp_path.is_file():
         raise FileNotFoundError(
@@ -308,19 +323,11 @@ def validate_container_preflight(root: Path, bundle: Path) -> None:
     stamp = json.loads(stamp_path.read_text())
     if stamp.get("schema_version") != 1:
         raise ValueError(f"Unsupported container preflight stamp: {stamp_path}")
-    current_commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=root,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    if stamp.get("gym_commit") != current_commit:
+    if stamp.get("gym_commit") != source_gym_commit:
         raise ValueError("Container preflight Gym commit does not match the current checkout")
     if stamp.get("resource_files") != RDKIT_SERVER_HASHES:
         raise ValueError("Container preflight RDKit sources do not match the current pinned sources")
 
-    container_path = bundle / "sqsh/nemo-rl-v0.6.0.sqsh"
     container_stat = container_path.stat()
     expected_container = {
         "path": str(container_path),
@@ -334,6 +341,8 @@ def validate_container_preflight(root: Path, bundle: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=Path.cwd())
+    parser.add_argument("--source-gym-commit")
+    parser.add_argument("--container-path", type=Path)
     parser.add_argument("--max-output-tokens", type=int, default=default_max_output_tokens())
     parser.add_argument("--require-container-preflight", action="store_true")
     parser.add_argument("--adapter-dir", type=Path)
@@ -353,12 +362,18 @@ def main() -> None:
     bundle = root / "cluster/rdkit_no_tool_grpo"
     data = bundle / "data"
 
-    validate_repository_version(root)
+    source_gym_commit = validate_repository_version(root, args.source_gym_commit)
     validate_server_sources(root)
     validate_pinned_gym_setup(root, bundle)
     validate_lora_config(bundle)
     if args.require_container_preflight:
-        validate_container_preflight(root, bundle)
+        if args.container_path is None:
+            raise ValueError("--container-path is required with --require-container-preflight")
+        validate_container_preflight(
+            bundle,
+            source_gym_commit=source_gym_commit,
+            container_path=args.container_path.absolute(),
+        )
     if args.require_adapter:
         if args.adapter_dir is None:
             raise ValueError("--adapter-dir is required with --require-adapter")
@@ -403,7 +418,7 @@ def main() -> None:
         bundle / "submit_chain.sh",
         bundle / "merge_es_adapter.py",
         bundle / "merge_es_adapter.sbatch",
-        bundle / "setup_integration_venv.sbatch",
+        bundle / "build_integration_sqsh.sbatch",
         bundle / "validate_merged_model.py",
         bundle / "validate_merged_model.sbatch",
         bundle / "submit_baseline.sh",

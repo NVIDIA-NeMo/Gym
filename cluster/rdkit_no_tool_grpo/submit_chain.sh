@@ -8,9 +8,7 @@ export GYM_DIR GYM_MAIN_DIR
 BUNDLE_DIR="${GYM_DIR}/cluster/rdkit_no_tool_grpo"
 RAY_SUB="${BUNDLE_DIR}/nemo_rl_assets/ray.sub"
 PREFLIGHT_SUB="${BUNDLE_DIR}/preflight_submission.sbatch"
-RUNNER="${BUNDLE_DIR}/nemo_rl_assets/run_grpo_nemo_gym.py"
-CONFIG="${BUNDLE_DIR}/rdkit_no_tool_grpo.yaml"
-TRAIN_PYTHON=${TRAIN_PYTHON:-${BUNDLE_DIR}/venvs/nemo-rl-gym-peft/bin/python}
+TRAIN_PYTHON=${TRAIN_PYTHON:-/opt/nemo_rl_venv/bin/python}
 
 SLURM_ACCOUNT=${SLURM_ACCOUNT:-healthcareeng_research}
 SLURM_PARTITION=${SLURM_PARTITION:-pool0}
@@ -23,12 +21,11 @@ START_DEPENDENCY=${START_DEPENDENCY:-}
 JOB_INDEX_OFFSET=${JOB_INDEX_OFFSET:-0}
 JOB_NAME_PREFIX=${JOB_NAME_PREFIX:-rdkit-es140-lora-grpo}
 JOB_TIME_LIMIT=${JOB_TIME_LIMIT:-12:00:00}
-CONTAINER_IMAGE_PATH=${CONTAINER_IMAGE_PATH:-${BUNDLE_DIR}/sqsh/nemo-rl-v0.6.0.sqsh}
+CONTAINER_IMAGE_PATH=${CONTAINER_IMAGE_PATH:-${BUNDLE_DIR}/sqsh/nemo-rl-v0.6.0-gym-peft.sqsh}
 SOURCE_DATA_DIR=${SOURCE_DATA_DIR:-${INFERNO_DIR}/data/rdkit-chemistry-no-tool/prepared-train1024-test1000}
 ES_ADAPTER_DIR=${ES_ADAPTER_DIR:-${GYM_MAIN_DIR}/artifacts/inferno-rdkit-nemotron3-nano-post-step-0140-lora-r8}
 export ES140_MERGED_MODEL_DIR=${ES140_MERGED_MODEL_DIR:-${GYM_MAIN_DIR}/artifacts/nemotron3-nano-rdkit-es140-merged-hf}
-export HF_HOME=${HF_HOME:-${INFERNO_DIR}/.local/cache/huggingface}
-export NRL_MEGATRON_CHECKPOINT_DIR=${NRL_MEGATRON_CHECKPOINT_DIR:-${BUNDLE_DIR}/results/model_cache/megatron}
+export NRL_MEGATRON_CHECKPOINT_DIR=${NRL_MEGATRON_CHECKPOINT_DIR:-${BUNDLE_DIR}/results/model_artifacts/megatron}
 
 RESULTS_DIR=${RESULTS_DIR:-${BUNDLE_DIR}/results/es140_lora}
 TRAIN_LOG_DIR=${TRAIN_LOG_DIR:-${RESULTS_DIR}/logs}
@@ -40,7 +37,6 @@ export WANDB_RUN_ID=${WANDB_RUN_ID:-rdkit-nemotron3-nano-grpo-lora-r8-a8-es140-6
 export WANDB_RUN_NAME=${WANDB_RUN_NAME:-rdkit-nemotron3-nano-grpo-lora-r8-a8-es140-64p16g-i200-lr3e-6-32k-iad-p0-64g}
 export WANDB_GROUP=${WANDB_GROUP:-rdkit-es140-lora-grpo}
 export WANDB_ENTITY=${WANDB_ENTITY:-nemo-llm-service}
-export WANDB_DIR=${WANDB_DIR:-${BUNDLE_DIR}/results/wandb}
 export WANDB_INIT_TIMEOUT=${WANDB_INIT_TIMEOUT:-600}
 export CONTAINER_IMAGE_PATH SOURCE_DATA_DIR ES_ADAPTER_DIR TRAIN_PYTHON
 
@@ -61,15 +57,14 @@ mkdir -p \
   "${BUNDLE_DIR}/logs" \
   "${TRAIN_LOG_DIR}" \
   "${CHECKPOINT_DIR}" \
-  "${NRL_MEGATRON_CHECKPOINT_DIR}" \
-  "${WANDB_DIR}"
+  "${NRL_MEGATRON_CHECKPOINT_DIR}"
 
 COMMAND=$(cat <<EOF
 set -euo pipefail
 export WANDB_INIT_TIMEOUT="${WANDB_INIT_TIMEOUT}"
-cd "${GYM_DIR}"
-"${TRAIN_PYTHON}" "${RUNNER}" \\
-  --config="${CONFIG}" \\
+cd "\${GYM_DIR}"
+"${TRAIN_PYTHON}" "\${GYM_DIR}/cluster/rdkit_no_tool_grpo/nemo_rl_assets/run_grpo_nemo_gym.py" \\
+  --config="\${GYM_DIR}/cluster/rdkit_no_tool_grpo/rdkit_no_tool_grpo.yaml" \\
   ++cluster.num_nodes=${NUM_ACTOR_NODES} \\
   ++cluster.gpus_per_node=${GPUS_PER_NODE} \\
   ++grpo.max_num_epochs=100000 \\

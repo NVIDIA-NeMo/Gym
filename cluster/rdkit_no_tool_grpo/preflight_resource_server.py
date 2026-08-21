@@ -24,8 +24,7 @@ def sha256(path: Path) -> str:
 
 def main() -> None:
     gym_dir = Path(os.environ["GYM_DIR"]).resolve()
-    scratch_base = Path(os.environ.get("SLURM_TMPDIR", "/tmp"))
-    scratch_dir = scratch_base / f"rdkit-resource-preflight-{os.environ.get('SLURM_JOB_ID', 'local')}"
+    scratch_dir = Path(os.environ["NODE_LOCAL_ROOT"]).resolve()
     venv_root = scratch_dir / "venvs"
     uv_cache_dir = scratch_dir / "uv-cache"
     uv_cache_dir.mkdir(parents=True, exist_ok=True)
@@ -72,15 +71,9 @@ print("RDKit resource-server container preflight passed")
 """
     subprocess.run([str(server_python), "-c", smoke_code], check=True, env=env)
 
-    container_path = gym_dir / "cluster/rdkit_no_tool_grpo/sqsh/nemo-rl-v0.6.0.sqsh"
+    container_path = Path(os.environ["CONTAINER_IMAGE_PATH"]).resolve()
     container_stat = container_path.stat()
-    gym_commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=gym_dir,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    gym_commit = os.environ["SOURCE_GYM_COMMIT"]
     resource_files = {
         filename: sha256(server_dir / filename)
         for filename in ("app.py", "requirements.txt", "sandbox_launcher.py")
@@ -98,7 +91,7 @@ print("RDKit resource-server container preflight passed")
         },
         "python": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
     }
-    stamp_path = gym_dir / "cluster/rdkit_no_tool_grpo/preflight/resource_server_container.json"
+    stamp_path = Path(os.environ["PREFLIGHT_OUTPUT"]).resolve()
     stamp_path.parent.mkdir(parents=True, exist_ok=True)
     temporary_stamp = stamp_path.with_suffix(f".{os.environ.get('SLURM_JOB_ID', 'local')}.tmp")
     temporary_stamp.write_text(json.dumps(stamp, indent=2, sort_keys=True) + "\n")

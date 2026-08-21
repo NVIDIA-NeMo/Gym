@@ -142,7 +142,7 @@ def merge(args: argparse.Namespace) -> None:
                 "rank": adapter["config"]["r"],
                 "alpha": adapter["config"]["lora_alpha"],
             },
-            "gym_commit": git_commit(args.gym_dir.resolve()),
+            "gym_commit": args.gym_commit or git_commit(args.gym_dir.resolve()),
             "output_files": output_files(temporary_dir),
         }
         (temporary_dir / "es140_merge_manifest.json").write_text(
@@ -161,6 +161,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--adapter-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--gym-dir", type=Path, required=True)
+    parser.add_argument("--gym-commit")
     parser.add_argument("--expected-adapter-sha256", default=EXPECTED_ADAPTER_SHA256)
     parser.add_argument("--max-shard-size", default="5GB")
     return parser.parse_args()

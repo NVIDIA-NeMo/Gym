@@ -51,8 +51,55 @@ CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
 COMMAND=${COMMAND:-}  # This is a script relative to HOST_WORKDIR. If left empty, it will leave the cluster idle after it's brought up.
 HOST_WORKDIR=${HOST_WORKDIR:-$SLURM_SUBMIT_DIR}
-PYXIS_HOST_CWD=${PYXIS_HOST_CWD:-/tmp}
-PYXIS_CONTAINER_CWD=${PYXIS_CONTAINER_CWD:-/tmp}
+if [[ ! -d "/raid/scratch/${USER}" ]]; then
+  srun --nodes="$SLURM_JOB_NUM_NODES" --ntasks-per-node=1 \
+    mkdir -p "/raid/scratch/${USER}"
+fi
+srun --nodes="$SLURM_JOB_NUM_NODES" --ntasks-per-node=1 \
+  test -w "/raid/scratch/${USER}"
+NODE_LOCAL_ROOT=${NODE_LOCAL_ROOT:-/raid/scratch/${USER}/rdkit-nemo-rl-${SLURM_JOB_ID}}
+STAGED_WORKDIR="${NODE_LOCAL_ROOT}/Gym"
+CONTAINER_SOURCE="${CONTAINER}"
+LOCAL_CONTAINER="${NODE_LOCAL_ROOT}/container/$(basename "${CONTAINER_SOURCE}")"
+srun --nodes="$SLURM_JOB_NUM_NODES" --ntasks-per-node=1 \
+  mkdir -p \
+    "${STAGED_WORKDIR}" \
+    "${NODE_LOCAL_ROOT}/container" \
+    "${NODE_LOCAL_ROOT}/enroot/cache" \
+    "${NODE_LOCAL_ROOT}/enroot/data" \
+    "${NODE_LOCAL_ROOT}/enroot/runtime" \
+    "${NODE_LOCAL_ROOT}/enroot/tmp" \
+    "${NODE_LOCAL_ROOT}/hf-home" \
+    "${NODE_LOCAL_ROOT}/uv-cache" \
+    "${NODE_LOCAL_ROOT}/wandb"
+srun --nodes="$SLURM_JOB_NUM_NODES" --ntasks-per-node=1 \
+  rsync -a "${CONTAINER_SOURCE}" "${LOCAL_CONTAINER}"
+srun --nodes="$SLURM_JOB_NUM_NODES" --ntasks-per-node=1 \
+  rsync -a \
+    --exclude=.git/ \
+    --exclude=artifacts/ \
+    --exclude=cluster/rdkit_no_tool_grpo/enroot/ \
+    --exclude=cluster/rdkit_no_tool_grpo/logs/ \
+    --exclude=cluster/rdkit_no_tool_grpo/results/ \
+    --exclude=cluster/rdkit_no_tool_grpo/sqsh/ \
+    --exclude=cluster/rdkit_no_tool_grpo/venvs/ \
+    "${HOST_WORKDIR}/" "${STAGED_WORKDIR}/"
+
+export GYM_DIR="${STAGED_WORKDIR}"
+export PYTHONPATH="${STAGED_WORKDIR}${PYTHONPATH:+:${PYTHONPATH}}"
+export HF_HOME="${NODE_LOCAL_ROOT}/hf-home"
+export HF_HUB_CACHE="${HF_HOME}/hub"
+export HUGGINGFACE_HUB_CACHE="${HF_HOME}/hub"
+export UV_CACHE_DIR_OVERRIDE="${NODE_LOCAL_ROOT}/uv-cache"
+export WANDB_DIR="${NODE_LOCAL_ROOT}/wandb"
+CONTAINER="${LOCAL_CONTAINER}"
+PYXIS_HOST_CWD="${STAGED_WORKDIR}"
+PYXIS_CONTAINER_CWD="${STAGED_WORKDIR}"
+if [[ -n "${MOUNTS}" ]]; then
+  MOUNTS+=",/raid/scratch:/raid/scratch"
+else
+  MOUNTS="/raid/scratch:/raid/scratch"
+fi
 ########################################################
 # Ports for all nodes (should be odd numbers since we place head/worker[0] on the same node) so all workers get the odd ports, but the head will get +1 the ports
 NODE_MANAGER_PORT=${NODE_MANAGER_PORT:-53001}
@@ -114,20 +161,10 @@ BASE_LOG_DIR=${BASE_LOG_DIR:-$HOST_WORKDIR}
 LOG_DIR="$BASE_LOG_DIR/$SLURM_JOB_ID-logs"
 mkdir -p $LOG_DIR
 
-ENROOT_BASE_PATH=${ENROOT_BASE_PATH:-$HOST_WORKDIR/cluster/rdkit_no_tool_grpo/enroot}
-export ENROOT_CACHE_PATH=${ENROOT_CACHE_PATH:-$ENROOT_BASE_PATH/cache}
-if [[ -n "${NODE_LOCAL_SCRATCH:-}" ]]; then
-  ENROOT_NODE_LOCAL_ROOT=${ENROOT_NODE_LOCAL_ROOT:-$NODE_LOCAL_SCRATCH/rdkit-nemo-rl-$SLURM_JOB_ID}
-elif [[ -n "${SLURM_TMPDIR:-}" ]]; then
-  ENROOT_NODE_LOCAL_ROOT=${ENROOT_NODE_LOCAL_ROOT:-$SLURM_TMPDIR/rdkit-nemo-rl-$SLURM_JOB_ID}
-elif [[ -d /raid && -w /raid ]]; then
-  ENROOT_NODE_LOCAL_ROOT=${ENROOT_NODE_LOCAL_ROOT:-/raid/enroot/rdkit-nemo-rl-$USER-$SLURM_JOB_ID}
-else
-  ENROOT_NODE_LOCAL_ROOT=${ENROOT_NODE_LOCAL_ROOT:-/tmp/rdkit-nemo-rl-$USER-$SLURM_JOB_ID}
-fi
-export ENROOT_DATA_PATH=${ENROOT_DATA_PATH:-$ENROOT_NODE_LOCAL_ROOT/data}
-export ENROOT_RUNTIME_PATH=${ENROOT_RUNTIME_PATH:-$ENROOT_NODE_LOCAL_ROOT/runtime}
-export ENROOT_TEMP_PATH=${ENROOT_TEMP_PATH:-$ENROOT_NODE_LOCAL_ROOT/tmp}
+export ENROOT_CACHE_PATH=${ENROOT_CACHE_PATH:-$NODE_LOCAL_ROOT/enroot/cache}
+export ENROOT_DATA_PATH=${ENROOT_DATA_PATH:-$NODE_LOCAL_ROOT/enroot/data}
+export ENROOT_RUNTIME_PATH=${ENROOT_RUNTIME_PATH:-$NODE_LOCAL_ROOT/enroot/runtime}
+export ENROOT_TEMP_PATH=${ENROOT_TEMP_PATH:-$NODE_LOCAL_ROOT/enroot/tmp}
 mkdir -p "$ENROOT_CACHE_PATH" "$ENROOT_DATA_PATH" "$ENROOT_RUNTIME_PATH" "$ENROOT_TEMP_PATH"
 echo "[INFO] ENROOT_CACHE_PATH=$ENROOT_CACHE_PATH"
 echo "[INFO] ENROOT_DATA_PATH=$ENROOT_DATA_PATH"

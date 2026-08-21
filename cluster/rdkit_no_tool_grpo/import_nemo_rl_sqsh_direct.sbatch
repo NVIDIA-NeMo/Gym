@@ -18,19 +18,23 @@ BASE_CONTAINER_IMAGE=${BASE_CONTAINER_IMAGE:-docker://nvcr.io#nvidia/nemo-rl:v0.
 SQSH_PATH=${SQSH_PATH:-${BUNDLE_DIR}/sqsh/nemo-rl-v0.6.0.sqsh}
 TMP_SQSH="${SQSH_PATH}.tmp-${SLURM_JOB_ID}"
 
-mkdir -p "${BUNDLE_DIR}/logs" "${BUNDLE_DIR}/sqsh" "${BUNDLE_DIR}/enroot/cache"
-if [[ -n "${SLURM_TMPDIR:-}" ]]; then
+mkdir -p "${BUNDLE_DIR}/logs" "${BUNDLE_DIR}/sqsh"
+if mkdir -p "/raid/scratch/${USER}" 2>/dev/null && [[ -w "/raid/scratch/${USER}" ]]; then
+  NODE_LOCAL_ROOT="/raid/scratch/${USER}/rdkit-nemo-rl-import-${SLURM_JOB_ID}"
+elif [[ -n "${SLURM_TMPDIR:-}" && -w "${SLURM_TMPDIR}" ]]; then
   NODE_LOCAL_ROOT="${SLURM_TMPDIR}/rdkit-nemo-rl-import-${SLURM_JOB_ID}"
-elif [[ -d /raid && -w /raid ]]; then
-  NODE_LOCAL_ROOT="/raid/enroot/rdkit-nemo-rl-import-${USER}-${SLURM_JOB_ID}"
 else
   NODE_LOCAL_ROOT="/tmp/rdkit-nemo-rl-import-${USER}-${SLURM_JOB_ID}"
 fi
-mkdir -p "${NODE_LOCAL_ROOT}/data" "${NODE_LOCAL_ROOT}/runtime" "${NODE_LOCAL_ROOT}/tmp"
+mkdir -p \
+  "${NODE_LOCAL_ROOT}/cache" \
+  "${NODE_LOCAL_ROOT}/data" \
+  "${NODE_LOCAL_ROOT}/runtime" \
+  "${NODE_LOCAL_ROOT}/tmp"
 
 cleanup() {
   case "${NODE_LOCAL_ROOT}" in
-    /raid/enroot/rdkit-nemo-rl-import-*|/tmp/rdkit-nemo-rl-import-*|*/rdkit-nemo-rl-import-*)
+    /raid/scratch/*/rdkit-nemo-rl-import-*|/tmp/rdkit-nemo-rl-import-*|*/rdkit-nemo-rl-import-*)
       rm -rf "${NODE_LOCAL_ROOT}"
       ;;
   esac
@@ -38,7 +42,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-export ENROOT_CACHE_PATH="${BUNDLE_DIR}/enroot/cache"
+export ENROOT_CACHE_PATH="${NODE_LOCAL_ROOT}/cache"
 export ENROOT_DATA_PATH="${NODE_LOCAL_ROOT}/data"
 export ENROOT_RUNTIME_PATH="${NODE_LOCAL_ROOT}/runtime"
 export ENROOT_TEMP_PATH="${NODE_LOCAL_ROOT}/tmp"

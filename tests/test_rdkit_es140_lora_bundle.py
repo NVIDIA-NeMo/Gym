@@ -80,3 +80,14 @@ def test_production_launcher_requires_baseline_dependency() -> None:
     assert "JOB_TIME_LIMIT=${JOB_TIME_LIMIT:-12:00:00}" in launcher
     assert "--dependency=\"${START_DEPENDENCY}\"" in launcher
     assert "REQUIRE_BASELINE_GATE=1" in launcher
+
+
+def test_cluster_launch_stages_code_and_caches_node_local() -> None:
+    ray_sub = (BUNDLE / "nemo_rl_assets/ray.sub").read_text()
+    assert "/raid/scratch/${USER}/rdkit-nemo-rl-${SLURM_JOB_ID}" in ray_sub
+    assert 'export GYM_DIR="${STAGED_WORKDIR}"' in ray_sub
+    assert 'export ENROOT_CACHE_PATH=${ENROOT_CACHE_PATH:-$NODE_LOCAL_ROOT/enroot/cache}' in ray_sub
+    assert 'export HF_HOME="${NODE_LOCAL_ROOT}/hf-home"' in ray_sub
+    assert 'export WANDB_DIR="${NODE_LOCAL_ROOT}/wandb"' in ray_sub
+    assert "setup_integration_venv.sbatch" not in (BUNDLE / "README.md").read_text()
+    assert (BUNDLE / "build_integration_sqsh.sbatch").is_file()

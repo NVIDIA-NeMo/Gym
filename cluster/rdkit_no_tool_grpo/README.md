@@ -9,7 +9,13 @@ Megatron LoRA GRPO in NeMo-RL v0.6.0. It is pinned to Gym commit
 ```
 
 All model/container work runs through Slurm. The login node only stages code
-and submits jobs.
+and submits jobs. Every allocation copies the bounded Gym checkout to
+`/raid/scratch/$USER` before Python starts; Python never imports or executes
+from Lustre. Enroot, Hugging Face, UV, W&B, and server virtual-environment
+caches are node-local. Checkpoints, logs, model directories, and prepared JSONL
+files are persisted on Lustre as artifacts. This no-tool RDKit environment has
+no SQLite database. Environments that do use SQLite must copy the database and
+its `-wal` and `-shm` companions to `/raid/scratch` before opening it.
 
 ## Initialization and training
 
@@ -45,20 +51,19 @@ From the worktree, with `WANDB_API_KEY` exported:
 
 ```bash
 sbatch cluster/rdkit_no_tool_grpo/import_nemo_rl_sqsh_direct.sbatch
-sbatch cluster/rdkit_no_tool_grpo/setup_integration_venv.sbatch
+sbatch cluster/rdkit_no_tool_grpo/build_integration_sqsh.sbatch
 sbatch cluster/rdkit_no_tool_grpo/merge_es_adapter.sbatch
 sbatch cluster/rdkit_no_tool_grpo/preflight_resource_server.sbatch
 sbatch cluster/rdkit_no_tool_grpo/validate_merged_model.sbatch
 cluster/rdkit_no_tool_grpo/submit_smoke.sh
 ```
 
-The integration venv is a small `--system-site-packages` overlay because the
-NeMo-RL v0.6 image lacks both Hugging Face PEFT and the dependencies needed to
-import the pinned Gym checkout. It installs Gym editable without resolving its
-broad dependency set, pins only `openai==2.6.1` and `peft==0.17.1`, and reuses
-the image's Ray, Torch, Transformers, Accelerate, and Safetensors packages.
-Each later job should use an `afterok` dependency on the preceding gate. After
-the one-update 64-GPU smoke completes:
+The derived integration squashfs adds only `openai==2.6.1` and `peft==0.17.1`
+to the image's Python environment. Gym itself is not installed into a
+Lustre-backed virtual environment: the node-local staged checkout is placed on
+`PYTHONPATH`, while the image supplies Ray, Torch, Transformers, Accelerate,
+and Safetensors. Each later job should use an `afterok` dependency on the
+preceding gate. After the one-update 64-GPU smoke completes:
 
 ```bash
 START_DEPENDENCY=afterok:<smoke_job_id> \
