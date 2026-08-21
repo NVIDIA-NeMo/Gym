@@ -44,7 +44,7 @@ experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%
 # +uv_venv_dir=/opt/uv_venvs is from the container.
 # +skip_venv_if_present=true will reuse the venvs baked into the container if possible.
 # ++use_absolute_ip=true: Necessary for communication between harness in sandbox and Gym model servers
-# ++upload_rollouts_to_wandb=false: Rollouts file is massive. We leave on the cluster.
+# ++upload_rollouts=false: Rollouts file is massive. We leave on the cluster.
 # global_aiohttp_connector_limit_per_host: 16k concurrent requests should be enough. We can raise further if our inference is efficient enough to support.
 # port_range_low, port_range_high: Move into ephemeral ports
 gym eval run \
@@ -62,7 +62,7 @@ gym eval run \
     ++policy_base_url=http://\$(getent hosts "\$ROUTER_NODE" | awk 'NR == 1 {print \$1}'):$ROUTER_SERVER_PORT/v1 \
     ++policy_api_key=dummy_api_key \
     ++policy_model_name=$MODEL \
-    ++upload_rollouts_to_wandb=false \
+    ++upload_rollouts=false \
     ++global_aiohttp_connector_limit_per_host=16384 \
     ++port_range_low=63000 \
     ++port_range_high=64000

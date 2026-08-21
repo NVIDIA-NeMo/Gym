@@ -41,7 +41,7 @@ from nemo_gym.rollout_collection import (
     _expand_input_glob,
     _failures_path_for,
     _get_max_rollout_attempts,
-    _rollout_for_wandb,
+    _rollout_for_export,
     _rollout_request_debug_summary,
     loads_jsonl_line,
 )
@@ -61,6 +61,33 @@ class TestLoadsJsonlLine:
     def test_malformed_line_raises_config_error_with_location(self) -> None:
         with pytest.raises(ConfigError, match=r"Malformed JSON in 'f.jsonl' at line 3"):
             loads_jsonl_line("{not json", "f.jsonl", 3)
+
+
+class TestUploadRolloutsDeprecation:
+    BASE = {"input_jsonl_fpath": "in.jsonl", "output_jsonl_fpath": "out.jsonl"}
+
+    def test_defaults_to_true(self) -> None:
+        assert RolloutCollectionConfig.model_validate(self.BASE).upload_rollouts
+
+    def test_deprecated_key_maps_and_warns(self) -> None:
+        with pytest.warns(DeprecationWarning, match="upload_rollouts_to_wandb"):
+            config = RolloutCollectionConfig.model_validate({**self.BASE, "upload_rollouts_to_wandb": False})
+
+        assert not config.upload_rollouts
+
+    def test_new_key_wins_over_the_deprecated_one(self) -> None:
+        with pytest.warns(DeprecationWarning):
+            config = RolloutCollectionConfig.model_validate(
+                {**self.BASE, "upload_rollouts_to_wandb": False, "upload_rollouts": True}
+            )
+
+        assert config.upload_rollouts
+
+    def test_new_key_alone_does_not_warn(self, recwarn) -> None:
+        config = RolloutCollectionConfig.model_validate({**self.BASE, "upload_rollouts": False})
+
+        assert not config.upload_rollouts
+        assert not [w for w in recwarn if issubclass(w.category, DeprecationWarning)]
 
 
 class TestGetMaxRolloutAttempts:
@@ -260,7 +287,7 @@ class TestRolloutCollection:
             {"code": "trajectory_projection_failed", "invocation_id": None, "detail": "ValueError"}
         ]
 
-    def test_rollout_for_wandb_omits_new_trajectory_and_raw_capture_payloads(self) -> None:
+    def test_rollout_for_export_omits_new_trajectory_and_raw_capture_payloads(self) -> None:
         result = {
             "response": {"output": "existing rollout content"},
             "ng_trajectory": {"invocations": [{"conversation": ["trajectory secret"]}]},
@@ -277,7 +304,7 @@ class TestRolloutCollection:
             },
         }
 
-        sanitized = _rollout_for_wandb(result)
+        sanitized = _rollout_for_export(result)
 
         assert "ng_trajectory" not in sanitized
         assert sanitized["ng_model_call_capture"]["calls"] == [{"model_call_id": "model-1"}]
@@ -290,7 +317,7 @@ class TestRolloutCollection:
             {"ng_model_call_capture": {"calls": ["secret", {"request": "secret"}]}},
         )
         for malformed_result in malformed:
-            sanitized = _rollout_for_wandb(malformed_result)
+            sanitized = _rollout_for_export(malformed_result)
             assert b"secret" not in orjson.dumps(sanitized)
 
     @pytest.mark.parametrize("request_debug_enabled", [True, False])
@@ -972,6 +999,57 @@ class TestRolloutCollection:
         assert store.read("0-0")[0]["request"]["input"][0]["type"] == "input_image"
         if redact_payloads:
             assert "data:image/png;base64,secret" not in orjson.dumps(results[0]).decode()
+
+    async def test_run_from_config_keys_capture_by_an_explicit_rollout_id(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from nemo_gym.base_responses_api_model import CaptureStore
+        from nemo_gym.global_config import ROLLOUT_ID_KEY_NAME
+
+        capture_dir = tmp_path / "captures"
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "get_global_config_dict",
+            lambda: {"observability_enabled": True, "model_call_capture_dir": str(capture_dir)},
+        )
+
+        # These indices would derive ``0-0``.
+        # The explicit id must win for both writer and consumer.
+        # Otherwise readback finds no matching capture.
+        source_row = {
+            "responses_create_params": {"input": []},
+            AGENT_REF_KEY_NAME: {"name": "agent"},
+            ROLLOUT_ID_KEY_NAME: "step7.0-0",
+        }
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes(orjson.dumps(source_row) + b"\n")
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            resume_from_cache=False,
+            disable_aggregation=True,
+        )
+
+        store = CaptureStore(capture_dir)
+
+        class Helper(RolloutCollectionHelper):
+            def run_examples(self, examples, *args, **kwargs):
+                [example] = examples
+                store.record(
+                    "step7.0-0",
+                    {"model_call_id": "call", "dialect": "responses", "request": {}, "response": {}},
+                )
+                future = Future()
+                future.set_result((example, {"response": {"usage": {}}}))
+                return [future]
+
+        results = await Helper().run_from_config(config)
+
+        assert results[0][ROLLOUT_ID_KEY_NAME] == "step7.0-0"
+        assert [call["model_call_id"] for call in results[0]["ng_model_call_capture"]["calls"]] == ["call"]
+        # No capture uses the derived id.
+        # The explicit id replaces it.
+        assert store.read("0-0") == []
 
     async def test_run_from_config_sorted(self, tmp_path: Path, empty_global_config: MagicMock) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"

@@ -10,7 +10,10 @@ import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+CICD_MAIN_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "cicd-main.yml"
+CLASSIFY_CHANGES_ACTION = REPO_ROOT / ".github" / "actions" / "classify-changes" / "action.yml"
 FULL_TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "full-test-suite.yml"
+GPU_E2E_SCRIPT = REPO_ROOT / "tests" / "e2e" / "gpu_e2e_test.sh"
 GITLAB_PIPELINE = REPO_ROOT / ".gitlab-ci.yml"
 IS_RETRYABLE_FULL_SUITE_FAILURE = REPO_ROOT / "scripts" / "ci" / "is_retryable_full_suite_failure.sh"
 RECLAIM_RUNNER_DISK = REPO_ROOT / "scripts" / "ci" / "reclaim_runner_disk.sh"
@@ -18,6 +21,7 @@ RETRY_FULL_TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "retry-full-tes
 SANITIZER = REPO_ROOT / "scripts" / "ci" / "sanitize_env.sh"
 SERVER_TESTS = REPO_ROOT / "scripts" / "ci" / "server_tests.sh"
 SETUP_DEV = REPO_ROOT / "scripts" / "ci" / "setup_dev.sh"
+TEST_TEMPLATE_ACTION = REPO_ROOT / ".github" / "actions" / "test-template" / "action.yml"
 UNIT_TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "unit-tests.yml"
 
 BEHAVIOR_CHANGING_ENV = {
@@ -174,6 +178,109 @@ def test_github_full_test_jobs_reclaim_disk_before_dependency_restore() -> None:
         sections = workflow.split("- name: Reclaim runner disk")
         for section in sections[1:]:
             assert section.index("reclaim_runner_disk.sh") < section.index("Cache uv dependencies")
+
+
+def test_cicd_main_wires_preflight_cpu_and_gpu_workflows() -> None:
+    workflow = CICD_MAIN_WORKFLOW.read_text()
+
+    assert "      - main\n" in workflow
+    assert '      - "pull-request/[0-9]+"\n' in workflow
+    assert "deploy-release" not in workflow
+    assert "schedule:" not in workflow
+    assert "workflow_dispatch:" not in workflow
+    assert "  contents: read\n" in workflow
+    assert "  pull-requests: read\n" in workflow
+    assert "id-token:" not in workflow
+    assert "uses: ./.github/workflows/unit-tests.yml" in workflow
+    assert workflow.count("base-ref: ${{ needs.pre-flight.outputs.base_ref }}") == 2
+    assert "uses: ./.github/actions/classify-changes" in workflow
+    assert "uses: ./.github/actions/test-template" in workflow
+    assert "base-ref: ${{ needs.pre-flight.outputs.base_ref }}" in workflow
+    assert "needs: [pre-flight, classify_changes, unit_tests]" in workflow
+    assert "needs: [pre-flight, classify_changes, unit_tests, container_build]" in workflow
+    assert workflow.count("if: needs.classify_changes.outputs.docs_only != 'true'") == 3
+    assert "needs.pre-flight.outputs.docs_only" not in workflow
+    assert "runs-on: ${{ needs.pre-flight.outputs.runner_prefix }}" in workflow
+    assert "matrix:" in workflow
+    assert "script: ${{ matrix.script }}" in workflow
+    assert "test-type: ${{ matrix.test_type }}" in workflow
+    assert "test-data-path: ${{ needs.pre-flight.outputs.test_data_path }}" in workflow
+    assert "container-image: ${{ needs.container_build.outputs.image }}" in workflow
+
+
+def test_cicd_container_build_pushes_sha_image_after_unit_tests() -> None:
+    workflow = CICD_MAIN_WORKFLOW.read_text()
+
+    assert "name: Build Gym container" in workflow
+    assert "runs-on: ${{ needs.pre-flight.outputs.runner_prefix }}" in workflow
+    assert "uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f" in workflow
+    assert "uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25" in workflow
+    assert "build-contexts: nemo-gym=." in workflow
+    assert "target: release" in workflow
+    assert "push: true" in workflow
+    assert 'echo "image=$REGISTRY/gym:$GITHUB_SHA"' in workflow
+    assert "cache-from: type=registry" in workflow
+    assert "cache-to: type=registry" in workflow
+
+
+def test_cicd_summary_accepts_only_expected_docs_only_skips() -> None:
+    workflow = CICD_MAIN_WORKFLOW.read_text()
+
+    assert "needs: [pre-flight, classify_changes, unit_tests, container_build, gpu_e2e_tests]" in workflow
+    assert "if: always() && !cancelled()" in workflow
+    assert '"$PREFLIGHT_RESULT" != "success"' in workflow
+    assert '"$CLASSIFY_RESULT" != "success"' in workflow
+    assert '"$DOCS_ONLY" == "true"' in workflow
+    assert '"$CONTAINER_BUILD_RESULT" == "skipped"' in workflow
+    assert '"$CONTAINER_BUILD_RESULT" == "success"' in workflow
+
+
+def test_shared_change_classifier_matches_gym_docs_and_server_paths() -> None:
+    action = CLASSIFY_CHANGES_ACTION.read_text()
+    unit_workflow = UNIT_TEST_WORKFLOW.read_text()
+
+    for path in ("**.md", "fern/**", "LICENSE", "benchmarks/**"):
+        assert path in action
+    for path in ("resources_servers/**", "responses_api_agents/**", "responses_api_models/**"):
+        assert path in action
+
+    assert "uses: ./.github/actions/classify-changes" in unit_workflow
+    assert "base-ref: ${{ inputs.base-ref || github.event.pull_request.base.sha || '' }}" in unit_workflow
+    assert "force-run-all: ${{ inputs.base-ref == '' && github.event_name != 'pull_request' }}" in unit_workflow
+    assert "gh pr view" not in action
+    assert "DOCS_ONLY_LABEL" not in action
+
+
+def test_test_template_runs_cpu_or_gpu_script_in_container() -> None:
+    action = TEST_TEMPLATE_ACTION.read_text()
+
+    assert '        case "$TEST_TYPE" in' in action
+    assert "          cpu)" in action
+    assert "          gpu)" in action
+    assert "gpu_args=(--runtime=nvidia --gpus all)" in action
+    assert 'docker pull "$CONTAINER_IMAGE"' in action
+    assert '--volume "$TEST_DATA_PATH:$TEST_DATA_PATH"' in action
+    assert '-e -u -o pipefail "$TEST_SCRIPT"' in action
+    assert "continue-on-error: true" in action
+    assert "      if: always()" in action
+    assert "TEST_OUTCOME: ${{ steps.test.outcome }}" in action
+    assert 'echo "::notice title=Test result::$TEST_SCRIPT — PASSED"' in action
+    assert 'echo "::error title=Test result::$TEST_SCRIPT — FAILED"' in action
+    assert '} >> "$GITHUB_STEP_SUMMARY"' in action
+    assert "┌─ launching test ─" in action
+    assert "║   ✅  PASSED" in action
+    assert "║   ❌  FAILED" in action
+    assert action.count("required: true") == 4
+
+
+def test_gpu_e2e_matrix_uses_placeholder_script() -> None:
+    workflow = CICD_MAIN_WORKFLOW.read_text()
+
+    assert "fail-fast: false" in workflow
+    assert "- name: GPU E2E - NVIDIA SMI" in workflow
+    assert "script: ./tests/e2e/gpu_e2e_test.sh" in workflow
+    assert "test_type: gpu" in workflow
+    assert GPU_E2E_SCRIPT.read_text().rstrip().endswith("nvidia-smi")
 
 
 def test_runner_disk_reclamation_fails_fast_when_space_is_still_low(tmp_path: Path) -> None:

@@ -115,7 +115,15 @@ def _render_service_command(
 
 
 def _build_vllm_command(service: VllmServiceConfig) -> str:
-    cmd = f"vllm serve {shlex.quote(service.model)} --port {service.port} --tensor-parallel-size {service.tensor_parallel_size}"
+    cmd = (
+        f"vllm serve {shlex.quote(service.model)}"
+        f" --port {service.port}"
+        f" --tensor-parallel-size {service.tensor_parallel_size}"
+    )
+    if service.pipeline_parallel_size > 1:
+        cmd += f" --pipeline-parallel-size {service.pipeline_parallel_size}"
+    if service.number_of_instances > 1:
+        cmd += f" --data-parallel-size {service.number_of_instances}"
     if service.trust_remote_code:
         cmd += " --trust-remote-code"
     return cmd
