@@ -1,0 +1,25 @@
+config_paths:
+  - responses_api_agents/legal_agent_bench_agent/configs/legal_agent_bench_claude_code.yaml
+
+legal_agent_bench_benchmark_claude_code_resources_server:
+  _inherit_from: legal_agent_bench
+  resources_servers:
+    legal_agent_bench:
+      description: Configurable-agent integration of Legal Agent Benchmark (LAB) using Claude Code
+
+legal_agent_bench_benchmark_claude_code_agent:
+  _inherit_from: legal_agent_bench_claude_code_agent
+  responses_api_agents:
+    legal_agent_bench_agent:
+      resources_server:
+        type: resources_servers
+        name: legal_agent_bench_benchmark_claude_code_resources_server
+      runtime_tasks_dir: ${legal_agent_bench_benchmark_claude_code_resources_server.resources_servers.legal_agent_bench.harbor_tasks_dir}
+      skills_dir: ${legal_agent_bench_benchmark_claude_code_resources_server.resources_servers.legal_agent_bench.harness_skills_dir}
+      datasets:
+        - name: legal_agent_bench
+          type: benchmark
+          jsonl_fpath: benchmarks/legal_agent_bench/data/legal_agent_bench_benchmark.jsonl
+          prompt_config: null
+          prepare_script: benchmarks/legal_agent_bench/prepare.py
+          num_repeats: 1

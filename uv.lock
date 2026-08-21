@@ -3340,7 +3340,7 @@ wheels = [
 
 [[package]]
 name = "openshell"
-version = "0.0.92"
+version = "0.0.103"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cloudpickle" },
@@ -3349,9 +3349,9 @@ dependencies = [
     { name = "protobuf" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/cc/e3/be7c389ae1b12312b302da847b82734475d2689188d2a19645ac8c1223c8/openshell-0.0.92-py3-none-macosx_13_0_arm64.whl", hash = "sha256:3d673a98e66520eabd4b06fbff126d55718fb92c868fbfeb994adb34970a4796", size = 8470512, upload-time = "2026-07-27T15:32:55.574Z" },
-    { url = "https://files.pythonhosted.org/packages/5f/ca/604e9a4b9701f11c51ca4129699ca3a548aad734254431bdfcda48f17e15/openshell-0.0.92-py3-none-manylinux_2_39_aarch64.whl", hash = "sha256:036fa76cd89dd49375405edde55ee35f72c0a3bd22f990942a336f4ededf15ef", size = 8532736, upload-time = "2026-07-27T15:33:16.548Z" },
-    { url = "https://files.pythonhosted.org/packages/4c/fc/24a15a862925d19b1d318be2796aa996233dc30b1b9e3c4862ec1039c6f4/openshell-0.0.92-py3-none-manylinux_2_39_x86_64.whl", hash = "sha256:8a20fea53ffff0c6127ca3f6841fb4b268ced1ccb03917cdbf278e419c1e9fdf", size = 9018946, upload-time = "2026-07-27T15:33:37.985Z" },
+    { url = "https://files.pythonhosted.org/packages/6b/67/2ce32a11297ba68cdb2b26b276f5ccd1e97e869e90ce4e51925b18aa2b80/openshell-0.0.103-py3-none-macosx_13_0_arm64.whl", hash = "sha256:d1c467a0c6925385c415fb8856a3c9ec627b7e51b711c6b33cfea51d718d965d", size = 8493933, upload-time = "2026-08-11T15:07:59.193Z" },
+    { url = "https://files.pythonhosted.org/packages/31/42/4d25a11e8ff20690b0f63c254d8cc870faf793722f89e9ca8617bda19577/openshell-0.0.103-py3-none-manylinux_2_39_aarch64.whl", hash = "sha256:b623addf09fea656f66306201877c5259fd7a20aaa9a15a704ee97a669535cd6", size = 8562102, upload-time = "2026-08-11T15:08:17.257Z" },
+    { url = "https://files.pythonhosted.org/packages/b5/4b/33bce6de7993704f1acc00e5b6d476f292b3ae724fbf65121aadcf61724b/openshell-0.0.103-py3-none-manylinux_2_39_x86_64.whl", hash = "sha256:b0e961425bcdfed930967efd89f806e24142436c34a30234d4dc888f92fec8d0", size = 9055035, upload-time = "2026-08-11T15:08:41.267Z" },
 ]
 
 [[package]]

@@ -7,6 +7,9 @@ import hashlib
 import io
 import json
 import tarfile
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -90,7 +93,12 @@ def test_generated_task_cache_is_deterministic_and_credential_free(monkeypatch, 
         "legal_agent_bench::area__task-group__scenario-01",
         "legal_agent_bench::area__task-one",
     ]
-    assert all(row["agent_ref"]["name"] == "legal_agent_bench_harbor_agent" for row in rows)
+    assert all("agent_ref" not in row for row in rows)
+    dockerfile = (first / "area__task-one" / "environment" / "Dockerfile").read_text(encoding="utf-8")
+    assert "iproute2" in dockerfile
+    assert "groupadd --gid 1000660000 sandbox" in dockerfile
+    assert "useradd -K UID_MAX=1000660000" in dockerfile
+    assert "install -d -o sandbox -g sandbox /workspace/output" in dockerfile
     for toml in first.glob("*/task.toml"):
         text = toml.read_text(encoding="utf-8")
         assert "[verifier.env]" not in text
@@ -110,6 +118,31 @@ def test_existing_valid_caches_skip_network(monkeypatch, tmp_path) -> None:
 
     assert result == {"tasks": tasks, "skills": skills}
     assert (tmp_path / "all.jsonl").read_bytes() == (tasks / prepare.INDEX_FILENAME).read_bytes()
+
+
+def test_legacy_harbor_index_migrates_without_network(monkeypatch, tmp_path) -> None:
+    _source, tasks, _skills = _build_caches(monkeypatch, tmp_path)
+    index_path = tasks / prepare.INDEX_FILENAME
+    legacy_rows = []
+    for line in index_path.read_text(encoding="utf-8").splitlines():
+        row = json.loads(line)
+        row["agent_ref"] = {
+            "name": "legal_agent_bench_harbor_agent",
+            "type": "responses_api_agents",
+        }
+        legacy_rows.append(json.dumps(row, sort_keys=True) + "\n")
+    index_path.write_text("".join(legacy_rows), encoding="utf-8")
+    monkeypatch.setattr(
+        prepare,
+        "_download_source_archive",
+        lambda _path: pytest.fail("the exact legacy index must migrate without a source download"),
+    )
+
+    result = prepare.prepare_assets("tasks", tasks_dir=tasks)
+
+    assert result == {"tasks": tasks}
+    assert all("agent_ref" not in json.loads(line) for line in index_path.read_text().splitlines())
+    prepare.validate_harbor_tasks(tasks)
 
 
 def test_missing_assets_download_extract_and_install(monkeypatch, tmp_path) -> None:
@@ -234,6 +267,66 @@ def test_runtime_hydration_can_reuse_a_validated_cache(monkeypatch, tmp_path) ->
     )
 
     assert (runtime / "area__task-one" / "task.toml").is_file()
+
+
+def test_directory_replacement_is_serialized_across_concurrent_publishers(monkeypatch, tmp_path) -> None:
+    target = tmp_path / "runtime"
+    target.mkdir()
+    (target / "value").write_text("old")
+    sources = []
+    for value in ("first", "second"):
+        source = tmp_path / value
+        source.mkdir()
+        (source / "value").write_text(value)
+        sources.append(source)
+
+    original_rename = Path.rename
+    active_renames = 0
+    maximum_active_renames = 0
+    counter_lock = threading.Lock()
+
+    def slow_rename(path: Path, destination: Path) -> Path:
+        nonlocal active_renames, maximum_active_renames
+        with counter_lock:
+            active_renames += 1
+            maximum_active_renames = max(maximum_active_renames, active_renames)
+        try:
+            time.sleep(0.02)
+            return original_rename(path, destination)
+        finally:
+            with counter_lock:
+                active_renames -= 1
+
+    monkeypatch.setattr(Path, "rename", slow_rename)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(lambda source: prepare._replace_directory(source, target), sources))
+
+    assert maximum_active_renames == 1
+    assert (target / "value").read_text() in {"first", "second"}
+    assert not target.with_name(".runtime.backup").exists()
+
+
+def test_directory_replacement_restores_stale_backup_before_failed_publish(monkeypatch, tmp_path) -> None:
+    target = tmp_path / "runtime"
+    backup = tmp_path / ".runtime.backup"
+    source = tmp_path / "new"
+    backup.mkdir()
+    source.mkdir()
+    (backup / "value").write_text("preserved")
+
+    original_rename = Path.rename
+
+    def fail_new_publish(path: Path, destination: Path) -> Path:
+        if path == source:
+            raise OSError("publish failed")
+        return original_rename(path, destination)
+
+    monkeypatch.setattr(Path, "rename", fail_new_publish)
+    with pytest.raises(OSError, match="publish failed"):
+        prepare._replace_directory(source, target)
+
+    assert (target / "value").read_text() == "preserved"
+    assert not backup.exists()
 
 
 def test_missing_public_skill_fails_clearly(monkeypatch, tmp_path) -> None:

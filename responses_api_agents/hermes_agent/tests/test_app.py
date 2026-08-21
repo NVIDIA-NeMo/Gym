@@ -35,6 +35,7 @@ from responses_api_agents.hermes_agent.app import (
     ResourcesServerRef,
     _split_input_to_user_and_history,
     _trajectory_to_output_items,
+    _usage_from_result,
 )
 from responses_api_agents.hermes_agent.observability import HermesAgentObserver
 
@@ -273,6 +274,43 @@ class TestTrajectoryToOutputItems:
         assert len(out) == 1
 
 
+class TestUsageFromResult:
+    def test_maps_hermes_session_counters(self) -> None:
+        usage = _usage_from_result(
+            {
+                "input_tokens": 100,
+                "cache_read_tokens": 20,
+                "cache_write_tokens": 5,
+                "prompt_tokens": 125,
+                "output_tokens": 40,
+                "reasoning_tokens": 10,
+                "total_tokens": 165,
+            }
+        )
+
+        assert usage.input_tokens == 125
+        assert usage.input_tokens_details.cached_tokens == 20
+        assert usage.output_tokens == 40
+        assert usage.output_tokens_details.reasoning_tokens == 10
+        assert usage.total_tokens == 165
+
+    def test_reconstructs_totals_when_aggregate_counters_are_missing(self) -> None:
+        usage = _usage_from_result(
+            {
+                "input_tokens": 100,
+                "cache_read_tokens": 20,
+                "cache_write_tokens": 5,
+                "completion_tokens": 40,
+            }
+        )
+
+        assert usage.input_tokens == 125
+        assert usage.input_tokens_details.cached_tokens == 20
+        assert usage.output_tokens == 40
+        assert usage.output_tokens_details.reasoning_tokens == 0
+        assert usage.total_tokens == 165
+
+
 class TestRolloutCorrelation:
     def test_responses_applies_rollout_prefix(self, monkeypatch) -> None:
         from fastapi.testclient import TestClient
@@ -296,7 +334,12 @@ class TestRolloutCorrelation:
                 self.compression_enabled = True
 
             def run_conversation(self, *args, **kwargs) -> dict:
-                return {"messages": [{"role": "assistant", "content": "ok"}]}
+                return {
+                    "messages": [{"role": "assistant", "content": "ok"}],
+                    "prompt_tokens": 12,
+                    "output_tokens": 3,
+                    "total_tokens": 15,
+                }
 
         monkeypatch.setattr("run_agent.AIAgent", _StubAIAgent)
         client = TestClient(agent.setup_webserver())
@@ -307,6 +350,9 @@ class TestRolloutCorrelation:
         direct = asyncio.run(agent.responses(request=None, body=NeMoGymResponseCreateParamsNonStreaming(input="hi")))
         assert seen["base_url"] == "http://h:1/v1"
         assert "_ng_agent_observations" not in direct.model_dump(mode="json")
+        assert direct.usage.input_tokens == 12
+        assert direct.usage.output_tokens == 3
+        assert direct.usage.total_tokens == 15
 
         episode = asyncio.run(
             agent._create_episode(
@@ -317,6 +363,80 @@ class TestRolloutCorrelation:
         assert seen["base_url"] == "http://h:1/ng-rollout/rid/v1"
         assert episode.observations.source == "hermes"
         assert episode.observations.records[0].invocation_id == "root"
+
+    def test_partial_output_preserves_trajectory_and_marks_response_failed(self, monkeypatch) -> None:
+        import nemo_gym.base_responses_api_agent as base_agent
+        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+
+        monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _gc, _name: {"host": "h", "port": 1})
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {}
+        server_client._build_server_base_url = lambda _cfg: "http://h:1"
+        agent = HermesAgent(config=_config(), server_client=server_client)
+        monkeypatch.setattr(agent, "_ensure_sigterm_handler", lambda: None)
+
+        class _StubAIAgent:
+            def __init__(self, **kwargs) -> None:
+                self._build_api_kwargs = lambda _messages: {}
+                self.compression_enabled = True
+
+            def run_conversation(self, *args, **kwargs) -> dict:
+                return {
+                    "messages": [{"role": "assistant", "content": "partial answer"}],
+                    "error": "model stream disconnected",
+                    "prompt_tokens": 12,
+                    "output_tokens": 3,
+                    "total_tokens": 15,
+                }
+
+        monkeypatch.setattr("run_agent.AIAgent", _StubAIAgent)
+        response = asyncio.run(agent.responses(request=None, body=NeMoGymResponseCreateParamsNonStreaming(input="hi")))
+
+        assert response.output
+        assert response.status == "failed"
+        assert response.error is not None
+        assert "stream disconnected" in response.error.message
+
+    @pytest.mark.parametrize(
+        ("result_update", "stop_reason"),
+        [
+            ({"completed": False, "api_calls": 30}, "max_turns"),
+            ({"error": "maximum context length exceeded"}, "context_limit"),
+        ],
+    )
+    def test_limit_output_is_a_scoreable_incomplete_outcome(self, monkeypatch, result_update, stop_reason) -> None:
+        import nemo_gym.base_responses_api_agent as base_agent
+        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+
+        monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _gc, _name: {"host": "h", "port": 1})
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {}
+        server_client._build_server_base_url = lambda _cfg: "http://h:1"
+        agent = HermesAgent(config=_config(max_turns=30), server_client=server_client)
+        monkeypatch.setattr(agent, "_ensure_sigterm_handler", lambda: None)
+
+        class _StubAIAgent:
+            def __init__(self, **kwargs) -> None:
+                self._build_api_kwargs = lambda _messages: {}
+                self.compression_enabled = True
+
+            def run_conversation(self, *args, **kwargs) -> dict:
+                return {
+                    "messages": [{"role": "assistant", "content": "partial answer"}],
+                    "prompt_tokens": 12,
+                    "output_tokens": 3,
+                    "total_tokens": 15,
+                    **result_update,
+                }
+
+        monkeypatch.setattr("run_agent.AIAgent", _StubAIAgent)
+        response = asyncio.run(agent.responses(request=None, body=NeMoGymResponseCreateParamsNonStreaming(input="hi")))
+
+        assert response.output
+        assert response.status == "incomplete"
+        assert response.error is None
+        assert response.incomplete_details.reason == "max_output_tokens"
+        assert response.metadata == {"nemo_gym_stop_reason": stop_reason}
 
 
 class TestMaxTokens:

@@ -32,13 +32,26 @@ pytestmark = pytest.mark.sandbox
 pytest.importorskip("openshell", reason="openshell optional dependency is not installed")
 
 import grpc  # noqa: E402  (grpcio ships with the openshell SDK)
-from openshell import SandboxError, SandboxRef, SandboxStatusRef  # noqa: E402
+from openshell import SandboxClient, SandboxError, SandboxRef  # noqa: E402
 from openshell._proto import openshell_pb2, sandbox_pb2  # noqa: E402
+
+
+try:  # OpenShell 0.0.92+ nests lifecycle state in SandboxStatusRef.
+    from openshell import SandboxStatusRef  # type: ignore[attr-defined]  # noqa: E402
+except ImportError:  # OpenShell 0.0.36 exposes phase directly on SandboxRef.
+    SandboxStatusRef = None  # type: ignore[assignment,misc]
+
+
+WORKSPACE_SDK = "workspace" in inspect.signature(SandboxClient.create).parameters
+RESOURCE_REQUIREMENTS_SDK = "resource_requirements" in openshell_pb2.SandboxSpec.DESCRIPTOR.fields_by_name
+DRIVER_CONFIG_SDK = "driver_config" in openshell_pb2.SandboxTemplate.DESCRIPTOR.fields_by_name
 
 from nemo_gym.sandbox.providers.openshell import provider as openshell_provider  # noqa: E402
 from nemo_gym.sandbox.providers.openshell.provider import (  # noqa: E402
+    MAX_SANDBOX_NAME_LENGTH,
     SANDBOX_LABEL,
     SANDBOX_NAME_PREFIX,
+    SANDBOX_NAME_RANDOM_HEX,
     SANDBOX_RUNTIME_RETURN_CODE,
     OpenShellConnectionConfig,
     OpenShellCreateConfig,
@@ -49,6 +62,7 @@ from nemo_gym.sandbox.providers.openshell.provider import (  # noqa: E402
     OpenShellProbeConfig,
     OpenShellProvider,
     OpenShellProviderOptions,
+    _new_sandbox_name,
     _OpenShellSandbox,
 )
 
@@ -71,7 +85,9 @@ def make_ref(
     name: str = "nemo-gym-test",
     workspace: str = "default",
 ) -> SandboxRef:
-    """A real SDK SandboxRef, so tests exercise the SDK's actual shape (nested status/phase)."""
+    """A real SDK SandboxRef, exercising the installed SDK's lifecycle-result shape."""
+    if SandboxStatusRef is None:
+        return SandboxRef(id=sandbox_id, name=name, namespace=workspace, phase=phase)
     return SandboxRef(
         id=sandbox_id,
         name=name,
@@ -157,6 +173,22 @@ class FakeClient:
         self.close_calls += 1
 
 
+class LegacyFakeClient(FakeClient):
+    """OpenShell's pre-workspace lifecycle API used by local gateway 0.0.36."""
+
+    def create(self, *, spec: Any = None) -> Any:
+        self.create_calls.append({"spec": spec})
+        return self._next(self.create_results)
+
+    def get(self, sandbox_name: str) -> Any:
+        self.get_calls.append({"name": sandbox_name})
+        return self._next(self.get_results)
+
+    def delete(self, sandbox_name: str) -> Any:
+        self.delete_calls.append({"name": sandbox_name})
+        return self._next(self.delete_results)
+
+
 @pytest.fixture(autouse=True)
 def clear_shared_clients() -> Any:
     openshell_provider._SHARED_CLIENTS.clear()
@@ -230,21 +262,78 @@ def test_missing_openshell_dependency_message(monkeypatch: pytest.MonkeyPatch) -
         openshell_provider._require_openshell()
 
 
+def test_generated_name_respects_openshell_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(openshell_provider.uuid, "uuid4", lambda: SimpleNamespace(hex="a" * 32))
+    name = _new_sandbox_name()
+    assert name == SANDBOX_NAME_PREFIX + "a" * SANDBOX_NAME_RANDOM_HEX
+    assert len(name) == MAX_SANDBOX_NAME_LENGTH
+
+
 def test_provider_call_shapes_bind_against_installed_sdk() -> None:
     """Bind the provider's exact SDK call shapes against the installed openshell signatures.
 
     This is the drift guard: an SDK release that changes a lifecycle signature (like 0.0.92
     adding required ``workspace``) fails here even though the unit tests run against fakes.
     """
-    from openshell import SandboxClient
-
-    inspect.signature(SandboxClient.create).bind(None, workspace="w", spec=None, name="n", labels={})
-    inspect.signature(SandboxClient.get).bind(None, "n", workspace="w")
-    inspect.signature(SandboxClient.delete).bind(None, "n", workspace="w")
+    if WORKSPACE_SDK:
+        inspect.signature(SandboxClient.create).bind(None, workspace="w", spec=None, name="n", labels={})
+        inspect.signature(SandboxClient.get).bind(None, "n", workspace="w")
+        inspect.signature(SandboxClient.delete).bind(None, "n", workspace="w")
+    else:
+        inspect.signature(SandboxClient.create).bind(None, spec=None)
+        inspect.signature(SandboxClient.get).bind(None, "n")
+        inspect.signature(SandboxClient.delete).bind(None, "n")
     inspect.signature(SandboxClient.exec).bind(
         None, "sid", ["/bin/sh", "-c", "true"], workdir=None, env=None, stdin=None, timeout_seconds=None
     )
     inspect.signature(SandboxClient.close).bind(None)
+
+
+@pytest.mark.asyncio
+async def test_legacy_lifecycle_api_omits_unsupported_workspace_name_and_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = LegacyFakeClient()
+    client.get_results = [
+        make_ref(openshell_pb2.SANDBOX_PHASE_READY),
+        FakeRpcError(grpc.StatusCode.NOT_FOUND),
+    ]
+    monkeypatch.setattr(openshell_provider, "_build_client", lambda _connection: client)
+    provider = OpenShellProvider(
+        create={"poll_interval_s": 0.01},
+        probe={"command": None},
+        operations={"poll_interval_s": 0.01},
+    )
+
+    handle = await provider.create(SandboxSpec(metadata={"purpose": "test"}))
+    await provider.close(handle)
+
+    assert client.create_calls == [{"spec": client.create_calls[0]["spec"]}]
+    assert client.get_calls == [{"name": "nemo-gym-test"}, {"name": "nemo-gym-test"}]
+    assert client.delete_calls == [{"name": "nemo-gym-test"}]
+
+
+@pytest.mark.asyncio
+async def test_legacy_lifecycle_api_rejects_workspace_and_does_not_retry_ambiguous_create(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = LegacyFakeClient()
+    client.create_results = [FakeRpcError(grpc.StatusCode.UNAVAILABLE)]
+    monkeypatch.setattr(openshell_provider, "_build_client", lambda _connection: client)
+    provider = OpenShellProvider(
+        connection={"workspace": "team-a"},
+        create={"retries": 3, "retry_delay_s": 0},
+        probe={"command": None},
+    )
+
+    with pytest.raises(OpenShellCreateError, match="non-default workspaces"):
+        await provider.create(SandboxSpec())
+    assert client.create_calls == []
+
+    provider._connection = openshell_provider.OpenShellConnectionConfig()
+    with pytest.raises(OpenShellCreateError, match="CreateSandbox failed"):
+        await provider.create(SandboxSpec())
+    assert len(client.create_calls) == 1
 
 
 def test_constructor_builds_real_client_and_config_coercion() -> None:
@@ -319,7 +408,7 @@ async def test_create_success_maps_spec(make_provider, fake_client: FakeClient) 
         env={"FOO": "bar"},
         metadata={"task": "demo", SANDBOX_LABEL: "user-override"},
         workdir="/workspace",
-        resources={"gpu": 2},
+        resources={"gpu": 2 if RESOURCE_REQUIREMENTS_SDK else 1},
         provider_options={"providers": ["nvidia"]},
     )
     handle = await provider.create(spec)
@@ -327,13 +416,17 @@ async def test_create_success_maps_spec(make_provider, fake_client: FakeClient) 
     call = fake_client.create_calls[0]
     assert call["workspace"] == "default"
     assert call["name"].startswith(SANDBOX_NAME_PREFIX)
+    assert len(call["name"]) <= MAX_SANDBOX_NAME_LENGTH
     # The marker label is applied last, so user metadata cannot clobber it.
     assert call["labels"] == {"task": "demo", SANDBOX_LABEL: "1"}
     pb_spec = call["spec"]
     assert pb_spec.template.image == "python:3.12-slim"
     assert dict(pb_spec.environment) == {"FOO": "bar"}
     assert list(pb_spec.providers) == ["nvidia"]
-    assert pb_spec.resource_requirements.gpu.count == 2
+    if RESOURCE_REQUIREMENTS_SDK:
+        assert pb_spec.resource_requirements.gpu.count == 2
+    else:
+        assert pb_spec.gpu is True
 
     assert handle.provider_name == "openshell"
     assert handle.sandbox_id == "sbx-1"
@@ -360,6 +453,11 @@ async def test_create_without_image_uses_gateway_default(make_provider, fake_cli
 
 async def test_create_template_resources_and_driver_config(make_provider, fake_client: FakeClient) -> None:
     provider = make_provider()
+    if not DRIVER_CONFIG_SDK:
+        with pytest.raises(OpenShellCreateError, match="driver_config.*workspace-aware"):
+            await provider.create(SandboxSpec(provider_options={"driver_config": {"runtime": "kata"}}))
+        assert not fake_client.create_calls
+        return
     await provider.create(
         SandboxSpec(
             provider_options={

@@ -41,16 +41,17 @@ Key metrics for math_with_judge_hermes_agent:
     "mean/reward": 0.2,
     "mean/turns_used": 1.6,
     "mean/finished_naturally": 1.0,
-    "mean/library_reward": 0.2,
-    "mean/input_tokens": 0.0,
-    "mean/output_tokens": 0.0,
-    "mean/total_tokens": 0.0
+    "mean/library_reward": 0.2
 }
 Finished rollout collection! View results at:
 Fully materialized inputs: responses_api_agents/hermes_agent/data/example_math_rollouts_materialized_inputs.jsonl
 Rollouts: responses_api_agents/hermes_agent/data/example_math_rollouts.jsonl
 Aggregate metrics: responses_api_agents/hermes_agent/data/example_math_rollouts_aggregate_metrics.json
 ```
+
+Current runs also report nonzero `mean/input_tokens`,
+`mean/output_tokens`, and `mean/total_tokens` from Hermes' cumulative session
+counters.
 
 Example training reward for small multi environment test is shown [here](https://github.com/NVIDIA-NeMo/Gym/pull/1033#issuecomment-4399509664).
 

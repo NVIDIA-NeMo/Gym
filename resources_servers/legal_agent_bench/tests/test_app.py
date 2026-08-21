@@ -31,6 +31,7 @@ def test_defaults_use_full_task_and_auto_prepare(tmp_path) -> None:
     assert server.config.reward_mode == "full_task"
     assert server.config.auto_prepare_assets is True
     assert server.config.judge_request_timeout_seconds == 90
+    assert server.config.judge_reasoning_effort is None
     assert server.config.judge_max_retries == 1
     assert server.config.judge_structured_output is True
     assert server.config.judge_parse_repair_attempts == 1
@@ -45,12 +46,14 @@ def test_startup_prepares_assets_then_rebuilds_runtime(tmp_path) -> None:
         judge_base_url="https://judge.example/v1",
         judge_api_key="test-key",  # pragma: allowlist secret
         judge_model_name="provider/model-name",
+        judge_reasoning_effort="medium",
         judge_temperature=0.2,
     )
     judge_env = {
         "LAB_JUDGE_BASE_URL": "https://judge.example/v1",
         "LAB_JUDGE_API_KEY": "test-key",  # pragma: allowlist secret
         "LAB_JUDGE_MODEL": "openai-compatible/provider/model-name",
+        "LAB_JUDGE_REASONING_EFFORT": "medium",
         "LAB_JUDGE_TEMPERATURE": "0.2",
         "LAB_JUDGE_REQUEST_TIMEOUT_SECONDS": "90",
         "LAB_JUDGE_MAX_RETRIES": "1",
