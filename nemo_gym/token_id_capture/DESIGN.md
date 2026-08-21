@@ -46,7 +46,7 @@ flowchart LR
 
 | Module | Role |
 |---|---|
-| `protocols.py` | The external contract: `TokenSink`, `TokenSource`, `LineageStore` (+ optional sink extension `begin_call`). Leaf-importable: no fastapi/ray/torch. |
+| `protocols.py` | The reference shapes for the external `TokenSink`, `TokenSource`, and `LineageStore` contracts, plus the optional `begin_call` sink extension. Framework adapters satisfy these contracts structurally; they do not inherit from the protocol definitions. |
 | `records.py` | `TokenEntry` (schema §6), digests (`compute_digest`, `encode_token_ids`), `stamp_lineage`. |
 | `lineage.py` | Canonicalization + hashing (`assistant_fingerprint`, `conversation_digest`, `FINGERPRINT_VERSION`), the matcher (`RolloutLineage`), `IncrementalLineageStore` (base every backend subclasses), `FileLineageStore` (file-backed reference), `InMemoryLineageStore` (tests only). |
 | `sink.py` | `CaptureContext` (per-call identity + parent decision + delta mode + prefix intent/proof), `resolve_parent`, `register_call_intent`, `capture_tokens`/`commit_entry`, worker health counters (`capture_health_snapshot`). |
@@ -145,7 +145,7 @@ flowchart TD
 Outcomes are persisted on every record with their diagnostic `parent_resolution_reason`.
 UNRESOLVED is never guessed across; it starts a masked fragment. The hashes are a cross-repo
 wire contract: `FINGERPRINT_VERSION` is stamped on entries and gated at indexing; golden
-vectors (`tests/unit_tests/token_capture_golden_vectors.json`) pin them, including
+vectors (`tests/unit_tests/test_token_capture_golden_vectors.py`) pin them, including
 cross-dialect equality. The builder independently re-verifies every claimed link by digest —
 the defense-in-depth that makes the §9 contract relaxations safe. Token-prefix matching
 survives for exactly one purpose: recovering a RESOLVED link whose parent is absent from the
@@ -200,7 +200,7 @@ pick a parent, which is the one forbidden move. `add_entry` is idempotent for id
 and raises on a conflicting re-index of the same call id.
 
 - **Supported schema floor: v3** (`TOKEN_ENTRY_MIN_SCHEMA_VERSION`). No v1/v2 records were
-  ever written outside development; readers refuse them, and the pre-v3 prefix-*inference*
+  ever written outside development; readers refuse them, and the pre-v3 prefix-derived parent
   reconstruction path has been removed.
 
 Delta reconstruction (builder and resolver share the walk):
@@ -303,7 +303,7 @@ classDiagram
 
 | Item | Does | Expectations |
 |---|---|---|
-| `async run_conformance(sink_factory, source_factory, lineage_factory=None, *, rollout_id=...) -> list[str]` | Runs the ordered contract checks: put→freeze visibility, idempotent re-put, conflicting re-put, mark durability, freeze idempotency, post-freeze write safety (relaxed fence), conditional retirement, resolution trichotomy, fresh-client lineage visibility, `begin_call` custody. | Returns passed check names; raises `ConformanceError(check_name, detail)` on the first failure. Lineage checks skip without a `lineage_factory`; the custody check skips for sinks without `begin_call`. **An external adapter passing this kit in its own environment (including a true multi-process run) is the integration bar.** Leaf-importable. |
+| `async run_conformance(sink_factory, source_factory, lineage_factory=None, *, rollout_id=...) -> list[str]` | Runs the ordered contract checks: put→freeze visibility, idempotent re-put, conflicting re-put, mark durability, freeze idempotency, post-freeze write safety (relaxed fence), conditional retirement, resolution trichotomy, fresh-client lineage visibility, `begin_call` custody. | Returns passed check names; raises `ConformanceError(check_name, detail)` on the first failure. Lineage checks skip without a `lineage_factory`; the custody check skips for sinks without `begin_call`. **An external adapter passing this kit in its own environment (including a true multi-process run) is the integration bar.** |
 
 ## 8. Scale characteristics
 
@@ -350,7 +350,7 @@ think-tag normalization with a `FINGERPRINT_VERSION` bump); the #2278 gate rebas
   index, per-rollout locking, and lazy digest-checked materialization including delta chains;
   `FileLineageStore` is the reference subclass; the conformance suite demonstrates the pattern
   with a ~15-line memory adapter.
-- **v3 floor; legacy prefix-inference reconstruction removed.** Missing resolution metadata
+- **v3 floor; legacy prefix-derived parent reconstruction removed.** Missing resolution metadata
   masks (`missing_resolution`); prefix matching retained solely for missing-parent recovery.
 - **Simplification pass:** removed `per_request` builder, the caller-less `parent_call_id`
   params (one way to declare a parent), and per-rollout resolver-unavailable bookkeeping.
