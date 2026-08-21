@@ -99,7 +99,7 @@ Gym defines the record shape and builds each record. The training framework cont
 
 ### The interfaces
 
-The `nemo_gym.token_id_capture.protocols` module defines two protocols. The module imports no web framework, cluster runtime, or tensor library. An inference worker can therefore import it without loading Gym's server stack.
+Gym describes the sink and source as structural protocols. Framework adapters do not inherit from these definitions or import them at runtime. They implement the same method signatures, and Gym consumes the resulting objects by that method shape. The definitions below are the reference contract.
 
 ```python
 class TokenSink(Protocol):
