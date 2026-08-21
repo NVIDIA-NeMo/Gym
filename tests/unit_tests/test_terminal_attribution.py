@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Test terminal attribution: the witnesses join.
+"""Test terminal attribution: the witnesses join, the anchored builder, and delivery.
 
 The ``/run`` result's ``response`` is the object the verifier scored.
 Attribution joins it to exactly one captured call.
@@ -20,7 +20,17 @@ The builder then delivers the root-to-terminal chain that earned the reward.
 Unattributed rollouts keep the strict single-chain policy bit-for-bit.
 """
 
-from nemo_gym.token_id_capture import TokenEntry
+import asyncio
+
+from nemo_gym.token_id_capture import TokenCaptureStore, TokenEntry
+from nemo_gym.token_id_capture.builder import run_builder
+from nemo_gym.token_id_capture.consumer import _assemble
+from nemo_gym.token_id_capture.delivery import (
+    MASK_SAMPLE_KEY,
+    TERMINAL_CALL_KEY,
+    TOKEN_CAPTURE_KEY,
+    finalize_rollout_token_capture,
+)
 from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint
 from nemo_gym.token_id_capture.terminal import resolve_terminal
 
@@ -241,3 +251,172 @@ def test_duplicated_response_id_abstains_but_content_can_still_attribute():
     att = resolve_terminal(entries, _response([_assistant_item("answer B")], response_id="resp_dup"))
     assert att.attributed and att.model_call_id == "call_b" and att.method == "content_output"
     assert "response_id_ambiguous" in att.reason
+
+
+# --- the builder under an attributed terminal ---------------------------------
+
+
+def _aux_entries() -> list[TokenEntry]:
+    """A two-call main chain plus an earlier-completing auxiliary call."""
+    return _chain_entries() + [
+        # A title-generator call: unrelated prompt, finished first.
+        _entry("aux", [90, 91], [92], text="A Title", response_id="resp_aux", created_at=1.0),
+    ]
+
+
+def test_unattributed_aux_call_masks_and_picks_the_wrong_root():
+    out = run_builder(_aux_entries())
+    assert out.notes.roots == 2 and out.notes.chains == 2
+    # Legacy selection picks the earliest root: the auxiliary call.
+    main = [c for c in out.chains if c.chain_id == "main"][0]
+    assert main.links[0].entry.model_call_id == "aux"
+
+
+def test_attributed_terminal_delivers_the_verified_chain_and_excludes_aux():
+    out = run_builder(_aux_entries(), terminal_call_id="call2")
+    assert out.notes.terminal_chain == "delivered"
+    main = [c for c in out.chains if c.chain_id == "main"][0]
+    assert [link.entry.model_call_id for link in main.links] == ["call1", "call2"]
+
+
+def test_terminal_truncates_calls_served_after_the_kept_response():
+    entries = _chain_entries() + [
+        _entry("call3", [1, 2, 3, 4, 5, 6, 7, 8, 9], [10], text="post-terminal", created_at=4.0),
+    ]
+    out = run_builder(entries, terminal_call_id="call2")
+    assert out.notes.terminal_chain == "delivered"
+    main = [c for c in out.chains if c.chain_id == "main"][0]
+    assert [link.entry.model_call_id for link in main.links] == ["call1", "call2"]
+
+
+def test_terminal_resolves_a_final_retry_group():
+    entries = [
+        _entry("call_a", [1, 2], [3, 4], text="answer A", response_id="resp_a"),
+        _entry("call_b", [1, 2], [5, 6], text="answer B", response_id="resp_b"),
+    ]
+    out = run_builder(entries, terminal_call_id="call_b")
+    assert out.notes.terminal_chain == "delivered"
+    assert out.notes.unresolved_retries == []
+    main = [c for c in out.chains if c.chain_id == "main"][0]
+    assert [link.entry.model_call_id for link in main.links] == ["call_b"]
+    # Without attribution the same shape is unresolved.
+    legacy = run_builder(entries)
+    assert set(legacy.notes.unresolved_retries) == {"call_a", "call_b"}
+
+
+def test_terminal_not_captured_is_reported():
+    out = run_builder(_chain_entries(), terminal_call_id="ghost")
+    assert out.notes.terminal_chain == "not_captured"
+
+
+# --- consumer mask semantics ---------------------------------------------------
+
+
+def test_assemble_attributed_aux_rollout_is_not_masked():
+    entries = _aux_entries()
+    response = _response(
+        [_assistant_item("step one"), _assistant_item("final answer")],
+        response_id="resp_2",
+    )
+    built = _assemble("r", entries, "prefix_merging", "m", verified_response=response)
+    assert built[MASK_SAMPLE_KEY] is False
+    attribution = built["metrics"]["terminal_attribution"]
+    assert attribution["method"] == "response_id" and attribution["chain"] == "delivered"
+    # The rebuilt response carries only the verified chain's tokens.
+    delivered = [i for i in built["rebuilt_response"]["output"] if i.get("generation_token_ids")]
+    assert [i["generation_token_ids"] for i in delivered] == [[3, 4], [7, 8]]
+
+
+def test_assemble_unattributed_aux_rollout_keeps_the_strict_policy():
+    built = _assemble("r", _aux_entries(), "prefix_merging", "m", verified_response=None)
+    assert built[MASK_SAMPLE_KEY] is True
+    assert built["metrics"]["terminal_attribution"]["method"] == "none"
+
+
+def test_assemble_attributed_but_undeliverable_chain_masks():
+    # The named terminal is not among the buildable entries.
+    built = _assemble(
+        "r",
+        _chain_entries(),
+        "prefix_merging",
+        "m",
+        explicit_terminal_call_id="ghost",
+        verified_response=None,
+    )
+    # "ghost" is not captured: no witness lands, so this is unattributed and
+    # falls back to the strict policy (single clean chain -> deliverable).
+    assert built["metrics"]["terminal_attribution"]["method"] == "none"
+    assert built[MASK_SAMPLE_KEY] is False
+
+
+def test_assemble_broken_terminal_chain_masks():
+    # Attribution succeeds but the terminal's ancestry is quarantined.
+    e1a = _entry("dup_a", [1, 2], [3, 4], text="same", created_at=1.0)
+    e1b = _entry("dup_b", [1, 2], [3, 4], text="same", created_at=1.5)
+    child = _entry("child", [1, 2, 3, 4, 9], [10], text="final", response_id="resp_child", created_at=2.0)
+    built = _assemble(
+        "r",
+        [e1a, e1b, child],
+        "prefix_merging",
+        "m",
+        explicit_terminal_call_id="child",
+    )
+    assert built["metrics"]["terminal_attribution"]["chain"] == "broken"
+    assert built[MASK_SAMPLE_KEY] is True
+
+
+# --- delivery end to end -------------------------------------------------------
+
+
+def _delivery_case(tmp_path, result: dict) -> dict:
+    store = TokenCaptureStore(tmp_path)
+
+    async def go() -> dict:
+        for entry in _aux_entries():
+            await store.put(entry.model_copy(update={"rollout_id": "t0-r0"}))
+        return await finalize_rollout_token_capture(result, store)
+
+    return asyncio.run(go())
+
+
+def test_finalize_attributes_from_the_result_response(tmp_path):
+    result = {
+        "_ng_rollout_id": "t0-r0",
+        "response": _response(
+            [_assistant_item("step one"), _assistant_item("final answer")],
+            response_id="resp_2",
+        ),
+        "reward": 1.0,
+    }
+    built = _delivery_case(tmp_path, result)
+    assert built[MASK_SAMPLE_KEY] is False
+    assert result.get(MASK_SAMPLE_KEY) is not True
+    attribution = result[TOKEN_CAPTURE_KEY]["terminal_attribution"]
+    assert attribution["method"] == "response_id" and attribution["chain"] == "delivered"
+    delivered = [i for i in result["response"]["output"] if i.get("generation_token_ids")]
+    assert [i["generation_token_ids"] for i in delivered] == [[3, 4], [7, 8]]
+
+
+def test_finalize_honors_an_explicit_terminal_key(tmp_path):
+    result = {
+        "_ng_rollout_id": "t0-r0",
+        "response": {"id": "", "model": "m", "object": "response", "output": []},
+        TERMINAL_CALL_KEY: "call2",
+        "reward": 1.0,
+    }
+    built = _delivery_case(tmp_path, result)
+    assert built[MASK_SAMPLE_KEY] is False
+    attribution = result[TOKEN_CAPTURE_KEY]["terminal_attribution"]
+    assert attribution["method"] == "explicit" and attribution["chain"] == "delivered"
+
+
+def test_finalize_without_witnesses_keeps_the_strict_policy(tmp_path):
+    result = {
+        "_ng_rollout_id": "t0-r0",
+        "response": {"id": "", "model": "m", "object": "response", "output": []},
+        "reward": 1.0,
+    }
+    built = _delivery_case(tmp_path, result)
+    # Two roots (main chain + aux) and no attribution: masked, as before.
+    assert built[MASK_SAMPLE_KEY] is True
+    assert result[MASK_SAMPLE_KEY] is True
