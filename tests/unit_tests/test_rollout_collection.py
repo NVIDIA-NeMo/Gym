@@ -56,6 +56,7 @@ from nemo_gym.rollout_collection import (
     loads_jsonl_line,
 )
 from nemo_gym.token_id_capture import (
+    LineageResolution,
     ParentResolutionStatus,
     TokenCaptureSnapshot,
     TokenCaptureStore,
@@ -71,6 +72,19 @@ from nemo_gym.token_id_capture.delivery import (
     retire_rollout_token_capture,
     rollout_carries_token_ids,
 )
+
+
+class _StubLineageStore:
+    """Satisfy the normal custom-sink contract in collector-only tests."""
+
+    async def resolve(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
+        return LineageResolution(ParentResolutionStatus.ROOT)
+
+    def is_process_shared(self) -> bool:
+        return True
+
+    async def close(self) -> None:
+        pass
 
 
 @pytest.fixture
@@ -1504,7 +1518,7 @@ class TestRolloutCollection:
                     "all_agents": True,
                     "sink": "framework.capture:Sink",
                     "rebuild_response": True,
-                    "allow_unresolved_continuations": True,
+                    "lineage_store": f"{__name__}:_StubLineageStore",
                 }
             },
         )
@@ -1564,7 +1578,7 @@ class TestRolloutCollection:
                     "all_agents": True,
                     "sink": "framework.capture:Sink",
                     "rebuild_response": True,
-                    "allow_unresolved_continuations": True,
+                    "lineage_store": f"{__name__}:_StubLineageStore",
                 }
             },
         )
