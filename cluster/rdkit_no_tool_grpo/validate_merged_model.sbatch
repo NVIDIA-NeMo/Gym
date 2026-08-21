@@ -23,7 +23,7 @@ ADAPTER_DIR=${ES_ADAPTER_DIR:-${GYM_MAIN_DIR}/artifacts/inferno-rdkit-nemotron3-
 MERGED_MODEL_DIR=${ES140_MERGED_MODEL_DIR:-${GYM_MAIN_DIR}/artifacts/nemotron3-nano-rdkit-es140-merged-hf}
 OUTPUT=${MERGE_PARITY_OUTPUT:-${BUNDLE_DIR}/results/es140_lora/merged_model_validation.json}
 MERGE_PYTHON=${MERGE_PYTHON:-/opt/nemo_rl_venv/bin/python}
-PEFT_VERSION=${PEFT_VERSION:-0.17.1}
+PEFT_VERSION=${PEFT_VERSION:-0.18.1}
 
 BASE_SNAPSHOT_SHA=$(<"${BASE_MODEL_CACHE_ROOT}/refs/main")
 BASE_SNAPSHOT_DIR="${BASE_MODEL_CACHE_ROOT}/snapshots/${BASE_SNAPSHOT_SHA}"

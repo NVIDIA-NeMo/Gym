@@ -21,7 +21,7 @@ BASE_MODEL_CACHE_ROOT=${BASE_MODEL_CACHE_ROOT:-${INFERNO_DIR}/.local/cache/huggi
 ADAPTER_DIR=${ES_ADAPTER_DIR:-${GYM_MAIN_DIR}/artifacts/inferno-rdkit-nemotron3-nano-post-step-0140-lora-r8}
 OUTPUT_DIR=${ES140_MERGED_MODEL_DIR:-${GYM_MAIN_DIR}/artifacts/nemotron3-nano-rdkit-es140-merged-hf}
 MERGE_PYTHON=${MERGE_PYTHON:-/opt/nemo_rl_venv/bin/python}
-PEFT_VERSION=${PEFT_VERSION:-0.17.1}
+PEFT_VERSION=${PEFT_VERSION:-0.18.1}
 PINNED_GYM_COMMIT=1a4912e231bb2795b062f7de97496caaf382c7f6
 SOURCE_GYM_COMMIT=$(git -C "${GYM_DIR}" rev-parse HEAD)
 git -C "${GYM_DIR}" merge-base --is-ancestor "${PINNED_GYM_COMMIT}" "${SOURCE_GYM_COMMIT}"

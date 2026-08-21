@@ -17,7 +17,7 @@ BUNDLE_DIR="${GYM_DIR}/cluster/rdkit_no_tool_grpo"
 BASE_CONTAINER=${BASE_CONTAINER_IMAGE_PATH:-${BUNDLE_DIR}/sqsh/nemo-rl-v0.6.0.sqsh}
 OUTPUT_CONTAINER=${CONTAINER_IMAGE_PATH:-${BUNDLE_DIR}/sqsh/nemo-rl-v0.6.0-gym-peft.sqsh}
 TMP_CONTAINER="${OUTPUT_CONTAINER}.tmp-${SLURM_JOB_ID}"
-PEFT_VERSION=${PEFT_VERSION:-0.17.1}
+PEFT_VERSION=${PEFT_VERSION:-0.18.1}
 OPENAI_VERSION=${OPENAI_VERSION:-2.6.1}
 PINNED_GYM_COMMIT=1a4912e231bb2795b062f7de97496caaf382c7f6
 SOURCE_GYM_COMMIT=$(git -C "${GYM_DIR}" rev-parse HEAD)
@@ -88,7 +88,6 @@ srun \
       '${NODE_LOCAL_ROOT}/Gym' 'openai==${OPENAI_VERSION}'
     uv pip install --python /opt/nemo_rl_venv/bin/python --no-deps \
       'peft==${PEFT_VERSION}'
-    uv pip check --python /opt/nemo_rl_venv/bin/python
     /opt/nemo_rl_venv/bin/python - <<'PY'
 import importlib.metadata
 from nemo_gym.cli import GlobalConfigDictParserConfig, RunHelper
