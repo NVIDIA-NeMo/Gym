@@ -41,7 +41,7 @@ from nemo_gym.rollout_collection import (
     _expand_input_glob,
     _failures_path_for,
     _get_max_rollout_attempts,
-    _rollout_for_wandb,
+    _rollout_for_export,
     _rollout_request_debug_summary,
     loads_jsonl_line,
 )
@@ -61,6 +61,33 @@ class TestLoadsJsonlLine:
     def test_malformed_line_raises_config_error_with_location(self) -> None:
         with pytest.raises(ConfigError, match=r"Malformed JSON in 'f.jsonl' at line 3"):
             loads_jsonl_line("{not json", "f.jsonl", 3)
+
+
+class TestUploadRolloutsDeprecation:
+    BASE = {"input_jsonl_fpath": "in.jsonl", "output_jsonl_fpath": "out.jsonl"}
+
+    def test_defaults_to_true(self) -> None:
+        assert RolloutCollectionConfig.model_validate(self.BASE).upload_rollouts
+
+    def test_deprecated_key_maps_and_warns(self) -> None:
+        with pytest.warns(DeprecationWarning, match="upload_rollouts_to_wandb"):
+            config = RolloutCollectionConfig.model_validate({**self.BASE, "upload_rollouts_to_wandb": False})
+
+        assert not config.upload_rollouts
+
+    def test_new_key_wins_over_the_deprecated_one(self) -> None:
+        with pytest.warns(DeprecationWarning):
+            config = RolloutCollectionConfig.model_validate(
+                {**self.BASE, "upload_rollouts_to_wandb": False, "upload_rollouts": True}
+            )
+
+        assert config.upload_rollouts
+
+    def test_new_key_alone_does_not_warn(self, recwarn) -> None:
+        config = RolloutCollectionConfig.model_validate({**self.BASE, "upload_rollouts": False})
+
+        assert not config.upload_rollouts
+        assert not [w for w in recwarn if issubclass(w.category, DeprecationWarning)]
 
 
 class TestGetMaxRolloutAttempts:
@@ -260,7 +287,7 @@ class TestRolloutCollection:
             {"code": "trajectory_projection_failed", "invocation_id": None, "detail": "ValueError"}
         ]
 
-    def test_rollout_for_wandb_omits_new_trajectory_and_raw_capture_payloads(self) -> None:
+    def test_rollout_for_export_omits_new_trajectory_and_raw_capture_payloads(self) -> None:
         result = {
             "response": {"output": "existing rollout content"},
             "ng_trajectory": {"invocations": [{"conversation": ["trajectory secret"]}]},
@@ -277,7 +304,7 @@ class TestRolloutCollection:
             },
         }
 
-        sanitized = _rollout_for_wandb(result)
+        sanitized = _rollout_for_export(result)
 
         assert "ng_trajectory" not in sanitized
         assert sanitized["ng_model_call_capture"]["calls"] == [{"model_call_id": "model-1"}]
@@ -290,7 +317,7 @@ class TestRolloutCollection:
             {"ng_model_call_capture": {"calls": ["secret", {"request": "secret"}]}},
         )
         for malformed_result in malformed:
-            sanitized = _rollout_for_wandb(malformed_result)
+            sanitized = _rollout_for_export(malformed_result)
             assert b"secret" not in orjson.dumps(sanitized)
 
     @pytest.mark.parametrize("request_debug_enabled", [True, False])

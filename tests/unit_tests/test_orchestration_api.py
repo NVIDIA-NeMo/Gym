@@ -96,3 +96,95 @@ def test_driver_env_accepted():
 def test_service_unknown_field_raises():
     with pytest.raises(ValidationError):
         SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "unknown_field": "x"}}))
+
+
+# ---------------------------------------------------------------------------
+# number_of_instances / distributed_backend
+# ---------------------------------------------------------------------------
+
+_MULTI_SERVICE = {**SERVICE, "number_of_instances": 4, "distributed_backend": {"type": "mp"}}
+
+
+def test_number_of_instances_with_backend_accepted():
+    config = SubmitConfig.model_validate(_config(services={"svc": _MULTI_SERVICE}))
+    svc = config.services["svc"]
+    assert svc.number_of_instances == 4
+    assert svc.distributed_backend is not None
+    assert svc.distributed_backend.type == "mp"
+
+
+def test_number_of_instances_defaults_to_1():
+    config = SubmitConfig.model_validate(_config())
+    assert config.services["svc"].number_of_instances == 1
+    assert config.services["svc"].distributed_backend is None
+
+
+def test_multi_instance_without_backend_defaults_to_mp():
+    config = SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "number_of_instances": 4}}))
+    svc = config.services["svc"]
+    assert svc.distributed_backend is not None
+    assert svc.distributed_backend.type == "mp"
+
+
+def test_single_instance_with_backend_raises():
+    with pytest.raises(ValidationError, match="should not be set"):
+        SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "distributed_backend": {"type": "mp"}}}))
+
+
+def test_number_of_instances_zero_raises():
+    with pytest.raises(ValidationError):
+        SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "number_of_instances": 0}}))
+
+
+# ---------------------------------------------------------------------------
+# GPU footprint vs node pool capacity
+# ---------------------------------------------------------------------------
+
+COMPUTE_8_GPUS_PER_NODE = {
+    "cluster": {
+        "type": "slurm",
+        "account": "my-account",
+        "hostname": "foo",
+        "node_pools": {"compute": {"partition": "batch", "gpus_per_node": 8}},
+    }
+}
+
+
+def test_gpu_footprint_exact_fit_accepted():
+    service = {
+        **SERVICE,
+        "tensor_parallel_size": 2,
+        "number_of_instances": 4,
+        "distributed_backend": {"type": "mp"},
+    }
+    config = SubmitConfig.model_validate(_config(services={"svc": service}, compute=COMPUTE_8_GPUS_PER_NODE))
+    assert config.services["svc"].number_of_instances == 4
+
+
+def test_gpu_footprint_exceeds_node_raises():
+    service = {
+        **SERVICE,
+        "tensor_parallel_size": 2,
+        "number_of_instances": 8,
+        "distributed_backend": {"type": "mp"},
+    }
+    with pytest.raises(ValidationError, match="exceeds the largest available"):
+        SubmitConfig.model_validate(_config(services={"svc": service}, compute=COMPUTE_8_GPUS_PER_NODE))
+
+
+def test_gpu_footprint_underutilized_warns():
+    service = {
+        **SERVICE,
+        "tensor_parallel_size": 2,
+        "number_of_instances": 2,
+        "distributed_backend": {"type": "mp"},
+    }
+    with pytest.warns(UserWarning, match="leaving 4 GPU"):
+        config = SubmitConfig.model_validate(_config(services={"svc": service}, compute=COMPUTE_8_GPUS_PER_NODE))
+    assert config.services["svc"].number_of_instances == 2
+
+
+def test_gpu_footprint_no_node_pools_skips_validation():
+    # Default COMPUTE fixture has no node_pools, so nothing to validate against.
+    config = SubmitConfig.model_validate(_config(services={"svc": _MULTI_SERVICE}))
+    assert config.services["svc"].number_of_instances == 4

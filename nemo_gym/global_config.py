@@ -29,14 +29,11 @@ from typing import ClassVar, List, Optional, Tuple, Type
 
 import hydra
 import rich
-import wandb
-import wandb.util
 from omegaconf import MISSING, DictConfig, ListConfig, OmegaConf, open_dict
 from omegaconf.errors import InterpolationResolutionError
 from openai import __version__ as openai_version
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from ray import __version__ as ray_version
-from wandb import Run
 
 from nemo_gym import CACHE_DIR, RESULTS_DIR, WORKING_DIR, _resolve_under_cwd_or_install, component_search_roots
 from nemo_gym.config_types import (
@@ -50,11 +47,12 @@ from nemo_gym.config_types import (
     NoServerInstancesError,
     ServerInstanceConfig,
     ServerRefNotFoundError,
-    WANDBConfig,
     is_almost_server,
     is_server_ref,
     maybe_get_server_instance_config,
 )
+from nemo_gym.exporters import setup_exporters
+from nemo_gym.secret_utils import recursively_hide_secrets
 
 
 _GLOBAL_CONFIG_DICT = None
@@ -153,16 +151,6 @@ POLICY_MODEL_NAME_KEY_NAME = "policy_model_name"
 POLICY_MODEL_KEY_NAME = "policy_model"
 
 DEFAULT_HEAD_SERVER_PORT = 11000
-
-
-# W&B
-# Increase row limit since some of our rollouts are pretty hefty
-wandb.util.VALUE_BYTES_LIMIT = 10_000_000
-_WANDB_RUN: Optional[Run] = None
-
-
-def get_wandb_run() -> Optional[Run]:
-    return _WANDB_RUN
 
 
 # HuggingFace
@@ -537,25 +525,6 @@ For example, on the command line:
 {override_examples}"""
         )
 
-    def _recursively_hide_secrets(self, dict_config: DictConfig) -> None:
-        with open_dict(dict_config):
-            self._recursively_hide_secrets_helper(dict_config)
-
-    def _recursively_hide_secrets_helper(self, dict_config: DictConfig) -> None:
-        for k, v in list(dict_config.items()):
-            if isinstance(v, (DictConfig, dict)):
-                self._recursively_hide_secrets_helper(v)
-            elif isinstance(v, (ListConfig, list)):
-                if "token" in k or "key" in k:
-                    dict_config[k] = ["****"] * len(v)
-                else:
-                    for inner_v in v:
-                        if isinstance(inner_v, (DictConfig, dict)):
-                            self._recursively_hide_secrets_helper(inner_v)
-            else:
-                if "token" in k or "key" in k:
-                    dict_config[k] = "****"
-
     def _recursively_swap_keys(self, dict_config: DictConfig) -> None:
         frozen_dict_config = deepcopy(dict_config)
         with open_dict(dict_config):
@@ -760,7 +729,7 @@ Pass each config with --config (it builds the list for you), e.g.:
             error_on_almost_servers = global_config_dict.get("error_on_almost_servers", True)
             if error_on_almost_servers:
                 config_dict_to_log = deepcopy(global_config_dict)
-                self._recursively_hide_secrets(config_dict_to_log)
+                recursively_hide_secrets(config_dict_to_log)
                 config_to_log_yaml = OmegaConf.to_yaml(config_dict_to_log)
 
                 error_msg = f"""Found {len(almost_servers)} almost-server(s) with validation errors. Fix the issues above or set error_on_almost_servers=false to bypass this error.
@@ -891,24 +860,11 @@ Found global config dict yaml:
             global_config_dict.setdefault(UV_VENV_DIR_KEY_NAME, str(WORKING_DIR))
 
         if parse_config.hide_secrets:  # pragma: no cover
-            self._recursively_hide_secrets(global_config_dict)
+            recursively_hide_secrets(global_config_dict)
 
-        # Set up W&B and log config. This must happen at the very last step.
-        wandb_config = WANDBConfig.model_validate(global_config_dict)
-        if wandb_config.is_available and not parse_config.offline:  # pragma: no cover
-            environ["WANDB_API_KEY"] = wandb_config.wandb_api_key
-
-            global _WANDB_RUN
-            _WANDB_RUN = wandb.init(
-                project=wandb_config.wandb_project,
-                name=wandb_config.wandb_name,
-                dir=str(Path(global_config_dict[RESULTS_DIR_KEY_NAME]) / "wandb"),
-            )
-
-            # Log params
-            config_dict_to_log = deepcopy(global_config_dict)
-            self._recursively_hide_secrets(config_dict_to_log)
-            _WANDB_RUN.config.update(OmegaConf.to_container(config_dict_to_log))
+        # Set up exporters and log config. This must happen at the very last step.
+        if not parse_config.offline:  # pragma: no cover
+            setup_exporters(global_config_dict)
 
         return global_config_dict
 
