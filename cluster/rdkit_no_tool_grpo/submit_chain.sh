@@ -13,6 +13,7 @@ TRAIN_PYTHON=${TRAIN_PYTHON:-/opt/nemo_rl_venv/bin/python}
 SLURM_ACCOUNT=${SLURM_ACCOUNT:-healthcareeng_research}
 SLURM_PARTITION=${SLURM_PARTITION:-pool0}
 PREFLIGHT_PARTITION=${PREFLIGHT_PARTITION:-cpu}
+PREFLIGHT_MEM=${PREFLIGHT_MEM:-64G}
 NUM_ACTOR_NODES=${NUM_ACTOR_NODES:-8}
 GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 CHAIN_JOBS=${CHAIN_JOBS:-3}
@@ -91,7 +92,7 @@ preflight_job_id=$(sbatch \
   --parsable \
   --nodes=1 \
   --cpus-per-task=2 \
-  --mem=8G \
+  --mem="${PREFLIGHT_MEM}" \
   --account="${SLURM_ACCOUNT}" \
   --partition="${PREFLIGHT_PARTITION}" \
   --time=00:20:00 \
