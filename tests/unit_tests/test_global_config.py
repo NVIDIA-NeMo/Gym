@@ -1905,7 +1905,9 @@ class TestComposeUnboundAgent:
         block = {
             "entrypoint": "app.py",
             "resources_server": {"type": "resources_servers", "name": "???"},
-            "model_server": {"type": "responses_api_models", "name": "policy_model"},
+            # Deliberately not the environment's `policy_model`: assertions must be able to tell which
+            # side a carried-over binding came from.
+            "model_server": {"type": "responses_api_models", "name": "harness_model"},
             "max_turns": 30,
             "terminal_backend": "local",
         }
@@ -2003,6 +2005,7 @@ class TestComposeUnboundAgent:
 
         # The environment's bindings and data are carried over, its agent parameters are not.
         assert block["resources_server"] == {"type": "resources_servers", "name": "gpqa_mcqa_resources_server"}
+        assert block["model_server"] == {"type": "responses_api_models", "name": "policy_model"}
         assert "max_steps" not in block
         assert OmegaConf.to_container(block["datasets"]) == [
             {
@@ -2047,16 +2050,14 @@ class TestComposeUnboundAgent:
         for name in categories:
             assert self._composed_block(config, name)["resources_server"]["name"] == "jailbreak_resources_server"
 
-    def test_falls_back_to_harness_model_environment_has_none(self) -> None:
-        # FIXME: policy_model is the default for both resources_server and model_server
-        # call them differently.
+    def test_falls_back_to_harness_model_when_environment_has_none(self) -> None:
         environment_agent = self._environment_agent("gpqa_mcqa_resources_server")
         environment_agent["responses_api_agents"]["simple_agent"].pop("model_server")
         config = self._config(no_model_server_agent=environment_agent)
 
         GlobalConfigDictParser().compose_unbound_agent(config)
 
-        assert self._composed_block(config, "no_model_server_agent")["model_server"]["name"] == "policy_model"
+        assert self._composed_block(config, "no_model_server_agent")["model_server"]["name"] == "harness_model"
 
     def test_skips_an_instance_whose_agent_block_is_unset(self) -> None:
         # Resolving the block would raise MissingMandatoryValue, which is not a ConfigError, so the CLI
