@@ -31,6 +31,11 @@ Downstream inference consumes those tokens to supply the exact prompt prefix.
 
 Every new record distinguishes a root, a resolved parent, and an unresolved boundary.
 Only records that predate this metadata use token-prefix fallback.
+
+The guaranteed invariant is token-chain exactness, not conversation fidelity.
+A delivered chain contains exactly the tokens the policy emitted over the recorded context.
+The hashes deliberately ignore reasoning and some inserted items.
+Those fields may differ from the harness rendering without breaking token-chain exactness.
 """
 
 from __future__ import annotations
@@ -47,6 +52,10 @@ import orjson
 from nemo_gym.token_id_capture.protocols import LineageMatch, LineageResolution
 from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry, cumulative_tokens
 
+
+# Increment when fingerprint canonicalization or hash layout changes.
+# Resolvers ignore entries stamped with a different version.
+FINGERPRINT_VERSION = 1
 
 _FINGERPRINT_DOMAIN = b"nemo-gym-lineage"
 _CONTEXT_DOMAIN = b"nemo-gym-lineage-context"
@@ -271,12 +280,16 @@ def assistant_fingerprint(messages: list[dict]) -> str:
 @dataclass
 class LineageNode:
     call_id: str
-    cum_tokens: list[int]
+    # ``None`` means the index is metadata-only.
+    # A resolved match loads tokens from ``entry_offset``.
+    cum_tokens: list[int] | None
     cum_len: int
     digest: str
+    entry_offset: int = -1
     # These fields describe the request context sent for this call.
     # They exclude the model's response.
-    # The request context has a stable item count across dialect round trips.
+    # The item count is stable while the harness stays in one dialect.
+    # A mid-rollout dialect switch can misalign it; verification then fails closed.
     context_len: int = 0
     context_digest: str = ""
 
@@ -286,6 +299,7 @@ def stamp_continuation(entry: TokenEntry, request_items: list[dict]) -> TokenEnt
     entry.continuation_fingerprint = assistant_fingerprint(list(request_items) + list(entry.output_items))
     entry.continuation_context_len = len(request_items)
     entry.continuation_context_digest = conversation_digest(request_items)
+    entry.fingerprint_version = FINGERPRINT_VERSION
     return entry
 
 
@@ -298,6 +312,32 @@ class RolloutLineage:
     # Cache the cumulative token count for memory bounds.
     total_tokens: int = 0
 
+    def resolve_node(self, messages: list[dict]) -> tuple[ParentResolutionStatus, "LineageNode | None", str]:
+        """Return the parent decision without touching token arrays.
+
+        Matching needs only fingerprints, digests, and lengths.
+        The caller materializes tokens for the single winner.
+        """
+        fingerprint = assistant_fingerprint(messages)
+        if not fingerprint:
+            return ParentResolutionStatus.ROOT, None, ""
+        # dict.fromkeys: a call id indexed twice (e.g. by racing refreshes) is one candidate.
+        call_ids = list(dict.fromkeys(self.by_fingerprint.get(fingerprint) or []))
+        candidates = [
+            node
+            for call_id in call_ids
+            if (node := self.by_call_id.get(call_id)) is not None and self._continues(node, messages)
+        ]
+        if len(candidates) > 1:
+            # Calls with identical cumulative tokens are interchangeable.
+            # Keep different token sequences unresolved.
+            digests = {(node.digest, node.cum_len) for node in candidates}
+            if len(digests) == 1 and candidates[0].digest:
+                candidates = [min(candidates, key=lambda node: node.call_id)]
+        if len(candidates) != 1:
+            return ParentResolutionStatus.UNRESOLVED, None, "no_match" if not candidates else "ambiguous"
+        return ParentResolutionStatus.RESOLVED, candidates[0], ""
+
     def resolve(self, messages: list[dict]) -> LineageResolution:
         """Return the immutable parent decision for this request.
 
@@ -305,19 +345,11 @@ class RolloutLineage:
         A request with unverified history is unresolved.
         Never guess among calls with identical output.
         """
-        fingerprint = assistant_fingerprint(messages)
-        if not fingerprint:
-            return LineageResolution(ParentResolutionStatus.ROOT)
-        call_ids = self.by_fingerprint.get(fingerprint) or []
-        candidates = [
-            node
-            for call_id in call_ids
-            if (node := self.by_call_id.get(call_id)) is not None and self._continues(node, messages)
-        ]
-        if len(candidates) != 1:
-            reason = "no_match" if not candidates else "ambiguous"
-            return LineageResolution(ParentResolutionStatus.UNRESOLVED, reason=reason)
-        node = candidates[0]
+        status, node, reason = self.resolve_node(messages)
+        if status != ParentResolutionStatus.RESOLVED:
+            return LineageResolution(status, reason=reason)
+        if node.cum_tokens is None:
+            raise ValueError("metadata-only lineage node requires caller-side materialization")
         return LineageResolution(
             ParentResolutionStatus.RESOLVED,
             match=LineageMatch(
@@ -342,15 +374,25 @@ class RolloutLineage:
             return False
         return conversation_digest(messages[: node.context_len]) == node.context_digest
 
-    def add_entry(self, entry: TokenEntry) -> None:
-        """Index lookup metadata carried by one committed token entry."""
+    def add_entry(self, entry: TokenEntry, *, store_tokens: bool = True, entry_offset: int = -1) -> None:
+        """Index lookup metadata carried by one committed token entry.
+
+        ``store_tokens=False`` keeps token arrays in the durable log.
+        """
         if not entry.continuation_fingerprint:
             return
+        if entry.fingerprint_version is not None and entry.fingerprint_version != FINGERPRINT_VERSION:
+            # A different algorithm produced this fingerprint; matching it would be luck.
+            return
+        if getattr(entry, "prompt_is_delta", False) and store_tokens:
+            # A memory-only index cannot reconstruct a delta chain.
+            raise ValueError("delta records require a durable-log-backed lineage store")
         node = LineageNode(
             call_id=entry.model_call_id,
-            cum_tokens=cumulative_tokens(entry),
+            cum_tokens=cumulative_tokens(entry) if store_tokens else None,
             cum_len=entry.cum_len if entry.cum_len is not None else len(cumulative_tokens(entry)),
             digest=entry.digest or "",
+            entry_offset=entry_offset,
             context_len=entry.continuation_context_len,
             context_digest=entry.continuation_context_digest,
         )
@@ -395,7 +437,7 @@ class LineageIndex:
     This index backs the single-worker fallback.
     Shared stores provide cross-worker visibility.
     Eviction removes the oldest rollout.
-    An evicted parent degrades to strict token-prefix matching.
+    An evicted parent leaves later continuations unresolved and the builder masks them.
     The only live rollout is never evicted.
     """
 
@@ -441,10 +483,12 @@ class LineageIndex:
 
 
 class InMemoryLineageStore:
-    """Resolve entries committed to one worker-local index.
+    """Reference resolver for in-process framework backends and tests.
 
-    Call ``put`` at the same publication boundary as the token sink.
-    Multi-worker deployments require a shared backend.
+    Production wiring uses ``FileLineageStore`` when a token store exists.
+    This class supports in-process framework adapters and tests.
+    Its index is memory-only.
+    Eviction or restart leaves affected continuations unresolved.
     """
 
     def __init__(self, max_rollouts: int = 512, max_tokens: int = 8_000_000) -> None:
@@ -464,49 +508,201 @@ class InMemoryLineageStore:
         self.index.clear()
 
 
-class FileLineageStore:
-    """Resolve lineage from the token JSONL committed by ``TokenCaptureStore``."""
+class IncrementalLineageStore:
+    """Base class for lineage resolvers over any committed-entry backend.
 
-    def __init__(self, root: str | Path) -> None:
-        from nemo_gym.token_id_capture.store import TokenCaptureStore
+    An external backend implements two hooks.
+    It inherits Gym's matcher, bounded index, locking, and token materialization.
+    Hash-for-hash agreement is the wire contract.
 
-        self._store = TokenCaptureStore(root)
-        self._cache: dict[str, tuple[int, int, RolloutLineage]] = {}
+    Required hooks:
+      ``_fetch_new_entries(rollout_id, cursor)`` -> ``(items, new_cursor)`` where
+        ``items`` is ``[(TokenEntry, ref), ...]`` in commit order since ``cursor``
+        (``None`` means from the beginning) and ``ref`` is any handle that
+        ``_load_entry`` can use later (byte offset, KV key, ...). Raise
+        ``CursorReset`` when the cursor no longer describes the backend (file
+        rotated, namespace recreated); the base refetches from the beginning.
+      ``_load_entry(rollout_id, ref)`` -> ``TokenEntry`` for one committed record.
 
-    def _refresh(self, rollout_id: str) -> RolloutLineage:
-        path = self._store.path_for(rollout_id)
-        if not path.exists():
+    Optional hooks:
+      ``_read_locked(rollout_id)`` — context manager held around fetch+resolve
+        for backends with a read-lock discipline (default: no lock).
+      ``is_process_shared()`` — default ``True``; an external backend exists to
+        be shared, and the multi-worker startup check trusts this answer.
+    """
+
+    class CursorReset(Exception):
+        """The stored cursor no longer describes the backend; refetch from scratch."""
+
+    def __init__(self, *, max_cached_rollouts: int = 65536) -> None:
+        import threading
+
+        if max_cached_rollouts < 1:
+            raise ValueError("max_cached_rollouts must be positive")
+        # (cursor, refs, lineage): lineage stays at index 2 for diagnostics/tooling.
+        self._cache: dict[str, tuple[Any, dict[str, Any], RolloutLineage]] = {}
+        self._max_cached_rollouts = max_cached_rollouts
+        self._cache_guard = threading.Lock()
+        # Fixed lock striping bounds synchronization metadata.
+        # Hash collisions only serialize unrelated rollouts.
+        self._rollout_locks = tuple(threading.Lock() for _ in range(256))
+
+    # -- hooks ----------------------------------------------------------------
+    def _fetch_new_entries(self, rollout_id: str, cursor: Any) -> tuple[list[tuple[TokenEntry, Any]], Any]:
+        raise NotImplementedError
+
+    def _load_entry(self, rollout_id: str, ref: Any) -> TokenEntry:
+        raise NotImplementedError
+
+    def _read_locked(self, rollout_id: str):
+        from contextlib import nullcontext
+
+        return nullcontext()
+
+    # -- shared machinery -----------------------------------------------------
+    def _rollout_lock(self, rollout_id: str):
+        return self._rollout_locks[hash(rollout_id) % len(self._rollout_locks)]
+
+    def _cache_put(self, rollout_id: str, value: tuple[Any, dict[str, Any], RolloutLineage]) -> None:
+        """Insert or touch a cache row with LRU semantics.
+
+        Reinsert a touched row so dictionary order tracks recency.
+        Eviction only requires a later backend refetch.
+        """
+        with self._cache_guard:
             self._cache.pop(rollout_id, None)
-            return RolloutLineage()
-        file_stat = path.stat()
-        inode, offset, lineage = self._cache.get(rollout_id, (file_stat.st_ino, 0, RolloutLineage()))
-        if inode != file_stat.st_ino or offset < 0 or offset > file_stat.st_size:
-            inode, offset, lineage = file_stat.st_ino, 0, RolloutLineage()
-        if offset == file_stat.st_size:
-            return lineage
-        with path.open("rb") as handle:
-            handle.seek(offset)
-            for line in handle:
-                payload = line.strip()
-                if not payload:
-                    continue
-                lineage.add_entry(TokenEntry.model_validate(orjson.loads(payload)))
-            offset = handle.tell()
-        self._cache[rollout_id] = (inode, offset, lineage)
-        return lineage
+            self._cache[rollout_id] = value
+            while len(self._cache) > self._max_cached_rollouts:
+                oldest = next(iter(self._cache))
+                if oldest == rollout_id:
+                    break
+                self._cache.pop(oldest)
+
+    def _refresh(self, rollout_id: str) -> tuple[dict[str, Any], RolloutLineage]:
+        with self._cache_guard:
+            cached = self._cache.get(rollout_id)
+        cursor, refs, lineage = cached if cached is not None else (None, {}, RolloutLineage())
+        try:
+            items, cursor = self._fetch_new_entries(rollout_id, cursor)
+        except IncrementalLineageStore.CursorReset:
+            refs, lineage = {}, RolloutLineage()
+            items, cursor = self._fetch_new_entries(rollout_id, None)
+        for entry, ref in items:
+            refs[entry.model_call_id] = ref
+            # Metadata-only: tokens stay in the backend behind ``ref``.
+            lineage.add_entry(entry, store_tokens=False, entry_offset=ref if isinstance(ref, int) else -1)
+        self._cache_put(rollout_id, (cursor, refs, lineage))
+        return refs, lineage
+
+    def _materialize(
+        self, rollout_id: str, node: LineageNode, refs: dict[str, Any], lineage: RolloutLineage
+    ) -> list[int]:
+        """Load one RESOLVED parent's cumulative tokens from the backend.
+
+        Digest verification makes stale references fail closed.
+        """
+        from nemo_gym.token_id_capture.records import compute_digest
+
+        def load(call_id: str) -> TokenEntry:
+            if call_id not in refs:
+                raise ValueError(f"lineage node for {call_id} has no backend ref")
+            entry = self._load_entry(rollout_id, refs[call_id])
+            if entry.model_call_id != call_id:
+                raise ValueError(f"ref for {call_id} points at {entry.model_call_id}")
+            return entry
+
+        # Walk delta suffixes back to a full-prompt anchor.
+        suffixes: list[tuple[list[int], list[int]]] = []
+        current = load(node.call_id)
+        depth = 0
+        while getattr(current, "prompt_is_delta", False):
+            depth += 1
+            if depth > 10_000:
+                raise ValueError(f"delta chain for {node.call_id} exceeds sane depth")
+            suffixes.append((list(current.prompt_token_ids), list(current.generation_token_ids)))
+            if not current.parent_call_id or lineage.by_call_id.get(current.parent_call_id) is None:
+                raise ValueError(f"delta record {current.model_call_id} has no indexed parent")
+            current = load(current.parent_call_id)
+        tokens = cumulative_tokens(current)
+        for suffix, generation in reversed(suffixes):
+            tokens = tokens + suffix + generation
+        if node.digest and compute_digest(tokens) != node.digest:
+            raise ValueError(f"materialized tokens for {node.call_id} fail their digest")
+        return tokens
 
     async def resolve(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
         return await asyncio.to_thread(self._resolve, rollout_id, request_items)
 
     def _resolve(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
-        # The resolver shares the token store's lock and durable log.
-        # A successful ``TokenSink.put`` is therefore immediately visible.
-        with self._store._locked(rollout_id, shared=True):
-            lineage = self._refresh(rollout_id)
-            return lineage.resolve(request_items)
+        with self._rollout_lock(rollout_id), self._read_locked(rollout_id):
+            refs, lineage = self._refresh(rollout_id)
+            status, node, reason = lineage.resolve_node(request_items)
+            if status != ParentResolutionStatus.RESOLVED:
+                return LineageResolution(status, reason=reason)
+            tokens = (
+                node.cum_tokens if node.cum_tokens is not None else self._materialize(rollout_id, node, refs, lineage)
+            )
+            return LineageResolution(
+                ParentResolutionStatus.RESOLVED,
+                match=LineageMatch(
+                    model_call_id=node.call_id,
+                    cumulative_token_ids=tuple(tokens),
+                    digest=node.digest,
+                ),
+            )
 
     def is_process_shared(self) -> bool:
         return True
 
     async def close(self) -> None:
-        self._cache.clear()
+        with self._cache_guard:
+            self._cache.clear()
+
+
+class FileLineageStore(IncrementalLineageStore):
+    """Resolve lineage from the token JSONL committed by ``TokenCaptureStore``.
+
+    The reference ``IncrementalLineageStore`` backend: cursor = (inode, offset),
+    ref = byte offset, reads under the store's shared flock so a committed
+    ``put`` is immediately visible.
+    """
+
+    def __init__(self, root: str | Path, *, max_cached_rollouts: int = 65536) -> None:
+        from nemo_gym.token_id_capture.store import TokenCaptureStore
+
+        super().__init__(max_cached_rollouts=max_cached_rollouts)
+        self._store = TokenCaptureStore(root)
+
+    def _read_locked(self, rollout_id: str):
+        return self._store._locked(rollout_id, shared=True)
+
+    def _fetch_new_entries(self, rollout_id: str, cursor: Any) -> tuple[list[tuple[TokenEntry, Any]], Any]:
+        path = self._store.path_for(rollout_id)
+        if not path.exists():
+            if cursor is not None:
+                raise IncrementalLineageStore.CursorReset
+            return [], None
+        file_stat = path.stat()
+        inode, offset = cursor if cursor is not None else (file_stat.st_ino, 0)
+        if inode != file_stat.st_ino or offset < 0 or offset > file_stat.st_size:
+            raise IncrementalLineageStore.CursorReset
+        items: list[tuple[TokenEntry, Any]] = []
+        if offset < file_stat.st_size:
+            with path.open("rb") as handle:
+                handle.seek(offset)
+                while True:
+                    line_offset = handle.tell()
+                    line = handle.readline()
+                    if not line:
+                        break
+                    payload = line.strip()
+                    if not payload:
+                        continue
+                    items.append((TokenEntry.model_validate(orjson.loads(payload)), line_offset))
+                offset = handle.tell()
+        return items, (inode, offset)
+
+    def _load_entry(self, rollout_id: str, ref: Any) -> TokenEntry:
+        with self._store.path_for(rollout_id).open("rb") as handle:
+            handle.seek(ref)
+            return TokenEntry.model_validate(orjson.loads(handle.readline()))

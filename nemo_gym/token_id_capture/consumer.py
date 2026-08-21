@@ -19,7 +19,6 @@ Gym rollout collection and trainer finalization use this consumer.
 Gym reads a frozen snapshot from the local token store.
 A trainer freezes the ``TokenSource`` provided by its transport.
 Both paths pass snapshot entries through the same build and projection.
-Single-response delivery rejects ``per_request`` because it can return multiple trajectories.
 
 This module does not import rollout-record or model-server modules.
 The caller supplies the ``rollout_id``.
@@ -201,6 +200,8 @@ def _assemble(
             or notes.roots != 1
             or notes.chains != 1
         )
+    # An empty delivery must never be trainable, whatever produced it.
+    mask = mask or not any(item.get("generation_token_ids") for item in response.get("output", []))
     return {
         "rollout_id": rollout_id,
         "builder": builder,

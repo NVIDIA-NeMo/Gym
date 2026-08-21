@@ -48,6 +48,10 @@ TOKEN_FIELDS = ("prompt_token_ids", "generation_token_ids", "generation_log_prob
 #   3  parent resolution and compact continuation lookup metadata
 TOKEN_ENTRY_RECORD_SCHEMA_VERSION = 3
 
+# Records below schema 3 never left development.
+# Current records always carry a request-time parent decision.
+TOKEN_ENTRY_MIN_SCHEMA_VERSION = 3
+
 # Increment this version when the digest encoding changes.
 # A stale digest must fail verification.
 DIGEST_VERSION = 1
@@ -68,12 +72,14 @@ def encode_token_ids(token_ids: list[int]) -> bytes:
 
     Independent implementations can hash the same bytes.
     """
-    encoded = bytearray(struct.pack(">BQ", DIGEST_VERSION, len(token_ids)))
-    for token_id in token_ids:
-        if token_id < 0:
-            raise ValueError(f"token ids must be non-negative, got {token_id}")
-        encoded.extend(struct.pack(">Q", token_id))
-    return bytes(encoded)
+    header = struct.pack(">BQ", DIGEST_VERSION, len(token_ids))
+    if not token_ids:
+        return header
+    try:
+        return header + struct.pack(f">{len(token_ids)}Q", *token_ids)
+    except struct.error:
+        negative = next(token_id for token_id in token_ids if token_id < 0)
+        raise ValueError(f"token ids must be non-negative, got {negative}") from None
 
 
 def compute_digest(token_ids: list[int]) -> str:
@@ -142,6 +148,10 @@ class TokenEntry(BaseModel):
     # The context fields verify the request that produced this call.
     continuation_context_len: int = 0
     continuation_context_digest: str = ""
+    # Persist the resolver's diagnostic reason.
+    parent_resolution_reason: str = ""
+    # Identify the continuation fingerprint algorithm.
+    fingerprint_version: int | None = None
 
     @model_validator(mode="after")
     def _refuse_a_newer_record(self) -> "TokenEntry":
@@ -156,6 +166,11 @@ class TokenEntry(BaseModel):
                 f"token record is schema_version {self.schema_version}, but this reader understands "
                 f"up to {TOKEN_ENTRY_RECORD_SCHEMA_VERSION}. Upgrade the reader, or point it at "
                 "records written by a writer it matches."
+            )
+        if self.schema_version < TOKEN_ENTRY_MIN_SCHEMA_VERSION:
+            raise ValueError(
+                f"token record is schema_version {self.schema_version}, below the supported minimum "
+                f"{TOKEN_ENTRY_MIN_SCHEMA_VERSION}. Regenerate the rollout with a current writer."
             )
         if len(self.generation_token_ids) != len(self.generation_log_probs):
             raise ValueError(
