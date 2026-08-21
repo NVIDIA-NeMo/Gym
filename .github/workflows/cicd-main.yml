@@ -120,6 +120,7 @@ jobs:
             NEMO_GYM_COMMIT=${{ github.sha }}
             NVIDIA_BUILD_ID=${{ github.run_id }}
             NVIDIA_BUILD_REF=${{ github.ref }}
+            NEMO_GYM_PREFETCH_CONFIGS=tests/e2e/gpu_e2e.yaml
           cache-from: type=registry,ref=${{ needs.pre-flight.outputs.registry }}/gym:${{ steps.image.outputs.cache-seed }}-buildcache
           cache-to: type=registry,ref=${{ needs.pre-flight.outputs.registry }}/gym:${{ steps.image.outputs.cache-key }}-buildcache,mode=max
           tags: |
@@ -134,10 +135,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: GPU E2E - NVIDIA SMI
+          - name: GPU E2E - Qwen vLLM rollout
             script: ./tests/e2e/gpu_e2e_test.sh
             test_type: gpu
+            model: Qwen/Qwen2.5-0.5B-Instruct
+            model_revision: 7ae557604adf67be50417f59c2c2f167def9a775
+            artifact_name: gpu-e2e-qwen-vllm
     runs-on: ${{ needs.pre-flight.outputs.runner_prefix }}
+    timeout-minutes: 30
     steps:
       - name: Checkout repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -149,6 +154,19 @@ jobs:
           test-type: ${{ matrix.test_type }}
           container-image: ${{ needs.container_build.outputs.image }}
           test-data-path: ${{ needs.pre-flight.outputs.test_data_path }}
+          model: ${{ matrix.model }}
+          model-revision: ${{ matrix.model_revision }}
+          hf-cache-path: ${{ needs.pre-flight.outputs.test_data_path }}/nemo-gym/huggingface
+          results-path: ${{ runner.temp }}/nemo-gym-gpu-e2e/${{ github.run_id }}-${{ github.run_attempt }}/${{ matrix.artifact_name }}
+
+      - name: Upload GPU E2E artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ matrix.artifact_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nemo-gym-gpu-e2e/${{ github.run_id }}-${{ github.run_attempt }}/${{ matrix.artifact_name }}
+          if-no-files-found: warn
+          retention-days: 7
 
   Nemo_CICD_Test:
     needs: [pre-flight, classify_changes, unit_tests, container_build, gpu_e2e_tests]

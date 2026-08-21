@@ -1,9 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -14,6 +16,9 @@ CICD_MAIN_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "cicd-main.yml"
 CLASSIFY_CHANGES_ACTION = REPO_ROOT / ".github" / "actions" / "classify-changes" / "action.yml"
 FULL_TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "full-test-suite.yml"
 GPU_E2E_SCRIPT = REPO_ROOT / "tests" / "e2e" / "gpu_e2e_test.sh"
+GPU_E2E_CONFIG = REPO_ROOT / "tests" / "e2e" / "gpu_e2e.yaml"
+GPU_E2E_DATASET = REPO_ROOT / "tests" / "e2e" / "gpu_smoke.jsonl"
+GPU_E2E_VERIFIER = REPO_ROOT / "tests" / "e2e" / "verify_gpu_rollout.py"
 GITLAB_PIPELINE = REPO_ROOT / ".gitlab-ci.yml"
 IS_RETRYABLE_FULL_SUITE_FAILURE = REPO_ROOT / "scripts" / "ci" / "is_retryable_full_suite_failure.sh"
 RECLAIM_RUNNER_DISK = REPO_ROOT / "scripts" / "ci" / "reclaim_runner_disk.sh"
@@ -23,6 +28,8 @@ SERVER_TESTS = REPO_ROOT / "scripts" / "ci" / "server_tests.sh"
 SETUP_DEV = REPO_ROOT / "scripts" / "ci" / "setup_dev.sh"
 TEST_TEMPLATE_ACTION = REPO_ROOT / ".github" / "actions" / "test-template" / "action.yml"
 UNIT_TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "unit-tests.yml"
+QWEN_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
+QWEN_REVISION = "7ae557604adf67be50417f59c2c2f167def9a775"
 
 BEHAVIOR_CHANGING_ENV = {
     "GYM_CI_DEV_VENV_DIR": "/tmp/injected-driver-venv",
@@ -182,6 +189,10 @@ def test_github_full_test_jobs_reclaim_disk_before_dependency_restore() -> None:
 
 def test_cicd_main_wires_preflight_cpu_and_gpu_workflows() -> None:
     workflow = CICD_MAIN_WORKFLOW.read_text()
+    results_path = (
+        "${{ runner.temp }}/nemo-gym-gpu-e2e/"
+        "${{ github.run_id }}-${{ github.run_attempt }}/${{ matrix.artifact_name }}"
+    )
 
     assert "      - main\n" in workflow
     assert '      - "pull-request/[0-9]+"\n' in workflow
@@ -206,6 +217,11 @@ def test_cicd_main_wires_preflight_cpu_and_gpu_workflows() -> None:
     assert "test-type: ${{ matrix.test_type }}" in workflow
     assert "test-data-path: ${{ needs.pre-flight.outputs.test_data_path }}" in workflow
     assert "container-image: ${{ needs.container_build.outputs.image }}" in workflow
+    assert "model: ${{ matrix.model }}" in workflow
+    assert "model-revision: ${{ matrix.model_revision }}" in workflow
+    assert "hf-cache-path: ${{ needs.pre-flight.outputs.test_data_path }}/nemo-gym/huggingface" in workflow
+    assert f"results-path: {results_path}" in workflow
+    assert f"path: {results_path}" in workflow
 
 
 def test_cicd_container_build_pushes_sha_image_after_unit_tests() -> None:
@@ -221,6 +237,7 @@ def test_cicd_container_build_pushes_sha_image_after_unit_tests() -> None:
     assert 'echo "image=$REGISTRY/gym:$GITHUB_SHA"' in workflow
     assert "cache-from: type=registry" in workflow
     assert "cache-to: type=registry" in workflow
+    assert "NEMO_GYM_PREFETCH_CONFIGS=tests/e2e/gpu_e2e.yaml" in workflow
 
 
 def test_cicd_summary_accepts_only_expected_docs_only_skips() -> None:
@@ -260,6 +277,11 @@ def test_test_template_runs_cpu_or_gpu_script_in_container() -> None:
     assert "gpu_args=(--runtime=nvidia --gpus all)" in action
     assert 'docker pull "$CONTAINER_IMAGE"' in action
     assert '--volume "$TEST_DATA_PATH:$TEST_DATA_PATH"' in action
+    assert '--volume "$HF_CACHE_PATH:/opt/nemo-gym/cache/huggingface"' in action
+    assert '--volume "$RESULTS_PATH:/opt/nemo-gym/results/gpu-e2e"' in action
+    assert '--env "MODEL=$MODEL"' in action
+    assert '--env "MODEL_REVISION=$MODEL_REVISION"' in action
+    assert 'TEST_DATA_PATH="$(prepare_mount_source test-data-path "$TEST_DATA_PATH")"' in action
     assert '-e -u -o pipefail "$TEST_SCRIPT"' in action
     assert "continue-on-error: true" in action
     assert "      if: always()" in action
@@ -273,14 +295,115 @@ def test_test_template_runs_cpu_or_gpu_script_in_container() -> None:
     assert action.count("required: true") == 4
 
 
-def test_gpu_e2e_matrix_uses_placeholder_script() -> None:
+def test_gpu_e2e_matrix_runs_pinned_qwen_rollout_and_uploads_artifacts() -> None:
     workflow = CICD_MAIN_WORKFLOW.read_text()
+    script = GPU_E2E_SCRIPT.read_text()
+    config = GPU_E2E_CONFIG.read_text()
+    dataset = json.loads(GPU_E2E_DATASET.read_text())
 
     assert "fail-fast: false" in workflow
-    assert "- name: GPU E2E - NVIDIA SMI" in workflow
+    assert "- name: GPU E2E - Qwen vLLM rollout" in workflow
     assert "script: ./tests/e2e/gpu_e2e_test.sh" in workflow
     assert "test_type: gpu" in workflow
-    assert GPU_E2E_SCRIPT.read_text().rstrip().endswith("nvidia-smi")
+    assert f"model: {QWEN_MODEL}" in workflow
+    assert f"model_revision: {QWEN_REVISION}" in workflow
+    assert "timeout-minutes: 30" in workflow
+    assert "if: always()" in workflow
+    assert "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02" in workflow
+    assert "if-no-files-found: warn" in workflow
+    assert "retention-days: 7" in workflow
+
+    for expected in (
+        "vllm serve",
+        '--tokenizer-revision "$MODEL_REVISION"',
+        "--tensor-parallel-size 1",
+        "gym env start",
+        "signal.SIG_DFL",
+        "gym eval run",
+        "--agent string_match_simple_agent",
+        "--temperature 0",
+        "verify_gpu_rollout.py",
+    ):
+        assert expected in script
+    assert "docker run" not in script
+    assert QWEN_REVISION in script
+
+    assert "resources_servers/string_match/configs/string_match.yaml" in config
+    assert "responses_api_models/vllm_model/configs/vllm_model.yaml" in config
+    assert "skip_venv_if_present: true" in config
+    assert QWEN_MODEL in config
+    assert dataset["expected_answer"] == "Paris"
+    assert dataset["extraction_mode"] == "final_answer"
+    assert dataset["case_sensitive"] is False
+
+
+def _valid_gpu_rollout() -> dict:
+    return {
+        "response": {
+            "status": "completed",
+            "error": None,
+            "model": QWEN_MODEL,
+            "usage": {"input_tokens": 12, "output_tokens": 6},
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "Final answer: Paris"}],
+                }
+            ],
+        },
+        "reward": 1.0,
+        "expected_answer": "Paris",
+        "extracted_answer": "Paris",
+        "agent_ref": {"name": "string_match_simple_agent"},
+    }
+
+
+def _run_gpu_rollout_verifier(tmp_path: Path, rollout: dict) -> subprocess.CompletedProcess[str]:
+    rollouts_path = tmp_path / "rollouts.jsonl"
+    rollouts_path.write_text(json.dumps(rollout) + "\n")
+    return subprocess.run(
+        [
+            sys.executable,
+            str(GPU_E2E_VERIFIER),
+            "--rollouts",
+            str(rollouts_path),
+            "--expected-model",
+            QWEN_MODEL,
+            "--expected-answer",
+            "Paris",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_gpu_e2e_verifier_accepts_successful_qwen_rollout(tmp_path: Path) -> None:
+    result = _run_gpu_rollout_verifier(tmp_path, _valid_gpu_rollout())
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_gpu_e2e_verifier_accepts_case_insensitive_reward(tmp_path: Path) -> None:
+    rollout = _valid_gpu_rollout()
+    rollout["response"]["output"][0]["content"][0]["text"] = "Final answer: paris"
+    rollout["extracted_answer"] = "paris"
+
+    result = _run_gpu_rollout_verifier(tmp_path, rollout)
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("failure", ["wrong-model", "zero-reward"])
+def test_gpu_e2e_verifier_rejects_vacuous_rollout(tmp_path: Path, failure: str) -> None:
+    rollout = _valid_gpu_rollout()
+    if failure == "wrong-model":
+        rollout["response"]["model"] = "unexpected/model"
+    else:
+        rollout["reward"] = 0.0
+
+    result = _run_gpu_rollout_verifier(tmp_path, rollout)
+
+    assert result.returncode != 0
 
 
 def test_runner_disk_reclamation_fails_fast_when_space_is_still_low(tmp_path: Path) -> None:

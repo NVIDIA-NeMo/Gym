@@ -21,6 +21,8 @@ from pathlib import Path
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--rollouts", type=Path, required=True)
+    parser.add_argument("--expected-model", required=True)
+    parser.add_argument("--expected-answer", required=True)
     args = parser.parse_args()
 
     with args.rollouts.open(encoding="utf-8") as rollouts_file:
@@ -30,7 +32,8 @@ def main() -> None:
     rollout = rollouts[0]
     response = rollout["response"]
     assert response["status"] == "completed"
-    assert response["model"]
+    assert response["error"] is None
+    assert response["model"] == args.expected_model
     assert response["usage"]["input_tokens"] > 0
     assert response["usage"]["output_tokens"] > 0
 
@@ -38,7 +41,11 @@ def main() -> None:
     assert len(messages) == 1
     output_text = [content["text"] for content in messages[0]["content"] if content["type"] == "output_text"]
     assert output_text and output_text[0].strip()
-    assert isinstance(rollout["reward"], float)
+    assert rollout["reward"] == 1.0
+    assert rollout["expected_answer"] == args.expected_answer
+    assert isinstance(rollout["extracted_answer"], str)
+    assert rollout["extracted_answer"].strip()
+    assert rollout["agent_ref"] == {"name": "string_match_simple_agent"}
 
 
 if __name__ == "__main__":
