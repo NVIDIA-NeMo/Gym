@@ -27,9 +27,6 @@ from aiohttp.client_exceptions import ClientResponseError
 from fastapi import Request
 from pydantic import Field, PrivateAttr, model_validator
 
-
-LOG = logging.getLogger(__name__)
-
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
     Body,
@@ -217,6 +214,8 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
             raise ValueError("supply_prefix_token_ids requires return_token_id_information=true")
         if self.supply_prefix_token_ids and self.use_completions_api:
             raise ValueError("supply_prefix_token_ids is not supported with use_completions_api=true")
+        if self.supply_prefix_token_ids and self.is_responses_native:
+            raise ValueError("supply_prefix_token_ids is not supported with is_responses_native=true")
         return self
 
     # When True, outbound calls go to vLLM's /v1/completions endpoint instead
@@ -626,8 +625,9 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         return body_dict
 
-    # The lock protects the ``[proven, configured]`` diagnostic counts.
-    _prefix_supply_counts: List[int] = PrivateAttr(default_factory=lambda: [0, 0])
+    # Protect the ``[supplied, eligible, total]`` diagnostic counts.
+    # Eligible calls have a resolved parent.
+    _prefix_supply_counts: List[int] = PrivateAttr(default_factory=lambda: [0, 0, 0])
     _prefix_supply_lock: Any = PrivateAttr(default_factory=Lock)
 
     def _apply_prefix_supply(self, body_dict: Dict[str, Any]) -> Dict[str, Any]:
@@ -644,50 +644,79 @@ class VLLMModel(SimpleResponsesAPIModel):
         """
         if not self.config.supply_prefix_token_ids:
             return body_dict
-        with self._prefix_supply_lock:
-            self._prefix_supply_counts[1] += 1
         context = current_capture_context()
+        # The parent was resolved before dispatch from the request as received.
+        # Conversion and preprocessing may have reshaped this body.
+        # Re-resolving here could select against a representation never indexed.
+        parent_tokens = context.parent_tokens if context is not None else []
+        with self._prefix_supply_lock:
+            self._prefix_supply_counts[2] += 1
+            if parent_tokens:
+                self._prefix_supply_counts[1] += 1
         if context is None:
             # An uncorrelated rollout call has no verified parent.
             return body_dict
-        # The parent was resolved before dispatch from the request as received.
-        # Conversion and preprocessing may have reshaped this body.
-        # Resolving from this body would use a representation that the index did not record.
-        if not context.parent_tokens:
+        if not parent_tokens:
             return body_dict
-        body_dict["required_prefix_token_ids"] = list(context.parent_tokens)
+        body_dict["required_prefix_token_ids"] = parent_tokens
         # This records intent only.
         # ``prefix_supplied`` remains false until generation-time prompt_token_ids prove application.
         context.prefix_requested = True
         return body_dict
 
-    def _verify_generation_prefix(self, body_dict: dict, response: dict) -> list[int] | None:
+    @staticmethod
+    def _generation_prompt_token_ids(response: dict) -> Any:
+        """Find generation-time prompt token ids, mirroring the token-metadata source order.
+
+        A message-level bundle outranks top-level transport fields.
+        """
+        choices = response.get("choices")
+        choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+        message = choice.get("message")
+        if isinstance(message, dict) and message.get("prompt_token_ids") is not None:
+            return message["prompt_token_ids"]
+        return response.get("prompt_token_ids")
+
+    def _verify_generation_prefix(self, body_dict: dict, response: dict) -> None:
         """Require generation-time proof that the engine applied the requested prefix."""
         context = current_capture_context()
         if context is None or not context.prefix_requested:
-            return None
+            return
         required = body_dict.get("required_prefix_token_ids")
         if not required:
             raise RuntimeError("A requested token prefix was removed before generation.")
-        tokens = response.get("prompt_token_ids")
+        tokens = self._generation_prompt_token_ids(response)
         if not isinstance(tokens, list):
             raise RuntimeError(
-                f"`{self.config.name}` requested required_prefix_token_ids, but the generation "
-                "response did not include prompt_token_ids proving which prompt the engine used"
+                f"`{self.config.name}` (base_url={self.config.base_url}) requested "
+                "required_prefix_token_ids, but the generation response did not include prompt_token_ids "
+                "proving which prompt the engine used. The backend must implement the "
+                "required_prefix_token_ids extension and return generation-time prompt token ids. "
+                "Disabling supply_prefix_token_ids is the fallback."
             )
         tokens = [int(token) for token in tokens]
         if tokens[: len(required)] != list(required):
             raise RuntimeError(
-                f"`{self.config.name}` returned generation prompt_token_ids that do not start "
-                "with required_prefix_token_ids"
+                f"`{self.config.name}` (base_url={self.config.base_url}) returned generation "
+                "prompt_token_ids that do not start with required_prefix_token_ids. The backend must "
+                "implement the required_prefix_token_ids extension and return generation-time prompt "
+                "token ids that extend the supplied prefix. Disabling supply_prefix_token_ids is the fallback."
             )
+        # This proves that the served prompt extended the exact parent tokens.
+        # It does not prove how the backend produced that prompt.
+        # A prefix-stable re-render still satisfies the training invariant.
         context.prefix_supplied = True
         with self._prefix_supply_lock:
             self._prefix_supply_counts[0] += 1
-            supplied, total = self._prefix_supply_counts
+            supplied, eligible, total = self._prefix_supply_counts
         if supplied % 10 == 0:
-            LOG.info("prefix supply: %d/%d calls supplied (%.0f%%)", supplied, total, 100.0 * supplied / total)
-        return tokens
+            LOG.info(
+                "prefix supply: %d/%d eligible calls supplied (%.0f%%; %d enabled calls total)",
+                supplied,
+                eligible,
+                100.0 * supplied / eligible,
+                total,
+            )
 
     async def chat_completions(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
