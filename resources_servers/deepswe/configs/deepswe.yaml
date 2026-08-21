@@ -22,5 +22,5 @@ deepswe_resources_server:
           istio.io/dataplane-mode: none
 
       logs_dir: resources_servers/deepswe/logs
-      clear_verifier_logs: false
-      include_model_patch_in_response: false
+      clear_verifier_logs: true
+      include_model_patch_in_response: true
