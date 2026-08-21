@@ -201,14 +201,14 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
         return options
 
     def _model_egress_target(self) -> str | None:
-        if self.config.sandbox_model_server_name:
+        if self.config.sandbox_model_server:
             model_config = get_first_server_config_dict(
                 get_global_config_dict(),
-                self.config.sandbox_model_server_name,
+                self.config.sandbox_model_server.name,
             )
             target = str(model_config.get("host") or "")
             if not target:
-                raise ValueError(f"Model server {self.config.sandbox_model_server_name!r} does not have a host")
+                raise ValueError(f"Model server {self.config.sandbox_model_server.name!r} does not have a host")
         else:
             return None
 
