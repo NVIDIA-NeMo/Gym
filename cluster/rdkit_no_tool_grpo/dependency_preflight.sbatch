@@ -28,6 +28,7 @@ else
 fi
 LOCAL_GYM_DIR="${NODE_LOCAL_ROOT}/Gym"
 LOCAL_CONTAINER="${NODE_LOCAL_ROOT}/container/$(basename "${BASE_CONTAINER}")"
+ENROOT_CONTAINER_NAME="rdkit-dependency-preflight-${SLURM_JOB_ID}"
 LOCAL_STAMP="${NODE_LOCAL_ROOT}/dependencies.json"
 PERSISTED_STAMP="${BUNDLE_DIR}/preflight/dependencies.json"
 mkdir -p \
@@ -65,6 +66,8 @@ export ENROOT_DATA_PATH="${NODE_LOCAL_ROOT}/enroot/data"
 export ENROOT_RUNTIME_PATH="${NODE_LOCAL_ROOT}/enroot/runtime"
 export ENROOT_TEMP_PATH="${NODE_LOCAL_ROOT}/enroot/tmp"
 
+enroot create --name "${ENROOT_CONTAINER_NAME}" "${LOCAL_CONTAINER}"
+
 srun \
   --nodes=1 \
   --ntasks=1 \
@@ -77,7 +80,7 @@ srun \
   enroot start \
   --rw \
   --mount "${NODE_LOCAL_ROOT}:${NODE_LOCAL_ROOT}" \
-  "${LOCAL_CONTAINER}" \
+  "${ENROOT_CONTAINER_NAME}" \
   /bin/bash -lc "
     set -euo pipefail
     export UV_CACHE_DIR='${NODE_LOCAL_ROOT}/uv-cache'

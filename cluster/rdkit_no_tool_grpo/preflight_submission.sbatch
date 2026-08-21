@@ -31,6 +31,7 @@ fi
 LOCAL_GYM_DIR="${NODE_LOCAL_ROOT}/Gym"
 LOCAL_BUNDLE_DIR="${LOCAL_GYM_DIR}/cluster/rdkit_no_tool_grpo"
 LOCAL_CONTAINER="${NODE_LOCAL_ROOT}/container/$(basename "${CONTAINER_IMAGE_PATH}")"
+ENROOT_CONTAINER_NAME="rdkit-submit-preflight-${SLURM_JOB_ID}"
 mkdir -p \
   "${LOCAL_GYM_DIR}" \
   "${NODE_LOCAL_ROOT}/container" \
@@ -66,6 +67,8 @@ export ENROOT_DATA_PATH="${NODE_LOCAL_ROOT}/enroot/data"
 export ENROOT_RUNTIME_PATH="${NODE_LOCAL_ROOT}/enroot/runtime"
 export ENROOT_TEMP_PATH="${NODE_LOCAL_ROOT}/enroot/tmp"
 
+enroot create --name "${ENROOT_CONTAINER_NAME}" "${LOCAL_CONTAINER}"
+
 DATA_TOKEN_ARGS=()
 if [[ -n "${MAX_NEW_TOKENS:-}" ]]; then
   DATA_TOKEN_ARGS=(--max-output-tokens "${MAX_NEW_TOKENS}")
@@ -86,7 +89,7 @@ COMMON_SRUN_ARGS=(
   enroot start
   --mount "${NODE_LOCAL_ROOT}:${NODE_LOCAL_ROOT}"
   --mount "/lustre:/lustre"
-  "${LOCAL_CONTAINER}"
+  "${ENROOT_CONTAINER_NAME}"
 )
 COMMON_ENV=(
   /usr/bin/env

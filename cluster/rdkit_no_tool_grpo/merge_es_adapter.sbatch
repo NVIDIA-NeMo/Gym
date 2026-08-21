@@ -45,6 +45,7 @@ else
 fi
 LOCAL_GYM_DIR="${NODE_LOCAL_ROOT}/Gym"
 LOCAL_CONTAINER="${NODE_LOCAL_ROOT}/container/$(basename "${CONTAINER_IMAGE_PATH}")"
+ENROOT_CONTAINER_NAME="rdkit-es140-merge-${SLURM_JOB_ID}"
 LOCAL_BASE_MODEL="${NODE_LOCAL_ROOT}/base-model"
 LOCAL_ADAPTER="${NODE_LOCAL_ROOT}/adapter"
 LOCAL_OUTPUT="${NODE_LOCAL_ROOT}/merged-model"
@@ -94,6 +95,7 @@ export ENROOT_CACHE_PATH="${NODE_LOCAL_ROOT}/enroot/cache"
 export ENROOT_DATA_PATH="${NODE_LOCAL_ROOT}/enroot/data"
 export ENROOT_RUNTIME_PATH="${NODE_LOCAL_ROOT}/enroot/runtime"
 export ENROOT_TEMP_PATH="${NODE_LOCAL_ROOT}/enroot/tmp"
+enroot create --name "${ENROOT_CONTAINER_NAME}" "${LOCAL_CONTAINER}"
 srun \
   --nodes=1 \
   --ntasks=1 \
@@ -106,7 +108,7 @@ srun \
   enroot start \
   --mount "${NODE_LOCAL_ROOT}:${NODE_LOCAL_ROOT}" \
   --mount "/lustre:/lustre" \
-  "${LOCAL_CONTAINER}" \
+  "${ENROOT_CONTAINER_NAME}" \
   /bin/bash -lc "
     set -euo pipefail
     export UV_CACHE_DIR='${NODE_LOCAL_ROOT}/uv-cache'

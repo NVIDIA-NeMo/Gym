@@ -29,6 +29,7 @@ else
 fi
 LOCAL_GYM_DIR="${NODE_LOCAL_ROOT}/Gym"
 LOCAL_CONTAINER="${NODE_LOCAL_ROOT}/container/$(basename "${CONTAINER_IMAGE_PATH}")"
+ENROOT_CONTAINER_NAME="rdkit-resource-preflight-${SLURM_JOB_ID}"
 LOCAL_STAMP="${NODE_LOCAL_ROOT}/resource_server_container.json"
 PERSISTED_STAMP="${BUNDLE_DIR}/preflight/resource_server_container.json"
 mkdir -p \
@@ -66,6 +67,8 @@ export ENROOT_DATA_PATH="${NODE_LOCAL_ROOT}/enroot/data"
 export ENROOT_RUNTIME_PATH="${NODE_LOCAL_ROOT}/enroot/runtime"
 export ENROOT_TEMP_PATH="${NODE_LOCAL_ROOT}/enroot/tmp"
 
+enroot create --name "${ENROOT_CONTAINER_NAME}" "${LOCAL_CONTAINER}"
+
 srun \
   --nodes=1 \
   --ntasks=1 \
@@ -78,7 +81,7 @@ srun \
     enroot start \
     --mount "${NODE_LOCAL_ROOT}:${NODE_LOCAL_ROOT}" \
     --mount "/lustre:/lustre" \
-    "${LOCAL_CONTAINER}" \
+    "${ENROOT_CONTAINER_NAME}" \
     /usr/bin/env \
     GYM_DIR="${LOCAL_GYM_DIR}" \
     NODE_LOCAL_ROOT="${NODE_LOCAL_ROOT}" \
