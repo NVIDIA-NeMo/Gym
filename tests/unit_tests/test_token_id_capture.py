@@ -1894,6 +1894,7 @@ async def test_an_external_endpoint_round_trips_the_sink_and_source_protocols():
             "enabled": True,
             "rebuild_response": True,
             "sink": target,
+            "lineage_store": f"{__name__}:_ConfiguredLineage",
         }
     }
     client = TestClient(_server(config).setup_webserver())
