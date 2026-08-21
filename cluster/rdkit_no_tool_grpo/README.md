@@ -25,7 +25,7 @@ then streams the frozen public HF safetensor shards and applies every LoRA
 to map exactly once, rejects shape mismatches and non-finite values, preserves
 the base tensor dtypes, and publishes the sharded HF directory atomically. This
 avoids importing the Nemotron-H implementation merely to add weights. The
-64-GPU one-update smoke is the model-load and inference gate.
+preferred GPU gate converts that merged model once and exercises one rollout.
 
 NeMo-RL converts that merged HF model to Megatron and creates a new zero-output
 adapter with:
@@ -58,7 +58,7 @@ sbatch cluster/rdkit_no_tool_grpo/dependency_preflight.sbatch
 sbatch cluster/rdkit_no_tool_grpo/build_integration_sqsh.sbatch
 sbatch cluster/rdkit_no_tool_grpo/merge_es_adapter.sbatch
 sbatch cluster/rdkit_no_tool_grpo/preflight_resource_server.sbatch
-cluster/rdkit_no_tool_grpo/submit_smoke.sh
+cluster/rdkit_no_tool_grpo/submit_conversion_rollout_gate.sh
 ```
 
 The dependency preflight installs the exact overlay in a disposable node-local
@@ -66,11 +66,25 @@ container and imports every Gym, verifier, vLLM-server, PEFT, Torch, and direct
 merge module before the longer jobs are submitted. The derived integration
 squashfs adds Gym's declared runtime dependencies, `openai==2.6.1`, and
 `peft==0.18.1`. No virtual environment or cache is created on Lustre. Each
-later job should use an `afterok` dependency on the preceding gate. After the
-one-update 64-GPU smoke completes:
+later job should use an `afterok` dependency on the preceding gate.
+
+The preferred GPU compatibility gate is now the 4-node conversion-and-rollout
+job. It runs the normal NeMo-RL setup path, persists the topology-neutral
+HF-to-Megatron `iter_0000000` checkpoint, loads the native LoRA policy, starts
+vLLM and NeMo-Gym, and scores exactly one held-out rollout. It does not perform
+an optimizer update and does not log to W&B:
 
 ```bash
-START_DEPENDENCY=afterok:<smoke_job_id> \
+cluster/rdkit_no_tool_grpo/submit_conversion_rollout_gate.sh
+```
+
+The older 64-GPU one-update smoke is retained for debugging but should not be
+used as a routine gate because an actual checkpointed training allocation tests
+the same training path without discarding useful optimizer work. After the
+conversion-and-rollout gate completes:
+
+```bash
+START_DEPENDENCY=afterok:<conversion_rollout_job_id> \
   cluster/rdkit_no_tool_grpo/submit_baseline.sh
 
 START_DEPENDENCY=afterok:<baseline_job_id> CHAIN_JOBS=3 \
