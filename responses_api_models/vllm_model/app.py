@@ -264,6 +264,11 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 class VLLMModel(SimpleResponsesAPIModel):
     config: VLLMModelConfig
 
+    _DYNAMO_ENGINE_DATA_FIELD_MAPPING: ClassVar[Dict[str, str]] = {
+        "prompt_token_ids": "prompt_token_ids",
+        "completion_token_ids": "generation_token_ids",
+        "completion_logprobs": "generation_log_probs",
+    }
     _TOKENIZE_CHAT_FIELDS: ClassVar[tuple[str, ...]] = (
         "model",
         "messages",
@@ -638,6 +643,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                 # No user message found — create one with just the audio blocks.
                 body_dict.setdefault("messages", []).append({"role": "user", "content": list(audio_blocks)})
 
+        if self.config.return_token_id_information and self._requests_dynamo_engine_data(body_dict):
+            self._derive_required_prefix_token_ids(body_dict)
         self._apply_sampling_overrides(body_dict)
         self._validate_single_choice_token_request(body_dict)
         body_dict = self._apply_prefix_supply(body_dict)
@@ -881,25 +888,38 @@ class VLLMModel(SimpleResponsesAPIModel):
 
             # Token metadata uses this source order:
             # 1. A complete bundle on the assistant message.
-            # 2. Prompt IDs at the response top level and generation IDs on the choice.
-            # 3. Generation data from choice logprobs and prompt IDs from `/tokenize`.
+            # 2. A complete bundle in Dynamo engine data.
+            # 3. Prompt IDs at the response top level and generation IDs on the choice.
+            # 4. Generation data from choice logprobs and prompt IDs from `/tokenize`.
             #
             # An earlier source supplies the normalized bundle.
             # Later inline sources are still checked when present.
             # A partially present source is invalid.
             # Duplicate token IDs must agree.
             message_bundle = self._extract_message_token_bundle(message_dict)
-            response_token_ids = self._extract_vllm_response_token_ids(chat_completion_dict, choice_dict)
+            dynamo_bundle = self._extract_dynamo_engine_data(chat_completion_dict)
 
-            if message_bundle is not None:
+            if message_bundle is not None and dynamo_bundle is not None:
+                if any(message_bundle[field] != dynamo_bundle[field] for field in REQUIRED_TOKEN_METADATA_FIELDS):
+                    raise RuntimeError("Message-level token metadata disagrees with Dynamo engine data.")
+
+            native_bundle = message_bundle if message_bundle is not None else dynamo_bundle
+            if native_bundle is None and self._requests_dynamo_engine_data(body_dict):
+                raise RuntimeError("Request asked for `nvext.engine_data` but the response did not include it.")
+            response_token_ids = self._extract_vllm_response_token_ids(
+                chat_completion_dict,
+                choice_dict,
+                ignore_partial=native_bundle is not None,
+            )
+            if native_bundle is not None:
                 if response_token_ids is not None:
                     response_prompt_token_ids, response_generation_token_ids = response_token_ids
                     if (
-                        message_bundle["prompt_token_ids"] != response_prompt_token_ids
-                        or message_bundle["generation_token_ids"] != response_generation_token_ids
+                        native_bundle["prompt_token_ids"] != response_prompt_token_ids
+                        or native_bundle["generation_token_ids"] != response_generation_token_ids
                     ):
-                        raise RuntimeError("Message-level token metadata disagrees with vLLM response token IDs.")
-                message_dict.update(message_bundle)
+                        raise RuntimeError("Native token metadata disagrees with vLLM response token IDs.")
+                message_dict.update(native_bundle)
             else:
                 logprob_token_ids, generation_log_probs = self._extract_choice_logprobs(choice_dict)
                 if response_token_ids is not None:
@@ -932,53 +952,78 @@ class VLLMModel(SimpleResponsesAPIModel):
                     )
                 )
 
-                # The adapter consumed this compatibility payload.
-                choice_dict.pop("logprobs", None)
-
-            # Top-level and choice-level token-ID fields are transport details.
+            # These fields only transport the token bundle to Gym.
+            choice_dict.pop("logprobs", None)
             chat_completion_dict.pop("prompt_token_ids", None)
             choice_dict.pop("token_ids", None)
+            nvext = chat_completion_dict.get("nvext")
+            if isinstance(nvext, dict):
+                nvext.pop("engine_data", None)
+                if not nvext:
+                    chat_completion_dict.pop("nvext", None)
             choice_dict["message"] = NeMoGymChatCompletionMessageForTraining.model_validate(message_dict)
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
 
     @staticmethod
     def _require_token_id_list(value: Any, field_name: str) -> List[Any]:
-        """Check the container without scanning or copying token IDs."""
+        """Validate a JSON token-ID list without copying it."""
         if not isinstance(value, list):
             raise RuntimeError(f"`{field_name}` must be a list of integer token IDs.")
+        for index, token_id in enumerate(value):
+            if not isinstance(token_id, int) or isinstance(token_id, bool):
+                raise RuntimeError(f"`{field_name}[{index}]` must be an integer token ID.")
         return value
 
     @staticmethod
     def _require_log_prob_list(value: Any, field_name: str) -> List[Any]:
-        """Check the container without scanning or copying log probabilities."""
+        """Validate a JSON log-probability list without copying it."""
         if not isinstance(value, list):
             raise RuntimeError(f"`{field_name}` must be a list of numeric log probabilities.")
+        for index, log_prob in enumerate(value):
+            if not isinstance(log_prob, (int, float)) or isinstance(log_prob, bool):
+                raise RuntimeError(f"`{field_name}[{index}]` must be a numeric log probability.")
         return value
 
     @classmethod
-    def _validate_token_bundle(cls, bundle: Dict[str, Any], source: str) -> Dict[str, Any]:
+    def _validate_token_bundle(
+        cls,
+        bundle: Dict[str, Any],
+        source: str,
+        source_field_names: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        source_field_names = source_field_names or {}
         present_fields = TOKEN_METADATA_FIELDS.intersection(bundle)
         missing_fields = REQUIRED_TOKEN_METADATA_FIELDS.difference(present_fields)
         if missing_fields:
-            missing = ", ".join(sorted(missing_fields))
+            missing = ", ".join(sorted(source_field_names.get(field, field) for field in missing_fields))
             raise RuntimeError(f"{source} returned partial token metadata; missing: {missing}.")
 
+        def source_field(field: str) -> str:
+            return f"{source}.{source_field_names.get(field, field)}"
+
         normalized = {
-            "prompt_token_ids": cls._require_token_id_list(bundle["prompt_token_ids"], f"{source}.prompt_token_ids"),
+            "prompt_token_ids": cls._require_token_id_list(
+                bundle["prompt_token_ids"], source_field("prompt_token_ids")
+            ),
             "generation_token_ids": cls._require_token_id_list(
-                bundle["generation_token_ids"], f"{source}.generation_token_ids"
+                bundle["generation_token_ids"], source_field("generation_token_ids")
             ),
             "generation_log_probs": cls._require_log_prob_list(
-                bundle["generation_log_probs"], f"{source}.generation_log_probs"
+                bundle["generation_log_probs"], source_field("generation_log_probs")
             ),
         }
         if "routed_experts" in bundle:
             normalized["routed_experts"] = bundle["routed_experts"]
 
         if len(normalized["generation_token_ids"]) != len(normalized["generation_log_probs"]):
+            mismatched_fields = (
+                f"{source_field_names['generation_token_ids']} and {source_field_names['generation_log_probs']}"
+                if source_field_names
+                else "generation token IDs and log probabilities"
+            )
             raise RuntimeError(
-                f"{source} returned mismatched generation token IDs and log probabilities: "
+                f"{source} returned mismatched {mismatched_fields}: "
                 f"{len(normalized['generation_token_ids'])} token IDs and "
                 f"{len(normalized['generation_log_probs'])} log probabilities."
             )
@@ -997,10 +1042,36 @@ class VLLMModel(SimpleResponsesAPIModel):
         )
 
     @classmethod
+    def _extract_dynamo_engine_data(cls, chat_completion_dict: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        nvext = chat_completion_dict.get("nvext")
+        if nvext is None:
+            return None
+        if not isinstance(nvext, dict):
+            raise RuntimeError("`nvext` must be an object when present.")
+        if "engine_data" not in nvext:
+            return None
+
+        engine_data = nvext["engine_data"]
+        if not isinstance(engine_data, dict):
+            raise RuntimeError("`nvext.engine_data` must be an object when present.")
+
+        bundle = {
+            destination: engine_data[source]
+            for source, destination in cls._DYNAMO_ENGINE_DATA_FIELD_MAPPING.items()
+            if source in engine_data
+        }
+        source_field_names = {
+            destination: source for source, destination in cls._DYNAMO_ENGINE_DATA_FIELD_MAPPING.items()
+        }
+        return cls._validate_token_bundle(bundle, "nvext.engine_data", source_field_names)
+
+    @classmethod
     def _extract_vllm_response_token_ids(
         cls,
         chat_completion_dict: Dict[str, Any],
         choice_dict: Dict[str, Any],
+        *,
+        ignore_partial: bool = False,
     ) -> Optional[tuple[List[Any], List[Any]]]:
         prompt_value = chat_completion_dict.get("prompt_token_ids")
         generation_value = choice_dict.get("token_ids")
@@ -1008,6 +1079,8 @@ class VLLMModel(SimpleResponsesAPIModel):
         generation_present = generation_value is not None
 
         if prompt_present != generation_present:
+            if ignore_partial:
+                return None
             missing = "choice.token_ids" if prompt_present else "prompt_token_ids"
             raise RuntimeError(f"vLLM response returned partial token metadata; missing: {missing}.")
         if not prompt_present:
@@ -1054,6 +1127,31 @@ class VLLMModel(SimpleResponsesAPIModel):
     def _get_tokenize_chat_body(cls, body_dict: Dict[str, Any]) -> Dict[str, Any]:
         """Keep every known prompt-affecting field aligned with generation."""
         return {field: body_dict[field] for field in cls._TOKENIZE_CHAT_FIELDS if field in body_dict}
+
+    @staticmethod
+    def _requests_dynamo_engine_data(body_dict: Dict[str, Any]) -> bool:
+        nvext = body_dict.get("nvext")
+        if not isinstance(nvext, dict):
+            return False
+        extra_fields = nvext.get("extra_fields")
+        return isinstance(extra_fields, list) and "engine_data" in extra_fields
+
+    @classmethod
+    def _derive_required_prefix_token_ids(cls, body_dict: Dict[str, Any]) -> None:
+        if body_dict.get("required_prefix_token_ids") is not None:
+            return
+
+        for message in reversed(body_dict.get("messages", [])):
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            token_bundle = cls._extract_message_token_bundle(message)
+            if token_bundle is None:
+                continue
+            body_dict["required_prefix_token_ids"] = [
+                *token_bundle["prompt_token_ids"],
+                *token_bundle["generation_token_ids"],
+            ]
+            return
 
     def _validate_single_choice_token_request(self, body_dict: Dict[str, Any]) -> None:
         if self.config.return_token_id_information and body_dict.get("n") not in (None, 1):
