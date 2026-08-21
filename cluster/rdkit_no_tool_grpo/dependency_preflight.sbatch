@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=rdkit-dependency-preflight
 #SBATCH --partition=cpu
-#SBATCH --nodelist=cpu-018
+#SBATCH --nodelist=cpu-028
 #SBATCH --account=healthcareeng_research
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
