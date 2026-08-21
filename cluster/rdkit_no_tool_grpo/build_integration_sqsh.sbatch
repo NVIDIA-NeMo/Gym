@@ -85,7 +85,9 @@ srun \
     set -euo pipefail
     export UV_CACHE_DIR='${NODE_LOCAL_ROOT}/uv-cache'
     uv pip install --python /opt/nemo_rl_venv/bin/python \
-      'openai==${OPENAI_VERSION}' 'peft==${PEFT_VERSION}'
+      'openai==${OPENAI_VERSION}'
+    uv pip install --python /opt/nemo_rl_venv/bin/python --no-deps \
+      'peft==${PEFT_VERSION}'
     uv pip install --python /opt/nemo_rl_venv/bin/python --no-deps \
       '${NODE_LOCAL_ROOT}/Gym'
     /opt/nemo_rl_venv/bin/python - <<'PY'
