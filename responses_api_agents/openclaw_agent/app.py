@@ -509,17 +509,17 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
 
         try:
             code, _, stderr = await self._run_exec(
-                [*self.config.command_parts, "setup", "--non-interactive", "--accept-risk", "--mode", "local"],
+                [*self.config.command_parts, "onboard", "--non-interactive", "--accept-risk", "--skip-health"],
                 cwd=str(work_dir),
                 env=env,
                 timeout=self.config.setup_timeout,
             )
             if code:
-                LOG.warning("openclaw setup exited %d: %s", code, stderr)
+                raise RuntimeError(f"openclaw onboard exited {code}: {stderr}")
 
             config_path = home / ".openclaw" / "openclaw.json"
             if not config_path.is_file():
-                raise RuntimeError(f"openclaw setup did not produce a config at {config_path}: {stderr}")
+                raise RuntimeError(f"openclaw onboard did not produce a config at {config_path}: {stderr}")
             base_cfg = json.loads(config_path.read_text())
             config_path.write_text(json.dumps(self._build_openclaw_config(base_cfg, rollout_id), indent=2) + "\n")
 
