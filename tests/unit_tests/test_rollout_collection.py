@@ -49,10 +49,12 @@ from nemo_gym.rollout_collection import (
     loads_jsonl_line,
 )
 from nemo_gym.token_id_capture import (
+    ParentResolutionStatus,
     TokenCaptureSnapshot,
     TokenCaptureStore,
     TokenEntry,
     clear_token_captures_for_rollouts,
+    stamp_lineage,
 )
 from nemo_gym.token_id_capture.delivery import (
     MASK_SAMPLE_KEY,
@@ -1121,6 +1123,7 @@ class TestRolloutCollection:
                     "all_agents": True,
                     "sink": "framework.capture:Sink",
                     "rebuild_response": True,
+                    "allow_unresolved_continuations": True,
                 }
             },
         )
@@ -1180,6 +1183,7 @@ class TestRolloutCollection:
                     "all_agents": True,
                     "sink": "framework.capture:Sink",
                     "rebuild_response": True,
+                    "allow_unresolved_continuations": True,
                 }
             },
         )
@@ -1921,17 +1925,17 @@ class TestFinalizeRolloutTokenCapture:
 
     @staticmethod
     def _capture(store: TokenCaptureStore) -> None:
-        store.append(
-            TokenEntry(
-                rollout_id="0-0",
-                model_call_id="c1",
-                prompt_token_ids=[1, 2, 3],
-                generation_token_ids=[4, 5],
-                generation_log_probs=[-0.1, -0.2],
-                output_items=[{"type": "message", "role": "assistant", "content": []}],
-                token_item_index=0,
-            )
+        entry = TokenEntry(
+            rollout_id="0-0",
+            model_call_id="c1",
+            prompt_token_ids=[1, 2, 3],
+            generation_token_ids=[4, 5],
+            generation_log_probs=[-0.1, -0.2],
+            output_items=[{"type": "message", "role": "assistant", "content": []}],
+            token_item_index=0,
         )
+        stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
+        store.append(entry)
 
     async def test_rebuilds_a_rollout_that_has_no_token_ids(self, tmp_path: Path) -> None:
         store = TokenCaptureStore(tmp_path)
