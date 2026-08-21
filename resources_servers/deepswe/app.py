@@ -14,6 +14,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from math import ceil
 from pathlib import Path
+from shutil import rmtree
 from time import monotonic
 from traceback import format_exc
 from typing import Any
@@ -490,9 +491,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                     await self._stop_sandbox(sandbox, task_id=current_task_id, phase="verifier")
 
         if self.config.clear_verifier_logs and result.evaluation_completed:
-            for path in log_dir.glob("*"):
-                path.unlink(missing_ok=True)
-            log_dir.rmdir()
+            rmtree(str(log_dir), ignore_errors=True)
 
         return DeepSWEVerifyResponse.model_validate(
             body.model_dump()
