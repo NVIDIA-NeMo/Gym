@@ -20,7 +20,7 @@ from resources_servers.deepswe.task_schema import (
 
 
 EXPECTED_TASK_COUNT = 113
-DEEPSWE_SOURCE_REVISION = "435ee89ec2f2e2289f33b0da4f992f0b7b7266b9"
+DEEPSWE_SOURCE_REVISION = "435ee89ec2f2e2289f33b0da4f992f0b7b7266b9"  # pragma: allowlist secret
 REQUIRED_TASK_FILES = (
     "task.toml",
     "instruction.md",

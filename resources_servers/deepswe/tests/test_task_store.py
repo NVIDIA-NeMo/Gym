@@ -22,7 +22,10 @@ def test_load_task_store(task_assets: Path) -> None:
     assert isinstance(task, Task)
     assert task_id(task) == "example-task"
     assert task_image(task) == "public.example/project/example-task:v1.1"
-    assert task.config.metadata["base_commit_hash"] == "0123456789abcdef0123456789abcdef01234567"
+    assert (
+        task.config.metadata["base_commit_hash"]
+        == "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
+    )
     collect = task_collect_hook(task)
     assert collect.command.endswith(
         "git diff --binary 0123456789abcdef0123456789abcdef01234567 HEAD > /logs/artifacts/model.patch"
