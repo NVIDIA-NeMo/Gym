@@ -78,12 +78,12 @@ srun \
   --rw \
   --mount "${NODE_LOCAL_ROOT}:${NODE_LOCAL_ROOT}" \
   "${ENROOT_CONTAINER_NAME}" \
-  /bin/bash -lc "
+  /bin/bash -c "
     set -euo pipefail
     export UV_CACHE_DIR='${NODE_LOCAL_ROOT}/uv-cache'
-    uv pip install --python /opt/nemo_rl_venv/bin/python \
+    /root/.local/bin/uv pip install --python /opt/nemo_rl_venv/bin/python \
       '${LOCAL_GYM_DIR}' 'openai==${OPENAI_VERSION}'
-    uv pip install --python /opt/nemo_rl_venv/bin/python --no-deps \
+    /root/.local/bin/uv pip install --python /opt/nemo_rl_venv/bin/python --no-deps \
       'peft==${PEFT_VERSION}'
     export PYTHONPATH='${LOCAL_GYM_DIR}'
     export DEPENDENCY_STAMP='${LOCAL_STAMP}'

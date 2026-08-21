@@ -81,12 +81,12 @@ srun \
   --container-mounts="${NODE_LOCAL_ROOT}:${NODE_LOCAL_ROOT}" \
   --container-workdir="${NODE_LOCAL_ROOT}" \
   --chdir="${NODE_LOCAL_ROOT}" \
-  /bin/bash -lc "
+  /bin/bash -c "
     set -euo pipefail
     export UV_CACHE_DIR='${NODE_LOCAL_ROOT}/uv-cache'
-    uv pip install --python /opt/nemo_rl_venv/bin/python \
+    /root/.local/bin/uv pip install --python /opt/nemo_rl_venv/bin/python \
       '${NODE_LOCAL_ROOT}/Gym' 'openai==${OPENAI_VERSION}'
-    uv pip install --python /opt/nemo_rl_venv/bin/python --no-deps \
+    /root/.local/bin/uv pip install --python /opt/nemo_rl_venv/bin/python --no-deps \
       'peft==${PEFT_VERSION}'
     export PYTHONPATH='${NODE_LOCAL_ROOT}/Gym'
     /opt/nemo_rl_venv/bin/python - <<'PY'

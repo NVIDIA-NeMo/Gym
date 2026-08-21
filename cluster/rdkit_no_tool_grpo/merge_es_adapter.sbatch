@@ -106,7 +106,7 @@ srun \
   --mount "${NODE_LOCAL_ROOT}:${NODE_LOCAL_ROOT}" \
   --mount "/lustre:/lustre" \
   "${ENROOT_CONTAINER_NAME}" \
-  /bin/bash -lc "
+  /bin/bash -c "
     set -euo pipefail
     export UV_CACHE_DIR='${NODE_LOCAL_ROOT}/uv-cache'
     export OMP_NUM_THREADS='${OMP_NUM_THREADS}'
