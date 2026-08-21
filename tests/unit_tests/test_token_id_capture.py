@@ -2001,6 +2001,14 @@ def test_a_record_below_the_schema_floor_is_refused():
         TokenEntry(**_entry_fields(schema_version=TOKEN_ENTRY_MIN_SCHEMA_VERSION - 1))
 
 
+def test_a_supported_older_record_uses_new_field_defaults():
+    entry = TokenEntry(**_entry_fields(schema_version=TOKEN_ENTRY_RECORD_SCHEMA_VERSION - 1))
+
+    assert entry.prompt_is_delta is False
+    assert entry.prefix_requested is False
+    assert entry.prefix_supplied is False
+
+
 def test_a_record_newer_than_this_reader_is_refused():
     """Reject newer records hidden by ``extra="allow"``."""
     with pytest.raises(ValidationError, match="this reader understands up to"):

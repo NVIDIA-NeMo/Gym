@@ -5342,9 +5342,11 @@ class TestPrefixSupplyAccounting:
         assert out["required_prefix_token_ids"] == [1, 2, 3]
         assert ctx.prefix_requested is True
         assert ctx.prefix_supplied is False
-        assert server._prefix_supply_counts == [0, 1]
+        # A resolved parent makes this call eligible.
+        # Generation proof has not landed yet.
+        assert server._prefix_supply_counts == [0, 1, 1]
 
-    def test_fallback_counts_as_eligible_but_not_supplied(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+    def test_fallback_counts_in_total_but_not_as_eligible(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
         server = TestPrefixSupply._server(monkeypatch, enabled=True)
         lineage_index().for_rollout("acct-1").record("parent", [{"role": "assistant", "content": "a"}], [1, 2], "d")
 
@@ -5365,7 +5367,8 @@ class TestPrefixSupplyAccounting:
 
         assert "required_prefix_token_ids" not in out
         assert ctx.prefix_supplied is False
-        assert server._prefix_supply_counts == [0, 1]  # Configured but not proven.
+        # A call without a resolved parent is not eligible.
+        assert server._prefix_supply_counts == [0, 0, 1]
 
 
 class TestPrefixSupplyReachesTokenize:
@@ -5631,3 +5634,118 @@ class TestPrefixSupplyUsesTheRequestAsReceived:
             reset_token_sink(token)
 
         assert out["required_prefix_token_ids"] == [7, 8, 9]
+
+
+class TestGenerationProofAcceptsBundleShape:
+    """Generation-time proof mirrors the token-metadata source order.
+
+    A backend can return prompt token ids as a message-level bundle instead of transport fields.
+    The proof must read the same sources in the same priority order.
+    """
+
+    def test_a_backend_returning_a_message_bundle_passes_verification(self, tmp_path) -> None:
+        model = TestPrefixSupplyReachesTokenize._model()
+        app = model.setup_webserver()
+
+        turn = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+        lineage_index().for_rollout("bundle-0").record("parent", turn, [11, 12, 13], "d")
+
+        async def mock_create_chat_completion(**kwargs):
+            return {
+                "id": "c",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "dummy_model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": "ok",
+                            "prompt_token_ids": [11, 12, 13, 77],
+                            "generation_token_ids": [77],
+                            "generation_log_probs": [-0.5],
+                        },
+                    }
+                ],
+            }
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        mock_client.create_tokenize = AsyncMock()
+        model._clients = [mock_client]
+
+        context = CaptureContext(
+            rollout_id="bundle-0",
+            model_call_id="call-b",
+            token_sink=TokenCaptureStore(tmp_path),
+            lineage_store=_TEST_LINEAGE,
+        )
+        sink = set_token_sink(context)
+        try:
+            response = TestClient(app).post(
+                "/v1/chat/completions",
+                json={"messages": turn + [{"role": "user", "content": "next"}]},
+            )
+        finally:
+            reset_token_sink(sink)
+
+        assert response.status_code == 200
+        assert context.prefix_supplied is True
+        assert mock_client.create_tokenize.await_count == 0
+
+    def _verify(self, tmp_path, response: dict) -> CaptureContext:
+        model = TestPrefixSupplyReachesTokenize._model()
+        context = CaptureContext(
+            rollout_id="bundle-1",
+            model_call_id="call-b",
+            token_sink=TokenCaptureStore(tmp_path),
+            lineage_store=_TEST_LINEAGE,
+        )
+        context.prefix_requested = True
+        token = set_token_sink(context)
+        try:
+            result = model._verify_generation_prefix({"required_prefix_token_ids": [11, 12, 13]}, response)
+        finally:
+            reset_token_sink(token)
+        assert result is None  # The proof has no consumer; the function returns nothing.
+        return context
+
+    def test_message_level_prompt_token_ids_outrank_top_level(self, tmp_path) -> None:
+        context = self._verify(
+            tmp_path,
+            {
+                "prompt_token_ids": [900, 901],
+                "choices": [{"index": 0, "message": {"role": "assistant", "prompt_token_ids": [11, 12, 13, 77]}}],
+            },
+        )
+        assert context.prefix_supplied is True
+
+    def test_top_level_prompt_token_ids_remain_a_valid_source(self, tmp_path) -> None:
+        context = self._verify(
+            tmp_path,
+            {
+                "prompt_token_ids": [11, 12, 13, 77],
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}}],
+            },
+        )
+        assert context.prefix_supplied is True
+
+
+class TestPrefixSupplyRejectsResponsesNative:
+    def test_rejected_at_construction(self) -> None:
+        with raises(ValueError, match="not supported with is_responses_native=true"):
+            VLLMModelConfig(
+                host="0.0.0.0",
+                port=8081,
+                base_url="http://api.openai.com/v1",
+                api_key="dummy_key",  # pragma: allowlist secret
+                model="dummy_model",
+                entrypoint="",
+                name="",
+                return_token_id_information=True,
+                uses_reasoning_parser=False,
+                supply_prefix_token_ids=True,
+                is_responses_native=True,
+            )
