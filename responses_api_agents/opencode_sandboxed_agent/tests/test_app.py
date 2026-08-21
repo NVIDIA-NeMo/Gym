@@ -137,8 +137,7 @@ class TestOpenCodeSandboxedAgent:
         monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox_mock})
         monkeypatch.setattr(server, "_create_opencode_config", lambda: dict())
 
-        sandbox_mock.return_value.exec.return_value = MagicMock()
-        sandbox_mock.return_value.exec.return_value.stdout = "my dir"
+        sandbox_mock.exec.return_value = MagicMock(stdout="/testbed\n", stderr="")
 
         monkeypatch.setattr(
             "responses_api_agents.opencode_sandboxed_agent.app.Path.exists",
@@ -160,6 +159,8 @@ class TestOpenCodeSandboxedAgent:
                 input=[{"role": "user", "content": "hello"}],
             ),
         )
+        assert sandbox_mock.download.await_args.args[0] == "/testbed/export.json"
+
         expected_response = NeMoGymResponse(
             id="resp_",
             created_at=0.0,
