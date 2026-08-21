@@ -23,7 +23,7 @@ keywords = []
 [metadata]
 task_id = "example-task"
 repository_url = "https://github.com/example/repo"
-base_commit_hash = "0123456789abcdef0123456789abcdef01234567"
+base_commit_hash = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
 language = "python"
 [verifier]
 network_mode = "no-network"
