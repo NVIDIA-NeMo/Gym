@@ -1,6 +1,7 @@
 swe_pivot:
   resources_servers:
     swe_pivot:
+      requires_agent: [tool_simulation_agent]
       entrypoint: app.py
       domain: agent
       verified: false

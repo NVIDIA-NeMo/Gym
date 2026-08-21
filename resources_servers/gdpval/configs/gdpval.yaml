@@ -1,6 +1,7 @@
 gdpval_resources_server:
   resources_servers:
     gdpval:
+      requires_agent: [stirrup_agent]
       entrypoint: app.py
       domain: other
       verified: false

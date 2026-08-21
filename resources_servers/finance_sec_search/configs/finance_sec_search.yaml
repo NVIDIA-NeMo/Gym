@@ -5,6 +5,7 @@ config_paths:
 finance_sec_search_resources_server:
   resources_servers:
     finance_sec_search:
+      requires_agent: [finance_agent]
       entrypoint: app.py
       domain: agent
       verified: false

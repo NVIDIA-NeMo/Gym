@@ -18,6 +18,7 @@ policy_model_no_interleaved_reasoning:
 browsecomp_benchmark_resources_server:
   resources_servers:
     browsecomp_advanced_harness:
+      requires_agent: [browsecomp_agent]
       entrypoint: app.py
       domain: agent
       debug: false

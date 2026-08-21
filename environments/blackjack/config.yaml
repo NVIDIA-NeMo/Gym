@@ -1,6 +1,7 @@
 blackjack:
   resources_servers:
     blackjack:
+      requires_agent: [gymnasium_agent]
       entrypoint: app.py
       domain: games
       verified: false
