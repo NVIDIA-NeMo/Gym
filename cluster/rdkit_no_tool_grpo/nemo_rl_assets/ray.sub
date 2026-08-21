@@ -28,12 +28,32 @@ set -euo pipefail
 # Function to detect if SLURM cluster uses GRES
 ########################################################
 maybe_gres_arg() {
-  # Check if any nodes in the partition have GRES configured
-  # Assumes a homogeneous allocation (not a heterogeneous job)
-  if sinfo -p $SLURM_JOB_PARTITION -h -o "%G" | grep -q "gpu:"; then
-    # Do a quick assert here that gpus:8 == gpus:$GPUS_PER_NODE. It is probably a user error if someone isn't using GPUS_PER_NODE=8 on our clusters if it supports --gres=gpu:8 or gpu:a100:8
-    if [[ $GPUS_PER_NODE -ne $(sinfo -p $SLURM_JOB_PARTITION -h -o "%G" | grep "gpu:" | awk -F: '{print $NF}') ]]; then
-      echo "Error: GPUS_PER_NODE=$GPUS_PER_NODE but GRES detected is $(sinfo -p $SLURM_JOB_PARTITION -h -o "%G" | grep "gpu:") meaning GPUS_PER_NODE is not set to fully claim the GPUs on the nodes." >&2
+  local gres_config gpu_counts
+  gres_config=$(sinfo -p "$SLURM_JOB_PARTITION" -h -o "%G")
+  if grep -q "gpu:" <<<"$gres_config"; then
+    # A topology suffix such as gpu:h100:8(S:0-1) is metadata, not part of
+    # the GPU count. Validate every GPU-bearing partition entry after removing it.
+    gpu_counts=$(
+      awk '
+        {
+          entry_count = split($0, entries, ",")
+          for (entry_index = 1; entry_index <= entry_count; entry_index++) {
+            if (entries[entry_index] !~ /^gpu:/) {
+              continue
+            }
+            entry = entries[entry_index]
+            sub(/\(.*/, "", entry)
+            field_count = split(entry, fields, ":")
+            count = fields[field_count]
+            if (count ~ /^[0-9]+$/) {
+              print count
+            }
+          }
+        }
+      ' <<<"$gres_config" | sort -u
+    )
+    if [[ -z "$gpu_counts" || "$gpu_counts" != "$GPUS_PER_NODE" ]]; then
+      echo "Error: GPUS_PER_NODE=$GPUS_PER_NODE but partition GRES entries are: $gres_config" >&2
       exit 1
     fi
     echo "--gres=gpu:${GPUS_PER_NODE}"
@@ -51,18 +71,24 @@ CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
 COMMAND=${COMMAND:-}  # This is a script relative to HOST_WORKDIR. If left empty, it will leave the cluster idle after it's brought up.
 HOST_WORKDIR=${HOST_WORKDIR:-$SLURM_SUBMIT_DIR}
-if [[ ! -d "/raid/scratch/${USER}" ]]; then
-  srun --nodes="$SLURM_JOB_NUM_NODES" --ntasks-per-node=1 \
-    mkdir -p "/raid/scratch/${USER}"
-fi
-srun --nodes="$SLURM_JOB_NUM_NODES" --ntasks-per-node=1 \
-  test -w "/raid/scratch/${USER}"
+
+# Be explicit about total tasks. A nested sbatch submission may otherwise
+# preserve SLURM_NTASKS=1 from its CPU launcher and stage only the head node.
+run_on_each_node() {
+  srun \
+    --nodes="$SLURM_JOB_NUM_NODES" \
+    --ntasks="$SLURM_JOB_NUM_NODES" \
+    --ntasks-per-node=1 \
+    "$@"
+}
+
+run_on_each_node mkdir -p "/raid/scratch/${USER}"
+run_on_each_node test -w "/raid/scratch/${USER}"
 NODE_LOCAL_ROOT=${NODE_LOCAL_ROOT:-/raid/scratch/${USER}/rdkit-nemo-rl-${SLURM_JOB_ID}}
 STAGED_WORKDIR="${NODE_LOCAL_ROOT}/Gym"
 CONTAINER_SOURCE="${CONTAINER}"
 LOCAL_CONTAINER="${NODE_LOCAL_ROOT}/container/$(basename "${CONTAINER_SOURCE}")"
-srun --nodes="$SLURM_JOB_NUM_NODES" --ntasks-per-node=1 \
-  mkdir -p \
+run_on_each_node mkdir -p \
     "${STAGED_WORKDIR}" \
     "${NODE_LOCAL_ROOT}/container" \
     "${NODE_LOCAL_ROOT}/enroot/cache" \
@@ -72,10 +98,8 @@ srun --nodes="$SLURM_JOB_NUM_NODES" --ntasks-per-node=1 \
     "${NODE_LOCAL_ROOT}/hf-home" \
     "${NODE_LOCAL_ROOT}/uv-cache" \
     "${NODE_LOCAL_ROOT}/wandb"
-srun --nodes="$SLURM_JOB_NUM_NODES" --ntasks-per-node=1 \
-  rsync -a "${CONTAINER_SOURCE}" "${LOCAL_CONTAINER}"
-srun --nodes="$SLURM_JOB_NUM_NODES" --ntasks-per-node=1 \
-  rsync -a \
+run_on_each_node rsync -a "${CONTAINER_SOURCE}" "${LOCAL_CONTAINER}"
+run_on_each_node rsync -a \
     --exclude=.git/ \
     --exclude=artifacts/ \
     --exclude=cluster/rdkit_no_tool_grpo/enroot/ \
