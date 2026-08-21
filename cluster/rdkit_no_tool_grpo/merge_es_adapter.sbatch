@@ -21,7 +21,7 @@ BASE_MODEL_CACHE_ROOT=${BASE_MODEL_CACHE_ROOT:-${INFERNO_DIR}/.local/cache/huggi
 ADAPTER_DIR=${ES_ADAPTER_DIR:-${GYM_MAIN_DIR}/artifacts/inferno-rdkit-nemotron3-nano-post-step-0140-lora-r8}
 OUTPUT_DIR=${ES140_MERGED_MODEL_DIR:-${GYM_MAIN_DIR}/artifacts/nemotron3-nano-rdkit-es140-merged-hf}
 MERGE_PYTHON=${MERGE_PYTHON:-/opt/nemo_rl_venv/bin/python}
-PEFT_VERSION=${PEFT_VERSION:-0.18.1}
+VALIDATION_OUTPUT=${MERGE_VALIDATION_OUTPUT:-${BUNDLE_DIR}/results/es140_lora/merged_model_validation.json}
 PINNED_GYM_COMMIT=1a4912e231bb2795b062f7de97496caaf382c7f6
 SOURCE_GYM_COMMIT=$(git -C "${GYM_DIR}" rev-parse HEAD)
 git -C "${GYM_DIR}" merge-base --is-ancestor "${PINNED_GYM_COMMIT}" "${SOURCE_GYM_COMMIT}"
@@ -47,19 +47,32 @@ LOCAL_GYM_DIR="${NODE_LOCAL_ROOT}/Gym"
 LOCAL_CONTAINER="${NODE_LOCAL_ROOT}/container/$(basename "${CONTAINER_IMAGE_PATH}")"
 LOCAL_BASE_MODEL="${NODE_LOCAL_ROOT}/base-model"
 LOCAL_ADAPTER="${NODE_LOCAL_ROOT}/adapter"
+LOCAL_OUTPUT="${NODE_LOCAL_ROOT}/merged-model"
+LOCAL_VALIDATION="${NODE_LOCAL_ROOT}/merged_model_validation.json"
+PERSIST_TMP="${OUTPUT_DIR}.tmp-${SLURM_JOB_ID}"
 mkdir -p \
   "${LOCAL_GYM_DIR}/cluster/rdkit_no_tool_grpo" \
   "${NODE_LOCAL_ROOT}/container" \
   "${LOCAL_BASE_MODEL}" \
   "${LOCAL_ADAPTER}" \
   "${NODE_LOCAL_ROOT}/hf-home" \
-  "${NODE_LOCAL_ROOT}/python-packages" \
-  "${NODE_LOCAL_ROOT}/uv-cache"
+  "${NODE_LOCAL_ROOT}/uv-cache" \
+  "$(dirname "${VALIDATION_OUTPUT}")"
+
+if [[ -e "${OUTPUT_DIR}" ]]; then
+  echo "Refusing to overwrite existing merged-model output: ${OUTPUT_DIR}" >&2
+  exit 1
+fi
 
 cleanup() {
   case "${NODE_LOCAL_ROOT}" in
     /raid/scratch/*/rdkit-es140-merge-*|/tmp/rdkit-es140-merge-*|*/rdkit-es140-merge-*)
       rm -rf "${NODE_LOCAL_ROOT}"
+      ;;
+  esac
+  case "${PERSIST_TMP}" in
+    *.tmp-"${SLURM_JOB_ID}")
+      rm -rf "${PERSIST_TMP}"
       ;;
   esac
 }
@@ -85,19 +98,19 @@ srun \
   /bin/bash -lc "
     set -euo pipefail
     export UV_CACHE_DIR='${NODE_LOCAL_ROOT}/uv-cache'
-    uv pip install --target '${NODE_LOCAL_ROOT}/python-packages' --no-deps \
-      'peft==${PEFT_VERSION}'
-    export PYTHONPATH='${NODE_LOCAL_ROOT}/python-packages'
-    export HF_HOME='${NODE_LOCAL_ROOT}/hf-home'
-    export HF_HUB_CACHE='${NODE_LOCAL_ROOT}/hf-home/hub'
-    export HUGGINGFACE_HUB_CACHE='${NODE_LOCAL_ROOT}/hf-home/hub'
-    export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
     export OMP_NUM_THREADS='${OMP_NUM_THREADS}'
     '${MERGE_PYTHON}' \
       '${LOCAL_GYM_DIR}/cluster/rdkit_no_tool_grpo/merge_es_adapter.py' \
       --base-model '${LOCAL_BASE_MODEL}' \
       --adapter-dir '${LOCAL_ADAPTER}' \
-      --output-dir '${OUTPUT_DIR}' \
-      --gym-dir '${LOCAL_GYM_DIR}' \
+      --output-dir '${LOCAL_OUTPUT}' \
+      --validation-output '${LOCAL_VALIDATION}' \
       --gym-commit '${SOURCE_GYM_COMMIT}'
   "
+
+mkdir -p "${PERSIST_TMP}"
+rsync -a "${LOCAL_OUTPUT}/" "${PERSIST_TMP}/"
+mv "${PERSIST_TMP}" "${OUTPUT_DIR}"
+install -m 0644 "${LOCAL_VALIDATION}" "${VALIDATION_OUTPUT}"
+echo "Published merged model: ${OUTPUT_DIR}"
+echo "Published direct-merge validation: ${VALIDATION_OUTPUT}"

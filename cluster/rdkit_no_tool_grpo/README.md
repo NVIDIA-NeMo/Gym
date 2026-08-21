@@ -20,9 +20,12 @@ its `-wal` and `-shm` companions to `/raid/scratch` before opening it.
 ## Initialization and training
 
 `merge_es_adapter.py` verifies the exact Inferno adapter SHA-256 and provenance,
-merges it into the frozen public HF base in BF16, and publishes a sharded HF
-directory atomically. `validate_merged_model.py` then compares logits on 16
-fixed prompts between base+PEFT and the merged model.
+then streams the frozen public HF safetensor shards and applies every LoRA
+`B @ A * (alpha / rank)` delta directly. It requires all 11,916 adapter tensors
+to map exactly once, rejects shape mismatches and non-finite values, preserves
+the base tensor dtypes, and publishes the sharded HF directory atomically. This
+avoids importing the Nemotron-H implementation merely to add weights. The
+64-GPU one-update smoke is the model-load and inference gate.
 
 NeMo-RL converts that merged HF model to Megatron and creates a new zero-output
 adapter with:
@@ -51,19 +54,20 @@ From the worktree, with `WANDB_API_KEY` exported:
 
 ```bash
 sbatch cluster/rdkit_no_tool_grpo/import_nemo_rl_sqsh_direct.sbatch
+sbatch cluster/rdkit_no_tool_grpo/dependency_preflight.sbatch
 sbatch cluster/rdkit_no_tool_grpo/build_integration_sqsh.sbatch
 sbatch cluster/rdkit_no_tool_grpo/merge_es_adapter.sbatch
 sbatch cluster/rdkit_no_tool_grpo/preflight_resource_server.sbatch
-sbatch cluster/rdkit_no_tool_grpo/validate_merged_model.sbatch
 cluster/rdkit_no_tool_grpo/submit_smoke.sh
 ```
 
-The derived integration squashfs adds only `openai==2.6.1` and `peft==0.17.1`
-to the image's Python environment. Gym itself is not installed into a
-Lustre-backed virtual environment: the node-local staged checkout is placed on
-`PYTHONPATH`, while the image supplies Ray, Torch, Transformers, Accelerate,
-and Safetensors. Each later job should use an `afterok` dependency on the
-preceding gate. After the one-update 64-GPU smoke completes:
+The dependency preflight installs the exact overlay in a disposable node-local
+container and imports every Gym, verifier, vLLM-server, PEFT, Torch, and direct
+merge module before the longer jobs are submitted. The derived integration
+squashfs adds Gym's declared runtime dependencies, `openai==2.6.1`, and
+`peft==0.18.1`. No virtual environment or cache is created on Lustre. Each
+later job should use an `afterok` dependency on the preceding gate. After the
+one-update 64-GPU smoke completes:
 
 ```bash
 START_DEPENDENCY=afterok:<smoke_job_id> \

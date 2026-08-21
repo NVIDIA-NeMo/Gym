@@ -199,12 +199,21 @@ def validate_merged_model(merged_model_dir: Path, *, deep: bool = False) -> None
     if not manifest_path.is_file():
         raise FileNotFoundError(manifest_path)
     manifest = json.loads(manifest_path.read_text())
-    if manifest.get("schema_version") != 1:
+    if manifest.get("schema_version") != 2:
         raise ValueError("Unsupported ES merge manifest schema")
+    if manifest.get("merge_method") != "direct_safetensors_lora_b_matmul_a":
+        raise ValueError("Merged model was not produced by the validated direct merge")
     if manifest.get("source_adapter", {}).get("sha256") != ES_ADAPTER_SHA256:
         raise ValueError("Merged model was not built from the expected ES adapter")
     if manifest.get("source_adapter", {}).get("inferno_update_count") != 140:
         raise ValueError("Merged model manifest does not identify Step 140")
+    validation = manifest.get("validation", {})
+    if validation.get("passed") is not True:
+        raise ValueError("Direct LoRA weight-merge validation did not pass")
+    if validation.get("adapter_tensor_count") != ES_ADAPTER_TENSOR_COUNT:
+        raise ValueError("Direct merge used an unexpected number of adapter tensors")
+    if validation.get("merged_module_count") != ES_ADAPTER_TENSOR_COUNT // 2:
+        raise ValueError("Direct merge did not consume every LoRA A/B tensor pair")
     for item in manifest.get("output_files", []):
         path = merged_model_dir / item["path"]
         if not path.is_file() or path.stat().st_size != item["bytes"]:
@@ -229,12 +238,18 @@ def validate_merge_parity_summary(path: Path) -> None:
     if not path.is_file():
         raise FileNotFoundError(path)
     summary = json.loads(path.read_text())
-    if summary.get("schema_version") != 1 or summary.get("passed") is not True:
-        raise ValueError(f"Merged-model parity did not pass: {path}")
-    if summary.get("prompt_count") != 16 or summary.get("top1_match_count") != 16:
-        raise ValueError(f"Merged-model parity did not match all fixed prompts: {path}")
-    if summary.get("minimum_cosine_similarity", 0.0) < 0.9999:
-        raise ValueError(f"Merged-model parity cosine similarity is too low: {path}")
+    if summary.get("schema_version") != 2 or summary.get("passed") is not True:
+        raise ValueError(f"Direct merged-weight validation did not pass: {path}")
+    if summary.get("validation_type") != "direct_lora_weight_merge":
+        raise ValueError(f"Unexpected merged-weight validation type: {path}")
+    if summary.get("adapter_tensor_count") != ES_ADAPTER_TENSOR_COUNT:
+        raise ValueError(f"Merged-weight validation used the wrong adapter tensor count: {path}")
+    if summary.get("merged_module_count") != ES_ADAPTER_TENSOR_COUNT // 2:
+        raise ValueError(f"Merged-weight validation did not consume all LoRA pairs: {path}")
+    if summary.get("unmapped_adapter_tensor_count") != 0:
+        raise ValueError(f"Merged-weight validation left adapter tensors unmapped: {path}")
+    if summary.get("nonfinite_delta_count") != 0:
+        raise ValueError(f"Merged-weight validation found non-finite deltas: {path}")
 
 
 def validate_server_sources(root: Path) -> None:
@@ -418,9 +433,8 @@ def main() -> None:
         bundle / "submit_chain.sh",
         bundle / "merge_es_adapter.py",
         bundle / "merge_es_adapter.sbatch",
+        bundle / "dependency_preflight.sbatch",
         bundle / "build_integration_sqsh.sbatch",
-        bundle / "validate_merged_model.py",
-        bundle / "validate_merged_model.sbatch",
         bundle / "submit_baseline.sh",
     ]
     missing = [str(path) for path in required if not path.exists()]

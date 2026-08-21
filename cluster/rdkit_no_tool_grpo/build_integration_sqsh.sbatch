@@ -88,8 +88,11 @@ srun \
       '${NODE_LOCAL_ROOT}/Gym' 'openai==${OPENAI_VERSION}'
     uv pip install --python /opt/nemo_rl_venv/bin/python --no-deps \
       'peft==${PEFT_VERSION}'
+    export PYTHONPATH='${NODE_LOCAL_ROOT}/Gym'
     /opt/nemo_rl_venv/bin/python - <<'PY'
 import importlib.metadata
+import safetensors
+import torch
 from nemo_gym.cli import GlobalConfigDictParserConfig, RunHelper
 from nemo_gym.rollout_collection import RolloutCollectionHelper
 from nemo_gym.server_utils import HeadServer, ServerClient
@@ -107,6 +110,8 @@ print(
     ServerClient,
     TrainDataProcessor,
     PeftModel,
+    safetensors.__version__,
+    torch.__version__,
 )
 PY
   "
