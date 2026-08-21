@@ -15,7 +15,7 @@
 import json
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from pydantic import BaseModel
 
 from nemo_gym.base_resources_server import (
@@ -53,7 +53,8 @@ class MultiVerseMathHardRequest(BaseModel):
 
 
 class MultiVerseMathHardResponse(BaseModel):
-    solution: float
+    solution: Optional[float] = None
+    error: Optional[str] = None
 
 
 class MultiVerseMathHardVerifyRequest(BaseVerifyRequest):
@@ -94,7 +95,7 @@ class MultiVerseMathHardResourcesServer(SimpleResourcesServer):
         func = self._function_map.get(path)
 
         if not func:
-            raise HTTPException(status_code=404, detail="Function not found")
+            return MultiVerseMathHardResponse(error=f"Function '{path}' not found")
 
         args = {key: value for key, value in body.model_dump(exclude_unset=True).items() if value is not None}
 
@@ -102,7 +103,7 @@ class MultiVerseMathHardResourcesServer(SimpleResourcesServer):
             result = func(**args)
             return MultiVerseMathHardResponse(solution=result)
         except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+            return MultiVerseMathHardResponse(error=str(e))
 
     async def verify(self, body: MultiVerseMathHardVerifyRequest) -> MultiVerseMathHardVerifyResponse:
         ground_truth = json.loads(body.ground_truth)
