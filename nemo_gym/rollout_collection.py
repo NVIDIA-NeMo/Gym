@@ -974,7 +974,8 @@ class RolloutCollectionHelper(BaseModel):
 
             current_pct = 100 * len(results) / len(input_rows)
             if pcts_to_print and current_pct >= pcts_to_print[0]:
-                pcts_to_print.pop(0)
+                while pcts_to_print and current_pct >= pcts_to_print[0]:
+                    pcts_to_print.pop(0)
 
                 time_taken_s = time() - start_time
                 time_taken = timedelta(seconds=int(time_taken_s))
