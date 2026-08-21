@@ -65,6 +65,7 @@ _RAY_WORKER_EVENT_LOOP: asyncio.AbstractEventLoop | None = None
 )
 def harbor_job_worker(job_config_dict: dict) -> str:
     global _RAY_WORKER_EVENT_LOOP
+    logging.disable(logging.DEBUG)
     if _RAY_WORKER_EVENT_LOOP is None or _RAY_WORKER_EVENT_LOOP.is_closed():
         _RAY_WORKER_EVENT_LOOP = asyncio.new_event_loop()
         asyncio.set_event_loop(_RAY_WORKER_EVENT_LOOP)
@@ -93,6 +94,7 @@ class HarborAgentConfig(BaseResponsesAPIAgentConfig):
             n_attempts=1,
             n_concurrent_trials=1,
             quiet=True,
+            debug=False,
             retry=RetryConfig(max_retries=0),
             datasets=[
                 self.harbor_dataset.model_copy(update={"task_names": [task_name]}),
