@@ -1000,7 +1000,9 @@ class RolloutCollectionHelper(BaseModel):
 
                 if get_exporters():
                     step_metrics = {
-                        f"progress/{agent_name}/reward": metrics["reward"]
+                        f"progress/{agent_name}/reward": round(
+                            100 * metrics["reward"] / agent_name_to_counts[agent_name], 2
+                        )
                         for agent_name, metrics in agent_name_to_metrics.items()
                     }
 
