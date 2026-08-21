@@ -6,11 +6,10 @@ config_paths:
 - benchmarks/scicode/config.yaml
 - benchmarks/omniscience/config.yaml
 - benchmarks/nemotron_3.5_super/benchmark_configs/hle_no_tools.yaml
-- responses_api_models/vllm_model/configs/vllm_model.yaml
-# TODO @bxyu-nvidia: Implementing in the harness x benchmark decoupling effort.
 - benchmarks/swebench/verified/opencode.yaml
 - benchmarks/swebench/multilingual/opencode.yaml
 - benchmarks/deepswe/opencode.yaml
+- responses_api_models/vllm_model/configs/vllm_model.yaml
 # - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 # SWE Bench Pro
 # Terminal Bench 2.1
