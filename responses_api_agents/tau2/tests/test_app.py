@@ -158,7 +158,9 @@ class TestApp:
             patch.object(tau2_llm_utils, "NeMoGymAsyncOpenAI"),
         ):
             server.setup_webserver()
-            client = tau2_llm_utils.NeMoGymAsyncOpenAI(base_url="http://model/v1", api_key="dummy")  # pragma: allowlist secret
+            client = tau2_llm_utils.NeMoGymAsyncOpenAI(
+                base_url="http://model/v1", api_key="dummy"
+            )  # pragma: allowlist secret
 
         assert isinstance(client, Tau2ToolValidatingAsyncOpenAI)
         assert client.malformed_tool_call_max_retries == 2
