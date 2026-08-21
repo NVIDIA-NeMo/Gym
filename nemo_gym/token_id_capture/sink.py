@@ -232,6 +232,7 @@ async def capture_tokens(
             output_items=content_items,
             token_item_index=token_item_index,
             created_at=time.time(),
+            prefix_requested=context.prefix_requested,
             prefix_supplied=context.prefix_supplied,
         )
         if request_messages is not None:
