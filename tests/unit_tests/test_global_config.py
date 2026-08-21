@@ -23,7 +23,7 @@ from pytest import LogCaptureFixture, MonkeyPatch, mark, raises
 
 import nemo_gym.global_config
 import nemo_gym.server_utils
-from nemo_gym import CACHE_DIR, NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, WORKING_DIR
+from nemo_gym import CACHE_DIR, NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, RESULTS_DIR, WORKING_DIR
 from nemo_gym.config_types import (
     AlmostServerError,
     ConfigError,
@@ -45,6 +45,7 @@ from nemo_gym.global_config import (
     get_first_server_config_dict,
     get_global_config_dict,
 )
+from nemo_gym.secret_utils import recursively_hide_secrets
 from nemo_gym.server_utils import (
     DictConfig,
 )
@@ -73,8 +74,10 @@ class TestGlobalConfig:
             "dry_run": False,
             "model_endpoint_readiness_timeout_seconds": 600,
             "allow_openai_version_skew": False,
-            "uv_cache_dir": str(CACHE_DIR / "uv"),
+            "uv_cache_dir": str(CACHE_DIR.expanduser().resolve() / "uv"),
             "uv_venv_dir": str(WORKING_DIR),
+            "results_dir": str(RESULTS_DIR.expanduser().resolve()),
+            "cache_dir": str(CACHE_DIR.expanduser().resolve()),
         }
 
     def test_get_global_config_dict_sanity(self, monkeypatch: MonkeyPatch) -> None:
@@ -108,10 +111,10 @@ class TestGlobalConfig:
         monkeypatch.delenv("UV_CACHE_DIR", raising=False)
         probe = MagicMock(side_effect=AssertionError("offline resolution must not probe sockets"))
         hostname = MagicMock(side_effect=AssertionError("offline resolution must not resolve hostnames"))
-        wandb_init = MagicMock(side_effect=AssertionError("offline resolution must not initialize W&B"))
+        setup_exporters = MagicMock(side_effect=AssertionError("offline resolution must not start exporters"))
         monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", probe)
         monkeypatch.setattr(nemo_gym.global_config, "gethostbyname", hostname)
-        monkeypatch.setattr(nemo_gym.global_config.wandb, "init", wandb_init)
+        monkeypatch.setattr(nemo_gym.global_config, "setup_exporters", setup_exporters)
         monkeypatch.setattr(WANDBConfig, "is_available", PropertyMock(return_value=True))
 
         config = GlobalConfigDictParser().parse(
@@ -132,7 +135,7 @@ class TestGlobalConfig:
         assert config.worker.resources_servers.example.host == "127.0.0.1"
         probe.assert_not_called()
         hostname.assert_not_called()
-        wandb_init.assert_not_called()
+        setup_exporters.assert_not_called()
         assert "UV_CACHE_DIR" not in nemo_gym.global_config.environ
 
     def _mock_parse_environment(self, monkeypatch: MonkeyPatch, config_dict: "DictConfig") -> None:
@@ -193,6 +196,37 @@ class TestGlobalConfig:
         self._mock_parse_environment(monkeypatch, DictConfig({"allow_openai_version_skew": "false"}))
 
         with raises(ConfigError, match="must be a boolean"):
+            get_global_config_dict()
+
+    def test_get_global_config_dict_artifact_dir_overrides(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+        self._mock_parse_environment(
+            monkeypatch, DictConfig({"results_dir": "/shared/results", "cache_dir": "/local/cache"})
+        )
+
+        global_config_dict = get_global_config_dict()
+        assert global_config_dict["results_dir"] == "/shared/results"
+        assert global_config_dict["cache_dir"] == "/local/cache"
+        # uv_cache_dir defaults under the (overridden) cache root.
+        assert global_config_dict["uv_cache_dir"] == str(Path("/local/cache") / "uv")
+
+    def test_get_global_config_dict_artifact_dir_normalization(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+        self._mock_parse_environment(
+            monkeypatch, DictConfig({"results_dir": "relative/results", "cache_dir": "~/gym-cache"})
+        )
+
+        global_config_dict = get_global_config_dict()
+        # Children resolve relative paths against their own cwd; the parser
+        # must hand them an absolute path.
+        assert global_config_dict["results_dir"] == str((Path.cwd() / "relative/results").resolve())
+        assert global_config_dict["cache_dir"] == str((Path.home() / "gym-cache").resolve())
+
+    def test_get_global_config_dict_artifact_dir_rejects_non_string(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+        self._mock_parse_environment(monkeypatch, DictConfig({"results_dir": 123}))
+
+        with raises(ConfigError, match="results_dir must be a non-empty path string"):
             get_global_config_dict()
 
     def test_get_global_config_dict_global_exists(self, monkeypatch: MonkeyPatch) -> None:
@@ -590,6 +624,59 @@ contested: second_inner
             }
             == global_config_dict
         )
+
+    def test_get_global_config_dict_skip_verification_defaults_for_agents(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+
+        find_open_port_mock = MagicMock()
+        find_open_port_mock.side_effect = [12345, 12346, 12347]
+        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock)
+
+        parser = GlobalConfigDictParser()
+        global_config_dict = parser.parse_no_environment(
+            DictConfig(
+                {
+                    "skip_verification": True,
+                    "skip_verification_reward": -1.5,
+                    "agent_name": {
+                        "responses_api_agents": {
+                            "agent_type": {
+                                "entrypoint": "app.py",
+                            }
+                        }
+                    },
+                    "explicit_agent_name": {
+                        "responses_api_agents": {
+                            "agent_type": {
+                                "entrypoint": "app.py",
+                                "skip_verification": False,
+                                "skip_verification_reward": 0.25,
+                            }
+                        }
+                    },
+                    "resources_name": {
+                        "resources_servers": {
+                            "resources_type": {
+                                "entrypoint": "app.py",
+                                "domain": "other",
+                            }
+                        }
+                    },
+                }
+            )
+        )
+
+        agent_config = global_config_dict["agent_name"]["responses_api_agents"]["agent_type"]
+        assert agent_config["skip_verification"] is True
+        assert agent_config["skip_verification_reward"] == -1.5
+
+        explicit_agent_config = global_config_dict["explicit_agent_name"]["responses_api_agents"]["agent_type"]
+        assert explicit_agent_config["skip_verification"] is False
+        assert explicit_agent_config["skip_verification_reward"] == 0.25
+
+        resources_config = global_config_dict["resources_name"]["resources_servers"]["resources_type"]
+        assert "skip_verification" not in resources_config
+        assert "skip_verification_reward" not in resources_config
 
     def test_get_global_config_dict_server_refs_sanity(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_versions_for_testing(monkeypatch)
@@ -1355,7 +1442,7 @@ contested: second_inner
                 "not": "not",
             }
         )
-        GlobalConfigDictParser()._recursively_hide_secrets(dict_config)
+        recursively_hide_secrets(dict_config)
         assert OmegaConf.to_container(dict_config) == {
             "dict": {"key": "****", "not": "not"},
             "list": [{"key": "****", "not": "not"}],

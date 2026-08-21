@@ -663,6 +663,13 @@ class TrainDataProcessor(BaseModel):
                         pass
                     else:
                         continue
+                elif metrics_fpath.exists():
+                    # The sidecar already exists and matches the freshly computed metrics (no conflict was
+                    # reported), so rewriting it would only reproduce identical bytes. Skip the write: when
+                    # the dataset lives in a shared, read-only directory, the redundant open(..., "w")
+                    # raises PermissionError for any user who does not own the pre-staged file.
+                    print(f"Aggregate metrics for {metrics_fpath} already up to date")
+                    continue
 
                 # Ensure the artifact dir exists: the metrics file is written next to the dataset's
                 # (cwd-relative) jsonl_fpath, which may not exist yet when collating from a fresh cwd.
