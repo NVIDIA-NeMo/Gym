@@ -30,11 +30,9 @@ else
 fi
 LOCAL_GYM_DIR="${NODE_LOCAL_ROOT}/Gym"
 LOCAL_BUNDLE_DIR="${LOCAL_GYM_DIR}/cluster/rdkit_no_tool_grpo"
-LOCAL_CONTAINER="${NODE_LOCAL_ROOT}/container/$(basename "${CONTAINER_IMAGE_PATH}")"
 ENROOT_CONTAINER_NAME="rdkit-submit-preflight-${SLURM_JOB_ID}"
 mkdir -p \
   "${LOCAL_GYM_DIR}" \
-  "${NODE_LOCAL_ROOT}/container" \
   "${NODE_LOCAL_ROOT}/enroot/cache" \
   "${NODE_LOCAL_ROOT}/enroot/data" \
   "${NODE_LOCAL_ROOT}/enroot/runtime" \
@@ -60,14 +58,13 @@ rsync -a \
   --exclude=cluster/rdkit_no_tool_grpo/sqsh/ \
   --exclude=cluster/rdkit_no_tool_grpo/venvs/ \
   "${GYM_DIR}/" "${LOCAL_GYM_DIR}/"
-rsync -a "${CONTAINER_IMAGE_PATH}" "${LOCAL_CONTAINER}"
 
 export ENROOT_CACHE_PATH="${NODE_LOCAL_ROOT}/enroot/cache"
 export ENROOT_DATA_PATH="${NODE_LOCAL_ROOT}/enroot/data"
 export ENROOT_RUNTIME_PATH="${NODE_LOCAL_ROOT}/enroot/runtime"
 export ENROOT_TEMP_PATH="${NODE_LOCAL_ROOT}/enroot/tmp"
 
-enroot create --name "${ENROOT_CONTAINER_NAME}" "${LOCAL_CONTAINER}"
+enroot create --name "${ENROOT_CONTAINER_NAME}" "${CONTAINER_IMAGE_PATH}"
 
 DATA_TOKEN_ARGS=()
 if [[ -n "${MAX_NEW_TOKENS:-}" ]]; then

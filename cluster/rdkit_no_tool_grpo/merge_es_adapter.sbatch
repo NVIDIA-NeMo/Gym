@@ -44,7 +44,6 @@ else
   NODE_LOCAL_ROOT="/tmp/rdkit-es140-merge-${USER}-${SLURM_JOB_ID}"
 fi
 LOCAL_GYM_DIR="${NODE_LOCAL_ROOT}/Gym"
-LOCAL_CONTAINER="${NODE_LOCAL_ROOT}/container/$(basename "${CONTAINER_IMAGE_PATH}")"
 ENROOT_CONTAINER_NAME="rdkit-es140-merge-${SLURM_JOB_ID}"
 LOCAL_BASE_MODEL="${NODE_LOCAL_ROOT}/base-model"
 LOCAL_ADAPTER="${NODE_LOCAL_ROOT}/adapter"
@@ -53,7 +52,6 @@ LOCAL_VALIDATION="${NODE_LOCAL_ROOT}/merged_model_validation.json"
 PERSIST_TMP="${OUTPUT_DIR}.tmp-${SLURM_JOB_ID}"
 mkdir -p \
   "${LOCAL_GYM_DIR}/cluster/rdkit_no_tool_grpo" \
-  "${NODE_LOCAL_ROOT}/container" \
   "${NODE_LOCAL_ROOT}/enroot/cache" \
   "${NODE_LOCAL_ROOT}/enroot/data" \
   "${NODE_LOCAL_ROOT}/enroot/runtime" \
@@ -85,7 +83,6 @@ trap cleanup EXIT
 
 install -m 0644 "${BUNDLE_DIR}/merge_es_adapter.py" \
   "${LOCAL_GYM_DIR}/cluster/rdkit_no_tool_grpo/merge_es_adapter.py"
-rsync -a "${CONTAINER_IMAGE_PATH}" "${LOCAL_CONTAINER}"
 rsync -aL "${BASE_SNAPSHOT_DIR}/" "${LOCAL_BASE_MODEL}/"
 rsync -a "${ADAPTER_DIR}/" "${LOCAL_ADAPTER}/"
 
@@ -95,7 +92,7 @@ export ENROOT_CACHE_PATH="${NODE_LOCAL_ROOT}/enroot/cache"
 export ENROOT_DATA_PATH="${NODE_LOCAL_ROOT}/enroot/data"
 export ENROOT_RUNTIME_PATH="${NODE_LOCAL_ROOT}/enroot/runtime"
 export ENROOT_TEMP_PATH="${NODE_LOCAL_ROOT}/enroot/tmp"
-enroot create --name "${ENROOT_CONTAINER_NAME}" "${LOCAL_CONTAINER}"
+enroot create --name "${ENROOT_CONTAINER_NAME}" "${CONTAINER_IMAGE_PATH}"
 srun \
   --nodes=1 \
   --ntasks=1 \
