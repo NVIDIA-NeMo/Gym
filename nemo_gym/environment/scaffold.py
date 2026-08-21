@@ -320,7 +320,7 @@ def _render_manifest_composition(root: Path, composition: _Composition) -> dict[
             }
         )
     else:
-        files[asset / "data" / "example.jsonl"] = _environment_example(composition.agent_instance)
+        files[asset / "data" / "example.jsonl"] = _environment_example()
 
     if composition.reused_verifier is None:
         resource_dir = root / "resources_servers" / composition.module_name
@@ -362,7 +362,7 @@ def _asset_readme(composition: _Composition) -> str:
     )
 
 
-def _environment_example(agent_instance: str) -> str:
+def _environment_example() -> str:
     return (
         json.dumps(
             {
@@ -370,7 +370,6 @@ def _environment_example(agent_instance: str) -> str:
                     "input": [{"role": "user", "content": "What is 6 x 7? Reply with only the answer."}]
                 },
                 "expected_answer": "42",
-                "agent_ref": {"type": "responses_api_agents", "name": agent_instance},
             }
         )
         + "\n"
@@ -445,6 +444,7 @@ def _resource_component_files(
         directory / "tests" / "__init__.py": _license_header().removesuffix("\n"),
         directory / "tests" / "test_app.py": _resources_server_test(),
         directory / "tests" / "verifier_cases.jsonl": _verifier_cases(),
+        directory / "example.jsonl": _environment_example(),
     }
 
 
