@@ -62,6 +62,7 @@ export ENROOT_CACHE_PATH="${NODE_LOCAL_ROOT}/enroot/cache"
 export ENROOT_DATA_PATH="${NODE_LOCAL_ROOT}/enroot/data"
 export ENROOT_RUNTIME_PATH="${NODE_LOCAL_ROOT}/enroot/runtime"
 export ENROOT_TEMP_PATH="${NODE_LOCAL_ROOT}/enroot/tmp"
+export ENROOT_MOUNT_HOME=no
 
 enroot create --name "${ENROOT_CONTAINER_NAME}" "${BASE_CONTAINER}"
 
@@ -74,6 +75,7 @@ srun \
   ENROOT_DATA_PATH="${ENROOT_DATA_PATH}" \
   ENROOT_RUNTIME_PATH="${ENROOT_RUNTIME_PATH}" \
   ENROOT_TEMP_PATH="${ENROOT_TEMP_PATH}" \
+  ENROOT_MOUNT_HOME="${ENROOT_MOUNT_HOME}" \
   enroot start \
   --rw \
   --mount "${NODE_LOCAL_ROOT}:${NODE_LOCAL_ROOT}" \
