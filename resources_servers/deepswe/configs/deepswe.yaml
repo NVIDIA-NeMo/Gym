@@ -13,8 +13,7 @@ deepswe_resources_server:
 
       sandbox_provider: sandbox
       enforce_agent_no_network: true
-      sandbox_model_base_url: ${oc.env:NEMO_GYM_SANDBOX_MODEL_BASE_URL,null}
-      sandbox_model_server_name: null
+      sandbox_model_server: null
       sandbox_config:
         ttl_s: 18000
         ready_timeout_s: 1200

@@ -9,7 +9,9 @@ opencode_deepswe_resources_server:
   _inherit_from: deepswe_resources_server
   resources_servers:
     deepswe:
-      sandbox_model_server_name: policy_model
+      sandbox_model_server:
+        type: responses_api_models
+        name: policy_model
 
 opencode_sandboxed_agent_deepswe:
   _inherit_from: opencode_sandboxed_agent

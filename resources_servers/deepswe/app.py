@@ -17,7 +17,6 @@ from pathlib import Path
 from time import monotonic
 from traceback import format_exc
 from typing import Any
-from urllib.parse import urlparse
 
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -31,6 +30,7 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
@@ -71,8 +71,7 @@ class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
     sandbox_provider: str
     sandbox_config: dict[str, Any]
     enforce_agent_no_network: bool = True
-    sandbox_model_base_url: str | None = None
-    sandbox_model_server_name: str | None = None
+    sandbox_model_server: ModelServerRef | None = None
 
     logs_dir: Path = Path("resources_servers/deepswe/logs")
     clear_verifier_logs: bool = False
@@ -202,12 +201,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
         return options
 
     def _model_egress_target(self) -> str | None:
-        if self.config.sandbox_model_base_url:
-            parsed = urlparse(self.config.sandbox_model_base_url)
-            if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-                raise ValueError(f"Invalid DeepSWE sandbox_model_base_url: {self.config.sandbox_model_base_url!r}")
-            target = parsed.hostname
-        elif self.config.sandbox_model_server_name:
+        if self.config.sandbox_model_server_name:
             model_config = get_first_server_config_dict(
                 get_global_config_dict(),
                 self.config.sandbox_model_server_name,
