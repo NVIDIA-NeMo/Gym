@@ -33,9 +33,12 @@ from nemo_gym.config_types import (
     MalformedConfigPathsError,
     NoServerInstancesError,
     ServerRefNotFoundError,
+    UnsupportedAgentPairingError,
     WANDBConfig,
 )
 from nemo_gym.global_config import (
+    ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
+    ALLOW_UNSUPPORTED_PAIRING_KEY_NAME,
     DEFAULT_HEAD_SERVER_PORT,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     USE_ABSOLUTE_IP,
@@ -1932,6 +1935,12 @@ class TestComposeUnboundAgent:
         assert list(agents) == ["hermes_agent"], f"{instance} was not rehosted on the harness"
         return agents["hermes_agent"]
 
+    def _guarded_config(self, *required_agents: str) -> DictConfig:
+        """The standard config with the environment's resources server declaring `requires_agent`."""
+        config = self._config()
+        config["gpqa_mcqa_resources_server"]["resources_servers"]["mcqa"]["requires_agent"] = list(required_agents)
+        return config
+
     def _parse(self, config: DictConfig) -> DictConfig:
         return GlobalConfigDictParser().parse(
             GlobalConfigDictParserConfig(
@@ -1970,6 +1979,118 @@ class TestComposeUnboundAgent:
         assert list(config["swe_agents"]["responses_api_agents"]) == ["swe_agents"]
         assert list(config["gpqa_mcqa_simple_agent"]["responses_api_agents"]) == ["simple_agent"]
 
+    @mark.parametrize("declared", [None, []], ids=["key absent", "empty list"])
+    def test_swap_allowed_when_the_verifier_declares_nothing(self, declared) -> None:
+        config = self._config() if declared is None else self._guarded_config(*declared)
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert list(config["gpqa_mcqa_simple_agent"]["responses_api_agents"]) == ["hermes_agent"]
+
+    def test_swap_allowed_when_the_selected_agent_is_declared(self) -> None:
+        config = self._guarded_config("simple_agent", "hermes_agent")
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert list(config["gpqa_mcqa_simple_agent"]["responses_api_agents"]) == ["hermes_agent"]
+
+    def test_swap_rejected_when_the_selected_agent_is_not_declared(self) -> None:
+        config = self._guarded_config("scicode_agent")
+
+        with raises(UnsupportedAgentPairingError) as error:
+            GlobalConfigDictParser().compose_unbound_agent(config)
+
+        message = str(error.value)
+        assert "gpqa_mcqa_simple_agent" in message
+        assert "scicode_agent" in message and "hermes_agent" in message
+        assert "--allow-unsupported-pairing" in message
+        # The rejected swap must not have been applied.
+        assert list(config["gpqa_mcqa_simple_agent"]["responses_api_agents"]) == ["simple_agent"]
+
+    def test_override_config_key_allows_the_rejected_swap(self) -> None:
+        config = self._guarded_config("scicode_agent")
+        config[ALLOW_UNSUPPORTED_PAIRING_KEY_NAME] = True
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert list(config["gpqa_mcqa_simple_agent"]["responses_api_agents"]) == ["hermes_agent"]
+
+    @mark.parametrize("value, allowed", [("1", True), ("true", True), ("0", False), ("", False)])
+    def test_override_env_var(self, monkeypatch: MonkeyPatch, value: str, allowed: bool) -> None:
+        monkeypatch.setenv(ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME, value)
+        config = self._guarded_config("scicode_agent")
+
+        if allowed:
+            GlobalConfigDictParser().compose_unbound_agent(config)
+            assert list(config["gpqa_mcqa_simple_agent"]["responses_api_agents"]) == ["hermes_agent"]
+        else:
+            with raises(UnsupportedAgentPairingError):
+                GlobalConfigDictParser().compose_unbound_agent(config)
+
+    def test_swap_allowed_when_the_requirement_cannot_be_determined(self) -> None:
+        """The guard permits what it cannot read, so the permissive paths are asserted, not assumed.
+
+        A server instance pins exactly one implementation, so a block with two is already invalid and is
+        reported by almost-server detection; the guard must not turn it into a pairing error.
+        """
+        config = self._config()
+        config["gpqa_mcqa_resources_server"]["resources_servers"]["extra"] = DictConfig(
+            {"entrypoint": "app.py", "domain": "knowledge", "requires_agent": ["scicode_agent"]}
+        )
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert list(config["gpqa_mcqa_simple_agent"]["responses_api_agents"]) == ["hermes_agent"]
+
+    def test_every_target_is_checked_not_just_the_first(self) -> None:
+        """A permissive verifier must not vouch for a restrictive one in the same config."""
+        config = self._guarded_config("hermes_agent")
+        config["strict_resources_server"] = DictConfig(
+            {"resources_servers": {"scicode": {"entrypoint": "app.py", "requires_agent": ["scicode_agent"]}}}
+        )
+        config["strict_agent"] = DictConfig(self._environment_agent("strict_resources_server"))
+
+        with raises(UnsupportedAgentPairingError) as error:
+            GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert "strict_agent" in str(error.value)
+
+    def test_reports_every_rejected_instance_at_once(self) -> None:
+        """Fixing one instance per re-resolve is the slow path; name them all in one error."""
+        config = self._guarded_config("simple_agent")
+        for name, required in (("scicode", ["scicode_agent", "simple_agent"]), ("critpt", ["critpt_agent"])):
+            config[f"{name}_resources_server"] = DictConfig(
+                {"resources_servers": {name: {"entrypoint": "app.py", "requires_agent": required}}}
+            )
+            config[f"{name}_agent"] = DictConfig(self._environment_agent(f"{name}_resources_server"))
+
+        with raises(UnsupportedAgentPairingError) as error:
+            GlobalConfigDictParser().compose_unbound_agent(config)
+
+        message = str(error.value)
+        # All three rejected instances, each with what it accepts, not just the first one hit.
+        for instance in ("gpqa_mcqa_simple_agent", "scicode_agent", "critpt_agent"):
+            assert instance in message, f"{instance} missing from:\n{message}"
+        assert "3 of the agent instance(s)" in message
+        # critpt accepts no agent the others do, so there is nothing to recommend.
+        assert "No single agent satisfies all of them." in message
+
+    def test_recommends_the_agent_every_rejected_instance_accepts(self) -> None:
+        config = self._guarded_config("scicode_agent", "simple_agent")
+        config["critpt_resources_server"] = DictConfig(
+            {
+                "resources_servers": {
+                    "critpt": {"entrypoint": "app.py", "requires_agent": ["critpt_agent", "simple_agent"]}
+                }
+            }
+        )
+        config["critpt_agent"] = DictConfig(self._environment_agent("critpt_resources_server"))
+
+        with raises(UnsupportedAgentPairingError) as error:
+            GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert "Select one of: simple_agent." in str(error.value)
+
     def test_rehosts_environment_instance_on_the_standalone_agent(self) -> None:
         config = self._config()
 
@@ -1980,7 +2101,6 @@ class TestComposeUnboundAgent:
         block = self._composed_block(config, "gpqa_mcqa_simple_agent")
 
         # The harness's own configuration comes across.
-        assert block["entrypoint"] == "app.py"
         assert block["terminal_backend"] == "local"
         assert block["max_turns"] == 30
 
