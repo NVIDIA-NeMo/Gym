@@ -110,8 +110,9 @@ class TokenIdCaptureSettings(BaseModel):
     # Finalization does not retire the frozen snapshot.
     # Durable delivery permits retirement by snapshot id and version.
     rebuild_response: bool = True
-    # Permit a custom sink without a paired resolver.
-    # Every continuation is unresolved in this mode.
+    # A custom sink normally needs a resolver over the same backend namespace.
+    # Without one, every multi-call continuation is unresolved and masked.
+    # This flag permits that degraded behavior explicitly.
     allow_unresolved_continuations: bool = False
     # Abort once enough finalized rollouts exceed this masked fraction.
     # ``None`` disables the limit.
@@ -162,7 +163,11 @@ class TokenIdCaptureConfig(BaseModel):
 
     @staticmethod
     def _require_resolver(block: TokenIdCaptureSettings) -> None:
-        """Require a resolver whenever a custom sink stores lineage."""
+        """Require a resolver whenever a custom sink stores lineage.
+
+        A missing resolver makes every continuation unresolved.
+        Current reconstruction refuses to guess across that boundary.
+        """
         if block.lineage_store is not None or installed_lineage_store() is not None:
             return
         if block.allow_unresolved_continuations:
