@@ -1,16 +1,7 @@
 # Enroot Sandbox Provider
 
 A [NeMo Gym](../../../../README.md) sandbox provider backed by the local
-[enroot](https://github.com/NVIDIA/enroot) CLI. It runs each sandbox as a
-long-lived enroot container on the host and shells out to the `enroot` binary —
-no daemon, no network service, no Kubernetes, and (unlike opensandbox) no server
-or API key.
-
-Use it when you want lightweight, **rootless** container isolation on a single
-machine or HPC node where enroot is the supported container runtime (common on
-NVIDIA/Slurm clusters, where it pairs with pyxis).
-
-> **Provider name:** `enroot` (select it via the sandbox config; see below).
+[enroot](https://github.com/NVIDIA/enroot) CLI.
 
 ## Requirements
 
@@ -27,43 +18,108 @@ NVIDIA/Slurm clusters, where it pairs with pyxis).
   must own the whole container lifecycle. Switching to another *container* user
   is done with `su` inside the container.
 
-## Pre-fetching images (recommended)
-
-`enroot import` pulls and converts a Docker image to squashfs on first use,
-which can take several minutes per image. For batch evaluation, pre-fetch images
-up front with the bundled helper so every sandbox create is an instant cache hit:
-
-```bash
-python scripts/enroot_prefetch_sqsh.py \
-    --sqsh-dir /path/to/enroot_sqshs \
-    --jobs 4 \
-    ubuntu:22.04 \
-    nvcr.io/nvidia/pytorch:24.01
-```
-
-The helper uses the same SHA-256 cache key as the provider
-(`sha256(image)[:16].sqsh`), so files written here are found automatically at
-runtime without re-importing. Point `sqsh_cache_dir` at the same directory:
-
-```yaml
-enroot:
-  create:
-    sqsh_cache_dir: /path/to/enroot_sqshs
-```
-
-Or pass it as a Hydra override:
-
-```bash
-'++sandbox.enroot.create.sqsh_cache_dir=/path/to/enroot_sqshs'
-```
-
 ## Quick start
 
-The provider is used through NeMo Gym's provider-neutral sandbox API
-(`nemo_gym.sandbox.api`). You pick the provider with a single-key mapping and
-describe the sandbox with a `SandboxSpec`.
+**Step 1 — set up the main virtual environment:**
 
-### Synchronous
+```bash
+uv venv && uv sync --extra dev
+source .venv/bin/activate
+```
+
+**Step 2 — set up the agent virtual environment (run once):**
+
+The `mini_swe_agent_2` server manages its own venv. On Ubuntu 24.04 or newer
+(glibc ≥ 2.39):
+
+```bash
+cd responses_api_agents/mini_swe_agent_2
+uv venv --seed --python 3.12 .venv
+uv pip install -r requirements.txt
+cd ../..
+```
+
+On Ubuntu 22.04 (glibc < 2.39), `openshell` (pulled in by the `[sandbox]` extra)
+has no compatible wheel and no source distribution. Since `openshell` is only
+needed for the OpenShell provider — not for enroot — install the deps directly
+without the `[sandbox]` extra. Pass `--python .venv/bin/python` so uv targets
+the server venv rather than any currently activated venv:
+
+```bash
+cd responses_api_agents/mini_swe_agent_2
+uv venv --seed --python 3.12 .venv
+uv pip install --python .venv/bin/python -e "../../[dev]" mini-swe-agent==2.1.0 swebench==4.1.0
+cd ../..
+```
+
+**Step 3 — pre-convert container images to squashfs (run once per image):**
+
+```python
+import hashlib, subprocess
+from pathlib import Path
+
+images = [
+    "docker.io/swebench/sweb.eval.x86_64.django_1776_django-10973:latest",
+    "docker.io/swebench/sweb.eval.x86_64.pylint-dev_1776_pylint-4551:latest",
+    "docker.io/swebench/sweb.eval.x86_64.sphinx-doc_1776_sphinx-8595:latest",
+    "docker.io/swebench/sweb.eval.x86_64.sympy_1776_sympy-20916:latest",
+    "docker.io/swebench/sweb.eval.x86_64.scikit-learn_1776_scikit-learn-14141:latest",
+]
+
+sqsh_dir = Path("/tmp/enroot_sqshs")
+sqsh_dir.mkdir(parents=True, exist_ok=True)
+
+for image in images:
+    key = hashlib.sha256(image.encode()).hexdigest()[:16]
+    out = sqsh_dir / f"{key}.sqsh"
+    if not out.exists():
+        # enroot treats docker.io as a literal registry path; strip it so the
+        # real Hub API (registry-1.docker.io) is used instead
+        enroot_ref = image.removeprefix("docker.io/")
+        subprocess.run(["enroot", "import", "-o", str(out), f"docker://{enroot_ref}"], check=True)
+        print(f"cached {image} → {out}")
+    else:
+        print(f"already cached: {image}")
+```
+
+**Step 4 — start the env stack:**
+
+The example below uses Qwen3-27B-FP8 — swap `--model` and the
+`vllm_serve_kwargs` overrides for any other model. The `+skip_venv_if_present=true`
+flag reuses the agent venv built in step 2:
+
+```bash
+gym env start \
+    --config responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml \
+    --config nemo_gym/sandbox/providers/enroot/configs/enroot.yaml \
+    +skip_venv_if_present=true \
+    --model-type local_vllm_model \
+    --model Qwen/Qwen3.6-27B-FP8 \
+    '++policy_model.responses_api_models.local_vllm_model.vllm_serve_kwargs.tensor_parallel_size=2' \
+    '++policy_model.responses_api_models.local_vllm_model.vllm_serve_env_vars.VLLM_RAY_DP_PACK_STRATEGY=strict' \
+    '++policy_model.responses_api_models.local_vllm_model.vllm_serve_kwargs.enable_auto_tool_choice=true' \
+    '++policy_model.responses_api_models.local_vllm_model.vllm_serve_kwargs.tool_call_parser=qwen3_coder' \
+    '++policy_model.responses_api_models.local_vllm_model.vllm_serve_kwargs.reasoning_parser=qwen3' \
+    '++policy_model.responses_api_models.local_vllm_model.uses_reasoning_parser=true' \
+    '++policy_model.responses_api_models.local_vllm_model.vllm_serve_kwargs.quantization=fp8' \
+    '++sandbox.enroot.create.sqsh_cache_dir=/tmp/enroot_sqshs' \
+    '++sandbox.enroot.create.bypass_entrypoint=false'
+```
+
+**Step 5 — run evaluation:**
+
+```bash
+gym eval run --no-serve \
+    --agent mini_swe_agent_2 \
+    --input responses_api_agents/mini_swe_agent_2/data/example.jsonl \
+    --output results/mini_swe_agent_2_v2.jsonl \
+    --limit 5 \
+    --num-repeats 1 \
+    --temperature 0.5 \
+    --max-output-tokens 2048
+```
+
+## Python API
 
 ```python
 from nemo_gym.sandbox.api import Sandbox
@@ -85,20 +141,6 @@ with Sandbox({"enroot": {}}, spec) as sandbox:
     sandbox.upload("./local_script.sh", "/sandbox/script.sh")
     sandbox.download("/sandbox/result.txt", "./result.txt")
 # leaving the `with` block kills the container and cleans up
-```
-
-### Asynchronous
-
-```python
-from nemo_gym.sandbox.api import AsyncSandbox
-from nemo_gym.sandbox.providers import SandboxSpec
-
-async def run():
-    spec = SandboxSpec(image="ubuntu:22.04", workdir="/sandbox")
-    async with AsyncSandbox({"enroot": {}}, spec) as sandbox:
-        await sandbox.start()
-        result = await sandbox.exec("uname -a")
-        print(result.stdout)
 ```
 
 > **Lifecycle contract:** download anything you want to keep *before* the sandbox
@@ -175,95 +217,6 @@ writable staging mount. Set `command: null` to skip the probe.
 | `provider_options` | `mounts`: a `"src:dst[:type:opts]"` string or list of enroot fstab entries — extra per-sandbox mounts added at start. |
 | `ttl_s` | **Not supported** — ignored with a warning. Tear down via `stop()`/`close()`. |
 
-## How it works
-
-### Lifecycle: one detached container per sandbox
-
-| Step | Enroot command |
-|---|---|
-| Import (cached) | `enroot import -o <cache>/<hash>.sqsh docker://<image>` |
-| Create rootfs | `enroot create -n nemo-gym-<uuid> <sqsh>` |
-| Start (detached) | `enroot start --rw -m <staging>:/sandbox [-e ...] <name> sh -c "<init>"` |
-| Exec | `enroot exec [-e ...] <pid> sh -c <command>` |
-| Status | `enroot list -f` (liveness from the PID column) |
-| Close | kill the start process group, then `enroot remove -f <name>` |
-
-Containers are named `nemo-gym-<uuid>` and persist across `exec` calls, so state
-written by one command is visible to the next — agents rely on this.
-
-### Why the init is launched detached (not "daemonized" like apptainer)
-
-Unlike `apptainer instance start`, **`enroot start` does not self-daemonize** —
-it stays in the foreground for the container's entire lifetime. So the provider
-launches it truly detached in its own session (`start_new_session=True`, output
-to temp files) and **does not await its exit**. It keeps the process-group id
-(for teardown) and then polls `enroot list -f` until the container's init PID
-appears, which confirms readiness. Every subsequent `enroot exec` targets that
-PID.
-
-### Pinned `ENROOT_*` paths (correctness requirement)
-
-enroot's default paths derive from `XDG_*`, which are often unset in server or
-daemon contexts (making `ENROOT_RUNTIME_PATH` resolve to an unwritable location).
-More importantly, if `ENROOT_RUNTIME_PATH` differed between the `start` call and a
-later `exec`/`list`/`remove`, the running container could not be found. The
-provider therefore resolves `ENROOT_DATA_PATH`, `ENROOT_CACHE_PATH`, and
-`ENROOT_RUNTIME_PATH` once (from config, then existing env, then a per-user base
-dir) and passes the same environment to **every** enroot subprocess.
-
-### Image references and the `#`-registry rule
-
-enroot's docker scheme separates the registry host with `#`, not `/`
-(`docker://[USER@][REGISTRY#]IMAGE[:TAG]`). The provider translates references:
-
-| `spec.image` | enroot import URI |
-|---|---|
-| `ubuntu:22.04` | `docker://ubuntu:22.04` |
-| `nvcr.io/nvidia/pytorch:24.01` | `docker://nvcr.io#nvidia/pytorch:24.01` |
-| `docker.io/swebench/foo:latest` | `docker://swebench/foo:latest` (Hub host dropped — the real API host is `registry-1.docker.io`, not `docker.io`) |
-| `docker://…` / other scheme | passed through unchanged |
-| `/path/to/image.sqsh` (or existing path) | used directly, no import |
-
-Imports are cached under `sqsh_cache_dir` keyed by a hash of the image name, and
-serialized with a per-image lock plus atomic temp-then-rename so concurrent
-creates of the same image never observe a half-written squashfs.
-
-### File transfer: a shared mounted directory
-
-On create, the provider makes a temporary host directory and mounts it into the
-container at `mount_point` (default `/sandbox`). Paths inside the mount are
-read/written directly on the host side (fast path); arbitrary in-container paths
-are staged in the shared folder and moved with an in-container `cp` (fallback).
-Because enroot is rootless, files land back on the host owned by the launching
-user.
-
-### Resource limits
-
-| Resource | Handling |
-|---|---|
-| `gpu` (truthy) | `NVIDIA_VISIBLE_DEVICES=0,1,…,n-1` set at start; the enroot NVIDIA hook injects the GPUs. |
-| `cpu`, `memory_mib`, `disk_gib` | **Ignored with a warning** — standalone rootless enroot does not enforce cgroups (that is pyxis/Slurm's job). |
-
-### Status mapping
-
-`enroot list -f` lists created rootfs *and* running containers, distinguishing
-them by the `PID` column:
-
-- name present **with a PID** → `RUNNING`,
-- name present without a PID, or name absent → `STOPPED`,
-- timeout / non-zero → `UNKNOWN`.
-
-### Error reporting
-
-`exec` never raises for command failure; it returns a `SandboxExecResult`:
-
-- **Normal** — the command's real `return_code`, `error_type=None`.
-- **Timeout** — `return_code=125`, `error_type="timeout"`.
-- **Enroot runtime failure** (container gone, nsenter error, etc., detected via
-  stderr markers like `[ERROR]`) — `return_code=125`, `error_type="sandbox"`.
-
-`125` is the sentinel `SANDBOX_RUNTIME_RETURN_CODE`, signaling "the sandbox
-runtime failed" rather than "the command exited 125".
 
 ## Limitations
 
@@ -277,27 +230,4 @@ runtime failed" rather than "the command exited 125".
 - **Runtime-failure detection is heuristic** — it keys off stderr markers, so a
   user command whose own output contains `[ERROR]` could be misclassified.
 
-## Development
 
-Source: [`provider.py`](./provider.py). The provider implements the
-`SandboxProvider` protocol from [`../base.py`](../base.py) structurally (no
-subclassing) and is registered under the name `enroot` in
-[`../registry.py`](../registry.py).
-
-### Running the tests
-
-The unit tests live in
-[`tests/unit_tests/test_enroot_provider.py`](../../../../tests/unit_tests/test_enroot_provider.py)
-and run as part of the core library test suite — no `enroot` binary required:
-
-```bash
-uv venv && uv sync --extra dev      # one-time environment setup
-pytest tests/unit_tests/test_enroot_provider.py -q
-```
-
-The suite mocks at the **subprocess boundary**: `_require_enroot` is
-monkeypatched to a fake path, `EnrootProvider._run` (the CLI chokepoint) is
-replaced with a recorder returning canned `(return_code, stdout, stderr)`, and
-`_start_detached` is stubbed with a fake process, so no real enroot or container
-is ever used. Async tests need no decorator because the repo sets
-`asyncio_mode = "auto"` in `pyproject.toml`.
