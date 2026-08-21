@@ -16,11 +16,12 @@ GYM_DIR=${GYM_DIR:-/lustre/fsw/portfolios/healthcareeng/projects/healthcareeng_r
 GYM_MAIN_DIR=${GYM_MAIN_DIR:-/lustre/fsw/portfolios/healthcareeng/projects/healthcareeng_research/users/dcorneil/code/Gym}
 INFERNO_DIR=${INFERNO_DIR:-/lustre/fsw/portfolios/healthcareeng/projects/healthcareeng_research/users/dcorneil/code/inferno}
 BUNDLE_DIR="${GYM_DIR}/cluster/rdkit_no_tool_grpo"
-CONTAINER_IMAGE_PATH=${CONTAINER_IMAGE_PATH:-${BUNDLE_DIR}/sqsh/nemo-rl-v0.6.0-gym-peft.sqsh}
+CONTAINER_IMAGE_PATH=${CONTAINER_IMAGE_PATH:-${BUNDLE_DIR}/sqsh/nemo-rl-v0.6.0.sqsh}
 BASE_MODEL_CACHE_ROOT=${BASE_MODEL_CACHE_ROOT:-${INFERNO_DIR}/.local/cache/huggingface/hub/models--nvidia--NVIDIA-Nemotron-3-Nano-30B-A3B-BF16}
 ADAPTER_DIR=${ES_ADAPTER_DIR:-${GYM_MAIN_DIR}/artifacts/inferno-rdkit-nemotron3-nano-post-step-0140-lora-r8}
 OUTPUT_DIR=${ES140_MERGED_MODEL_DIR:-${GYM_MAIN_DIR}/artifacts/nemotron3-nano-rdkit-es140-merged-hf}
 MERGE_PYTHON=${MERGE_PYTHON:-/opt/nemo_rl_venv/bin/python}
+PEFT_VERSION=${PEFT_VERSION:-0.17.1}
 PINNED_GYM_COMMIT=1a4912e231bb2795b062f7de97496caaf382c7f6
 SOURCE_GYM_COMMIT=$(git -C "${GYM_DIR}" rev-parse HEAD)
 git -C "${GYM_DIR}" merge-base --is-ancestor "${PINNED_GYM_COMMIT}" "${SOURCE_GYM_COMMIT}"
@@ -51,7 +52,9 @@ mkdir -p \
   "${NODE_LOCAL_ROOT}/container" \
   "${LOCAL_BASE_MODEL}" \
   "${LOCAL_ADAPTER}" \
-  "${NODE_LOCAL_ROOT}/hf-home"
+  "${NODE_LOCAL_ROOT}/hf-home" \
+  "${NODE_LOCAL_ROOT}/python-packages" \
+  "${NODE_LOCAL_ROOT}/uv-cache"
 
 cleanup() {
   case "${NODE_LOCAL_ROOT}" in
@@ -79,17 +82,22 @@ srun \
   --container-mounts="${NODE_LOCAL_ROOT}:${NODE_LOCAL_ROOT},/lustre:/lustre" \
   --container-workdir="${LOCAL_GYM_DIR}" \
   --chdir="${LOCAL_GYM_DIR}" \
-  /usr/bin/env \
-    HF_HOME="${NODE_LOCAL_ROOT}/hf-home" \
-    HF_HUB_CACHE="${NODE_LOCAL_ROOT}/hf-home/hub" \
-    HUGGINGFACE_HUB_CACHE="${NODE_LOCAL_ROOT}/hf-home/hub" \
-    HF_HUB_OFFLINE=1 \
-    TRANSFORMERS_OFFLINE=1 \
-    OMP_NUM_THREADS="${OMP_NUM_THREADS}" \
-    "${MERGE_PYTHON}" \
-    "${LOCAL_GYM_DIR}/cluster/rdkit_no_tool_grpo/merge_es_adapter.py" \
-      --base-model "${LOCAL_BASE_MODEL}" \
-      --adapter-dir "${LOCAL_ADAPTER}" \
-      --output-dir "${OUTPUT_DIR}" \
-      --gym-dir "${LOCAL_GYM_DIR}" \
-      --gym-commit "${SOURCE_GYM_COMMIT}"
+  /bin/bash -lc "
+    set -euo pipefail
+    export UV_CACHE_DIR='${NODE_LOCAL_ROOT}/uv-cache'
+    uv pip install --target '${NODE_LOCAL_ROOT}/python-packages' --no-deps \
+      'peft==${PEFT_VERSION}'
+    export PYTHONPATH='${NODE_LOCAL_ROOT}/python-packages'
+    export HF_HOME='${NODE_LOCAL_ROOT}/hf-home'
+    export HF_HUB_CACHE='${NODE_LOCAL_ROOT}/hf-home/hub'
+    export HUGGINGFACE_HUB_CACHE='${NODE_LOCAL_ROOT}/hf-home/hub'
+    export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+    export OMP_NUM_THREADS='${OMP_NUM_THREADS}'
+    '${MERGE_PYTHON}' \
+      '${LOCAL_GYM_DIR}/cluster/rdkit_no_tool_grpo/merge_es_adapter.py' \
+      --base-model '${LOCAL_BASE_MODEL}' \
+      --adapter-dir '${LOCAL_ADAPTER}' \
+      --output-dir '${OUTPUT_DIR}' \
+      --gym-dir '${LOCAL_GYM_DIR}' \
+      --gym-commit '${SOURCE_GYM_COMMIT}'
+  "

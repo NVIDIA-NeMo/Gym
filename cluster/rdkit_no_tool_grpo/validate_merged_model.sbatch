@@ -17,12 +17,13 @@ GYM_DIR=${GYM_DIR:-/lustre/fsw/portfolios/healthcareeng/projects/healthcareeng_r
 GYM_MAIN_DIR=${GYM_MAIN_DIR:-/lustre/fsw/portfolios/healthcareeng/projects/healthcareeng_research/users/dcorneil/code/Gym}
 INFERNO_DIR=${INFERNO_DIR:-/lustre/fsw/portfolios/healthcareeng/projects/healthcareeng_research/users/dcorneil/code/inferno}
 BUNDLE_DIR="${GYM_DIR}/cluster/rdkit_no_tool_grpo"
-CONTAINER_IMAGE_PATH=${CONTAINER_IMAGE_PATH:-${BUNDLE_DIR}/sqsh/nemo-rl-v0.6.0-gym-peft.sqsh}
+CONTAINER_IMAGE_PATH=${CONTAINER_IMAGE_PATH:-${BUNDLE_DIR}/sqsh/nemo-rl-v0.6.0.sqsh}
 BASE_MODEL_CACHE_ROOT=${BASE_MODEL_CACHE_ROOT:-${INFERNO_DIR}/.local/cache/huggingface/hub/models--nvidia--NVIDIA-Nemotron-3-Nano-30B-A3B-BF16}
 ADAPTER_DIR=${ES_ADAPTER_DIR:-${GYM_MAIN_DIR}/artifacts/inferno-rdkit-nemotron3-nano-post-step-0140-lora-r8}
 MERGED_MODEL_DIR=${ES140_MERGED_MODEL_DIR:-${GYM_MAIN_DIR}/artifacts/nemotron3-nano-rdkit-es140-merged-hf}
 OUTPUT=${MERGE_PARITY_OUTPUT:-${BUNDLE_DIR}/results/es140_lora/merged_model_validation.json}
 MERGE_PYTHON=${MERGE_PYTHON:-/opt/nemo_rl_venv/bin/python}
+PEFT_VERSION=${PEFT_VERSION:-0.17.1}
 
 BASE_SNAPSHOT_SHA=$(<"${BASE_MODEL_CACHE_ROOT}/refs/main")
 BASE_SNAPSHOT_DIR="${BASE_MODEL_CACHE_ROOT}/snapshots/${BASE_SNAPSHOT_SHA}"
@@ -48,6 +49,8 @@ mkdir -p \
   "${LOCAL_BASE_MODEL}" \
   "${LOCAL_ADAPTER}" \
   "${NODE_LOCAL_ROOT}/hf-home" \
+  "${NODE_LOCAL_ROOT}/python-packages" \
+  "${NODE_LOCAL_ROOT}/uv-cache" \
   "$(dirname "${OUTPUT}")"
 
 cleanup() {
@@ -75,16 +78,21 @@ srun \
   --container-mounts="${NODE_LOCAL_ROOT}:${NODE_LOCAL_ROOT},/lustre:/lustre" \
   --container-workdir="${LOCAL_GYM_DIR}" \
   --chdir="${LOCAL_GYM_DIR}" \
-  /usr/bin/env \
-    HF_HOME="${NODE_LOCAL_ROOT}/hf-home" \
-    HF_HUB_OFFLINE=1 \
-    TRANSFORMERS_OFFLINE=1 \
-    "${MERGE_PYTHON}" \
-    "${LOCAL_GYM_DIR}/cluster/rdkit_no_tool_grpo/validate_merged_model.py" \
-      --base-model "${LOCAL_BASE_MODEL}" \
-      --adapter-dir "${LOCAL_ADAPTER}" \
-      --merged-model-dir "${MERGED_MODEL_DIR}" \
-      --output "${LOCAL_OUTPUT}"
+  /bin/bash -lc "
+    set -euo pipefail
+    export UV_CACHE_DIR='${NODE_LOCAL_ROOT}/uv-cache'
+    uv pip install --target '${NODE_LOCAL_ROOT}/python-packages' --no-deps \
+      'peft==${PEFT_VERSION}'
+    export PYTHONPATH='${NODE_LOCAL_ROOT}/python-packages'
+    export HF_HOME='${NODE_LOCAL_ROOT}/hf-home'
+    export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+    '${MERGE_PYTHON}' \
+      '${LOCAL_GYM_DIR}/cluster/rdkit_no_tool_grpo/validate_merged_model.py' \
+      --base-model '${LOCAL_BASE_MODEL}' \
+      --adapter-dir '${LOCAL_ADAPTER}' \
+      --merged-model-dir '${MERGED_MODEL_DIR}' \
+      --output '${LOCAL_OUTPUT}'
+  "
 
 install -m 0644 "${LOCAL_OUTPUT}" "${OUTPUT}"
 echo "Published merge parity summary: ${OUTPUT}"
