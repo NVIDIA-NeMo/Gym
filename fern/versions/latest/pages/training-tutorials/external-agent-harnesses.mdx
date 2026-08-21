@@ -74,7 +74,7 @@ Each captured call records one parent-resolution result. `ROOT` means that the r
 
 Each rollout's resolved model calls are stitched into a single Responses payload with contiguous `output` items. Each item's `prompt_token_ids` contains the running sequence. Its `generation_token_ids` contains the tokens sampled by the policy at that step. Gym replaces the rollout's `response.output` with these items, so a trainer reads `response.output` the same way for native agents and external harnesses.
 
-An unresolved call begins a separate incomplete fragment. Gym never crosses that boundary with token-prefix inference. The call and its descendants remain available for diagnostics or a consumer that explicitly supports partial trajectories, but single-response delivery sets `mask_sample: true`. Supported records always carry parent-resolution metadata. Prefix matching remains only as a recovery path when a record says `RESOLVED` but its direct parent was filtered from the current build.
+An unresolved call begins a separate incomplete fragment. Gym never crosses that boundary by guessing a parent from token prefixes. The call and its descendants remain available for diagnostics or a consumer that explicitly supports partial trajectories, but single-response delivery sets `mask_sample: true`. Supported records always carry parent-resolution metadata. Prefix matching remains only as a recovery path when a record says `RESOLVED` but its direct parent was filtered from the current build.
 
 The loss mask follows from this structure instead of being sent separately. Prompt positions provide context. Generation positions are trainable.
 
