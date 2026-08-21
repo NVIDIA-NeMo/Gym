@@ -38,7 +38,6 @@ Failed or masked builds retain their capture evidence.
 from nemo_gym.token_id_capture.builder import (
     Chain,
     assert_prefix_contiguity,
-    per_request,
     prefix_merging,
     project_chain_to_output_items,
     project_main_chain_response,
@@ -53,6 +52,7 @@ from nemo_gym.token_id_capture.consumer import (
 )
 from nemo_gym.token_id_capture.lineage import (
     FileLineageStore,
+    IncrementalLineageStore,
     InMemoryLineageStore,
     LineageIndex,
     RolloutLineage,
@@ -75,6 +75,7 @@ from nemo_gym.token_id_capture.protocols import (
     installed_token_source,
 )
 from nemo_gym.token_id_capture.records import (
+    TOKEN_ENTRY_MIN_SCHEMA_VERSION,
     TOKEN_ENTRY_RECORD_SCHEMA_VERSION,
     TOKEN_FIELDS,
     ParentResolutionStatus,
@@ -86,6 +87,7 @@ from nemo_gym.token_id_capture.records import (
 )
 from nemo_gym.token_id_capture.sink import (
     CaptureContext,
+    capture_health_snapshot,
     capture_tokens,
     commit_entry,
     current_capture_context,
@@ -101,6 +103,7 @@ __all__ = [
     "Chain",
     "TokenIdCaptureConfig",
     "TokenEntry",
+    "TOKEN_ENTRY_MIN_SCHEMA_VERSION",
     "TOKEN_ENTRY_RECORD_SCHEMA_VERSION",
     "TOKEN_FIELDS",
     "ParentResolutionStatus",
@@ -125,19 +128,20 @@ __all__ = [
     "installed_token_source",
     "CaptureContext",
     "set_token_sink",
-    "reset_token_sink",
+    "capture_health_snapshot",
     "register_call_intent",
+    "reset_token_sink",
     "resolve_parent",
     "capture_tokens",
     "commit_entry",
     "current_capture_context",
     "FileLineageStore",
+    "IncrementalLineageStore",
     "InMemoryLineageStore",
     "LineageIndex",
     "RolloutLineage",
     "assistant_fingerprint",
     "stamp_continuation",
-    "per_request",
     "prefix_merging",
     "project_chain_to_output_items",
     "project_main_chain_response",

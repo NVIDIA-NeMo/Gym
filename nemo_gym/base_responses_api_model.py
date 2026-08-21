@@ -275,7 +275,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # all of them.
         # Resolve the parent from the received request before dispatch.
         # Exact prefix supply and capture share this decision.
-        await resolve_parent(_request_messages(params))
+        request_messages = _request_messages(params)
+        await resolve_parent(request_messages)
         await register_call_intent()
         if "request" in inspect.signature(self.chat_completions).parameters:
             completion = await self.chat_completions(request=request, body=params)
@@ -283,7 +284,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             completion = await self.chat_completions(body=params)
         await capture_tokens(
             completion,
-            request_messages=_request_messages(params),
+            request_messages=request_messages,
         )
         return completion
 
@@ -315,7 +316,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # all of them.
         # Resolve the parent from the received request before dispatch.
         # Exact prefix supply and capture share this decision.
-        await resolve_parent(_request_messages(params))
+        request_messages = _request_messages(params)
+        await resolve_parent(request_messages)
         await register_call_intent()
         if "request" in inspect.signature(self.responses).parameters:
             response = await self.responses(request=request, body=params)
@@ -326,7 +328,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # The assembled response still carries them here for every dialect.
         await capture_tokens(
             response,
-            request_messages=_request_messages(params),
+            request_messages=request_messages,
         )
         return response
 

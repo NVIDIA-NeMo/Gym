@@ -53,6 +53,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.token_id_capture import (
+    TOKEN_ENTRY_MIN_SCHEMA_VERSION,
     TOKEN_ENTRY_RECORD_SCHEMA_VERSION,
     TOKEN_FIELDS,
     CaptureContext,
@@ -278,15 +279,15 @@ def test_dangling_call_intent_marks_frozen_snapshot_incomplete(tmp_path):
 def test_committed_call_satisfies_its_intent(tmp_path):
     store = TokenCaptureStore(tmp_path)
     asyncio.run(store.begin_call("complete", "c1"))
-    store.append(
-        TokenEntry(
-            rollout_id="complete",
-            model_call_id="c1",
-            prompt_token_ids=PTOKS,
-            generation_token_ids=GTOKS,
-            generation_log_probs=LPS,
-        )
+    entry = TokenEntry(
+        rollout_id="complete",
+        model_call_id="c1",
+        prompt_token_ids=PTOKS,
+        generation_token_ids=GTOKS,
+        generation_log_probs=LPS,
     )
+    stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
+    asyncio.run(store.put(entry))
 
     snapshot = store.freeze_now("complete")
 
@@ -350,15 +351,15 @@ def test_token_store_freeze_is_atomic_and_conditional_drop_is_race_safe(tmp_path
 def test_token_store_sweeps_only_old_retired_tombstones(tmp_path):
     store = TokenCaptureStore(tmp_path)
     for rollout_id in ("old", "recent", "live"):
-        store.append(
-            TokenEntry(
-                rollout_id=rollout_id,
-                model_call_id=f"{rollout_id}-c1",
-                prompt_token_ids=PTOKS,
-                generation_token_ids=GTOKS,
-                generation_log_probs=LPS,
-            )
+        entry = TokenEntry(
+            rollout_id=rollout_id,
+            model_call_id=f"{rollout_id}-c1",
+            prompt_token_ids=PTOKS,
+            generation_token_ids=GTOKS,
+            generation_log_probs=LPS,
         )
+        stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
+        store.append(entry)
     for rollout_id in ("old", "recent"):
         snapshot = store.freeze_now(rollout_id)
         assert asyncio.run(store.drop(rollout_id, snapshot_id=snapshot.snapshot_id, version=snapshot.version))
@@ -381,9 +382,11 @@ def test_token_store_recovers_state_lag_from_the_durable_jsonl_tail(tmp_path):
         generation_token_ids=GTOKS,
         generation_log_probs=LPS,
     )
+    stamp_lineage(first, None, parent_resolution=ParentResolutionStatus.ROOT)
     store.append(first)
     state_after_first = store.state_path_for("lag").read_bytes()
-    store.append(first.model_copy(update={"model_call_id": "c2"}))
+    second = first.model_copy(update={"model_call_id": "c2"})
+    store.append(second)
 
     store.state_path_for("lag").write_bytes(state_after_first)
     snapshot = store.freeze_now("lag")
@@ -396,7 +399,14 @@ def test_token_store_recovers_state_lag_from_the_durable_jsonl_tail(tmp_path):
 
 
 def _block(**kwargs) -> dict:
-    return {"token_id_capture": {"enabled": True, "rebuild_response": False, **kwargs}}
+    return {
+        "token_id_capture": {
+            "enabled": True,
+            "rebuild_response": False,
+            "allow_unresolved_continuations": True,
+            **kwargs,
+        }
+    }
 
 
 def test_config_disabled_needs_no_dir():
@@ -442,7 +452,7 @@ def test_mask_fraction_limit_defaults_off_and_parses():
 
 def test_agent_capture_selection_uses_static_agent_config_or_all_agents():
     config = {
-        "token_id_capture": {"enabled": True, "rebuild_response": False},
+        "token_id_capture": {"enabled": True, "rebuild_response": False, "allow_unresolved_continuations": True},
         "captured": {"responses_api_agents": {"implementation": {"token_id_capture": True}}},
         "ordinary": {"responses_api_agents": {"implementation": {"token_id_capture": False}}},
     }
@@ -476,7 +486,13 @@ def test_config_rejects_an_unknown_key():
 
 def test_config_accepts_a_sink_without_constructing_the_consumer_source():
     config = TokenIdCaptureConfig.model_validate(
-        {"token_id_capture": {"enabled": True, "sink": f"{__name__}:_ConfiguredSink"}}
+        {
+            "token_id_capture": {
+                "enabled": True,
+                "sink": f"{__name__}:_ConfiguredSink",
+                "allow_unresolved_continuations": True,
+            }
+        }
     )
     assert config.token_id_capture.sink == f"{__name__}:_ConfiguredSink"
 
@@ -784,7 +800,7 @@ def _external_mode(tmp_path) -> dict:
     """Capture on, no destination in this process: records are staged elsewhere."""
     return {
         "observability_enabled": False,
-        "token_id_capture": {"enabled": True, "rebuild_response": False},
+        "token_id_capture": {"enabled": True, "rebuild_response": False, "allow_unresolved_continuations": True},
     }
 
 
@@ -950,7 +966,7 @@ def installed_sink():
 
 def test_installed_sink_receives_entries_without_a_capture_dir(installed_sink):
     """The framework path: capture on, no directory anywhere, records still arrive."""
-    config = {"token_id_capture": {"enabled": True, "rebuild_response": False}}
+    config = {"token_id_capture": {"enabled": True, "rebuild_response": False, "allow_unresolved_continuations": True}}
     client = TestClient(_server(config).setup_webserver())
     resp = client.post("/ng-rollout/task0-sink0/training-token-capture/v1/responses", json={"input": "hi"})
     assert resp.status_code == 200
@@ -985,30 +1001,29 @@ def test_installed_sink_is_marked_incomplete_through_the_protocol(installed_sink
         raise RuntimeError("transport down")
 
     monkeypatch.setattr(installed_sink, "put", boom)
-    client = TestClient(_server({"token_id_capture": {"enabled": True, "rebuild_response": False}}).setup_webserver())
+    client = TestClient(
+        _server(
+            {"token_id_capture": {"enabled": True, "rebuild_response": False, "allow_unresolved_continuations": True}}
+        ).setup_webserver()
+    )
     resp = client.post("/ng-rollout/task0-sink1/training-token-capture/v1/responses", json={"input": "hi"})
     assert resp.status_code == 200  # capture never fails the model call
     assert installed_sink.incomplete == [("task0-sink1", installed_sink.incomplete[0][1])]
 
 
-def test_a_sink_without_mark_incomplete_is_logged_not_swallowed(caplog):
-    """The signal cannot be lost quietly: that is the outcome the failure path exists to stop."""
+def test_a_sink_without_mark_incomplete_is_refused_at_install():
+    """The signal cannot be lost quietly: a sink that cannot report a lost call is
+    refused when installed, matching the startup validation of configured sinks."""
 
     class _PutOnlySink:
         async def put(self, entry):
             raise RuntimeError("transport down")
 
-    install_token_sink(_PutOnlySink())
-    try:
-        client = TestClient(
-            _server({"token_id_capture": {"enabled": True, "rebuild_response": False}}).setup_webserver()
-        )
-        with caplog.at_level(logging.ERROR):
-            resp = client.post("/ng-rollout/task0-sink2/training-token-capture/v1/responses", json={"input": "hi"})
-        assert resp.status_code == 200
-        assert any("does not implement mark_incomplete" in r.message for r in caplog.records)
-    finally:
-        install_token_sink(None)
+    from nemo_gym.token_id_capture import installed_token_sink
+
+    with pytest.raises(TypeError, match="mark_incomplete"):
+        install_token_sink(_PutOnlySink())
+    assert installed_token_sink() is None
 
 
 def test_commit_entry_records_a_call_with_no_token_fields_on_the_response(installed_sink):
@@ -1063,7 +1078,15 @@ def test_a_malformed_token_payload_does_not_fail_the_model_call(installed_sink):
 
     with patch("nemo_gym.token_id_capture.sink.TokenEntry", _bad_entry):
         client = TestClient(
-            _server({"token_id_capture": {"enabled": True, "rebuild_response": False}}).setup_webserver()
+            _server(
+                {
+                    "token_id_capture": {
+                        "enabled": True,
+                        "rebuild_response": False,
+                        "allow_unresolved_continuations": True,
+                    }
+                }
+            ).setup_webserver()
         )
         resp = client.post("/ng-rollout/task0-bad0/training-token-capture/v1/responses", json={"input": "hi"})
 
@@ -1245,6 +1268,42 @@ async def test_file_lineage_resolves_across_independent_worker_instances(tmp_pat
     assert parent.match is not None
     assert parent.match.model_call_id == "call-1"
     assert parent.match.cumulative_token_ids == (1, 2, 3)
+
+
+async def test_file_lineage_cache_is_lru_and_metadata_only(tmp_path):
+    resolver = FileLineageStore(tmp_path, max_cached_rollouts=2)
+    continuation = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+        {"role": "user", "content": "next"},
+    ]
+    for rollout_id in ("r-a", "r-b", "r-c"):
+        _put_shared_file_entry(str(tmp_path), rollout_id, f"{rollout_id}-c1")
+
+    await resolver.resolve("r-a", continuation)
+    await resolver.resolve("r-b", continuation)
+    await resolver.resolve("r-a", continuation)
+    await resolver.resolve("r-c", continuation)
+
+    assert "r-a" in resolver._cache
+    assert "r-b" not in resolver._cache
+    node = resolver._cache["r-a"][2].by_call_id["r-a-c1"]
+    assert node.cum_tokens is None
+    assert node.entry_offset >= 0
+
+    cold = await resolver.resolve("r-b", continuation)
+    assert cold.status == ParentResolutionStatus.RESOLVED
+    assert cold.match is not None
+    assert cold.match.cumulative_token_ids == (1, 2, 3)
+
+
+def test_file_lineage_uses_bounded_striped_locks(tmp_path):
+    resolver = FileLineageStore(tmp_path)
+
+    for index in range(10_000):
+        resolver._rollout_lock(f"r-{index}")
+
+    assert len(resolver._rollout_locks) == 256
 
 
 async def test_file_lineage_appends_without_rewriting_prior_records(tmp_path):
@@ -1648,7 +1707,7 @@ def test_a_record_is_readable_as_soon_as_put_returns(tmp_path):
         generation_log_probs=[-0.1],
     )
     asyncio.run(store.put(entry))
-    assert [entry.model_call_id for entry in asyncio.run(store.freeze("r0")).entries] == ["c1"]
+    assert [e.model_call_id for e in store.read_entries("r0")] == ["c1"]
 
 
 def test_a_rollout_that_lost_a_call_is_distinguishable_from_a_complete_one(tmp_path):
@@ -1742,6 +1801,7 @@ def test_a_configured_sink_receives_entries(tmp_path):
             "enabled": True,
             "rebuild_response": False,
             "sink": f"{__name__}:_ConfiguredSink",
+            "allow_unresolved_continuations": True,
         }
     }
     client = TestClient(_server(config).setup_webserver())
@@ -1763,6 +1823,7 @@ def test_a_configured_sink_wins_over_an_installed_one(installed_sink):
             "enabled": True,
             "rebuild_response": False,
             "sink": f"{__name__}:_ConfiguredSink",
+            "allow_unresolved_continuations": True,
         }
     }
     client = TestClient(_server(config).setup_webserver())
@@ -1828,6 +1889,7 @@ def test_a_sink_that_cannot_report_failures_is_refused_at_startup():
                 "enabled": True,
                 "rebuild_response": False,
                 "sink": f"{__name__}:_NotASink",
+                "allow_unresolved_continuations": True,
             }
         }
     )
@@ -1847,6 +1909,7 @@ def test_a_sink_whose_protocol_member_is_not_callable_is_refused():
                 "enabled": True,
                 "rebuild_response": False,
                 "sink": f"{__name__}:_NotCallableSink",
+                "allow_unresolved_continuations": True,
             }
         }
     )
@@ -1860,7 +1923,14 @@ def test_a_sink_whose_protocol_member_is_not_callable_is_refused():
 )
 def test_a_malformed_sink_path_is_refused_at_startup(target, expected):
     config = TokenIdCaptureConfig.model_validate(
-        {"token_id_capture": {"enabled": True, "rebuild_response": False, "sink": target}}
+        {
+            "token_id_capture": {
+                "enabled": True,
+                "rebuild_response": False,
+                "sink": target,
+                "allow_unresolved_continuations": True,
+            }
+        }
     )
     with pytest.raises(ValueError, match=expected):
         config.build_sink()
@@ -1906,7 +1976,7 @@ def test_the_store_is_a_token_source(tmp_path):
             generation_log_probs=[-0.1],
         )
     )
-    assert [entry.model_call_id for entry in asyncio.run(store.freeze("r0")).entries] == ["c1"]
+    assert [e.model_call_id for e in store.read_entries("r0")] == ["c1"]
 
     # A colocated source can detect a capture failure.
     # This prevents training on an incomplete rollout.
@@ -1926,10 +1996,9 @@ def _entry_fields(**overrides):
     )
 
 
-def test_a_record_older_than_this_reader_is_accepted():
-    """Use defaults for fields absent from older records."""
-    entry = TokenEntry(**_entry_fields(schema_version=TOKEN_ENTRY_RECORD_SCHEMA_VERSION - 1))
-    assert entry.generation_token_ids == [2]
+def test_a_record_below_the_schema_floor_is_refused():
+    with pytest.raises(ValidationError, match="below the supported minimum"):
+        TokenEntry(**_entry_fields(schema_version=TOKEN_ENTRY_MIN_SCHEMA_VERSION - 1))
 
 
 def test_a_record_newer_than_this_reader_is_refused():
@@ -2006,6 +2075,20 @@ def test_two_calls_with_identical_output_resolve_to_neither():
     lineage.record("call-2", messages, cum_tokens=[9, 9], digest="d2")
 
     assert lineage.resolve(messages).status == ParentResolutionStatus.UNRESOLVED
+
+
+def test_identical_retries_with_the_same_tokens_share_one_parent():
+    lineage = RolloutLineage()
+    messages = [{"role": "user", "content": "q"}, _ASSISTANT_TURN]
+    lineage.record("call-2", messages, cum_tokens=[1, 2], digest="same")
+    lineage.record("call-1", messages, cum_tokens=[1, 2], digest="same")
+
+    resolved = lineage.resolve(messages)
+
+    assert resolved.status == ParentResolutionStatus.RESOLVED
+    assert resolved.match is not None
+    assert resolved.match.model_call_id == "call-1"
+    assert resolved.match.cumulative_token_ids == (1, 2)
 
 
 def test_a_conversation_with_no_model_turn_starts_a_new_root():
