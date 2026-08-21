@@ -30,7 +30,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from nemo_gym.token_id_capture.records import TokenEntry
+from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry
 
 
 @dataclass(frozen=True)
@@ -53,40 +53,40 @@ class LineageMatch:
     digest: str
 
 
+@dataclass(frozen=True)
+class LineageResolution:
+    """Return one immutable request-time parent decision."""
+
+    status: ParentResolutionStatus
+    match: LineageMatch | None = None
+    reason: str = ""
+
+    def __post_init__(self) -> None:
+        if self.status == ParentResolutionStatus.RESOLVED and self.match is None:
+            raise ValueError("resolved lineage requires a match")
+        if self.status != ParentResolutionStatus.RESOLVED and self.match is not None:
+            raise ValueError(f"{self.status.value} lineage cannot carry a match")
+
+
 @runtime_checkable
 class LineageStore(Protocol):
-    """Share request-time lineage across every worker serving a rollout.
+    """Resolve request-time lineage from entries committed by a token sink.
 
     Implementations must provide cross-worker read-after-write consistency.
-    After ``record`` returns, a later ``resolve`` must see the record.
-    A missing or ambiguous identity returns ``None``.
+    After ``TokenSink.put`` returns, a later ``resolve`` must see the entry.
     Implementations must never guess among candidates.
     """
 
-    async def resolve(self, rollout_id: str, request_items: list[dict]) -> LineageMatch | None:
-        """Return one verified parent, or ``None`` for a root or ambiguity.
+    async def resolve(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
+        """Return whether the request is a root, resolved, or unresolved.
 
         ``request_items`` are the unmodified harness items.
         The implementation must verify the recorded request context.
         """
         ...
 
-    async def record(
-        self,
-        rollout_id: str,
-        model_call_id: str,
-        request_items: list[dict],
-        response_items: list[dict],
-        cumulative_token_ids: list[int],
-        digest: str,
-    ) -> None:
-        """Publish a completed call for later request-time resolution.
-
-        Request and response items retain their wire representations.
-        Repeating a model call ID with the same payload is a no-op.
-        Reusing a model call ID with different data must fail.
-        Return only after every serving worker can read the record.
-        """
+    def is_process_shared(self) -> bool:
+        """Return whether separate model-server workers share committed entries."""
         ...
 
     async def close(self) -> None:
@@ -101,6 +101,8 @@ class TokenSink(Protocol):
     async def put(self, entry: TokenEntry) -> None:
         """Durably store one record.
 
+        The entry carries its continuation lookup metadata.
+        A paired lineage resolver must see it after this method returns.
         Repeating the same call id with the same payload is a no-op.
         Reusing a call id with a different payload must fail.
         Writing after the rollout is frozen must fail.

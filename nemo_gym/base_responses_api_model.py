@@ -82,7 +82,7 @@ from nemo_gym.token_id_capture import (
 # The store factory needs Gym's server stack.
 # The leaf package does not re-export it.
 from nemo_gym.token_id_capture.config import token_id_capture_config
-from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore
+from nemo_gym.token_id_capture.lineage import FileLineageStore
 from nemo_gym.token_id_capture.store import make_token_store
 
 
@@ -1402,7 +1402,6 @@ def install_model_call_capture(
     That path provides a request-scoped token sink.
     The model server records token ids from its complete response.
     Consumers access records through ``TokenSource.freeze``.
-    There is no HTTP token reader.
     """
     capture_settings = token_id_capture_config(global_config_dict) if global_config_dict is not None else None
     token_store = make_token_store(global_config_dict) if global_config_dict is not None else None
@@ -1413,14 +1412,14 @@ def install_model_call_capture(
     configured_lineage = capture_settings.build_lineage_store() if capture_settings is not None else None
     lineage_store = configured_lineage or installed_lineage_store()
     default_lineage = None
-    if lineage_store is None and capture_settings is not None and capture_settings.enabled:
-        default_lineage = FileLineageStore(token_store.root) if token_store is not None else InMemoryLineageStore()
+    if lineage_store is None and token_store is not None:
+        default_lineage = FileLineageStore(token_store.root)
         lineage_store = default_lineage
     if capture_settings is not None and capture_settings.enabled and (num_workers or 1) > 1:
-        if isinstance(lineage_store, InMemoryLineageStore):
+        if lineage_store is None or not lineage_store.is_process_shared():
             raise ValueError(
-                "token_id_capture.lineage_store is required with num_workers > 1 "
-                "when capture is not using Gym's shared file store"
+                "token_id_capture with num_workers > 1 requires a process-shared lineage resolver "
+                "over the same backend used by the token sink"
             )
     owned_endpoints = [
         endpoint

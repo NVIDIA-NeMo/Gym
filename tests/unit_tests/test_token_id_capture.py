@@ -56,6 +56,8 @@ from nemo_gym.token_id_capture import (
     TOKEN_ENTRY_RECORD_SCHEMA_VERSION,
     TOKEN_FIELDS,
     CaptureContext,
+    LineageResolution,
+    ParentResolutionStatus,
     TokenCaptureStore,
     TokenEntry,
     TokenIdCaptureConfig,
@@ -68,9 +70,12 @@ from nemo_gym.token_id_capture import (
     install_token_sink,
     register_call_intent,
     reset_token_sink,
+    resolve_parent,
     set_token_sink,
+    stamp_continuation,
     stamp_lineage,
 )
+from nemo_gym.token_id_capture.config import token_id_capture_enabled_for_agent
 from nemo_gym.token_id_capture.lineage import (
     FileLineageStore,
     LineageIndex,
@@ -78,7 +83,6 @@ from nemo_gym.token_id_capture.lineage import (
     assistant_fingerprint,
     conversation_digest,
 )
-from nemo_gym.token_id_capture.config import token_id_capture_enabled_for_agent
 from nemo_gym.token_id_capture.protocols import TokenSource
 from nemo_gym.token_id_capture.store import make_token_store
 
@@ -161,6 +165,24 @@ def test_token_entry_rejects_mismatched_generation_arrays():
             prompt_token_ids=PTOKS,
             generation_token_ids=GTOKS,
             generation_log_probs=[-0.1],
+        )
+
+
+def test_token_entry_rejects_inconsistent_parent_resolution():
+    common = {
+        "rollout_id": "r0",
+        "model_call_id": "c0",
+        "prompt_token_ids": PTOKS,
+        "generation_token_ids": GTOKS,
+        "generation_log_probs": LPS,
+    }
+    with pytest.raises(ValidationError, match="requires parent_call_id"):
+        TokenEntry(**common, parent_resolution=ParentResolutionStatus.RESOLVED)
+    with pytest.raises(ValidationError, match="cannot carry parent_call_id"):
+        TokenEntry(
+            **common,
+            parent_resolution=ParentResolutionStatus.ROOT,
+            parent_call_id="parent",
         )
 
 
@@ -1116,8 +1138,9 @@ def test_lineage_resolves_the_parent_across_a_turn():
     # The next request echoes the assistant turn.
     second_request = first_request + [{"role": "assistant", "content": "hi"}, {"role": "user", "content": "more"}]
     parent = lineage.resolve(second_request)
-    assert parent is not None and parent.call_id == "call-1"
-    assert parent.cum_tokens == [1, 2, 3] and parent.cum_len == 3
+    assert parent.status == ParentResolutionStatus.RESOLVED
+    assert parent.match is not None and parent.match.model_call_id == "call-1"
+    assert parent.match.cumulative_token_ids == (1, 2, 3)
 
 
 def test_lineage_record_is_idempotent():
@@ -1127,7 +1150,8 @@ def test_lineage_record_is_idempotent():
     lineage.record("call-1", messages, [1, 2, 3], "d1")
 
     parent = lineage.resolve(messages)
-    assert parent is not None and parent.call_id == "call-1"
+    assert parent.status == ParentResolutionStatus.RESOLVED
+    assert parent.match is not None and parent.match.model_call_id == "call-1"
 
 
 def test_lineage_rejects_a_conflicting_call_identity():
@@ -1139,10 +1163,13 @@ def test_lineage_rejects_a_conflicting_call_identity():
 
 
 def test_lineage_misses_on_a_rewritten_history():
-    """Treat a compacted or rewritten context as a new root."""
+    """Treat compacted or rewritten model history as unresolved."""
     lineage = RolloutLineage()
     lineage.record("call-1", [{"role": "assistant", "content": "hi"}], [1, 2, 3], "d1")
-    assert lineage.resolve([{"role": "assistant", "content": "a summary of the above"}]) is None
+    assert (
+        lineage.resolve([{"role": "assistant", "content": "a summary of the above"}]).status
+        == ParentResolutionStatus.UNRESOLVED
+    )
 
 
 def test_lineage_refuses_an_ambiguous_parent():
@@ -1151,7 +1178,7 @@ def test_lineage_refuses_an_ambiguous_parent():
     messages = [{"role": "assistant", "content": "same"}]
     lineage.record("call-a", messages, [1, 2], "da")
     lineage.record("call-b", messages, [3, 4], "db")
-    assert lineage.resolve(messages) is None
+    assert lineage.resolve(messages).status == ParentResolutionStatus.UNRESOLVED
 
 
 def test_lineage_is_a_tree_so_forks_get_the_parent_not_the_previous_call():
@@ -1173,8 +1200,9 @@ def test_lineage_is_a_tree_so_forks_get_the_parent_not_the_previous_call():
     # The second branch continues the shared parent.
     second = shared + [{"role": "user", "content": "b"}]
     parent = lineage.resolve(second)
-    assert parent is not None and parent.call_id == "parent"
-    assert parent.cum_tokens == [1, 2, 3]
+    assert parent.status == ParentResolutionStatus.RESOLVED
+    assert parent.match is not None and parent.match.model_call_id == "parent"
+    assert parent.match.cumulative_token_ids == (1, 2, 3)
 
 
 def test_lineage_index_is_bounded():
@@ -1185,45 +1213,47 @@ def test_lineage_index_is_bounded():
     assert len(index) == 3
 
 
-def _record_shared_file_lineage(root: str) -> None:
-    store = FileLineageStore(root)
-    asyncio.run(
-        store.record(
-            "process-shared",
-            "child-process-call",
-            [{"role": "user", "content": "hello"}],
-            [{"role": "assistant", "content": "hi"}],
-            [1, 2, 3],
-            "digest",
-        )
+def _put_shared_file_entry(
+    root: str,
+    rollout_id: str = "process-shared",
+    model_call_id: str = "child-process-call",
+    response_text: str = "hi",
+) -> None:
+    request = [{"role": "user", "content": "hello"}]
+    entry = TokenEntry(
+        rollout_id=rollout_id,
+        model_call_id=model_call_id,
+        prompt_token_ids=[1, 2],
+        generation_token_ids=[3],
+        generation_log_probs=[-0.1],
+        output_items=[{"role": "assistant", "content": response_text}],
     )
+    stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
+    stamp_continuation(entry, request)
+    TokenCaptureStore(root).append(entry)
 
 
 async def test_file_lineage_resolves_across_independent_worker_instances(tmp_path):
-    writer = FileLineageStore(tmp_path)
     reader = FileLineageStore(tmp_path)
     request = [{"role": "user", "content": "hello"}]
     response = [{"role": "assistant", "content": "hi"}]
-    await writer.record("shared-rollout", "call-1", request, response, [1, 2, 3], "digest-1")
+    _put_shared_file_entry(str(tmp_path), "shared-rollout", "call-1")
 
     parent = await reader.resolve("shared-rollout", request + response + [{"role": "user", "content": "next"}])
 
-    assert parent is not None
-    assert parent.model_call_id == "call-1"
-    assert parent.cumulative_token_ids == (1, 2, 3)
+    assert parent.status == ParentResolutionStatus.RESOLVED
+    assert parent.match is not None
+    assert parent.match.model_call_id == "call-1"
+    assert parent.match.cumulative_token_ids == (1, 2, 3)
 
 
 async def test_file_lineage_appends_without_rewriting_prior_records(tmp_path):
-    store = FileLineageStore(tmp_path)
-    request = [{"role": "user", "content": "hello"}]
-    first_response = [{"role": "assistant", "content": "first"}]
-    second_response = [{"role": "assistant", "content": "second"}]
-    await store.record("shared-rollout", "call-1", request, first_response, [1, 2, 3], "digest-1")
-    path = tmp_path / "shared-rollout.lineage.jsonl"
+    _put_shared_file_entry(str(tmp_path), "shared-rollout", "call-1", "first")
+    path = tmp_path / "shared-rollout.tokens.jsonl"
     first_payload = path.read_bytes()
     first_inode = path.stat().st_ino
 
-    await store.record("shared-rollout", "call-2", request, second_response, [4, 5, 6], "digest-2")
+    _put_shared_file_entry(str(tmp_path), "shared-rollout", "call-2", "second")
 
     payload = path.read_bytes()
     assert path.stat().st_ino == first_inode
@@ -1233,7 +1263,7 @@ async def test_file_lineage_appends_without_rewriting_prior_records(tmp_path):
 
 async def test_file_lineage_resolves_across_spawned_worker_processes(tmp_path):
     context = multiprocessing.get_context("spawn")
-    process = context.Process(target=_record_shared_file_lineage, args=(str(tmp_path),))
+    process = context.Process(target=_put_shared_file_entry, args=(str(tmp_path),))
     process.start()
     process.join(timeout=10)
     assert process.exitcode == 0
@@ -1247,8 +1277,59 @@ async def test_file_lineage_resolves_across_spawned_worker_processes(tmp_path):
             {"role": "user", "content": "next"},
         ],
     )
-    assert parent is not None
-    assert parent.model_call_id == "child-process-call"
+    assert parent.status == ParentResolutionStatus.RESOLVED
+    assert parent.match is not None and parent.match.model_call_id == "child-process-call"
+
+
+async def test_failed_token_commit_never_becomes_resolver_visible(tmp_path, monkeypatch):
+    token_store = TokenCaptureStore(tmp_path)
+    resolver = FileLineageStore(tmp_path)
+    request = [{"role": "user", "content": "hello"}]
+    entry = TokenEntry(
+        rollout_id="failed-publication",
+        model_call_id="call-1",
+        prompt_token_ids=[1, 2],
+        generation_token_ids=[3],
+        generation_log_probs=[-0.1],
+        output_items=[{"role": "assistant", "content": "hi"}],
+    )
+    stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
+    stamp_continuation(entry, request)
+
+    monkeypatch.setattr(token_store, "append", MagicMock(side_effect=RuntimeError("write failed")))
+    with pytest.raises(RuntimeError, match="write failed"):
+        await token_store.put(entry)
+
+    resolution = await resolver.resolve(
+        entry.rollout_id,
+        request + entry.output_items + [{"role": "user", "content": "next"}],
+    )
+    assert resolution.status == ParentResolutionStatus.UNRESOLVED
+
+
+async def test_retirement_invalidates_warm_worker_indexes(tmp_path):
+    _put_shared_file_entry(str(tmp_path), "retired-rollout", "call-1")
+    resolver = FileLineageStore(tmp_path)
+    continuation = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+        {"role": "user", "content": "next"},
+    ]
+    assert (await resolver.resolve("retired-rollout", continuation)).status == ParentResolutionStatus.RESOLVED
+
+    token_store = TokenCaptureStore(tmp_path)
+    lock_inode = token_store.lock_path_for("retired-rollout").stat().st_ino
+    snapshot = await token_store.freeze("retired-rollout")
+    assert await token_store.drop(
+        "retired-rollout",
+        snapshot_id=snapshot.snapshot_id,
+        version=snapshot.version,
+    )
+
+    assert (await resolver.resolve("retired-rollout", continuation)).status == ParentResolutionStatus.UNRESOLVED
+    assert token_store.lock_path_for("retired-rollout").stat().st_ino == lock_inode
+    with pytest.raises(RuntimeError, match="retired"):
+        _put_shared_file_entry(str(tmp_path), "retired-rollout", "late-call")
 
 
 def test_served_calls_link_to_their_parent(tmp_path):
@@ -1258,6 +1339,9 @@ def test_served_calls_link_to_their_parent(tmp_path):
     client.post("/ng-rollout/lin0-roll0/training-token-capture/v1/chat/completions", json={"messages": first})
     entries = TokenCaptureStore(tmp_path).read_entries("lin0-roll0")
     assert len(entries) == 1 and entries[0].parent_call_id is None
+    assert entries[0].parent_resolution == ParentResolutionStatus.ROOT
+    assert entries[0].continuation_fingerprint
+    assert entries[0].continuation_context_digest
 
     content = entries[0].output_items[0]["content"]
     served_text = content if isinstance(content, str) else content[0]["text"]
@@ -1266,6 +1350,26 @@ def test_served_calls_link_to_their_parent(tmp_path):
 
     entries = TokenCaptureStore(tmp_path).read_entries("lin0-roll0")
     assert len(entries) == 2
+    assert entries[1].parent_call_id == entries[0].model_call_id
+    assert entries[1].parent_resolution == ParentResolutionStatus.RESOLVED
+
+
+def test_separate_model_worker_instances_share_committed_lineage(tmp_path):
+    config = _both_enabled(tmp_path)
+    worker_a = TestClient(_server(config, num_workers=2).setup_webserver())
+    worker_b = TestClient(_server(config, num_workers=2).setup_webserver())
+    first = [{"role": "user", "content": "hello"}]
+
+    worker_a.post("/ng-rollout/two-workers/training-token-capture/v1/chat/completions", json={"messages": first})
+    first_entry = TokenCaptureStore(tmp_path).read_entries("two-workers")[0]
+    content = first_entry.output_items[0]["content"]
+    served_text = content if isinstance(content, str) else content[0]["text"]
+    second = first + [{"role": "assistant", "content": served_text}, {"role": "user", "content": "more"}]
+    worker_b.post("/ng-rollout/two-workers/training-token-capture/v1/chat/completions", json={"messages": second})
+
+    entries = TokenCaptureStore(tmp_path).read_entries("two-workers")
+    assert len(entries) == 2
+    assert entries[1].parent_resolution == ParentResolutionStatus.RESOLVED
     assert entries[1].parent_call_id == entries[0].model_call_id
 
 
@@ -1296,6 +1400,7 @@ def test_served_calls_do_not_link_across_a_changed_system_prompt(tmp_path):
     entries = store.read_entries("sys0")
     assert len(entries) == 2
     assert entries[1].parent_call_id is None
+    assert entries[1].parent_resolution == ParentResolutionStatus.UNRESOLVED
 
     # Unchanged instructions preserve the link.
     call("sys1", "SYSTEM ONE", first)
@@ -1303,6 +1408,52 @@ def test_served_calls_do_not_link_across_a_changed_system_prompt(tmp_path):
     linked = store.read_entries("sys1")
     assert len(linked) == 2
     assert linked[1].parent_call_id == linked[0].model_call_id
+    assert linked[1].parent_resolution == ParentResolutionStatus.RESOLVED
+
+
+async def test_lineage_lookup_failure_is_persisted_as_unresolved(tmp_path):
+    class _FailingResolver:
+        async def resolve(self, rollout_id, request_items):
+            raise RuntimeError("resolver unavailable")
+
+        def is_process_shared(self):
+            return True
+
+        async def close(self):
+            pass
+
+    store = TokenCaptureStore(tmp_path)
+    context = CaptureContext(
+        rollout_id="lookup-failure",
+        model_call_id="call-1",
+        token_sink=store,
+        lineage_store=_FailingResolver(),
+    )
+    request = [{"role": "assistant", "content": "prior output"}, {"role": "user", "content": "continue"}]
+    token = set_token_sink(context)
+    try:
+        await resolve_parent(request)
+        await capture_tokens(
+            {
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": "next output",
+                        "prompt_token_ids": PTOKS,
+                        "generation_token_ids": GTOKS,
+                        "generation_log_probs": LPS,
+                    }
+                ]
+            },
+            request_messages=request,
+        )
+    finally:
+        reset_token_sink(token)
+
+    entry = store.read_entries("lookup-failure")[0]
+    assert entry.parent_resolution == ParentResolutionStatus.UNRESOLVED
+    assert entry.parent_call_id is None
 
 
 def test_a_changed_tool_schema_breaks_the_link():
@@ -1313,8 +1464,12 @@ def test_a_changed_tool_schema_breaks_the_link():
 
     lineage = RolloutLineage()
     lineage.record("call-1", with_search, [1, 2, 3], "d1")
-    assert lineage.resolve(with_search + [{"role": "user", "content": "next"}]) is not None
-    assert lineage.resolve(with_bash + [{"role": "user", "content": "next"}]) is None
+    assert (
+        lineage.resolve(with_search + [{"role": "user", "content": "next"}]).status == ParentResolutionStatus.RESOLVED
+    )
+    assert (
+        lineage.resolve(with_bash + [{"role": "user", "content": "next"}]).status == ParentResolutionStatus.UNRESOLVED
+    )
 
 
 def test_the_envelope_does_not_change_the_lookup_key():
@@ -1347,7 +1502,7 @@ def test_fingerprint_matches_across_openai_and_anthropic_tool_shapes():
         {
             "role": "assistant",
             "content": "Let me compute that.",
-            "tool_calls": [{"function": {"name": "Bash", "arguments": '{"command":"echo 6"}'}}],
+            "tool_calls": [{"id": "c1", "function": {"name": "Bash", "arguments": '{"command":"echo 6"}'}}],
         }
     ]
     echoed = [
@@ -1355,7 +1510,7 @@ def test_fingerprint_matches_across_openai_and_anthropic_tool_shapes():
             "role": "assistant",
             "content": [
                 {"type": "text", "text": "Let me compute that."},
-                {"type": "tool_use", "name": "Bash", "input": {"command": "echo 6"}},
+                {"type": "tool_use", "id": "c1", "name": "Bash", "input": {"command": "echo 6"}},
             ],
         }
     ]
@@ -1372,14 +1527,14 @@ def test_fingerprint_agrees_across_all_three_dialects():
 
     anthropic = [
         {"role": "user", "content": "hi"},
-        {"role": "assistant", "content": [{"type": "tool_use", "name": "Bash", "input": {"cmd": "ls"}}]},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "c1", "name": "Bash", "input": {"cmd": "ls"}}]},
     ]
     chat = [
         {"role": "user", "content": "hi"},
         {
             "role": "assistant",
             "content": None,
-            "tool_calls": [{"function": {"name": "Bash", "arguments": '{"cmd":"ls"}'}}],
+            "tool_calls": [{"id": "c1", "function": {"name": "Bash", "arguments": '{"cmd":"ls"}'}}],
         },
     ]
     responses = [
@@ -1403,12 +1558,52 @@ def test_responses_tool_calls_are_distinguished():
     assert assistant_fingerprint(turn("ls")) != assistant_fingerprint(turn("rm -rf /"))
 
 
+def test_tool_call_identity_changes_the_fingerprint():
+    def turn(call_id):
+        return [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "function": {"name": "Bash", "arguments": '{"cmd":"ls"}'},
+                    }
+                ],
+            }
+        ]
+
+    assert assistant_fingerprint(turn("call-a")) != assistant_fingerprint(turn("call-b"))
+
+
+def test_multimodal_content_changes_the_conversation_digest():
+    def request(url):
+        return [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "describe"},
+                    {"type": "input_image", "image_url": url},
+                ],
+            }
+        ]
+
+    assert conversation_digest(request("https://example/a.png")) != conversation_digest(
+        request("https://example/b.png")
+    )
+
+
+def test_non_object_request_items_fail_closed():
+    with pytest.raises(ValueError, match="not an object"):
+        conversation_digest([{"role": "user", "content": "ok"}, "unsupported"])
+
+
 def test_lineage_resolves_a_tool_using_turn_echoed_in_anthropic_shape():
     lineage = RolloutLineage()
     produced = {
         "role": "assistant",
         "content": "",
-        "tool_calls": [{"function": {"name": "Bash", "arguments": '{"command":"factor 420"}'}}],
+        "tool_calls": [{"id": "c1", "function": {"name": "Bash", "arguments": '{"command":"factor 420"}'}}],
     }
     lineage.record("call-1", [{"role": "user", "content": "factor 420"}, produced], [1, 2, 3], "d1")
 
@@ -1416,12 +1611,19 @@ def test_lineage_resolves_a_tool_using_turn_echoed_in_anthropic_shape():
     # The harness then appends the tool result.
     next_request = [
         {"role": "user", "content": "factor 420"},
-        {"role": "assistant", "content": [{"type": "tool_use", "name": "Bash", "input": {"command": "factor 420"}}]},
-        {"role": "user", "content": [{"type": "tool_result", "content": "420: 2 2 3 5 7"}]},
+        {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": "c1", "name": "Bash", "input": {"command": "factor 420"}}],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": "c1", "content": "420: 2 2 3 5 7"}],
+        },
     ]
     parent = lineage.resolve(next_request)
-    assert parent is not None and parent.call_id == "call-1"
-    assert parent.cum_tokens == [1, 2, 3]
+    assert parent.status == ParentResolutionStatus.RESOLVED
+    assert parent.match is not None and parent.match.model_call_id == "call-1"
+    assert parent.match.cumulative_token_ids == (1, 2, 3)
 
 
 @pytest.mark.parametrize("bad", ["", "a/b", "../escape", "a b"])
@@ -1492,18 +1694,10 @@ class _ConfiguredLineage:
         self.namespace = namespace
 
     async def resolve(self, rollout_id: str, request_items: list[dict]):
-        return None
+        return LineageResolution(ParentResolutionStatus.ROOT)
 
-    async def record(
-        self,
-        rollout_id: str,
-        model_call_id: str,
-        request_items: list[dict],
-        response_items: list[dict],
-        cumulative_token_ids: list[int],
-        digest: str,
-    ) -> None:
-        pass
+    def is_process_shared(self) -> bool:
+        return True
 
     async def close(self) -> None:
         pass
@@ -1604,7 +1798,7 @@ def test_a_lineage_store_receives_its_configured_kwargs():
 
 def test_multi_worker_custom_capture_requires_shared_lineage():
     config = _block(sink=f"{__name__}:_ConfiguredSink")
-    with pytest.raises(ValueError, match="lineage_store is required"):
+    with pytest.raises(ValueError, match="process-shared lineage resolver"):
         _server(config, num_workers=2).setup_webserver()
 
 
@@ -1788,7 +1982,7 @@ def test_a_rewritten_conversation_does_not_resolve_to_the_original_call():
 
     compacted = [{"role": "user", "content": "SUMMARY: we were working on task BETA"}, _ASSISTANT_TURN]
 
-    assert lineage.resolve(compacted) is None
+    assert lineage.resolve(compacted).status == ParentResolutionStatus.UNRESOLVED
 
 
 def test_appending_a_tool_result_still_resolves():
@@ -1800,7 +1994,8 @@ def test_appending_a_tool_result_still_resolves():
     continuation = sent + [_ASSISTANT_TURN, {"role": "tool", "content": "search result"}]
 
     resolved = lineage.resolve(continuation)
-    assert resolved is not None and resolved.call_id == "call-1"
+    assert resolved.status == ParentResolutionStatus.RESOLVED
+    assert resolved.match is not None and resolved.match.model_call_id == "call-1"
 
 
 def test_two_calls_with_identical_output_resolve_to_neither():
@@ -1810,7 +2005,7 @@ def test_two_calls_with_identical_output_resolve_to_neither():
     lineage.record("call-1", messages, cum_tokens=[1, 2], digest="d1")
     lineage.record("call-2", messages, cum_tokens=[9, 9], digest="d2")
 
-    assert lineage.resolve(messages) is None
+    assert lineage.resolve(messages).status == ParentResolutionStatus.UNRESOLVED
 
 
 def test_a_conversation_with_no_model_turn_starts_a_new_root():
@@ -1818,7 +2013,7 @@ def test_a_conversation_with_no_model_turn_starts_a_new_root():
     lineage = RolloutLineage()
     lineage.record("call-1", [{"role": "user", "content": "q"}, _ASSISTANT_TURN], cum_tokens=[1], digest="d")
 
-    assert lineage.resolve([{"role": "user", "content": "a brand new task"}]) is None
+    assert lineage.resolve([{"role": "user", "content": "a brand new task"}]).status == ParentResolutionStatus.ROOT
     assert assistant_fingerprint([{"role": "user", "content": "q"}]) == ""
 
 
@@ -1831,9 +2026,10 @@ def test_two_forks_of_one_call_both_resolve_to_it():
     a = lineage.resolve(base + [{"role": "tool", "content": "branch A"}])
     b = lineage.resolve(base + [{"role": "tool", "content": "branch B"}])
 
-    assert a is not None and b is not None
-    assert a.call_id == b.call_id == "parent"
-    assert a.cum_tokens == b.cum_tokens == [1, 2, 3]
+    assert a.status == b.status == ParentResolutionStatus.RESOLVED
+    assert a.match is not None and b.match is not None
+    assert a.match.model_call_id == b.match.model_call_id == "parent"
+    assert a.match.cumulative_token_ids == b.match.cumulative_token_ids == (1, 2, 3)
 
 
 def test_recording_a_child_does_not_mutate_its_parent():
@@ -1855,7 +2051,10 @@ def test_an_evicted_rollout_resolves_to_nothing_rather_than_to_another_rollout()
     for name in ("r1", "r2", "r3"):
         index.for_rollout(name).record(name, [{"role": "user", "content": "q"}, _ASSISTANT_TURN], [1], "d")
 
-    assert index.for_rollout("r1").resolve([{"role": "user", "content": "q"}, _ASSISTANT_TURN]) is None
+    assert (
+        index.for_rollout("r1").resolve([{"role": "user", "content": "q"}, _ASSISTANT_TURN]).status
+        == ParentResolutionStatus.UNRESOLVED
+    )
 
 
 def test_the_last_rollout_is_kept_even_over_budget():
@@ -1864,7 +2063,7 @@ def test_the_last_rollout_is_kept_even_over_budget():
     messages = [{"role": "user", "content": "q"}, _ASSISTANT_TURN]
     index.for_rollout("r1").record("c1", messages, [1] * 100, "d")
 
-    assert index.for_rollout("r1").resolve(messages) is not None
+    assert index.for_rollout("r1").resolve(messages).status == ParentResolutionStatus.RESOLVED
 
 
 def test_a_response_echoed_as_several_items_still_resolves():
@@ -1884,7 +2083,8 @@ def test_a_response_echoed_as_several_items_still_resolves():
     continuation = sent + served + [{"type": "function_call_output", "output": "42"}]
 
     resolved = lineage.resolve(continuation)
-    assert resolved is not None and resolved.call_id == "call-1"
+    assert resolved.status == ParentResolutionStatus.RESOLVED
+    assert resolved.match is not None and resolved.match.model_call_id == "call-1"
 
 
 def test_reasoning_the_harness_drops_does_not_break_resolution():
@@ -1901,7 +2101,8 @@ def test_reasoning_the_harness_drops_does_not_break_resolution():
     )
 
     resolved = lineage.resolve(sent + served)
-    assert resolved is not None and resolved.call_id == "call-1"
+    assert resolved.status == ParentResolutionStatus.RESOLVED
+    assert resolved.match is not None and resolved.match.model_call_id == "call-1"
 
 
 @pytest.mark.parametrize(
