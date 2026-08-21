@@ -146,6 +146,7 @@ async def test_run_verification_returns_resolved_result(tmp_path) -> None:
     assert result.completed
     assert result.resolved
     assert result.patch_applied
+    assert result.test_output == "STDOUT:\ntest stdout\n\nSTDERR:\ntest stderr"
     assert json.loads((tmp_path / "output.json").read_text()) == output
 
 
@@ -168,4 +169,5 @@ async def test_run_verification_rejects_malformed_parser_output(tmp_path) -> Non
 
     assert not result.completed
     assert not result.resolved
+    assert result.test_output == "STDOUT:\n\n\nSTDERR:\nfailed"
     assert "invalid JSON" in result.error
