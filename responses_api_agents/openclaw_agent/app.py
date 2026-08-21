@@ -354,8 +354,8 @@ class OpenClawAgentConfig(BaseResponsesAPIAgentConfig):
     timeout: int = 900
     extra_args: list[str] = []
     openclaw_config: dict[str, Any] = Field(default_factory=dict)
-    context_window: int = 262144
-    max_output_tokens: int = 131072
+    context_window: Optional[int] = None
+    max_output_tokens: Optional[int] = None
     # required: every config must pin an explicit version so runs are reproducible and cannot silently drift
     openclaw_version: str
 
@@ -418,22 +418,23 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         if self.config.model_server:
             providers = cfg.setdefault("models", {}).setdefault("providers", {})
             nemo = providers.setdefault("nemo", {})
+            model_entry = {
+                "id": self.config.model,
+                "name": self.config.model,
+                "api": "openai-completions",
+                "reasoning": True,
+                "input": ["text"],
+            }
+            if self.config.context_window is not None:
+                model_entry["contextWindow"] = self.config.context_window
+            if self.config.max_output_tokens is not None:
+                model_entry["maxTokens"] = self.config.max_output_tokens
             nemo.update(
                 {
                     "api": "openai-completions",
                     "baseUrl": self._resolve_model_base_url(rollout_id),
                     "apiKey": "EMPTY",  # pragma: allowlist secret
-                    "models": [
-                        {
-                            "id": self.config.model,
-                            "name": self.config.model,
-                            "api": "openai-completions",
-                            "reasoning": True,
-                            "input": ["text"],
-                            "contextWindow": self.config.context_window,
-                            "maxTokens": self.config.max_output_tokens,
-                        }
-                    ],
+                    "models": [model_entry],
                 }
             )
         self._merge_headless_tool_denies(cfg)
@@ -509,17 +510,17 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
 
         try:
             code, _, stderr = await self._run_exec(
-                [*self.config.command_parts, "setup", "--non-interactive", "--accept-risk", "--mode", "local"],
+                [*self.config.command_parts, "onboard", "--non-interactive", "--accept-risk", "--skip-health"],
                 cwd=str(work_dir),
                 env=env,
                 timeout=self.config.setup_timeout,
             )
             if code:
-                LOG.warning("openclaw setup exited %d: %s", code, stderr)
+                raise RuntimeError(f"openclaw onboard exited {code}: {stderr}")
 
             config_path = home / ".openclaw" / "openclaw.json"
             if not config_path.is_file():
-                raise RuntimeError(f"openclaw setup did not produce a config at {config_path}: {stderr}")
+                raise RuntimeError(f"openclaw onboard did not produce a config at {config_path}: {stderr}")
             base_cfg = json.loads(config_path.read_text())
             config_path.write_text(json.dumps(self._build_openclaw_config(base_cfg, rollout_id), indent=2) + "\n")
 

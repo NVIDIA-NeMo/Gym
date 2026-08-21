@@ -41,6 +41,10 @@ cd /opt/Gym
 gym eval prepare $@ +use_cached_prepared_benchmarks=true
 
 experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%d_%H%M%S)
+# export_to_csv.py derives <base>_aggregate_metrics.json from this, so the
+# default timestamped name makes the aggregate unfindable to anything that
+# did not watch the job run. Override it when results/ is already per-run.
+rollouts_fpath=\${ROLLOUTS_FPATH:-results/\$experiment_name.jsonl}
 # +uv_venv_dir=/opt/uv_venvs is from the container.
 # +skip_venv_if_present=true will reuse the venvs baked into the container if possible.
 # ++use_absolute_ip=true: Necessary for communication between harness in sandbox and Gym model servers
@@ -54,7 +58,7 @@ gym eval run \
     +uv_venv_dir=/opt/uv_venvs \
     +nemo_gym_log_dir=results/\$experiment_name/logs \
     +skip_venv_if_present=true \
-    ++output_jsonl_fpath=results/\$experiment_name.jsonl \
+    ++output_jsonl_fpath=\$rollouts_fpath \
     ++overwrite_metrics_conflicts=true \
     ++split=benchmark \
     ++use_absolute_ip=true \
@@ -71,10 +75,10 @@ gym eval run \
 if (( $EXPORT_TO_CSV )); then
     python benchmarks/nemotron_3.5_super/export_to_csv.py \
         --model-path $MODEL \
-        --jsonl-fpath-base \$(realpath results/\$experiment_name)
+        --jsonl-fpath-base \$(realpath "\${rollouts_fpath%.jsonl}")
 
     if (( $EXPORT_CSV_TO_MODEL_DIR )); then
-        cp results/\$experiment_name_export.csv $MODEL/export.csv
+        cp "\${rollouts_fpath%.jsonl}_export.csv" $MODEL/export.csv
     fi
 fi
 

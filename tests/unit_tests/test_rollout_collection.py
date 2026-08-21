@@ -13,8 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import warnings
 from asyncio import Future
 from collections import Counter
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -23,6 +25,7 @@ import pytest
 import yaml
 
 import nemo_gym.rollout_collection
+import nemo_gym.token_id_capture.delivery
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
@@ -44,6 +47,20 @@ from nemo_gym.rollout_collection import (
     _rollout_for_export,
     _rollout_request_debug_summary,
     loads_jsonl_line,
+)
+from nemo_gym.token_id_capture import (
+    TokenCaptureSnapshot,
+    TokenCaptureStore,
+    TokenEntry,
+    clear_token_captures_for_rollouts,
+)
+from nemo_gym.token_id_capture.delivery import (
+    MASK_SAMPLE_KEY,
+    TOKEN_CAPTURE_KEY,
+    capture_build_can_retire,
+    finalize_rollout_token_capture,
+    retire_rollout_token_capture,
+    rollout_carries_token_ids,
 )
 
 
@@ -1051,6 +1068,150 @@ class TestRolloutCollection:
         # The explicit id replaces it.
         assert store.read("0-0") == []
 
+    async def test_run_from_config_does_not_finalize_a_nonparticipating_agent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        capture_dir = tmp_path / "tokens"
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "get_global_config_dict",
+            lambda: {
+                "token_id_capture": {"enabled": True, "dir": str(capture_dir)},
+                "agent": {"responses_api_agents": {"implementation": {"token_id_capture": False}}},
+            },
+        )
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes(
+            orjson.dumps(
+                {
+                    "responses_create_params": {"input": []},
+                    AGENT_REF_KEY_NAME: {"name": "agent"},
+                }
+            )
+            + b"\n"
+        )
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            resume_from_cache=False,
+            disable_aggregation=True,
+        )
+
+        class Helper(RolloutCollectionHelper):
+            def run_examples(self, examples, *args, **kwargs):
+                [example] = examples
+                future = Future()
+                future.set_result((example, {"response": {"output": [], "usage": {}}}))
+                return [future]
+
+        [result] = await Helper().run_from_config(config)
+
+        assert MASK_SAMPLE_KEY not in result
+        assert TOKEN_CAPTURE_KEY not in result
+
+    async def test_run_from_config_requires_source_before_dispatch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "get_global_config_dict",
+            lambda: {
+                "token_id_capture": {
+                    "enabled": True,
+                    "all_agents": True,
+                    "sink": "framework.capture:Sink",
+                    "rebuild_response": True,
+                }
+            },
+        )
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes(
+            orjson.dumps(
+                {
+                    "responses_create_params": {"input": []},
+                    AGENT_REF_KEY_NAME: {"name": "agent"},
+                }
+            )
+            + b"\n"
+        )
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            resume_from_cache=False,
+            disable_aggregation=True,
+        )
+
+        class Helper(RolloutCollectionHelper):
+            def run_examples(self, examples, *args, **kwargs):
+                raise AssertionError("Dispatch must not start without a TokenSource.")
+
+        with pytest.raises(ValueError, match="rollout-collector process"):
+            await Helper().run_from_config(config)
+
+    async def test_run_from_config_does_not_close_an_installed_source(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class Source:
+            closed = False
+
+            async def freeze(self, rollout_id):
+                return TokenCaptureSnapshot(
+                    rollout_id=rollout_id,
+                    entries=(),
+                    incomplete=False,
+                    snapshot_id="snapshot",
+                    version=1,
+                )
+
+            async def drop(self, rollout_id, *, snapshot_id, version):
+                return True
+
+            async def close(self):
+                self.closed = True
+
+        source = Source()
+        monkeypatch.setattr(nemo_gym.rollout_collection, "installed_token_source", lambda: source)
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "get_global_config_dict",
+            lambda: {
+                "token_id_capture": {
+                    "enabled": True,
+                    "all_agents": True,
+                    "sink": "framework.capture:Sink",
+                    "rebuild_response": True,
+                }
+            },
+        )
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes(
+            orjson.dumps(
+                {
+                    "responses_create_params": {"input": []},
+                    AGENT_REF_KEY_NAME: {"name": "agent"},
+                }
+            )
+            + b"\n"
+        )
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            resume_from_cache=False,
+            disable_aggregation=True,
+        )
+
+        class Helper(RolloutCollectionHelper):
+            def run_examples(self, examples, *args, **kwargs):
+                [example] = examples
+                future = Future()
+                future.set_result((example, {"response": {"output": [], "usage": {}}}))
+                return [future]
+
+        with pytest.warns(UserWarning, match="capture contains no token records"):
+            await Helper().run_from_config(config)
+
+        assert source.closed is False
+
     async def test_run_from_config_sorted(self, tmp_path: Path, empty_global_config: MagicMock) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"
         samples = [
@@ -1697,3 +1858,285 @@ class TestRolloutAggregationHelper:
         # though output_jsonl_fpath is used to derive the metrics path.
         assert not output_fpath.exists()
         assert (tmp_path / "rollouts_aggregate_metrics.json").exists()
+
+
+class TestTokenCaptureRetention:
+    """Test retirement after handoff and stale-record clearing.
+
+    ``TokenCaptureStore.append`` uses append mode.
+    Rollout ids are deterministic.
+    Clearing prevents a rerun from merging different attempts.
+    Retirement prevents unbounded growth after durable handoff.
+    """
+
+    @staticmethod
+    def _entry(rollout_id: str, mcid: str) -> TokenEntry:
+        return TokenEntry(
+            rollout_id=rollout_id,
+            model_call_id=mcid,
+            prompt_token_ids=[1, 2, 3],
+            generation_token_ids=[4, 5],
+            generation_log_probs=[-0.1, -0.2],
+        )
+
+    async def test_clear_removes_stale_records_before_dispatch(self, tmp_path: Path) -> None:
+        store = TokenCaptureStore(tmp_path)
+        store.append(self._entry("0-0", "old"))
+        await store.mark_incomplete("0-0", "old")
+        rows = [{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}]
+
+        clear_token_captures_for_rollouts(rows, [tmp_path])
+
+        assert store.read_entries("0-0") == []
+        assert not store.is_incomplete("0-0")
+
+    def test_clear_is_a_noop_without_capture_dirs(self, tmp_path: Path) -> None:
+        store = TokenCaptureStore(tmp_path)
+        store.append(self._entry("0-0", "keep"))
+        clear_token_captures_for_rollouts([{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}], [])
+        assert len(store.read_entries("0-0")) == 1
+
+    def test_clear_skips_rows_without_a_derivable_rollout_id(self, tmp_path: Path) -> None:
+        store = TokenCaptureStore(tmp_path)
+        store.append(self._entry("0-0", "keep"))
+        clear_token_captures_for_rollouts([{"unrelated": True}], [tmp_path])
+        assert len(store.read_entries("0-0")) == 1
+
+
+class TestFinalizeRolloutTokenCapture:
+    """Test the per-record token-capture finalizer.
+
+    The finalizer accepts a record and a ``TokenSource``.
+    A framework can provide a source without using Gym configuration.
+    """
+
+    @staticmethod
+    def _record(output: list | None = None) -> dict:
+        return {
+            TASK_INDEX_KEY_NAME: 0,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            "reward": 1.0,
+            "response": {"model": "m", "output": output if output is not None else []},
+        }
+
+    @staticmethod
+    def _capture(store: TokenCaptureStore) -> None:
+        store.append(
+            TokenEntry(
+                rollout_id="0-0",
+                model_call_id="c1",
+                prompt_token_ids=[1, 2, 3],
+                generation_token_ids=[4, 5],
+                generation_log_probs=[-0.1, -0.2],
+                output_items=[{"type": "message", "role": "assistant", "content": []}],
+                token_item_index=0,
+            )
+        )
+
+    async def test_rebuilds_a_rollout_that_has_no_token_ids(self, tmp_path: Path) -> None:
+        store = TokenCaptureStore(tmp_path)
+        self._capture(store)
+        result = self._record()
+
+        built = await finalize_rollout_token_capture(result, store)
+
+        [item] = result["response"]["output"]
+        assert item["generation_token_ids"] == [4, 5]
+        assert result["reward"] == 1.0  # Preserve harness and verifier output.
+        assert result[TOKEN_CAPTURE_KEY]["delivered_fraction"] == 1.0
+        assert built is not None and built["rebuilt_response"] is not None
+        assert len(store.read_entries("0-0")) == 1  # Retain evidence until durable handoff.
+        assert await retire_rollout_token_capture("0-0", store, built) is True
+        assert store.read_entries("0-0") == []
+
+    async def test_retirement_cannot_delete_a_newer_rollout_attempt(self, tmp_path: Path) -> None:
+        store = TokenCaptureStore(tmp_path)
+        self._capture(store)
+        built = await finalize_rollout_token_capture(self._record(), store)
+
+        store.delete("0-0")
+        replacement = TokenEntry(
+            rollout_id="0-0",
+            model_call_id="new",
+            prompt_token_ids=[1],
+            generation_token_ids=[2],
+            generation_log_probs=[-0.1],
+        )
+        store.append(replacement)
+
+        assert await retire_rollout_token_capture("0-0", store, built) is False
+        assert [entry.model_call_id for entry in store.read_entries("0-0")] == ["new"]
+
+    async def test_a_rollout_that_already_has_token_ids_is_left_alone(self, tmp_path: Path) -> None:
+        """Keep the token ids sampled by a native agent.
+
+        A reconstruction may differ from the sampled ids.
+        Overwriting them would silently train on that difference.
+        """
+        store = TokenCaptureStore(tmp_path)
+        self._capture(store)
+        native = [{"type": "message", "role": "assistant", "generation_token_ids": [9, 9], "content": []}]
+        result = self._record(output=native)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")  # Existing ids are not an error.
+            built = await finalize_rollout_token_capture(result, store)
+
+        assert result["response"]["output"] == native
+        assert TOKEN_CAPTURE_KEY not in result
+        assert capture_build_can_retire(built)
+        assert len(store.read_entries("0-0")) == 1
+        assert await retire_rollout_token_capture("0-0", store, built) is True
+        assert store.read_entries("0-0") == []
+
+    async def test_native_and_external_rollouts_are_handled_in_one_batch(self, tmp_path: Path) -> None:
+        """Finalize native and external rollouts through the same call."""
+        store = TokenCaptureStore(tmp_path)
+        self._capture(store)
+        native = self._record(
+            output=[{"type": "message", "role": "assistant", "generation_token_ids": [7], "content": []}]
+        )
+        external = self._record()
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            native_build = await finalize_rollout_token_capture(native, store)
+        built = await finalize_rollout_token_capture(external, store)
+
+        assert native["response"]["output"][0]["generation_token_ids"] == [7]
+        assert external["response"]["output"][0]["generation_token_ids"] == [4, 5]
+        assert capture_build_can_retire(native_build)
+        assert built is not None
+
+    async def test_a_second_call_is_a_no_op(self, tmp_path: Path) -> None:
+        """Leave a finalized rollout unchanged on a second call."""
+        store = TokenCaptureStore(tmp_path)
+        self._capture(store)
+        result = self._record()
+
+        await finalize_rollout_token_capture(result, store)
+        rebuilt = deepcopy(result["response"]["output"])
+        second = await finalize_rollout_token_capture(result, store)
+        assert second is not None
+        assert second.get("rebuilt_response") is None
+        assert second.get("_capture_snapshot", {}).get("snapshot_id")
+        assert result["response"]["output"] == rebuilt
+
+    async def test_no_source_means_this_caller_is_not_capturing(self, tmp_path: Path) -> None:
+        result = self._record()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assert await finalize_rollout_token_capture(result, None) is None
+        assert result["response"]["output"] == []
+
+    async def test_a_masked_rollout_is_flagged_at_the_top_of_the_record(self, tmp_path: Path) -> None:
+        store = TokenCaptureStore(tmp_path)
+        self._capture(store)
+        # A call that failed to capture leaves a chain that looks contiguous but is missing a turn.
+        await store.mark_incomplete("0-0", "c2")
+        result = self._record()
+
+        with pytest.warns(UserWarning, match="marked for masking"):
+            await finalize_rollout_token_capture(result, store)
+
+        # Keep the masking decision in one top-level field.
+        assert result[MASK_SAMPLE_KEY] is True
+        assert MASK_SAMPLE_KEY not in result[TOKEN_CAPTURE_KEY]
+        assert result[TOKEN_CAPTURE_KEY]["capture_incomplete"] is True
+
+    async def test_a_healthy_rollout_is_not_flagged(self, tmp_path: Path) -> None:
+        store = TokenCaptureStore(tmp_path)
+        self._capture(store)
+        result = self._record()
+
+        await finalize_rollout_token_capture(result, store)
+
+        # Omit the field so presence-based consumers keep healthy samples.
+        assert MASK_SAMPLE_KEY not in result
+
+    async def test_a_failed_build_keeps_its_records_and_reports_why(self, tmp_path: Path) -> None:
+        store = TokenCaptureStore(tmp_path)
+        malformed = TokenEntry(
+            rollout_id="0-0",
+            model_call_id="c1",
+            prompt_token_ids=[1, 2],
+            generation_token_ids=[4, 5],
+            generation_log_probs=[-0.1, -0.2],
+            output_items=[{"type": "message", "role": "assistant", "content": []}],
+            token_item_index=0,
+        )
+        malformed.generation_log_probs = [-0.1]
+        store.append(malformed)
+        result = self._record()
+
+        with pytest.warns(UserWarning, match="marked for masking"):
+            await finalize_rollout_token_capture(result, store)
+
+        assert result[MASK_SAMPLE_KEY] is True
+        assert "ValidationError" in result[TOKEN_CAPTURE_KEY]["error"]
+        # Retain failed-build records as diagnostic evidence.
+        assert store.path_for("0-0").stat().st_size > 0
+
+    async def test_a_rollout_with_no_capture_key_is_masked(self, tmp_path: Path) -> None:
+        result = self._record()
+        del result[TASK_INDEX_KEY_NAME]
+        del result[ROLLOUT_INDEX_KEY_NAME]
+
+        with pytest.warns(UserWarning, match="carries no id"):
+            built = await finalize_rollout_token_capture(result, TokenCaptureStore(tmp_path))
+
+        # Mask the rollout before it reaches the trainer without ids.
+        assert result[MASK_SAMPLE_KEY] is True
+        assert result[TOKEN_CAPTURE_KEY]["error"] == "no capture key"
+        assert built is not None and built["rebuilt_response"] is None
+
+    async def test_nothing_recorded_for_a_rollout_that_needs_ids_is_masked(self, tmp_path: Path) -> None:
+        result = self._record()
+
+        with pytest.warns(UserWarning, match="marked for masking"):
+            built = await finalize_rollout_token_capture(result, TokenCaptureStore(tmp_path))
+
+        assert result[MASK_SAMPLE_KEY] is True
+        assert result[TOKEN_CAPTURE_KEY]["error"] == "capture contains no token records"
+        # Report the rollout as both masked and unbuilt.
+        assert built is not None and built[MASK_SAMPLE_KEY] is True and built["rebuilt_response"] is None
+
+    async def test_a_source_that_raises_loses_one_rollout_not_the_batch(self, tmp_path: Path) -> None:
+        """Keep transport failures scoped to their rollout."""
+
+        class _Failing:
+            async def freeze(self, rollout_id: str):
+                raise ConnectionError("data plane unreachable")
+
+            async def drop(self, rollout_id: str, *, snapshot_id: str, version: int) -> bool:
+                return False
+
+            async def close(self) -> None: ...
+
+        result = self._record()
+
+        with pytest.warns(UserWarning, match="marked for masking"):
+            built = await finalize_rollout_token_capture(result, _Failing())
+
+        assert result[MASK_SAMPLE_KEY] is True
+        assert "ConnectionError" in result[TOKEN_CAPTURE_KEY]["error"]
+        assert built is not None and built["rebuilt_response"] is None
+
+
+class TestRolloutCarriesTokenIds:
+    def test_true_when_any_item_carries_generated_ids(self) -> None:
+        result = {"response": {"output": [{"type": "message"}, {"generation_token_ids": [1]}]}}
+        assert rollout_carries_token_ids(result) is True
+
+    @pytest.mark.parametrize(
+        "response",
+        [
+            {"output": []},
+            {"output": [{"type": "message", "content": []}]},
+            {"output": [{"generation_token_ids": []}]},  # An empty list contains no sampled ids.
+            {},
+            None,
+        ],
+    )
+    def test_false_without_them(self, response) -> None:
+        assert rollout_carries_token_ids({"response": response}) is False

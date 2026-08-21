@@ -353,7 +353,31 @@ class TestBuildOpenclawConfig:
         assert agent._effective_model() == "nemo/Qwen3.6-35B-A3B"
         assert provider["baseUrl"] == "http://model/v1"
         assert provider["models"][0]["id"] == "Qwen3.6-35B-A3B"
-        assert provider["models"][0]["maxTokens"] == 131072
+
+    def test_context_window_and_max_tokens_omitted_by_default(self) -> None:
+        # Regression: a static default here previously caused every request to fail unconditionally
+        # once it didn't match the deployed model's real context window. None (the default) must omit
+        # both keys so openclaw falls back to its own auto-discovery / sane self-hosted defaults.
+        agent = _make_agent(model_server=ModelServerRef(type="responses_api_models", name="policy_model"))
+        with patch.object(agent, "_resolve_model_base_url", return_value="http://model/v1"):
+            cfg = agent._build_openclaw_config({})
+
+        model_entry = cfg["models"]["providers"]["nemo"]["models"][0]
+        assert "contextWindow" not in model_entry
+        assert "maxTokens" not in model_entry
+
+    def test_context_window_and_max_tokens_included_when_set(self) -> None:
+        agent = _make_agent(
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            context_window=131072,
+            max_output_tokens=8192,
+        )
+        with patch.object(agent, "_resolve_model_base_url", return_value="http://model/v1"):
+            cfg = agent._build_openclaw_config({})
+
+        model_entry = cfg["models"]["providers"]["nemo"]["models"][0]
+        assert model_entry["contextWindow"] == 131072
+        assert model_entry["maxTokens"] == 8192
 
     def test_timeout_pads_empty_output(self) -> None:
         agent = _make_agent()
