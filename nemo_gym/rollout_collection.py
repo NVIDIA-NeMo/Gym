@@ -998,6 +998,14 @@ class RolloutCollectionHelper(BaseModel):
                 # Use tqdm.write here so we can print properly with tqdm being used.
                 tqdm.write(print_str)
 
+                if get_exporters():
+                    step_metrics = {
+                        f"progress/{agent_name}/reward": metrics["reward"]
+                        for agent_name, metrics in agent_name_to_metrics.items()
+                    }
+
+                    export_metrics(step_metrics, step=int(current_pct))
+
         results_file.close()
         failures_file.close()
         if owned_token_source is not None:
