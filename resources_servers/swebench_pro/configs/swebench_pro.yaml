@@ -1,0 +1,71 @@
+# Resources server for the public ScaleAI SWE-bench Pro benchmark.
+swebench_pro_resources_server:
+  resources_servers:
+    swebench_pro:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+
+      evaluation_timeout: 3600
+      image_repository: docker.io/jefzda/sweap-images
+      is_verifying_golden_patch: false
+      prefetch_go_modules: true
+
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        resources:
+          cpu: 4
+          memory_mib: 30720
+          disk_gib: 30
+        provider_options:
+          resource_requests:
+            cpu: 4
+            memory_mib: 30720
+            disk_gib: 30
+        metadata:
+          benchmark: swebench-pro
+
+swebench_pro_example_resources_server:
+  resources_servers:
+    swebench_pro:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+
+      evaluation_timeout: 3600
+      image_repository: docker.io/jefzda/sweap-images
+      is_verifying_golden_patch: true
+      prefetch_go_modules: true
+
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        resources:
+          cpu: 4
+          memory_mib: 30720
+          disk_gib: 30
+        provider_options:
+          resource_requests:
+            cpu: 4
+            memory_mib: 30720
+            disk_gib: 30
+        metadata:
+          benchmark: swebench-pro-example
+
+swebench_pro_example_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: swebench_pro_example_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/swebench_pro/data/example.jsonl
