@@ -1,4 +1,15 @@
+# Lines below are enforced: GitHub auto-requests review from these owners and
+# main's branch protection requires their approval before merge.
+#
+# `# suggest: <path-pattern> @user-or-team ...` lines are advisory only. GitHub's
+# CODEOWNERS parser ignores all comment lines, so these can never become a required
+# reviewer — they're read separately by .github/workflows/suggest-reviewers.yml,
+# which posts them as a non-blocking PR comment. Add/update suggestions here,
+# next to the enforced rule they relate to, so there's one file to maintain.
+
 .github/ @nvidia-nemo/automation
+# suggest: .github/ @marta-sd @ritaneves
 docker/ @nvidia-nemo/automation
+# suggest: docker/ @anwithk
 pyproject.toml @nvidia-nemo/automation
 uv.lock @nvidia-nemo/automation
