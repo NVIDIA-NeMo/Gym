@@ -385,6 +385,8 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
 
     config: OpenClawAgentConfig
     sem: Semaphore = None
+    sigterm_events: set = Field(default_factory=set)
+    sigterm_handler_installed: bool = False
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     # deny the interactive "message" channel so the headless agent finishes
@@ -484,6 +486,13 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             proc.kill()
             await proc.communicate()
             raise TimeoutError(f"Timed out after {timeout}s: {shlex.join(args)}") from None
+        except asyncio.CancelledError:
+            # Cancellation (e.g. SIGTERM salvage) only stops us from awaiting the process; it does
+            # not stop the process itself. Kill it here so we never leak an orphaned child.
+            proc.kill()
+            with contextlib.suppress(Exception):
+                await proc.communicate()
+            raise
         return proc.returncode or 0, stdout.decode(errors="replace"), stderr.decode(errors="replace")
 
     @staticmethod
@@ -514,6 +523,29 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             except OSError:
                 continue
         return None
+
+    def _install_sigterm_handler(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Install the process's SIGTERM handler once (never removed), chaining to whatever was
+        previously installed — e.g. uvicorn's graceful-shutdown handler — so it still fires.
+        loop.add_signal_handler replaces any existing handler for the signal outright, so
+        installing once per instance and fanning out to a registry of per-run Events is the only
+        way to support concurrent runs without one run's cleanup silently disabling salvage (or
+        graceful shutdown) for every other run sharing this process."""
+        if self.sigterm_handler_installed:
+            return
+        previous = signal.getsignal(signal.SIGTERM)
+
+        def _on_sigterm() -> None:
+            for event in self.sigterm_events:
+                event.set()
+            if callable(previous):
+                previous(signal.SIGTERM, None)
+
+        try:
+            loop.add_signal_handler(signal.SIGTERM, _on_sigterm)
+            self.sigterm_handler_installed = True
+        except (NotImplementedError, RuntimeError):
+            pass  # signal handlers need the main-thread loop; fall back to timeout-only salvage
 
     async def _run_openclaw(
         self,
@@ -571,37 +603,27 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             # response before the SIGKILL, so no harness change is needed.
             code, stdout, stderr = None, "", ""
             loop = asyncio.get_running_loop()
+            self._install_sigterm_handler(loop)
             sigterm_hit = asyncio.Event()
-            handler_installed = False
-            try:
-                loop.add_signal_handler(signal.SIGTERM, sigterm_hit.set)
-                handler_installed = True
-            except (NotImplementedError, RuntimeError):
-                pass  # signal handlers need the main-thread loop; fall back to timeout-only salvage
-
+            self.sigterm_events.add(sigterm_hit)
             run_task = asyncio.ensure_future(
                 self._run_exec(cmd, cwd=str(work_dir), env=env, timeout=self.config.timeout)
             )
             try:
-                if handler_installed:
-                    term_task = asyncio.ensure_future(sigterm_hit.wait())
-                    done, _ = await asyncio.wait({run_task, term_task}, return_when=asyncio.FIRST_COMPLETED)
-                    term_task.cancel()
-                    if run_task in done:
-                        code, stdout, stderr = run_task.result()
-                    else:
-                        LOG.warning("openclaw received SIGTERM; salvaging partial session")
-                        run_task.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await run_task
+                term_task = asyncio.ensure_future(sigterm_hit.wait())
+                done, _ = await asyncio.wait({run_task, term_task}, return_when=asyncio.FIRST_COMPLETED)
+                term_task.cancel()
+                if run_task in done:
+                    code, stdout, stderr = run_task.result()
                 else:
-                    code, stdout, stderr = await run_task
+                    LOG.warning("openclaw received SIGTERM; salvaging partial session")
+                    run_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await run_task
             except TimeoutError:
                 LOG.warning("openclaw timed out after %ds; salvaging partial session", self.config.timeout)
             finally:
-                if handler_installed:
-                    with contextlib.suppress(Exception):
-                        loop.remove_signal_handler(signal.SIGTERM)
+                self.sigterm_events.discard(sigterm_hit)
 
             if code:
                 LOG.warning("openclaw exited %d: %s", code, stderr)

@@ -708,6 +708,39 @@ class TestTimeoutSalvage:
         assert not work_dir.exists()  # workdir cleanup still runs after salvage
 
 
+class TestRunExecCancellation:
+    def test_cancellation_kills_child_process(self) -> None:
+        agent = _make_agent()
+        captured: dict = {}
+        orig_create = asyncio.create_subprocess_exec
+
+        async def _capturing_create(*args, **kwargs):
+            proc = await orig_create(*args, **kwargs)
+            captured["proc"] = proc
+            return proc
+
+        async def _main():
+            with patch("asyncio.create_subprocess_exec", _capturing_create):
+                task = asyncio.ensure_future(
+                    agent._run_exec(["sleep", "30"], cwd=None, env=os.environ.copy(), timeout=100)
+                )
+                for _ in range(200):
+                    if "proc" in captured:
+                        break
+                    await asyncio.sleep(0.01)
+                assert "proc" in captured, "subprocess never started"
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                await captured["proc"].wait()
+
+        asyncio.run(_main())
+
+        assert captured["proc"].returncode is not None  # cancellation killed it, not left running
+
+
 class TestSigtermSalvage:
     def test_sigterm_returns_partial_session_from_disk(self, tmp_path: Path) -> None:
         agent = _make_agent()
@@ -747,6 +780,62 @@ class TestSigtermSalvage:
         assert output
         assert output[0].content[0].text == "partial"
         assert not work_dir.exists()
+
+    def test_handler_installed_once_and_chains_to_previous_across_concurrent_runs(self, tmp_path: Path) -> None:
+        agent = _make_agent()
+        work_dir_a, work_dir_b = tmp_path / "run_a", tmp_path / "run_b"
+        for work_dir in (work_dir_a, work_dir_b):
+            home = work_dir / ".openclaw-home"
+            config_path = home / ".openclaw" / "openclaw.json"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text("{}")
+            _seed_session(home, "session-1", "partial")
+
+        async def _run_exec_stub(cmd, *, cwd, env, timeout):
+            if "setup" in cmd:
+                return 0, "", ""
+            await asyncio.Event().wait()  # hangs until the SIGTERM path cancels it
+
+        registered: dict = {}
+        install_calls = 0
+        previous_calls = 0
+
+        def _fake_previous(sig, frame) -> None:
+            nonlocal previous_calls
+            previous_calls += 1
+
+        async def _main():
+            loop = asyncio.get_running_loop()
+
+            def _add_signal_handler(sig, cb, *a):
+                nonlocal install_calls
+                install_calls += 1
+                registered[sig] = cb
+
+            loop.add_signal_handler = _add_signal_handler  # type: ignore[method-assign]
+
+            with patch("signal.getsignal", return_value=_fake_previous):
+                work_dirs = iter([work_dir_a, work_dir_b])
+                with (
+                    patch.object(agent, "_workspace_root", side_effect=lambda: next(work_dirs)),
+                    patch.object(agent, "_run_exec", _run_exec_stub),
+                ):
+                    task_a = asyncio.ensure_future(agent._run_openclaw("solve", None))
+                    task_b = asyncio.ensure_future(agent._run_openclaw("solve", None))
+                    for _ in range(100):
+                        if signal.SIGTERM in registered:
+                            break
+                        await asyncio.sleep(0)
+                    assert signal.SIGTERM in registered
+                    registered[signal.SIGTERM]()
+                    return await asyncio.gather(task_a, task_b)
+
+        results = asyncio.run(_main())
+
+        assert install_calls == 1  # installed once, not once per run
+        assert previous_calls == 1  # the previously-installed handler (uvicorn's) still fires
+        for output, _usage, _model in results:
+            assert output[0].content[0].text == "partial"
 
 
 class TestDeepMerge:
