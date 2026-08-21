@@ -44,6 +44,10 @@ responses_api_agents:
     token_id_capture: true
 ```
 
+For a training run that captures every configured agent, set `token_id_capture.all_agents: true` in the run-wide block instead of repeating the agent flag. This overrides agent-level opt-ins but does not enable capture by itself. Keep both `enabled` and `all_agents` false in evaluation configs.
+
+An opted-in agent adds `/training-token-capture` to its rollout-correlated model-server URL. The model server uses that segment to distinguish training capture from ordinary requests on the same endpoint, then strips it before API routing. It does not intercept or change the request body.
+
 Capture reads token ids from the served response, so the inference server must return them. For vLLM, that requires a tokenizer:
 
 ```yaml
@@ -100,18 +104,24 @@ The `nemo_gym.token_id_capture.protocols` module defines two protocols. The modu
 ```python
 class TokenSink(Protocol):
     async def put(self, entry: TokenEntry) -> None: ...
-    def mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None: ...
+    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None: ...
+    async def close(self) -> None: ...
 
 class TokenSource(Protocol):
-    async def tokens_for(self, rollout_id: str) -> list[TokenEntry]: ...
-    async def drop(self, rollout_id: str) -> None: ...
+    async def freeze(self, rollout_id: str) -> TokenCaptureSnapshot: ...
+    async def drop(self, rollout_id: str, *, snapshot_id: str, version: int) -> bool: ...
+    async def close(self) -> None: ...
 ```
 
-`put` must make the record durable before it returns. A reader that runs after the rollout must see the record. This guarantee allows the exact frozen snapshot to be retired after durable downstream handoff.
+`put` must make the record durable before it returns. A reader that runs after the rollout must see every acknowledged record. This guarantee allows the consumer to freeze one complete view after the harness finishes.
 
 `mark_incomplete` is the durable signal that a rollout lost a call. The model call still succeeds. A sink that drops this signal makes an incomplete rollout look complete.
 
-A transport without a delete operation implements `drop` as a successful no-op. The storage owner remains responsible for record retention.
+`freeze` returns one atomic snapshot containing entries, incomplete state, `snapshot_id`, and version. It is idempotent for an unchanged rollout. A write that races the snapshot must advance the observable version.
+
+`drop` conditionally retires only the supplied snapshot identity and version. It returns `false` if state changed after `freeze`, preserving a late write instead of deleting evidence the consumer never saw. A transport without a delete operation returns `true` without deleting data, and its storage owner remains responsible for retention.
+
+`close` releases client resources. Gym closes clients it constructs, but it does not close a caller-installed source.
 
 ### Connecting a framework-owned transport
 
@@ -142,7 +152,7 @@ await durable_handoff(built)
 await retire_rollout_token_capture(result["_ng_rollout_id"], source, built)
 ```
 
-`rebuild_response: false` tells Gym to stop after the write. Correlation and capture are unaffected. Only the read-back after each rollout stops. The training framework freezes records through its `TokenSource` and retires the consumed snapshot with `drop` after durable handoff. Without this setting, Gym tries to read from a source that received no records and reports every healthy rollout as a failed rebuild.
+`rebuild_response: false` tells Gym to stop after the write. Correlation and capture are unaffected. The training framework freezes, reconstructs, durably hands off, and conditionally retires the snapshot through its `TokenSource`. Set `rebuild_response: true` only when Gym's rollout collector owns that sequence; the collector process then requires an installed source or the default file store.
 
 When Gym's rollout collector owns rebuilding over a framework transport, install the framework-created source in that collector process with `install_token_source` before collection starts. The default file-backed path needs no installation because Gym constructs a `TokenCaptureStore` from `token_id_capture.dir`.
 
@@ -164,11 +174,11 @@ A framework that stages records through its own transport reads them through its
 
 Every source must return an accurate `incomplete` value in its frozen snapshot. This value tells the consumer that a rollout lost a model call. The records that arrived can form a contiguous-looking chain while still missing a turn. A source that always reports `false` can cause training to use that incomplete rollout.
 
-Gym does not provide an HTTP reader. No current integration requires one. A reader must return an atomic snapshot that includes both the entries and the incomplete state.
+Consume records through `TokenSource.freeze`. Reading entries alone is insufficient because safe masking and retirement also require the snapshot's incomplete state, identity, and version.
 
 ### Driving rollouts yourself
 
-`gym eval run` finalizes each record. A framework that calls `run_examples` directly does not use that path, so it must call the same function for each finished record:
+`gym eval run` finalizes each record and retires successful evidence only after the output row is durable. A framework that calls `run_examples` directly does not use that path, so it must perform the same sequence for each finished record:
 
 ```python
 from nemo_gym.token_id_capture.delivery import (
@@ -181,7 +191,7 @@ await downstream.put(result)  # Must be durable when this returns.
 await retire_rollout_token_capture(rollout_id, source, built)
 ```
 
-This function freezes the capture snapshot, rebuilds `response.output`, and attaches the build metrics. It mutates the record in place and never raises. The caller supplies the `TokenSource` as the second argument. The function does not retire the snapshot. Retirement occurs only after durable downstream handoff.
+`finalize_rollout_token_capture` freezes the source snapshot, rebuilds `response.output`, and attaches build metrics. It mutates the record in place and does not retire evidence. `retire_rollout_token_capture` conditionally drops only the snapshot that was rebuilt, and only after the caller establishes its durability boundary. Failed and masked builds remain available for diagnosis.
 
 A rollout that cannot be rebuilt is flagged with `mask_sample: true` at the top level of its record. Exclude these rollouts from the loss. The trajectory is missing a turn, or two candidate generations could not be distinguished. Training on such a trajectory is off-policy.
 
