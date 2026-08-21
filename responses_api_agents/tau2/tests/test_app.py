@@ -51,6 +51,7 @@ class TestApp:
         self,
         max_agent_steps: Optional[int] = None,
         turns_remaining_interval: int = 1,
+        malformed_tool_call_max_retries: int = 0,
     ) -> Tuple[Tau2Config, Tau2Agent]:
         config = Tau2Config(
             host="0.0.0.0",
@@ -68,6 +69,7 @@ class TestApp:
             max_steps=4,
             max_agent_steps=max_agent_steps,
             turns_remaining_interval=turns_remaining_interval,
+            malformed_tool_call_max_retries=malformed_tool_call_max_retries,
         )
         server = Tau2Agent(config=config, server_client=MagicMock(spec=ServerClient))
 
@@ -146,52 +148,73 @@ class TestApp:
 
         assert config.max_agent_steps is None
         assert config.turns_remaining_interval == 1
+        assert config.malformed_tool_call_max_retries == 0
 
     def test_setup_webserver_installs_tool_validating_client(self) -> None:
-        _, server = self._dummy_server()
+        _, server = self._dummy_server(malformed_tool_call_max_retries=2)
 
         with (
             patch("responses_api_agents.tau2.app.ensure_tau2_data_dir"),
             patch.object(tau2_llm_utils, "NeMoGymAsyncOpenAI"),
         ):
             server.setup_webserver()
-            assert tau2_llm_utils.NeMoGymAsyncOpenAI is Tau2ToolValidatingAsyncOpenAI
+            client = tau2_llm_utils.NeMoGymAsyncOpenAI(base_url="http://model/v1", api_key="dummy")  # pragma: allowlist secret
 
-    async def test_tool_argument_validation_retries_malformed_then_returns_valid(self) -> None:
+        assert isinstance(client, Tau2ToolValidatingAsyncOpenAI)
+        assert client.malformed_tool_call_max_retries == 2
+
+    async def test_tool_argument_validation_does_not_retry_malformed_response(self) -> None:
         malformed = self._chat_completion('{"account_id": "123"')
-        valid = self._chat_completion('{"account_id": "123"}')
         messages = [{"role": "user", "content": "look it up"}]
         original_messages = deepcopy(messages)
-        client = Tau2ToolValidatingAsyncOpenAI(base_url="http://model/v1", api_key="dummy")
-
-        with patch(
-            "nemo_gym.openai_utils.NeMoGymAsyncOpenAI.create_chat_completion",
-            AsyncMock(side_effect=[malformed, valid]),
-        ) as create_chat_completion:
-            response = await client.create_chat_completion(model="model", messages=messages)
-
-        assert response == valid
-        assert create_chat_completion.await_count == 2
-        assert all(call.kwargs["messages"] == original_messages for call in create_chat_completion.await_args_list)
-        assert messages == original_messages
-
-    async def test_tool_argument_validation_stops_after_five_malformed_responses(self) -> None:
-        malformed = self._chat_completion('{"account_id": "123"')
-        client = Tau2ToolValidatingAsyncOpenAI(base_url="http://model/v1", api_key="dummy")
+        client = Tau2ToolValidatingAsyncOpenAI(base_url="http://model/v1", api_key="dummy")  # pragma: allowlist secret
 
         with patch(
             "nemo_gym.openai_utils.NeMoGymAsyncOpenAI.create_chat_completion",
             AsyncMock(return_value=malformed),
         ) as create_chat_completion:
-            with pytest.raises(Tau2MalformedToolCallError, match="5 consecutive attempts"):
+            with pytest.raises(Tau2MalformedToolCallError, match="1 consecutive attempts"):
+                await client.create_chat_completion(model="model", messages=messages)
+
+        assert create_chat_completion.await_count == 1
+        assert all(call.kwargs["messages"] == original_messages for call in create_chat_completion.await_args_list)
+        assert messages == original_messages
+
+    async def test_tool_argument_validation_stops_after_first_malformed_response(self) -> None:
+        malformed = self._chat_completion('{"account_id": "123"')
+        client = Tau2ToolValidatingAsyncOpenAI(base_url="http://model/v1", api_key="dummy")  # pragma: allowlist secret
+
+        with patch(
+            "nemo_gym.openai_utils.NeMoGymAsyncOpenAI.create_chat_completion",
+            AsyncMock(return_value=malformed),
+        ) as create_chat_completion:
+            with pytest.raises(Tau2MalformedToolCallError, match="1 consecutive attempts"):
                 await client.create_chat_completion(model="model", messages=[])
 
-        assert create_chat_completion.await_count == 5
+        assert create_chat_completion.await_count == 1
+
+    async def test_tool_argument_validation_honors_retry_override(self) -> None:
+        malformed = self._chat_completion('{"account_id": "123"')
+        valid = self._chat_completion('{"account_id": "123"}')
+        client = Tau2ToolValidatingAsyncOpenAI(
+            base_url="http://model/v1",
+            api_key="dummy",  # pragma: allowlist secret
+            malformed_tool_call_max_retries=1,
+        )
+
+        with patch(
+            "nemo_gym.openai_utils.NeMoGymAsyncOpenAI.create_chat_completion",
+            AsyncMock(side_effect=[malformed, valid]),
+        ) as create_chat_completion:
+            response = await client.create_chat_completion(model="model", messages=[])
+
+        assert response == valid
+        assert create_chat_completion.await_count == 2
 
     @pytest.mark.parametrize("arguments", ['["not", "an", "object"]', '"not an object"', "null"])
     async def test_tool_argument_validation_rejects_valid_json_that_is_not_an_object(self, arguments: str) -> None:
         response = self._chat_completion(arguments)
-        client = Tau2ToolValidatingAsyncOpenAI(base_url="http://model/v1", api_key="dummy")
+        client = Tau2ToolValidatingAsyncOpenAI(base_url="http://model/v1", api_key="dummy")  # pragma: allowlist secret
 
         with patch(
             "nemo_gym.openai_utils.NeMoGymAsyncOpenAI.create_chat_completion",
@@ -200,14 +223,14 @@ class TestApp:
             with pytest.raises(Tau2MalformedToolCallError, match="must decode to an object"):
                 await client.create_chat_completion(model="model", messages=[])
 
-        assert create_chat_completion.await_count == 5
+        assert create_chat_completion.await_count == 1
 
     @pytest.mark.parametrize("arguments", ['{"account_id": "123"}', None])
     async def test_tool_argument_validation_passes_valid_and_no_tool_responses_without_retry(
         self, arguments: Optional[str]
     ) -> None:
         expected = self._chat_completion(arguments)
-        client = Tau2ToolValidatingAsyncOpenAI(base_url="http://model/v1", api_key="dummy")
+        client = Tau2ToolValidatingAsyncOpenAI(base_url="http://model/v1", api_key="dummy")  # pragma: allowlist secret
 
         with patch(
             "nemo_gym.openai_utils.NeMoGymAsyncOpenAI.create_chat_completion",
@@ -269,8 +292,7 @@ class TestApp:
 
         _, server = self._dummy_server()
 
-        with patch("responses_api_agents.tau2.app.ensure_tau2_data_dir"):
-            app = server.setup_webserver()
+        app = server.setup_webserver()
         client = TestClient(app)
 
         async_openai_mock = MagicMock()

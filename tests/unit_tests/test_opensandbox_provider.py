@@ -201,6 +201,19 @@ async def test_direct_create_passes_platform_to_sdk_create(
         os="linux",
         arch="amd64",
     )
+    assert "network_policy" not in FakeSandbox.created_kwargs
+
+
+async def test_direct_create_passes_network_policy_to_sdk_create(fake_opensandbox_sdk: None) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+    policy = {
+        "defaultAction": "deny",
+        "egress": [{"action": "allow", "target": "pypi.org"}],
+    }
+
+    await provider.create(SandboxSpec(image="image:tag", provider_options={"network_policy": policy}))
+
+    assert FakeSandbox.created_kwargs["network_policy"].model_dump(by_alias=True, exclude_none=True) == policy
 
 
 async def test_direct_create_passes_resource_requests_to_sdk_create(
@@ -454,6 +467,7 @@ def test_provider_options_from_mapping() -> None:
     parsed = options_cls.from_mapping(
         {
             "image_auth": {"username": "user", "password": TEST_REGISTRY_PASSWORD},
+            "network_policy": {"defaultAction": "allow", "egress": []},
             "platform": {"os": "linux", "arch": "amd64"},
             "snapshot_id": "snap-1",
             "volumes": [{"name": "workspace"}],
@@ -462,6 +476,7 @@ def test_provider_options_from_mapping() -> None:
         }
     )
     assert parsed.image_auth == {"username": "user", "password": TEST_REGISTRY_PASSWORD}
+    assert parsed.network_policy == {"defaultAction": "allow", "egress": []}
     assert parsed.platform == {"os": "linux", "arch": "amd64"}
     assert parsed.snapshot_id == "snap-1"
     assert parsed.volumes == ({"name": "workspace"},)
@@ -476,6 +491,8 @@ def test_provider_options_from_mapping() -> None:
         options_cls.from_mapping({"platform": "linux/amd64"})
     with pytest.raises(TypeError, match="'image_auth' must be a mapping"):
         options_cls.from_mapping({"image_auth": "not-a-mapping"})
+    with pytest.raises(TypeError, match="'network_policy' must be a mapping"):
+        options_cls.from_mapping({"network_policy": "allow"})
     with pytest.raises(TypeError, match="'snapshot_id' must be a string"):
         options_cls.from_mapping({"snapshot_id": 123})
     with pytest.raises(TypeError, match="'volumes' must be a list of mappings"):

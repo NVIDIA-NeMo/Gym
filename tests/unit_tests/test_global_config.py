@@ -45,6 +45,7 @@ from nemo_gym.global_config import (
     get_first_server_config_dict,
     get_global_config_dict,
 )
+from nemo_gym.secret_utils import recursively_hide_secrets
 from nemo_gym.server_utils import (
     DictConfig,
 )
@@ -110,10 +111,10 @@ class TestGlobalConfig:
         monkeypatch.delenv("UV_CACHE_DIR", raising=False)
         probe = MagicMock(side_effect=AssertionError("offline resolution must not probe sockets"))
         hostname = MagicMock(side_effect=AssertionError("offline resolution must not resolve hostnames"))
-        wandb_init = MagicMock(side_effect=AssertionError("offline resolution must not initialize W&B"))
+        setup_exporters = MagicMock(side_effect=AssertionError("offline resolution must not start exporters"))
         monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", probe)
         monkeypatch.setattr(nemo_gym.global_config, "gethostbyname", hostname)
-        monkeypatch.setattr(nemo_gym.global_config.wandb, "init", wandb_init)
+        monkeypatch.setattr(nemo_gym.global_config, "setup_exporters", setup_exporters)
         monkeypatch.setattr(WANDBConfig, "is_available", PropertyMock(return_value=True))
 
         config = GlobalConfigDictParser().parse(
@@ -134,7 +135,7 @@ class TestGlobalConfig:
         assert config.worker.resources_servers.example.host == "127.0.0.1"
         probe.assert_not_called()
         hostname.assert_not_called()
-        wandb_init.assert_not_called()
+        setup_exporters.assert_not_called()
         assert "UV_CACHE_DIR" not in nemo_gym.global_config.environ
 
     def _mock_parse_environment(self, monkeypatch: MonkeyPatch, config_dict: "DictConfig") -> None:
@@ -1441,7 +1442,7 @@ contested: second_inner
                 "not": "not",
             }
         )
-        GlobalConfigDictParser()._recursively_hide_secrets(dict_config)
+        recursively_hide_secrets(dict_config)
         assert OmegaConf.to_container(dict_config) == {
             "dict": {"key": "****", "not": "not"},
             "list": [{"key": "****", "not": "not"}],
