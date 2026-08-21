@@ -36,6 +36,7 @@ The guaranteed invariant is token-chain exactness, not conversation fidelity.
 A delivered chain contains exactly the tokens the policy emitted over the recorded context.
 The hashes deliberately ignore reasoning and some inserted items.
 Those fields may differ from the harness rendering without breaking token-chain exactness.
+Ambiguous matches remain unresolved rather than risking tokens from the wrong call.
 """
 
 from __future__ import annotations
@@ -489,6 +490,8 @@ class InMemoryLineageStore:
     This class supports in-process framework adapters and tests.
     Its index is memory-only.
     Eviction or restart leaves affected continuations unresolved.
+    That failure mode is safe but can mask otherwise usable rollouts.
+    Production adapters should back the incremental resolver with durable records.
     """
 
     def __init__(self, max_rollouts: int = 512, max_tokens: int = 8_000_000) -> None:
@@ -514,6 +517,8 @@ class IncrementalLineageStore:
     An external backend implements two hooks.
     It inherits Gym's matcher, bounded index, locking, and token materialization.
     Hash-for-hash agreement is the wire contract.
+    The backend remains the source of truth when cache rows are evicted.
+    A resolved match loads only the winning call's token chain.
 
     Required hooks:
       ``_fetch_new_entries(rollout_id, cursor)`` -> ``(items, new_cursor)`` where
