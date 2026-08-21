@@ -49,6 +49,7 @@ from nemo_gym.config_types import (
     NoServerInstancesError,
     ServerInstanceConfig,
     ServerRefNotFoundError,
+    UnsupportedAgentPairingError,
     is_almost_server,
     is_server_ref,
     maybe_get_server_instance_config,
@@ -103,6 +104,8 @@ TOKEN_ID_CAPTURE_BLOCK = "token_id_capture"
 COMPONENT_NAME_KEY_NAME = "component_name"
 SKIP_VERIFICATION_KEY_NAME = "skip_verification"
 SKIP_VERIFICATION_REWARD_KEY_NAME = "skip_verification_reward"
+ALLOW_UNSUPPORTED_PAIRING_KEY_NAME = "allow_unsupported_pairing"
+ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME = "NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -138,11 +141,15 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     COMPONENT_NAME_KEY_NAME,
     SKIP_VERIFICATION_KEY_NAME,
     SKIP_VERIFICATION_REWARD_KEY_NAME,
+    ALLOW_UNSUPPORTED_PAIRING_KEY_NAME,
 ]
 
 AGENT_SERVER_TYPE_KEY_NAME = "responses_api_agents"
 # Carried over from the environment's agent instance onto the composed agent; every other key is dropped.
 _COMPOSED_AGENT_CARRY_OVER_KEYS = ("resources_server", "model_server", "datasets")
+# Declared on a resources server: the agent types it is known to score correctly. Absent means any harness.
+REQUIRES_AGENT_KEY_NAME = "requires_agent"
+RESOURCES_SERVER_TYPE_KEY_NAME = "resources_servers"
 
 
 @dataclass(frozen=True)
@@ -580,6 +587,8 @@ Duplicate config paths:
                 f"resources server alongside the agent so there is a task for it to run."
             )
 
+        self._raise_on_unsupported_pairing(global_config_dict, source, targets)
+
         # Struct mode would reject the key removals below - we need open_dict to allow it.
         with open_dict(global_config_dict):
             for target in targets:
@@ -590,6 +599,67 @@ Duplicate config paths:
                 agents.pop(target.agent_type)
                 agents[source.agent_type] = composed
             global_config_dict.pop(source.name)
+
+    @staticmethod
+    def _pairing_override_enabled(global_config_dict: DictConfig) -> bool:
+        return bool(global_config_dict.get(ALLOW_UNSUPPORTED_PAIRING_KEY_NAME)) or getenv(
+            ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME, ""
+        ).lower() not in ("", "0", "false")
+
+    @staticmethod
+    def _required_agents(global_config_dict: DictConfig, target: _AgentInstance) -> Optional[List[str]]:
+        """The agent types the target's resources server declares support for, or None if it declares none.
+
+        Read from the implementation rather than the instance; an instance may still override.
+        """
+        reference = target.server_config._get_node("resources_server")
+        instance_name = reference.get("name") if isinstance(reference, DictConfig) else None
+        instance = global_config_dict.get(instance_name) if instance_name else None
+        if not isinstance(instance, DictConfig) or "resources_servers" not in instance:
+            return None
+        servers = instance["resources_servers"]
+        if not isinstance(servers, DictConfig) or len(servers) != 1:
+            return None
+        implementation = next(iter(servers))
+        declared = servers[implementation].get(REQUIRES_AGENT_KEY_NAME)
+        return [str(name) for name in declared] if declared else None
+
+    def _raise_on_unsupported_pairing(
+        self, global_config_dict: DictConfig, source: _AgentInstance, targets: List[_AgentInstance]
+    ) -> None:
+        """Reject swapping `source` onto any target whose resources server does not declare support for it.
+
+        Compatibility is declared verifier-side because that is where it is known: an environment's author
+        knows which harnesses score their task correctly, while a generic harness cannot know that for every
+        environment. A server that declares nothing accepts any harness.
+        """
+        if self._pairing_override_enabled(global_config_dict):
+            return
+
+        rejected: List[Tuple[str, List[str]]] = []
+        for target in targets:
+            required = self._required_agents(global_config_dict, target)
+            if required is not None and source.agent_type not in required:
+                rejected.append((target, required))
+        if not rejected:
+            return
+
+        # Report every rejected instance at once: a config can bring in several, and fixing them one
+        # error at a time means one full re-resolve per instance.
+        rejected_list = "\n".join(
+            f"  - {target.name} uses {target.server_config.get('resources_server').get('name')} and accepts {', '.join(required)}"
+            for target, required in rejected
+        )
+        supported = sorted(set.intersection(*(set(required) for _, required in rejected)))
+        remedy = f"Select one of: {', '.join(supported)}." if supported else "No single agent satisfies all of them."
+        raise UnsupportedAgentPairingError(
+            f"""'{source.agent_type}' is not declared compatible with {len(rejected)} of the agent instance(s) """
+            f"""it would replace, so it cannot be scored correctly:
+{rejected_list}
+
+{remedy} Or pass --allow-unsupported-pairing (or set {ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME}=1) to bypass \
+the check."""
+        )
 
     @staticmethod
     def _carry_over_agent_bindings(original: DictConfig, composed: DictConfig) -> None:
