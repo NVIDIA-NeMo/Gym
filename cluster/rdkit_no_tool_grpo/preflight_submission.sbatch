@@ -34,6 +34,10 @@ LOCAL_CONTAINER="${NODE_LOCAL_ROOT}/container/$(basename "${CONTAINER_IMAGE_PATH
 mkdir -p \
   "${LOCAL_GYM_DIR}" \
   "${NODE_LOCAL_ROOT}/container" \
+  "${NODE_LOCAL_ROOT}/enroot/cache" \
+  "${NODE_LOCAL_ROOT}/enroot/data" \
+  "${NODE_LOCAL_ROOT}/enroot/runtime" \
+  "${NODE_LOCAL_ROOT}/enroot/tmp" \
   "${NODE_LOCAL_ROOT}/hf-home" \
   "${NODE_LOCAL_ROOT}/uv-cache"
 
@@ -56,6 +60,11 @@ rsync -a \
   --exclude=cluster/rdkit_no_tool_grpo/venvs/ \
   "${GYM_DIR}/" "${LOCAL_GYM_DIR}/"
 rsync -a "${CONTAINER_IMAGE_PATH}" "${LOCAL_CONTAINER}"
+
+export ENROOT_CACHE_PATH="${NODE_LOCAL_ROOT}/enroot/cache"
+export ENROOT_DATA_PATH="${NODE_LOCAL_ROOT}/enroot/data"
+export ENROOT_RUNTIME_PATH="${NODE_LOCAL_ROOT}/enroot/runtime"
+export ENROOT_TEMP_PATH="${NODE_LOCAL_ROOT}/enroot/tmp"
 
 DATA_TOKEN_ARGS=()
 if [[ -n "${MAX_NEW_TOKENS:-}" ]]; then

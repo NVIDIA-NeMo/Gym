@@ -53,6 +53,10 @@ PERSIST_TMP="${OUTPUT_DIR}.tmp-${SLURM_JOB_ID}"
 mkdir -p \
   "${LOCAL_GYM_DIR}/cluster/rdkit_no_tool_grpo" \
   "${NODE_LOCAL_ROOT}/container" \
+  "${NODE_LOCAL_ROOT}/enroot/cache" \
+  "${NODE_LOCAL_ROOT}/enroot/data" \
+  "${NODE_LOCAL_ROOT}/enroot/runtime" \
+  "${NODE_LOCAL_ROOT}/enroot/tmp" \
   "${LOCAL_BASE_MODEL}" \
   "${LOCAL_ADAPTER}" \
   "${NODE_LOCAL_ROOT}/hf-home" \
@@ -86,6 +90,10 @@ rsync -a "${ADAPTER_DIR}/" "${LOCAL_ADAPTER}/"
 
 mkdir -p "${BUNDLE_DIR}/logs" "${GYM_MAIN_DIR}/artifacts"
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-16}"
+export ENROOT_CACHE_PATH="${NODE_LOCAL_ROOT}/enroot/cache"
+export ENROOT_DATA_PATH="${NODE_LOCAL_ROOT}/enroot/data"
+export ENROOT_RUNTIME_PATH="${NODE_LOCAL_ROOT}/enroot/runtime"
+export ENROOT_TEMP_PATH="${NODE_LOCAL_ROOT}/enroot/tmp"
 srun \
   --nodes=1 \
   --ntasks=1 \
