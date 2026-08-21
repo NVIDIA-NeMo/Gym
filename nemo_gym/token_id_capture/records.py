@@ -71,6 +71,8 @@ def encode_token_ids(token_ids: list[int]) -> bytes:
     """Stable, length-delimited, big-endian encoding of a token sequence.
 
     Independent implementations can hash the same bytes.
+    One vectorized pack replaces the per-token loop.
+    The byte layout remains identical to the original encoding.
     """
     header = struct.pack(">BQ", DIGEST_VERSION, len(token_ids))
     if not token_ids:

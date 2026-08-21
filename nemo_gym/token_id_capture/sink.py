@@ -55,6 +55,8 @@ class CaptureContext:
     The context identifies the rollout and model call.
     ``token_sink`` receives the resulting record.
     A framework may provide any ``TokenSink`` implementation.
+    Every consumer shares the same per-call parent decision.
+    This keeps request-time resolution and capture metadata consistent.
     """
 
     rollout_id: str
@@ -125,6 +127,7 @@ async def register_call_intent() -> None:
     ``begin_call`` is an optional sink extension.
     It lets a source detect a call whose entry was lost.
     A failure happens before generation and must fail the model call.
+    The harness can retry without spending inference compute.
     """
     context = _CAPTURE_CONTEXT.get()
     if context is None or context.token_sink is None:

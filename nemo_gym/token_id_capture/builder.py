@@ -166,7 +166,8 @@ def _resolve_parent(
     """Find this call's parent.
 
     New records preserve the request-time parent decision.
-    Token-prefix matching recovers a resolved link whose parent is absent.
+    Token-prefix matching recovers a resolved link whose parent is absent from this build.
+    This can happen when the parent had an empty generation and was filtered out.
     ``note`` reports why the recorded link was not used as recorded.
     """
     prompt = list(node.entry.prompt_token_ids)
@@ -182,7 +183,8 @@ def _resolve_parent(
         parent = by_call_id.get(claimed)
         if parent is None:
             # An absent parent is not evidence of conflict.
-            # Prefix matching can attach the child to a verified ancestor.
+            # Prefix matching may attach the child to a verified surviving ancestor.
+            # A digest mismatch remains a hard boundary.
             inferred, ambiguous = prefix_index.infer_parent(prompt)
             if inferred is not None and not ambiguous:
                 return inferred, False, "parent_call_id_missing_recovered"
@@ -205,6 +207,7 @@ class _NullPrefixIndex:
 
     Every supported entry carries a request-time parent decision.
     Only missing-parent recovery needs the trie.
+    Avoiding the trie is significant for long multi-call rollouts.
     """
 
     def add(self, candidate: "_Node") -> None:
