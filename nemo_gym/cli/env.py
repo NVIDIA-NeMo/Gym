@@ -72,6 +72,7 @@ from nemo_gym.global_config import (
 )
 from nemo_gym.registry import (
     EnvironmentCatalogEntry,
+    RegistryError,
     discover_environment_catalog,
     read_environment_details,
     resolve_catalog_entry,
@@ -1370,9 +1371,20 @@ def _inspect_environment(
 ) -> None:
     """Render one entry from the unified environment catalog."""
     kind = global_config_dict.get("catalog_kind")
-    matching_names = {entry.name: entry for entry in entries}
+    if kind not in (None, "environment", "benchmark"):  # else a bogus kind renders as the error noun
+        raise RegistryError(f"Unknown catalog kind '{kind}'.")
+    # Scope the did-you-mean pool to the requested kind so it never suggests the kind the user did not ask for.
+    matching_names = {entry.name: entry for entry in entries if kind is None or entry.kind == kind}
     if name not in matching_names:
-        exit_unknown_component(name, matching_names, "environment")
+        # A `kind` is always set here when the name exists at all, since an unset one matches everything.
+        known = next((entry for entry in entries if entry.name == name), None)
+        if known is not None:
+            article = "an" if known.kind.startswith(("a", "e", "i", "o", "u")) else "a"
+            rich.print(
+                f"[red]'{name}' is {article} {known.kind}, not a {kind}.[/red] Try `gym list {known.kind}s {name}`."
+            )
+            sys.exit(1)
+        exit_unknown_component(name, matching_names, kind or "environment")
         return
     entry = resolve_catalog_entry(name, kind, entries=entries)
     parsed = read_environment_details(entry.config_path)

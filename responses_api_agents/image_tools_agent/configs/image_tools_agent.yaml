@@ -1,0 +1,38 @@
+image_tools_simple_agent:
+  responses_api_agents:
+    image_tools_agent:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      resource_servers_by_agent:
+        string_match_simple_agent:
+          type: resources_servers
+          name: string_match
+        math_with_judge_simple_agent:
+          type: resources_servers
+          name: math_with_judge
+        mcqa_simple_agent:
+          type: resources_servers
+          name: mcqa
+        gui_coordinate_simple_agent:
+          type: resources_servers
+          name: gui_coordinate
+      max_steps: 21
+      max_output_tokens: 4096
+      stop_strings: ["</tool_call>"]
+      include_stop_str_in_output: true
+      crop_dir: image_tool_outputs
+      crop_format: jpeg
+      crop_jpeg_quality: 95
+      crop_min_pixels: 262144
+      crop_max_pixels: 1048576
+      max_tool_calls: 20
+      max_tool_calls_per_turn: 1
+      tool_success_reward: 0.02
+      tool_success_reward_cap: 0.20
+      invalid_tool_call_penalty: -0.05
+      duplicate_tool_call_penalty: -0.02
+      force_final_after_duplicate: true
+      terminate_on_invalid_tool_call: true
+      duplicate_iou_threshold: 0.5
