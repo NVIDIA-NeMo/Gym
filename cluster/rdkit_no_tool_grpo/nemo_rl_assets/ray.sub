@@ -120,7 +120,7 @@ if [[ -n "${NODE_LOCAL_SCRATCH:-}" ]]; then
   ENROOT_NODE_LOCAL_ROOT=${ENROOT_NODE_LOCAL_ROOT:-$NODE_LOCAL_SCRATCH/rdkit-nemo-rl-$SLURM_JOB_ID}
 elif [[ -n "${SLURM_TMPDIR:-}" ]]; then
   ENROOT_NODE_LOCAL_ROOT=${ENROOT_NODE_LOCAL_ROOT:-$SLURM_TMPDIR/rdkit-nemo-rl-$SLURM_JOB_ID}
-elif [[ -d /raid ]]; then
+elif [[ -d /raid && -w /raid ]]; then
   ENROOT_NODE_LOCAL_ROOT=${ENROOT_NODE_LOCAL_ROOT:-/raid/enroot/rdkit-nemo-rl-$USER-$SLURM_JOB_ID}
 else
   ENROOT_NODE_LOCAL_ROOT=${ENROOT_NODE_LOCAL_ROOT:-/tmp/rdkit-nemo-rl-$USER-$SLURM_JOB_ID}

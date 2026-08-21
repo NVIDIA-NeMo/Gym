@@ -18,7 +18,7 @@ if [[ -n "${NODE_LOCAL_SCRATCH:-}" ]]; then
   NODE_LOCAL_BASE="${NODE_LOCAL_SCRATCH}"
 elif [[ -n "${SLURM_TMPDIR:-}" ]]; then
   NODE_LOCAL_BASE="${SLURM_TMPDIR}"
-elif [[ -d /raid ]]; then
+elif [[ -d /raid && -w /raid ]]; then
   NODE_LOCAL_BASE="/raid/enroot/rdkit-nemo-rl-${USER:-unknown}-probe-$$"
 else
   NODE_LOCAL_BASE="/tmp/enroot/rdkit-nemo-rl-${USER:-unknown}-probe-$$"

@@ -21,7 +21,7 @@ TMP_SQSH="${SQSH_PATH}.tmp-${SLURM_JOB_ID}"
 mkdir -p "${BUNDLE_DIR}/logs" "${BUNDLE_DIR}/sqsh" "${BUNDLE_DIR}/enroot/cache"
 if [[ -n "${SLURM_TMPDIR:-}" ]]; then
   NODE_LOCAL_ROOT="${SLURM_TMPDIR}/rdkit-nemo-rl-import-${SLURM_JOB_ID}"
-elif [[ -d /raid ]]; then
+elif [[ -d /raid && -w /raid ]]; then
   NODE_LOCAL_ROOT="/raid/enroot/rdkit-nemo-rl-import-${USER}-${SLURM_JOB_ID}"
 else
   NODE_LOCAL_ROOT="/tmp/rdkit-nemo-rl-import-${USER}-${SLURM_JOB_ID}"
