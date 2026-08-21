@@ -218,9 +218,9 @@ dependencies = [
     # wandb: E2E rollout collection data and metrics upload
     # Capped at <=0.27.1 pending validation of newer releases on this branch. NOTE: this does NOT
     # remediate GHSA-f5wc-c3c7-36mc / GHSA-89gr-r52h-f8rx / GHSA-5cgq-3rg8-m6cv (golang.org/x/crypto
-    # bundled in the wandb-core binary) -- wandb has not shipped a wandb-core rebuild with an
-    # updated golang.org/x/crypto within the 0.27.x line as of this update. Track upstream and
-    # revisit the cap to pick up the fix.
+    # bundled in the precompiled wandb-core binary). Confirmed via the embedded Go build info in
+    # wandb-core: 0.27.0 bundles golang.org/x/crypto v0.51.0 (vulnerable; fix requires >=0.52.0),
+    # wandb 0.28.1 bundles v0.53.0 (fixed). Revisit the cap to pick up 0.28.1+ once validated.
     # Updated: Thu Aug 20, 2026 with wandb>=0.27.0,<=0.27.1
     # License: MIT https://github.com/wandb/wandb/blob/f8acf479342b6aa8217dd0833bb32190b11c14bc/LICENSE
     "wandb>=0.27.0,<=0.27.1",
