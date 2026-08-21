@@ -302,6 +302,8 @@ def _asset_config(composition: _Composition) -> str:
     res = yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
     res = f"\n{composition.agent_instance}".join(res.split(composition.agent_instance))
 
+    return res
+
 
 def _render_manifest_composition(root: Path, composition: _Composition) -> dict[Path, str]:
     asset = composition.asset_dir
