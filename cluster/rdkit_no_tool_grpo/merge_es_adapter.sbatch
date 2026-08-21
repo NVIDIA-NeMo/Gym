@@ -19,7 +19,12 @@ CONTAINER=${CONTAINER_IMAGE_PATH:-${BUNDLE_DIR}/sqsh/nemo-rl-v0.6.0.sqsh}
 HF_CACHE_DIR=${HF_CACHE_DIR:-/lustre/fsw/portfolios/healthcareeng/projects/healthcareeng_research/users/dcorneil/code/inferno/.local/cache/huggingface}
 ADAPTER_DIR=${ES_ADAPTER_DIR:-${GYM_MAIN_DIR}/artifacts/inferno-rdkit-nemotron3-nano-post-step-0140-lora-r8}
 OUTPUT_DIR=${ES140_MERGED_MODEL_DIR:-${GYM_MAIN_DIR}/artifacts/nemotron3-nano-rdkit-es140-merged-hf}
-TRAIN_PYTHON=${TRAIN_PYTHON:-/opt/nemo_rl_venv/bin/python}
+MERGE_PYTHON=${MERGE_PYTHON:-${BUNDLE_DIR}/venvs/peft-0.17.1/bin/python}
+
+if [[ ! -x "${MERGE_PYTHON}" ]]; then
+  echo "Missing PEFT merge environment: ${MERGE_PYTHON}" >&2
+  exit 1
+fi
 
 mkdir -p "${BUNDLE_DIR}/logs" "${GYM_MAIN_DIR}/artifacts"
 export HF_HOME="${HF_CACHE_DIR}"
@@ -45,7 +50,7 @@ srun \
     HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1 \
     OMP_NUM_THREADS="${OMP_NUM_THREADS}" \
-    "${TRAIN_PYTHON}" "${BUNDLE_DIR}/merge_es_adapter.py" \
+    "${MERGE_PYTHON}" "${BUNDLE_DIR}/merge_es_adapter.py" \
       --adapter-dir "${ADAPTER_DIR}" \
       --output-dir "${OUTPUT_DIR}" \
       --gym-dir "${GYM_DIR}"

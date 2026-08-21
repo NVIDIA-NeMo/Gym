@@ -22,7 +22,12 @@ HF_CACHE_DIR=${HF_CACHE_DIR:-${INFERNO_DIR}/.local/cache/huggingface}
 ADAPTER_DIR=${ES_ADAPTER_DIR:-${GYM_MAIN_DIR}/artifacts/inferno-rdkit-nemotron3-nano-post-step-0140-lora-r8}
 MERGED_MODEL_DIR=${ES140_MERGED_MODEL_DIR:-${GYM_MAIN_DIR}/artifacts/nemotron3-nano-rdkit-es140-merged-hf}
 OUTPUT=${MERGE_PARITY_OUTPUT:-${BUNDLE_DIR}/results/es140_lora/merged_model_validation.json}
-TRAIN_PYTHON=${TRAIN_PYTHON:-/opt/nemo_rl_venv/bin/python}
+MERGE_PYTHON=${MERGE_PYTHON:-${BUNDLE_DIR}/venvs/peft-0.17.1/bin/python}
+
+if [[ ! -x "${MERGE_PYTHON}" ]]; then
+  echo "Missing PEFT merge environment: ${MERGE_PYTHON}" >&2
+  exit 1
+fi
 
 mkdir -p "${BUNDLE_DIR}/logs" "$(dirname "${OUTPUT}")"
 srun \
@@ -39,7 +44,7 @@ srun \
     HF_HOME="${HF_CACHE_DIR}" \
     HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1 \
-    "${TRAIN_PYTHON}" "${BUNDLE_DIR}/validate_merged_model.py" \
+    "${MERGE_PYTHON}" "${BUNDLE_DIR}/validate_merged_model.py" \
       --base-model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
       --adapter-dir "${ADAPTER_DIR}" \
       --merged-model-dir "${MERGED_MODEL_DIR}" \
