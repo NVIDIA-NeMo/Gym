@@ -434,6 +434,13 @@ ENVIRONMENT = _asset_selector("environment")
 RESOURCES_SERVER_CONFIG = _asset_selector("resources-server")
 MODEL_TYPE = _asset_selector("model-type")
 
+# Override for the verifier-side `requires_agent` guard. Offered wherever --agent-type composes.
+ALLOW_UNSUPPORTED_PAIRING = _bool_flag(
+    "allow-unsupported-pairing",
+    "allow_unsupported_pairing",
+    "Run even if the environment's resources server does not declare support for the selected agent.",
+)
+
 AGENT_TYPE = Flag(
     register=lambda p: p.add_argument(
         "--agent-type",
@@ -755,6 +762,7 @@ COMMANDS = {
             RESOURCES_SERVER_CONFIG,
             MODEL_TYPE,
             AGENT_TYPE,
+            ALLOW_UNSUPPORTED_PAIRING,
             SEARCH_DIR,
             MODEL,
             MODEL_URL,
@@ -803,6 +811,7 @@ COMMANDS = {
             RESOURCES_SERVER_CONFIG,
             MODEL_TYPE,
             AGENT_TYPE,
+            ALLOW_UNSUPPORTED_PAIRING,
             SEARCH_DIR,
             MODEL,
             MODEL_URL,
@@ -819,6 +828,7 @@ COMMANDS = {
             RESOURCES_SERVER_CONFIG,
             MODEL_TYPE,
             AGENT_TYPE,
+            ALLOW_UNSUPPORTED_PAIRING,
             SEARCH_DIR,
         ),
     ),
@@ -847,6 +857,7 @@ COMMANDS = {
             ),
             _bool_flag("resume", "resume_from_cache", "Resume from cached rollouts instead of recollecting."),
             AGENT_TYPE,
+            ALLOW_UNSUPPORTED_PAIRING,
             _value_flag("agent", "agent_name", "Agent to collect rollouts with.", aliases=("-a",)),
             _value_flag("input", "input_jsonl_fpath", "Input tasks JSONL file.", aliases=("-i",)),
             _value_flag("output", "output_jsonl_fpath", "Output rollouts JSONL file.", aliases=("-o",)),
