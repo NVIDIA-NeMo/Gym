@@ -29,7 +29,7 @@ SETUP_DEV = REPO_ROOT / "scripts" / "ci" / "setup_dev.sh"
 TEST_TEMPLATE_ACTION = REPO_ROOT / ".github" / "actions" / "test-template" / "action.yml"
 UNIT_TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "unit-tests.yml"
 QWEN_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
-QWEN_REVISION = "7ae557604adf67be50417f59c2c2f167def9a775"
+QWEN_REVISION = "7ae557604adf67be50417f59c2c2f167def9a775"  # pragma: allowlist secret
 
 BEHAVIOR_CHANGING_ENV = {
     "GYM_CI_DEV_VENV_DIR": "/tmp/injected-driver-venv",
@@ -219,7 +219,7 @@ def test_cicd_main_wires_preflight_cpu_and_gpu_workflows() -> None:
     assert "container-image: ${{ needs.container_build.outputs.image }}" in workflow
     assert "model: ${{ matrix.model }}" in workflow
     assert "model-revision: ${{ matrix.model_revision }}" in workflow
-    assert "hf-cache-path: ${{ needs.pre-flight.outputs.test_data_path }}/nemo-gym/huggingface" in workflow
+    assert "hf-cache-path:" not in workflow
     assert f"results-path: {results_path}" in workflow
     assert f"path: {results_path}" in workflow
 
@@ -276,9 +276,10 @@ def test_test_template_runs_cpu_or_gpu_script_in_container() -> None:
     assert "          gpu)" in action
     assert "gpu_args=(--runtime=nvidia --gpus all)" in action
     assert 'docker pull "$CONTAINER_IMAGE"' in action
-    assert '--volume "$TEST_DATA_PATH:$TEST_DATA_PATH"' in action
-    assert '--volume "$HF_CACHE_PATH:/opt/nemo-gym/cache/huggingface"' in action
-    assert '--volume "$RESULTS_PATH:/opt/nemo-gym/results/gpu-e2e"' in action
+    assert '--volume "$TEST_DATA_PATH:/home/TestData"' in action
+    assert '--env "TEST_DATA_PATH=/home/TestData"' in action
+    assert '--env "HF_HOME=/home/TestData/HF_HOME"' in action
+    assert '--volume "$RESULTS_PATH:$CONTAINER_RESULTS_DIR"' in action
     assert '--env "MODEL=$MODEL"' in action
     assert '--env "MODEL_REVISION=$MODEL_REVISION"' in action
     assert 'TEST_DATA_PATH="$(prepare_mount_source test-data-path "$TEST_DATA_PATH")"' in action
@@ -315,6 +316,7 @@ def test_gpu_e2e_matrix_runs_pinned_qwen_rollout_and_uploads_artifacts() -> None
 
     for expected in (
         "vllm serve",
+        'bash "$ROOT_DIR/docker/install_codec_deps.sh"',
         '--tokenizer-revision "$MODEL_REVISION"',
         "--tensor-parallel-size 1",
         "gym env start",
@@ -327,6 +329,9 @@ def test_gpu_e2e_matrix_runs_pinned_qwen_rollout_and_uploads_artifacts() -> None
         assert expected in script
     assert "docker run" not in script
     assert QWEN_REVISION in script
+    assert 'if [[ -z "${HF_HOME:-}" ]]' in script
+    assert 'HF_HOME="$TEST_DATA_PATH/HF_HOME"' in script
+    assert "HF_CACHE_DIR" not in script
 
     assert "resources_servers/string_match/configs/string_match.yaml" in config
     assert "responses_api_models/vllm_model/configs/vllm_model.yaml" in config

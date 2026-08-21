@@ -37,10 +37,6 @@ inputs:
     description: Optional immutable model revision exposed to the test script
     required: false
     default: ""
-  hf-cache-path:
-    description: Optional host directory mounted as the Hugging Face cache
-    required: false
-    default: ""
   results-path:
     description: Optional host directory mounted for test results
     required: false
@@ -54,8 +50,8 @@ runs:
       continue-on-error: true
       shell: bash -e -u -o pipefail {0}
       env:
+        CONTAINER_RESULTS_DIR: /opt/nemo-gym/results/gpu-e2e
         CONTAINER_IMAGE: ${{ inputs.container-image }}
-        HF_CACHE_PATH: ${{ inputs.hf-cache-path }}
         MODEL: ${{ inputs.model }}
         MODEL_REVISION: ${{ inputs.model-revision }}
         RESULTS_PATH: ${{ inputs.results-path }}
@@ -94,19 +90,16 @@ runs:
         esac
 
         TEST_DATA_PATH="$(prepare_mount_source test-data-path "$TEST_DATA_PATH")"
-        container_args=()
-        if [[ -n "$HF_CACHE_PATH" ]]; then
-          HF_CACHE_PATH="$(prepare_mount_source hf-cache-path "$HF_CACHE_PATH")"
-          container_args+=(
-            --env "HF_CACHE_DIR=/opt/nemo-gym/cache/huggingface"
-            --volume "$HF_CACHE_PATH:/opt/nemo-gym/cache/huggingface"
-          )
-        fi
+        container_args=(
+          --env "TEST_DATA_PATH=/home/TestData"
+          --env "HF_HOME=/home/TestData/HF_HOME"
+          --volume "$TEST_DATA_PATH:/home/TestData"
+        )
         if [[ -n "$RESULTS_PATH" ]]; then
           RESULTS_PATH="$(prepare_mount_source results-path "$RESULTS_PATH")"
           container_args+=(
-            --env "RESULTS_DIR=/opt/nemo-gym/results/gpu-e2e"
-            --volume "$RESULTS_PATH:/opt/nemo-gym/results/gpu-e2e"
+            --env "RESULTS_DIR=$CONTAINER_RESULTS_DIR"
+            --volume "$RESULTS_PATH:$CONTAINER_RESULTS_DIR"
           )
         fi
         if [[ -n "$MODEL" ]]; then
@@ -127,8 +120,6 @@ runs:
           "${gpu_args[@]}" \
           "${container_args[@]}" \
           --shm-size=64g \
-          --env TEST_DATA_PATH="$TEST_DATA_PATH" \
-          --volume "$TEST_DATA_PATH:$TEST_DATA_PATH" \
           --entrypoint bash \
           "$CONTAINER_IMAGE" \
           -e -u -o pipefail "$TEST_SCRIPT"

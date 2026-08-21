@@ -32,11 +32,11 @@ EVAL_TIMEOUT_SECONDS="${EVAL_TIMEOUT_SECONDS:-300}"
 VLLM_PID=""
 GYM_PID=""
 
-if [[ -z "${HF_CACHE_DIR:-}" ]]; then
+if [[ -z "${HF_HOME:-}" ]]; then
   if [[ -n "${TEST_DATA_PATH:-}" ]]; then
-    HF_CACHE_DIR="$TEST_DATA_PATH/nemo-gym/huggingface"
+    HF_HOME="$TEST_DATA_PATH/HF_HOME"
   else
-    HF_CACHE_DIR="${HF_HOME:-$HOME/.cache/huggingface}"
+    HF_HOME="$HOME/.cache/huggingface"
   fi
 fi
 
@@ -112,21 +112,21 @@ wait_for_url() {
   echo "$name is ready."
 }
 
-for command in curl gym nvidia-smi python3 timeout vllm; do
+for command in curl gym nvidia-smi python python3 timeout uv vllm; do
   if ! command -v "$command" >/dev/null; then
     echo "Required command is not installed: $command" >&2
     exit 1
   fi
 done
 
-for directory in "$E2E_DIR" "$RESULTS_DIR" "$HF_CACHE_DIR"; do
+for directory in "$E2E_DIR" "$RESULTS_DIR" "$HF_HOME"; do
   if [[ "$directory" != /* ]]; then
-    echo "E2E_DIR, RESULTS_DIR, and HF_CACHE_DIR must be absolute paths: $directory" >&2
+    echo "E2E_DIR, RESULTS_DIR, and HF_HOME must be absolute paths: $directory" >&2
     exit 1
   fi
   mkdir -p "$directory"
   if [[ "$(cd "$directory" && pwd -P)" == "/" ]]; then
-    echo "E2E_DIR, RESULTS_DIR, and HF_CACHE_DIR cannot resolve to the filesystem root." >&2
+    echo "E2E_DIR, RESULTS_DIR, and HF_HOME cannot resolve to the filesystem root." >&2
     exit 1
   fi
 done
@@ -134,11 +134,12 @@ done
 WORKSPACE_DIR="$(mktemp -d "$E2E_DIR/workspace.XXXXXX")"
 
 export CUDA_VISIBLE_DEVICES="$GPU_DEVICE"
-export HF_HOME="$HF_CACHE_DIR"
+export HF_HOME
 export HF_HUB_DISABLE_IMPLICIT_TOKEN=1
 export NEMO_GYM_VLLM_TRANSPORT_LOG="$RESULTS_DIR/vllm-transport.jsonl"
 
 nvidia-smi | tee "$RESULTS_DIR/nvidia-smi.txt"
+bash "$ROOT_DIR/docker/install_codec_deps.sh"
 
 vllm serve "$MODEL" \
   --revision "$MODEL_REVISION" \
