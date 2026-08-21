@@ -64,6 +64,7 @@ class CompCodingRunRequest(BaseRunRequest):
 
 class CompCodingVerifyRequest(CompCodingRunRequest, BaseVerifyRequest):
     verifier_metadata: Optional[Dict[str, Any]] = None
+    target_language: Optional[str] = None
 
 
 class CompCodingVerifyResponse(BaseVerifyResponse):
@@ -74,6 +75,7 @@ class CompCodingVerifyResponse(BaseVerifyResponse):
     unit_tests_time_taken: Optional[float] = None
     reasoning_format_violation_rate: float = 0.0
     difficulty: Optional[str] = None
+    target_language: Optional[str] = None
 
 
 # ----------------------------
@@ -124,6 +126,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
         )
         add_avg_sample_std_dev(metrics, all_score_dicts, score_names, max_k)
         metrics.update(compute_subset_metrics(tasks, "difficulty", self._code_score_fn, "extracted_model_code"))
+        metrics.update(compute_subset_metrics(tasks, "target_language", self._code_score_fn, "extracted_model_code"))
         return metrics
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
