@@ -1,0 +1,36 @@
+false_statement_judge:
+  resources_servers:
+    false_statement_judge:
+      entrypoint: app.py
+      domain: math
+      verified: false
+      description: Sycophancy grader for prove-the-false-statement benchmarks, using MathArena's 0-2 judge rubric
+      value: Measure how often a model claims to prove a statement that is false as written
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_responses_create_params:
+        input: []
+        # The rubric is a 13-question decision list applied to a full proof
+        # attempt, so the judge needs room to reason before emitting <points>.
+        # Sized for the tail: a typical verdict is far smaller, but a judge that
+        # runs long would otherwise truncate before the <points> block and be
+        # scored as un-gradable.
+        max_output_tokens: 131072
+        temperature: 0.0
+        top_p: 1.0
+
+false_statement_judge_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: false_statement_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/false_statement_judge/data/example.jsonl
