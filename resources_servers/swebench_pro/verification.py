@@ -79,6 +79,7 @@ class VerificationResult:
     resolved: bool
     patch_applied: bool
     test_results: dict[str, Any] | None
+    test_output: str = ""
     error: str | None = None
 
 
@@ -238,8 +239,9 @@ async def run_verification(
         (log_dir / local_name).write_text(contents, encoding="utf-8")
         return contents
 
-    await capture(STDOUT_PATH, "test_stdout.log")
-    await capture(STDERR_PATH, "test_stderr.log")
+    test_stdout = await capture(STDOUT_PATH, "test_stdout.log")
+    test_stderr = await capture(STDERR_PATH, "test_stderr.log")
+    test_output = f"STDOUT:\n{test_stdout}\n\nSTDERR:\n{test_stderr}"
     patch_status = await capture(f"{WORKSPACE_DIR}/patch_apply_status", "patch_apply_status")
     output_text = await capture(OUTPUT_PATH, "output.json")
     patch_applied = patch_status.strip() == "0"
@@ -256,6 +258,7 @@ async def run_verification(
             resolved=False,
             patch_applied=patch_applied,
             test_results=None,
+            test_output=test_output,
             error=f"Evaluation execution failed: {execution_error}",
         )
 
@@ -267,6 +270,7 @@ async def run_verification(
             resolved=False,
             patch_applied=patch_applied,
             test_results=None,
+            test_output=test_output,
             error=f"Parser produced invalid JSON: {exc}",
         )
     if not isinstance(test_results, dict):
@@ -275,6 +279,7 @@ async def run_verification(
             resolved=False,
             patch_applied=patch_applied,
             test_results=None,
+            test_output=test_output,
             error="Parser output must be a JSON object",
         )
 
@@ -284,5 +289,6 @@ async def run_verification(
         resolved=resolved,
         patch_applied=patch_applied,
         test_results=test_results,
+        test_output=test_output,
         error=None if execution.return_code == 0 else f"Evaluation script exited with {execution.return_code}",
     )
