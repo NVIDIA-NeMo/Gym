@@ -96,7 +96,6 @@ run_on_each_node mkdir -p \
     "${NODE_LOCAL_ROOT}/enroot/runtime" \
     "${NODE_LOCAL_ROOT}/enroot/tmp" \
     "${NODE_LOCAL_ROOT}/hf-home" \
-    "${NODE_LOCAL_ROOT}/uv-cache" \
     "${NODE_LOCAL_ROOT}/wandb"
 run_on_each_node rsync -a "${CONTAINER_SOURCE}" "${LOCAL_CONTAINER}"
 run_on_each_node rsync -a \
@@ -114,7 +113,6 @@ export PYTHONPATH="${STAGED_WORKDIR}${PYTHONPATH:+:${PYTHONPATH}}"
 export HF_HOME="${NODE_LOCAL_ROOT}/hf-home"
 export HF_HUB_CACHE="${HF_HOME}/hub"
 export HUGGINGFACE_HUB_CACHE="${HF_HOME}/hub"
-export UV_CACHE_DIR_OVERRIDE="${NODE_LOCAL_ROOT}/uv-cache"
 export WANDB_DIR="${NODE_LOCAL_ROOT}/wandb"
 CONTAINER="${LOCAL_CONTAINER}"
 PYXIS_HOST_CWD="${STAGED_WORKDIR}"
@@ -168,17 +166,10 @@ MAX_WORKER_PORT=${MAX_WORKER_PORT:-64000}
 RAY_LOG_SYNC_FREQUENCY=${RAY_LOG_SYNC_FREQUENCY:-}
 ########################################################
 
-# Unset UV_CACHE_DIR to avoid local cache directory interferring with the container cache
-unset UV_CACHE_DIR
-
-if [[ -n "${UV_CACHE_DIR_OVERRIDE:-}" ]]; then
-  mkdir -p "$UV_CACHE_DIR_OVERRIDE"
-  if [[ -n $MOUNTS ]]; then
-    MOUNTS+=",$UV_CACHE_DIR_OVERRIDE:/root/.cache/uv"
-  else
-    MOUNTS="$UV_CACHE_DIR_OVERRIDE:/root/.cache/uv"
-  fi
-fi
+# The image venvs symlink into the baked uv cache. The squashfs and writable
+# overlay are already node-local, so masking /root/.cache/uv with an empty
+# directory breaks the Ray and actor interpreters.
+unset UV_CACHE_DIR UV_CACHE_DIR_OVERRIDE
 
 # Create logs directory
 BASE_LOG_DIR=${BASE_LOG_DIR:-$HOST_WORKDIR}
@@ -354,6 +345,7 @@ log-sync-sidecar() {
 log-sync-sidecar &
 
 # Patch nsight.py before starting Ray head
+/opt/nemo_rl_venv/bin/python -c 'import nemo_gym; import peft; import ray.scripts.scripts; import torch; print(torch.__version__, torch.version.cuda, torch.cuda.get_device_name(), torch.cuda.get_device_capability())'
 sed -i 's/context\.py_executable = " "\.join(self\.nsight_cmd) + " python"/context.py_executable = " ".join(self.nsight_cmd) + f" {context.py_executable}"/g' /opt/nemo_rl_venv/lib64/python*/site-packages/ray/_private/runtime_env/nsight.py
 perl -0pi -e 's/megatron_bridge = AutoBridge\.from_hf_pretrained\(\n        hf_model_name, trust_remote_code=True\n    \)/megatron_bridge = AutoBridge.from_hf_pretrained(\n        hf_model_name,\n        trust_remote_code=True,\n        **(config.get("hf_config_overrides", {}) or {}),\n    )/' /opt/nemo-rl/nemo_rl/models/megatron/setup.py
 grep -q 'hf_config_overrides' /opt/nemo-rl/nemo_rl/models/megatron/setup.py
@@ -495,6 +487,7 @@ log-sync-sidecar() {
 log-sync-sidecar &
 
 # Patch nsight.py before starting Ray worker
+/opt/nemo_rl_venv/bin/python -c 'import nemo_gym; import peft; import ray.scripts.scripts; import torch; print(torch.__version__, torch.version.cuda, torch.cuda.get_device_name(), torch.cuda.get_device_capability())'
 sed -i 's/context\.py_executable = " "\.join(self\.nsight_cmd) + " python"/context.py_executable = " ".join(self.nsight_cmd) + f" {context.py_executable}"/g' /opt/nemo_rl_venv/lib64/python*/site-packages/ray/_private/runtime_env/nsight.py
 perl -0pi -e 's/megatron_bridge = AutoBridge\.from_hf_pretrained\(\n        hf_model_name, trust_remote_code=True\n    \)/megatron_bridge = AutoBridge.from_hf_pretrained(\n        hf_model_name,\n        trust_remote_code=True,\n        **(config.get("hf_config_overrides", {}) or {}),\n    )/' /opt/nemo-rl/nemo_rl/models/megatron/setup.py
 grep -q 'hf_config_overrides' /opt/nemo-rl/nemo_rl/models/megatron/setup.py

@@ -89,5 +89,9 @@ def test_cluster_launch_stages_code_and_caches_node_local() -> None:
     assert 'export ENROOT_CACHE_PATH=${ENROOT_CACHE_PATH:-$NODE_LOCAL_ROOT/enroot/cache}' in ray_sub
     assert 'export HF_HOME="${NODE_LOCAL_ROOT}/hf-home"' in ray_sub
     assert 'export WANDB_DIR="${NODE_LOCAL_ROOT}/wandb"' in ray_sub
+    assert "UV_CACHE_DIR_OVERRIDE:/root/.cache/uv" not in ray_sub
+    assert "unset UV_CACHE_DIR UV_CACHE_DIR_OVERRIDE" in ray_sub
+    assert ray_sub.count("import ray.scripts.scripts") == 2
+    assert ray_sub.count("torch.cuda.get_device_capability()") == 2
     assert "setup_integration_venv.sbatch" not in (BUNDLE / "README.md").read_text()
     assert (BUNDLE / "build_integration_sqsh.sbatch").is_file()
