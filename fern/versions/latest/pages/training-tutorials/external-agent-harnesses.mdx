@@ -74,11 +74,11 @@ Each captured call records one parent-resolution result. `ROOT` means that the r
 
 Each rollout's resolved model calls are stitched into a single Responses payload with contiguous `output` items. Each item's `prompt_token_ids` contains the running sequence. Its `generation_token_ids` contains the tokens sampled by the policy at that step. Gym replaces the rollout's `response.output` with these items, so a trainer reads `response.output` the same way for native agents and external harnesses.
 
-An unresolved call begins a separate incomplete fragment. Gym never crosses that boundary with token-prefix inference. The call and its descendants remain available for diagnostics or a consumer that explicitly supports partial trajectories, but single-response delivery sets `mask_sample: true`. Prefix inference is reserved for records written before parent-resolution metadata existed.
+An unresolved call begins a separate incomplete fragment. Gym never crosses that boundary with token-prefix inference. The call and its descendants remain available for diagnostics or a consumer that explicitly supports partial trajectories, but single-response delivery sets `mask_sample: true`. Supported records always carry parent-resolution metadata. Prefix matching remains only as a recovery path when a record says `RESOLVED` but its direct parent was filtered from the current build.
 
 The loss mask follows from this structure instead of being sent separately. Prompt positions provide context. Generation positions are trainable.
 
-Single-response delivery uses `prefix_merging` because one rollout record can carry only one rebuilt response. Gym rejects the `per_request` builder for this path because it can return multiple trajectories.
+Single-response delivery uses `prefix_merging` because one rollout record can carry only one rebuilt response. The builder reports extra fragments and masks the rollout instead of choosing an unverified chain.
 
 ## What to watch on a first run
 
@@ -127,6 +127,8 @@ class LineageStore(Protocol):
 
 `TokenSink` remains the writer-side interface. `put` is the only publication boundary: it must make the complete token record and its compact continuation lookup metadata durable before returning. `LineageStore` is the worker-side read client over those committed entries; it does not publish a second record. A later request may resolve an entry only after the corresponding `put` has returned.
 
+A sink can additionally implement `begin_call(rollout_id, model_call_id)`. Gym calls this optional extension before dispatch. If generation starts but no matching `TokenEntry` becomes durable, the dangling intent makes `freeze` report the rollout as incomplete. Failure to record the intent occurs before generation and fails the model call, allowing the harness to retry without spending inference compute.
+
 `TokenSink.mark_incomplete` is the only signal that a rollout lost a call. The model call itself still succeeds, so an adapter that drops this state makes an incomplete rollout look complete.
 
 `freeze` returns one atomic snapshot containing entries, incomplete state, `snapshot_id`, and version. It is idempotent for an unchanged rollout. A write that races the snapshot must advance the observable version.
@@ -154,12 +156,16 @@ env:
       lineage_store_kwargs:
         endpoint: ${oc.env:MY_DATAPLANE_URL}
         shard: ${oc.select:cluster_shard,0}
+      delta_records: true
+      max_mask_fraction: 0.5
       rebuild_response: false
 ```
 
 Gym passes each kwargs block to its constructor, so the clients can receive the required endpoint, shard, or credentials instead of reading ambient state. Use `${oc.env:VAR}` for secrets instead of writing them into the config. Unsupported constructor arguments cause a startup error. A sink that does not implement `mark_incomplete` also causes a startup error because it could otherwise make a rollout with a missing call look complete.
 
-The sink and lineage resolver must use the same backend namespace. The backend transaction behind `TokenSink.put` stores the `TokenEntry` and updates the continuation-key index together. Pointing the two clients at unrelated services does not satisfy the protocol even if both methods return successfully.
+The sink and lineage resolver must use the same backend namespace. `TokenEntry` carries the continuation lookup metadata, so committing the record publishes both token data and the information needed to derive the resolver index. A separate index write is unnecessary. `put` must not return until another worker's resolver can observe the committed entry. Pointing the two clients at unrelated services does not satisfy the protocol even if both methods return successfully.
+
+Run `nemo_gym.token_id_capture.conformance.run_conformance` against the framework adapters in their real environment. The checks cover idempotent publication, conflicting call ids, incomplete-state durability, freeze and conditional retirement, fresh-client lineage visibility, and optional call-intent custody. A multi-process backend should also run the kit with independent clients because an in-process pass cannot prove cross-worker visibility.
 
 `sink` replaces the file store, so a `dir` configured alongside it is not used. This condition produces a warning instead of an error because no data is lost. No capture files appear on disk.
 
@@ -174,6 +180,8 @@ await retire_rollout_token_capture(result["_ng_rollout_id"], source, built)
 
 `rebuild_response: false` tells Gym to stop after the write. Correlation and capture are unaffected. The training framework freezes, reconstructs, durably hands off, and conditionally retires the snapshot through its `TokenSource`. Set `rebuild_response: true` only when Gym's rollout collector owns that sequence; the collector process then requires an installed source or the default file store.
 
+`max_mask_fraction` is an optional run-level kill switch. After `mask_fraction_min_samples` finalized rollouts, Gym aborts collection when the masked fraction exceeds the configured limit. This prevents a resolver, capture backend, or harness regression from consuming a training budget while producing mostly token-less samples.
+
 When Gym's rollout collector owns rebuilding over a framework transport, install the framework-created source in that collector process with `install_token_source` before collection starts. The default file-backed path needs no installation because Gym constructs a `TokenCaptureStore` from `token_id_capture.dir`.
 
 Leaving `enabled` off disables capture. An external harness then produces rollouts without token ids and no token data for training. Use this configuration only for evaluation.
@@ -186,11 +194,11 @@ Do not install a sink only in a launcher process.
 Configured sink and lineage factories run inside each worker at app startup. Their adapter package must be installed in that worker's environment, and every client must connect to the same process-shared backend. `LineageStore.is_process_shared()` must return `true`; startup rejects a process-local resolver when `num_workers > 1`.
 </Warning>
 
-With Gym's local file backend, all workers append and resolve from the same token JSONL under one per-rollout lock. The resolver incrementally indexes only newly appended entries in each worker. Freeze and retirement use the same lock. Retirement keeps the lock file and a tombstone, so an old worker cannot recreate a retired capture.
+With Gym's local file backend, all workers append and resolve from the same token JSONL under one per-rollout file lock. Each worker keeps a bounded, metadata-only LRU index and incrementally reads only newly appended entries. Tokens are loaded from the durable log only for the winning parent and verified against its digest. Eviction causes a cold refetch, not loss of lineage. Freeze and retirement use the same file lock. Retirement keeps the lock file and a tombstone, so an old worker cannot recreate a retired capture.
 
 ### Reading records back
 
-`TokenCaptureStore` satisfies both sink and source protocols and is the default. The local deployment also uses `FileLineageStore`, an append-only JSONL store shared by model-server workers using the same directory.
+`TokenCaptureStore` satisfies both sink and source protocols and is the default. `FileLineageStore` is a resolver over the same committed token JSONL, not a second lineage file. An external backend can subclass `IncrementalLineageStore` and implement `_fetch_new_entries` and `_load_entry` to reuse Gym's canonical matcher, bounded cache, locking, and digest-checked materialization.
 
 A framework staging records through its own transport reads them through its own `TokenSource`, which lives wherever that transport does. Nothing in the protocol requires node-local storage.
 
@@ -200,13 +208,15 @@ Consume records through `TokenSource.freeze`. Reading entries alone is insuffici
 
 ## How a rollout's calls are linked
 
-By default the calls of a rollout are chained by their token prefixes: a call is parented to the earlier call whose prompt plus generation is the longest prefix of this call's prompt. That is correct, and it has one blind spot. If a harness retries a call, both attempts share a prompt and differ only in what they generated, so prefix matching cannot tell which one the harness kept.
+The model server resolves each call's parent before dispatch and persists that decision with the token record. `ROOT` starts a conversation. `RESOLVED` names one verified committed call. `UNRESOLVED` records why no safe parent could be proven. The builder consumes this decision instead of inferring lineage from token prefixes.
 
-The model server therefore identifies the parent at request time instead. A harness must echo the conversation to continue it, so hashing the model-authored turns of an incoming request finds the call that produced the last one. Nothing is added to the wire and nothing depends on the harness preserving a field Gym invented.
+A harness must echo the conversation to continue it, so hashing the model-authored turns of an incoming request finds the call that produced the last one. Nothing is added to the wire and nothing depends on the harness preserving a field Gym invented.
 
-Two things are checked before a match is used. It must be unique because two calls that produced byte-identical output cannot be told apart. The conversation containing those turns must also match the request sent to that call. This check rules out a compacted or summarized history whose model output is unchanged.
+Two things are checked before a match is used. The conversation context must match the request sent to the candidate call. The candidate must also be unique by cumulative token identity. Retries with the same fingerprint and identical cumulative tokens are interchangeable and collapse to one deterministic parent. Candidates with different cumulative tokens remain ambiguous and unresolved.
 
-A request-time miss or missing parent target leaves no usable explicit link, so the builder falls back to strict token-prefix matching. A digest mismatch quarantines the call instead of falling back. `parent_link_failures` in the per-rollout metrics reports invalid explicit links.
+A request-time miss is an unresolved boundary and never triggers prefix guessing. If a record says `RESOLVED` but its direct parent is absent from the current build, the builder may recover a verified surviving ancestor through strict prefix matching. A digest mismatch remains a hard boundary. `parent_link_failures` reports invalid or recovered explicit links.
+
+Set `delta_records: true` to store a resolved continuation's prompt as only the suffix beyond its verified parent's cumulative tokens. Root and unresolved calls retain full prompts, so every valid chain has a reconstruction anchor. `cum_len` and `digest` still describe the full sequence. The resolver and builder walk parent links to materialize the prompt and mask the rollout if any link is missing, cyclic, or digest-invalid.
 
 ### Driving rollouts yourself
 
@@ -247,7 +257,7 @@ By default the inference engine builds each prompt by re-rendering the whole con
 
 Prefix supply sends the engine the exact tokens of the call being continued, so the new prompt extends the previous one by construction. Enable it by overlaying `responses_api_models/vllm_model/configs/vllm_model_supply_prefix.yaml`.
 
-Setting `required_prefix_token_ids` records prefix intent. It does not prove that the backend generated from that prefix. The backend must return the generation-time `prompt_token_ids` in the Chat Completions response. Gym records `prefix_supplied: true` only after verifying that those ids start with the required prefix. Missing or mismatched proof fails the model call instead of silently capturing off-policy tokens. The separate tokenize endpoint is used only when no prefix was requested. Prefix supply is incompatible with `use_completions_api: true`.
+Setting `required_prefix_token_ids` records prefix intent. It does not prove that the backend generated from that prefix. The backend must return the generation-time `prompt_token_ids` in the Chat Completions response. Gym persists `prefix_requested: true` when it sends the request and `prefix_supplied: true` only after verifying that the generation-time ids start with the required prefix. Missing or mismatched proof fails the model call instead of silently capturing off-policy tokens. A message-level token metadata bundle takes precedence over top-level transport fields, matching the capture extractor. The separate tokenize endpoint is used only when no prefix was requested. Prefix supply is incompatible with `use_completions_api: true` and `is_responses_native: true`.
 
 ### Sampling pin
 
