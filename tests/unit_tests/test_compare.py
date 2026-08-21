@@ -20,21 +20,16 @@ from typing import Any, Dict, List, Optional
 import orjson
 import pytest
 
-from nemo_gym.cli.compare import (
-    build_comparison_result,
-    resolve_output_dir,
-    summary_lines,
-    write_reports,
-)
-from nemo_gym.compare.diff import build_flip_summary, build_metric_rows, compare_runs, is_comparable_metric
-from nemo_gym.compare.loading import (
+from nemo_gym.comparison.diff import build_flip_summary, build_metric_rows, compare_runs, is_comparable_metric
+from nemo_gym.comparison.loading import (
     build_loaded_run,
     load_run_file,
     resolve_agent_selections,
     run_labels,
 )
-from nemo_gym.compare.report import render_markdown
-from nemo_gym.compare.schema import CompareConfig
+from nemo_gym.comparison.report import render_markdown, summary_lines, write_reports
+from nemo_gym.comparison.runner import build_comparison_result, resolve_output_dir
+from nemo_gym.comparison.schema import CompareConfig
 from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
 from nemo_gym.path_utils import aggregate_metrics_path_for
 
@@ -507,6 +502,18 @@ class TestCompareConfig:
         with pytest.raises(ValueError, match="candidate_aggregate_metrics_fpaths has 2 entries"):
             CompareConfig.model_validate(payload)
 
+    @pytest.mark.parametrize(
+        "payload_kwargs, flag",
+        [
+            ({"candidate_agent_names": ["one", "two"]}, "--candidate-agents"),
+            ({"candidate_aggregate_metrics_fpaths": ["x.json", "y.json"]}, "--candidates-agg-metrics"),
+        ],
+    )
+    def test_parallel_list_errors_name_the_flag_to_fix(self, payload_kwargs, flag):
+        """The config key is not derivable from the flag name, so the error has to say both."""
+        with pytest.raises(ValueError, match=f"Pass {flag} once per candidate"):
+            CompareConfig.model_validate(self._config(**payload_kwargs))
+
 
 class TestCliFlagTranslation:
     """`gym compare`'s flags must survive the argparse -> Hydra override -> pydantic round trip."""
@@ -571,9 +578,31 @@ class TestCliFlagTranslation:
         assert "+agent_name=my_agent" in overrides
         assert '+candidate_agent_names=["other_agent"]' in overrides
 
+    def test_agg_metrics_override_flags_translate(self):
+        config = self._config(
+            [
+                "eval",
+                "compare",
+                "--baseline",
+                "a.jsonl",
+                "--candidates",
+                "b.jsonl",
+                "--baseline-agg-metrics",
+                "elsewhere/base.json",
+                "--candidates-agg-metrics",
+                "elsewhere/cand.json",
+            ]
+        )
+        assert config.baseline_aggregate_metrics_fpath == "elsewhere/base.json"
+        assert config.candidate_aggregate_metrics_fpaths == ["elsewhere/cand.json"]
+
     def test_unset_flags_contribute_no_overrides(self):
         overrides = self._overrides(["eval", "compare", "--baseline", "a.jsonl", "--candidates", "b.jsonl"])
-        assert not [token for token in overrides if "output_dirpath" in token or "agent" in token]
+        assert not [
+            token
+            for token in overrides
+            if "output_dirpath" in token or "agent" in token or "aggregate_metrics" in token
+        ]
 
 
 class TestEndToEnd:
@@ -648,6 +677,76 @@ class TestEndToEnd:
         assert all(path.exists() and path.stat().st_size > 0 for path in written)
         # Only the requested artifacts are written.
         assert sorted(path.name for path in output_dir.iterdir()) == sorted(expected)
+
+    def test_an_unwritable_output_dir_is_rejected_cleanly(self, tmp_path):
+        _, result = self._result(tmp_path)
+        readonly = tmp_path / "readonly"
+        readonly.mkdir()
+        readonly.chmod(0o500)
+        try:
+            if os.access(readonly, os.W_OK):
+                pytest.skip("cannot make a directory read-only as this user (running as root?)")
+            # mkdir of a child fails...
+            with pytest.raises(ConfigError, match="Cannot write to --output-dir"):
+                write_reports(result, readonly / "nested", "both")
+            # ...and so does writing into an existing but read-only directory.
+            with pytest.raises(ConfigError, match="Cannot write the report into"):
+                write_reports(result, readonly, "both")
+        finally:
+            readonly.chmod(0o755)
+
+    def test_run_comparison_returns_the_result_and_the_paths_it_wrote(self, tmp_path):
+        from nemo_gym.comparison.runner import run_comparison
+
+        config, _ = self._result(tmp_path, output_dirpath=str(tmp_path / "out"))
+        result, written = run_comparison(config, command="gym eval compare ...")
+        assert result.comparisons[0].baseline_agent == AGENT
+        assert [path.name for path in written] == ["compare_report.md", "compare_report.json"]
+        assert all(path.exists() for path in written)
+
+    def test_invoked_command_records_the_resolved_invocation(self, monkeypatch):
+        from nemo_gym.comparison.runner import invoked_command
+
+        # `dispatch` rewrites argv to the resolved Hydra overrides before the entry point runs.
+        monkeypatch.setattr("sys.argv", ["gym", "+baseline_rollouts_jsonl_fpath=a b.jsonl"])
+        assert invoked_command() == "gym eval compare '+baseline_rollouts_jsonl_fpath=a b.jsonl'"
+
+    def test_key_metrics_table_is_rendered_per_agent(self, tmp_path):
+        from nemo_gym.comparison.report import render_key_metrics_tables
+
+        _, result = self._result(tmp_path)
+        (table,) = render_key_metrics_tables(result)
+        assert table.title == f"Key metrics — {AGENT}"
+        assert [column.header for column in table.columns] == [
+            "Metric",
+            "Drop (cand - base)",
+            "Baseline",
+            "Baseline 95% CI",
+            "Candidate",
+            "Candidate 95% CI",
+        ]
+        # Only key metrics get a row, and `[avg-of-k]` survives Rich markup escaping.
+        assert table.row_count == 1
+        assert "pass@1\\[avg-of-2]/accuracy" in list(table.columns[0].cells)
+
+    @pytest.mark.parametrize(
+        "groups, expected",
+        [
+            ([_group(0, [0.25])], "Per-task changes: 1 of 1 common tasks moved"),
+            ([_group(9, [1.0])], "Sample flips unavailable:"),
+        ],
+    )
+    def test_summary_reports_every_flip_mode(self, tmp_path, groups, expected):
+        baseline = _write_run(tmp_path / "modes", "run_a", [_entry(groups=[_group(0, [0.75])])])
+        candidate = _write_run(tmp_path / "modes", "run_b", [_entry(groups=groups)])
+        config = CompareConfig.model_validate(
+            {
+                "baseline_rollouts_jsonl_fpath": str(baseline),
+                "candidate_rollouts_jsonl_fpaths": [str(candidate)],
+            }
+        )
+        result = build_comparison_result(config, command="gym eval compare ...")
+        assert any(expected in line for line in summary_lines(result, []))
 
     def test_json_report_round_trips(self, tmp_path):
         _, result = self._result(tmp_path)
@@ -734,7 +833,7 @@ class TestReportEdgeCases:
 
     def test_flip_table_is_capped_per_direction(self, tmp_path):
         """The cap applies to each direction, so improvements are never crowded out by regressions."""
-        from nemo_gym.compare.report import MAX_FLIPS_SHOWN
+        from nemo_gym.comparison.report import MAX_FLIPS_SHOWN
 
         over_cap = MAX_FLIPS_SHOWN + 3
         # Regressions first in task order, then the same number of improvements. A single global cap

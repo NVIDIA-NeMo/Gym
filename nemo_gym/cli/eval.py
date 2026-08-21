@@ -477,3 +477,23 @@ Input rows: {completion_summary["total_input_rows"]} total; {completion_summary[
 Reward profiling outputs: {reward_profiling_fpath}
 Agent-level metrics: {agent_level_metrics_fpath}
 Repeat-level metrics: {repeat_level_metrics_fpath}""")
+
+
+@exit_cleanly_on_config_error
+def compare() -> None:  # pragma: no cover
+    from nemo_gym.comparison.report import render_key_metrics_tables, summary_lines
+    from nemo_gym.comparison.runner import invoked_command, run_comparison
+    from nemo_gym.comparison.schema import CompareConfig
+
+    global_config_dict = get_global_config_dict(
+        global_config_dict_parser_config=GlobalConfigDictParserConfig(
+            initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+        )
+    )
+    config = CompareConfig.model_validate(global_config_dict)
+
+    result, written = run_comparison(config, command=invoked_command())
+
+    for table in render_key_metrics_tables(result):
+        print_rich_table(table)
+    print("\n".join(summary_lines(result, written)))

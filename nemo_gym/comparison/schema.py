@@ -49,7 +49,7 @@ class CompareConfig(BaseNeMoGymCLIConfig):
     ```
 
     To point at metrics files that do not follow the `<stem>_aggregate_metrics.json` convention,
-    set `+baseline_aggregate_metrics_fpath=...` and `+candidate_aggregate_metrics_fpaths=[...]`.
+    pass `--baseline-agg-metrics` and `--candidates-agg-metrics`.
     """
 
     baseline_rollouts_jsonl_fpath: str = Field(
@@ -104,14 +104,20 @@ class CompareConfig(BaseNeMoGymCLIConfig):
                 f"{num_candidates} candidates were given, but comparing more than {MAX_CANDIDATES} candidate "
                 "is not supported yet. Pass a single path to --candidates."
             )
+        # Name the flag, not just the config key: neither is derivable from the other
+        # (`--candidates-agg-metrics` vs `candidate_aggregate_metrics_fpaths`).
         for field_name, value, flag in (
             ("candidate_agent_names", self.candidate_agent_names, "--candidate-agents"),
-            ("candidate_aggregate_metrics_fpaths", self.candidate_aggregate_metrics_fpaths, None),
+            (
+                "candidate_aggregate_metrics_fpaths",
+                self.candidate_aggregate_metrics_fpaths,
+                "--candidates-agg-metrics",
+            ),
         ):
             if value is not None and len(value) != num_candidates:
-                hint = f" Pass {flag} once per candidate, in the same order." if flag else ""
                 raise ValueError(
-                    f"{field_name} has {len(value)} entries but {num_candidates} candidate run(s) were given.{hint}"
+                    f"{field_name} has {len(value)} entries but {num_candidates} candidate run(s) were given. "
+                    f"Pass {flag} once per candidate, in the same order."
                 )
         return self
 

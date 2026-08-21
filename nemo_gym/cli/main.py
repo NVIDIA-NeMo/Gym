@@ -916,8 +916,8 @@ COMMANDS = {
         ),
     ),
     "eval compare": Command(
-        target="nemo_gym.cli.compare:compare",
-        summary="Compare a baseline eval run against a candidate run.",
+        target="nemo_gym.cli.eval:compare",
+        summary="Compare a baseline eval run against candidate runs.",
         flags=(
             _value_flag(
                 "baseline",
@@ -929,6 +929,18 @@ COMMANDS = {
                 "candidates",
                 "candidate_rollouts_jsonl_fpaths",
                 "Candidate run's rollouts JSONL. Comma-separated list; one candidate is supported today.",
+                metavar="PATH[,PATH...]",
+            ),
+            _value_flag(
+                "baseline-agg-metrics",
+                "baseline_aggregate_metrics_fpath",
+                "Baseline's aggregate-metrics JSON, when it is not the sibling of --baseline.",
+                quote=True,
+            ),
+            _comma_list_flag(
+                "candidates-agg-metrics",
+                "candidate_aggregate_metrics_fpaths",
+                "Candidates' aggregate-metrics JSON, in --candidates order, when not siblings of --candidates.",
                 metavar="PATH[,PATH...]",
             ),
             _value_flag("agent", "agent_name", "Agent to compare on both sides (default: all shared agents)."),

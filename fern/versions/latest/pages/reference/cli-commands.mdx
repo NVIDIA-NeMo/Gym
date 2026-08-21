@@ -738,8 +738,10 @@ The report contains a metric table (the change, plus each side's value and confi
 
 | Option | Description |
 | --- | --- |
-| `--baseline PATH` | Baseline run's rollouts JSONL. |
+| `--baseline PATH` | Baseline run's rollouts JSONL. Its `*_aggregate_metrics.json` sibling is what gets read. |
 | `--candidates PATH[,PATH...]` | Candidate run's rollouts JSONL. Comma-separated; one candidate is supported today. |
+| `--baseline-agg-metrics PATH` | Baseline's aggregate-metrics JSON, when it is not the sibling of `--baseline`. |
+| `--candidates-agg-metrics PATH[,PATH...]` | Candidates' aggregate-metrics JSON, in `--candidates` order, when not siblings of `--candidates`. |
 | `--agent NAME` | Agent to compare on both sides. Defaults to every agent present in both runs. |
 | `--baseline-agent NAME` | Agent to read from the baseline. Takes precedence over `--agent`. |
 | `--candidate-agents NAME[,NAME...]` | Agent to read from each candidate, in `--candidates` order. Takes precedence over `--agent`. |
@@ -759,7 +761,7 @@ Writes into the output directory:
 | `compare_report.md` | Human-readable report. |
 | `compare_report.json` | Machine-readable result (`schema_version` 1). |
 
-If a run was collected with `--disable-aggregation` it has no `*_aggregate_metrics.json`; run [`gym eval aggregate`](#gym-eval-aggregate) first, or point at the file directly with `+baseline_aggregate_metrics_fpath=` / `+candidate_aggregate_metrics_fpaths=[...]`.
+If a run was collected with `--disable-aggregation` it has no `*_aggregate_metrics.json`; run [`gym eval aggregate`](#gym-eval-aggregate) first, or point at the file directly with `--baseline-agg-metrics` / `--candidates-agg-metrics`.
 
 ### `gym eval reverify`
 

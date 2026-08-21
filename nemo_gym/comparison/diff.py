@@ -20,7 +20,7 @@ from what the runs already recorded; nothing here estimates, tests, or judges.
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from nemo_gym.compare.loading import (
+from nemo_gym.comparison.loading import (
     CI_HIGH_PREFIX,
     CI_LOW_PREFIX,
     MEAN_ACROSS_REPEATS_PREFIX,
@@ -28,7 +28,7 @@ from nemo_gym.compare.loading import (
     STD_ERR_ACROSS_RUNS_SUFFIX,
     LoadedRun,
 )
-from nemo_gym.compare.schema import (
+from nemo_gym.comparison.schema import (
     AgentComparison,
     CandidateMetricValue,
     FlipSummary,
