@@ -495,6 +495,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
 
         if self.config.clear_verifier_logs:
             rmtree(str(log_dir), ignore_errors=True)
+            log_dir = ""
 
         return DeepSWEVerifyResponse.model_validate(
             body.model_dump()
