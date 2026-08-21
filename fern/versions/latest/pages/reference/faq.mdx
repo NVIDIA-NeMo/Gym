@@ -464,11 +464,12 @@ For agents with non-monotonic trajectoires, the asserts may need to be disabled.
 
 # How do I choose an onboarding path?
 
-Copy an existing folder under `benchmarks/` unless you need new scoring code. Start at the [onboarding decision tree](/contribute/environments/onboarding-decision-tree).
+Start with `gym search`, then scaffold a manifest-backed benchmark. Start at the [onboarding decision tree](/contribute/environments/onboarding-decision-tree).
 
-- Same scorer, new data or prompt → [Add a benchmark](/contribute/environments/adding-a-benchmark) (copy `gsm8k`, `gpqa`, or `livecodebench/v5_2408_2502`).
-- New `verify()` → [New Environment](/contribute/environments/new-environment).
-- GUI, sandbox, or a third-party runner → [Complex benchmarks](/contribute/environments/adding-a-benchmark#complex-benchmarks).
+- Same scorer, new data or prompt → [Add a benchmark](/contribute/environments/adding-a-benchmark) with `--reuse-verifier` when the scorer exports `VERIFIER_FIXTURE`.
+- New `verify()` → `gym env init --benchmark <name>` generates the scorer with the workload; use [New Environment](/contribute/environments/new-environment) for implementation guidance.
+- GUI, sandbox, or a third-party runner → choose the matching integration profile in [Add a benchmark](/contribute/environments/adding-a-benchmark#2-choose-an-integration-profile).
+- Legacy scorer without `VERIFIER_FIXTURE` → use the documented overlay migration path until that scorer is migrated.
 
 # Which scorers can I reuse?
 
@@ -478,7 +479,9 @@ Most overlays reuse `math_with_judge`, `mcqa`, `code_gen`, `asr_with_pc`, `instr
 
 # How do I make my benchmark show up in the CLI?
 
-Add `benchmarks/<name>/config.yaml` with a dataset of `type: benchmark` and a `prepare_script`. Then `gym list benchmarks` will list it. Run:
+Run `gym env init --benchmark <name> --profile <profile>`, complete the generated manifest and config, and run `gym env publish <name>`. The local catalog then lists it as `experimental`. For a legacy overlay, add `benchmarks/<name>/config.yaml` with a dataset of `type: benchmark` and a `prepare_script`; it remains visible as `no-manifest` during migration.
+
+Smoke test with:
 
 ```bash
 gym eval prepare --benchmark <name>
@@ -489,7 +492,7 @@ gym eval run --benchmark <name> \
   --limit 2
 ```
 
-Do not pass `--resources-server` unless you added a new scorer. Full flags: [Add a benchmark](/contribute/environments/adding-a-benchmark#4-prepare-and-run).
+Do not pass `--resources-server` unless you are testing a standalone scorer. Full workflow: [Add a benchmark](/contribute/environments/adding-a-benchmark#5-validate-test-run-and-publish).
 
 # Where do example_rollouts go?
 
@@ -503,7 +506,7 @@ Only new scorers need this file: `resources_servers/<name>/data/example_rollouts
 
 # Should I use --reuse-verifier?
 
-No, not for pull requests to this repository. It needs `VERIFIER_FIXTURE`, which shipped scorers do not export. Copy `benchmarks/gsm8k` and use `config_paths` plus `_inherit_from`.
+Yes, when the selected resources server exports `VERIFIER_FIXTURE`. The command reuses both the scorer and its behavioral contract, and requires you to declare the reward range and direction. If an existing scorer has not adopted the fixture yet, use the legacy `config_paths` plus `_inherit_from` overlay path documented in [Add a benchmark](/contribute/environments/adding-a-benchmark#3-scaffold-the-benchmark).
 
 # I am not an NVIDIA employee. Do I need GitLab?
 
