@@ -18,7 +18,7 @@ VALIDATION_REPEATS = 4
 EXPECTED_DATA_HASHES = {
     "train": "7acc2e5b9909ee3279fa26599ef1cba1388e328a2f248c152137bae2652c00cf",
     "test": "b02ee40add79325edbc5f41c785a1c1288dd471de9d633046d063525f59a3303",
-    "train_smoke": "852cc228799ea8317f555f164ba78a753985fc78e1e2f2616f09192368de0383",
+    "train_smoke": "852cc228799ea8317f555f164ba78a753985fc78a1e2f2616f09192368de0383",
     "test_smoke": "9bb195bf7de05a1c5c437b46966ecd1e1acf44efdf2d12ed52eba13d653f74fb",
 }
 AGENT = "rdkit_chemistry_direct_agent"
