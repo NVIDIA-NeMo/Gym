@@ -26,4 +26,4 @@ opencode_sandboxed_agent_deepswe:
           type: benchmark
           jsonl_fpath: benchmarks/deepswe/data/deepswe_benchmark.jsonl
           prepare_script: benchmarks/deepswe/prepare.py
-          num_repeats: 3
+          num_repeats: 5
