@@ -16,7 +16,7 @@ description: >
 
 Before starting, determine which type of benchmark you're adding:
 
-**Native overlay** — reuse an existing resources server. Do this first. Add `benchmarks/<name>/config.yaml` with `config_paths` and `_inherit_from` (copy `benchmarks/gsm8k`). Do **not** run `gym env init --resources-server` unless no scorer exists. Human docs: `fern/versions/latest/pages/contribute/environments/adding-a-benchmark.mdx`.
+**Manifest-backed benchmark** — use `gym env init --benchmark <name> --profile <profile>`. Reuse an existing resources server with `--reuse-verifier` when it exports `VERIFIER_FIXTURE`; otherwise use the documented legacy overlay migration path. Human docs: `fern/versions/latest/pages/contribute/environments/adding-a-benchmark.mdx`.
 
 **Native new scorer** — verification logic implemented directly in a Gym resources server:
 - Resources server implements `verify()` with reward logic
@@ -33,7 +33,14 @@ Before starting, determine which type of benchmark you're adding:
 
 ## Workflow
 
-If this is an overlay on `math_with_judge`, `mcqa`, `code_gen`, or similar, skip scaffolding a new server. Copy the closest overlay and stop after prepare + CLI wiring:
+Search environments and scorers before creating anything. The default benchmark path is:
+
+```bash
+gym search "task description"
+gym env init --benchmark my_benchmark --profile custom-gym-verifier
+```
+
+When `math_with_judge`, `mcqa`, `code_gen`, or a similar scorer exports `VERIFIER_FIXTURE`, pass `--reuse-verifier`, `--reward-range`, and the reward direction. If the scorer has not migrated to that fixture contract, copy the closest legacy overlay and stop after prepare + CLI wiring:
 
 | Task | Copy |
 | --- | --- |
@@ -41,29 +48,31 @@ If this is an overlay on `math_with_judge`, `mcqa`, `code_gen`, or similar, skip
 | Multiple choice | `benchmarks/gpqa` |
 | Unit-test code | `benchmarks/livecodebench/v5_2408_2502` |
 
-Human walkthrough: `fern/versions/latest/pages/contribute/environments/adding-a-benchmark.mdx`. Only do Step 1 when no existing scorer fits.
+Human walkthrough: `fern/versions/latest/pages/contribute/environments/adding-a-benchmark.mdx`. Only scaffold a standalone resources server when you are contributing a reusable scorer without a complete benchmark.
 
 When the overlay sets `prompt_config`, JSONL rows are raw fields (`question`, `expected_answer`, …). Do **not** bake `responses_create_params.input` into those rows. `prepare()` must return a `Path` equal to `jsonl_fpath`. Keep generated JSONL gitignored.
 
-Search scorers with `gym search resources-servers "…"` (bare `gym search` defaults to environments). Do not use `gym env init --benchmark` for in-tree overlays.
+Search scorers with `gym search resources-servers "…"` (bare `gym search` defaults to environments).
 
-Smoke test (output is required):
+Manifest-backed local checks and smoke test (output is required):
 
 ```bash
-gym env validate --benchmark my_bench
-gym eval prepare --benchmark my_bench
-gym eval run --benchmark my_bench \
+gym env validate my_benchmark
+gym env test my_benchmark
+gym eval prepare --benchmark my_benchmark
+gym eval run --benchmark my_benchmark \
   --model-type openai_model \
   --split benchmark \
-  --output results/my_bench_rollouts.jsonl \
+  --output results/my_benchmark_rollouts.jsonl \
   --limit 2
+gym env publish my_benchmark
 ```
 
-`--no-serve` also needs `--agent`, `--input`, `--prompt-config`, and `--output`. Overlay-only PRs skip `gym env test --resources-server`.
+Legacy overlays use `gym env validate --benchmark my_bench` and do not support workload `test` or `publish`. `--no-serve` also needs `--agent`, `--input`, `--prompt-config`, and `--output`.
 
 ### Step 1: Scaffold the server
 
-Run `gym env init` to generate the directory structure:
+For a standalone scorer only, run `gym env init` to generate the directory structure:
 
 ```bash
 gym env init --resources-server my_benchmark

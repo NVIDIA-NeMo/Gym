@@ -1,12 +1,12 @@
 ---
 title: "Add a benchmark"
-description: "Reuse an existing scorer: copy an overlay, prepare data, and run gym eval."
+description: "Discover, scaffold, validate, run, and publish a manifest-backed benchmark."
 position: 2
 ---
 import { NavButton } from "../../../../../components/NavButton";
 
 <Info>
-**Goal:** Add your benchmark as a folder under `benchmarks/<name>/` that reuses an existing scorer. You will not write scoring code (`app.py`).
+**Goal:** Add a versioned, manifest-backed benchmark under `benchmarks/<name>/`, reusing an existing scorer when one fits.
 
 A **scorer** (resources server) grades the model's answer. An **overlay** is a small config folder that points at that scorer and supplies your dataset. A **rollout** is one model run on one task, with a numeric score (`reward`).
 
@@ -14,12 +14,12 @@ A **scorer** (resources server) grades the model's answer. An **overlay** is a s
 
 **In this guide you will:**
 
-1. Confirm Gym already has a scorer for this task
-2. Copy a working overlay and rename it
-3. Write `prepare.py` and the dataset JSONL
-4. Run `gym eval prepare` and `gym eval run`
-5. Open a pull request
-6. Optionally measure score stability before maintainers mark it verified
+1. Search for an existing benchmark and scorer
+2. Choose the integration profile
+3. Scaffold the benchmark and `manifest.yaml`
+4. Prepare and validate the dataset and scorer
+5. Run a smoke evaluation and local publication check
+6. Open a pull request and establish benchmark fidelity
 
 Need new scoring code instead? Go to [New Environment](/contribute/environments/new-environment).
 </Info>
@@ -36,11 +36,12 @@ Unsure which path you are on? Start at the [onboarding decision tree](/contribut
 
 ---
 
-## 1. Confirm you can reuse a scorer
+## 1. Discover before you create
 
-Search for a program that can grade this task:
+Search the environment catalog first. If the benchmark already exists, reuse it instead of creating a duplicate. Then search for a scorer that can grade the task:
 
 ```bash
+gym search "task description"
 gym search resources-servers "math word problems"
 gym list resources-servers
 gym search benchmarks math
@@ -59,19 +60,52 @@ If none of those scorers can grade the task, stop and follow [New Environment](/
 Most overlays use Gym's default one-turn agent (`simple_agent`). If the task needs a repo sandbox, GUI VM, search loop, or Harbor, pick that agent **before** you copy GSM8K — see [Complex benchmarks](#complex-benchmarks).
 </Warning>
 
-**Next:** copy the closest overlay in the table.
+**Next:** choose who drives the episode.
 
 ---
 
-## 2. Copy the overlay
+## 2. Choose an integration profile
+
+The profile identifies the authoring boundary. It does not change runtime dispatch; Gym config remains authoritative.
+
+| Profile | Choose it when |
+| --- | --- |
+| `custom-gym-verifier` | Gym drives the standard agent loop. This is the default for question-answer and scoring benchmarks. |
+| `custom-gym-agent-loop` | Custom agent behavior such as browsing or planning is part of what the benchmark measures. |
+| `external-agent-loop` | An external framework owns the episode and adapts its result back to Gym. |
+| `external-rollout-driver` | Custom coordination above the agent owns rollout execution. |
+
+If you are unsure, choose `custom-gym-verifier`.
+
+**Next:** scaffold the benchmark.
+
+---
+
+## 3. Scaffold the benchmark
+
+Create the manifest, config, source data, prompt, typed `prepare()` hook, README, and the extension point selected by the profile:
+
+```bash
+gym env init --benchmark my_benchmark --profile custom-gym-verifier
+```
+
+When the scorer already exports `VERIFIER_FIXTURE`, reuse it instead of generating scoring code:
+
+```bash
+gym env init --benchmark my_benchmark --profile custom-gym-verifier \
+  --reuse-verifier existing_scorer \
+  --reward-range 0 1 \
+  --higher-is-better
+```
+
+`--reuse-verifier` requires an explicit reward contract because the manifest checks the scorer fixture against those endpoints. If the selected in-tree scorer has not adopted `VERIFIER_FIXTURE` yet, use the legacy overlay migration path below; do not copy its scoring implementation.
+
+<Accordion title="Legacy overlay migration path">
+Some existing benchmarks and resources servers have not adopted manifests and verifier fixtures yet. For one of those scorers, copy the closest working overlay while it remains a `no-manifest` catalog entry:
 
 `--benchmark <name>` is the name printed by `gym list benchmarks`. For `benchmarks/gsm8k/config.yaml` that name is `gsm8k`. Nested folders use the path, for example `livecodebench/v5_2408_2502`.
 
 Copy a working example. Do not start from an empty folder.
-
-<Warning>
-When you add a benchmark to this repository, copy an existing overlay. Do not run `gym env init --benchmark` — that creates a different, experimental layout.
-</Warning>
 
 ```bash
 cp -r benchmarks/gsm8k benchmarks/my_bench
@@ -98,12 +132,19 @@ In the copied files, replace every `gsm8k` (or `gpqa` / `livecodebench`) token:
 - README title, license, and run commands
 
 Do not add `app.py` or copy `verify()`.
+</Accordion>
 
-**Next:** edit `benchmarks/my_bench/config.yaml` and `prepare.py`.
+**Next:** complete the generated config, `prepare.py`, and data.
 
 ---
 
-## 3. Wire config, prepare, and data
+## 4. Wire config, prepare, and data
+
+For a manifest-backed scaffold, edit the generated files in place. The manifest owns identity, catalog metadata, reward, determinism, and benchmark protocol. Gym config owns runtime composition; `gym env validate --sync` repairs only the mirrored composition fields in the manifest.
+
+The generated benchmark requires `canonical_split`, `standard_prompt_config`, and at least one dataset of `type: benchmark` with `prepare_script`. Replace the generated example data and TODO implementation without changing the generated `prepare()` contract.
+
+<Accordion title="Manual config for a legacy overlay">
 
 Open `benchmarks/my_bench/config.yaml` and set these fields:
 
@@ -137,6 +178,7 @@ my_bench_math_with_judge_simple_agent:
         prepare_script: benchmarks/my_bench/prepare.py
         num_repeats: 1
 ```
+</Accordion>
 
 <Warning>
 `gym eval prepare` imports `prepare.py` and calls `prepare()`. The `Path` you return **must** equal `jsonl_fpath`. Keep that generated file out of git (`data/.gitignore`, usually `*benchmark.jsonl`).
@@ -181,13 +223,30 @@ Copy the overlay that already uses your scorer, then match **that** `prepare.py`
 GPQA also sets `grading_mode` on the inherited scorer so extraction matches the prompt (`Answer: A/B/C/D`). Keep that kind of override when you copy.
 </Accordion>
 
-**Next:** validate the YAML and run two tasks.
+**Next:** validate the manifest and scorer, then run two tasks.
 
 ---
 
-## 4. Prepare and run
+## 5. Validate, test, run, and publish
 
-Check the config, write the JSONL, then run two tasks. `--output` is required. `--split benchmark` selects the dataset with `type: benchmark`.
+The local onboarding loop does not require Ray or a model until the smoke evaluation:
+
+```bash
+gym env validate my_benchmark
+gym env test my_benchmark
+gym eval prepare --benchmark my_benchmark
+gym eval run --benchmark my_benchmark \
+  --model-type openai_model \
+  --split benchmark \
+  --output results/my_benchmark_rollouts.jsonl \
+  --limit 2
+gym env publish my_benchmark
+```
+
+`gym env validate` resolves config and inheritance, checks the manifest mirrors and materialized benchmark rows, and reports profile evidence without starting services. `gym env test` exercises the resources-server-owned verifier fixture. `gym env publish` reruns those checks, rejects manifest placeholders, and confirms exact catalog discovery as `experimental`; it does not commit, push, deploy, or certify the benchmark.
+
+<Accordion title="Validate a legacy overlay">
+Legacy `no-manifest` overlays keep the config validation form and do not support workload fixture or publication commands:
 
 ```bash
 gym env validate --benchmark my_bench
@@ -198,6 +257,7 @@ gym eval run --benchmark my_bench \
   --output results/my_bench_rollouts.jsonl \
   --limit 2
 ```
+</Accordion>
 
 If servers are already running, pass **agent, input, prompt, and output**. Prepared overlay rows do not include those fields:
 
@@ -218,15 +278,17 @@ gym eval run --no-serve \
 `--agent` is the YAML block name (`my_bench_…_simple_agent`). Put the same run commands in `README.md`.
 
 <Note>
-If your PR only adds files under `benchmarks/`, you do not need `example_rollouts.jsonl` or `gym env test --resources-server`. CI still runs copyright and pre-commit checks. New scorers do need five example tasks — see [New Environment](/contribute/environments/new-environment#4-example-data-and-rollouts).
+A legacy overlay PR that only adds files under `benchmarks/` does not add `example_rollouts.jsonl` or run `gym env test --resources-server`. A manifest-backed benchmark uses `gym env test <name>` and its verifier fixture. A standalone scorer follows the example-data requirements in [New Environment](/contribute/environments/new-environment#4-example-data-and-rollouts).
 </Note>
 
 **Next:** open a pull request.
 
 ---
 
-## 5. Open a PR
+## 6. Open a PR
 
+- [ ] `manifest.yaml` contains the benchmark protocol fields and no placeholders
+- [ ] `gym env validate <name>`, `gym env test <name>`, and `gym env publish <name>` pass for a manifest-backed benchmark
 - [ ] `prepare.py` writes the JSONL (`returned Path` matches `jsonl_fpath`)
 - [ ] `gym eval prepare --benchmark <name>` and a short `gym eval run` succeed
 - [ ] `README.md` lists the **code** license (Apache-2.0) and the **data** license plus upstream URL
@@ -251,11 +313,11 @@ Apache-2.0 (NeMo Gym contribution)
 
 If you copy upstream source into this repo, add an `ATTRIBUTIONS.md` entry. See [CONTRIBUTING.md](https://github.com/NVIDIA-NeMo/Gym/blob/main/CONTRIBUTING.md).
 
-**Next:** you can open the PR now. Step 6 is optional until maintainers mark the benchmark verified.
+**Next:** you can open the PR now. Step 7 establishes the evidence needed for benchmark fidelity.
 
 ---
 
-## 6. Reward profiling
+## 7. Establish fidelity and profile rewards
 
 Do this before maintainers set `verified: true`. You do not need it to open the first PR.
 
@@ -267,14 +329,14 @@ Open-source models should score in a meaningful range (about 30% or higher). Clo
 
 ---
 
-<Accordion title="Need a new scorer instead?">
-Create a resources server, then come back and add this overlay pointing at it:
+<Accordion title="Need a reusable standalone scorer instead?">
+`gym env init --benchmark` generates a scorer when `--reuse-verifier` is omitted. If you are contributing only a reusable scorer component, scaffold it separately:
 
 ```bash
 gym env init --resources-server my_scorer
 ```
 
-Follow [New Environment](/contribute/environments/new-environment) for `verify()`, tests, and the five example tasks. Do not use `gym env init --benchmark` for overlays in this repo.
+Follow [New Environment](/contribute/environments/new-environment) for `verify()`, tests, and example tasks. A complete benchmark should still use the manifest-backed workflow above.
 </Accordion>
 
 ## Complex benchmarks
