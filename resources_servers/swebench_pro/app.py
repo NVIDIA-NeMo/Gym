@@ -107,6 +107,7 @@ class SWEBenchProVerifyResponse(BaseVerifyResponse):
     instance_id: str
     model_patch: str | None
     test_results: dict[str, Any] | None
+    test_output: str
     error: str | None
     log_dir: str
 
@@ -282,6 +283,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             "instance_id": body.instance_id,
             "model_patch": model_patch or None,
             "test_results": result.test_results,
+            "test_output": result.test_output,
             "error": extraction_error or result.error,
             "log_dir": str(run_log_dir),
         }
