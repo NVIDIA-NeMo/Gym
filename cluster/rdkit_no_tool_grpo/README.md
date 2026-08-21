@@ -72,7 +72,7 @@ The preferred GPU compatibility gate is now the 4-node conversion-and-rollout
 job. It runs the normal NeMo-RL setup path, persists the topology-neutral
 HF-to-Megatron `iter_0000000` checkpoint, loads the native LoRA policy, starts
 vLLM and NeMo-Gym, and scores exactly one held-out rollout. It does not perform
-an optimizer update and does not log to W&B:
+an optimizer update, does not log to W&B, and has a one-hour time limit:
 
 ```bash
 cluster/rdkit_no_tool_grpo/submit_conversion_rollout_gate.sh
