@@ -20,7 +20,9 @@ harness install) are bypassed by calling staticmethods/properties directly rathe
 constructing the agent.
 """
 
+import hashlib
 import json
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, PropertyMock, patch
@@ -458,6 +460,25 @@ class TestHarnessProcessorSetup:
             proc.setup()
             proc.setup()
         assert "already at" in capsys.readouterr().out
+
+    def test_rechecks_sentinel_after_acquiring_lock(self, tmp_path: Path) -> None:
+        proc = self._proc_no_script()
+        deps_dir = tmp_path / "deps" / "anyterminal_no_such_agent_deps"
+        lock_path = deps_dir.parent / f".{deps_dir.name}.lockdir"
+        lock_path.mkdir(parents=True)
+
+        def finish_other_install(_seconds: float) -> None:
+            deps_dir.mkdir()
+            (deps_dir / ".installed").write_text(hashlib.sha256(b"no-script").hexdigest())
+            shutil.rmtree(lock_path)
+
+        with (
+            patch.object(type(proc), "_parent", new_callable=PropertyMock, return_value=tmp_path),
+            patch("responses_api_agents.anyterminal_agent.app.time.sleep", side_effect=finish_other_install),
+        ):
+            assert proc.setup() == deps_dir
+
+        assert not lock_path.exists()
 
 
 # ── GymAgentHarnessProcessor.get_run_command ─────────────────────────────────────
