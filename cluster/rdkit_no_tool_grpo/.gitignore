@@ -1,0 +1,7 @@
+data/
+enroot/
+logs/
+preflight/*.json
+results/
+sqsh/
+venvs/

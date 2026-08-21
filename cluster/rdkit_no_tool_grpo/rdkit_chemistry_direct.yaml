@@ -1,0 +1,31 @@
+rdkit_chemistry:
+  resources_servers:
+    rdkit_chemistry:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      description: >-
+        Direct molecular chemistry question answering over RDKit-computable
+        SMILES properties.
+      value: Improve molecular reasoning and SMILES parsing without tool use.
+
+rdkit_chemistry_direct_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 1
+      resources_server:
+        type: resources_servers
+        name: rdkit_chemistry
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: train
+          type: train
+          jsonl_fpath: cluster/rdkit_no_tool_grpo/data/train.jsonl
+          license: "TBD"
+        - name: validation
+          type: validation
+          jsonl_fpath: cluster/rdkit_no_tool_grpo/data/test_eval4.jsonl
+          license: "TBD"

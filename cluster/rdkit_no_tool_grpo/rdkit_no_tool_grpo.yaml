@@ -1,0 +1,306 @@
+# RDKit override of the Nano v3 GRPO recipe shipped in the NeMo-RL v0.6.0
+# image at /opt/nemo-rl/examples/nemo_gym/grpo_nanov3.yaml.
+grpo:
+  # max_num_steps is the production termination criterion; leave enough epochs
+  # for continuation jobs to restore and reach it.
+  max_num_epochs: 100000
+  num_prompts_per_step: 64
+  num_generations_per_prompt: 16
+  num_val_generations_per_prompt: 4
+  max_rollout_turns: 1
+  max_num_steps: 200
+  normalize_rewards: true
+  use_leave_one_out_baseline: true
+  val_period: 5
+  # A separate validation-only job owns the step-zero gate and W&B baseline.
+  val_at_start: false
+  val_at_end: false
+  overlong_filtering: true
+  max_val_samples: null
+  val_batch_size: 256
+  seed: 42
+  use_dynamic_sampling: false
+  dynamic_sampling_max_gen_batches: 10
+  batch_multiplier: 1
+  reward_shaping:
+    enabled: false
+    overlong_buffer_length: 128
+    overlong_buffer_penalty: 1
+    max_response_length: ${policy.generation.max_new_tokens}
+  reward_scaling:
+    enabled: false
+    source_min: 0.0
+    source_max: 1.0
+    target_min: 0.0
+    target_max: 1.0
+  seq_logprob_error_threshold: 2
+  async_grpo:
+    enabled: false
+    max_trajectory_age_steps: 1
+  skip_reference_policy_logprobs_calculation: true
+
+loss_fn:
+  reference_policy_kl_penalty: 0
+  reference_policy_kl_type: "k3"
+  kl_input_clamp_value: null
+  kl_output_clamp_value: null
+  ratio_clip_min: 0.2
+  ratio_clip_max: 0.28
+  ratio_clip_c: null
+  use_on_policy_kl_approximation: true
+  sequence_level_importance_ratios: false
+  truncated_importance_sampling_ratio: null
+  use_importance_sampling_correction: true
+  token_level_loss: true
+  force_on_policy_ratio: false
+
+checkpointing:
+  enabled: true
+  checkpoint_dir: cluster/rdkit_no_tool_grpo/results/es140_lora/checkpoints
+  # The task reward is binary, so validation accuracy is exact reconstruction.
+  metric_name: "val:accuracy"
+  higher_is_better: true
+  keep_top_k: 10
+  save_period: 5
+  checkpoint_must_save_by: "00:11:30:00"
+  save_optimizer: true
+
+policy:
+  # The ES Step 140 adapter is merged into this frozen HF checkpoint before
+  # NeMo-RL converts it to Megatron format. The native PEFT adapter below is
+  # therefore a zero-output continuation adapter at initialization.
+  model_name: ${oc.env:ES140_MERGED_MODEL_DIR}
+  tokenizer:
+    name: ${policy.model_name}
+    chat_template_kwargs:
+      enable_thinking: true
+  hf_config_overrides:
+    architectures:
+      - "NemotronHForCausalLM"
+  train_global_batch_size: 1024
+  train_micro_batch_size: 1
+  logprob_batch_size: 1
+  generation_batch_size: 64
+  max_total_sequence_length: 65536
+  max_completion_length: null
+  precision: "bfloat16"
+  logprob_chunk_size: 2048
+  offload_optimizer_for_logprob: false
+
+  dtensor_cfg:
+    _v2: true
+    enabled: false
+    cpu_offload: false
+    sequence_parallel: false
+    activation_checkpointing: false
+    tensor_parallel_size: 1
+    context_parallel_size: 1
+    custom_parallel_plan: null
+    clear_cache_every_n_steps: null
+
+  megatron_cfg:
+    enabled: true
+    empty_unused_memory_level: 1
+    activation_checkpointing: true
+    tensor_model_parallel_size: 2
+    expert_tensor_parallel_size: 1
+    expert_model_parallel_size: 8
+    pipeline_model_parallel_size: 2
+    num_layers_in_first_pipeline_stage: null
+    num_layers_in_last_pipeline_stage: null
+    context_parallel_size: 8
+    pipeline_dtype: ${policy.precision}
+    sequence_parallel: true
+    freeze_moe_router: true
+    moe_router_dtype: "fp32"
+    moe_router_load_balancing_type: "none"
+    moe_router_bias_update_rate: 0.0
+    moe_router_enable_expert_bias: false
+    moe_aux_loss_coeff: 0
+    moe_enable_deepep: false
+    moe_per_layer_logging: true
+    moe_permute_fusion: true
+    moe_shared_expert_overlap: false
+    moe_token_dispatcher_type: "alltoall"
+    track_moe_metrics: true
+    apply_rope_fusion: true
+    defer_fp32_logits: true
+    gradient_accumulation_fusion: false
+    bias_activation_fusion: false
+    calculate_per_token_loss: true
+    do_not_average_loss: true
+    cp_normalize: true
+    scale_loss_by_dp_cp_size: false
+
+    optimizer:
+      optimizer: "adam"
+      lr: 3.0e-6
+      min_lr: 3.0e-6
+      weight_decay: 0.0
+      bf16: true
+      fp16: false
+      params_dtype: "float32"
+      adam_beta1: 0.9
+      adam_beta2: 0.999
+      adam_eps: 1.0e-8
+      sgd_momentum: 0.9
+      use_distributed_optimizer: true
+      use_precision_aware_optimizer: true
+      optimizer_cpu_offload: false
+      optimizer_offload_fraction: 0.0
+      clip_grad: ${policy.max_grad_norm}
+
+    scheduler:
+      start_weight_decay: 0.0
+      end_weight_decay: 0.0
+      weight_decay_incr_style: "constant"
+      lr_decay_style: "constant"
+      lr_decay_iters: null
+      lr_warmup_iters: 10
+      lr_warmup_init: 3.0e-7
+      override_opt_param_scheduler: true
+      use_checkpoint_opt_param_scheduler: false
+
+    distributed_data_parallel_config:
+      grad_reduce_in_fp32: false
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      use_custom_fsdp: false
+      data_parallel_sharding_strategy: "optim_grads_params"
+      average_in_collective: false
+
+    env_vars: null
+
+    peft:
+      enabled: true
+      target_modules:
+        - "linear_qkv"
+        - "linear_proj"
+        - "linear_fc1"
+        - "linear_fc2"
+      exclude_modules: []
+      dim: 8
+      alpha: 8
+      dropout: 0.0
+      dropout_position: "post"
+      lora_A_init_method: "xavier"
+      lora_B_init_method: "zero"
+      a2a_experimental: false
+      lora_dtype: null
+
+  dynamic_batching:
+    enabled: false
+    train_mb_tokens: ${policy.max_total_sequence_length}
+    logprob_mb_tokens: ${policy.max_total_sequence_length}
+    sequence_length_round: 64
+
+  sequence_packing:
+    enabled: true
+    train_mb_tokens: ${policy.max_total_sequence_length}
+    logprob_mb_tokens: ${policy.max_total_sequence_length}
+    algorithm: "modified_first_fit_decreasing"
+    sequence_length_round: 64
+
+  make_sequence_length_divisible_by: 32
+  max_grad_norm: 1.0
+  optimizer: null
+  scheduler: null
+
+  generation:
+    backend: "vllm"
+    max_new_tokens: 32768
+    temperature: 1.0
+    top_p: 1.0
+    top_k: null
+    stop_token_ids: null
+    stop_strings: null
+    vllm_cfg:
+      async_engine: false
+      precision: ${policy.precision}
+      tensor_parallel_size: 4
+      pipeline_parallel_size: 1
+      expert_parallel_size: 1
+      gpu_memory_utilization: 0.5
+      max_model_len: ${policy.max_total_sequence_length}
+      enforce_eager: false
+      use_deep_gemm: false
+      kv_cache_dtype: "auto"
+      load_format: "dummy"
+      num_last_layers_in_bf16: 0
+      num_first_layers_in_bf16: 0
+      expose_http_server: true
+      skip_tokenizer_init: false
+      http_server_serving_chat_kwargs:
+        enable_auto_tools: false
+        reasoning_parser_plugin: ${oc.env:GYM_DIR}/cluster/rdkit_no_tool_grpo/reasoning_parsers/nano_v3_reasoning_parser.py
+        reasoning_parser: "nano_v3"
+    vllm_kwargs:
+      compilation_config:
+        backend: eager
+      mamba_ssm_cache_dtype: "float32"
+    colocated:
+      enabled: true
+      resources:
+        gpus_per_node: null
+        num_nodes: null
+
+data:
+  max_input_seq_length: null
+  shuffle: false
+  num_workers: 1
+  use_multiple_dataloader: false
+  train:
+    data_path: cluster/rdkit_no_tool_grpo/data/train.jsonl
+  validation:
+    # NeMo-RL v0.6 does not apply num_val_generations_per_prompt in its
+    # NeMo-Gym validation loop. This file repeats each of 1,000 prompts four
+    # times so the intended 4,000 stochastic validation rollouts are explicit.
+    data_path: cluster/rdkit_no_tool_grpo/data/test_eval4.jsonl
+  default:
+    dataset_name: NemoGymDataset
+    env_name: "nemo_gym"
+    prompt_file: null
+    system_prompt_file: null
+    processor: "nemo_gym_data_processor"
+
+env:
+  should_use_nemo_gym: true
+  should_log_nemo_gym_responses: true
+  nemo_gym:
+    config_paths:
+      - cluster/rdkit_no_tool_grpo/vllm_model_for_training_nano_v3.yaml
+      - cluster/rdkit_no_tool_grpo/rdkit_chemistry_direct.yaml
+    rdkit_chemistry_direct_agent:
+      responses_api_agents:
+        simple_agent:
+          max_steps: 1
+
+logger:
+  log_dir: cluster/rdkit_no_tool_grpo/results/es140_lora/logs
+  num_val_samples_to_print: 0
+  wandb_enabled: true
+  tensorboard_enabled: false
+  mlflow_enabled: false
+  swanlab_enabled: false
+  monitor_gpus: true
+  wandb:
+    project: "RDKit Chemistry RL"
+    entity: ${oc.env:WANDB_ENTITY,nemo-llm-service}
+    name: ${oc.env:WANDB_RUN_NAME,rdkit-nemotron3-nano-grpo-lora-r8-a8-es140-64p16g-i200-lr3e-6-32k-iad-p0-64g}
+    id: ${oc.env:WANDB_RUN_ID,rdkit-nemotron3-nano-grpo-lora-r8-a8-es140-64p16g-i200-lr3e-6-32k-iad-p0-64g}
+    group: ${oc.env:WANDB_GROUP,rdkit-es140-lora-grpo}
+    resume: "allow"
+  tensorboard: {}
+  mlflow:
+    experiment_name: "rdkit-chemistry-grpo"
+    run_name: ${oc.env:WANDB_RUN_NAME,rdkit-no-tool-grpo}
+  gpu_monitoring:
+    collection_interval: 10
+    flush_interval: 10
+
+cluster:
+  gpus_per_node: 8
+  num_nodes: 8
+
+skip_venv_if_present: true
+uv_venv_dir: cluster/rdkit_no_tool_grpo/venvs
