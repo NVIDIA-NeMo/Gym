@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+name: CPU end-to-end test
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  UV_INSTALL_URL: "https://astral.sh/uv/0.11.29/install.sh"
+
+jobs:
+  tool-use:
+    name: CPU tool-use end to end
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      E2E_DIR: ${{ runner.temp }}/nemo-gym-cpu-e2e
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install uv
+        run: |
+          curl -LsSf "$UV_INSTALL_URL" | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Run CPU end-to-end test
+        run: bash tests/e2e/run_cpu_tool_e2e.sh
+
+      - name: Upload test artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cpu-tool-use-e2e-${{ github.run_id }}
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/nemo-gym-cpu-e2e/results/
