@@ -132,6 +132,7 @@ class VerifierResult(BaseModel):
     apply_failed: bool = False
     verifier_exit_code: int | None = None
     verifier_error: str | None = None
+    test_output: str | None = None
     f2p_total: int = 0
     f2p_passed: int = 0
     p2p_total: int = 0
@@ -322,9 +323,6 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
 
         log_dir.mkdir(parents=True, exist_ok=True)
         combined_output = (command_result.stdout or "") + (command_result.stderr or "")
-        stdout_path = log_dir / "test-stdout.txt"
-        stdout_path.write_text(combined_output, encoding="utf-8", errors="replace")
-        await sandbox.upload(stdout_path, "/logs/verifier/test-stdout.txt")
 
         artifact_paths = {
             "reward.json": log_dir / "reward.json",
@@ -341,6 +339,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 reward=0.0,
                 verifier_exit_code=command_result.return_code,
                 verifier_error="Verifier did not produce /logs/verifier/reward.json",
+                test_output=combined_output,
             )
         try:
             reward_data = json.loads(artifact_paths["reward.json"].read_text(encoding="utf-8"))
@@ -350,6 +349,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 reward=0.0,
                 verifier_exit_code=command_result.return_code,
                 verifier_error=f"Invalid verifier reward.json: {error}",
+                test_output=combined_output,
             )
 
         reward = float(reward_data.get("reward", 0.0))
@@ -359,6 +359,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 reward=0.0,
                 verifier_exit_code=command_result.return_code,
                 verifier_error=f"Verifier returned non-binary reward: {reward!r}",
+                test_output=combined_output,
             )
         if not present["ctrf.json"]:
             return VerifierResult(
@@ -366,6 +367,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 reward=0.0,
                 verifier_exit_code=command_result.return_code,
                 verifier_error="Verifier did not produce /logs/verifier/ctrf.json",
+                test_output=combined_output,
             )
 
         return VerifierResult(
@@ -373,6 +375,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             reward=reward,
             apply_failed=bool(reward_data.get("apply_failed", False)),
             verifier_exit_code=command_result.return_code,
+            test_output=combined_output,
             f2p_total=int(reward_data.get("f2p_total", 0)),
             f2p_passed=int(reward_data.get("f2p_passed", 0)),
             p2p_total=int(reward_data.get("p2p_total", 0)),
@@ -490,26 +493,15 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 if sandbox is not None:
                     await self._stop_sandbox(sandbox, task_id=current_task_id, phase="verifier")
 
-        if self.config.clear_verifier_logs and result.evaluation_completed:
+        if self.config.clear_verifier_logs:
             rmtree(str(log_dir), ignore_errors=True)
 
         return DeepSWEVerifyResponse.model_validate(
             body.model_dump()
+            | result.model_dump()
             | {
-                "reward": result.reward,
                 "task_id": current_task_id,
                 "sandbox_handle": sandbox_handle,
-                "evaluation_completed": result.evaluation_completed,
-                "apply_failed": result.apply_failed,
-                "verifier_exit_code": result.verifier_exit_code,
-                "verifier_error": result.verifier_error,
-                "f2p_total": result.f2p_total,
-                "f2p_passed": result.f2p_passed,
-                "p2p_total": result.p2p_total,
-                "p2p_passed": result.p2p_passed,
-                "f2p": result.f2p,
-                "p2p": result.p2p,
-                "partial": result.partial,
                 "model_patch": model_patch.decode("utf-8", errors="replace")
                 if self.config.include_model_patch_in_response
                 else None,
