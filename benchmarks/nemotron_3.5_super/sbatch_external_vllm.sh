@@ -9,6 +9,95 @@ MODEL=$MODEL
 CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
 VLLM_CONFIG=$VLLM_CONFIG
+SBATCH_EXCLUDE=${SBATCH_EXCLUDE:-}
+SBATCH_TIME=${SBATCH_TIME:-04:00:00}
+# Optionally bound full-rollout concurrency after measuring adapter and model-server backpressure.
+# When unset, preserve Gym's existing configured/default behavior.
+NUM_SAMPLES_IN_PARALLEL=${NUM_SAMPLES_IN_PARALLEL:-}
+NUM_SAMPLES_IN_PARALLEL_ARG=""
+# Opt in to a stable per-experiment output path and Gym's task-index cache so
+# requeued or freshly resubmitted jobs continue unfinished rollouts.
+RESUME_EVAL_ON_REQUEUE=${RESUME_EVAL_ON_REQUEUE:-0}
+RESUME_FROM_CACHE_ARG=""
+# Optionally override main's cache-aware decode routing policy.
+VLLM_DECODE_POLICY=${VLLM_DECODE_POLICY:-}
+# auto uses NUM_NODES when sbatch advertises --segment; none omits it; a positive integer overrides it.
+VLLM_SLURM_SEGMENT=${VLLM_SLURM_SEGMENT:-auto}
+export UCX_NET_DEVICES="${UCX_NET_DEVICES:-mlx5_0:1}"
+
+if [[ -n "$NUM_SAMPLES_IN_PARALLEL" ]]; then
+    if [[ ! "$NUM_SAMPLES_IN_PARALLEL" =~ ^[1-9][0-9]*$ ]]; then
+        echo "ERROR: NUM_SAMPLES_IN_PARALLEL must be a positive integer; got '$NUM_SAMPLES_IN_PARALLEL'." >&2
+        exit 1
+    fi
+    NUM_SAMPLES_IN_PARALLEL_ARG="++num_samples_in_parallel=$NUM_SAMPLES_IN_PARALLEL"
+fi
+
+case "$RESUME_EVAL_ON_REQUEUE" in
+    0)
+        ;;
+    1)
+        RESUME_FROM_CACHE_ARG="++resume_from_cache=true"
+        ;;
+    *)
+        echo "ERROR: RESUME_EVAL_ON_REQUEUE must be 0 or 1; got '$RESUME_EVAL_ON_REQUEUE'." >&2
+        exit 1
+        ;;
+esac
+
+case "$VLLM_DECODE_POLICY" in
+    ""|random|round_robin|cache_aware|power_of_two|consistent_hash)
+        ;;
+    *)
+        echo "ERROR: VLLM_DECODE_POLICY must be random, round_robin, cache_aware, power_of_two, consistent_hash, or empty; got '$VLLM_DECODE_POLICY'." >&2
+        exit 1
+        ;;
+esac
+
+SBATCH_EXCLUDE_ARGS=()
+if [[ -n "$SBATCH_EXCLUDE" ]]; then
+    # Exclusion lists can outlive cluster topology changes. Revalidate immediately before
+    # submission so stale node names do not make sbatch reject the entire job.
+    if ! requested_excludes=$(scontrol show hostnames "$SBATCH_EXCLUDE"); then
+        echo "ERROR: Could not expand SBATCH_EXCLUDE='$SBATCH_EXCLUDE'." >&2
+        exit 1
+    fi
+
+    if ! cluster_nodes=$(scontrol show nodes --oneliner); then
+        echo "ERROR: Could not query Slurm's node inventory." >&2
+        exit 1
+    fi
+
+    declare -A cluster_node_set=()
+    while IFS= read -r node_record; do
+        node=${node_record#NodeName=}
+        node=${node%% *}
+        [[ -n "$node" ]] && cluster_node_set["$node"]=1
+    done <<< "$cluster_nodes"
+
+    valid_excludes=()
+    stale_excludes=()
+    while IFS= read -r node; do
+        [[ -z "$node" ]] && continue
+        if [[ -n "${cluster_node_set[$node]:-}" ]]; then
+            valid_excludes+=("$node")
+        else
+            stale_excludes+=("$node")
+        fi
+    done <<< "$requested_excludes"
+
+    if (( ${#stale_excludes[@]} )); then
+        stale_excludes_csv=$(IFS=,; echo "${stale_excludes[*]}")
+        echo "WARNING: Ignoring exclusions absent from Slurm's current node inventory: $stale_excludes_csv" >&2
+    fi
+    if (( ${#valid_excludes[@]} )); then
+        valid_excludes_csv=$(IFS=,; echo "${valid_excludes[*]}")
+        echo "Using ${#valid_excludes[@]} valid node exclusions."
+        SBATCH_EXCLUDE_ARGS+=(--exclude="$valid_excludes_csv")
+    else
+        echo "WARNING: No requested node exclusions exist in Slurm's current node inventory." >&2
+    fi
+fi
 
 should_run_eval=$(( $# > 0 ))
 if (( should_run_eval )); then
@@ -40,7 +129,11 @@ cd /opt/Gym
 
 gym eval prepare $@ +use_cached_prepared_benchmarks=true
 
-experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%d_%H%M%S)
+if (( $RESUME_EVAL_ON_REQUEUE )); then
+    experiment_name=$EXPERIMENT_NAME/resumable
+else
+    experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%d_%H%M%S)
+fi
 # +uv_venv_dir=/opt/uv_venvs is from the container.
 # +skip_venv_if_present=true will reuse the venvs baked into the container if possible.
 # ++use_absolute_ip=true: Necessary for communication between harness in sandbox and Gym model servers
@@ -59,10 +152,11 @@ gym eval run \
     ++split=benchmark \
     ++use_absolute_ip=true \
     ++reuse_existing_data_preparation=true \
+    $RESUME_FROM_CACHE_ARG \
     ++policy_base_url=http://\$(getent hosts "\$ROUTER_NODE" | awk 'NR == 1 {print \$1}'):$ROUTER_SERVER_PORT/v1 \
     ++policy_api_key=dummy_api_key \
     ++policy_model_name=$MODEL \
-    ++upload_rollouts=false \
+    ++upload_rollouts=false $NUM_SAMPLES_IN_PARALLEL_ARG \
     ++global_aiohttp_connector_limit_per_host=16384 \
     ++port_range_low=63000 \
     ++port_range_high=64000
@@ -94,10 +188,10 @@ export VLLM_SSM_CONV_STATE_LAYOUT=DS
 export VLLM_USE_FASTOKENS=1
 
 # NIXL uses UCX for cross-node KV transfer. Explicitly enable UCX's CUDA
-# transports and the GB200 InfiniBand interface; otherwise UCX treats VRAM as
-# host memory and NIXL KV-cache registration fails with NIXL_ERR_BACKEND.
+# transports and the selected InfiniBand/RoCE interface; otherwise UCX treats
+# VRAM as host memory and NIXL KV-cache registration fails with NIXL_ERR_BACKEND.
 export UCX_TLS=rc_x,rc,cuda_copy,cuda_ipc
-export UCX_NET_DEVICES=mlx5_0:1
+export UCX_NET_DEVICES="\${UCX_NET_DEVICES:-mlx5_0:1}"
 export UCX_IB_ADDR_TYPE=eth
 export UCX_RNDV_SCHEME=get_zcopy
 export UCX_RNDV_THRESH=0
@@ -113,7 +207,7 @@ if (( SLURM_PROCID == 0 )); then
     # Don't manually wait as vllm-router will wait for the URLs to come up
     router_args=( \
         --prefill-policy cache_aware \
-        --decode-policy cache_aware \
+        --decode-policy "${VLLM_DECODE_POLICY:-cache_aware}" \
         --vllm-pd-disaggregation \
         --host \$this_node_hostname \
         --port $ROUTER_SERVER_PORT \
@@ -156,6 +250,25 @@ EOF
 )
 
 NUM_NODES=$((NUM_PREFILL_NODES + NUM_DECODE_NODES))
+SBATCH_SEGMENT_ARGS=()
+case "$VLLM_SLURM_SEGMENT" in
+    auto)
+        sbatch_help=$(sbatch --help 2>&1)
+        if [[ "$sbatch_help" == *"--segment"* ]]; then
+            SBATCH_SEGMENT_ARGS+=(--segment="$NUM_NODES")
+        fi
+        ;;
+    none)
+        ;;
+    *)
+        if [[ ! "$VLLM_SLURM_SEGMENT" =~ ^[1-9][0-9]*$ ]]; then
+            echo "ERROR: VLLM_SLURM_SEGMENT must be auto, none, or a positive integer." >&2
+            exit 2
+        fi
+        SBATCH_SEGMENT_ARGS+=(--segment="$VLLM_SLURM_SEGMENT")
+        ;;
+esac
+
 batch_command=$(cat <<EOF
 set -euo pipefail
 
@@ -163,6 +276,7 @@ nodes=(\$(scontrol show hostnames "\$SLURM_JOB_NODELIST"))
 
 ALL_NODES="\${nodes[*]}" \
 srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 \
+    --kill-on-bad-exit=1 \
     --container-image=$CONTAINER \
     --container-name=container-on-node \
     --container-mounts=$MOUNTS \
@@ -231,16 +345,19 @@ wait "\$server_step"
 EOF
 )
 
-# --segment > 0 otherwise the engine will hang on the second or third engine step.
+# Some Slurm deployments need --segment > 0 to avoid engine hangs, while
+# upstream Slurm does not provide the option. Auto-detection preserves that
+# behavior and omits the argument when the local sbatch does not advertise it.
 VLLM_PD_WORKLOAD="$command" \
 EVAL_COMMAND="$EVAL_COMMAND" \
 VLLM_PD_BATCH_COMMAND="$batch_command" \
 sbatch \
     --nodes=$NUM_NODES \
-    --time=04:00:00 \
+    --time="$SBATCH_TIME" \
+    "${SBATCH_EXCLUDE_ARGS[@]}" \
+    "${SBATCH_SEGMENT_ARGS[@]}" \
     --job-name=gym-$EXPERIMENT_NAME-$USER \
     --output=slurm-logs/%j-%x.log \
     --ntasks-per-node=1 \
     --exclusive \
-    --segment=$NUM_NODES \
     --wrap 'exec bash -lc "$VLLM_PD_BATCH_COMMAND"'

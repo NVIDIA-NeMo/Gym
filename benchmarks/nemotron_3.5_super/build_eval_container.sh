@@ -30,7 +30,8 @@ set -xeuo pipefail
 # Hardlink, not clone to save space
 export UV_LINK_MODE=hardlink
 
-uv pip install --system vllm-router
+# The shared vLLM launcher enables VLLM_USE_FASTOKENS=1, so install Fastokens into the system vLLM environment.
+uv pip install --system "fastokens>=0.2.0" vllm-router
 
 apt-get update
 apt-get install -y --no-install-recommends \
@@ -52,6 +53,9 @@ git fetch origin $NEMO_GYM_GIT_REF
 git checkout $NEMO_GYM_GIT_REF
 
 uv sync --active
+# Ensure Gym's profiling dependency is available in the runtime environment.
+uv pip install "gprof2dot==2025.4.14"
+python -c 'import gprof2dot'
 
 ########################################
 # START Benchmark specific preparation
