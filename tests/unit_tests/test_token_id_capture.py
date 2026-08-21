@@ -1331,17 +1331,26 @@ async def test_file_lineage_appends_without_rewriting_prior_records(tmp_path):
 async def test_file_lineage_concurrent_idempotent_publication_stays_unique(tmp_path):
     request = [{"role": "user", "content": "hello"}]
     response = [{"role": "assistant", "content": "hi"}]
-    writers = [FileLineageStore(tmp_path) for _ in range(4)]
-
-    await asyncio.gather(
-        *(writer.record("shared-race", "call-1", request, response, [1, 2, 3], "digest-1") for writer in writers)
+    entry = TokenEntry(
+        rollout_id="shared-race",
+        model_call_id="call-1",
+        prompt_token_ids=[1, 2],
+        generation_token_ids=[3],
+        generation_log_probs=[-0.1],
+        output_items=response,
     )
+    stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
+    stamp_continuation(entry, request)
+    writers = [TokenCaptureStore(tmp_path) for _ in range(4)]
+
+    await asyncio.gather(*(asyncio.to_thread(writer.append, entry) for writer in writers))
 
     parent = await FileLineageStore(tmp_path).resolve(
         "shared-race", request + response + [{"role": "user", "content": "next"}]
     )
-    assert parent is not None
-    assert parent.model_call_id == "call-1"
+    assert parent.status == ParentResolutionStatus.RESOLVED
+    assert parent.match is not None and parent.match.model_call_id == "call-1"
+    assert len((tmp_path / "shared-race.tokens.jsonl").read_text().splitlines()) == 1
 
 
 async def test_file_lineage_resolves_across_spawned_worker_processes(tmp_path):
