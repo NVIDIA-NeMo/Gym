@@ -72,6 +72,7 @@ from nemo_gym.token_id_capture.sink import (
     capture_tokens,
     commit_entry,
     current_capture_context,
+    register_call_intent,
     reset_token_sink,
     set_token_sink,
 )
@@ -98,6 +99,7 @@ __all__ = [
     "CaptureContext",
     "set_token_sink",
     "reset_token_sink",
+    "register_call_intent",
     "capture_tokens",
     "commit_entry",
     "current_capture_context",

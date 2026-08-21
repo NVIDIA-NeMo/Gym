@@ -72,6 +72,7 @@ from nemo_gym.token_id_capture import (
     CaptureContext,
     capture_tokens,
     installed_token_sink,
+    register_call_intent,
     reset_token_sink,
     set_token_sink,
 )
@@ -209,6 +210,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # chat_completions() signatures vary across servers: some take a leading `request`, some
         # only `body`. Dispatch on whichever this server declares so the shared dispatch works for
         # all of them.
+        await register_call_intent()
         if "request" in inspect.signature(self.chat_completions).parameters:
             completion = await self.chat_completions(request=request, body=params)
         else:
@@ -242,6 +244,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # responses() signatures vary across servers: some take a leading `request`, some only
         # `body`. Dispatch on whichever this server declares so the default messages() works for
         # all of them.
+        await register_call_intent()
         if "request" in inspect.signature(self.responses).parameters:
             response = await self.responses(request=request, body=params)
         else:
@@ -1107,6 +1110,19 @@ class _CaptureMiddleware:
         # Installed sinks are resolved for each request.
         token_sink = self._configured_sink or installed_token_sink() or self._token_store
         capture_wanted = token_capture_requested and (token_sink is not None or self._token_capture_enabled)
+        if token_capture_requested and dialect is None and token_sink is not None:
+            # This call cannot produce a capture record.
+            # Its output may still feed a later prompt.
+            # Mark the rollout incomplete before forwarding the request.
+            try:
+                await token_sink.mark_incomplete(rollout_from_path, "")
+            except Exception:
+                logger.warning(
+                    "Could not mark rollout %s incomplete for unobserved path %s.",
+                    rollout_from_path,
+                    path,
+                    exc_info=True,
+                )
         if (self._store is None and not capture_wanted) or rollout_from_path is None or dialect is None:
             await self._app(scope, receive, send)
             return

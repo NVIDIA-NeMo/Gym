@@ -105,6 +105,10 @@ class TokenIdCaptureSettings(BaseModel):
     # Finalization does not retire the frozen snapshot.
     # Durable delivery permits retirement by snapshot id and version.
     rebuild_response: bool = True
+    # Abort once enough finalized rollouts exceed this masked fraction.
+    # ``None`` disables the limit.
+    max_mask_fraction: float | None = None
+    mask_fraction_min_samples: int = 50
 
 
 class TokenIdCaptureConfig(BaseModel):

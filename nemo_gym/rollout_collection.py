@@ -94,6 +94,7 @@ from nemo_gym.token_id_capture import (
 )
 from nemo_gym.token_id_capture.config import token_id_capture_enabled_for_agent
 from nemo_gym.token_id_capture.delivery import (
+    MASK_SAMPLE_KEY,
     capture_build_can_retire,
     finalize_rollout_token_capture,
     retire_rollout_token_capture,
@@ -845,6 +846,12 @@ class RolloutCollectionHelper(BaseModel):
             print("Clearing existing token captures for rollouts being dispatched")
             clear_token_captures_for_rollouts(token_capture_rows, token_capture_dirs)
 
+        # Stop a run that produces mostly masked captures.
+        finalized_count = 0
+        masked_count = 0
+        mask_reasons: Counter = Counter()
+        warned_malformed_rollout_id = False
+
         # Intermediate status printing
         pcts_to_print = list(range(1, 100)) + [99.5]
         agent_name_to_metrics = defaultdict(Counter)
@@ -891,6 +898,32 @@ class RolloutCollectionHelper(BaseModel):
                 (row.get(AGENT_REF_KEY_NAME) or {}).get("name"),
             ):
                 token_capture_build = await finalize_rollout_token_capture(result, token_source)
+                if token_capture_build is not None:
+                    finalized_count += 1
+                    if token_capture_build.get(MASK_SAMPLE_KEY):
+                        masked_count += 1
+                        # Aggregate available reasons for the abort message.
+                        build_metrics = token_capture_build.get("metrics") or {}
+                        if build_metrics.get("capture_incomplete"):
+                            mask_reasons["capture_incomplete"] += 1
+                        if build_metrics.get("unresolved_parent_calls"):
+                            mask_reasons["unresolved_parent_calls"] += 1
+                        build_error = token_capture_build.get("error") or build_metrics.get("error")
+                        if build_error:
+                            mask_reasons[str(build_error)] += 1
+                    settings = token_capture_config.token_id_capture
+                    if (
+                        settings.max_mask_fraction is not None
+                        and finalized_count >= settings.mask_fraction_min_samples
+                        and masked_count / finalized_count > settings.max_mask_fraction
+                    ):
+                        raise RuntimeError(
+                            f"{masked_count}/{finalized_count} finalized rollouts "
+                            f"({masked_count / finalized_count:.1%}) are masked, exceeding "
+                            f"token_id_capture.max_mask_fraction={settings.max_mask_fraction}. "
+                            f"Mask reasons: {dict(mask_reasons)}. Aborting instead of collecting "
+                            "mostly token-less data."
+                        )
 
             no_persist = bool(result.get(NG_NO_PERSIST_KEY))
             failure_class = result.get(NG_FAILURE_CLASS_KEY)
@@ -914,7 +947,18 @@ class RolloutCollectionHelper(BaseModel):
                 results_file.flush()
                 persisted_rows.append(row)
                 persisted_results.append(result)
-                rollout_id = maybe_rollout_id_from_run_body(result)
+                try:
+                    rollout_id = maybe_rollout_id_from_run_body(result)
+                except (TypeError, ValueError) as error:
+                    # Preserve capture evidence when the rollout id is invalid.
+                    rollout_id = None
+                    if not warned_malformed_rollout_id:
+                        warned_malformed_rollout_id = True
+                        warnings.warn(
+                            f"a result carries a malformed rollout id ({error}); "
+                            "its token capture will not be retired.",
+                            stacklevel=2,
+                        )
                 if rollout_id is not None and capture_build_can_retire(token_capture_build):
                     os.fsync(results_file.fileno())
                     await retire_rollout_token_capture(rollout_id, token_source, token_capture_build)

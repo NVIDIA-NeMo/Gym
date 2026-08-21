@@ -103,10 +103,21 @@ async def finalize_rollout_token_capture(result: dict, source: TokenSource | Non
     if source is None:
         return None
 
-    rollout_id = maybe_rollout_id_from_run_body(result)
+    try:
+        rollout_id = maybe_rollout_id_from_run_body(result)
+    except (TypeError, ValueError) as error:
+        # A malformed explicit id cannot be looked up.
+        # Mask the rollout instead of raising.
+        return _unusable(
+            result,
+            f"malformed rollout id: {error}",
+            f"a rollout result carries a malformed id ({error}), so its recorded token ids could "
+            "not be looked up and it will be token-less.",
+        )
     if rollout_carries_token_ids(result):
-        # A second finalization of a rebuilt rollout reuses the first build.
-        if TOKEN_CAPTURE_KEY in result or rollout_id is None:
+        # Re-finalization must return the frozen snapshot.
+        # The caller must be able to retire on every path.
+        if rollout_id is None:
             return None
         try:
             snapshot = await source.freeze(rollout_id)
