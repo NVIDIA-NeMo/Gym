@@ -1,0 +1,22 @@
+# Chain to existing resource server + agent config
+config_paths:
+  - resources_servers/math_with_autograder/configs/math_with_autograder.yaml
+  - resources_servers/math_with_autograder/configs/math_with_autograder_nemotron3ultra.yaml
+
+# Symbolic-first grading with an autograder LLM fallback; see README.md for
+# how it compares against MathArena's own labels.
+arxivmath_0526_math_with_autograder_resources_server:
+  _inherit_from: math_with_autograder
+
+arxivmath_0526_math_with_autograder_simple_agent:
+  _inherit_from: math_with_autograder_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: arxivmath_0526_math_with_autograder_resources_server
+      datasets:
+      - name: arxivmath_0526
+        type: benchmark
+        jsonl_fpath: benchmarks/arxivmath_0526/data/arxivmath_0526_withsys.jsonl
+        prompt_config: benchmarks/arxivmath_0526/prompts/with_system.yaml
+        prepare_script: benchmarks/arxivmath_0526/prepare.py
