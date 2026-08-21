@@ -1431,6 +1431,18 @@ class TestListEnvironmentsRouting:
         assert target == "nemo_gym.cli.env:list_environments"
         assert overrides == ["+json=true"]
 
+    def test_list_benchmarks_unknown_name_uses_benchmark_noun(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        # One end-to-end smoke over the real router and catalog; the kind-scoping rules themselves are
+        # asserted against a synthetic catalog in tests/unit_tests/test_cli.py::TestListEnvironments.
+        # Substring, not equality: rich wraps to the console width and colorizes when FORCE_COLOR is set.
+        monkeypatch.setattr(sys, "argv", ["gym", "list", "benchmarks", "gsm8kk"])
+
+        with pytest.raises(SystemExit) as error:
+            main()
+
+        assert error.value.code == 1
+        assert "Unknown benchmark 'gsm8kk'" in " ".join(capsys.readouterr().out.split())
+
     def test_catalog_filters_translate_to_reserved_keys(self, monkeypatch: MonkeyPatch) -> None:
         target, overrides = _dispatch_for(
             monkeypatch,
