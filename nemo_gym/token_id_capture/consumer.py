@@ -141,6 +141,7 @@ def _assemble(
         "generated_tokens_captured": notes.generated_tokens_captured,
         "generated_tokens_delivered": notes.generated_tokens_delivered,
         "parent_link_failures": dict(notes.parent_link_failures),
+        "unresolved_parent_calls": len(notes.unresolved_parent_calls),
         # Calls without generated tokens have no training signal.
         # A nonzero count can indicate an output-budget or content-filter cutoff.
         "empty_generation_calls": len(notes.empty_generation_calls),
@@ -153,8 +154,12 @@ def _assemble(
         "metrics": metrics,
         # A retry of the final call can leave two plausible generations.
         # Mask the rollout when the client-selected generation is unknown.
-        "mask_sample": bool(unresolved) or notes.roots != 1 or notes.chains != 1,
+        "mask_sample": bool(unresolved)
+        or bool(notes.unresolved_parent_calls)
+        or notes.roots != 1
+        or notes.chains != 1,
         "unresolved_retries": list(unresolved),
+        "unresolved_parent_calls": list(notes.unresolved_parent_calls),
     }
 
 

@@ -23,7 +23,6 @@ The snapshot includes entries and incomplete state.
 Its ``snapshot_id`` identifies the exact frozen state.
 ``TokenCaptureStore`` is Gym's local sink and source implementation.
 Framework transports may provide their own sink and source.
-There is no HTTP token reader.
 This leaf package avoids imports from Gym's server stack.
 The rollout-record finalizer needs Gym's server stack.
 It is deliberately not re-exported here.
@@ -59,9 +58,11 @@ from nemo_gym.token_id_capture.lineage import (
     RolloutLineage,
     assistant_fingerprint,
     canonicalize_tool_arguments,
+    stamp_continuation,
 )
 from nemo_gym.token_id_capture.protocols import (
     LineageMatch,
+    LineageResolution,
     LineageStore,
     TokenCaptureSnapshot,
     TokenSink,
@@ -76,6 +77,7 @@ from nemo_gym.token_id_capture.protocols import (
 from nemo_gym.token_id_capture.records import (
     TOKEN_ENTRY_RECORD_SCHEMA_VERSION,
     TOKEN_FIELDS,
+    ParentResolutionStatus,
     TokenEntry,
     compute_digest,
     cumulative_tokens,
@@ -101,6 +103,7 @@ __all__ = [
     "TokenEntry",
     "TOKEN_ENTRY_RECORD_SCHEMA_VERSION",
     "TOKEN_FIELDS",
+    "ParentResolutionStatus",
     "extract_token_fields",
     "compute_digest",
     "cumulative_tokens",
@@ -111,6 +114,7 @@ __all__ = [
     "TokenSink",
     "TokenSource",
     "LineageMatch",
+    "LineageResolution",
     "LineageStore",
     "install_lineage_store",
     "installed_lineage_store",
@@ -132,6 +136,7 @@ __all__ = [
     "LineageIndex",
     "RolloutLineage",
     "assistant_fingerprint",
+    "stamp_continuation",
     "per_request",
     "prefix_merging",
     "project_chain_to_output_items",

@@ -43,7 +43,6 @@ A configured sink replaces the file store.
 Consumers construct and inject their ``TokenSource`` in their own process.
 Consumers call ``TokenSource.freeze`` to obtain an atomic snapshot.
 Consumers retire that exact snapshot with its ``snapshot_id`` and version.
-There is no HTTP token reader.
 Uvicorn workers use spawned processes.
 They do not inherit a sink installed by a launcher.
 Configure the sink here so each worker builds its own.
@@ -102,7 +101,8 @@ class TokenIdCaptureSettings(BaseModel):
     # A real transport needs explicit endpoint, client, or credential wiring.
     # Use ``${oc.env:VAR}`` for secrets instead of writing them here.
     sink_kwargs: dict[str, Any] = Field(default_factory=dict)
-    # Optional process-shared request-time lineage supplied by a framework.
+    # Optional process-shared resolver over entries committed by the sink.
+    # Both clients must use the same backend namespace.
     lineage_store: str | None = None
     lineage_store_kwargs: dict[str, Any] = Field(default_factory=dict)
     # Whether Gym freezes capture records and rebuilds the response.
