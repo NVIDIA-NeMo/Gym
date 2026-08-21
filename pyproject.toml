@@ -181,9 +181,16 @@ dependencies = [
     "datasets",
 
     # orjson: JSON library for faster serialization/deserialization
-    # Updated: Thu Jan 08, 2026 with orjson==3.11.3
+    # orjson<3.11.6 does not limit recursion for deeply nested JSON documents (GHSA-hx9q-6w63-j58v).
+    # Updated: Thu Aug 20, 2026 with orjson>=3.11.6
     # License: Apache 2.0 https://github.com/ijl/orjson/blob/fb3eb1f729c7e7b019f780af5695722c99c7c695/LICENSE-APACHE
-    "orjson",
+    "orjson>=3.11.6",
+
+    # msgpack: MessagePack serialization library (transitive dependency, pinned for security)
+    # msgpack<1.2.1 has an out-of-bounds read/crash on Unpacker reuse after a caught error (GHSA-6v7p-g79w-8964).
+    # Updated: Thu Aug 20, 2026 with msgpack>=1.2.1
+    # License: Apache 2.0 https://github.com/msgpack/msgpack-python/blob/main/COPYING
+    "msgpack>=1.2.1",
 
     # urllib3: HTTP client library (transitive dependency, pinned for security)
     # Updated: Mon May 19, 2026 with urllib3>=2.7.0
@@ -196,9 +203,11 @@ dependencies = [
     "fonttools>=4.60.2",
 
     # python-multipart: Streaming multipart parser (transitive dependency, pinned for security)
-    # Updated: Mon Feb 10, 2026 with python-multipart>=0.0.22
+    # python-multipart<0.0.30 has quadratic-time querystring parsing with semicolon separators,
+    # causing CPU denial of service (GHSA-5rvq-cxj2-64vf).
+    # Updated: Thu Aug 20, 2026 with python-multipart>=0.0.30
     # License: Apache 2.0 https://github.com/andrew-d/python-multipart/blob/master/LICENSE.txt
-    "python-multipart>=0.0.22",
+    "python-multipart>=0.0.30",
 
     # pyarrow: columnar data library (transitive dependency via mlflow, pinned for security)
     # mlflow caps pyarrow<25; versions >=23.0.1 have cp313 wheels and address use-after-free.
@@ -207,9 +216,14 @@ dependencies = [
     "pyarrow>=23.0.1",
 
     # wandb: E2E rollout collection data and metrics upload
-    # Updated: Mon May 19, 2026 with wandb==0.27.0
+    # Capped at <=0.27.1 pending validation of newer releases on this branch. NOTE: this does NOT
+    # remediate GHSA-f5wc-c3c7-36mc / GHSA-89gr-r52h-f8rx / GHSA-5cgq-3rg8-m6cv (golang.org/x/crypto
+    # bundled in the wandb-core binary) -- wandb has not shipped a wandb-core rebuild with an
+    # updated golang.org/x/crypto within the 0.27.x line as of this update. Track upstream and
+    # revisit the cap to pick up the fix.
+    # Updated: Thu Aug 20, 2026 with wandb>=0.27.0,<=0.27.1
     # License: MIT https://github.com/wandb/wandb/blob/f8acf479342b6aa8217dd0833bb32190b11c14bc/LICENSE
-    "wandb",
+    "wandb>=0.27.0,<=0.27.1",
 
     # GitPython: Git interaction library (transitive dependency of wandb, pinned for security)
     # Updated: Mon Aug 04, 2026 with GitPython>=3.1.57
