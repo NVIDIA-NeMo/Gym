@@ -2,6 +2,7 @@
 swebench_resources_server:          # instance name — how agents/CLI refer to this server
   resources_servers:                              # server type: resources_servers | responses_api_agents | responses_api_models
     swebench:                        # implementation directory under resources_servers/
+      requires_agent: [opencode_sandboxed_agent]
       entrypoint: app.py                        # server entry module
       domain: other                             # task domain; one of: math, coding, agent, knowledge,
                                                 #   instruction_following, long_context, safety, games, translation,

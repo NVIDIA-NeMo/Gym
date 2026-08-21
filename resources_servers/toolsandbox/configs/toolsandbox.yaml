@@ -25,6 +25,7 @@ config_paths:
 toolsandbox:
   resources_servers:
     toolsandbox:
+      requires_agent: [toolsandbox_agent]
       entrypoint: app.py
       domain: agent
       verified: false

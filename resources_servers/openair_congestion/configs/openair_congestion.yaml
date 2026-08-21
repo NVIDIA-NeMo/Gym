@@ -9,6 +9,7 @@ openair_congestion:
     # Inner key must equal the on-disk dir name; entrypoint resolves relative
     # to resources_servers/openair_congestion/.
     openair_congestion:
+      requires_agent: [gymnasium_agent]
       entrypoint: app.py
       domain: agent
       verified: false

@@ -1,6 +1,7 @@
 gsm8k_aviary_resources_server:
   resources_servers:
     aviary:
+      requires_agent: [aviary_agent]
       entrypoint: gsm8k_app.py
       domain: math
       verified: false

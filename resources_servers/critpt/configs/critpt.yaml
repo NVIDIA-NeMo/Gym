@@ -4,6 +4,7 @@ config_paths:
 critpt_resources_server:
   resources_servers:
     critpt:
+      requires_agent: [critpt_agent]
       entrypoint: app.py
       domain: other
       api_key: ${oc.select:artificial_analysis_api_key,null}

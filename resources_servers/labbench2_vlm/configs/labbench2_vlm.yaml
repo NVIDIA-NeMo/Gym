@@ -1,6 +1,7 @@
 labbench2_vlm:
   resources_servers:
     labbench2_vlm:
+      requires_agent: [labbench2_vlm_agent]
       entrypoint: app.py
       domain: knowledge
       verified: false

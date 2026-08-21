@@ -1,6 +1,7 @@
 grl_sokoban:
   resources_servers:
     grl_sokoban:
+      requires_agent: [gymnasium_agent]
       entrypoint: app.py
       domain: games
       verified: false

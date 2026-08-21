@@ -1,6 +1,7 @@
 search_pivot_single_step_tool_use_with_argument_comparison_resources_server:
   resources_servers:
     single_step_tool_use_with_argument_comparison:
+      requires_agent: [tool_simulation_agent]
       entrypoint: app.py
       domain: agent
       tool_call_comparator_config:

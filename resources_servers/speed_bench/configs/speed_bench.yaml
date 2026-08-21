@@ -1,6 +1,7 @@
 speed_bench_resources_server:
   resources_servers:
     speed_bench:
+      requires_agent: [speed_bench_agent]
       entrypoint: app.py
       domain: other
       verified: false
