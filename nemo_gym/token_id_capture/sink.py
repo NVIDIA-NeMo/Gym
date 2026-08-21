@@ -29,13 +29,14 @@ from __future__ import annotations
 import logging
 import time
 from contextvars import ContextVar, Token
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
-from nemo_gym.token_id_capture.protocols import LineageStore, TokenSink
+from nemo_gym.token_id_capture.lineage import assistant_fingerprint, stamp_continuation
+from nemo_gym.token_id_capture.protocols import LineageMatch, LineageResolution, LineageStore, TokenSink
 from nemo_gym.token_id_capture.records import (
+    ParentResolutionStatus,
     TokenEntry,
-    cumulative_tokens,
     extract_token_fields,
     response_to_output_items,
     stamp_lineage,
@@ -65,12 +66,18 @@ class CaptureContext:
     # ``commit_entry`` sets this after another capture path records the call.
     committed: bool = False
     # Resolve the parent once before dispatch.
-    # Downstream inference consumes ``parent_tokens`` for exact prefix supply.
-    # Capture reuses the same parent decision.
-    # ``parent_resolved`` distinguishes a miss from an unresolved request.
-    parent_resolved: bool = False
-    parent_call_id: str | None = None
-    parent_tokens: list[int] = field(default_factory=list)
+    # Downstream inference and capture share this immutable decision.
+    parent_resolution: LineageResolution | None = None
+
+    @property
+    def parent_call_id(self) -> str | None:
+        match = self.parent_resolution.match if self.parent_resolution is not None else None
+        return match.model_call_id if match is not None else None
+
+    @property
+    def parent_tokens(self) -> list[int]:
+        match = self.parent_resolution.match if self.parent_resolution is not None else None
+        return list(match.cumulative_token_ids) if match is not None else []
 
 
 _CAPTURE_CONTEXT: ContextVar[CaptureContext | None] = ContextVar("nemo_gym_capture_context", default=None)
@@ -118,18 +125,24 @@ async def resolve_parent(request_messages: list | None) -> None:
     A miss leaves the parent link unset.
     """
     context = _CAPTURE_CONTEXT.get()
-    if context is None or request_messages is None or context.lineage_store is None:
+    if context is None or request_messages is None:
         return
-    context.parent_resolved = True
     try:
-        parent = await context.lineage_store.resolve(context.rollout_id, request_messages)
+        if not assistant_fingerprint(request_messages):
+            context.parent_resolution = LineageResolution(ParentResolutionStatus.ROOT)
+        elif context.lineage_store is None:
+            context.parent_resolution = LineageResolution(
+                ParentResolutionStatus.UNRESOLVED,
+                reason="resolver_unavailable",
+            )
+        else:
+            context.parent_resolution = await context.lineage_store.resolve(context.rollout_id, request_messages)
     except Exception:
         logger.warning("Could not resolve a parent for rollout %s.", context.rollout_id, exc_info=True)
-        return
-    if parent is None:
-        return
-    context.parent_call_id = parent.model_call_id
-    context.parent_tokens = list(parent.cumulative_token_ids)
+        context.parent_resolution = LineageResolution(
+            ParentResolutionStatus.UNRESOLVED,
+            reason="lookup_error",
+        )
 
 
 async def capture_tokens(
@@ -166,14 +179,20 @@ async def capture_tokens(
         # Store token arrays only on the entry.
         content_items, token_item_index = strip_token_fields(response_to_output_items(payload))
         # Reuse the parent selected before dispatch.
-        # This keeps exact prefix supply and the recorded parent link consistent.
         # Resolve here only when the caller skipped the pre-dispatch step.
-        if parent_call_id is None:
-            if context.parent_resolved:
-                parent_call_id = context.parent_call_id
-            elif request_messages is not None and context.lineage_store is not None:
-                parent = await context.lineage_store.resolve(context.rollout_id, request_messages)
-                parent_call_id = parent.model_call_id if parent is not None else None
+        if context.parent_resolution is None and request_messages is not None:
+            await resolve_parent(request_messages)
+        resolution = context.parent_resolution
+        if parent_call_id is not None:
+            resolution = LineageResolution(
+                ParentResolutionStatus.RESOLVED,
+                match=LineageMatch(parent_call_id, (), ""),
+            )
+        if resolution is None:
+            resolution = LineageResolution(
+                ParentResolutionStatus.UNRESOLVED,
+                reason="not_attempted",
+            )
         entry = TokenEntry(
             rollout_id=context.rollout_id,
             model_call_id=context.model_call_id,
@@ -187,33 +206,20 @@ async def capture_tokens(
             token_item_index=token_item_index,
             created_at=time.time(),
         )
+        if request_messages is not None:
+            stamp_continuation(entry, list(request_messages))
     except Exception:
         await _capture_failed(context, "build")
         return
-    await commit_entry(entry, parent_call_id)
-    # Index this call for the next request.
-    # Indexing needs the request representation seen by the server.
-    # Engine-side callers do not have that representation.
-    # The commit above stamps the digest.
-    if request_messages is not None and context.lineage_store is not None:
-        try:
-            # Index the served items without rebuilding a turn.
-            # The next request echoes these items.
-            # One response can echo as several items.
-            await context.lineage_store.record(
-                context.rollout_id,
-                context.model_call_id,
-                list(request_messages),
-                list(entry.output_items or []),
-                cumulative_tokens(entry),
-                entry.digest or "",
-            )
-        except Exception:
-            # The builder falls back to strict token-prefix matching.
-            logger.warning("Could not index lineage for rollout %s.", context.rollout_id, exc_info=True)
+    await commit_entry(entry, parent_resolution=resolution)
 
 
-async def commit_entry(entry: TokenEntry, parent_call_id: str | None = None) -> None:
+async def commit_entry(
+    entry: TokenEntry,
+    parent_call_id: str | None = None,
+    *,
+    parent_resolution: LineageResolution | None = None,
+) -> None:
     """Durably record a finished entry against the in-flight call.
 
     ``capture_tokens`` extracts arrays from a served response.
@@ -238,9 +244,24 @@ async def commit_entry(entry: TokenEntry, parent_call_id: str | None = None) -> 
         context.committed = True
         return
     try:
+        resolution = parent_resolution or context.parent_resolution
+        if parent_call_id is not None:
+            resolution = LineageResolution(
+                ParentResolutionStatus.RESOLVED,
+                match=LineageMatch(parent_call_id, (), ""),
+            )
+        if resolution is None:
+            resolution = LineageResolution(
+                ParentResolutionStatus.UNRESOLVED,
+                reason="not_attempted",
+            )
         # The cumulative length and digest always describe this call.
-        # The parent link is present only after successful resolution.
-        stamp_lineage(entry, parent_call_id)
+        # The parent decision is persisted with the same sink write.
+        stamp_lineage(
+            entry,
+            resolution.match.model_call_id if resolution.match is not None else None,
+            parent_resolution=resolution.status,
+        )
         await context.token_sink.put(entry)
         context.committed = True
     except Exception:

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import struct
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -44,13 +45,22 @@ TOKEN_FIELDS = ("prompt_token_ids", "generation_token_ids", "generation_log_prob
 #
 #   1  rollout and call identity, the token arrays, the output items and their carrier index
 #   2  parent_call_id, cum_len and digest, added when calls began being linked to their parent
-TOKEN_ENTRY_RECORD_SCHEMA_VERSION = 2
+#   3  parent resolution and compact continuation lookup metadata
+TOKEN_ENTRY_RECORD_SCHEMA_VERSION = 3
 
 # Increment this version when the digest encoding changes.
 # A stale digest must fail verification.
 DIGEST_VERSION = 1
 _DIGEST_DOMAIN = b"nemo-gym-tokens"
 _EMPTY_DIGEST = hashlib.sha256(_DIGEST_DOMAIN).hexdigest()
+
+
+class ParentResolutionStatus(StrEnum):
+    """Describe whether a model call has a proven captured predecessor."""
+
+    ROOT = "root"
+    RESOLVED = "resolved"
+    UNRESOLVED = "unresolved"
 
 
 def encode_token_ids(token_ids: list[int]) -> bytes:
@@ -120,6 +130,15 @@ class TokenEntry(BaseModel):
     cum_len: int | None = None
     # This is ``compute_digest(prompt_token_ids + generation_token_ids)``.
     digest: str | None = None
+    # New records distinguish a valid root from a missing parent.
+    # ``None`` is reserved for records written before schema version 3.
+    parent_resolution: ParentResolutionStatus | None = None
+    # These fields make a committed entry visible to request-time resolution.
+    # The fingerprint identifies the model-authored output.
+    continuation_fingerprint: str = ""
+    # The context fields verify the request that produced this call.
+    continuation_context_len: int = 0
+    continuation_context_digest: str = ""
 
     @model_validator(mode="after")
     def _refuse_a_newer_record(self) -> "TokenEntry":
@@ -144,6 +163,11 @@ class TokenEntry(BaseModel):
             raise ValueError(
                 f"token_item_index {self.token_item_index} is outside output_items of length {len(self.output_items)}"
             )
+        if self.parent_resolution == ParentResolutionStatus.RESOLVED and not self.parent_call_id:
+            raise ValueError("resolved parent metadata requires parent_call_id")
+        if self.parent_resolution in {ParentResolutionStatus.ROOT, ParentResolutionStatus.UNRESOLVED}:
+            if self.parent_call_id is not None:
+                raise ValueError(f"{self.parent_resolution.value} parent metadata cannot carry parent_call_id")
         return self
 
 
@@ -152,16 +176,27 @@ def cumulative_tokens(entry: TokenEntry) -> list[int]:
     return list(entry.prompt_token_ids) + list(entry.generation_token_ids)
 
 
-def stamp_lineage(entry: TokenEntry, parent_call_id: str | None) -> TokenEntry:
-    """Fill ``cum_len`` and ``digest`` (always) and ``parent_call_id`` (when known).
+def stamp_lineage(
+    entry: TokenEntry,
+    parent_call_id: str | None,
+    *,
+    parent_resolution: ParentResolutionStatus | None = None,
+) -> TokenEntry:
+    """Fill token lineage and the request-time parent decision.
 
     ``cum_len`` and ``digest`` always describe this call.
-    The parent link is present only when the model server resolved one.
+    ``parent_resolution=None`` preserves records built by compatibility callers.
     """
     cumulative = cumulative_tokens(entry)
     entry.cum_len = len(cumulative)
     entry.digest = compute_digest(cumulative)
     entry.parent_call_id = parent_call_id
+    entry.parent_resolution = parent_resolution
+    if parent_resolution == ParentResolutionStatus.RESOLVED and parent_call_id is None:
+        raise ValueError("resolved parent metadata requires parent_call_id")
+    if parent_resolution in {ParentResolutionStatus.ROOT, ParentResolutionStatus.UNRESOLVED}:
+        if parent_call_id is not None:
+            raise ValueError(f"{parent_resolution.value} parent metadata cannot carry parent_call_id")
     return entry
 
 

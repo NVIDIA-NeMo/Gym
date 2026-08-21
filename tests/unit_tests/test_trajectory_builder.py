@@ -20,6 +20,7 @@ import threading
 import pytest
 
 from nemo_gym.token_id_capture import (
+    ParentResolutionStatus,
     TokenCaptureSnapshot,
     assert_prefix_contiguity,
     compute_digest,
@@ -701,7 +702,8 @@ def test_the_builder_runs_once_per_rollout(tmp_path, monkeypatch):
 
 
 def _with_lineage(entry, parent_call_id=None):
-    stamp_lineage(entry, parent_call_id)
+    status = ParentResolutionStatus.RESOLVED if parent_call_id is not None else ParentResolutionStatus.ROOT
+    stamp_lineage(entry, parent_call_id, parent_resolution=status)
     return entry
 
 
@@ -736,22 +738,22 @@ def test_unresolvable_final_retry_is_flagged_not_silently_tie_broken():
     assert sorted(out.notes.unresolved_retries) == ["a", "b"]
 
 
-def test_a_stale_parent_link_fails_verification_and_is_quarantined():
-    """Quarantine an explicit parent link with a digest mismatch."""
+def test_a_stale_parent_link_becomes_an_incomplete_fragment():
+    """Preserve a call without inventing an edge across a digest mismatch."""
     root = _with_lineage(_entry("root", [1, 2], [3]))
     child = _entry("child", [1, 2, 3, 4], [5])
-    stamp_lineage(child, "root")
+    stamp_lineage(child, "root", parent_resolution=ParentResolutionStatus.RESOLVED)
     # Simulate a stale record by corrupting the parent digest.
     root.digest = compute_digest([42, 42, 42])
 
     out = prefix_merging([root, child])
     assert out.notes.parent_link_failures == {"parent_digest_mismatch": 1}
-    main = next(c for c in out.chains if c.chain_id == "main")
-    assert [link.entry.model_call_id for link in main.links] == ["root"]
-    assert "child" in out.quarantined
+    assert out.notes.unresolved_parent_calls == ["child"]
+    assert sorted([link.entry.model_call_id for chain in out.chains for link in chain.links]) == ["child", "root"]
+    assert "child" not in out.quarantined
 
 
-def test_a_missing_filtered_parent_falls_back_to_prefix_matching():
+def test_a_missing_filtered_parent_starts_an_incomplete_fragment():
     root = _with_lineage(_entry("root", [1, 2], [3]))
     empty = _with_lineage(_entry("empty", [1, 2, 3, 4], []), parent_call_id="root")
     child = _with_lineage(_entry("child", [1, 2, 3, 4, 5], [6]), parent_call_id="empty")
@@ -759,9 +761,30 @@ def test_a_missing_filtered_parent_falls_back_to_prefix_matching():
     out = prefix_merging([root, empty, child])
 
     assert out.notes.parent_link_failures == {"parent_call_id_missing": 1}
-    main = next(c for c in out.chains if c.chain_id == "main")
-    assert [link.entry.model_call_id for link in main.links] == ["root", "child"]
+    assert out.notes.unresolved_parent_calls == ["child"]
+    assert len(out.chains) == 2
     assert "child" not in out.quarantined
+
+
+def test_unresolved_parent_never_uses_prefix_fallback():
+    root = _with_lineage(_entry("root", [1, 2], [3]))
+    child = _entry("child", [1, 2, 3, 4], [5])
+    stamp_lineage(child, None, parent_resolution=ParentResolutionStatus.UNRESOLVED)
+
+    out = prefix_merging([root, child])
+
+    assert len(out.chains) == 2
+    assert out.notes.unresolved_parent_calls == ["child"]
+
+
+def test_explicit_root_never_uses_prefix_fallback():
+    first = _with_lineage(_entry("first", [1, 2], [3]))
+    root = _with_lineage(_entry("root", [1, 2, 3, 4], [5]))
+
+    out = prefix_merging([first, root])
+
+    assert len(out.chains) == 2
+    assert out.notes.unresolved_parent_calls == []
 
 
 def test_parent_link_and_prefix_matching_agree_on_a_clean_rollout():

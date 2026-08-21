@@ -45,7 +45,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable
 
-from nemo_gym.token_id_capture.records import TokenEntry, compute_digest
+from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry, compute_digest
 
 
 @dataclass
@@ -99,6 +99,8 @@ class BuildNotes:
     empty_generation_calls: list[str] = field(default_factory=list)
     # Count why recorded parent links were not used.
     parent_link_failures: dict[str, int] = field(default_factory=dict)
+    # These calls begin fragments after an unproven parent boundary.
+    unresolved_parent_calls: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -124,6 +126,7 @@ class _Node:
     parent: "_Node | None" = None
     children: list["_Node"] = field(default_factory=list)
     quarantined: bool = False
+    unresolved_boundary: bool = False
 
 
 @dataclass
@@ -164,18 +167,23 @@ def _resolve_parent(
 ) -> tuple["_Node | None", bool, str | None]:
     """Find this call's parent.
 
-    Prefer a verified recorded link.
-    A missing parent target falls back to strict longest token-prefix matching.
-    A digest mismatch returns no parent and quarantines the call.
+    New records preserve the request-time parent decision.
+    Only legacy records may infer a parent from token prefixes.
     ``note`` reports why the recorded link was not used.
     """
     prompt = list(node.entry.prompt_token_ids)
+    resolution = node.entry.parent_resolution
+    if resolution == ParentResolutionStatus.ROOT:
+        return None, False, None
+    if resolution == ParentResolutionStatus.UNRESOLVED:
+        return None, False, "parent_unresolved"
     claimed = node.entry.parent_call_id
-    if claimed is not None:
+    if resolution == ParentResolutionStatus.RESOLVED or claimed is not None:
+        if claimed is None:
+            return None, False, "resolved_parent_missing_id"
         parent = by_call_id.get(claimed)
         if parent is None:
-            inferred, ambiguous = _infer_parent(prompt, prefix_index)
-            return inferred, ambiguous, "parent_call_id_missing"
+            return None, False, "parent_call_id_missing"
         cum_len = parent.entry.cum_len
         if cum_len is None:
             cum_len = len(parent.cumulative)
@@ -184,6 +192,7 @@ def _resolve_parent(
         ):
             return parent, False, None
         return None, False, "parent_digest_mismatch"
+    # Resolution metadata is absent only on records written before schema 3.
     return _infer_parent(prompt, prefix_index) + (None,)
 
 
@@ -222,6 +231,7 @@ def prefix_merging(entries: list[TokenEntry]) -> BuildOutput:
 
     nodes_by_call_id: dict[str, _Node] = {}
     parent_link_failures: dict[str, int] = {}
+    unresolved_parent_calls: list[str] = []
 
     for entry in ordered:
         prompt = list(entry.prompt_token_ids)
@@ -229,9 +239,8 @@ def prefix_merging(entries: list[TokenEntry]) -> BuildOutput:
         parent, ambiguous, note = _resolve_parent(node, nodes_by_call_id, prefix_index)
         if note:
             parent_link_failures[note] = parent_link_failures.get(note, 0) + 1
-            if note == "parent_digest_mismatch":
-                node.quarantined = True
-                quarantined.append(entry.model_call_id)
+            node.unresolved_boundary = True
+            unresolved_parent_calls.append(entry.model_call_id)
         if parent is not None:
             node.parent = parent
             if ambiguous:
@@ -356,6 +365,7 @@ def prefix_merging(entries: list[TokenEntry]) -> BuildOutput:
         unresolved_retries=unresolved_retries,
         empty_generation_calls=empty_generation,
         parent_link_failures=parent_link_failures,
+        unresolved_parent_calls=unresolved_parent_calls,
     )
     return BuildOutput(chains=chains, quarantined=quarantined, notes=notes)
 
