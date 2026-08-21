@@ -298,7 +298,9 @@ def _asset_config(composition: _Composition) -> str:
     }
     if composition.rollout_driver:
         config["rollout_collection_driver"] = composition.rollout_driver
-    return yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
+
+    res = yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
+    res = f"\n{composition.agent_instance}".join(res.split(composition.agent_instance))
 
 
 def _render_manifest_composition(root: Path, composition: _Composition) -> dict[Path, str]:
