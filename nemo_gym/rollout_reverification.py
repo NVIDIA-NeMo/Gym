@@ -587,6 +587,7 @@ async def _call_aggregate_metrics(
             "agent_metrics": agg_result.agent_metrics,
             "key_metrics": agg_result.key_metrics,
             "group_level_metrics": agg_result.group_level_metrics,
+            "repeat_level_metrics": agg_result.repeat_level_metrics,
         }
         return agent_entry
 

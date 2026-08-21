@@ -14,6 +14,9 @@
 # limitations under the License.
 
 
+from pathlib import Path
+
+import orjson
 import pytest
 
 from nemo_gym.reward_profile import RewardProfiler
@@ -25,6 +28,8 @@ class TestRewardProfile:
             for key in list(row):
                 if key.startswith("histogram"):
                     row[key] = None
+                elif key.startswith("ci_low_95") or key.startswith("ci_high_95"):
+                    row.pop(key)
                 elif key in {
                     "_ng_task_index",
                     "expected_num_rollouts",
@@ -166,7 +171,7 @@ class TestRewardProfile:
             },
         ]
 
-        actual_group_level_metrics, actual_agent_level_metrics = RewardProfiler().profile_from_data(rows, results)
+        actual_group_level_metrics, actual_agent_level_metrics, _ = RewardProfiler().profile_from_data(rows, results)
 
         self._clean_metrics(actual_group_level_metrics)
         self._clean_metrics(actual_agent_level_metrics)
@@ -262,30 +267,42 @@ class TestRewardProfile:
         ]
         assert expected_group_level_metrics == actual_group_level_metrics
 
-        expected_agent_level_metrics = [
-            {
-                "agent_ref": {"name": "my_agent"},
-                "mean/bool": 0.5,
-                "mean/reward": 0.5,
-                "mean/abc usage": 1.0,
-                "max/bool": True,
-                "max/reward": 1,
-                "max/abc usage": 1,
-                "min/bool": False,
-                "min/reward": 0,
-                "min/abc usage": 1,
-                "median/bool": 0.5,
-                "median/reward": 0.5,
-                "median/abc usage": 1.0,
-                "std/bool": 0.5477225575051661,
-                "std/reward": 0.5477225575051661,
-                "std/abc usage": 0.0,
-                "histogram/bool": None,
-                "histogram/reward": None,
-                "histogram/abc usage": None,
-            }
-        ]
-        assert expected_agent_level_metrics == actual_agent_level_metrics
+        # profile_from_data also merges in cross-repeat aggregates (mean/median/se of each
+        # per-repeat estimate, e.g. "mean_across_repeats/mean/reward") since there are 2 rollout_indices here.
+        # Check those separately below rather than pinning the full exploded key set.
+        assert len(actual_agent_level_metrics) == 1
+        actual_agent_metrics = actual_agent_level_metrics[0]
+        expected_agent_level_metrics = {
+            "agent_ref": {"name": "my_agent"},
+            "mean/bool": 0.5,
+            "mean/reward": 0.5,
+            "mean/abc usage": 1.0,
+            "max/bool": True,
+            "max/reward": 1,
+            "max/abc usage": 1,
+            "min/bool": False,
+            "min/reward": 0,
+            "min/abc usage": 1,
+            "median/bool": 0.5,
+            "median/reward": 0.5,
+            "median/abc usage": 1.0,
+            "std/bool": 0.5477225575051661,
+            "std/reward": 0.5477225575051661,
+            "std/abc usage": 0.0,
+            "histogram/bool": None,
+            "histogram/reward": None,
+            "histogram/abc usage": None,
+        }
+        assert expected_agent_level_metrics == {k: actual_agent_metrics[k] for k in expected_agent_level_metrics}
+
+        # rollout_index 0 always has reward=0/bool=1 across all 3 tasks, rollout_index 1 always
+        # has reward=1/bool=0 -- so the per-repeat mean is constant within each repeat but differs
+        # by 1.0 between the two repeats, giving a cross-repeat mean of 0.5 and se of 0.5.
+        assert actual_agent_metrics["mean_across_repeats/mean/reward"] == pytest.approx(0.5)
+        assert actual_agent_metrics["median_across_repeats/mean/reward"] == pytest.approx(0.5)
+        assert actual_agent_metrics["se_across_repeats/mean/reward"] == pytest.approx(0.5)
+        assert actual_agent_metrics["mean_across_repeats/mean/abc usage"] == pytest.approx(1.0)
+        assert actual_agent_metrics["se_across_repeats/mean/abc usage"] == pytest.approx(0.0)
 
     def test_profile_from_data_series(self) -> None:
         rows = [
@@ -373,7 +390,7 @@ class TestRewardProfile:
             },
         ]
 
-        group_level_metrics, _ = RewardProfiler().profile_from_data(rows, results)
+        group_level_metrics, _, __ = RewardProfiler().profile_from_data(rows, results)
         row = RewardProfiler().prepare_for_serialization(group_level_metrics)[0]
 
         assert row["_ng_task_index"] == 0
@@ -415,7 +432,7 @@ class TestRewardProfile:
         results = [self._result(0, 0, reward=0.0, total_tokens=5), self._result(0, 1), self._result(1, 0)]
 
         profiler = RewardProfiler()
-        group_level_metrics, _ = profiler.profile_from_data(rows, results, allow_partial_rollouts=True)
+        group_level_metrics, _, __ = profiler.profile_from_data(rows, results, allow_partial_rollouts=True)
         profile_rows = profiler.prepare_for_serialization(group_level_metrics)
         summary = profiler.profile_completion_summary(rows, results)
 
@@ -477,7 +494,7 @@ class TestRewardProfile:
             {"_ng_task_index": 1, "_ng_rollout_index": 0, "response": {"usage": {"abc usage": 1}}, "second_col": 2},
         ]
 
-        actual_group_level_metrics, actual_agent_level_metrics = RewardProfiler().profile_from_data(rows, results)
+        actual_group_level_metrics, actual_agent_level_metrics, _ = RewardProfiler().profile_from_data(rows, results)
 
         self._clean_metrics(actual_group_level_metrics)
         self._clean_metrics(actual_agent_level_metrics)
@@ -552,3 +569,85 @@ class TestRewardProfile:
             }
         ]
         assert expected_agent_level_metrics == actual_agent_level_metrics
+
+
+class TestWriteToDisk:
+    def test_writes_three_files(self, tmp_path: Path) -> None:
+        group_level_metrics = [{"_ng_task_index": 0, "mean/reward": 1.0}]
+        agent_level_metrics = [{"agent_ref": {"name": "agent"}, "mean/reward": 1.0}]
+        repeat_level_metrics = [
+            {"agent_ref": {"name": "agent"}, "_ng_rollout_index": 0, "mean/reward": 1.0},
+            {"agent_ref": {"name": "agent"}, "_ng_rollout_index": 1, "mean/reward": 1.0},
+        ]
+        base_output_fpath = tmp_path / "rollouts.jsonl"
+
+        reward_profiling_fpath, agent_level_metrics_fpath, repeat_level_metrics_fpath = RewardProfiler().write_to_disk(
+            group_level_metrics, agent_level_metrics, repeat_level_metrics, base_output_fpath
+        )
+
+        assert reward_profiling_fpath == tmp_path / "rollouts_reward_profiling.jsonl"
+        assert agent_level_metrics_fpath == tmp_path / "rollouts_agent_metrics.json"
+        assert repeat_level_metrics_fpath == tmp_path / "rollouts_repeat_level_metrics.json"
+        assert reward_profiling_fpath.exists()
+        assert agent_level_metrics_fpath.exists()
+        assert repeat_level_metrics_fpath.exists()
+
+    def test_reward_profiling_file_is_jsonl(self, tmp_path: Path) -> None:
+        group_level_metrics = [
+            {"_ng_task_index": 0, "mean/reward": 1.0},
+            {"_ng_task_index": 1, "mean/reward": 0.0},
+        ]
+        base_output_fpath = tmp_path / "rollouts.jsonl"
+
+        reward_profiling_fpath, _, _ = RewardProfiler().write_to_disk(group_level_metrics, [], [], base_output_fpath)
+
+        lines = reward_profiling_fpath.read_text().splitlines()
+        assert len(lines) == 2
+        assert [orjson.loads(line) for line in lines] == group_level_metrics
+
+    def test_agent_level_metrics_file_is_json_array(self, tmp_path: Path) -> None:
+        agent_level_metrics = [{"agent_ref": {"name": "agent"}, "mean/reward": 1.0}]
+        base_output_fpath = tmp_path / "rollouts.jsonl"
+
+        _, agent_level_metrics_fpath, _ = RewardProfiler().write_to_disk(
+            [], agent_level_metrics, [], base_output_fpath
+        )
+
+        assert orjson.loads(agent_level_metrics_fpath.read_bytes()) == agent_level_metrics
+
+    def test_repeat_level_metrics_file_is_json_array(self, tmp_path: Path) -> None:
+        repeat_level_metrics = [
+            {"agent_ref": {"name": "agent"}, "_ng_rollout_index": 0, "mean/reward": 0.5},
+            {"agent_ref": {"name": "agent"}, "_ng_rollout_index": 1, "mean/reward": 0.7},
+        ]
+        base_output_fpath = tmp_path / "rollouts.jsonl"
+
+        _, _, repeat_level_metrics_fpath = RewardProfiler().write_to_disk(
+            [], [], repeat_level_metrics, base_output_fpath
+        )
+
+        assert orjson.loads(repeat_level_metrics_fpath.read_bytes()) == repeat_level_metrics
+
+    def test_repeat_level_metrics_file_empty_list_when_single_repeat(self, tmp_path: Path) -> None:
+        """repeat_level_metrics is [] when there's only one rollout_index -- the file should
+        still be written, just containing an empty JSON array.
+        """
+        base_output_fpath = tmp_path / "rollouts.jsonl"
+
+        _, _, repeat_level_metrics_fpath = RewardProfiler().write_to_disk([], [], [], base_output_fpath)
+
+        assert repeat_level_metrics_fpath.exists()
+        assert orjson.loads(repeat_level_metrics_fpath.read_bytes()) == []
+
+    def test_histograms_stripped_from_repeat_level_metrics_file(self, tmp_path: Path) -> None:
+        repeat_level_metrics = [
+            {"agent_ref": {"name": "agent"}, "_ng_rollout_index": 0, "mean/reward": 1.0, "histogram/reward": "x"}
+        ]
+        base_output_fpath = tmp_path / "rollouts.jsonl"
+
+        _, _, repeat_level_metrics_fpath = RewardProfiler().write_to_disk(
+            [], [], repeat_level_metrics, base_output_fpath
+        )
+
+        written = orjson.loads(repeat_level_metrics_fpath.read_bytes())
+        assert "histogram/reward" not in written[0]
