@@ -1,0 +1,136 @@
+---
+title: "TALES Onboarding Report"
+description: "Eval-first onboarding engagement report for the TALES environment: integration gaps, verdicts, and the deferred baseline runbook"
+position: 3
+---
+
+# TALES Onboarding Report
+
+**Engagement**: 2026-07-09, design-only (the configured inference endpoint's
+key had expired — verified by live probe — so no model runs; all
+performance-dependent selections are provisional). Produced by a coordinated
+agent team (environment auditor, paper researcher, dataset designer, review
+curator, devil's advocate) with adversarial cross-verification; devil's-advocate
+verdicts are applied throughout. Upstream verified at
+`microsoft/tale-suite@ef349ba7cfdebf339e9aedcd09d89d6c917f86e5`.
+
+Provenance tags: `MEASURED` / `STRUCTURAL` (file:line) / `PRIOR` (source
+fetched during the engagement) / `PLACEHOLDER`.
+
+## Canonical reference
+
+**TALES: Text Adventure Learning Environment Suite**, arXiv:2504.14128
+(`PRIOR`, resolved via the arXiv API and read in full; the upstream README at
+the pinned ref cites it). Baseline scores are the paper's **Table 3**;
+per-framework standard deviations are **Table 5**; framework properties are
+Table 1. The paper's headline: top agents fail to reach 15% on human-written
+games (jericho) — best models score ≤13.4/100 there.
+
+Reference anchors (`PRIOR`, Table 3, zero-shot/reasoning as published):
+claude-3.7-sonnet avg 52.5 (jericho 12.5); gpt-4o 40.6; Llama-3.3-70B 32.8;
+gpt-4o-mini 21.8; **Llama-3.1-8B 13.9** (primary reproduction target);
+Qwen2.5-7B 11.7; Llama-3.2-1B 3.3. The full 34-model table lives in the
+engagement record.
+
+## Integration-gap findings
+
+All `STRUCTURAL`, independently re-verified by at least two agents:
+
+| # | Finding | Evidence | Status |
+|---|---|---|---|
+| G1 | Both step caps default 25 vs the paper's 100; the **agent** cap binds — rows setting 100 are inert without the config edit | `tales.yaml:15,26`; agent loops `range(max_steps)` | must-override for any protocol run |
+| G2 | `split` is a silent no-op for 4/5 families; only scienceworld is env-enforced | `app.py:71-74, 87-88` | mitigated at row level by the generator |
+| G3 | Jericho reward inflation: cumulative score re-summed per step; the harness-summed rollout `reward` is the inflated quantity | `app.py:116-121`; `gymnasium_agent/app.py:138` | server fix recommended; moot for scoring once normalized highscore lands (still a training-reward concern) |
+| G4 | Score clobber: `info["score"]` overwritten per step, destroying the clean cumulative for scienceworld/twx; twx's surviving `total_score` is native 0–1 | `app.py:129-133`; upstream `twx_env.py` | server fix required |
+| G5 | Paper metric is the normalized running **highscore**; no current field reproduces it for non-monotonic games | upstream `benchmark.py` (line-verified by two agents) | server fix required |
+| G6 | Family identity and slicing metadata don't survive into rollouts or `aggregate_metrics` | `rollout_collection.py:511-517, 611-620` | mitigated via `responses_create_params.metadata` mirror; in-pipeline aggregation still needs the fix |
+| G7 | Oracle leak: `walkthrough`/`expert_plan` unfiltered in `info` — **downgraded**: the stock agent never feeds `info` to the model, so this is artifact contamination and a custom-harness risk, not cheating | `app.py:142-143`; agent `:154` | filter recommended |
+| G8 | Paper-parity population: the paper evaluated all 54 jericho games; the 27-game test split is a branch artifact | paper Table 1 (re-verified against the source during collation) | addressed by `paper_parity.jsonl` |
+
+**Adjudicated non-bug**: ALFWorld's step tuple appears misordered
+(`obs, done, reward, info` in upstream variable names) but the underlying
+TextWorld `Filter` wrapper returns `(ob, score, done, infos)` and ALFWorld
+merely mislabels the slots while preserving positional order — behavior is
+correct (`STRUCTURAL`, upstream `textworld/filter.py:49`, verified against a
+fresh clone). A success-path alfworld test is still recommended: all current
+example fixtures are failure-regime (`MEASURED`).
+
+**Measured anomaly fixtures already in-repo** (`MEASURED`,
+`data/example_rollouts.jsonl`, model Qwen3-4B-Instruct-2507 at 25-step cap —
+not paper-comparable, fixtures only): a scienceworld episode with
+`reward=-100, lost=True`, and an alfworld episode with `moves=0` across 25
+steps (every action rejected).
+
+## Recommended server fixes (not implemented in this engagement)
+
+1. **Metric fix (prerequisite for the sweep)**: read upstream cumulative
+   `game_score` before the clobber, track running `highscore`, expose
+   `game_score` / `highscore` / `normalized_highscore` / `won` / `framework`
+   in step `info`; add an `aggregate_metrics` override grouping by
+   `info["framework"]`. Resolves G3 (for scoring), G4, G5, and G6's
+   in-pipeline half with no per-family branching.
+2. Write the resolved SHA into `requirements.txt` (branch pins are mutable)
+   and pin the `scienceworld` dependency (task indices are library-derived).
+3. Delta-branch jericho's reward like textworld's (training-signal fix).
+4. Warn loudly (or enforce) on `split` for the four no-op families.
+5. Filter `walkthrough` / `expert_plan` from `info` unless a diagnostic flag
+   is set.
+6. Minor: wrap `gym.make` in `asyncio.to_thread`; add an alfworld
+   success-path test.
+
+## Deliverables of this engagement
+
+- `resources_servers/tales/scripts/generate_eval_datasets.py` — deterministic
+  generator importing upstream split machinery (no hand-written index lists).
+- `resources_servers/tales/data/{smoke,eval_v0,eval_full,paper_parity}.jsonl`
+  — generated and validated (`MEASURED`: 5/64/95/122 rows; per-family counts,
+  split hygiene, alfworld `seed=0`, byte-identical prompt, jericho
+  order-mapping, and metadata mirror all machine-checked).
+- The [TALES environment page](/main/environment-reports/tales) (task
+  inventory, tiers, metric contract, repro protocol).
+- The [expert-review package](/main/environment-reports/tales-expert-review).
+
+## Runs table
+
+**Empty — zero model runs this engagement.** The env.yaml
+`inference_hub_api_key` expired 2026-07-05 (`MEASURED` probe); W&B is
+unconfigured. Every future run must be W&B-tracked and appended to the
+baseline-runs table on the environment page.
+
+## Deferred baseline runbook (Wave 3)
+
+Entry gate: (1) working policy endpoint (renew the inference-hub key, use a
+build.nvidia.com key, or self-host vLLM on the local GPUs); (2) W&B configured
+(`wandb_project` / `wandb_name` / `wandb_api_key`); (3) the metric server fix
+above.
+
+1. **Smoke**: start servers (`gym env start` with the tales + model configs),
+   run `data/smoke.jsonl`, confirm rewards/terminations look sane.
+2. **Sweep**: `RAY_TMPDIR=/tmp gym eval run --no-serve` over
+   `data/eval_full.jsonl`, `--num-repeats 5`, temperature 0, then
+   `gym eval profile`. W&B name convention:
+   `onboard-tales/<purpose>-<tier>-<model>-r<repeats>`.
+3. **Paper parity**: same over `data/paper_parity.jsonl` with self-hosted
+   `Llama-3.1-8B-Instruct` (exact paper model; fits 2× RTX 6000 Ada);
+   compare per-framework normalized highscore to
+   `[tw 29.7, twx 50.3, alf 0.0, sw 15.7, jericho 2.3]` at
+   ±max(5, 2σ) tolerance. Out-of-tolerance cells are integration bugs until
+   proven otherwise.
+4. **Multi-model reward profiling**: ≥3 models of clearly different strength
+   (one `++policy_model_name` override per cycle), checking strength
+   monotonicity, range usage, and pathologies; feed the cross-model
+   discrimination table into eval_v0 re-selection.
+5. **Measured confirmations owed**: twx native 0–1 scale on a solved episode;
+   jericho inflation magnitude; provider round-trip of
+   `responses_create_params.metadata`; and that the paper's scienceworld runs
+   used the test variations (row `split="test"` is assumed parity — confirm
+   before calling the sw column comparable).
+6. **Re-select eval_v0** from eval_full (saturated / discriminative / floored)
+   and complete the expert-review package with real trajectories.
+
+## Verified-flag recommendation
+
+**Keep `verified: false`.** Flip only after: the server metric fix lands; the
+SHA and scienceworld pins land; the W&B-tracked sweep and paper-parity run
+exist with the jericho population caveat honored; and a domain expert signs
+off on the review package.
