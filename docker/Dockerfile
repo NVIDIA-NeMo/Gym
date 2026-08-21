@@ -140,8 +140,12 @@ COPY --from=nemo-gym --chown=${RUNTIME_UID}:${RUNTIME_GID} pyproject.toml uv.loc
 COPY --from=nemo-gym --chown=${RUNTIME_UID}:${RUNTIME_GID} \
     nemo_gym/__init__.py nemo_gym/package_info.py ./nemo_gym/
 
+# The telemetry extra is included even though telemetry is off by default. It is a few MB
+# of pure-Python packages, and without it in the image nobody can switch tracing on with
+# an environment variable — they would have to rebuild. Off remains the default: the code
+# is inert until NEMO_LENS_ENABLED=1.
 RUN uv venv --seed && \
-    uv sync --link-mode symlink --locked --extra vllm --no-install-project
+    uv sync --link-mode symlink --locked --extra vllm --extra telemetry --no-install-project
 
 ENV PATH="/opt/nemo_gym_venv/bin:$PATH"
 
@@ -165,11 +169,11 @@ LABEL com.nvidia.build.ref="${NVIDIA_BUILD_REF}"
 # present from the hermetic stage. Runtime ownership is applied after install.
 COPY --from=nemo-gym --exclude=pyproject.toml --exclude=uv.lock . /opt/nemo-gym
 
-# Install the nemo-gym project itself along with the vllm extra. The worktree
-# was created for the runtime UID in the base stage, so restore build ownership
+# Install the nemo-gym project itself along with the vllm and telemetry extras. The
+# worktree was created for the runtime UID in the base stage, so restore build ownership
 # before setuptools invokes Git.
 RUN chown root:root /opt/nemo-gym && \
-    UV_LINK_MODE=symlink uv sync --locked --extra vllm
+    UV_LINK_MODE=symlink uv sync --locked --extra vllm --extra telemetry
 
 # Keep runtime uv and XDG caches separate from the root-owned build cache that
 # backs the symlinked project environment.
