@@ -82,6 +82,7 @@ srun \
   "${ENROOT_CONTAINER_NAME}" \
   /bin/bash -c "
     set -euo pipefail
+    cd '${LOCAL_GYM_DIR}'
     export UV_CACHE_DIR='${NODE_LOCAL_ROOT}/uv-cache'
     /root/.local/bin/uv pip install --python /opt/nemo_rl_venv/bin/python \
       '${LOCAL_GYM_DIR}' 'openai==${OPENAI_VERSION}'
