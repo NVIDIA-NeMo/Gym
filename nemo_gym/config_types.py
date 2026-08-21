@@ -184,6 +184,10 @@ class AgentCompositionError(ConfigError, ValueError):
     """A standalone agent config could not be composed onto the merged config's agent instances."""
 
 
+class UnsupportedAgentPairingError(ConfigError, ValueError):
+    """The selected agent is not one the environment's resources server declares support for."""
+
+
 ########################################
 # Dataset configs for handling and upload/download
 ########################################
