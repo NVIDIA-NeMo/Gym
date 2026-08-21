@@ -74,6 +74,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from nemo_gym.token_id_capture.protocols import (
     LineageStore,
     TokenSink,
+    installed_lineage_store,
     installed_token_sink,
 )
 
@@ -109,6 +110,9 @@ class TokenIdCaptureSettings(BaseModel):
     # Finalization does not retire the frozen snapshot.
     # Durable delivery permits retirement by snapshot id and version.
     rebuild_response: bool = True
+    # Permit a custom sink without a paired resolver.
+    # Every continuation is unresolved in this mode.
+    allow_unresolved_continuations: bool = False
     # Abort once enough finalized rollouts exceed this masked fraction.
     # ``None`` disables the limit.
     max_mask_fraction: float | None = None
@@ -140,12 +144,14 @@ class TokenIdCaptureConfig(BaseModel):
                     "the file store, so %s will not be written to.",
                     block.dir,
                 )
+            self._require_resolver(block)
             return self
         directory = self.resolved_dir()
         if directory is None:
             # A programmatic sink replaces the file store.
             # That process does not need a directory.
             if installed_token_sink() is not None:
+                self._require_resolver(block)
                 return self
             if not block.rebuild_response:
                 return self
@@ -153,6 +159,23 @@ class TokenIdCaptureConfig(BaseModel):
         if not directory.is_absolute():
             raise ValueError("training-token capture directory must be an absolute path")
         return self
+
+    @staticmethod
+    def _require_resolver(block: TokenIdCaptureSettings) -> None:
+        """Require a resolver whenever a custom sink stores lineage."""
+        if block.lineage_store is not None or installed_lineage_store() is not None:
+            return
+        if block.allow_unresolved_continuations:
+            logger.warning(
+                "token_id_capture has a custom sink and no lineage_store. "
+                "Every continuation will be unresolved and masked."
+            )
+            return
+        raise ValueError(
+            "token_id_capture has a custom sink but no lineage_store. Configure "
+            "token_id_capture.lineage_store on the same backend as the sink, or set "
+            "token_id_capture.allow_unresolved_continuations: true to accept unresolved continuations."
+        )
 
     @property
     def enabled(self) -> bool:
