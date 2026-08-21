@@ -300,7 +300,7 @@ def _asset_config(composition: _Composition) -> str:
         config["rollout_collection_driver"] = composition.rollout_driver
 
     res = yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
-    res = f"\n{composition.agent_instance}".join(res.split(composition.agent_instance))
+    res = f"\n{composition.agent_instance}".join(res.split(composition.agent_instance, maxsplit=1))
 
     return res
 
