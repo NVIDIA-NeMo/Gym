@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=rdkit-dependency-preflight
 #SBATCH --partition=cpu
-#SBATCH --nodelist=cpu-017
+#SBATCH --nodelist=cpu-018
 #SBATCH --account=healthcareeng_research
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=16G
-#SBATCH --time=00:30:00
+#SBATCH --time=00:15:00
 #SBATCH --output=cluster/rdkit_no_tool_grpo/logs/%x-%j.out
 #SBATCH --error=cluster/rdkit_no_tool_grpo/logs/%x-%j.err
 

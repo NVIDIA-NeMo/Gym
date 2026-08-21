@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --nodes=1
-#SBATCH --nodelist=cpu-017
+#SBATCH --nodelist=cpu-018
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=64G
