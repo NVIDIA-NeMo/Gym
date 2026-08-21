@@ -19,6 +19,9 @@ NUM_SAMPLES_IN_PARALLEL_ARG=""
 # requeued or freshly resubmitted jobs continue unfinished rollouts.
 RESUME_EVAL_ON_REQUEUE=${RESUME_EVAL_ON_REQUEUE:-0}
 RESUME_FROM_CACHE_ARG=""
+# independent starts one complete TP model replica per node. coupled forms one
+# multi-node DP/EP engine per tier so models too large for one node can fit.
+VLLM_PD_DEPLOYMENT_MODE=${VLLM_PD_DEPLOYMENT_MODE:-independent}
 # Optionally override main's cache-aware decode routing policy.
 VLLM_DECODE_POLICY=${VLLM_DECODE_POLICY:-}
 # auto uses NUM_NODES when sbatch advertises --segment; none omits it; a positive integer overrides it.
@@ -41,6 +44,15 @@ case "$RESUME_EVAL_ON_REQUEUE" in
         ;;
     *)
         echo "ERROR: RESUME_EVAL_ON_REQUEUE must be 0 or 1; got '$RESUME_EVAL_ON_REQUEUE'." >&2
+        exit 1
+        ;;
+esac
+
+case "$VLLM_PD_DEPLOYMENT_MODE" in
+    independent|coupled)
+        ;;
+    *)
+        echo "ERROR: VLLM_PD_DEPLOYMENT_MODE must be independent or coupled; got '$VLLM_PD_DEPLOYMENT_MODE'." >&2
         exit 1
         ;;
 esac
@@ -119,6 +131,11 @@ DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT=5700
 
 ROUTER_SERVER_PORT=8000
 WORKER_SERVER_PORT=8001
+PREFILL_SERVER_PORT=8001
+DECODE_SERVER_PORT=8002
+
+PREFILL_DP_RPC_PORT=13345
+DECODE_DP_RPC_PORT=13346
 
 EVAL_COMMAND=$(cat <<EOF
 set -euo pipefail
@@ -199,52 +216,131 @@ export UCX_RNDV_THRESH=0
 source "$VLLM_CONFIG"
 
 this_node_hostname=\$(hostname)
-if (( SLURM_PROCID == 0 )); then
-    read -r -a nodes <<< "\$ALL_NODES"
+read -r -a nodes <<< "\$ALL_NODES"
 
-    # @bxyu-nvidia: for --intra-node-data-parallel-size: Not sure what to set this to other than 1. I can't tell from the docs what is appropriate and 1 seems to work fine.
-    # Set a super long request timeout since some reasoning requests may take a long time to generate.
-    # Don't manually wait as vllm-router will wait for the URLs to come up
-    router_args=( \
-        --prefill-policy cache_aware \
-        --decode-policy "${VLLM_DECODE_POLICY:-cache_aware}" \
-        --vllm-pd-disaggregation \
-        --host \$this_node_hostname \
-        --port $ROUTER_SERVER_PORT \
-        --intra-node-data-parallel-size 1 \
-        --request-timeout-secs 86400 \
-        --log-level error
-    )
+if [[ "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
+    PREFILL_HEAD=\${nodes[0]}
+    DECODE_HEAD=\${nodes[$NUM_PREFILL_NODES]}
 
-    for (( i = 0; i < $NUM_PREFILL_NODES; i++ )); do
-        router_args+=(--prefill "http://\${nodes[i]}:$WORKER_SERVER_PORT")
-    done
-    for (( i = 0; i < $NUM_DECODE_NODES; i++ )); do
-        node_idx=\$(( $NUM_PREFILL_NODES + i ))
-        router_args+=(--decode "http://\${nodes[node_idx]}:$WORKER_SERVER_PORT")
-    done
+    wait_for_vllm_health() {
+        local role=\$1
+        local url=\$2
+        local pid=\$3
 
-    vllm-router "\${router_args[@]}" &
+        until curl -fs "\$url" >/dev/null; do
+            if ! kill -0 "\$pid" 2>/dev/null; then
+                local status=0
+                wait "\$pid" || status=\$?
+                (( status != 0 )) || status=1
+                echo "ERROR: \$role vLLM process exited before becoming healthy (status=\$status)." >&2
+                return "\$status"
+            fi
+            sleep 5
+        done
+    }
 
-    router_pid=\$!
-    trap 'kill "\$router_pid" 2>/dev/null || true' EXIT
-fi
+    if (( SLURM_PROCID == 0 )); then
+        # The head rank owns the prefill API while the remaining prefill ranks
+        # run headless. Expert parallelism can therefore span every prefill node.
+        VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
+        VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
+        vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
+            --host \$this_node_hostname \
+            --port $PREFILL_SERVER_PORT \
+            --data-parallel-size $NUM_PREFILL_NODES \
+            --data-parallel-address \$PREFILL_HEAD \
+            --data-parallel-rpc-port $PREFILL_DP_RPC_PORT \
+            --api-server-count 1 \
+            &
+        prefill_pid=\$!
+        trap 'kill "\$prefill_pid" 2>/dev/null || true' EXIT
 
-# Split nodes here by index
-if (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
-    # Prefill
-    VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
-    VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
-        --host \$this_node_hostname \
-        --port $WORKER_SERVER_PORT
+        wait_for_vllm_health "prefill" "http://\$PREFILL_HEAD:$PREFILL_SERVER_PORT/health" "\$prefill_pid"
+        wait_for_vllm_health "decode" "http://\$DECODE_HEAD:$DECODE_SERVER_PORT/health" "\$prefill_pid"
+
+        vllm-router \
+            --prefill-policy cache_aware \
+            --decode-policy "${VLLM_DECODE_POLICY:-cache_aware}" \
+            --vllm-pd-disaggregation \
+            --prefill "http://\$PREFILL_HEAD:$PREFILL_SERVER_PORT" \
+            --decode "http://\$DECODE_HEAD:$DECODE_SERVER_PORT" \
+            --host \$PREFILL_HEAD \
+            --port $ROUTER_SERVER_PORT \
+            --intra-node-data-parallel-size 1 \
+            --request-timeout-secs 86400 \
+            --log-level error
+    elif (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
+        VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
+        VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
+        vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
+            --headless \
+            --data-parallel-size $NUM_PREFILL_NODES \
+            --data-parallel-start-rank \$SLURM_PROCID \
+            --data-parallel-address \$PREFILL_HEAD \
+            --data-parallel-rpc-port $PREFILL_DP_RPC_PORT
+    elif (( SLURM_PROCID == $NUM_PREFILL_NODES )); then
+        # Decode mirrors prefill: one API head plus headless ranks across the
+        # remaining nodes, forming a single multi-node expert-parallel engine.
+        VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
+        VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
+        vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
+            --host \$this_node_hostname \
+            --port $DECODE_SERVER_PORT \
+            --data-parallel-size $NUM_DECODE_NODES \
+            --data-parallel-address \$DECODE_HEAD \
+            --data-parallel-rpc-port $DECODE_DP_RPC_PORT \
+            --api-server-count 1
+    else
+        VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
+        VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
+        vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
+            --headless \
+            --data-parallel-size $NUM_DECODE_NODES \
+            --data-parallel-start-rank \$(( SLURM_PROCID - $NUM_PREFILL_NODES )) \
+            --data-parallel-address \$DECODE_HEAD \
+            --data-parallel-rpc-port $DECODE_DP_RPC_PORT
+    fi
 else
-    # Decode
-    VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
-    VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
-        --host \$this_node_hostname \
-        --port $WORKER_SERVER_PORT
+    # Upstream Super behavior: every node is a complete DP=1 model server and
+    # the router balances requests across all prefill and decode replicas.
+    if (( SLURM_PROCID == 0 )); then
+        router_args=( \
+            --prefill-policy cache_aware \
+            --decode-policy "${VLLM_DECODE_POLICY:-cache_aware}" \
+            --vllm-pd-disaggregation \
+            --host \$this_node_hostname \
+            --port $ROUTER_SERVER_PORT \
+            --intra-node-data-parallel-size 1 \
+            --request-timeout-secs 86400 \
+            --log-level error
+        )
+
+        for (( i = 0; i < $NUM_PREFILL_NODES; i++ )); do
+            router_args+=(--prefill "http://\${nodes[i]}:$WORKER_SERVER_PORT")
+        done
+        for (( i = 0; i < $NUM_DECODE_NODES; i++ )); do
+            node_idx=\$(( $NUM_PREFILL_NODES + i ))
+            router_args+=(--decode "http://\${nodes[node_idx]}:$WORKER_SERVER_PORT")
+        done
+
+        vllm-router "\${router_args[@]}" &
+        router_pid=\$!
+        trap 'kill "\$router_pid" 2>/dev/null || true' EXIT
+    fi
+
+    if (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
+        VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
+        VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
+        vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
+            --host \$this_node_hostname \
+            --port $WORKER_SERVER_PORT
+    else
+        VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
+        VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
+        vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
+            --host \$this_node_hostname \
+            --port $WORKER_SERVER_PORT
+    fi
 fi
 EOF
 )

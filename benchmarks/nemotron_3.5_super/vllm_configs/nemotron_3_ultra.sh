@@ -4,7 +4,8 @@
 
 # Nemotron 3 Ultra BF16 baseline for disaggregated prefill/decode on 4-GPU
 # GB200 nodes. This launcher's TP4-per-node layout needs four coupled DP ranks
-# per tier so expert parallelism can shard the 512 experts over 16 GPUs.
+# per tier so expert parallelism can shard the 512 experts over 16 GPUs. Launch
+# this config with VLLM_PD_DEPLOYMENT_MODE=coupled; it cannot fit in DP=1 mode.
 
 # InstantTensor's io_uring loader returned EIO while 24 ranks concurrently read
 # the Lustre-hosted checkpoint in Run 001. Keep the loader selectable for later
