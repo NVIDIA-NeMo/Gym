@@ -19,6 +19,7 @@ OUTPUT_CONTAINER=${CONTAINER_IMAGE_PATH:-${BUNDLE_DIR}/sqsh/nemo-rl-v0.6.0-gym-p
 TMP_CONTAINER="${OUTPUT_CONTAINER}.tmp-${SLURM_JOB_ID}"
 PEFT_VERSION=${PEFT_VERSION:-0.17.1}
 OPENAI_VERSION=${OPENAI_VERSION:-2.6.1}
+DEVTOOLS_VERSION=${DEVTOOLS_VERSION:-0.12.2}
 PINNED_GYM_COMMIT=1a4912e231bb2795b062f7de97496caaf382c7f6
 SOURCE_GYM_COMMIT=$(git -C "${GYM_DIR}" rev-parse HEAD)
 git -C "${GYM_DIR}" merge-base --is-ancestor "${PINNED_GYM_COMMIT}" "${SOURCE_GYM_COMMIT}"
@@ -85,7 +86,7 @@ srun \
     set -euo pipefail
     export UV_CACHE_DIR='${NODE_LOCAL_ROOT}/uv-cache'
     uv pip install --python /opt/nemo_rl_venv/bin/python \
-      'openai==${OPENAI_VERSION}'
+      'openai==${OPENAI_VERSION}' 'devtools==${DEVTOOLS_VERSION}'
     uv pip install --python /opt/nemo_rl_venv/bin/python --no-deps \
       'peft==${PEFT_VERSION}'
     uv pip install --python /opt/nemo_rl_venv/bin/python --no-deps \
