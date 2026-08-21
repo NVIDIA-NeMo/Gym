@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --account=healthcareeng_research
 #SBATCH --partition=cpu
-#SBATCH --nodelist=cpu-004
+#SBATCH --nodelist=cpu-017
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
