@@ -109,6 +109,7 @@ def test_normal_verify_extracts_agent_patch(monkeypatch: MonkeyPatch) -> None:
             resolved=False,
             patch_applied=True,
             test_results={"tests": []},
+            test_output="test run output",
         )
     )
     monkeypatch.setattr("resources_servers.swebench_pro.app.run_verification", verify)
@@ -118,6 +119,7 @@ def test_normal_verify_extracts_agent_patch(monkeypatch: MonkeyPatch) -> None:
     assert response.status_code == 200
     assert response.json()["model_patch"] == "agent patch"
     assert response.json()["reward"] == 0.0
+    assert response.json()["test_output"] == "test run output"
 
 
 def test_verify_reports_sandbox_failure(monkeypatch: MonkeyPatch) -> None:
