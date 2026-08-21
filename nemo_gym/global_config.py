@@ -610,7 +610,8 @@ Duplicate config paths:
     def _required_agents(global_config_dict: DictConfig, target: _AgentInstance) -> Optional[List[str]]:
         """The agent types the target's resources server declares support for, or None if it declares none.
 
-        Read from the implementation rather than the instance; an instance may still override.
+        Read off the instance: every config that declares a server block states its own fields, so one
+        written from scratch must declare this too (enforced by test_agent_pairing.py).
         """
         reference = target.server_config._get_node("resources_server")
         instance_name = reference.get("name") if isinstance(reference, DictConfig) else None
@@ -636,7 +637,7 @@ Duplicate config paths:
         if self._pairing_override_enabled(global_config_dict):
             return
 
-        rejected: List[Tuple[str, List[str]]] = []
+        rejected: List[Tuple[_AgentInstance, List[str]]] = []
         for target in targets:
             required = self._required_agents(global_config_dict, target)
             if required is not None and source.agent_type not in required:
@@ -647,7 +648,8 @@ Duplicate config paths:
         # Report every rejected instance at once: a config can bring in several, and fixing them one
         # error at a time means one full re-resolve per instance.
         rejected_list = "\n".join(
-            f"  - {target.name} uses {target.server_config.get('resources_server').get('name')} and accepts {', '.join(required)}"
+            f"  - {target.name} uses {target.server_config['resources_server']['name']} "
+            f"and accepts {', '.join(required)}"
             for target, required in rejected
         )
         supported = sorted(set.intersection(*(set(required) for _, required in rejected)))
