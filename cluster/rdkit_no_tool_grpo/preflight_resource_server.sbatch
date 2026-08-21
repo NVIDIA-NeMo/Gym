@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --account=healthcareeng_research
 #SBATCH --partition=cpu
+#SBATCH --nodelist=cpu-004
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
@@ -11,6 +12,13 @@
 #SBATCH --error=/lustre/fsw/portfolios/healthcareeng/projects/healthcareeng_research/users/dcorneil/code/Gym-rdkit-es140-lora-grpo/cluster/rdkit_no_tool_grpo/logs/%x-%j.err
 
 set -euo pipefail
+
+MIN_ENROOT_FREE_BYTES=$((50 * 1024 * 1024 * 1024))
+SCRATCH_FREE_BYTES=$(df -PB1 /raid/scratch | awk 'NR == 2 {print $4}')
+if (( SCRATCH_FREE_BYTES < MIN_ENROOT_FREE_BYTES )); then
+  echo "Insufficient /raid/scratch space: ${SCRATCH_FREE_BYTES} bytes free" >&2
+  exit 1
+fi
 
 GYM_DIR=${GYM_DIR:-/lustre/fsw/portfolios/healthcareeng/projects/healthcareeng_research/users/dcorneil/code/Gym-rdkit-es140-lora-grpo}
 BUNDLE_DIR="${GYM_DIR}/cluster/rdkit_no_tool_grpo"
