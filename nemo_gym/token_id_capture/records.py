@@ -154,8 +154,9 @@ class TokenEntry(BaseModel):
     fingerprint_version: int | None = None
 
     # Prefix supply fields were added in schema version 4.
+    # Request intent is distinct from generation-time proof.
+    prefix_requested: bool = False
     # This is true only when generation-time prompt_token_ids prove prefix application.
-    # Recording proof per call makes prefix supply auditable after the run.
     prefix_supplied: bool = False
 
     @model_validator(mode="after")
