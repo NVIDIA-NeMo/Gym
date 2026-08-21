@@ -69,11 +69,15 @@ srun \
   --nodes=1 \
   --ntasks=1 \
   --cpus-per-task="${SLURM_CPUS_PER_TASK:-2}" \
-  --no-container-mount-home \
-  --container-image="${LOCAL_CONTAINER}" \
-  --container-mounts="${NODE_LOCAL_ROOT}:${NODE_LOCAL_ROOT}" \
-  --container-workdir="${LOCAL_GYM_DIR}" \
-  --chdir="${LOCAL_GYM_DIR}" \
+  /usr/bin/env \
+  ENROOT_CACHE_PATH="${ENROOT_CACHE_PATH}" \
+  ENROOT_DATA_PATH="${ENROOT_DATA_PATH}" \
+  ENROOT_RUNTIME_PATH="${ENROOT_RUNTIME_PATH}" \
+  ENROOT_TEMP_PATH="${ENROOT_TEMP_PATH}" \
+  enroot start \
+  --rw \
+  --mount "${NODE_LOCAL_ROOT}:${NODE_LOCAL_ROOT}" \
+  "${LOCAL_CONTAINER}" \
   /bin/bash -lc "
     set -euo pipefail
     export UV_CACHE_DIR='${NODE_LOCAL_ROOT}/uv-cache'

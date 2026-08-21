@@ -70,12 +70,16 @@ srun \
   --nodes=1 \
   --ntasks=1 \
   --cpus-per-task="${SLURM_CPUS_PER_TASK:-4}" \
-  --no-container-mount-home \
-  --container-image="${LOCAL_CONTAINER}" \
-  --container-mounts="${NODE_LOCAL_ROOT}:${NODE_LOCAL_ROOT},/lustre:/lustre" \
-  --container-workdir="${LOCAL_GYM_DIR}" \
-  --chdir="${LOCAL_GYM_DIR}" \
   /usr/bin/env \
+    ENROOT_CACHE_PATH="${ENROOT_CACHE_PATH}" \
+    ENROOT_DATA_PATH="${ENROOT_DATA_PATH}" \
+    ENROOT_RUNTIME_PATH="${ENROOT_RUNTIME_PATH}" \
+    ENROOT_TEMP_PATH="${ENROOT_TEMP_PATH}" \
+    enroot start \
+    --mount "${NODE_LOCAL_ROOT}:${NODE_LOCAL_ROOT}" \
+    --mount "/lustre:/lustre" \
+    "${LOCAL_CONTAINER}" \
+    /usr/bin/env \
     GYM_DIR="${LOCAL_GYM_DIR}" \
     NODE_LOCAL_ROOT="${NODE_LOCAL_ROOT}" \
     CONTAINER_IMAGE_PATH="${CONTAINER_IMAGE_PATH}" \
