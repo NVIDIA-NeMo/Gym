@@ -41,12 +41,9 @@ cd /opt/Gym
 gym eval prepare $@ +use_cached_prepared_benchmarks=true
 
 experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%d_%H%M%S)
-# Where the rollouts land, and with them the aggregate metrics that
-# export_to_csv.py derives as <base>_aggregate_metrics.json. The default nests
-# them under the experiment name, the job id and a timestamp, which keeps
-# concurrent runs apart in a shared results directory. Set ROLLOUTS_FPATH when
-# the results directory is already per-run and something downstream has to find
-# the aggregate without knowing the timestamp.
+# export_to_csv.py derives <base>_aggregate_metrics.json from this, so the
+# default timestamped name makes the aggregate unfindable to anything that
+# did not watch the job run. Override it when results/ is already per-run.
 rollouts_fpath=\${ROLLOUTS_FPATH:-results/\$experiment_name.jsonl}
 # +uv_venv_dir=/opt/uv_venvs is from the container.
 # +skip_venv_if_present=true will reuse the venvs baked into the container if possible.
