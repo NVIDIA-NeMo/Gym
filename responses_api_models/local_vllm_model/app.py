@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
 import sys
 from argparse import Namespace
 from pathlib import Path
@@ -149,8 +150,8 @@ class LocalVLLMModel(VLLMModel):
         final_args = parser.parse_args(namespace=Namespace(**server_args))
         validate_parsed_serve_args(final_args)
 
-        # @bxyu-nvidia: TODO remove, specific to Nemotron 3 Ultra vLLM version
-        # this return_routed_experts argument isn't present in 0.17.0, so this must be from 0.16.x
+        # @bxyu-nvidia: TODO remove, specific to Nemotron 3 Ultra vLLM version.
+        # Upstream vLLM only exposes `enable_return_routed_experts`, so alias it across.
         final_args.return_routed_experts = final_args.enable_return_routed_experts
 
         if self.config.debug:
@@ -161,6 +162,20 @@ class LocalVLLMModel(VLLMModel):
 Environment variables: {env_vars_to_print}""")
 
         return final_args, env_vars
+
+    def _ray_actor_path(self) -> str:
+        """PATH for the Ray actor running vLLM.
+
+        runtime_env.py_executable gives the actor this server's venv interpreter, but does not
+        put that venv's bin directory on its PATH, so console scripts installed next to the
+        interpreter are not resolvable in the actor or its child processes. vLLM declares ninja
+        as a runtime dependency and shells out to it when compiling kernels, which fails with
+        "No such file or directory: 'ninja'" even though ninja is installed in the venv.
+
+        Prepend the interpreter's directory, keeping the inherited PATH as a fallback.
+        """
+        venv_bin_dir = str(Path(self.config.ray_worker_py_executable).resolve().parent)
+        return os.pathsep.join(filter(None, [venv_bin_dir, os.environ.get("PATH", "")]))
 
     def _select_vllm_server_head_node(self, server_args: Namespace, env_vars: Dict[str, str]) -> PlacementGroup:
         """
@@ -216,6 +231,8 @@ Total Ray cluster resources: {cluster_resources()}""")
                 env_vars={
                     "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
                     "PYTHONPATH": pythonpath,
+                    # Listed before `env_vars` so a server config can still override PATH.
+                    "PATH": self._ray_actor_path(),
                     **env_vars,
                 },
             ),

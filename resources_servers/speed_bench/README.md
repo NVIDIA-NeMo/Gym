@@ -107,18 +107,18 @@ For an EAGLE3 / MTP setup with a paired draft model, see
 ```bash
 # Running servers — uses the demo local_vllm_model config above (drop in
 # your own model config to swap targets; just keep the speculative_config block).
-config_paths="responses_api_models/local_vllm_model/configs/Qwen/Qwen3-30B-A3B-Instruct-2507-ngram-specdec.yaml,\
-resources_servers/speed_bench/configs/speed_bench.yaml,\
-responses_api_agents/speed_bench_agent/configs/speed_bench_agent.yaml"
-ng_run "+config_paths=[$config_paths]" \
+gym env start \
+    --model-type local_vllm_model/Qwen/Qwen3-30B-A3B-Instruct-2507-ngram-specdec \
+    --resources-server speed_bench \
+    --config responses_api_agents/speed_bench_agent/configs/speed_bench_agent.yaml \
     +policy_model=Qwen3-30B-A3B-Instruct-2507-ngram-specdec
 
 # Collecting rollouts (5-example smoke test)
-ng_collect_rollouts \
-    +agent_name=speed_bench_simple_agent \
-    +input_jsonl_fpath=resources_servers/speed_bench/data/example.jsonl \
-    +output_jsonl_fpath=results/speed_bench_rollouts.jsonl \
-    +num_repeats=1
+gym eval run --no-serve \
+    --agent speed_bench_simple_agent \
+    --input resources_servers/speed_bench/data/example.jsonl \
+    --output results/speed_bench_rollouts.jsonl \
+    --num-repeats 1
 ```
 
 If you'd rather use the lighter-weight `vllm_model` config (which expects
@@ -129,7 +129,7 @@ when starting the upstream `vllm serve` process.
 ## Tests
 
 ```bash
-ng_test +entrypoint=resources_servers/speed_bench
+gym env test --resources-server speed_bench
 ```
 
 The unit tests cover the Prometheus parser, the running-delta math, the

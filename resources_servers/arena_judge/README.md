@@ -47,16 +47,16 @@ Each JSONL row must carry the following top-level fields (pydantic
 
 ```bash
 # Running servers
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-resources_servers/arena_judge/configs/arena_judge.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --resources-server arena_judge
 
 # Collecting rollouts (5-example smoke test)
-ng_collect_rollouts \
-    +agent_name=arena_judge_simple_agent \
-    +input_jsonl_fpath=resources_servers/arena_judge/data/example.jsonl \
-    +output_jsonl_fpath=results/arena_judge_rollouts.jsonl \
-    +num_repeats=1
+gym eval run --no-serve \
+    --agent arena_judge_simple_agent \
+    --input resources_servers/arena_judge/data/example.jsonl \
+    --output results/arena_judge_rollouts.jsonl \
+    --num-repeats 1
 ```
 
 ## Configuring the judge

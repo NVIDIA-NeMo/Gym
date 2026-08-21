@@ -38,7 +38,7 @@ matching Skills.
 ## Data preparation
 
 ```
-ng_prepare_benchmark "+config_paths=[benchmarks/polymath/config.yaml]"
+gym eval prepare --benchmark polymath
 ```
 
 Writes `data/polymath_benchmark.jsonl` with one row per
@@ -50,20 +50,20 @@ Start the servers (inherits the `polymath` resources server in
 symbolic-only mode plus a vLLM model server):
 
 ```
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/polymath/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark polymath
 ```
 
 Collect rollouts (use `+num_repeats=4` for a quick parity pass,
 `+num_repeats=16` for parity-grade evaluation):
 
 ```
-ng_collect_rollouts \
-    +agent_name=polymath_benchmark_simple_agent \
-    +input_jsonl_fpath=benchmarks/polymath/data/polymath_benchmark.jsonl \
-    +output_jsonl_fpath=results/polymath_rollouts.jsonl \
-    +num_repeats=4
+gym eval run --no-serve \
+    --agent polymath_benchmark_simple_agent \
+    --input benchmarks/polymath/data/polymath_benchmark.jsonl \
+    --output results/polymath_rollouts.jsonl \
+    --num-repeats 4
 ```
 
 Start the model server with `--reasoning-parser <name>` (e.g.

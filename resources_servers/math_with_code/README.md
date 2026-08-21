@@ -95,23 +95,31 @@ OR
 If you want to download directly
 
 ```
-ng_download_dataset_from_gitlab \
-    +dataset_name=open_math_reasoning_problems_tool \
-    +version=0.0.1 \
-    +artifact_fpath=open_math_reasoning_problems_tool.jsonl \
-    +output_fpath=data/open_math_reasoning_problems_tool.jsonl
+gym dataset download --storage gitlab \
+    --name open_math_reasoning_problems_tool \
+    --revision 0.0.1 \
+    --artifact open_math_reasoning_problems_tool.jsonl \
+    --output data/open_math_reasoning_problems_tool.jsonl
 ```
 
 
 Start server 
 ```
-ng_run "+config_paths=[responses_api_agents/simple_agent/configs/simple_agent.yaml,responses_api_models/openai_model/configs/openai_model.yaml,resources_servers/math_with_code/configs/math_with_code.yaml]"     +simple_agent.responses_api_agents.simple_agent.resources_server.name=math_with_code
+gym env start \
+    --config responses_api_agents/simple_agent/configs/simple_agent.yaml \
+    --model-type openai_model \
+    --resources-server math_with_code \
+    +simple_agent.responses_api_agents.simple_agent.resources_server.name=math_with_code
 ```
 
 
 Collect trajectories
 ```
-ng_collect_rollouts +agent_name=simple_agent +input_jsonl_fpath=data/open_math_reasoning_problems_tool.jsonl +output_jsonl_fpath=results/open_math_reasoning_problems_tool_output_new.jsonl +limit=1
+gym eval run --no-serve \
+    --agent simple_agent \
+    --input data/open_math_reasoning_problems_tool.jsonl \
+    --output results/open_math_reasoning_problems_tool_output_new.jsonl \
+    --limit 1
 ```
 
 

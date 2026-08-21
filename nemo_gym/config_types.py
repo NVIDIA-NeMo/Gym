@@ -12,10 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import warnings
 from argparse import ArgumentParser
 from enum import Enum
 from pathlib import Path
-from typing import Any, ClassVar, Dict, List, Literal, Optional, Set, Tuple, Union
+from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Set, Tuple, Union
 
 import rich
 from omegaconf import DictConfig, OmegaConf
@@ -136,8 +137,47 @@ def is_server_ref(config_dict: DictConfig) -> Optional[ServerRef]:
         return None
 
 
-class ServerRefNotFoundError(ValueError):
+class ConfigError(Exception):
+    """Base for user-facing configuration errors.
+
+    These represent actionable user mistakes (typos, missing files, malformed input) rather than
+    internal bugs. The CLI catches `ConfigError` and prints just the message — no traceback —
+    while still leaving them as ordinary exceptions so callers like `validate` can catch and
+    format them.
+    """
+
+
+class ConfigPathNotFoundError(ConfigError, FileNotFoundError):
+    """A `config_paths` entry could not be found in the cwd or the Gym install location."""
+
+
+class MalformedConfigPathsError(ConfigError, ValueError):
+    """`config_paths` was not a list of paths (e.g. a scalar string was passed)."""
+
+
+class NoServerInstancesError(ConfigError, ValueError):
+    """A run was requested but the merged config defines no server instances to start."""
+
+
+class ConfigMissingValuesError(ConfigError, ValueError):
+    """One or more required config values are still unset (OmegaConf '???') after merging."""
+
+
+class ConfigInterpolationError(ConfigError, ValueError):
+    """An `${...}` interpolation references a key that is not present in the merged config."""
+
+
+class ServerRefNotFoundError(ConfigError, ValueError):
     """A server cross-reference points to an instance that is not defined in the merged config."""
+
+
+class InheritPathNotFoundError(ConfigError, ValueError):
+    """An `_inherit_from` / swap / copy directive references a config path that does not exist."""
+
+
+class AlmostServerError(ConfigError, ValueError):
+    """One or more server blocks are almost-servers (right shape, failed validation) and
+    `error_on_almost_servers` is set, so the run is aborted."""
 
 
 ########################################
@@ -152,7 +192,7 @@ class UploadJsonlDatasetGitlabConfig(BaseNeMoGymCLIConfig):
     Examples:
 
     ```bash
-    ng_upload_dataset_to_gitlab \
+    gym dataset upload --storage gitlab \
         +dataset_name=example_multi_step \
         +version=0.0.1 \
         +input_jsonl_fpath=data/train.jsonl
@@ -177,7 +217,7 @@ class DownloadJsonlDatasetGitlabConfig(JsonlDatasetGitlabIdentifer, BaseNeMoGymC
     Examples:
 
     ```bash
-    ng_download_dataset_from_gitlab \
+    gym dataset download --storage gitlab \
         +dataset_name=example_multi_step \
         +version=0.0.1 \
         +artifact_fpath=train.jsonl \
@@ -198,7 +238,7 @@ class DeleteJsonlDatasetGitlabConfig(BaseNeMoGymCLIConfig):
     Examples:
 
     ```bash
-    ng_delete_dataset_from_gitlab +dataset_name=old_dataset
+    gym dataset rm +dataset_name=old_dataset
     ```
     """
 
@@ -221,7 +261,7 @@ class BaseUploadJsonlDatasetHuggingFaceConfig(BaseNeMoGymCLIConfig):
 
     ```bash
     resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
-    ng_upload_dataset_to_hf \
+    gym dataset upload \
         +dataset_name=my_dataset \
         +input_jsonl_fpath=data/train.jsonl \
         +resource_config_path=${resource_config_path}
@@ -268,13 +308,13 @@ class UploadJsonlDatasetHuggingFaceConfig(BaseUploadJsonlDatasetHuggingFaceConfi
     Upload a JSONL dataset to HuggingFace Hub and automatically delete from GitLab after successful upload.
 
     This command always deletes the dataset from GitLab after uploading to HuggingFace.
-    Use `ng_upload_dataset_to_hf` if you want optional deletion control.
+    Use `gym dataset upload` if you want optional deletion control.
 
     Examples:
 
     ```bash
     resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
-    ng_gitlab_to_hf_dataset \
+    gym dataset migrate \
         +dataset_name=my_dataset \
         +input_jsonl_fpath=data/train.jsonl \
         +resource_config_path=${resource_config_path}
@@ -300,7 +340,7 @@ class UploadJsonlDatasetHuggingFaceMaybeDeleteConfig(BaseUploadJsonlDatasetHuggi
 
     ```bash
     resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
-    ng_upload_dataset_to_hf \
+    gym dataset upload \
         +dataset_name=my_dataset \
         +input_jsonl_fpath=data/train.jsonl \
         +resource_config_path=${resource_config_path} \
@@ -320,7 +360,7 @@ class DownloadJsonlDatasetHuggingFaceConfig(JsonlDatasetHuggingFaceIdentifer, Ba
     Examples:
 
     ```bash
-    ng_download_dataset_from_hf \
+    gym dataset download \
         +repo_id=NVIDIA/NeMo-Gym-Math-example_multi_step-v1 \
         +artifact_fpath=train.jsonl \
         +output_fpath=data/train.jsonl
@@ -362,12 +402,37 @@ class DownloadJsonlDatasetHuggingFaceConfig(JsonlDatasetHuggingFaceIdentifer, Ba
 DatasetType = Union[Literal["train"], Literal["validation"], Literal["example"]]
 
 
+class GitlabDatasetSource(BaseModel):
+    """Unified ``source:`` for a dataset fetched from the GitLab model registry."""
+
+    type: Literal["gitlab"]
+    dataset_name: str
+    version: str
+    artifact_fpath: str
+
+
+class HuggingFaceDatasetSource(BaseModel):
+    """Unified ``source:`` for a dataset fetched from the HuggingFace Hub."""
+
+    type: Literal["huggingface"]
+    repo_id: str
+    artifact_fpath: Optional[str] = None
+
+
+# One discriminated `source:` block replaces the parallel gitlab_identifier / huggingface_identifier
+# fields; `type` selects the backend so it's unambiguous which fields apply.
+DatasetSource = Annotated[Union[GitlabDatasetSource, HuggingFaceDatasetSource], Field(discriminator="type")]
+
+
 class DatasetConfig(BaseModel):
     name: str
     type: DatasetType
     jsonl_fpath: str
 
     num_repeats: int = Field(default=1, ge=1)
+    # Unified, self-describing dataset source. Prefer this over the legacy *_identifier fields below.
+    source: Optional[DatasetSource] = None
+    # Deprecated: kept working (and back-filled from/into `source`) for backward compatibility.
     gitlab_identifier: Optional[JsonlDatasetGitlabIdentifer] = None
     huggingface_identifier: Optional[JsonlDatasetHuggingFaceIdentifer] = None
     license: Optional[
@@ -376,6 +441,8 @@ class DatasetConfig(BaseModel):
             Literal["MIT"],
             Literal["Creative Commons Attribution 4.0 International"],
             Literal["Creative Commons Attribution-ShareAlike 4.0 International"],
+            Literal["CC BY-SA 4.0"],
+            Literal["CC BY-NC 3.0"],
             Literal["NVIDIA Internal Use Only, Do Not Distribute"],
             Literal["NVIDIA Evaluation Dataset License Agreement"],
             Literal["TBD"],
@@ -390,13 +457,69 @@ class DatasetConfig(BaseModel):
 
         return self
 
+    @model_validator(mode="after")
+    def normalize_dataset_source(self) -> "DatasetConfig":
+        """Reconcile the unified `source:` with the legacy `*_identifier` fields.
+
+        The unified `source:` block is mutually exclusive with the legacy identifiers. The two
+        legacy identifiers may still be set together (a gitlab-primary / huggingface-fallback pair
+        selected at download time by `config.data_source`) for backward compatibility. A legacy
+        identifier emits a deprecation warning and, when a single backend is given, is mirrored into
+        `source`; conversely a `source:` is mirrored back into the matching legacy field so existing
+        consumers that read `gitlab_identifier`/`huggingface_identifier` keep working.
+        """
+        legacy_specified = [
+            name
+            for name, value in (
+                ("gitlab_identifier", self.gitlab_identifier),
+                ("huggingface_identifier", self.huggingface_identifier),
+            )
+            if value is not None
+        ]
+        if self.source is not None and legacy_specified:
+            raise ValueError(
+                f"Specify a dataset source once for '{self.name}': set only one of "
+                f"['source', {', '.join(repr(name) for name in legacy_specified)}]. "
+                "Prefer the unified `source:` block."
+            )
+
+        if self.source is not None:
+            # `source:` was used: back-fill the matching legacy field for existing consumers.
+            fields = self.source.model_dump(exclude={"type"})
+            if isinstance(self.source, GitlabDatasetSource):
+                self.gitlab_identifier = JsonlDatasetGitlabIdentifer(**fields)
+            else:
+                self.huggingface_identifier = JsonlDatasetHuggingFaceIdentifer(**fields)
+            return self
+
+        if not legacy_specified:
+            return self
+
+        warnings.warn(
+            f"{' and '.join(f'`{name}`' for name in legacy_specified)} "
+            f"{'is' if len(legacy_specified) == 1 else 'are'} deprecated for dataset "
+            f"'{self.name}'; prefer the unified `source:` block.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        # Mirror a single legacy identifier into `source`. When both are set (primary + fallback),
+        # the single discriminated `source:` can't represent both, so leave it unset and keep the
+        # legacy fields as the source of truth.
+        if len(legacy_specified) == 1:
+            if self.gitlab_identifier is not None:
+                self.source = GitlabDatasetSource(type="gitlab", **self.gitlab_identifier.model_dump())
+            else:
+                self.source = HuggingFaceDatasetSource(type="huggingface", **self.huggingface_identifier.model_dump())
+
+        return self
+
 
 class BenchmarkDatasetConfig(BaseModel):
     name: str
     type: Literal["benchmark"]
     jsonl_fpath: Path
     prepare_script: Path
-    prompt_config: Optional[Path]
+    prompt_config: Optional[Path] = None
     num_repeats: int = Field(default=1, ge=1)
 
 
@@ -406,6 +529,27 @@ class BenchmarkDatasetConfig(BaseModel):
 
 
 class Domain(str, Enum):
+    """The capability a resources server primarily evaluates or trains.
+
+    Pick the single domain that best fits the task. If several seem to apply, choose the most
+    specific one (e.g. prefer `math` or `coding` over `agent`); use `other` only when none
+    of the specific values fit. The values:
+
+    - `math`                  — mathematical problem solving (e.g. AIME, MATH, GSM8K).
+    - `coding`                — code generation, repair, or execution (e.g. SWE-bench, LiveCodeBench).
+    - `agent`                 — multi-step, tool-using / environment-interacting tasks (e.g. tau2,
+      workplace_assistant). Prefer a more specific value when the task is really math/coding/etc.
+    - `knowledge`             — factual or domain-knowledge question answering (e.g. GPQA, MMLU).
+    - `instruction_following` — adherence to explicit formatting/constraints (e.g. IFEval).
+    - `long_context`          — reasoning over long inputs (e.g. RULER, long-document QA).
+    - `safety`                — refusing harmful content / resisting jailbreaks & prompt injection.
+    - `games`                 — interactive game environments (e.g. blackjack, tetris).
+    - `translation`           — machine translation quality (e.g. WMT).
+    - `e2e`                   — end-to-end pipelines spanning multiple capabilities at once.
+    - `rlhf`                  — preference / reward-model / LLM-as-judge evaluations.
+    - `other`                 — catch-all when no specific domain above applies.
+    """
+
     MATH = "math"
     CODING = "coding"
     AGENT = "agent"
@@ -595,11 +739,62 @@ AGENT_REF_KEY = "agent_ref"
 
 
 ########################################
-# Weights and Biases
+# Exporter backends
 ########################################
 
 
-class WANDBConfig(BaseModel):
+class ExporterConfig(BaseModel):
+    """Credentials and run identity for one exporter backend.
+
+    The exporter registry validates these against the global config to decide which backends to
+    open, which is why they live here rather than next to the backend: checking availability must
+    not require importing a tracking SDK.
+    """
+
+    @property
+    def is_available(self) -> bool:
+        """Whether every field the backend needs to connect is set."""
+        raise NotImplementedError
+
+
+DEPRECATED_UPLOAD_ROLLOUTS_KEY = "upload_rollouts_to_wandb"
+
+
+class UploadRolloutsConfigMixin(BaseModel):
+    """`upload_rollouts` plus back-compat for the W&B-specific name it replaced.
+
+    The flag gates rollout upload for every configured exporter, not just W&B, so the old name is
+    accepted for one deprecation cycle and mapped onto the new field.
+    """
+
+    upload_rollouts: bool = Field(
+        default=True,
+        description=(
+            "Upload the rollouts to every configured exporter. Sometimes this should be off "
+            "because the rollouts are massive. Default: True"
+        ),
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def map_deprecated_upload_rollouts(cls, data):
+        if not isinstance(data, dict) or DEPRECATED_UPLOAD_ROLLOUTS_KEY not in data:
+            return data
+
+        data = dict(data)
+        legacy = data.pop(DEPRECATED_UPLOAD_ROLLOUTS_KEY)
+        warnings.warn(
+            f"`{DEPRECATED_UPLOAD_ROLLOUTS_KEY}` is deprecated; use `upload_rollouts`, which "
+            "gates rollout upload for every configured exporter.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        # An explicit `upload_rollouts` wins, so callers can migrate without removing the old key.
+        data.setdefault("upload_rollouts", legacy)
+        return data
+
+
+class WANDBConfig(ExporterConfig):
     wandb_project: Optional[str] = None
     wandb_name: Optional[str] = None
     wandb_api_key: Optional[str] = None
@@ -610,8 +805,27 @@ class WANDBConfig(BaseModel):
         return self.wandb_project and self.wandb_name and self.wandb_api_key and self.wandb_api_key != "****"
 
 
+class MLFlowConfig(ExporterConfig):
+    """Also used for the GitLab model registry, which needs only the URI and token."""
+
+    mlflow_tracking_uri: Optional[str] = None
+    mlflow_tracking_token: Optional[str] = None
+    mlflow_experiment_name: Optional[str] = None
+    mlflow_run_name: Optional[str] = None
+
+    @property
+    def is_available(self) -> bool:
+        # The token is optional: unauthenticated tracking servers are possible.
+        return (
+            self.mlflow_tracking_uri
+            and self.mlflow_experiment_name
+            and self.mlflow_run_name
+            and self.mlflow_tracking_token != "****"
+        )
+
+
 ########################################
-# Weights and Biases
+# Aggregate Metrics
 ########################################
 
 
@@ -644,3 +858,13 @@ class AggregateMetrics(BaseModel):
         default_factory=dict,
         description="Headline metrics for this benchmark. Subset of agent_metrics.",
     )
+
+
+########################################
+# Model Call Capture
+########################################
+
+# Per-rollout model-call correlation. Callers place the rollout id in the model-server URL;
+# the capture middleware in base_responses_api_model.py strips this prefix before routing.
+ROLLOUT_PATH_PREFIX = "ng-rollout"
+TOKEN_CAPTURE_PATH_SEGMENT = "training-token-capture"

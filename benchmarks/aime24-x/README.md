@@ -21,7 +21,7 @@ This benchmark reuses `math_with_judge` in symbolic-only mode
 ## Data Preparation
 
 ```bash
-ng_prepare_benchmark "+config_paths=[benchmarks/aime24-x/config.yaml]"
+gym eval prepare --benchmark aime24-x
 ```
 
 That writes `benchmarks/aime24-x/data/aime24-x_benchmark.jsonl`.
@@ -36,16 +36,21 @@ python benchmarks/aime24-x/prepare.py --prompt_language en
 ## Quickstart
 
 ```bash
-ng_run "+config_paths=[benchmarks/aime24-x/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+gym env start \
+    --benchmark aime24-x \
+    --model-type vllm_model
 ```
 
 Then in another shell:
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=aime24-x_math_with_judge_simple_agent \
-    +input_jsonl_fpath=benchmarks/aime24-x/data/aime24-x_benchmark.jsonl \
-    +output_jsonl_fpath=results/aime24-x/rollouts.jsonl \
-    +num_repeats=32 +num_repeats_add_seed=true \
-    "+responses_create_params={temperature: 1.0, top_p: 0.95, max_output_tokens: 65536}"
+gym eval run --no-serve \
+    --agent aime24-x_math_with_judge_simple_agent \
+    --input benchmarks/aime24-x/data/aime24-x_benchmark.jsonl \
+    --output results/aime24-x/rollouts.jsonl \
+    --num-repeats 32 \
+    --temperature 1.0 \
+    --top-p 0.95 \
+    --max-output-tokens 65536 \
+    +num_repeats_add_seed=true
 ```

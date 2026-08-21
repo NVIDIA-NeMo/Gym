@@ -62,3 +62,5 @@ When solving bugs, follow these steps:
     - For any unrelated changes (for example, `Cargo.lock` or similar file being modified automatically, or you accidentally modifying any test files), you must run `git restore <unrelated_file>` before completing the task to ensure such changes are not included.
     - For any unrelated newly created files (for example, temporary debug files created while reproducing the issue), delete them before completing the task to ensure they are not included.
     - Make sure that in the final state of the repository, only the clean, intentional fix changes are present, with no unrelated file modifications and no changes to any test files.
+
+I will export your changes and apply suitable test patches to verify if your fix is correct when you finish this task. This means you MUST NOT modify the testing logic or any of the tests in any way!

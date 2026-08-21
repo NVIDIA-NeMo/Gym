@@ -56,6 +56,11 @@ class HarborDatasetSourceConfig(BaseModel):
 class HarborAgentConfig(BaseResponsesAPIAgentConfig):
     concurrency: int
 
+    # CPUs Ray reserves per Harbor job. Jobs are I/O-bound, so a fractional
+    # value runs far more of them than Ray's default of 1 CPU/task, which caps
+    # concurrency at the driver's CPU count.
+    harbor_ray_task_num_cpus: Optional[float] = None
+
     # --- Harbor agent settings ---
     # Name of a built-in Harbor agent (e.g. "terminus-2", "claude-code", "aider").
     harbor_agent_name: Optional[str] = "terminus-2"
@@ -103,6 +108,9 @@ class HarborAgentConfig(BaseResponsesAPIAgentConfig):
     # Directory where Harbor writes job results and trial artifacts.
     harbor_jobs_dir: str = "jobs"
 
+    # Keep Docker runtime images between trials (maps to EnvironmentConfig.delete=False).
+    harbor_no_delete: bool = True
+
     # --- Model routing ---
     # NeMo Gym model server reference used to resolve Harbor model base URL.
     model_server: ModelServerRef
@@ -117,8 +125,17 @@ class HarborVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
 
+def _find_trial_dir_with_result(job_dir: Path) -> Optional[Path]:
+    if not job_dir.exists():
+        return None
+    for trial_dir in job_dir.iterdir():
+        if trial_dir.is_dir() and (trial_dir / "result.json").exists():
+            return trial_dir
+    return None
+
+
 async def run_harbor_job(job_config_dict: dict) -> str:
-    """Runs a single Harbor Job and returns the trial directory path.
+    """Runs a single Harbor Job and returns the *absolute* trial directory path.
 
     The trial directory contains:
     - result.json: Summary result with reward, agent_result, verifier_result, etc.
@@ -129,6 +146,18 @@ async def run_harbor_job(job_config_dict: dict) -> str:
     fails (e.g. verifier timeout, reward file not found, OOM).  We recover the
     trial directory after an exception so the caller can still use the partial
     trajectory for training.
+
+    This runs inside a Ray remote worker (see ``runner_ray_remote``), whose cwd
+    is inherited from wherever the Ray cluster was started (the Gym repo root,
+    via ``ng_run``) -- NOT the `harbor_agent` server process's own cwd (which
+    `ng_run` `cd`s into `responses_api_agents/harbor_agent/` before launching).
+    `config.jobs_dir` is a relative path (e.g. `responses_api_agents/harbor_agent/
+    jobs/...`), so it only resolves correctly from the *former*. We therefore
+    MUST resolve to an absolute path before returning, since the caller
+    (`HarborAgent.run()`) re-opens `result.json` from the server process's own
+    cwd -- a relative path here silently resolves to the wrong (nonexistent,
+    doubled) location there, and every trial looks like it failed even though
+    it ran and wrote everything correctly to disk.
     """
     from harbor.job import Job
     from harbor.models.job.config import JobConfig
@@ -142,23 +171,19 @@ async def run_harbor_job(job_config_dict: dict) -> str:
     except Exception as e:
         job_error = e
 
-    # Find the trial directory from the job output directory.  Harbor writes
+    # Find the trial directory from the job output directory. Harbor writes
     # result.json before propagating most exceptions, so we can usually
     # recover the trial even when job.run() raised.
     job_dir = config.jobs_dir / config.job_name
-    if job_dir.exists():
-        for trial_dir in job_dir.iterdir():
-            if not trial_dir.is_dir():
-                continue
-            result_path = trial_dir / "result.json"
-            if result_path.exists():
-                return str(trial_dir)
+    trial_dir = _find_trial_dir_with_result(job_dir)
+    if trial_dir is not None:
+        return str(trial_dir.resolve())
 
     # No trial directory found — re-raise the original error if there was one,
     # otherwise raise FileNotFoundError.
     if job_error is not None:
         raise job_error
-    raise FileNotFoundError(f"No trial result found in {job_dir}")
+    raise FileNotFoundError(f"No trial result found in {job_dir.resolve()}")
 
 
 _RAY_WORKER_EVENT_LOOP: Optional[asyncio.AbstractEventLoop] = None
@@ -200,6 +225,12 @@ class HarborAgent(SimpleResponsesAPIAgent):
         app = FastAPI()
         app.post("/v1/responses")(self.responses)
         app.post("/run")(self.run)
+        # Registered explicitly because this override replaces (rather than extends)
+        # SimpleResponsesAPIAgent.setup_webserver(), which would otherwise add this route
+        # by default. HarborAgent doesn't override compute_metrics/get_key_metrics, so this
+        # uses AggregateMetricsMixin's generic reward-based aggregation (mean/max/min/median/std
+        # via RewardProfiler) over the `reward` field already present on every /run response.
+        app.post("/aggregate_metrics")(self.aggregate_metrics)
         return app
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
@@ -240,27 +271,27 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 params = dict(
                     job_config_dict=job_config_dict,
                 )
-                future = runner_ray_remote.remote(_run_harbor_job_sync, params)
-                trial_dir_path = await asyncio.to_thread(ray.get, future)
+                runner = runner_ray_remote
+                if self.config.harbor_ray_task_num_cpus is not None:
+                    runner = runner_ray_remote.options(num_cpus=self.config.harbor_ray_task_num_cpus)
+                future = runner.remote(_run_harbor_job_sync, params)
+                # Await the ObjectRef directly; to_thread(ray.get, ...) would pin
+                # one executor thread per in-flight trial, so completed trials
+                # would queue behind long-running ones.
+                trial_dir_path = await future
                 trial_dir = Path(trial_dir_path)
 
-                # Read the trial result (summary: reward, agent_result, verifier_result)
-                with open(trial_dir / "result.json", "r") as f:
-                    trial_result = json.load(f)
+                def _read_trial_files():
+                    traj_path = trial_dir / "agent" / "trajectory.json"
+                    flags_path = trial_dir / "agent" / "agent_error_flags.json"
+                    return (
+                        json.loads((trial_dir / "result.json").read_text()),
+                        json.loads(traj_path.read_text()) if traj_path.exists() else None,
+                        json.loads(flags_path.read_text()) if flags_path.exists() else {},
+                    )
 
-                # Read the ATIF trajectory (full conversation with per-token logprobs)
-                trajectory = None
-                trajectory_path = trial_dir / "agent" / "trajectory.json"
-                if trajectory_path.exists():
-                    with open(trajectory_path, "r") as f:
-                        trajectory = json.load(f)
-
-                # Read agent error flags written by the agent
-                agent_error_flags = {}
-                agent_error_flags_path = trial_dir / "agent" / "agent_error_flags.json"
-                if agent_error_flags_path.exists():
-                    with open(agent_error_flags_path, "r") as f:
-                        agent_error_flags = json.load(f)
+                # Trajectories can be many MB; parse off the event loop.
+                trial_result, trajectory, agent_error_flags = await asyncio.to_thread(_read_trial_files)
 
                 # Extract reward from verifier result
                 verifier_result = trial_result.get("verifier_result")
@@ -456,6 +487,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
         environment_config = EnvironmentConfig(
             type=self.config.harbor_environment_type if not self.config.harbor_environment_import_path else None,
             import_path=self.config.harbor_environment_import_path,
+            delete=not self.config.harbor_no_delete,
             kwargs=environment_kwargs,
         )
 

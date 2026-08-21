@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import statistics
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -35,7 +36,7 @@ from responses_api_agents.scicode_agent.step_utils import (
 )
 
 
-_PROMPT_FPATH = "benchmarks/scicode/prompts/default.yaml"
+_PROMPT_FPATH = "benchmarks/scicode/prompts/background.yaml"
 
 
 def _config():
@@ -264,3 +265,79 @@ class TestApp:
         assert key["subtask_accuracy"] == 0.414
         assert key["mean/reward"] == 0.1875
         assert "max/reward" not in key  # only mean/* + subtask_accuracy are headline
+
+
+# ---------------------------------------------------------------------------
+# Across-run variability (_across_run_stats via compute_metrics)
+# ---------------------------------------------------------------------------
+
+
+def _repeat(idx, passed, total):
+    return {
+        "_ng_rollout_index": idx,
+        "num_steps_passed": passed,
+        "num_steps_total": total,
+        "problem_accuracy": passed == total,
+    }
+
+
+class TestAcrossRunStats:
+    def test_three_runs_hand_computed(self):
+        # Two problems x three repeats. Per-run problem accuracy is the mean of
+        # problem_accuracy over problems; per-run subtask accuracy is the
+        # sub-step-weighted pool - the same definitions as the headline metrics.
+        tasks = [
+            [_repeat(0, 2, 2), _repeat(1, 1, 2), _repeat(2, 0, 2)],
+            [_repeat(0, 3, 4), _repeat(1, 4, 4), _repeat(2, 3, 4)],
+        ]
+        m = _agent().compute_metrics(tasks)
+        # Pooled headline is unchanged: (2+1+0+3+4+3) / (3*2 + 3*4) = 13/18.
+        assert m["subtask_accuracy"] == pytest.approx(13 / 18)
+        problem_runs = [1 / 2, 1 / 2, 0.0]  # run means of problem_accuracy
+        subtask_runs = [5 / 6, 5 / 6, 3 / 6]  # per-run pooled sub-step fractions
+        assert m["mean/problem_accuracy/std_dev_across_runs"] == pytest.approx(statistics.stdev(problem_runs))
+        assert m["subtask_accuracy/std_dev_across_runs"] == pytest.approx(statistics.stdev(subtask_runs))
+        assert not any(k.endswith("std_err_across_runs") for k in m)
+
+    def test_single_repeat_emits_only_pooled_metric(self):
+        tasks = [[_repeat(0, 1, 2)], [_repeat(0, 3, 4)]]
+        assert _agent().compute_metrics(tasks) == {"subtask_accuracy": 4 / 6}
+
+    def test_rollout_index_alignment_not_arrival_order(self):
+        ordered = [
+            [_repeat(0, 2, 2), _repeat(1, 0, 2)],
+            [_repeat(0, 4, 4), _repeat(1, 1, 4)],
+        ]
+        shuffled = [list(reversed(task)) for task in ordered]
+        assert _agent().compute_metrics(shuffled) == _agent().compute_metrics(ordered)
+
+    def test_uneven_repeat_counts_use_min_k(self):
+        tasks = [
+            [_repeat(0, 2, 2), _repeat(1, 0, 2), _repeat(2, 1, 2)],
+            [_repeat(0, 4, 4), _repeat(1, 0, 4)],
+        ]
+        m = _agent().compute_metrics(tasks)
+        # k = 2: subtask runs (2+4)/6 = 1.0 and (0+0)/6 = 0.0.
+        assert m["subtask_accuracy/std_dev_across_runs"] == pytest.approx(statistics.stdev([1.0, 0.0]))
+
+    def test_identical_runs_zero_std(self):
+        tasks = [
+            [_repeat(0, 1, 2), _repeat(1, 1, 2)],
+            [_repeat(0, 4, 4), _repeat(1, 4, 4)],
+        ]
+        m = _agent().compute_metrics(tasks)
+        assert m["mean/problem_accuracy/std_dev_across_runs"] == 0.0
+        assert m["subtask_accuracy/std_dev_across_runs"] == 0.0
+
+    def test_get_key_metrics_includes_across_run_stats(self):
+        agent_metrics = {
+            "mean/problem_accuracy": 0.19,
+            "mean/problem_accuracy/std_dev_across_runs": 0.02,
+            "subtask_accuracy": 0.41,
+            "subtask_accuracy/std_dev_across_runs": 0.015,
+            "std/reward": 0.4,
+        }
+        key = _agent().get_key_metrics(agent_metrics)
+        assert "mean/problem_accuracy/std_dev_across_runs" in key
+        assert "subtask_accuracy/std_dev_across_runs" in key
+        assert "std/reward" not in key

@@ -3,22 +3,20 @@ Running this benchmark requires 1 GPU for 7B https://huggingface.co/allenai/wild
 
 # Prepare data
 ```bash
-config_paths="benchmarks/xstest/config.yaml"
-ng_prepare_benchmark "+config_paths=[$config_paths]"
+gym eval prepare --benchmark xstest
 ```
 
 # Run
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/xstest/config.yaml"
-ng_e2e_collect_rollouts \
-    "+config_paths=[${config_paths}]" \
-    ++output_jsonl_fpath=results/benchmarks/xstest.jsonl \
+gym eval run \
+    --model-type vllm_model \
+    --benchmark xstest \
+    --output results/benchmarks/xstest.jsonl \
+    --split benchmark \
+    --model-url <> \
+    --model-api-key <> \
+    --model <> \
+    --resume \
     ++overwrite_metrics_conflicts=true \
-    ++split=benchmark \
-    ++resume_from_cache=true \
-    ++reuse_existing_data_preparation=true \
-    ++policy_base_url=<> \
-    ++policy_api_key=<> \
-    ++policy_model_name=<>
+    ++reuse_existing_data_preparation=true
 ```

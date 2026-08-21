@@ -20,23 +20,27 @@ from mlflow import MlflowClient
 from mlflow.artifacts import get_artifact_repository
 from mlflow.environment_variables import MLFLOW_TRACKING_TOKEN
 from mlflow.exceptions import RestException
-from pydantic import BaseModel
 
 from nemo_gym.config_types import (
+    ConfigError,
     DownloadJsonlDatasetGitlabConfig,
+    MLFlowConfig,
     UploadJsonlDatasetGitlabConfig,
 )
 from nemo_gym.server_utils import get_global_config_dict
 
 
-class MLFlowConfig(BaseModel):
-    mlflow_tracking_uri: str
-    mlflow_tracking_token: str
-
-
 def create_mlflow_client() -> MlflowClient:  # pragma: no cover
     global_config = get_global_config_dict()
     config = MLFlowConfig.model_validate(global_config)
+
+    # Only the registry half of MLFlowConfig is needed here; experiment/run name are exporter-only.
+    if not (config.mlflow_tracking_uri and config.mlflow_tracking_token):
+        raise ConfigError(
+            "GitLab dataset storage needs MLflow credentials. Add to env.yaml:\n"
+            "  mlflow_tracking_uri: <your_gitlab_uri>\n"
+            "  mlflow_tracking_token: <your_gitlab_token>"
+        )
 
     environ["MLFLOW_TRACKING_TOKEN"] = config.mlflow_tracking_token
     client = MlflowClient(tracking_uri=config.mlflow_tracking_uri)
@@ -66,18 +70,12 @@ def upload_jsonl_dataset(
     filename = Path(config.input_jsonl_fpath).name
     DownloadJsonlDatasetGitlabConfig
     print(f"""Download this artifact:
-ng_download_dataset_from_gitlab \\
+gym dataset download --storage gitlab \\
     +dataset_name={config.dataset_name} \\
     +version={config.version} \\
     +artifact_fpath={filename} \\
     +output_fpath={config.input_jsonl_fpath}
 """)
-
-
-def upload_jsonl_dataset_cli() -> None:  # pragma: no cover
-    global_config = get_global_config_dict()
-    config = UploadJsonlDatasetGitlabConfig.model_validate(global_config)
-    upload_jsonl_dataset(config)
 
 
 def download_jsonl_dataset(
@@ -100,12 +98,6 @@ def download_jsonl_dataset(
         f.write(response.content.decode())
 
 
-def download_jsonl_dataset_cli() -> None:  # pragma: no cover
-    global_config = get_global_config_dict()
-    config = DownloadJsonlDatasetGitlabConfig.model_validate(global_config)
-    download_jsonl_dataset(config)
-
-
 def is_model_in_gitlab(model_name: str) -> bool:  # pragma: no cover
     client = create_mlflow_client()
 
@@ -122,3 +114,17 @@ def is_model_in_gitlab(model_name: str) -> bool:  # pragma: no cover
 def delete_model_from_gitlab(model_name: str) -> None:  # pragma: no cover
     client = create_mlflow_client()
     client.delete_registered_model(model_name)
+
+
+# Backward-compatibility shims (CLI refactor): these CLI entry points moved to `nemo_gym.cli.dataset`.
+# Re-exported lazily to avoid a circular import; accessing them emits a DeprecationWarning.
+from nemo_gym.cli._compat import moved_attr_getter  # noqa: E402
+
+
+__getattr__ = moved_attr_getter(
+    __name__,
+    {
+        "upload_jsonl_dataset_cli": "nemo_gym.cli.dataset",
+        "download_jsonl_dataset_cli": "nemo_gym.cli.dataset",
+    },
+)

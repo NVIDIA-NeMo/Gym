@@ -1,0 +1,45 @@
+math_with_judge:
+  resources_servers:
+    math_with_judge:
+      entrypoint: app.py
+      judge_model_server:
+        type: responses_api_models
+        name: policy_model
+      judge_responses_create_params: {input: []}
+      should_use_judge: false
+      domain: math
+      verified: false
+      description: pi agent harness on OpenMathReasoning math dataset with math-verify
+      value: Improve model math capabilities in the pi agent harness
+
+math_with_judge_pi_agent:
+  responses_api_agents:
+    pi_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: math_with_judge
+      concurrency: 8
+      command: pi
+      model: nvinf/nvidia/qwen/qwen3-next-80b-a3b-instruct
+      pi_version: 0.80.2
+      timeout: 600
+      system_prompt: |
+        You are a precise math assistant with a bash tool. Run python3 to compute or verify numeric
+        results instead of doing them by hand, then state the final answer as \boxed{answer}.
+      models_config:
+        providers:
+          nvinf:
+            baseUrl: ${policy_base_url}
+            api: openai-completions
+            apiKey: ${policy_api_key}
+            compat:
+              supportsDeveloperRole: false
+              supportsReasoningEffort: false
+            models:
+            - id: nvidia/qwen/qwen3-next-80b-a3b-instruct
+              reasoning: false
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/math_with_judge/data/example.jsonl

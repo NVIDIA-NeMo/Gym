@@ -22,7 +22,7 @@ This benchmark reuses the `mcqa` resource server, which matches Skills'
 ## Data Preparation
 
 ```bash
-ng_prepare_benchmark "+config_paths=[benchmarks/gpqa-x/config.yaml]"
+gym eval prepare --benchmark gpqa-x
 ```
 
 That writes `benchmarks/gpqa-x/data/gpqa-x_benchmark.jsonl`.
@@ -37,17 +37,22 @@ python benchmarks/gpqa-x/prepare.py --prompt_language en
 ## Quickstart
 
 ```bash
-ng_run "+config_paths=[benchmarks/gpqa-x/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+gym env start \
+    --benchmark gpqa-x \
+    --model-type vllm_model
 ```
 
 Then in another shell:
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=gpqa-x_mcqa_simple_agent \
-    +input_jsonl_fpath=benchmarks/gpqa-x/data/gpqa-x_benchmark.jsonl \
-    +output_jsonl_fpath=results/gpqa-x/rollouts.jsonl \
-    +prompt_config=benchmarks/prompts/generic/default.yaml \
-    +num_repeats=8 +num_repeats_add_seed=true \
-    "+responses_create_params={temperature: 1.0, top_p: 0.95, max_output_tokens: 32768}"
+gym eval run --no-serve \
+    --agent gpqa-x_mcqa_simple_agent \
+    --input benchmarks/gpqa-x/data/gpqa-x_benchmark.jsonl \
+    --output results/gpqa-x/rollouts.jsonl \
+    --prompt-config benchmarks/prompts/generic/default.yaml \
+    --num-repeats 8 \
+    --temperature 1.0 \
+    --top-p 0.95 \
+    --max-output-tokens 32768 \
+    +num_repeats_add_seed=true
 ```

@@ -228,7 +228,7 @@ def prepare(include_web_search: bool = False) -> Path:
 
     Args:
         include_web_search: Include the web_search tool in tool definitions.
-            Default False (ng_prepare_benchmark calls prepare() with no args).
+            Default False (gym eval prepare calls prepare() with no args).
             Pass True or use --include-web-search on the CLI.
     """
     DATA_DIR.mkdir(parents=True, exist_ok=True)

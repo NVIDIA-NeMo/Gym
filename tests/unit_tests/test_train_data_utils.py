@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import shutil
 from pathlib import Path
 from unittest.mock import MagicMock, mock_open
 
@@ -21,6 +22,7 @@ from pytest import MonkeyPatch, raises
 
 import nemo_gym.global_config
 import nemo_gym.train_data_utils
+from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.config_types import DatasetConfig, ResponsesAPIAgentServerInstanceConfig
 from nemo_gym.global_config import DictConfig, GlobalConfigDictParser
 from nemo_gym.train_data_utils import (
@@ -125,6 +127,7 @@ class TestLoadAndValidateServerInstanceConfigs:
                                 "type": "example",
                                 "jsonl_fpath": "resources_servers/example_multi_step/data/example.jsonl",
                                 "num_repeats": 1,
+                                "source": None,
                                 "gitlab_identifier": None,
                                 "huggingface_identifier": None,
                                 "license": None,
@@ -562,7 +565,69 @@ class TestValidateSamplesAndAggregateMetrics:
             == actual_dataset_type_to_aggregate_metrics.get("example").model_dump()
         )
 
-        assert write_filenames == [Path("resources_servers/example_multi_step/data/example_metrics.json")]
+        # The sidecar already exists on disk and matches the freshly computed metrics, so the
+        # (previously unconditional) rewrite is now skipped -- no metrics file is written.
+        assert write_filenames == []
+
+    def test_validate_samples_and_aggregate_metrics_skips_rewrite_when_sidecar_matches(self, tmp_path: Path) -> None:
+        """An up-to-date metrics sidecar must not be rewritten.
+
+        Rewriting a sidecar that already matches the freshly computed metrics is redundant, and when the
+        dataset lives in a shared, read-only directory the redundant ``open(..., "w")`` raises
+        ``PermissionError`` for any user who does not own the pre-staged file. This reproduces that setup
+        by making the sidecar read-only between the two passes.
+        """
+        processor = TrainDataProcessor()
+
+        # Copy the bundled example dataset into a writable temp dir so we can toggle its permissions
+        # without touching the repo. The dataset is the same one exercised by the sanity test, so its
+        # metrics aggregate cleanly.
+        source_fpath = _resolve_under_cwd_or_install("resources_servers/example_multi_step/data/example.jsonl")
+        data_fpath = tmp_path / "example.jsonl"
+        shutil.copyfile(source_fpath, data_fpath)
+        metrics_fpath = data_fpath.with_name(f"{data_fpath.stem}_metrics.json")
+
+        server_type_config_dict = {
+            "responses_api_agents": {
+                "simple_agent": {
+                    "host": "127.0.0.1",
+                    "port": 12345,
+                    "entrypoint": "app.py",
+                    "datasets": [
+                        {
+                            "name": "example",
+                            "type": "example",
+                            "jsonl_fpath": str(data_fpath),
+                            "num_repeats": 1,
+                            "gitlab_identifier": None,
+                            "license": None,
+                        }
+                    ],
+                    "resources_server": {"type": "resources_servers", "name": "test_resources_server"},
+                    "model_server": {"type": "responses_api_models", "name": "policy_model"},
+                }
+            }
+        }
+        server_config = ResponsesAPIAgentServerInstanceConfig(
+            name="test_agent",
+            server_type_config_dict=DictConfig(server_type_config_dict),
+            responses_api_agents=server_type_config_dict["responses_api_agents"],
+        )
+
+        # First pass creates the sidecar next to the dataset.
+        processor.validate_samples_and_aggregate_metrics([server_config], overwrite_metrics_conflicts=False)
+        assert metrics_fpath.exists()
+        original_bytes = metrics_fpath.read_bytes()
+
+        # Make the sidecar read-only, mimicking a shared dataset dir owned by another user. The old
+        # unconditional rewrite raised PermissionError here; the second pass must instead be a no-op.
+        metrics_fpath.chmod(0o444)
+        try:
+            processor.validate_samples_and_aggregate_metrics([server_config], overwrite_metrics_conflicts=False)
+        finally:
+            metrics_fpath.chmod(0o644)
+
+        assert metrics_fpath.read_bytes() == original_bytes
 
     def test_validate_samples_and_aggregate_metrics_conflict_raises_ValueError(self, monkeypatch: MonkeyPatch) -> None:
         mock_write_file = mock_open()
@@ -575,7 +640,9 @@ class TestValidateSamplesAndAggregateMetrics:
                 write_filenames.append(filename)
                 return mock_write_file()
 
-            if filename == "resources_servers/example_multi_step/data/example.jsonl":
+            if Path(filename) == _resolve_under_cwd_or_install(
+                "resources_servers/example_multi_step/data/example.jsonl"
+            ):
                 return original_open(filename, mode)
             elif filename == Path("resources_servers/example_multi_step/data/example_metrics.json"):
                 with original_open(filename, mode) as f:
@@ -1115,6 +1182,26 @@ class TestCollateSamples:
             Path("resources_servers/example_multi_step/data/example_prepare.jsonl"),
             Path("example.jsonl"),
         ]
+
+    def test_collate_creates_missing_parent_dir(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+        # The prepared-output file is written next to the dataset's jsonl_fpath. When that dir does not
+        # exist in the cwd (e.g. a built-in dataset resolved from the install root while collating from
+        # a fresh cwd), the write must create the parent instead of crashing with FileNotFoundError.
+        missing_dir = tmp_path / "does" / "not" / "exist"
+        assert not missing_dir.exists()
+        cfg = _make_agent_instance_config(
+            "ex", [{"name": "example", "type": "example", "jsonl_fpath": str(missing_dir / "data.jsonl")}]
+        )
+        processor = TrainDataProcessor()
+        # Bypass the dataset read so the source file isn't needed; we're exercising the write path.
+        monkeypatch.setattr(processor, "_iter_dataset_lines", lambda d: iter(['{"foo": "bar"}']))
+
+        paths = processor._collate_samples_single_type("example", [cfg])
+
+        prepare_path = missing_dir / "data_prepare.jsonl"
+        assert paths == [prepare_path]
+        assert prepare_path.exists()  # parent dir auto-created; write did not crash
+        assert json.loads(prepare_path.read_text().strip())["foo"] == "bar"
 
     def test_collate_samples_metrics_conflict_raises_ValueError(self, monkeypatch: MonkeyPatch) -> None:
         write_filenames_to_mock = dict()

@@ -47,15 +47,21 @@ elsewhere. Cluster/SLURM users can co-launch the sandbox via Skills'
 ## Running
 
 ```bash
-ng_prepare_data +config_paths=[benchmarks/ioi/config.yaml] \
-  +output_dirpath=benchmarks/ioi/data \
-  +mode=benchmark_preparation
+gym dataset collate --config benchmarks/ioi/config.yaml \
+  --output-dir benchmarks/ioi/data \
+  --mode benchmark_preparation
 
-ng_run +config_paths=[benchmarks/ioi/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]
+gym env start \
+    --benchmark ioi \
+    --model-type vllm_model
 
-ng_collect_rollouts +agent_name=ioi_simple_agent \
-  +input_jsonl_fpath=benchmarks/ioi/data/ioi24_benchmark.jsonl \
-  +output_jsonl_fpath=results/ioi_rollouts.jsonl \
-  +num_repeats=50 +num_repeats_add_seed=true \
-  "+responses_create_params={max_output_tokens: 131072, temperature: 1.0, top_p: 0.95}"
+gym eval run --no-serve \
+  --agent ioi_simple_agent \
+  --input benchmarks/ioi/data/ioi24_benchmark.jsonl \
+  --output results/ioi_rollouts.jsonl \
+  --num-repeats 50 \
+  --temperature 1.0 \
+  --top-p 0.95 \
+  --max-output-tokens 131072 \
+  +num_repeats_add_seed=true
 ```

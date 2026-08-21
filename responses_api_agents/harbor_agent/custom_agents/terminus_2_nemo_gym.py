@@ -118,6 +118,7 @@ class Terminus2NemoGym(Terminus2):
         except Exception as e:
             self.logger.info(f"Agent error: {type(e).__name__}: {e}. Returning history from completed turns.")
         finally:
+            self._attach_routed_experts_to_trajectory()
             self._write_agent_error_flags()
             # Close the LLM's persistent HTTP client now the episode is done.
             llm = getattr(self, "_llm", None)
@@ -126,6 +127,35 @@ class Terminus2NemoGym(Terminus2):
                     await llm.aclose()
                 except Exception:
                     pass  # teardown is best-effort; never fail the trial on cleanup
+
+    def _attach_routed_experts_to_trajectory(self) -> None:
+        """Add NeMo Gym routed experts to Harbor metrics.extra before Gym converts the trajectory."""
+        llm = getattr(self, "_llm", None)
+        if not isinstance(llm, NemoGymLLM):
+            return
+
+        modified = False
+        for step in getattr(self, "_trajectory_steps", []):
+            if getattr(step, "source", None) != "agent":
+                continue
+            metrics = getattr(step, "metrics", None)
+            if metrics is None:
+                continue
+
+            routed_experts = llm.pop_routed_experts_for_rollout_details(
+                getattr(metrics, "prompt_token_ids", None),
+                getattr(metrics, "completion_token_ids", None),
+                getattr(metrics, "logprobs", None),
+            )
+            if routed_experts is None:
+                continue
+            metrics_extra = metrics.extra or {}
+            metrics_extra["routed_experts"] = routed_experts
+            metrics.extra = metrics_extra
+            modified = True
+
+        if modified:
+            self._dump_trajectory()
 
     def _write_agent_error_flags(self) -> None:
         """Write agent error flags to disk for app.py to pick up."""

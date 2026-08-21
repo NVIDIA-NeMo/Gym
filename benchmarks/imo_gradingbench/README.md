@@ -33,20 +33,20 @@ details.
 
 ```bash
 # Prepare benchmark data
-ng_prepare_benchmark "+config_paths=[benchmarks/imo_gradingbench/config.yaml]"
+gym eval prepare --benchmark imo_gradingbench
 
 # Running servers
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/imo_gradingbench/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark imo_gradingbench
 
 # Collecting rollouts (4 rollouts per task)
-ng_collect_rollouts \
-    +agent_name=imo_gradingbench_imo_gradingbench_simple_agent \
-    +input_jsonl_fpath=benchmarks/imo_gradingbench/data/imo_gradingbench_benchmark.jsonl \
-    +output_jsonl_fpath=results/imo_gradingbench_rollouts.jsonl \
-    +prompt_config=benchmarks/imo_gradingbench/prompts/default.yaml \
-    +num_repeats=4
+gym eval run --no-serve \
+    --agent imo_gradingbench_imo_gradingbench_simple_agent \
+    --input benchmarks/imo_gradingbench/data/imo_gradingbench_benchmark.jsonl \
+    --output results/imo_gradingbench_rollouts.jsonl \
+    --num-repeats 4 \
+    --prompt-config benchmarks/imo_gradingbench/prompts/default.yaml
 ```
 
 ## Metrics

@@ -1,0 +1,5 @@
+results/
+deps/
+anyterminal_*_deps
+anyterminal_results_*
+sifs/

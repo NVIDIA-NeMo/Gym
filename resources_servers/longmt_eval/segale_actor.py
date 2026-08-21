@@ -11,10 +11,12 @@ class, then instantiate one actor per GPU on the gym node.
 
 from __future__ import annotations
 
+import gzip
 import logging
 import os
 import shutil
 import sys
+import urllib.request
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -53,6 +55,61 @@ def _mirror_python(cache_env_var: str, default_cache: str) -> Path:
     return mirrored_bin
 
 
+def _download_once(dest: str, produce) -> None:
+    """Produce `dest` (a file or dir) exactly once, race-safe across Ray actors.
+
+    `produce(tmp)` fills a private pid-scoped tmp beside `dest`; we then atomically
+    os.replace() it in (atomic for files and dirs on one filesystem). A competing
+    actor that published first simply wins.
+    """
+    if os.path.exists(dest):
+        return
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    tmp = f"{dest}.{os.getpid()}.tmp"
+    produce(tmp)
+    if os.path.exists(dest):
+        # Lost the race: another actor published first. Discard our just-made copy.
+        shutil.rmtree(tmp) if os.path.isdir(tmp) else os.remove(tmp)
+    else:
+        os.replace(tmp, dest)
+
+
+def _download_to(url: str, tmp: str, gunzip: bool = False) -> None:
+    with urllib.request.urlopen(url) as resp:
+        stream = gzip.GzipFile(fileobj=resp) if gunzip else resp
+        with open(tmp, "wb") as out:
+            shutil.copyfileobj(stream, out)
+
+
+def _download_ersatz_model(model_name: str = "default-multilingual") -> None:
+    """Fetch ersatz weights once; its download_model() writes in-place with no lock."""
+    from ersatz.utils import ERSATZ_DIR, MODELS
+
+    m = MODELS[model_name]
+    _download_once(os.path.join(ERSATZ_DIR, m["destination"]), lambda tmp: _download_to(m["source"], tmp, gunzip=True))
+
+
+def _download_laser_model(model_dir: str) -> None:
+    """Fetch LASER2 weights once; its downloader's cross-fs shutil.move() isn't atomic."""
+    from laser_encoders.download_models import LaserModelDownloader
+
+    base_url = LaserModelDownloader(model_dir).base_url
+    for filename in ("laser2.pt", "laser2.spm", "laser2.cvocab"):
+        url = f"{base_url}/{filename}"
+        _download_once(os.path.join(model_dir, filename), lambda tmp, url=url: _download_to(url, tmp))
+
+
+def _download_comet_model(comet_model: str) -> str:
+    """Fetch a COMET checkpoint once and return its path; its non-HF URL fallback isn't race-safe."""
+    from comet import download_model
+
+    cache_root = os.environ.get("LONGMT_COMET_CACHE", "/opt/Gym/.cache/longmt-comet")
+    dest = os.path.join(cache_root, comet_model.replace("/", "__"))
+    _download_once(dest, lambda tmp: download_model(comet_model, saving_directory=tmp))
+    # Files are present now; resolve the checkpoint path locally, no network.
+    return download_model(comet_model, saving_directory=dest, local_files_only=True)
+
+
 def _build_segale_actor_class(actors_per_gpu: int = 1, use_extra_gpu: bool = False):
     """Build the _SegaleActor @ray.remote class. Must be called after Ray.init().
 
@@ -85,9 +142,17 @@ def _build_segale_actor_class(actors_per_gpu: int = 1, use_extra_gpu: bool = Fal
         # Ray thinks this node has 0 GPUs; preserve physical CUDA_VISIBLE_DEVICES
         # so the actor can still access its assigned GPU directly.
         env_vars["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"] = "1"
-    for key in ("HF_HOME", "HF_HUB_OFFLINE", "HF_HUB_CACHE", "LASER_HOME", "ERSATZ", "TRANSFORMERS_CACHE"):
+    # HF_HOME: root HuggingFace cache dir; hub cache derives from it.
+    # HF_HUB_OFFLINE: when 1, blocks all HF Hub network calls.
+    # HF_HUB_CACHE: overrides just the hub model-cache location.
+    # TRANSFORMERS_CACHE: legacy transformers cache dir (deprecated; forwarded for compat).
+    # LASER_HOME: dir for LASER2 weights
+    # ERSATZ: dir for ersatz segmenter weights
+    for key in ("HF_HOME", "HF_HUB_OFFLINE", "HF_HUB_CACHE", "TRANSFORMERS_CACHE"):
         if os.environ.get(key):
             env_vars[key] = os.environ[key]
+    env_vars["LASER_HOME"] = os.environ.get("LASER_HOME", "/opt/Gym/.cache/longmt-laser")
+    env_vars["ERSATZ"] = os.environ.get("ERSATZ", "/opt/Gym/.cache/longmt-ersatz")
 
     gpu_fraction = 1 / actors_per_gpu
     if use_extra_gpu:
@@ -104,7 +169,7 @@ def _build_segale_actor_class(actors_per_gpu: int = 1, use_extra_gpu: bool = Fal
             embed_batch_size: int,
         ):
             import torch
-            from comet import download_model, load_from_checkpoint
+            from comet import load_from_checkpoint
             from ersatz.split import EvalModel as ErsatzModel
             from ersatz.utils import get_model_path
             from laser_encoders import LaserEncoderPipeline
@@ -126,16 +191,18 @@ def _build_segale_actor_class(actors_per_gpu: int = 1, use_extra_gpu: bool = Fal
 
             laser_home = os.environ.get("LASER_HOME")
             LOG.info("SegaleActor[%d]: loading LASER2 from %s", gpu_idx, laser_home)
+            _download_laser_model(laser_home)
             self._laser = LaserEncoderPipeline(laser="laser2", model_dir=laser_home)
 
             LOG.info("SegaleActor[%d]: loading COMETKiwi %s on %s", gpu_idx, comet_model, self._device)
-            ckpt = download_model(comet_model)
+            ckpt = _download_comet_model(comet_model)
             self._comet = load_from_checkpoint(ckpt)
             self._comet.to(self._device).eval()
 
             LOG.info("SegaleActor[%d]: loading ersatz segmenter", gpu_idx)
             from ersatz.candidates import MultilingualPunctuation
 
+            _download_ersatz_model("default-multilingual")
             self._ersatz = ErsatzModel(get_model_path("default-multilingual"))
             self._ersatz.device = torch.device("cpu")
             self._ersatz_candidates = MultilingualPunctuation()

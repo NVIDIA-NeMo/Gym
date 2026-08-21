@@ -36,29 +36,29 @@ python benchmarks/longcodebench/prepare.py \
 
 ```bash
 # Prepare benchmark data (default)
-ng_prepare_benchmark "+config_paths=[benchmarks/longcodebench/config.yaml]"
+gym eval prepare --benchmark longcodebench
 
 # Prepare benchmark data (N3 1M variant)
-ng_prepare_benchmark "+config_paths=[benchmarks/longcodebench/config_n3_1m.yaml]"
+gym eval prepare --benchmark longcodebench/config_n3_1m
 
 # Running servers
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/longcodebench/config.yaml"
-ng_run "+config_paths=[$config_paths]"
+gym env start \
+    --model-type vllm_model \
+    --benchmark longcodebench
 
 # Collecting rollouts — default
-ng_collect_rollouts \
-    +agent_name=longcodebench_mcqa_simple_agent \
-    +input_jsonl_fpath=benchmarks/longcodebench/data/longcodebench_benchmark.jsonl \
-    +output_jsonl_fpath=results/longcodebench_rollouts.jsonl \
-    +prompt_config=benchmarks/prompts/generic/default.yaml \
-    +num_repeats=4
+gym eval run --no-serve \
+    --agent longcodebench_mcqa_simple_agent \
+    --input benchmarks/longcodebench/data/longcodebench_benchmark.jsonl \
+    --output results/longcodebench_rollouts.jsonl \
+    --num-repeats 4 \
+    --prompt-config benchmarks/prompts/generic/default.yaml
 
 # Collecting rollouts — N3 1M
-ng_collect_rollouts \
-    +agent_name=longcodebench_n3_1m_mcqa_simple_agent \
-    +input_jsonl_fpath=benchmarks/longcodebench/data/longcodebench_n3_1m_benchmark.jsonl \
-    +output_jsonl_fpath=results/longcodebench_n3_1m_rollouts.jsonl \
-    +prompt_config=benchmarks/prompts/generic/default.yaml \
-    +num_repeats=4
+gym eval run --no-serve \
+    --agent longcodebench_n3_1m_mcqa_simple_agent \
+    --input benchmarks/longcodebench/data/longcodebench_n3_1m_benchmark.jsonl \
+    --output results/longcodebench_n3_1m_rollouts.jsonl \
+    --num-repeats 4 \
+    --prompt-config benchmarks/prompts/generic/default.yaml
 ```

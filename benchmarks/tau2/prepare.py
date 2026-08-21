@@ -1,78 +1,84 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-"""Prepare Tau2 benchmark data."""
+"""Prepare Tau2 and Tau3 banking_knowledge benchmark data."""
 
-import json
+from __future__ import annotations
+
+import argparse
+import sys
 from pathlib import Path
-from subprocess import run
 
 
-BENCHMARK_DIR = Path(__file__).parent
-DATA_DIR = BENCHMARK_DIR / "data"
-OUTPUT_FPATH = DATA_DIR / "tau2_benchmark.jsonl"
+if __package__ in (None, ""):
+    sys.path.append(str(Path(__file__).resolve().parents[2]))
+
+from benchmarks.tau2.prepare_utils import (
+    BANKING_RETRIEVAL_CONFIGS,
+    prepare_all_banking_knowledge,
+    prepare_banking_knowledge,
+    prepare_tau2,
+)
 
 
-def prepare() -> Path:
-    """Download and prepare Tau2 data. Returns the output file path."""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+def prepare(
+    dataset: str = "tau2",
+    retrieval_config: str | None = None,
+    all_retrieval_configs: bool = False,
+) -> Path:
+    """Prepare a Tau dataset and return the generated JSONL path.
 
-    cwd = Path(__file__).parent
-    data_dirpath = cwd / "nemo_gym_data"
-    if not data_dirpath.exists():
-        run(
-            """git clone https://github.com/bxyu-nvidia/tau2-bench \
-&& cd tau2-bench \
-&& git checkout bxyu/nemo_gym_data \
-&& bash dump_nemo_gym_data.sh \
-&& cp -r nemo_gym_data ../nemo_gym_data \
-&& cd .. \
-&& rm -rf tau2-bench""",
-            shell=True,
-            cwd=cwd,
-            check=True,
-            executable="/bin/bash",
-        )
+    Gym calls this without arguments for the default Tau2 benchmark. Direct CLI
+    calls can opt into Tau3 banking variants with the same argument names.
+    """
 
-    samples = []
-    for path in data_dirpath.glob("*/*.json"):
-        data = json.loads(path.read_text())
-        data["config"]["save_to"] = ""
+    if dataset == "tau2":
+        if all_retrieval_configs or retrieval_config is not None:
+            raise ValueError("Tau2 base prepare does not accept banking arguments")
+        return prepare_tau2()
 
-        # The default is `all_with_nl_assertions` which may actually be a mistake when running from CLI
-        # We always see "nl": null or "nl": "No nl_assertions to evaluate" for results
-        data["evaluation_type"] = "all"
-        if "NL_ASSERTION" in data["task"]["evaluation_criteria"]["reward_basis"]:
-            data["task"]["evaluation_criteria"]["reward_basis"].remove("NL_ASSERTION")
+    if dataset in ("banking", "banking_knowledge"):
+        if all_retrieval_configs:
+            prepared = prepare_all_banking_knowledge()
+            return prepared["terminal_use"]
+        if retrieval_config is None:
+            raise ValueError("banking_knowledge prepare requires retrieval_config")
+        if retrieval_config not in BANKING_RETRIEVAL_CONFIGS:
+            supported = ", ".join(BANKING_RETRIEVAL_CONFIGS)
+            raise ValueError(
+                f"Unsupported banking_knowledge retrieval_config {retrieval_config!r}. Supported: {supported}"
+            )
+        return prepare_banking_knowledge(retrieval_config)
 
-        # The actual prompts are constructed on the fly by Tau2-Bench
-        # data["responses_create_params"]
+    raise ValueError(f"Unsupported Tau2 prepare dataset: {dataset!r}")
 
-        # Clean temperature sampling parameters
-        data["config"]["llm_args_user"].pop("temperature")
 
-        samples.append(data)
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "dataset",
+        nargs="?",
+        default="tau2",
+        choices=("tau2", "banking", "banking_knowledge"),
+    )
+    parser.add_argument(
+        "--retrieval-config",
+        choices=BANKING_RETRIEVAL_CONFIGS,
+        help="banking_knowledge retrieval config to prepare",
+    )
+    parser.add_argument(
+        "--all",
+        dest="all_retrieval_configs",
+        action="store_true",
+        help="prepare JSONLs for every pinned banking_knowledge retrieval config",
+    )
+    args = parser.parse_args()
 
-    count = 0
-    with open(OUTPUT_FPATH, "w") as f:
-        for sample in samples:
-            f.write(json.dumps(sample) + "\n")
-            count += 1
-
-    print(f"Wrote {count} problems to {OUTPUT_FPATH}")
-    return OUTPUT_FPATH
+    prepare(
+        dataset=args.dataset,
+        retrieval_config=args.retrieval_config,
+        all_retrieval_configs=args.all_retrieval_configs,
+    )
 
 
 if __name__ == "__main__":
-    prepare()
+    main()

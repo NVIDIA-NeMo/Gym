@@ -19,10 +19,11 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 from pytest import MonkeyPatch, raises
 
-import nemo_gym.cli_setup_command
-from nemo_gym.cli_setup_command import (
+import nemo_gym.cli.setup_command
+from nemo_gym.cli.setup_command import (
     _get_nemo_gym_install_flags,
     _get_nemo_gym_version_spec,
+    get_venv_path,
     run_command,
     setup_env_command,
 )
@@ -52,6 +53,18 @@ class TestCLISetupCommandSetupEnvCommand:
         )
         expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install -r requirements.txt ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         assert expected_command == actual_command
+
+    def test_requirements_uses_server_local_overrides(self, tmp_path: Path) -> None:
+        server_dir = self._setup_server_dir(tmp_path)
+        (server_dir / "overrides.txt").write_text("dependency==2\n")
+
+        actual_command = setup_env_command(
+            dir_path=server_dir,
+            global_config_dict=self._debug_global_config_dict(tmp_path),
+            prefix="my server name",
+        )
+
+        assert "uv pip install --override overrides.txt -r requirements.txt" in actual_command
 
     def test_skips_install_when_venv_present(self, tmp_path: Path) -> None:
         server_dir = self._setup_server_dir(tmp_path)
@@ -178,6 +191,17 @@ class TestCLISetupCommandSetupEnvCommand:
         expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version {uv_venv_dir}/first_level/second_level/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {uv_venv_dir}/first_level/second_level/.venv/bin/activate && uv pip install -r requirements.txt ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         assert expected_command == actual_command
 
+    def test_uv_venv_dir_path_is_shared_with_cleanup(self, tmp_path: Path) -> None:
+        server_dir = self._setup_server_dir(tmp_path)
+        uv_venv_dir = tmp_path / "uv_venv_dir"
+
+        actual_path = get_venv_path(
+            server_dir,
+            self._debug_global_config_dict(tmp_path) | {"uv_venv_dir": str(uv_venv_dir)},
+        )
+
+        assert actual_path == uv_venv_dir / "first_level/second_level/.venv"
+
     @pytest.mark.parametrize("version", ["0.3.0", "0.3.0rc0", "1.0.0", "2.1.3rc1"])
     def test_installs_from_pypi_when_not_editable(
         self, tmp_path: Path, version: str, monkeypatch: MonkeyPatch
@@ -243,15 +267,15 @@ class TestCLISetupCommandSetupEnvCommand:
 class TestCLISetupCommandRunCommand:
     def _setup(self, monkeypatch: MonkeyPatch) -> tuple[MagicMock, MagicMock]:
         Popen_mock = MagicMock()
-        monkeypatch.setattr(nemo_gym.cli_setup_command, "Popen", Popen_mock)
+        monkeypatch.setattr(nemo_gym.cli.setup_command, "Popen", Popen_mock)
 
         get_global_config_dict_mock = MagicMock(return_value={"uv_cache_dir": "default uv cache dir"})
-        monkeypatch.setattr(nemo_gym.cli_setup_command, "get_global_config_dict", get_global_config_dict_mock)
+        monkeypatch.setattr(nemo_gym.cli.setup_command, "get_global_config_dict", get_global_config_dict_mock)
 
-        monkeypatch.setattr(nemo_gym.cli_setup_command, "environ", dict())
+        monkeypatch.setattr(nemo_gym.cli.setup_command, "environ", dict())
 
-        monkeypatch.setattr(nemo_gym.cli_setup_command, "stdout", "stdout")
-        monkeypatch.setattr(nemo_gym.cli_setup_command, "stderr", "stderr")
+        monkeypatch.setattr(nemo_gym.cli.setup_command, "stdout", "stdout")
+        monkeypatch.setattr(nemo_gym.cli.setup_command, "stderr", "stderr")
 
         return Popen_mock, get_global_config_dict_mock
 
@@ -267,6 +291,7 @@ class TestCLISetupCommandRunCommand:
             "my command",
             executable="/bin/bash",
             shell=True,
+            # Default (no project_root): only the server dir is on PYTHONPATH.
             env={"PYTHONPATH": "/my path", "UV_CACHE_DIR": "default uv cache dir"},
             stdout="stdout",
             stderr="stderr",
@@ -276,7 +301,7 @@ class TestCLISetupCommandRunCommand:
 
     def test_custom_pythonpath(self, monkeypatch: MonkeyPatch) -> None:
         Popen_mock, get_global_config_dict_mock = self._setup(monkeypatch)
-        monkeypatch.setattr(nemo_gym.cli_setup_command, "environ", {"PYTHONPATH": "existing pythonpath"})
+        monkeypatch.setattr(nemo_gym.cli.setup_command, "environ", {"PYTHONPATH": "existing pythonpath"})
 
         run_command(
             command="my command",
@@ -288,6 +313,28 @@ class TestCLISetupCommandRunCommand:
             executable="/bin/bash",
             shell=True,
             env={"PYTHONPATH": "/my path:existing pythonpath", "UV_CACHE_DIR": "default uv cache dir"},
+            stdout="stdout",
+            stderr="stderr",
+        )
+        actual_args = Popen_mock.call_args
+        assert expected_args == actual_args
+
+    def test_project_root_added_to_pythonpath(self, monkeypatch: MonkeyPatch) -> None:
+        # Opt-in: callers that need `resources_servers.<name>`-style imports (e.g. gym env test) pass
+        # the project root, which is appended after the server dir.
+        Popen_mock, get_global_config_dict_mock = self._setup(monkeypatch)
+
+        run_command(
+            command="my command",
+            working_dir_path=Path("/root/resources_servers/my_server"),
+            project_root=Path("/root"),
+        )
+
+        expected_args = call(
+            "my command",
+            executable="/bin/bash",
+            shell=True,
+            env={"PYTHONPATH": "/root/resources_servers/my_server:/root", "UV_CACHE_DIR": "default uv cache dir"},
             stdout="stdout",
             stderr="stderr",
         )
@@ -314,6 +361,22 @@ class TestCLISetupCommandRunCommand:
         )
         actual_args = Popen_mock.call_args
         assert expected_args == actual_args
+
+    def test_supplied_config_and_streams_avoid_global_config(self, monkeypatch: MonkeyPatch) -> None:
+        popen, get_global_config = self._setup(monkeypatch)
+
+        run_command(
+            command="my command",
+            working_dir_path=Path("/my path"),
+            global_config_dict={"uv_cache_dir": "isolated cache"},
+            stdout_target="isolated stdout",
+            stderr_target="isolated stderr",
+        )
+
+        get_global_config.assert_not_called()
+        assert popen.call_args.kwargs["env"]["UV_CACHE_DIR"] == "isolated cache"
+        assert popen.call_args.kwargs["stdout"] == "isolated stdout"
+        assert popen.call_args.kwargs["stderr"] == "isolated stderr"
 
 
 class TestGetNemoGymInstallFlags:
@@ -430,7 +493,7 @@ class TestCLISetupCommandRunCommandTeeLog(TestCLISetupCommandRunCommand):
 
         run_command(
             command="my command",
-            working_dir_path=Path("/my path"),
+            working_dir_path=Path("/root/resources_servers/my_server"),
             server_name="my_resources/my_server",
         )
 
@@ -438,7 +501,7 @@ class TestCLISetupCommandRunCommandTeeLog(TestCLISetupCommandRunCommand):
             "set -o pipefail; (my command) 2>&1 | tee -a /tmp/gym_logs/my_resources_my_server.log",
             executable="/bin/bash",
             shell=True,
-            env={"PYTHONPATH": "/my path", "UV_CACHE_DIR": "default uv cache dir"},
+            env={"PYTHONPATH": "/root/resources_servers/my_server", "UV_CACHE_DIR": "default uv cache dir"},
             stdout="stdout",
             stderr="stderr",
         )
@@ -455,14 +518,14 @@ class TestCLISetupCommandRunCommandTeeLog(TestCLISetupCommandRunCommand):
 
         run_command(
             command="my command",
-            working_dir_path=Path("/my path"),
+            working_dir_path=Path("/root/resources_servers/my_server"),
         )
 
         expected_args = call(
-            "set -o pipefail; (my command) 2>&1 | tee -a /tmp/gym_logs/my path.log",
+            "set -o pipefail; (my command) 2>&1 | tee -a /tmp/gym_logs/my_server.log",
             executable="/bin/bash",
             shell=True,
-            env={"PYTHONPATH": "/my path", "UV_CACHE_DIR": "default uv cache dir"},
+            env={"PYTHONPATH": "/root/resources_servers/my_server", "UV_CACHE_DIR": "default uv cache dir"},
             stdout="stdout",
             stderr="stderr",
         )

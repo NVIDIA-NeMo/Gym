@@ -62,11 +62,15 @@ def _text(content: Any) -> str:
 def _tok_kwargs(tokens: dict | None) -> dict:
     if not tokens:
         return {}
-    return {
+    kwargs = {
         "prompt_token_ids": tokens.get("prompt_ids", []),
         "generation_token_ids": tokens.get("completion_ids", []),
         "generation_log_probs": tokens.get("completion_logprobs", []),
     }
+    routed_experts = tokens.get("routed_experts")
+    if routed_experts is not None:
+        kwargs["routed_experts"] = routed_experts
+    return kwargs
 
 
 def _normalize_tool_call(tool_call: Any) -> dict:

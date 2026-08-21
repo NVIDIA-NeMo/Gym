@@ -34,13 +34,13 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import call_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
-from nemo_gym.server_utils import get_response_json
 
 
 class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
@@ -184,12 +184,9 @@ Example output: "My final verdict is different [[A!=B]]"."""
                 assistant_responses.append(content_item.text)
 
         combined_response = "".join(assistant_responses)
-        (
-            reward,
-            extracted_answer,
-            library_reward,
-            judge_evaluations,
-        ) = await self._verify_answer(body.question, body.expected_answer, combined_response)
+        reward, extracted_answer, library_reward, judge_evaluations = await self._verify_answer(
+            body.question, body.expected_answer, combined_response
+        )
         return LibraryJudgeMathVerifyResponse(
             **body.model_dump(),
             reward=reward,
@@ -345,12 +342,13 @@ Example output: "My final verdict is different [[A!=B]]"."""
             ),
         ]
 
-        response = await self.server_client.post(
+        judge_response = await call_judge(
+            self.server_client,
             server_name=config.judge_model_server.name,
             url_path="/v1/responses",
             json=responses_create_params,
+            response_model=NeMoGymResponse,
         )
-        judge_response = NeMoGymResponse.model_validate(await get_response_json(response))
         judge_evaluation = JudgeEvaluation(responses_create_params=responses_create_params, response=judge_response)
 
         # Currently, for all the cases in which the response from the LLM judge

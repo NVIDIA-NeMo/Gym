@@ -1,15 +1,13 @@
 # Prepare data
 ```bash
-config_paths="benchmarks/aalcr/config.yaml"
-ng_prepare_benchmark "+config_paths=[$config_paths]"
+gym eval prepare --benchmark aalcr
 ```
 
 # Run
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/aalcr/config.yaml"
-ng_e2e_collect_rollouts \
-    "+config_paths=[${config_paths}]" \
+gym eval run \
+    --model-type vllm_model \
+    --benchmark aalcr \
     ++output_jsonl_fpath=results/benchmarks/aalcr.jsonl \
     ++overwrite_metrics_conflicts=true \
     ++split=benchmark \

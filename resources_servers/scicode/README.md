@@ -7,7 +7,7 @@ ground-truth targets in `test_data.h5` and returns the reward.
 
 - Task type: multi-step code generation (one LLM call per sub-step) + local code execution
 - Domain: `coding`
-- Tasks: 80 problems / 341 sub-steps (`validation` + `test`, the split nemo-skills calls `test_aai`)
+- Tasks: 65 problems / 288 evaluated sub-steps (`test` only, matching the current AA Intelligence Index setup)
 - Reward: binary per problem — `1.0` iff every sub-step passes its tests
 
 > **Run commands and `env.yaml` setup**: see [`benchmarks/scicode/README.md`](../../benchmarks/scicode/README.md),
@@ -54,7 +54,7 @@ fails fast with a clear error rather than scoring everything as wrong.
 
 Two JSONL files coexist with different shapes:
 
-- **`benchmarks/scicode/data/scicode_benchmark.jsonl`** (full 80-row dataset, gitignored; produced by
+- **`benchmarks/scicode/data/scicode_benchmark.jsonl`** (65-row test split, gitignored; produced by
   `prepare.py`). Flat-field: each row has `problem_id`, `sub_steps`, `required_dependencies`, `uuid`.
 - **`resources_servers/scicode/data/example.jsonl`** (5-row fixture, committed).
 
@@ -66,7 +66,7 @@ rollouts.
 ## Running servers
 
 ```bash
-ng_run "+config_paths=[benchmarks/scicode/config.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
+gym env start --benchmark scicode --model-type openai_model
 ```
 
 ## Smoke test (5 example problems)
@@ -75,18 +75,18 @@ Requires `test_data.h5` staged. Use the benchmark config (so `test_data_fpath` i
 benchmark agent:
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=scicode_benchmark_agent \
-    +input_jsonl_fpath=resources_servers/scicode/data/example.jsonl \
-    +output_jsonl_fpath=results/scicode_smoke.jsonl \
-    +num_repeats=1 \
-    "++responses_create_params={temperature: 0.0}"
+gym eval run --no-serve \
+    --agent scicode_benchmark_agent \
+    --input resources_servers/scicode/data/example.jsonl \
+    --output results/scicode_smoke.jsonl \
+    --num-repeats 1 \
+    --temperature 0.0
 ```
 
 ## Tests
 
 ```bash
-ng_test +entrypoint=resources_servers/scicode
+gym env test +entrypoint=resources_servers/scicode
 ```
 
 Covers test sanitization, the program builder, subprocess pass/fail/timeout, and the `verify()`

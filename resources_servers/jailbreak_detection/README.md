@@ -27,16 +27,21 @@ The example dataset includes various jailbreak attack patterns:
 
 1. Start the servers:
 ```bash
-ng_run "+config_paths=[resources_servers/jailbreak_detection/configs/jailbreak_detection_nemotron_combined_reward_tp8.yaml,responses_api_models/openai_model/configs/openai_model.yaml,resources_servers/jailbreak_detection/configs/safety_judge_model.yaml]"
+gym env start \
+    --resources-server jailbreak_detection/jailbreak_detection_nemotron_combined_reward_tp8 \
+    --model-type openai_model \
+    --resources-server jailbreak_detection/safety_judge_model
 ```
 
 2. Collect rollouts:
 ```bash
-ng_collect_rollouts \
-    "+config_paths=[resources_servers/jailbreak_detection/configs/jailbreak_detection_nemotron_combined_reward_tp8.yaml,responses_api_models/openai_model/configs/openai_model.yaml,resources_servers/jailbreak_detection/configs/safety_judge_model.yaml]" \
-    +agent_name=jailbreak_detection_simple_agent \
-    +input_jsonl_fpath=resources_servers/jailbreak_detection/data/example.jsonl \
-    +output_jsonl_fpath=results/jailbreak_detection_rollouts.jsonl
+gym eval run --no-serve \
+    --resources-server jailbreak_detection/jailbreak_detection_nemotron_combined_reward_tp8 \
+    --model-type openai_model \
+    --resources-server jailbreak_detection/safety_judge_model \
+    --agent jailbreak_detection_simple_agent \
+    --input resources_servers/jailbreak_detection/data/example.jsonl \
+    --output results/jailbreak_detection_rollouts.jsonl
 ```
 
 ## Configuration

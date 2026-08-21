@@ -1,0 +1,46 @@
+# Daytona sandbox provider config.
+#
+# `sandbox` is the instance name an agent references via `sandbox_provider:
+# sandbox`; the child key `daytona` selects the provider class and its value is
+# passed to the provider constructor.
+#
+# Every shipped provider config binds the same name `sandbox`, so swapping
+# providers is swapping this config path in `+config_paths` (no agent edit):
+#
+#   AGENT=responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml
+#   MODEL=responses_api_models/vllm_model/configs/vllm_model.yaml
+#   gym env start \
+#       --config $AGENT \
+#       --config nemo_gym/sandbox/providers/daytona/configs/daytona.yaml \
+#       --config $MODEL
+#
+# To run multiple sandboxes at once, give each block a distinct instance name
+# (e.g. `daytona_foo`, `daytona_baz`) and reference each by name.
+#
+# `default_metadata` (optional) is merged into every sandbox's spec metadata
+# (SandboxSpec.metadata); an agent's own sandbox_spec.metadata overrides it.
+sandbox:
+  default_metadata:
+    sandbox-api: daytona-sdk
+  daytona:
+    connection:
+      api_key: ${oc.env:DAYTONA_API_KEY}
+    create:
+      timeout_s: 1200
+      retries: 4
+      retry_delay_s: 5.0
+      retry_max_delay_s: 90.0
+      auto_stop_interval: 30
+      auto_delete_interval: 600
+    probe:
+      timeout_s: 60
+      deadline_s: 180
+    operations:
+      retries: 4
+      retry_delay_s: 1.0
+      retry_max_delay_s: 45.0
+      command_retries: 0
+      close_timeout_s: 60
+      file_timeout_s: 1800
+    batch:
+      concurrency: 3

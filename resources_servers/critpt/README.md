@@ -41,7 +41,7 @@ batch, so `pass@1` across the 70 problems equals the AA aggregate.
 that doesn't already contain its `problem_id`, opening a new batch if every pending batch
 already has it. With `num_repeats=N` and 70 problems, this produces N independent batches of
 70 unique `problem_id`s — N AA API calls total, each scored as a separate run. Assumes
-uniform `num_repeats` across problems (which `ng_collect_rollouts` enforces).
+uniform `num_repeats` across problems (which `gym eval run --no-serve` enforces).
 
 ## Dataset Format
 
@@ -88,10 +88,42 @@ curl -s http://127.0.0.1:$PORT/status
 On HPC: bind is `127.0.0.1` on the compute node — curl from the same host, or
 `ssh <node> "curl ..."`.
 
+## Replay recovery
+
+`resources_servers.critpt.replay` is a scoring-only recovery tool for CritPt runs that fail
+after hitting Artificial Analysis rate limits. The live server writes model submissions before
+shipping a full 70-submission batch to AA. If AA rejects the batch because quota is exhausted,
+replay can later read those cached submissions, skip anything already scored, and send only the
+unscored full batches back to AA without rerunning model inference.
+
+Replay requires the live server to persist its cache. Set `CRITPT_CACHE_DIR` before starting
+the server:
+
+```bash
+export CRITPT_CACHE_DIR=results/critpt_cache
+```
+
+When set, each server launch persists `submissions.jsonl`, successful `aa_responses.jsonl`
+records, and `partial_metrics.json` under its own `<timestamp>-<pid>-<rand>` subdirectory of
+`CRITPT_CACHE_DIR`, so independent runs never share (and pollute) each other's cache. The exact
+path is logged at startup (`CritPt cache for this run: ...`). After the AA quota resets, point
+replay at that run's subdirectory:
+
+```bash
+RUN_DIR="$CRITPT_CACHE_DIR/20260707-110622-48213-1a2b3c4d"  # from the server startup log
+ARTIFICIAL_ANALYSIS_API_KEY="aa-xxxxx" <!-- pragma: allowlist secret --> \
+  python -m resources_servers.critpt.replay --cache-dir "$RUN_DIR"
+```
+
+Set `unique_cache_per_run: false` on the resources server config to write directly into
+`CRITPT_CACHE_DIR` instead (e.g. to resume a specific prior run's directory).
+
+For the full benchmark workflow, see [`benchmarks/critpt/README.md`](../../benchmarks/critpt/README.md).
+
 ## Running servers
 
 ```bash
-ng_run "+config_paths=[benchmarks/critpt/config.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
+gym env start --benchmark critpt --model-type openai_model
 ```
 
 ## Smoke test (5 example problems)
@@ -100,35 +132,35 @@ ng_run "+config_paths=[benchmarks/critpt/config.yaml,responses_api_models/openai
 has one opt-in config knob:
 
 - `fire_after: int` — fire the batch after this many real submissions arrive, then pad
-  up to `batch_size` (70) with empty dummies for the missing problem_ids (drawn from the
+  up to `batch_size` (70) with empty padding submissions for the missing problem_ids (drawn from the
   hardcoded canonical CritPt problem list, `Challenge_<N>_main` for `N` in 1..70)
 
 Defaults to `None`/unset, so production behavior is unchanged. Set it only for testing purposes:
 
 ```bash
-ng_run "+config_paths=[benchmarks/critpt/config.yaml,responses_api_models/openai_model/configs/openai_model.yaml]" \
+gym env start --benchmark critpt --model-type openai_model \
     '++critpt_benchmark_resources_server.resources_servers.critpt.fire_after=5'
 ```
 
 ## Collecting rollouts
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=critpt_benchmark_agent \
-    +input_jsonl_fpath=resources_servers/critpt/data/example.jsonl \
-    +output_jsonl_fpath=results/critpt_smoke.jsonl \
-    +num_repeats=1 \
-    "++responses_create_params={temperature: 0.0}"
+gym eval run --no-serve \
+    --agent critpt_benchmark_agent \
+    --input resources_servers/critpt/data/example.jsonl \
+    --output results/critpt_smoke.jsonl \
+    --num-repeats 1 \
+    --temperature 0.0
 ```
 
 What this exercises: agent runs Turn 1 + Turn 2 on exactly 5 problems -> 5 verify() calls
-arrive -> server fires the batch after the 5th, pads with 65 empty dummies -> real AA
+arrive -> server fires the batch after the 5th, pads with 65 empty padding slots -> real AA
 call -> aggregate distributed to the 5 real rollouts.
 
 ## Tests
 
 ```bash
-ng_test +entrypoint=resources_servers/critpt
+gym env test +entrypoint=resources_servers/critpt
 ```
 
 Covers code extraction edge cases, partial/full/multi-batch buffering, the `/status`

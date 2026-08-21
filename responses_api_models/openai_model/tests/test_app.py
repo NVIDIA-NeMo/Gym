@@ -19,7 +19,14 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
+from starlette.middleware.base import BaseHTTPMiddleware
 
+from nemo_gym.base_responses_api_model import (
+    CaptureStore,
+    _CaptureMiddleware,
+    aggregate_model_call_metrics,
+    read_model_call_records,
+)
 from nemo_gym.server_utils import ServerClient
 from responses_api_models.openai_model.app import (
     NeMoGymAsyncOpenAI,
@@ -28,8 +35,35 @@ from responses_api_models.openai_model.app import (
 )
 
 
+def _response_data() -> dict:
+    return {
+        "id": "resp_688babb004988199b26c5250ba69c1e80abdf302bcd600d3",
+        "created_at": 1753983920.0,
+        "model": "dummy_model",
+        "object": "response",
+        "output": [
+            {
+                "id": "msg_688babb17a7881998cc7a42d53c8e5790abdf302bcd600d3",
+                "content": [
+                    {
+                        "annotations": [],
+                        "text": "Hello! How can I help you today?",
+                        "type": "output_text",
+                    }
+                ],
+                "role": "assistant",
+                "status": "completed",
+                "type": "message",
+            }
+        ],
+        "parallel_tool_calls": True,
+        "tool_choice": "auto",
+        "tools": [],
+    }
+
+
 class TestApp:
-    def _setup_server(self, max_concurrent_requests=None):
+    def _setup_server(self, max_concurrent_requests=None, drop_input_reasoning_items=False):
         config = SimpleModelServerConfig(
             host="0.0.0.0",
             port=8081,
@@ -37,16 +71,21 @@ class TestApp:
             openai_api_key="dummy_key",  # pragma: allowlist secret
             openai_model="dummy_model",
             entrypoint="",
-            name="",
+            name="test_model_server",
             max_concurrent_requests=max_concurrent_requests,
+            drop_input_reasoning_items=drop_input_reasoning_items,
         )
-        return SimpleModelServer(config=config, server_client=MagicMock(spec=ServerClient))
+        return SimpleModelServer(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
 
     async def test_sanity(self) -> None:
         self._setup_server()
 
-    async def test_chat_completions(self, monkeypatch: MonkeyPatch) -> None:
+    async def test_chat_completions(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
         server = self._setup_server()
+        server.server_client.global_config_dict = {
+            "observability_enabled": True,
+            "model_call_capture_dir": str(tmp_path),
+        }
         app = server.setup_webserver()
         client = TestClient(app)
 
@@ -78,7 +117,7 @@ class TestApp:
         server._client.create_chat_completion = AsyncMock(side_effect=mock_create_chat)
 
         chat_no_model = client.post(
-            "/v1/chat/completions",
+            "/ng-rollout/chat-test/v1/chat/completions",
             json={"messages": [{"role": "user", "content": "hi"}]},
         )
         assert chat_no_model.status_code == 200
@@ -98,49 +137,30 @@ class TestApp:
             messages=[{"role": "user", "content": "hi"}],
             model="dummy_model",
         )
+        calls = read_model_call_records(CaptureStore(tmp_path), "chat-test")
+        assert len(calls) == 1 and calls[0].dialect == "chat"
 
-    async def test_responses(self, monkeypatch: MonkeyPatch) -> None:
+    async def test_responses(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
         server = self._setup_server()
+        server.server_client.global_config_dict = {
+            "observability_enabled": True,
+            "model_call_capture_dir": str(tmp_path),
+        }
         app = server.setup_webserver()
         client = TestClient(app)
-
-        mock_response_data = {
-            "id": "resp_688babb004988199b26c5250ba69c1e80abdf302bcd600d3",
-            "created_at": 1753983920.0,
-            "model": "dummy_model",
-            "object": "response",
-            "output": [
-                {
-                    "id": "msg_688babb17a7881998cc7a42d53c8e5790abdf302bcd600d3",
-                    "content": [
-                        {
-                            "annotations": [],
-                            "text": "Hello! How can I help you today?",
-                            "type": "output_text",
-                        }
-                    ],
-                    "role": "assistant",
-                    "status": "completed",
-                    "type": "message",
-                }
-            ],
-            "parallel_tool_calls": True,
-            "tool_choice": "auto",
-            "tools": [],
-        }
 
         called_args_response = {}
 
         async def mock_create_response(**kwargs):
             nonlocal called_args_response
             called_args_response = kwargs
-            return mock_response_data
+            return _response_data()
 
         server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
         server._client.create_response = AsyncMock(side_effect=mock_create_response)
 
         # No model provided should use the one from the config
-        res_no_model = client.post("/v1/responses", json={"input": "hello"})
+        res_no_model = client.post("/ng-rollout/openai-test/v1/responses", json={"input": "hello"})
         assert res_no_model.status_code == 200
         assert called_args_response.get("model") == "dummy_model"
 
@@ -150,6 +170,124 @@ class TestApp:
         assert called_args_response.get("model") == "dummy_model"
 
         server._client.create_response.assert_any_await(input="hello", model="dummy_model")
+        calls = read_model_call_records(CaptureStore(tmp_path), "openai-test")
+        assert len(calls) == 1
+        assert calls[0].dialect == "responses"
+        assert calls[0].model_ref is not None
+        assert calls[0].model_ref.name == "test_model_server"
+        assert calls[0].request == {"input": "hello"}
+        assert aggregate_model_call_metrics(CaptureStore(tmp_path), "openai-test")["num_calls"] == 1
+
+    def test_streaming_messages_capture(self, tmp_path) -> None:
+        server = self._setup_server()
+        server.server_client.global_config_dict = {
+            "observability_enabled": True,
+            "model_call_capture_dir": str(tmp_path),
+        }
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_response = AsyncMock(return_value=_response_data())
+        app = server.setup_webserver()
+        assert app.user_middleware[0].cls is _CaptureMiddleware
+        assert not issubclass(_CaptureMiddleware, BaseHTTPMiddleware)
+        client = TestClient(app)
+
+        response = client.post(
+            "/ng-rollout/messages-test/v1/messages",
+            json={
+                "model": "claude-test",
+                "max_tokens": 32,
+                "stream": True,
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+        assert response.status_code == 200
+        assert "event: message_stop" in response.text
+        calls = read_model_call_records(CaptureStore(tmp_path), "messages-test")
+        assert len(calls) == 1 and calls[0].dialect == "messages"
+        assert calls[0].error_category is None
+
+    async def test_responses_parses_hosted_mcp_call(self, monkeypatch: MonkeyPatch) -> None:
+        """A server-side ``mcp_call`` output item must validate (200), not 500.
+
+        NVIDIA-hosted gpt-oss surfaces its built-in python tool as an ``mcp_call``;
+        before it was in the response schema this returned a 500 that aborted the
+        whole rollout collection.
+        """
+        server = self._setup_server()
+        client = TestClient(server.setup_webserver())
+
+        mock_response_data = {
+            "id": "resp_mcp",
+            "created_at": 1753983920.0,
+            "model": "dummy_model",
+            "object": "response",
+            "output": [
+                {
+                    "type": "mcp_call",
+                    "id": "mcp_1",
+                    "name": "python",
+                    "server_label": "exec",
+                    "arguments": '{"code": "print(42)"}',
+                    "output": "42\n",
+                    "status": "completed",
+                },
+                {
+                    "id": "msg_1",
+                    "content": [{"annotations": [], "text": "(Answer: 42)", "type": "output_text"}],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                },
+            ],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_response = AsyncMock(return_value=mock_response_data)
+
+        res = client.post("/v1/responses", json={"input": "compute qed"})
+        assert res.status_code == 200
+        assert res.json()["output"][0]["type"] == "mcp_call"
+
+    async def test_drop_input_reasoning_items_strips_reasoning(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(drop_input_reasoning_items=True)
+        client = TestClient(server.setup_webserver())
+
+        called_args = {}
+
+        async def mock_create_response(**kwargs):
+            nonlocal called_args
+            called_args = kwargs
+            return {
+                "id": "resp_1",
+                "created_at": 0.0,
+                "model": "dummy_model",
+                "object": "response",
+                "output": [],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_response = AsyncMock(side_effect=mock_create_response)
+
+        res = client.post(
+            "/v1/responses",
+            json={
+                "input": [
+                    {"type": "reasoning", "id": "r1", "summary": []},
+                    {"role": "user", "content": "hi", "type": "message"},
+                ]
+            },
+        )
+        assert res.status_code == 200
+        sent_types = [item.get("type") for item in called_args["input"]]
+        assert "reasoning" not in sent_types
+        assert "message" in sent_types
 
     def test_semaphore_disabled_by_default(self) -> None:
         server = self._setup_server()

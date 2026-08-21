@@ -1,12 +1,17 @@
 # WMT24++ Translation Benchmark
 
-English to {de_DE, es_MX, fr_FR, it_IT, ja_JP} segment-level translation
-from [`google/wmt24pp`](https://huggingface.co/datasets/google/wmt24pp).
+English-to-X segment-level translation across all 55 target locales in
+[`google/wmt24pp`](https://huggingface.co/datasets/google/wmt24pp).
 
-Verification is deterministic corpus-level BLEU (sacrebleu) per language
-pair, with cross-pair aggregations `en->xx`, `xx->xx`, and `xx->{tgt}`.
+Verification reports deterministic corpus-level spBLEU and chrF (sacrebleu) per language
+pair, with spBLEU consistently using the `flores200` SentencePiece tokenizer
+and cross-pair aggregations `en->xx`, `xx->xx`, and `xx->{tgt}`.
 Optionally augments with xCOMET-XXL neural QE scores when
 `compute_comet: true` is set on the wmt_translation server.
+Each rollout also reports CLD2 target-language consistency. CLD2 cannot
+distinguish the regional varieties in the `ar_EG`/`ar_SA`,
+`fr_CA`/`fr_FR`, `pt_BR`/`pt_PT`, and `sw_KE`/`sw_TZ` pairs, so these scores
+validate the major language only and cannot detect the wrong regional variety.
 
 See `resources_servers/wmt_translation/README.md` for the verifier
 details and the Ray GPU-scheduled COMET path.
@@ -14,39 +19,46 @@ details and the Ray GPU-scheduled COMET path.
 ## Prepare benchmark data
 
 ```bash
-ng_prepare_benchmark "+config_paths=[benchmarks/wmt24pp/config.yaml]"
+gym eval prepare --benchmark wmt24pp
 ```
 
 In addition to writing `data/wmt24pp_benchmark.jsonl`, the prepare step
-pre-fetches the xCOMET-XXL checkpoint and its xlm-roberta-xxl tokenizer
-into `HF_HOME` (when `unbabel-comet` is installed in the active env).
+pre-fetches SacreBLEU's FLORES-200 SentencePiece model into its cache, plus
+the xCOMET-XXL checkpoint and its xlm-roberta-xxl tokenizer into `HF_HOME`
+(when `unbabel-comet` is installed in the active env).
 That keeps the resource server's Ray actors fully offline at runtime —
 no HF Hub calls during `verify()`, no rate-limit retries.
+
+Target-locale display names are loaded from the checked-in
+`data/wmt24pp_language_names.json` file. Regenerate it deliberately with
+`resources_servers/wmt_translation/scripts/generate_wmt24pp_language_names.py`
+when updating the WMT24++ dataset; preparation does not query metadata at
+runtime.
 
 ## Running servers
 
 The xCOMET-XXL actor pool requires the `extra_gpu` Ray resource, which
 is only advertised on multi-node SLURM deployments via NeMo-Skills'
 `get_ray_server_cmd` (see the SLURM block below). Local / single-node
-runs disable COMET via Hydra override and rely on corpus-BLEU only;
+runs disable COMET via Hydra override and rely on local spBLEU and chrF;
 xCOMET scoring still works end-to-end on the cluster path:
 
 ```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/wmt24pp/config.yaml"
-ng_run "+config_paths=[$config_paths]" \
+gym env start \
+    --model-type vllm_model \
+    --benchmark wmt24pp \
     "++wmt24pp_wmt_translation_resources_server.resources_servers.wmt_translation.compute_comet=false"
 ```
 
 ## Collecting rollouts
 
 ```bash
-ng_collect_rollouts \
-    +agent_name=wmt24pp_wmt_translation_simple_agent \
-    +prompt_config=benchmarks/wmt24pp/prompts/default.yaml \
-    +input_jsonl_fpath=benchmarks/wmt24pp/data/wmt24pp_benchmark.jsonl \
-    +output_jsonl_fpath=results/wmt24pp_rollouts.jsonl \
-    +num_repeats=4
+gym eval run --no-serve \
+    --agent wmt24pp_wmt_translation_simple_agent \
+    --input benchmarks/wmt24pp/data/wmt24pp_benchmark.jsonl \
+    --output results/wmt24pp_rollouts.jsonl \
+    --num-repeats 4 \
+    --prompt-config benchmarks/wmt24pp/prompts/default.yaml
 ```
 
 ## End-to-end reproduction on a SLURM cluster (via NeMo-Skills)
@@ -92,13 +104,14 @@ The two container fields that aren't trivial:
   — cross-container Ray-cluster joins fail with `ConnectionError: Could
   not read 'temp_dir' from GCS` on protocol mismatch.
 - **`nemo-gym`**: any image where `pip install -e <gym>[dev]` resolves
-  cleanly AND has `unbabel-comet`, `torch>=2.5`, `sacrebleu` baked in.
+  cleanly AND has `unbabel-comet`, `torch>=2.5`, `sacrebleu`, and
+  `sentencepiece` baked in.
   The lazy-install path in `resources_servers/wmt_translation/.venv`
   works as a fallback but adds 2–3 min to first-job startup.
 
 #### Prepare benchmark data on the cluster
 
-The local `ng_prepare_benchmark` from [above](#prepare-benchmark-data)
+The local `gym eval prepare` from [above](#prepare-benchmark-data)
 writes the JSONL to your dev workstation. For a SLURM run, the JSONL
 plus the `Unbabel/XCOMET-XXL` cache need to live on the cluster's
 filesystem. Dispatch the prepare via `ns run_cmd` with the `nemo-gym`
@@ -110,7 +123,7 @@ ns run_cmd \
     --cluster <your-cluster> \
     --container nemo-gym \
     --expname wmt24pp_prepare \
-    --command 'ng_prepare_benchmark "+config_paths=[benchmarks/wmt24pp/config.yaml]"'
+    --command 'gym eval prepare --benchmark wmt24pp'
 ```
 
 This populates `benchmarks/wmt24pp/data/wmt24pp_benchmark.jsonl` and
@@ -126,7 +139,7 @@ and switch to a batch partition for larger evaluations.
 
 ```bash
 # Pick a translation-capable policy model accessible from your cluster.
-# The PR's parity numbers come from nvidia/Nemotron-3-Nano-30B-A3B-BF16.
+# Example translation-capable policy model.
 MODEL="nvidia/Nemotron-3-Nano-30B-A3B-BF16"
 
 ns nemo_gym_rollouts \
