@@ -48,11 +48,24 @@ Uvicorn workers use spawned processes.
 They do not inherit a sink installed by a launcher.
 Configure the sink here so each worker builds its own.
 Programmatic installation must occur inside the serving process.
+
+Choosing who reads them back
+----------------------------
+``rebuild_response`` controls whether Gym rebuilds a finished rollout.
+Gym freezes captured records before rebuilding ``response.output``.
+Rebuilding does not retire the frozen snapshot.
+Gym retires a successful build only after durable handoff.
+Retirement uses the frozen ``snapshot_id`` and version.
+Failed or masked builds retain their capture evidence.
+Set it to false when a framework reads through its own ``TokenSource``.
+Gym then stops after the write.
+Read ownership is independent of write ownership.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from importlib import import_module
 from pathlib import Path
 from typing import Any
@@ -88,8 +101,14 @@ class TokenIdCaptureSettings(BaseModel):
     # A real transport needs explicit endpoint, client, or credential wiring.
     # Use ``${oc.env:VAR}`` for secrets instead of writing them here.
     sink_kwargs: dict[str, Any] = Field(default_factory=dict)
-    # Rebuild opaque-harness responses from captured records after the run.
+    # Whether Gym freezes capture records and rebuilds the response.
+    # Finalization does not retire the frozen snapshot.
+    # Durable delivery permits retirement by snapshot id and version.
     rebuild_response: bool = True
+    # Abort once enough finalized rollouts exceed this masked fraction.
+    # ``None`` disables the limit.
+    max_mask_fraction: float | None = None
+    mask_fraction_min_samples: int = 50
 
 
 class TokenIdCaptureConfig(BaseModel):
@@ -179,3 +198,26 @@ class TokenIdCaptureConfig(BaseModel):
 def token_id_capture_config(global_config_dict: Any) -> TokenIdCaptureConfig:
     """Read the capture settings out of a global config dict."""
     return TokenIdCaptureConfig.model_validate(global_config_dict or {})
+
+
+def token_id_capture_enabled_for_agent(global_config_dict: Any, agent_name: str | None) -> bool:
+    """Return whether one configured agent participates in capture."""
+    config = token_id_capture_config(global_config_dict)
+    settings = config.token_id_capture
+    if not settings.enabled:
+        return False
+    if settings.all_agents:
+        return True
+    if not agent_name or not isinstance(global_config_dict, Mapping):
+        return False
+    server_entry = global_config_dict.get(agent_name)
+    if not isinstance(server_entry, Mapping):
+        return False
+    agents = server_entry.get("responses_api_agents")
+    if not isinstance(agents, Mapping):
+        return False
+    return any(
+        bool(agent_config.get("token_id_capture", False))
+        for agent_config in agents.values()
+        if isinstance(agent_config, Mapping)
+    )

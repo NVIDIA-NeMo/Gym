@@ -19,13 +19,13 @@ Middleware mints a ``model_call_id``.
 Middleware sets a request-scoped token sink.
 The model server records a ``TokenEntry``.
 Consumers read records through ``TokenSource.freeze``.
-There is no HTTP token reader.
 """
 
 import asyncio
 import json
 import logging
 import multiprocessing
+import os
 import subprocess
 import sys
 from time import time
@@ -63,9 +63,11 @@ from nemo_gym.token_id_capture import (
     current_capture_context,
     extract_token_fields,
     install_token_sink,
+    register_call_intent,
     reset_token_sink,
     set_token_sink,
 )
+from nemo_gym.token_id_capture.config import token_id_capture_enabled_for_agent
 from nemo_gym.token_id_capture.protocols import TokenSource
 from nemo_gym.token_id_capture.store import make_token_store
 
@@ -222,6 +224,51 @@ def test_token_store_recovers_an_unindexed_durable_tail(tmp_path):
     assert set(state["entry_digests"]) == {"c0"}
 
 
+def test_dangling_call_intent_marks_frozen_snapshot_incomplete(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    asyncio.run(store.begin_call("lost", "c1"))
+
+    snapshot = store.freeze_now("lost")
+
+    assert snapshot.entries == ()
+    assert snapshot.incomplete is True
+
+
+def test_committed_call_satisfies_its_intent(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    asyncio.run(store.begin_call("complete", "c1"))
+    store.append(
+        TokenEntry(
+            rollout_id="complete",
+            model_call_id="c1",
+            prompt_token_ids=PTOKS,
+            generation_token_ids=GTOKS,
+            generation_log_probs=LPS,
+        )
+    )
+
+    snapshot = store.freeze_now("complete")
+
+    assert [entry.model_call_id for entry in snapshot.entries] == ["c1"]
+    assert snapshot.incomplete is False
+
+
+def test_register_call_intent_uses_optional_sink_extension():
+    calls: list[tuple[str, str]] = []
+
+    class Sink:
+        async def begin_call(self, rollout_id: str, model_call_id: str) -> None:
+            calls.append((rollout_id, model_call_id))
+
+    token = set_token_sink(CaptureContext(rollout_id="r", model_call_id="c", token_sink=Sink()))
+    try:
+        asyncio.run(register_call_intent())
+    finally:
+        reset_token_sink(token)
+
+    assert calls == [("r", "c")]
+
+
 def test_token_store_freeze_is_atomic_and_conditional_drop_is_race_safe(tmp_path):
     store = TokenCaptureStore(tmp_path)
     entry = TokenEntry(
@@ -248,17 +295,60 @@ def test_token_store_freeze_is_atomic_and_conditional_drop_is_race_safe(tmp_path
     assert state["retired"] is True
     assert state["indexed_size"] == 0
     assert state["entry_digests"] == {}
-    retired = asyncio.run(store.freeze("r0"))
-    assert retired.entries == ()
-    assert retired.snapshot_id == updated.snapshot_id
-    assert retired.version == updated.version
-    with pytest.raises(RuntimeError, match="already frozen"):
+    with pytest.raises(RuntimeError, match="retired"):
+        asyncio.run(store.freeze("r0"))
+    with pytest.raises(RuntimeError, match="retired"):
         asyncio.run(store.put(entry.model_copy(update={"model_call_id": "late-after-drop"})))
 
     store.delete("r0")
     replacement = entry.model_copy(update={"model_call_id": "replacement"})
     asyncio.run(store.put(replacement))
     assert store.read_entries("r0") == [replacement]
+
+
+def test_token_store_sweeps_only_old_retired_tombstones(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    for rollout_id in ("old", "recent", "live"):
+        store.append(
+            TokenEntry(
+                rollout_id=rollout_id,
+                model_call_id=f"{rollout_id}-c1",
+                prompt_token_ids=PTOKS,
+                generation_token_ids=GTOKS,
+                generation_log_probs=LPS,
+            )
+        )
+    for rollout_id in ("old", "recent"):
+        snapshot = store.freeze_now(rollout_id)
+        assert asyncio.run(store.drop(rollout_id, snapshot_id=snapshot.snapshot_id, version=snapshot.version))
+
+    old = time() - 3600
+    os.utime(store.state_path_for("old"), (old, old))
+
+    assert store.sweep_retired(older_than_seconds=600) == 1
+    assert not store.state_path_for("old").exists()
+    assert store.state_path_for("recent").exists()
+    assert store.path_for("live").exists()
+
+
+def test_token_store_recovers_state_lag_from_the_durable_jsonl_tail(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    first = TokenEntry(
+        rollout_id="lag",
+        model_call_id="c1",
+        prompt_token_ids=PTOKS,
+        generation_token_ids=GTOKS,
+        generation_log_probs=LPS,
+    )
+    store.append(first)
+    state_after_first = store.state_path_for("lag").read_bytes()
+    store.append(first.model_copy(update={"model_call_id": "c2"}))
+
+    store.state_path_for("lag").write_bytes(state_after_first)
+    snapshot = store.freeze_now("lag")
+
+    assert {entry.model_call_id for entry in snapshot.entries} == {"c1", "c2"}
+    assert snapshot.incomplete is False
 
 
 # --- config -------------------------------------------------------------------
@@ -298,6 +388,35 @@ def test_config_keeps_settings_when_capture_is_off(tmp_path):
     cfg = TokenIdCaptureConfig.model_validate({"token_id_capture": {"enabled": False, "dir": str(tmp_path)}})
     assert cfg.enabled is False
     assert cfg.build_sink() is None
+
+
+def test_mask_fraction_limit_defaults_off_and_parses():
+    default = TokenIdCaptureConfig.model_validate(_block(dir="/tmp/token-capture"))
+    configured = TokenIdCaptureConfig.model_validate(_block(dir="/tmp/token-capture", max_mask_fraction=0.5))
+
+    assert default.token_id_capture.max_mask_fraction is None
+    assert configured.token_id_capture.max_mask_fraction == 0.5
+    assert configured.token_id_capture.mask_fraction_min_samples == 50
+
+
+def test_agent_capture_selection_uses_static_agent_config_or_all_agents():
+    config = {
+        "token_id_capture": {"enabled": True, "rebuild_response": False},
+        "captured": {"responses_api_agents": {"implementation": {"token_id_capture": True}}},
+        "ordinary": {"responses_api_agents": {"implementation": {"token_id_capture": False}}},
+    }
+
+    assert token_id_capture_enabled_for_agent(config, "captured")
+    assert not token_id_capture_enabled_for_agent(config, "ordinary")
+    assert not token_id_capture_enabled_for_agent(config, "missing")
+    assert token_id_capture_enabled_for_agent(
+        {**config, "token_id_capture": {**config["token_id_capture"], "all_agents": True}},
+        "ordinary",
+    )
+    assert not token_id_capture_enabled_for_agent(
+        {**config, "token_id_capture": {**config["token_id_capture"], "enabled": False, "all_agents": True}},
+        "captured",
+    )
 
 
 def test_config_warns_rather_than_fails_on_a_sink_beside_a_directory(caplog):
@@ -929,7 +1048,7 @@ def test_a_record_is_readable_as_soon_as_put_returns(tmp_path):
         generation_log_probs=[-0.1],
     )
     asyncio.run(store.put(entry))
-    assert [e.model_call_id for e in asyncio.run(store.tokens_for("r0"))] == ["c1"]
+    assert [entry.model_call_id for entry in asyncio.run(store.freeze("r0")).entries] == ["c1"]
 
 
 def test_a_rollout_that_lost_a_call_is_distinguishable_from_a_complete_one(tmp_path):
@@ -1144,7 +1263,7 @@ def test_the_store_is_a_token_source(tmp_path):
             generation_log_probs=[-0.1],
         )
     )
-    assert [e.model_call_id for e in asyncio.run(store.tokens_for("r0"))] == ["c1"]
+    assert [entry.model_call_id for entry in asyncio.run(store.freeze("r0")).entries] == ["c1"]
 
     # A colocated source can detect a capture failure.
     # This prevents training on an incomplete rollout.
