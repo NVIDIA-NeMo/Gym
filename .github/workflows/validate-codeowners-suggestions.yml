@@ -4,11 +4,13 @@ name: Validate CODEOWNERS Suggestions
 # member of any suggested team) must be a current NVIDIA-NeMo org member.
 # Runs on every PR unconditionally — not just PRs that touch CODEOWNERS —
 # so a suggested reviewer who has since left the org is still caught, not
-# only at the moment someone adds them.
+# only at the moment someone adds them. Also warns (non-blocking) on
+# redundant CODEOWNERS rules, and runs the shared matcher's own unit tests.
 #
-# Reuses the same building blocks already used elsewhere in this repo
-# (cicd-main.yml): the check-nvidia-sso composite action from
-# NVIDIA-NeMo/FW-CI-templates, backed by the NVIDIA_MANAGEMENT_ORG_PAT secret.
+# Implementation lives in NVIDIA-NeMo/FW-CI-templates so any NeMo repo with a
+# CODEOWNERS file can reuse it the same way. See that repo's
+# .github/workflows/_validate_codeowners_suggestions.yml and .github/scripts/
+# codeowners-suggestions.js (+ its unit tests) for the matching logic.
 
 on:
   pull_request:
@@ -18,92 +20,10 @@ permissions:
   contents: read
 
 jobs:
-  extract-suggested-users:
-    if: github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
-    outputs:
-      usernames: ${{ steps.expand.outputs.usernames }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          sparse-checkout: |
-            .github/CODEOWNERS
-          sparse-checkout-cone-mode: false
-
-      - name: Parse `# suggest:` users and teams
-        id: parse
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const codeownersPath = '.github/CODEOWNERS';
-            const SUGGEST_PREFIX = /^#\s*suggest:\s*(.+)$/;
-
-            const owners = fs.existsSync(codeownersPath)
-              ? fs.readFileSync(codeownersPath, 'utf8')
-                  .split('\n')
-                  .map(l => l.trim())
-                  .map(l => l.match(SUGGEST_PREFIX))
-                  .filter(Boolean)
-                  .flatMap(m => m[1].trim().split(/\s+/).slice(1))
-              : [];
-
-            const users = new Set();
-            const teams = new Set();
-            for (const owner of owners) {
-              const name = owner.replace(/^@/, '');
-              (name.includes('/') ? teams : users).add(name);
-            }
-
-            core.setOutput('users', JSON.stringify([...users]));
-            core.setOutput('teams', JSON.stringify([...teams]));
-
-      - name: Expand teams to member usernames
-        id: expand
-        env:
-          GH_TOKEN: ${{ secrets.NVIDIA_MANAGEMENT_ORG_PAT }}
-          USERS_JSON: ${{ steps.parse.outputs.users }}
-          TEAMS_JSON: ${{ steps.parse.outputs.teams }}
-        run: |
-          set -euo pipefail
-          all_users=$(echo "$USERS_JSON" | jq -c '.')
-
-          for team in $(echo "$TEAMS_JSON" | jq -r '.[]'); do
-            org="${team%%/*}"
-            slug="${team#*/}"
-            echo "Expanding team members for $org/$slug..."
-            members=$(gh api "orgs/${org}/teams/${slug}/members" --paginate --jq '[.[].login]')
-            all_users=$(echo "$all_users $members" | jq -sc 'add | unique')
-          done
-
-          echo "usernames=$all_users" | tee -a "$GITHUB_OUTPUT"
-
-  validate-membership:
-    needs: extract-suggested-users
-    if: needs.extract-suggested-users.outputs.usernames != '[]'
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        username: ${{ fromJson(needs.extract-suggested-users.outputs.usernames) }}
-    steps:
-      - name: Checkout NVIDIA-NeMo/FW-CI-templates
-        uses: actions/checkout@v4
-        with:
-          repository: NVIDIA-NeMo/FW-CI-templates
-          ref: cf5acebace78c7c339bc1f804357a991336f1c4d # v1.8.10
-          path: ci-templates
-
-      - name: Check NVIDIA-NeMo org membership
-        id: check-sso
-        uses: ./ci-templates/.github/actions/check-nvidia-sso
-        with:
-          username: ${{ matrix.username }}
-          github_token: ${{ secrets.NVIDIA_MANAGEMENT_ORG_PAT }}
-
-      - name: Fail if not an org member
-        if: steps.check-sso.outputs.is_org_member != 'true'
-        run: |
-          echo "::error::${{ matrix.username }} is referenced in a .github/CODEOWNERS \`# suggest:\` line (directly, or via a suggested team) but is not a current member of the NVIDIA-NeMo org."
-          exit 1
+  validate-codeowners-suggestions:
+    # TODO: pin to a released tag once NVIDIA-NeMo/FW-CI-templates#556 merges.
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_validate_codeowners_suggestions.yml@86d996c29cc8bb4a98941b41bf64851964e83b84
+    with:
+      workflow_ref: 86d996c29cc8bb4a98941b41bf64851964e83b84
+    secrets:
+      NVIDIA_MANAGEMENT_ORG_PAT: ${{ secrets.NVIDIA_MANAGEMENT_ORG_PAT }}
