@@ -119,14 +119,16 @@ def update_metrics(metrics_fpath: Path, update_dict: Dict[str, Any]) -> None:
 
 def _safe_config_json(params: "AnyTerminalInstanceConfig", indent: Optional[int] = None) -> str:
     """Serialize config without secrets."""
-    secret_suffixes = ("apikey", "token", "password", "secret")
 
     def redact(value: Any) -> Any:
         if isinstance(value, dict):
             result = {}
             for key, item in value.items():
                 normalized_key = key.lower().replace("_", "").replace("-", "")
-                result[key] = "***" if normalized_key.endswith(secret_suffixes) else redact(item)
+                is_secret = any(part in normalized_key for part in ("apikey", "password", "secret")) or (
+                    normalized_key.endswith("token")
+                )
+                result[key] = "***" if is_secret else redact(item)
             return result
         if isinstance(value, list):
             return [redact(item) for item in value]

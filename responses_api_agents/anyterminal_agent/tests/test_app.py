@@ -306,10 +306,24 @@ class TestSafeConfigJson:
                 "password": "z",
                 "anthropic_api_key": "a",
                 "apiKey": "b",
+                "aws_secret_access_key": "c",
+                "password_hash": "d",
+                "api_key_id": "e",
             },
         )
         result = json.loads(_safe_config_json(cfg))
-        for key in ("my_secret", "auth_token", "hf_token", "password", "anthropic_api_key", "apiKey"):
+        secret_keys = (
+            "my_secret",
+            "auth_token",
+            "hf_token",
+            "password",
+            "anthropic_api_key",
+            "apiKey",
+            "aws_secret_access_key",
+            "password_hash",
+            "api_key_id",
+        )
+        for key in secret_keys:
             assert result["agent_kwargs"][key] == "***"
 
     def test_max_output_tokens_preserved_for_round_trip(self, tmp_path: Path) -> None:
