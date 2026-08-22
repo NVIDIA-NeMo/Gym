@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: gsm8k
+version: 0.1.0
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: math
+description: Grade-school math word problems from the GSM8K test split.
+modality: text
+licensing: MIT
+authors:
+  - NVIDIA NeMo Gym contributors
+reward:
+  range: [0, 1]
+  higher_is_better: true
+determinism: unknown
+resources_server: math_with_judge
+agent_server: simple_agent
+model_server: policy_model
+datasets:
+  - name: gsm8k
+    type: benchmark
+    jsonl_fpath: benchmarks/gsm8k/data/gsm8k_benchmark.jsonl
+    prepare_script: benchmarks/gsm8k/prepare.py
+    prompt_config: benchmarks/prompts/generic/math.yaml
+    num_repeats: 1
+canonical_split: test
+standard_prompt_config: benchmarks/prompts/generic/math.yaml
+lifecycle: active

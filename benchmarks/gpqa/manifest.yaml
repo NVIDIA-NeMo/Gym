@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: gpqa
+version: 0.1.0
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: knowledge
+description: Graduate-level multiple-choice questions across physics, biology, and chemistry.
+modality: text
+licensing: unknown
+authors:
+  - NVIDIA NeMo Gym contributors
+reward:
+  range: [0, 1]
+  higher_is_better: true
+determinism: seeded
+resources_server: mcqa
+agent_server: simple_agent
+model_server: policy_model
+datasets:
+  - name: gpqa
+    type: benchmark
+    jsonl_fpath: benchmarks/gpqa/data/gpqa_diamond_benchmark.jsonl
+    prepare_script: benchmarks/gpqa/prepare.py
+    prompt_config: benchmarks/prompts/eval/aai/mcq-4choices.yaml
+    num_repeats: 8
+grading_mode: lenient_answer_colon_md
+canonical_split: train
+standard_prompt_config: benchmarks/prompts/eval/aai/mcq-4choices.yaml
+lifecycle: active
