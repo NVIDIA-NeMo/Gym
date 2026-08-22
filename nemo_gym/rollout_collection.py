@@ -15,45 +15,93 @@
 import asyncio
 import glob as glob_module
 import json
+import logging
 import os
 import warnings
 from asyncio import Future, Semaphore
-from collections import Counter
+from collections import Counter, defaultdict
 from contextlib import nullcontext
 from copy import deepcopy
+from datetime import timedelta
 from itertools import repeat
 from pathlib import Path
+from time import time
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
 from omegaconf import OmegaConf
 from pydantic import BaseModel, Field, field_validator, model_validator
 from tqdm.asyncio import tqdm
-from wandb import Table
 
-from nemo_gym import PARENT_DIR
+from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig, ConfigError, ConfigPathNotFoundError
+from nemo_gym.base_responses_api_model import (
+    clear_model_call_captures_for_rollouts,
+    merge_model_call_capture_into_record,
+    model_call_capture_dirs_from_config,
+)
+from nemo_gym.config_types import (
+    BaseNeMoGymCLIConfig,
+    BaseServerConfig,
+    ConfigError,
+    ConfigPathNotFoundError,
+    UploadRolloutsConfigMixin,
+)
+from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
+    ATTEMPT_INDEX_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
+    ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
-    get_wandb_run,
+    get_global_config_dict,
 )
+from nemo_gym.path_utils import failures_path_for
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
+from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+from nemo_gym.rollout_observability import (
+    AgentInvocation,
+    AgentObservationBundle,
+    ObservationGap,
+    ToolCallObservation,
+    TrajectoryModelCall,
+    TrajectoryRecord,
+    TrajectoryTokenStats,
+    TrajectoryToolCall,
+    TrajectoryTurn,
+)
+
+
+_failures_path_for = failures_path_for  # Backwards-compatible alias
 from nemo_gym.server_utils import (
-    GlobalAIOHTTPAsyncClientConfig,
     ServerClient,
     get_response_json,
     is_global_aiohttp_client_request_debug_enabled,
-    is_global_aiohttp_client_setup,
     raise_for_status,
-    set_global_aiohttp_client,
+)
+from nemo_gym.server_utils import (
+    setup_server_client as setup_server_client_utils,
 )
 from nemo_gym.skills import SkillsConfig, load_skill_directory
+from nemo_gym.token_id_capture import (
+    TokenCaptureStore,
+    TokenIdCaptureConfig,
+    clear_token_captures_for_rollouts,
+    installed_token_source,
+    token_id_capture_dirs_from_config,
+)
+from nemo_gym.token_id_capture.config import token_id_capture_enabled_for_agent
+from nemo_gym.token_id_capture.delivery import (
+    MASK_SAMPLE_KEY,
+    capture_build_can_retire,
+    finalize_rollout_token_capture,
+    retire_rollout_token_capture,
+)
 
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Failure-routing sentinels (set by agent servers, read by the dispatcher).
@@ -84,8 +132,253 @@ from nemo_gym.skills import SkillsConfig, load_skill_directory
 NG_FAILURE_CLASS_KEY = "_ng_failure_class"
 NG_NO_PERSIST_KEY = "_ng_no_persist"
 NG_TERMINAL_KEY = "_ng_failure_terminal"
+NG_TRAJECTORY_KEY = "ng_trajectory"
+_MODEL_CALL_PAYLOAD_KEYS = ("request", "response", "request_raw", "response_raw")
 
 _DEFAULT_MAX_ROLLOUT_ATTEMPTS = 3
+
+
+def _nonnegative_int(value: Any) -> Optional[int]:
+    return value if type(value) is int and value >= 0 else None
+
+
+def _has_observation_gap(result: dict[str, Any], code: str) -> bool:
+    for key in (NG_TRAJECTORY_KEY, "ng_agent_observations"):
+        observations = result.get(key)
+        gaps = observations.get("gaps") if isinstance(observations, dict) else None
+        if isinstance(gaps, list) and any(isinstance(gap, dict) and gap.get("code") == code for gap in gaps):
+            return True
+    return False
+
+
+def _trajectory_identity(row: dict[str, Any]) -> tuple[str, str]:
+    task_id = next(
+        (str(row[key]) for key in ("task_id", "problem_id", "instance_id") if row.get(key) is not None),
+        str(row[TASK_INDEX_KEY_NAME]),
+    )
+    rollout_id = maybe_rollout_id_from_run_body(row) or f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
+    return task_id, rollout_id
+
+
+def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> TrajectoryRecord:
+    task_id, rollout_id = _trajectory_identity(row)
+    gaps: list[ObservationGap] = []
+    invocations: list[AgentInvocation] = []
+    turns: list[TrajectoryTurn] = []
+    tools: list[TrajectoryToolCall] = []
+    model_calls: list[TrajectoryModelCall] = []
+
+    raw_trajectory = result.get(NG_TRAJECTORY_KEY)
+    if isinstance(raw_trajectory, dict):
+        try:
+            trajectory = TrajectoryRecord.model_validate(raw_trajectory)
+            mismatches = [
+                field
+                for field, producer, canonical in (
+                    ("task_id", trajectory.task_id, task_id),
+                    ("rollout_id", trajectory.rollout_id, rollout_id),
+                )
+                if producer != canonical
+            ]
+            if mismatches:
+                gaps.append(ObservationGap(code="producer_trajectory_identity_mismatch", detail=",".join(mismatches)))
+                turns = [
+                    turn.model_copy(update={"task_id": task_id, "rollout_id": rollout_id}) for turn in trajectory.turns
+                ]
+            else:
+                turns = trajectory.turns
+            gaps.extend(trajectory.gaps)
+            invocations = trajectory.invocations
+            tools = trajectory.tool_calls
+            model_calls = trajectory.model_calls
+        except Exception as exc:
+            gaps.append(ObservationGap(code="producer_trajectory_invalid", detail=type(exc).__name__))
+
+    raw_observations = result.get("ng_agent_observations")
+    if raw_observations is not None:
+        try:
+            observations = AgentObservationBundle.model_validate(raw_observations)
+            gaps.extend(observations.gaps)
+            observed_invocations = [record for record in observations.records if isinstance(record, AgentInvocation)]
+            producer_invocation_ids = {record.invocation_id for record in invocations}
+            invocations.extend(
+                record for record in observed_invocations if record.invocation_id not in producer_invocation_ids
+            )
+            observed_tools = [record for record in observations.records if isinstance(record, ToolCallObservation)]
+            if observed_tools:
+                outputs = {
+                    (invocation.invocation_id, item.call_id): item.output
+                    for invocation in invocations
+                    for item in invocation.conversation
+                    if getattr(item, "type", None) == "function_call_output"
+                }
+                positions = {(tool.invocation_id, tool.tool_call_id): index for index, tool in enumerate(tools)}
+                for observed in observed_tools:
+                    key = (observed.invocation_id, observed.tool_call_id)
+                    position = positions.get(key)
+                    existing = tools[position] if position is not None else None
+                    merged = existing.model_dump(mode="json") if existing is not None else {}
+                    update = observed.model_dump(mode="json", exclude_none=True)
+                    if existing is not None and observed.status == "unknown" and existing.status != "unknown":
+                        update.pop("status", None)
+                    merged.update(update)
+                    if key in outputs:
+                        merged["output"] = outputs[key]
+                    projected = TrajectoryToolCall.model_validate(merged)
+                    if position is None:
+                        positions[key] = len(tools)
+                        tools.append(projected)
+                    else:
+                        tools[position] = projected
+        except Exception as exc:
+            gaps.append(ObservationGap(code="agent_observations_invalid", detail=type(exc).__name__))
+
+    turns.sort(key=lambda turn: (turn.timestamp, turn.invocation_id, turn.turn_no))
+
+    capture = result.get("ng_model_call_capture")
+    capture = capture if isinstance(capture, dict) else {}
+    raw_calls = capture.get("calls") or []
+    model_call_positions = {
+        call.model_call_id: index for index, call in enumerate(model_calls) if call.model_call_id is not None
+    }
+    for raw_call in raw_calls:
+        if not isinstance(raw_call, dict):
+            continue
+        model_call_id = raw_call.get("model_call_id")
+        metadata = {
+            key: raw_call[key]
+            for key in (
+                "response_id",
+                "model_ref",
+                "model",
+                "dialect",
+                "status_code",
+                "response_status",
+                "finish_reason",
+                "error_category",
+                "latency_ttft_ms",
+            )
+            if raw_call.get(key) is not None
+        }
+        response = raw_call.get("response")
+        if isinstance(response, dict) and isinstance(response.get("status"), str):
+            metadata.setdefault("response_status", response["status"])
+        projected = TrajectoryModelCall(
+            model_call_id=model_call_id,
+            started_at=raw_call.get("started_at"),
+            completed_at=raw_call.get("completed_at"),
+            duration_ms=raw_call.get("latency_total_ms"),
+            request=raw_call.get("request") if raw_call.get("request") is not None else raw_call.get("request_raw"),
+            response=raw_call.get("response")
+            if raw_call.get("response") is not None
+            else raw_call.get("response_raw"),
+            response_metadata=metadata,
+            token_stats=TrajectoryTokenStats(
+                prompt_tokens=_nonnegative_int(raw_call.get("tokens_in")),
+                completion_tokens=_nonnegative_int(raw_call.get("tokens_out")),
+                reasoning_tokens=_nonnegative_int(raw_call.get("tokens_reasoning")),
+                total_tokens=_nonnegative_int(raw_call.get("tokens_total")),
+                cached_tokens=_nonnegative_int(raw_call.get("cached_tokens")),
+            ),
+        )
+        position = model_call_positions.pop(model_call_id, None) if model_call_id is not None else None
+        if position is None:
+            model_calls.append(projected)
+        else:
+            merged = model_calls[position].model_dump(mode="json")
+            update = projected.model_dump(mode="json", exclude_none=True)
+            for key in ("response_metadata", "token_stats"):
+                merged[key].update(update.pop(key))
+            merged.update(update)
+            projected = TrajectoryModelCall.model_validate(merged)
+            model_calls[position] = projected
+
+    for raw_gap in capture.get("gaps") or []:
+        if isinstance(raw_gap, dict):
+            try:
+                gaps.append(ObservationGap.model_validate(raw_gap))
+            except Exception:
+                gaps.append(ObservationGap(code="model_call_capture_gap_invalid"))
+    if not model_calls:
+        gaps.append(ObservationGap(code="model_calls_unavailable"))
+    if not turns:
+        gaps.append(ObservationGap(code="turns_unavailable"))
+    if not any(invocation.conversation for invocation in invocations):
+        gaps.append(ObservationGap(code="conversation_unavailable"))
+
+    return TrajectoryRecord(
+        task_id=task_id,
+        rollout_id=rollout_id,
+        invocations=invocations,
+        turns=turns,
+        model_calls=model_calls,
+        tool_calls=tools,
+        gaps=list({(gap.code, gap.invocation_id, gap.detail): gap for gap in gaps}.values()),
+    )
+
+
+def _strip_capture_payloads(result: dict[str, Any]) -> None:
+    capture = result.get("ng_model_call_capture")
+    calls = capture.get("calls") if isinstance(capture, dict) else None
+    for call in calls if isinstance(calls, list) else []:
+        if isinstance(call, dict):
+            for key in _MODEL_CALL_PAYLOAD_KEYS:
+                call.pop(key, None)
+
+
+def _rollout_for_export(result: dict[str, Any]) -> dict[str, Any]:
+    """Return an exporter view without the complete trajectory or raw capture payloads."""
+    sanitized = dict(result)
+    sanitized.pop(NG_TRAJECTORY_KEY, None)
+    sanitized.pop("ng_model_call_capture", None)
+    capture = result.get("ng_model_call_capture")
+    if isinstance(capture, dict):
+        sanitized_capture = dict(capture)
+        calls = capture.get("calls")
+        if isinstance(calls, list):
+            sanitized_capture["calls"] = [
+                {key: value for key, value in call.items() if key not in _MODEL_CALL_PAYLOAD_KEYS}
+                for call in calls
+                if isinstance(call, dict)
+            ]
+        else:
+            sanitized_capture.pop("calls", None)
+        sanitized["ng_model_call_capture"] = sanitized_capture
+    return sanitized
+
+
+def _attach_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> None:
+    try:
+        result[NG_TRAJECTORY_KEY] = _build_trajectory_record(row, result).model_dump(mode="json")
+    except Exception as exc:
+        result.pop(NG_TRAJECTORY_KEY, None)
+        logger.warning("Could not project standardized trajectory evidence.", exc_info=True)
+        gap = ObservationGap(code="trajectory_projection_failed", detail=type(exc).__name__).model_dump(
+            mode="json", exclude_none=True
+        )
+        target = result.get("ng_model_call_capture")
+        if not isinstance(target, dict):
+            target = result.get("ng_agent_observations")
+        gap_attached = False
+        if isinstance(target, dict):
+            gaps = target.setdefault("gaps", [])
+            if isinstance(gaps, list):
+                gaps.append(gap)
+                gap_attached = True
+        if not gap_attached:
+            try:
+                task_id, rollout_id = _trajectory_identity(row)
+                result[NG_TRAJECTORY_KEY] = TrajectoryRecord(
+                    task_id=task_id,
+                    rollout_id=rollout_id,
+                    gaps=[ObservationGap.model_validate(gap)],
+                ).model_dump(mode="json")
+            except Exception:
+                logger.warning("Could not retain the trajectory projection failure gap.", exc_info=True)
+    else:
+        # Raw capture payloads remain as a fallback on failure. After success,
+        # ng_trajectory owns them, so remove only the duplicate copies.
+        _strip_capture_payloads(result)
 
 
 def _get_max_rollout_attempts() -> int:
@@ -107,12 +400,7 @@ def _get_max_rollout_attempts() -> int:
         return _DEFAULT_MAX_ROLLOUT_ATTEMPTS
 
 
-def _failures_path_for(output_fpath: Path) -> Path:
-    """Sidecar path used by the dispatcher and ``_load_from_cache``."""
-    return output_fpath.with_name(output_fpath.stem + "_failures.jsonl")
-
-
-class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
+class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
     num_samples_in_parallel: Optional[int] = Field(
         default=None, description="Limit the number of concurrent samples running at once."
@@ -120,10 +408,6 @@ class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
     responses_create_params: Dict[str, Any] = Field(
         default_factory=dict,
         description="Overrides for the responses_create_params e.g. temperature, max_output_tokens, etc.",
-    )
-    upload_rollouts_to_wandb: bool = Field(
-        default=True,
-        description="Upload the rollouts to W&B. Sometimes this should be off because the rollouts are massive. Default: True",
     )
     disable_aggregation: bool = Field(
         default=False,
@@ -302,10 +586,8 @@ class RolloutCollectionHelper(BaseModel):
                 f"{', '.join(s.name for s in skills_ref.skills)})"
             )
 
-        _input_path = Path(config.input_jsonl_fpath)
-        if not _input_path.is_absolute():
-            _cwd_path = Path.cwd() / _input_path
-            _input_path = _cwd_path if _cwd_path.exists() else PARENT_DIR / _input_path
+        # Search NEMO_GYM_EXTRA_ROOTS, cwd, then the install root.
+        _input_path = _resolve_under_cwd_or_install(config.input_jsonl_fpath)
         if not _input_path.exists():
             raise ConfigPathNotFoundError(
                 f"Input file not found: '{config.input_jsonl_fpath}' (--input). Check the path is spelled correctly."
@@ -423,7 +705,7 @@ class RolloutCollectionHelper(BaseModel):
 
         # Sidecar: one row per non-kill_shaped failure attempt. Count attempts
         # per key + flag terminal rows so chain-hop 2 retries the right ones.
-        failures_fpath = _failures_path_for(Path(config.output_jsonl_fpath))
+        failures_fpath = failures_path_for(Path(config.output_jsonl_fpath))
         attempts_by_key: Counter = Counter()
         terminal_keys: set = set()
         if failures_fpath.exists():
@@ -446,6 +728,14 @@ class RolloutCollectionHelper(BaseModel):
 
         input_rows = [row for row in original_input_rows if get_key(row) not in gated]
 
+        # Stamp the resume attempt (count of prior failures for this key) on actual retries so their
+        # captured model calls are keyed separately from the prior attempt's (see
+        # maybe_rollout_id_from_run_body). The first attempt (0) is left unstamped -> bare rollout id.
+        for row in input_rows:
+            attempt = attempts_by_key.get(get_key(row), 0)
+            if attempt > 0:
+                row[ATTEMPT_INDEX_KEY_NAME] = attempt
+
         key_to_row = dict(zip(map(get_key, original_input_rows), original_input_rows))
         rows = [key_to_row[get_key(result)] for result in results]
 
@@ -464,6 +754,13 @@ class RolloutCollectionHelper(BaseModel):
     async def run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
 
+        # Create the output directory up front: every artifact this run writes (materialized inputs,
+        # rollouts, failures sidecar, aggregate metrics) is derived from output_fpath and keeps its
+        # parent, and the materialized-inputs write below is the first one. Keep this above that
+        # write -- a user pointing --output at a not-yet-existing directory is the common case
+        # outside a git clone.
+        output_fpath.parent.mkdir(parents=True, exist_ok=True)
+
         if config.resume_from_cache and config.materialized_jsonl_fpath.exists() and output_fpath.exists():
             (
                 input_rows,
@@ -471,6 +768,8 @@ class RolloutCollectionHelper(BaseModel):
                 results,
                 result_strs,
             ) = self._load_from_cache(config)
+            persisted_rows = list(rows)
+            persisted_results = list(results)
         else:
             if config.resume_from_cache:
                 if not output_fpath.exists():
@@ -484,7 +783,8 @@ class RolloutCollectionHelper(BaseModel):
 
             rows: List[Dict] = []
             results: List[Dict] = []
-            result_strs: List[List[str]] = []
+            persisted_rows: List[Dict] = []
+            persisted_results: List[Dict] = []
 
             input_rows = self._preprocess_rows_from_config(config)
             # Returned rows are sorted by (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
@@ -500,11 +800,65 @@ class RolloutCollectionHelper(BaseModel):
             print(f"Querying with {config.num_samples_in_parallel} concurrent requests")
             semaphore = Semaphore(config.num_samples_in_parallel)
 
-        output_fpath.parent.mkdir(exist_ok=True, parents=True)
-        failures_fpath = _failures_path_for(output_fpath)
+        failures_fpath = failures_path_for(output_fpath)
 
-        pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
+        # Resolve capture dirs once so each rollout's captured model calls can be folded
+        # into its record below (uniform across agents; no-op when capture is off / dirs absent).
+        global_config = get_global_config_dict()
+        capture_dirs = model_call_capture_dirs_from_config(global_config)
+        # Resolve the training-token store directory once.
+        # Training capture is independent of evaluation capture.
+        # An empty result disables training-token capture.
+        token_capture_dirs = token_id_capture_dirs_from_config(global_config)
+        # The finalizer reads and freezes records through this source.
+        # The source is absent when capture or response rebuilding is disabled.
+        # A framework-owned transport may rebuild through its own source.
+        # The sink still records captures when Gym does not rebuild.
+        # Reruns still clear deterministic rollout ids before dispatch.
+        token_source = None
+        owned_token_source = None
+        token_capture_config = TokenIdCaptureConfig.model_validate(global_config)
+        if token_capture_config.enabled and token_capture_config.token_id_capture.rebuild_response:
+            token_source = installed_token_source()
+            if token_source is None and token_capture_dirs:
+                token_source = TokenCaptureStore(token_capture_dirs[0])
+            if isinstance(token_source, TokenCaptureStore):
+                owned_token_source = token_source
+
+        # Clear only rows about to be dispatched, after resume has assigned retry suffixes. This also
+        # removes a kill-shaped attempt's partial capture when its rollout-attempt id is reused.
+        if capture_dirs:
+            print("Clearing existing model-call captures for rollouts being dispatched")
+            clear_model_call_captures_for_rollouts(input_rows, capture_dirs)
+        token_capture_rows = [
+            row
+            for row in input_rows
+            if token_id_capture_enabled_for_agent(global_config, (row.get(AGENT_REF_KEY_NAME) or {}).get("name"))
+        ]
+        if token_capture_config.token_id_capture.rebuild_response and token_capture_rows and token_source is None:
+            raise ValueError(
+                "Token capture response rebuilding requires a TokenSource in the rollout-collector process. "
+                "Call install_token_source before starting collection or configure token_id_capture.dir."
+            )
+        if token_capture_dirs and token_capture_rows:
+            # Token stores append under deterministic rollout ids.
+            # Clear stale records to avoid merging different attempts.
+            print("Clearing existing token captures for rollouts being dispatched")
+            clear_token_captures_for_rollouts(token_capture_rows, token_capture_dirs)
+
+        # Stop a run that produces mostly masked captures.
+        finalized_count = 0
+        masked_count = 0
+        mask_reasons: Counter = Counter()
+        warned_malformed_rollout_id = False
+
+        # Intermediate status printing
+        pcts_to_print = list(range(1, 100)) + [99.5]
+        agent_name_to_metrics = defaultdict(Counter)
+        agent_name_to_counts = defaultdict(int)
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
+        start_time = time()
+
         results_file = output_fpath.open("ab")
         failures_file = failures_fpath.open("ab")
         for future in self.run_examples(input_rows, semaphore=semaphore):
@@ -515,6 +869,61 @@ class RolloutCollectionHelper(BaseModel):
             result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
             if SKILLS_REF_KEY_NAME in row:
                 result[SKILLS_REF_KEY_NAME] = row[SKILLS_REF_KEY_NAME]
+            if ATTEMPT_INDEX_KEY_NAME in row:
+                result[ATTEMPT_INDEX_KEY_NAME] = row[ATTEMPT_INDEX_KEY_NAME]
+            if ROLLOUT_ID_KEY_NAME in row:
+                # Capture readback recomputes the id from the finished record.
+                # Preserve an explicit id on the result just like the indices.
+                result[ROLLOUT_ID_KEY_NAME] = row[ROLLOUT_ID_KEY_NAME]
+
+            # Fold this rollout's captured model calls into its record (uniform across agents; no-op
+            # when capture is off). Never alters the harness output/reward already in `result`.
+            if capture_dirs:
+                merge_model_call_capture_into_record(
+                    result,
+                    capture_dirs,
+                    include_payloads=not _has_observation_gap(result, "multimodal_history_redacted"),
+                )
+
+            if "ng_model_call_capture" in result or "ng_agent_observations" in result or NG_TRAJECTORY_KEY in result:
+                _attach_trajectory_record(row, result)
+
+            # Freeze and rebuild tokens only for participating agents.
+            # This step does not retire the frozen snapshot.
+            # It leaves harness output and reward unchanged.
+            # Direct callers of run_examples finalize each record themselves.
+            token_capture_build = None
+            if token_id_capture_enabled_for_agent(
+                global_config,
+                (row.get(AGENT_REF_KEY_NAME) or {}).get("name"),
+            ):
+                token_capture_build = await finalize_rollout_token_capture(result, token_source)
+                if token_capture_build is not None:
+                    finalized_count += 1
+                    if token_capture_build.get(MASK_SAMPLE_KEY):
+                        masked_count += 1
+                        # Aggregate available reasons for the abort message.
+                        build_metrics = token_capture_build.get("metrics") or {}
+                        if build_metrics.get("capture_incomplete"):
+                            mask_reasons["capture_incomplete"] += 1
+                        if build_metrics.get("unresolved_parent_calls"):
+                            mask_reasons["unresolved_parent_calls"] += 1
+                        build_error = token_capture_build.get("error") or build_metrics.get("error")
+                        if build_error:
+                            mask_reasons[str(build_error)] += 1
+                    settings = token_capture_config.token_id_capture
+                    if (
+                        settings.max_mask_fraction is not None
+                        and finalized_count >= settings.mask_fraction_min_samples
+                        and masked_count / finalized_count > settings.max_mask_fraction
+                    ):
+                        raise RuntimeError(
+                            f"{masked_count}/{finalized_count} finalized rollouts "
+                            f"({masked_count / finalized_count:.1%}) are masked, exceeding "
+                            f"token_id_capture.max_mask_fraction={settings.max_mask_fraction}. "
+                            f"Mask reasons: {dict(mask_reasons)}. Aborting instead of collecting "
+                            "mostly token-less data."
+                        )
 
             no_persist = bool(result.get(NG_NO_PERSIST_KEY))
             failure_class = result.get(NG_FAILURE_CLASS_KEY)
@@ -522,7 +931,6 @@ class RolloutCollectionHelper(BaseModel):
             rows.append(row)
             results.append(result)
             serialized = orjson.dumps(result)
-            result_strs.append([serialized])
 
             if no_persist:
                 # kill_shaped: don't write anywhere. Set-difference on resume
@@ -537,35 +945,76 @@ class RolloutCollectionHelper(BaseModel):
                 # Success → main jsonl.
                 results_file.write(serialized + b"\n")
                 results_file.flush()
+                persisted_rows.append(row)
+                persisted_results.append(result)
+                try:
+                    rollout_id = maybe_rollout_id_from_run_body(result)
+                except (TypeError, ValueError) as error:
+                    # Preserve capture evidence when the rollout id is invalid.
+                    rollout_id = None
+                    if not warned_malformed_rollout_id:
+                        warned_malformed_rollout_id = True
+                        warnings.warn(
+                            f"a result carries a malformed rollout id ({error}); "
+                            "its token capture will not be retired.",
+                            stacklevel=2,
+                        )
+                if rollout_id is not None and capture_build_can_retire(token_capture_build):
+                    os.fsync(results_file.fileno())
+                    await retire_rollout_token_capture(rollout_id, token_source, token_capture_build)
 
             counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
             if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
                 counts_left.pop(row[AGENT_REF_KEY_NAME]["name"])
 
+            agent_name = result["agent_ref"]["name"]
+            metrics = agent_name_to_metrics[agent_name]
+            metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float)) and not k.startswith("_")})
+            agent_name_to_counts[agent_name] += 1
+
             current_pct = 100 * len(results) / len(input_rows)
             if pcts_to_print and current_pct >= pcts_to_print[0]:
-                while pcts_to_print and current_pct >= pcts_to_print[0]:
-                    pcts_to_print.pop(0)
+                pcts_to_print.pop(0)
 
-                top_left = counts_left.most_common(5)  # Fix to top 3 for now.
-                if top_left:
-                    top_left_str = "\n".join(f"{i + 1}. {k}: {v}" for i, (k, v) in enumerate(top_left))
-                    # Use tqdm.write here so we can print properly with tqdm being used.
-                    tqdm.write(f"Examples left:\n{top_left_str}")
+                time_taken_s = time() - start_time
+                time_taken = timedelta(seconds=int(time_taken_s))
+                rollouts_per_min = len(results) / (time_taken_s / 60)
+                print_str = f"Finished {len(results)} / {len(input_rows)} rollouts ({int(current_pct)}%) in {time_taken} ({rollouts_per_min:.2f} rollouts/min). "
+
+                top_left = counts_left.most_common()
+                top_left_str = "\n".join(f"{i + 1}. {k}: {v}" for i, (k, v) in enumerate(top_left))
+                print_str += f"""Examples left:
+{top_left_str}
+"""
+                for agent_name in sorted(agent_name_to_metrics):
+                    metrics = agent_name_to_metrics[agent_name]
+                    agent_total_samples = counts_left[agent_name] + agent_name_to_counts[agent_name]
+                    agent_sample_pct = 100 * agent_name_to_counts[agent_name] / agent_total_samples
+                    avg_metrics = {k: v / agent_name_to_counts[agent_name] for k, v in metrics.items()}
+                    print_str += f"""Found {agent_name_to_counts[agent_name]} / {agent_total_samples} ({agent_sample_pct:.2f}%) rollouts for `{agent_name}`.
+{json.dumps(avg_metrics, indent=4)}
+"""
+                # Use tqdm.write here so we can print properly with tqdm being used.
+                tqdm.write(print_str)
 
         results_file.close()
         failures_file.close()
+        if owned_token_source is not None:
+            await owned_token_source.close()
 
-        if config.upload_rollouts_to_wandb and get_wandb_run():  # pragma: no cover
-            print("Uploading rollouts to W&B. This may take a few minutes if your data is large.")
-            get_wandb_run().log({"Rollouts": Table(data=result_strs, columns=["Rollout"])})
-        del result_strs
+        if config.upload_rollouts and get_exporters():  # pragma: no cover
+            print("Uploading rollouts. This may take a few minutes if your data is large.")
+            export_rollouts([_rollout_for_export(result) for result in results])
 
         print("Sorting results to ensure consistent ordering")
         rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
         results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
+        persisted_rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
+        persisted_results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
 
-        # Compute and write aggregate metrics via /aggregate_metrics on each agent server
+        # Compute and write aggregate metrics via /aggregate_metrics using only the
+        # rows written to the main rollouts jsonl so runtime aggregation matches
+        # `gym eval aggregate`.
         if config.disable_aggregation:
             print(
                 "Skipping aggregate-metrics computation because disable_aggregation=True. "
@@ -574,7 +1023,9 @@ class RolloutCollectionHelper(BaseModel):
             aggregate_metrics_fpath = None
         else:
             print("Computing aggregate metrics")
-            aggregate_metrics_fpath = await self._call_aggregate_metrics(results, rows, output_fpath)
+            aggregate_metrics_fpath = await self._call_aggregate_metrics(
+                persisted_results, persisted_rows, output_fpath
+            )
 
         print(f"""Finished rollout collection! View results at:
 Fully materialized inputs: {config.materialized_jsonl_fpath}
@@ -611,7 +1062,18 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
             # Strip heavyweight fields before sending, but preserve response.usage
             stripped = []
             for r in agent_result_list:
-                entry = {k: v for k, v in r.items() if k not in ("response", "responses_create_params")}
+                entry = {
+                    k: v
+                    for k, v in r.items()
+                    if k
+                    not in (
+                        "response",
+                        "responses_create_params",
+                        "ng_agent_observations",
+                        "ng_model_call_capture",
+                        NG_TRAJECTORY_KEY,
+                    )
+                }
                 usage = (r.get("response") or {}).get("usage")
                 if usage:
                     entry["response"] = {"usage": usage}
@@ -663,8 +1125,7 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
                 }
             )
 
-        if get_wandb_run():  # pragma: no cover
-            get_wandb_run().log(metrics_to_log)
+        export_metrics(metrics_to_log)
 
         # Write single file with all agents
         metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
@@ -711,15 +1172,7 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
     def setup_server_client(
         self, head_server_config: Optional[BaseServerConfig] = None
     ) -> ServerClient:  # pragma: no cover
-        server_client = ServerClient.load_from_global_config(head_server_config)
-
-        # We set this rollout global aiohttp client to use the same max connections as the underlying head server global config.
-        if not is_global_aiohttp_client_setup():
-            set_global_aiohttp_client(
-                cfg=GlobalAIOHTTPAsyncClientConfig.model_validate(server_client.global_config_dict)
-            )
-
-        return server_client
+        return setup_server_client_utils(head_server_config)
 
 
 class RolloutAggregationConfig(BaseNeMoGymCLIConfig):

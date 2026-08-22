@@ -1,0 +1,15 @@
+conversational_tool_use_scenario_generation:
+  responses_api_agents:
+    conversational_tool_use/scenario_generation:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: scenario_generation_model
+      request_count: 20
+      max_concurrency: 20
+      scenarios_per_request: 80
+      outside_policy_scope_fraction: 0.1
+      random_seed: null
+
+scenario_generation_model:
+  _copy: policy_model

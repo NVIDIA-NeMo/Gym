@@ -14,7 +14,7 @@
 # limitations under the License.
 import json
 
-from fastapi import Body
+from fastapi import Body, Request
 from pydantic import ConfigDict, ValidationError
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
@@ -44,10 +44,12 @@ class ToolSimulationAgentVerifyResponse(BaseVerifyResponse):
 class ToolSimulationAgent(SimpleResponsesAPIAgent):
     config: ToolSimulationAgentConfig
 
-    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+    async def responses(
+        self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
+    ) -> NeMoGymResponse:
         model_response = await self.server_client.post(
             server_name=self.config.model_server.name,
-            url_path="/v1/responses",
+            url_path=self.url_path_for_request("/v1/responses", request),
             json=body,
         )
 
@@ -66,24 +68,31 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
         config = self.config
         response = await self.server_client.post(
             server_name=config.name,
-            url_path="/v1/responses",
+            url_path=self.url_path_for_run("/v1/responses", body),
             json=body.responses_create_params,
         )
         await raise_for_status(response)
 
-        verify_request_body = body.model_dump()
-        verify_request_body["response"] = await response.json()
-        verify_request = ToolSimulationAgentVerifyRequest.model_validate(verify_request_body)
+        response_json = await response.json()
+        if config.skip_verification:
+            result = body.model_dump() | {
+                "response": response_json,
+                "reward": float(config.skip_verification_reward),
+                "verification_skipped": True,
+            }
+        else:
+            verify_request = ToolSimulationAgentVerifyRequest.model_validate(
+                body.model_dump() | {"response": response_json}
+            )
+            verify_response = await self.server_client.post(
+                server_name=config.resources_server.name,
+                url_path="/verify",
+                json=verify_request.model_dump(),
+            )
+            await raise_for_status(verify_response)
+            result = await verify_response.json()
 
-        verify_response = await self.server_client.post(
-            server_name=config.resources_server.name,
-            url_path="/verify",
-            json=verify_request.model_dump(),
-        )
-        await raise_for_status(verify_response)
-        verify_response_json = await verify_response.json()
-
-        return ToolSimulationAgentVerifyResponse.model_validate(verify_response_json)
+        return ToolSimulationAgentVerifyResponse.model_validate(result)
 
 
 if __name__ == "__main__":

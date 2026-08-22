@@ -37,11 +37,18 @@ openclaw_config:
         - {id: nvidia/meta/llama-3.3-70b-instruct, name: nvidia/meta/llama-3.3-70b-instruct, api: openai-completions}
 ```
 
+Alternatively, set `model_server` to a Gym model server and set `model` to its served model id. The
+agent creates the OpenClaw provider entry automatically. Without `model_server`, the existing
+provider configuration is unchanged.
+
 ## Config fields
 
 - `concurrency`: max simultaneous `run()` calls
 - `command`: the OpenClaw command, split on spaces so a multi-word launcher works (e.g. `npx openclaw`)
 - `model`: `<provider>/<model-name>` (see Model id)
+- `model_server`: optional Gym model server used to generate the provider entry
+- `context_window`: context limit for a generated model entry
+- `max_output_tokens`: output limit for a generated model entry
 - `workspace_root`: where per-request workspaces are created and deleted
 - `openclaw_agent_id`: passed to `--agent`
 - `thinking`: passed to `--thinking` (off, low, medium, high, ...)
