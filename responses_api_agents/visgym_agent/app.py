@@ -735,7 +735,14 @@ class TextActionAgent(SimpleResponsesAPIAgent):
     async def run(self, body: TextActionAgentRunRequest) -> VisGymAgentVerifyResponse:
         try:
             response = await self.responses(body)
-            verify_request = VisGymAgentVerifyRequest.model_validate({"response": response.model_dump()})
+            verify_request = VisGymAgentVerifyRequest.model_validate(
+                {
+                    "response": response.model_dump(),
+                    # Echoed back through /verify because NeMo-RL reads it off
+                    # the rollout result, not off the task row.
+                    "responses_create_params": body.responses_create_params.model_dump(),
+                }
+            )
             verify_response = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/verify",

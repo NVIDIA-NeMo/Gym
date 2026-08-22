@@ -556,7 +556,11 @@ class VisGymResourcesServer(SimpleResourcesServer):
         body.response.metadata = metadata
         if not known_env_id:
             logger.info("/verify drained unknown VisGym env_id=%s; returning 0.0", env_id)
-        return VisGymAgentVerifyResponse(response=body.response, reward=reward)
+        return VisGymAgentVerifyResponse(
+            responses_create_params=body.responses_create_params,
+            response=body.response,
+            reward=reward,
+        )
 
     def _resolve_task_row(self, body: VisGymSeedSessionRequest) -> VisGymTaskRow:
         if body.task_row is not None:

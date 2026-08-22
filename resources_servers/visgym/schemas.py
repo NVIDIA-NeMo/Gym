@@ -11,6 +11,8 @@ from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
 )
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -158,14 +160,18 @@ class VisGymNeMoGymResponse(NeMoGymResponse):
     output: list[VisGymNeMoGymResponseOutputItem] | list[list[VisGymNeMoGymResponseOutputItem]]
 
 
-class VisGymAgentVerifyRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class VisGymAgentVerifyRequest(BaseVerifyRequest):
+    """Verify request for a VisGym episode.
+
+    Inherits ``responses_create_params`` from the base contract rather than
+    declaring only ``response``. NeMo-RL reads that field straight off the
+    rollout result when it rebuilds the initial prompt, so an environment that
+    drops it fails postprocessing with ``KeyError: responses_create_params``
+    after the episode has already been played.
+    """
 
     response: VisGymNeMoGymResponse
 
 
-class VisGymAgentVerifyResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class VisGymAgentVerifyResponse(BaseVerifyResponse):
     response: VisGymNeMoGymResponse
-    reward: float

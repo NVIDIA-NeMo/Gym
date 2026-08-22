@@ -696,6 +696,7 @@ class TestRunWorkflow:
         # so close_data is intentionally omitted from the side_effect list.
         verify_data = {
             "reward": 1.0,
+            "responses_create_params": {"input": []},
             "response": {
                 "id": "resp_1",
                 "created_at": 1753983920.0,
@@ -800,3 +801,56 @@ class TestModelRequestSerialization:
         assert assistant_items[0]["prompt_token_ids"] == [10, 11]
         assert assistant_items[0]["generation_token_ids"] == [20, 21]
         assert assistant_items[0]["generation_log_probs"] == [-0.1, -0.2]
+
+
+class TestNeMoRLResultContract:
+    """The /run result has to carry what NeMo-RL reads off a rollout."""
+
+    async def test_run_result_carries_the_fields_nemo_rl_reads(self) -> None:
+        # NeMo-RL's postprocessing indexes these directly:
+        #   nemo_gym_result["responses_create_params"]["input"] (rebuilds the
+        #   initial prompt), nemo_gym_result["response"]["output"] (the trained
+        #   turns) and full_result["reward"] (the scalar that becomes
+        #   total_reward). A missing key is not caught until postprocessing, by
+        #   which point the episode has already been played on real GPUs.
+        agent = _make_agent(max_steps=1)
+        env_id = str(uuid.uuid4())
+
+        dotjson_mock = AsyncMock()
+        dotjson_mock.json.side_effect = [
+            _seed_session(env_id=env_id),
+            _model_response("\\boxed{step}"),
+            _step(done=True, reward=1.0),
+            {
+                "reward": 1.0,
+                "responses_create_params": {"input": []},
+                "response": {
+                    "id": "resp_1",
+                    "created_at": 1753983920.0,
+                    "model": "dummy_model",
+                    "object": "response",
+                    "env_id": env_id,
+                    "group_id": "0",
+                    "contains_transitions": False,
+                    "output": [],
+                    "parallel_tool_calls": True,
+                    "tool_choice": "auto",
+                    "tools": [],
+                },
+            },
+        ]
+        dotjson_mock.raise_for_status = MagicMock()
+        dotjson_mock.cookies = None
+        agent.server_client.post = AsyncMock(return_value=dotjson_mock)
+
+        result = await agent.run(
+            TextActionAgentRunRequest(
+                task_idx=0,
+                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            )
+        )
+
+        wire = result.model_dump(mode="json")
+        assert {"reward", "responses_create_params", "response"} <= set(wire)
+        assert "input" in wire["responses_create_params"]
+        assert "output" in wire["response"]

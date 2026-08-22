@@ -13,6 +13,7 @@ from fastapi import HTTPException, Request
 from omegaconf import OmegaConf
 
 from nemo_gym.config_types import BaseServerConfig
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from resources_servers.visgym import app as visgym_app
 from resources_servers.visgym.schemas import (
@@ -153,7 +154,10 @@ def _verify_request(env_id: str) -> VisGymAgentVerifyRequest:
         tools=[],
         env_id=env_id,
     )
-    return VisGymAgentVerifyRequest(response=response)
+    return VisGymAgentVerifyRequest(
+        response=response,
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+    )
 
 
 def test_headless_defaults_force_matplotlib_agg(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -268,6 +272,9 @@ async def test_step_accumulates_reward_and_verify_drains(monkeypatch: pytest.Mon
     assert stepped.reward == 1.0
     assert verified.reward == 1.0
     assert verified.response.metadata["training_reward"] == "1.0"
+    # NeMo-RL reads responses_create_params off the rollout result to rebuild
+    # the initial prompt; dropping it fails postprocessing after the episode.
+    assert verified.responses_create_params is not None
 
 
 @pytest.mark.asyncio
