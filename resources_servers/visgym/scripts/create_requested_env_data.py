@@ -34,14 +34,70 @@ class EnvironmentSpec:
 
 
 MATCHSTICK_EASY_SEEDS = (
-    1259, 1289, 1310, 1319, 1327, 1341, 1347, 1368,
-    1369, 1396, 1398, 1420, 1434, 1455, 1506, 1538,
-    1577, 1600, 1662, 1680, 1716, 1720, 1729, 1761,
-    1824, 1841, 1853, 1868, 1906, 1911, 1913, 2023,
-    2034, 2070, 2072, 2086, 2149, 2184, 2255, 2260,
-    2290, 2323, 2413, 2419, 2438, 2444, 2472, 2510,
-    2521, 2563, 2575, 2620, 2648, 2664, 2670, 2687,
-    2693, 2963, 2980, 2994, 3002, 3015, 3063, 3072,
+    1259,
+    1289,
+    1310,
+    1319,
+    1327,
+    1341,
+    1347,
+    1368,
+    1369,
+    1396,
+    1398,
+    1420,
+    1434,
+    1455,
+    1506,
+    1538,
+    1577,
+    1600,
+    1662,
+    1680,
+    1716,
+    1720,
+    1729,
+    1761,
+    1824,
+    1841,
+    1853,
+    1868,
+    1906,
+    1911,
+    1913,
+    2023,
+    2034,
+    2070,
+    2072,
+    2086,
+    2149,
+    2184,
+    2255,
+    2260,
+    2290,
+    2323,
+    2413,
+    2419,
+    2438,
+    2444,
+    2472,
+    2510,
+    2521,
+    2563,
+    2575,
+    2620,
+    2648,
+    2664,
+    2670,
+    2687,
+    2693,
+    2963,
+    2980,
+    2994,
+    3002,
+    3015,
+    3063,
+    3072,
 )
 
 
@@ -233,9 +289,21 @@ def create_general_images(count: int = 32) -> None:
             width=6,
         )
         draw.ellipse((280 - shift // 3, 85, 450 - shift // 3, 255), fill=palette[(index + 3) % len(palette)], width=5)
-        draw.rectangle((255, 300 - shift // 4, 465, 455 - shift // 4), fill=palette[(index + 1) % len(palette)], outline=(15, 18, 20), width=6)
+        draw.rectangle(
+            (255, 300 - shift // 4, 465, 455 - shift // 4),
+            fill=palette[(index + 1) % len(palette)],
+            outline=(15, 18, 20),
+            width=6,
+        )
         draw.line((45, 435, 225, 305), fill=(250, 250, 250), width=22)
-        draw.text((28, 20), f"SCENE {index + 1:02d}", font=font(30), fill=(255, 255, 255), stroke_width=2, stroke_fill=(0, 0, 0))
+        draw.text(
+            (28, 20),
+            f"SCENE {index + 1:02d}",
+            font=font(30),
+            fill=(255, 255, 255),
+            stroke_width=2,
+            stroke_fill=(0, 0, 0),
+        )
         image.save(image_dir / f"scene_{index:03d}.png")
 
 
@@ -492,12 +560,8 @@ def create_manifests(
     smoke_rows_by_slug: dict[str, list[dict[str, Any]]] = {}
     for env_offset, (slug, spec) in enumerate(ENV_SPECS.items()):
         env_seed_base = seed_base + env_offset * 100_000
-        train_path = manifest_dir / (
-            f"{slug}_easy_train_{samples}{horizon_suffix}_t{max_output_tokens}.jsonl"
-        )
-        smoke_path = manifest_dir / (
-            f"{slug}_easy_smoke_{smoke_samples}{horizon_suffix}_t{max_output_tokens}.jsonl"
-        )
+        train_path = manifest_dir / (f"{slug}_easy_train_{samples}{horizon_suffix}_t{max_output_tokens}.jsonl")
+        smoke_path = manifest_dir / (f"{slug}_easy_smoke_{smoke_samples}{horizon_suffix}_t{max_output_tokens}.jsonl")
         if selected_slug is None or selected_slug == slug:
             rows = [
                 task_row(
@@ -527,11 +591,7 @@ def create_manifests(
             "horizon_cap": horizon_cap if horizon_cap is not None else spec.horizon_cap,
         }
 
-    combined_train = [
-        rows_by_slug[slug][sample_index]
-        for sample_index in range(samples)
-        for slug in ENV_SPECS
-    ]
+    combined_train = [rows_by_slug[slug][sample_index] for sample_index in range(samples) for slug in ENV_SPECS]
     combined_smoke = [row for slug in ENV_SPECS for row in smoke_rows_by_slug[slug]]
     combined_train_path = manifest_dir / (
         f"requested_envs_combined_train_{len(combined_train)}{horizon_suffix}_t{max_output_tokens}.jsonl"
@@ -549,14 +609,10 @@ def create_manifests(
             f"requested_envs_combined_train_{len(combined_h15)}_h15_t{max_output_tokens}.jsonl"
         )
         write_jsonl(combined_h15_path, combined_h15)
-        index["combined_train_h15_manifest"] = str(
-            combined_h15_path.relative_to(VISGYM_ROOT)
-        )
+        index["combined_train_h15_manifest"] = str(combined_h15_path.relative_to(VISGYM_ROOT))
     else:
         index["uniform_horizon_cap"] = horizon_cap
-        index[f"combined_train_h{horizon_cap}_manifest"] = str(
-            combined_train_path.relative_to(VISGYM_ROOT)
-        )
+        index[f"combined_train_h{horizon_cap}_manifest"] = str(combined_train_path.relative_to(VISGYM_ROOT))
     index["combined_train_rows"] = len(combined_train)
     index["combined_train_order"] = "round_robin_by_environment"
     index_path = manifest_dir / f"requested_env_manifest_index{horizon_suffix}.json"

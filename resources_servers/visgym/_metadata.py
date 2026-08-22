@@ -77,7 +77,5 @@ def sanitize_metadata(value: Any) -> Any:
     if _json_serializable(value):
         return value
 
-    _warn_once(
-        f"Converting non-JSON-serializable VisGym metadata value to repr: {type(value).__name__}"
-    )
+    _warn_once(f"Converting non-JSON-serializable VisGym metadata value to repr: {type(value).__name__}")
     return repr(value)

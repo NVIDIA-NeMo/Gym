@@ -39,9 +39,7 @@ def _make_config(**overrides) -> TextActionAgentConfig:
         entrypoint="",
         name="",
         model_server=ModelServerRef(type="responses_api_models", name="my model name"),
-        resources_server=ResourcesServerRef(
-            type="resources_servers", name="my resources name"
-        ),
+        resources_server=ResourcesServerRef(type="resources_servers", name="my resources name"),
     )
     base.update(overrides)
     return TextActionAgentConfig(**base)
@@ -78,9 +76,7 @@ def _model_response(
         "parallel_tool_calls": True,
         "tool_choice": "auto",
         "tools": [],
-        "incomplete_details": (
-            {"reason": incomplete_reason} if incomplete_reason is not None else None
-        ),
+        "incomplete_details": ({"reason": incomplete_reason} if incomplete_reason is not None else None),
     }
 
 
@@ -102,10 +98,7 @@ def _step(obs_text: str = "Next obs", reward: float = 0.0, done: bool = False) -
 
 class TestExtractBoxed:
     def test_finds_last(self) -> None:
-        text = (
-            "Let me think. The example would be \\boxed{example} but the "
-            "real answer is \\boxed{[up]}."
-        )
+        text = "Let me think. The example would be \\boxed{example} but the real answer is \\boxed{[up]}."
         assert TextActionAgent._extract_boxed(text) == "[up]"
 
     def test_returns_none_if_missing(self) -> None:
@@ -133,42 +126,23 @@ class TestExtractAction:
 
     def test_boxed_action_still_takes_precedence(self) -> None:
         assert (
-            TextActionAgent._extract_action(
-                "reasoning \\boxed{('move', 3)}", self.maze_action_regex
-            )
-            == "('move', 3)"
+            TextActionAgent._extract_action("reasoning \\boxed{('move', 3)}", self.maze_action_regex) == "('move', 3)"
         )
 
     def test_accepts_exact_unboxed_action_when_configured(self) -> None:
-        assert (
-            TextActionAgent._extract_action("  ('move', 0)\n", self.maze_action_regex)
-            == "('move', 0)"
-        )
+        assert TextActionAgent._extract_action("  ('move', 0)\n", self.maze_action_regex) == "('move', 0)"
 
     def test_accepts_observed_unboxed_action_with_terminal_chat_token(self) -> None:
-        assert (
-            TextActionAgent._extract_action(
-                " ('move', 3)<|im_end|>\n", self.maze_action_regex
-            )
-            == "('move', 3)"
-        )
+        assert TextActionAgent._extract_action(" ('move', 3)<|im_end|>\n", self.maze_action_regex) == "('move', 3)"
 
     def test_rejects_unboxed_action_by_default(self) -> None:
         assert TextActionAgent._extract_action("('move', 0)") is None
 
     def test_rejects_prose_around_unboxed_action(self) -> None:
-        assert (
-            TextActionAgent._extract_action(
-                "I choose ('move', 0)", self.maze_action_regex
-            )
-            is None
-        )
+        assert TextActionAgent._extract_action("I choose ('move', 0)", self.maze_action_regex) is None
 
     def test_rejects_action_outside_grammar(self) -> None:
-        assert (
-            TextActionAgent._extract_action("('move', 4)", self.maze_action_regex)
-            is None
-        )
+        assert TextActionAgent._extract_action("('move', 4)", self.maze_action_regex) is None
 
 
 class TestExtractAssistantText:
@@ -205,10 +179,8 @@ class TestExtractAssistantText:
                 "content": [{"annotations": [], "text": "world", "type": "output_text"}],
             }
         )
-        assert (
-            TextActionAgent._extract_assistant_text([user_msg, assistant_msg])
-            == "world"
-        )
+        assert TextActionAgent._extract_assistant_text([user_msg, assistant_msg]) == "world"
+
 
 class TestLifecycleHappyPath:
     async def test_lifecycle_happy_path(self) -> None:
@@ -274,10 +246,7 @@ class TestLifecycleHappyPath:
         assert calls[2][1]["server_name"] == "my resources name"
         assert calls[2][1]["url_path"] == "/step"
         assert calls[2][1]["json"] == {"env_id": env_id, "action_string": "step"}
-        assert calls[3] == call(
-            server_name="my resources name", url_path="/close", json={"env_id": env_id}
-        )
-
+        assert calls[3] == call(server_name="my resources name", url_path="/close", json={"env_id": env_id})
 
     async def test_two_turn_history_preserves_training_token_ids(self) -> None:
         agent = _make_agent(max_steps=2)
@@ -322,19 +291,11 @@ class TestLifecycleHappyPath:
 
         calls = agent.server_client.post.await_args_list
         second_model_input = calls[3][1]["json"].input
-        prior_assistant = next(
-            item for item in second_model_input if hasattr(item, "prompt_token_ids")
-        )
+        prior_assistant = next(item for item in second_model_input if hasattr(item, "prompt_token_ids"))
         assert prior_assistant.prompt_token_ids == [10, 11]
         assert prior_assistant.generation_token_ids == [20, 21]
-        second_model_wire = calls[3][1]["json"].model_dump(
-            exclude_unset=True, mode="json"
-        )
-        prior_assistant_wire = next(
-            item
-            for item in second_model_wire["input"]
-            if "prompt_token_ids" in item
-        )
+        second_model_wire = calls[3][1]["json"].model_dump(exclude_unset=True, mode="json")
+        prior_assistant_wire = next(item for item in second_model_wire["input"] if "prompt_token_ids" in item)
         assert prior_assistant_wire["prompt_token_ids"] == [10, 11]
         assert prior_assistant_wire["generation_token_ids"] == [20, 21]
         assert [item.role for item in result.output] == [
@@ -401,9 +362,7 @@ class TestNoBoxedRecovery:
             and "produced no \\boxed{...} action" in str(m.content)
             for m in second_input
         )
-        assert recovery_present, (
-            "Expected the no-boxed-answer recovery message to be in agent state"
-        )
+        assert recovery_present, "Expected the no-boxed-answer recovery message to be in agent state"
         assert calls[1][1]["json"].max_output_tokens is None
         assert calls[2][1]["json"].max_output_tokens is None
 
@@ -437,9 +396,7 @@ class TestNoBoxedRecovery:
 
         request = TextActionAgentRunRequest(
             task_idx=0,
-            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
-                input=[], max_output_tokens=100
-            ),
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[], max_output_tokens=100),
         )
         result = await agent.responses(request)
 
@@ -451,9 +408,7 @@ class TestNoBoxedRecovery:
             "/v1/responses",
             "/close",
         ]
-        model_calls = [
-            c for c in agent.server_client.post.await_args_list if c[1]["url_path"] == "/v1/responses"
-        ]
+        model_calls = [c for c in agent.server_client.post.await_args_list if c[1]["url_path"] == "/v1/responses"]
         assert [c[1]["json"].max_output_tokens for c in model_calls] == [100, 200, 400]
         assert result.metadata["termination_reason"] == "no_boxed_retry_cap"
         assert result.metadata["no_boxed_truncation_retries"] == "2"
@@ -490,15 +445,11 @@ class TestNoBoxedRecovery:
 
         request = TextActionAgentRunRequest(
             task_idx=0,
-            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
-                input=[], max_output_tokens=100
-            ),
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[], max_output_tokens=100),
         )
         await agent.responses(request)
 
-        model_calls = [
-            c for c in agent.server_client.post.await_args_list if c[1]["url_path"] == "/v1/responses"
-        ]
+        model_calls = [c for c in agent.server_client.post.await_args_list if c[1]["url_path"] == "/v1/responses"]
         assert [c[1]["json"].max_output_tokens for c in model_calls] == [100, 200, 100]
 
     async def test_invalid_env_action_does_not_reset_truncation_budget(self) -> None:
@@ -533,15 +484,11 @@ class TestNoBoxedRecovery:
 
         request = TextActionAgentRunRequest(
             task_idx=0,
-            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
-                input=[], max_output_tokens=100
-            ),
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[], max_output_tokens=100),
         )
         await agent.responses(request)
 
-        model_calls = [
-            c for c in agent.server_client.post.await_args_list if c[1]["url_path"] == "/v1/responses"
-        ]
+        model_calls = [c for c in agent.server_client.post.await_args_list if c[1]["url_path"] == "/v1/responses"]
         assert [c[1]["json"].max_output_tokens for c in model_calls] == [100, 200, 200]
 
 
@@ -615,7 +562,9 @@ class TestReEmitRules:
 
         # seed_obs carries the initial observation + rules reminder (post-injection).
         assert result.seed_obs is not None
-        seed_obs_contents = [s.get("content") if isinstance(s, dict) else getattr(s, "content", None) for s in result.seed_obs]
+        seed_obs_contents = [
+            s.get("content") if isinstance(s, dict) else getattr(s, "content", None) for s in result.seed_obs
+        ]
         assert "Seed obs" in seed_obs_contents
         assert "REMINDER!" in seed_obs_contents
 
@@ -659,9 +608,7 @@ class TestReEmitRules:
         )
         result = await agent.responses(request)
 
-        contents = [
-            getattr(m, "content", None) for m in result.output
-        ]
+        contents = [getattr(m, "content", None) for m in result.output]
         assert "Env obs" in contents
         # Default template must NOT be injected when re_emit_rules_each_turn=False.
         assert agent.config.rules_summary_template not in contents
@@ -711,9 +658,7 @@ class TestCloseLifecycle:
 
         model_err_mock = AsyncMock()
         model_err_mock.raise_for_status = MagicMock(
-            side_effect=aiohttp.ClientResponseError(
-                request_info=MagicMock(), history=(), status=500, message="boom"
-            )
+            side_effect=aiohttp.ClientResponseError(request_info=MagicMock(), history=(), status=500, message="boom")
         )
         model_err_mock.text = "boom"
 
@@ -722,9 +667,7 @@ class TestCloseLifecycle:
         close_mock.raise_for_status = MagicMock()
         close_mock.cookies = None
 
-        agent.server_client.post = AsyncMock(
-            side_effect=[seed_mock, model_err_mock, close_mock]
-        )
+        agent.server_client.post = AsyncMock(side_effect=[seed_mock, model_err_mock, close_mock])
 
         request = TextActionAgentRunRequest(
             task_idx=0,

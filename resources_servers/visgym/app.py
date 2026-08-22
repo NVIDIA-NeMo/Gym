@@ -87,9 +87,7 @@ def _install_skimage_io_compatibility() -> None:
 
 def _install_mental_rotation_3d_renderer_compatibility() -> None:
     """Keep rendered frames consistent with the environment observation space."""
-    module = importlib.import_module(
-        "gymnasium.envs.mental_rotation_3d_cube.mental_rotation_3d_cube"
-    )
+    module = importlib.import_module("gymnasium.envs.mental_rotation_3d_cube.mental_rotation_3d_cube")
     if getattr(module, "_nemo_gym_renderer_size_installed", False):
         return
 
@@ -125,6 +123,7 @@ try:
 except ImportError:  # pragma: no cover - exercised in containers lacking VisGym deps.
     gym = None  # type: ignore[assignment]
 
+
 def _install_maze3d_headless_renderer() -> None:
     """Replace Maze3D's process-global Ursina scene with a session-safe renderer."""
     maze_module = importlib.import_module("gymnasium.envs.maze_3d.maze_3d")
@@ -146,11 +145,7 @@ def _install_maze3d_headless_renderer() -> None:
 
     def is_wall(env: Any, location: Any) -> bool:
         row, col = int(location[0]), int(location[1])
-        return not (
-            0 <= row < env.maze_height
-            and 0 <= col < env.maze_width
-            and env.maze_map[row, col] != 1
-        )
+        return not (0 <= row < env.maze_height and 0 <= col < env.maze_width and env.maze_map[row, col] != 1)
 
     def render_frame(env: Any) -> Any:
         render_size = env._render_size or (336, 336)
@@ -291,7 +286,9 @@ def _render_fetch_state(env: Any, obs: dict[str, Any]) -> Any:
 
     gauge_left, gauge_right = 190, 214
     gauge_top, gauge_bottom = 25, 202
-    draw.rectangle((gauge_left, gauge_top, gauge_right, gauge_bottom), fill=(248, 248, 248), outline=(45, 49, 52), width=2)
+    draw.rectangle(
+        (gauge_left, gauge_top, gauge_right, gauge_bottom), fill=(248, 248, 248), outline=(45, 49, 52), width=2
+    )
     draw.text((190, 7), "Z+", fill=(20, 24, 26), font=label_font)
 
     def draw_height(position: Any, color: tuple[int, int, int], offset: int) -> None:
@@ -402,9 +399,7 @@ class VisGymResourcesServer(SimpleResourcesServer):
         app.post("/close")(self.close)
         return app
 
-    async def seed_session(
-        self, request: Request, body: VisGymSeedSessionRequest
-    ) -> VisGymSeedSessionResponse:
+    async def seed_session(self, request: Request, body: VisGymSeedSessionRequest) -> VisGymSeedSessionResponse:
         row = self._resolve_task_row(body)
         env_kwargs = dict(row.env_kwargs)
         if row.seed_key:
@@ -462,9 +457,7 @@ class VisGymResourcesServer(SimpleResourcesServer):
         env_id_str = row_dict["env_id"]
 
         try:
-            obs, reward, terminated, truncated, info = await self._step_env(
-                env, env_id_str, body.action_string
-            )
+            obs, reward, terminated, truncated, info = await self._step_env(env, env_id_str, body.action_string)
             info = self._augment_info(env, info, env_id_str)
         except Exception as exc:
             logger.warning(
@@ -554,9 +547,7 @@ class VisGymResourcesServer(SimpleResourcesServer):
 
         return VisGymCloseResponse(success=True, message="ok")
 
-    async def verify(
-        self, request: Request, body: VisGymAgentVerifyRequest
-    ) -> VisGymAgentVerifyResponse:
+    async def verify(self, request: Request, body: VisGymAgentVerifyRequest) -> VisGymAgentVerifyResponse:
         env_id = body.response.env_id
         known_env_id = env_id in self.env_id_to_total_reward
         reward = self.env_id_to_total_reward.pop(env_id, 0.0)

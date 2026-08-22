@@ -210,8 +210,7 @@ def main() -> int:
         max_output_tokens=args.max_output_tokens,
     )
     combined_train_path = (
-        args.output_dir
-        / f"{args.output_prefix}_train_{args.samples_per_env}each_t{args.max_output_tokens}.jsonl"
+        args.output_dir / f"{args.output_prefix}_train_{args.samples_per_env}each_t{args.max_output_tokens}.jsonl"
     )
     write_jsonl(combined_train_path, train_combined)
     index["files"]["combined_train"] = {
@@ -246,7 +245,10 @@ def main() -> int:
         }
         for env_id, rows in val_by_env.items():
             env_name = ENV_CONFIGS[env_id]["name"]
-            path = args.output_dir / f"{env_name}_synthetic_val_{args.val_samples_per_env}_t{args.max_output_tokens}.jsonl"
+            path = (
+                args.output_dir
+                / f"{env_name}_synthetic_val_{args.val_samples_per_env}_t{args.max_output_tokens}.jsonl"
+            )
             write_jsonl(path, rows)
             index["files"][f"{env_name}_val"] = {"path": str(path), "rows": len(rows)}
 

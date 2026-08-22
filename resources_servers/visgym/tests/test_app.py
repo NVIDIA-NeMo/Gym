@@ -304,12 +304,8 @@ async def test_distance_delta_reward_shaping_preserves_raw_reward(
 
 
 def test_matchstick_info_exposes_binary_solution_distance() -> None:
-    incorrect = visgym_app.VisGymResourcesServer._augment_info(
-        None, {"is_correct": False}, "matchstick_equation/easy"
-    )
-    correct = visgym_app.VisGymResourcesServer._augment_info(
-        None, {"is_correct": True}, "matchstick_equation/easy"
-    )
+    incorrect = visgym_app.VisGymResourcesServer._augment_info(None, {"is_correct": False}, "matchstick_equation/easy")
+    correct = visgym_app.VisGymResourcesServer._augment_info(None, {"is_correct": True}, "matchstick_equation/easy")
 
     assert incorrect["matchstick_distance"] == 1.0
     assert correct["matchstick_distance"] == 0.0

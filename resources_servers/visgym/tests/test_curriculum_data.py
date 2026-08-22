@@ -46,10 +46,7 @@ def _read_jsonl(path: Path) -> list[dict]:
 
 
 def _without_task_idx(rows: list[dict]) -> list[dict]:
-    return [
-        {key: value for key, value in row.items() if key != "task_idx"}
-        for row in rows
-    ]
+    return [{key: value for key, value in row.items() if key != "task_idx"} for row in rows]
 
 
 def test_curriculum_is_ordered_and_schema_valid(curriculum_dir: Path) -> None:
@@ -64,18 +61,9 @@ def test_curriculum_is_ordered_and_schema_valid(curriculum_dir: Path) -> None:
     assert index["total_rows"] == 5120
     assert len(combined_rows) == 5120
 
-    expected_sizes = (
-        ["5x5"] * 1280
-        + ["7x7"] * 1280
-        + ["9x9"] * 1280
-        + ["11x11"] * 1280
-    )
-    expected_horizons = (
-        [8] * 1280 + [12] * 1280 + [25] * 1280 + [35] * 1280
-    )
-    assert [
-        row["task_metadata"]["maze_size"] for row in combined_rows
-    ] == expected_sizes
+    expected_sizes = ["5x5"] * 1280 + ["7x7"] * 1280 + ["9x9"] * 1280 + ["11x11"] * 1280
+    expected_horizons = [8] * 1280 + [12] * 1280 + [25] * 1280 + [35] * 1280
+    assert [row["task_metadata"]["maze_size"] for row in combined_rows] == expected_sizes
     assert [row["horizon_cap"] for row in combined_rows] == expected_horizons
     assert [row["task_idx"] for row in combined_rows] == list(range(5120))
     assert len({row["task_id"] for row in combined_rows}) == 5120
@@ -99,9 +87,7 @@ def test_curriculum_is_ordered_and_schema_valid(curriculum_dir: Path) -> None:
     assert offset == len(combined_rows)
 
 
-def test_curriculum_generator_is_deterministic(
-    curriculum_dir: Path, tmp_path: Path
-) -> None:
+def test_curriculum_generator_is_deterministic(curriculum_dir: Path, tmp_path: Path) -> None:
     """Two independent runs must be byte-identical.
 
     Determinism is the contract that lets the launcher regenerate the manifest

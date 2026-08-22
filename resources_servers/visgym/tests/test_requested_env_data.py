@@ -122,9 +122,7 @@ def test_requested_training_and_smoke_manifests() -> None:
     assert counting_row["horizon_cap"] == 4
     refcoco_row = load_rows(MANIFEST_ROOT / "refcoco_plus_easy_train_1280_t1024.jsonl")[0]
     assert refcoco_row["env_id"] == "referring_dot_pointing/easy"
-    rotation_3d_row = load_rows(
-        MANIFEST_ROOT / "mental_rotation_3d_easy_train_1280_t1024.jsonl"
-    )[0]
+    rotation_3d_row = load_rows(MANIFEST_ROOT / "mental_rotation_3d_easy_train_1280_t1024.jsonl")[0]
     assert rotation_3d_row["env_id"] == "mental_rotation_3d_cube/easy"
     assert rotation_3d_row["task_metadata"]["reward_shaping"]["info_key"] == "rotation_error"
 
@@ -133,9 +131,7 @@ def test_requested_combined_training_manifest_is_balanced() -> None:
     combined_path = MANIFEST_ROOT / "requested_envs_combined_train_17920_t1024.jsonl"
     rows = load_rows(combined_path)
     assert len(rows) == len(SLUGS) * 20 * 64
-    assert Counter(row["task_metadata"]["environment_slug"] for row in rows) == {
-        slug: 20 * 64 for slug in SLUGS
-    }
+    assert Counter(row["task_metadata"]["environment_slug"] for row in rows) == {slug: 20 * 64 for slug in SLUGS}
     assert [row["task_metadata"]["environment_slug"] for row in rows[: len(SLUGS)]] == list(SLUGS)
 
     for step_start in range(0, len(rows), 64):
@@ -143,9 +139,7 @@ def test_requested_combined_training_manifest_is_balanced() -> None:
         assert step_slugs == set(SLUGS)
 
     first_twenty_steps = rows[: 20 * 64]
-    prefix_counts = Counter(
-        row["task_metadata"]["environment_slug"] for row in first_twenty_steps
-    )
+    prefix_counts = Counter(row["task_metadata"]["environment_slug"] for row in first_twenty_steps)
     assert set(prefix_counts) == set(SLUGS)
     assert max(prefix_counts.values()) - min(prefix_counts.values()) <= 1
 
@@ -156,9 +150,7 @@ def test_requested_combined_training_manifest_is_balanced() -> None:
 
 
 def test_requested_uniform_horizon_20_manifests() -> None:
-    combined_rows = load_rows(
-        MANIFEST_ROOT / "requested_envs_combined_train_17920_h20_t1024.jsonl"
-    )
+    combined_rows = load_rows(MANIFEST_ROOT / "requested_envs_combined_train_17920_h20_t1024.jsonl")
     assert len(combined_rows) == len(SLUGS) * 20 * 64
     assert all(row["horizon_cap"] == 20 for row in combined_rows)
     assert Counter(row["task_metadata"]["environment_slug"] for row in combined_rows) == {
@@ -166,12 +158,8 @@ def test_requested_uniform_horizon_20_manifests() -> None:
     }
 
     for slug in SLUGS:
-        train_rows = load_rows(
-            MANIFEST_ROOT / f"{slug}_easy_train_1280_h20_t1024.jsonl"
-        )
-        smoke_rows = load_rows(
-            MANIFEST_ROOT / f"{slug}_easy_smoke_16_h20_t1024.jsonl"
-        )
+        train_rows = load_rows(MANIFEST_ROOT / f"{slug}_easy_train_1280_h20_t1024.jsonl")
+        smoke_rows = load_rows(MANIFEST_ROOT / f"{slug}_easy_smoke_16_h20_t1024.jsonl")
         assert len(train_rows) == 20 * 64
         assert smoke_rows == train_rows[:16]
         assert all(row["horizon_cap"] == 20 for row in train_rows)

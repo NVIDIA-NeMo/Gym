@@ -36,9 +36,7 @@ def parse_sizes(raw: str) -> list[int]:
     if any(size < 3 or size % 2 == 0 for size in sizes):
         raise argparse.ArgumentTypeError("maze sizes must be odd integers >= 3")
     if sizes != sorted(set(sizes)):
-        raise argparse.ArgumentTypeError(
-            "maze sizes must be unique and strictly increasing"
-        )
+        raise argparse.ArgumentTypeError("maze sizes must be unique and strictly increasing")
     return sizes
 
 
@@ -64,9 +62,7 @@ def make_row(
         "env_id": "maze_2d/easy",
         "env_kwargs": {"maze_width": size, "maze_height": size},
         "seed": seed,
-        "task_id": (
-            f"maze_2d_easy_curriculum_stage{stage}_{size}x{size}_seed{seed}"
-        ),
+        "task_id": (f"maze_2d_easy_curriculum_stage{stage}_{size}x{size}_seed{seed}"),
         "act_grammar_regex": ACTION_GRAMMAR,
         "horizon_cap": horizon_cap,
         "task_metadata": {
@@ -118,10 +114,7 @@ def main() -> int:
     if args.samples_per_stage < 1:
         parser.error("--samples-per-stage must be positive")
     if args.seed_stride < args.samples_per_stage:
-        parser.error(
-            "--seed-stride must be at least --samples-per-stage to keep stage "
-            "seed ranges disjoint"
-        )
+        parser.error("--seed-stride must be at least --samples-per-stage to keep stage seed ranges disjoint")
     if args.max_output_tokens < 1:
         parser.error("--max-output-tokens must be positive")
 
@@ -151,8 +144,7 @@ def main() -> int:
             for stage_index in range(args.samples_per_stage)
         ]
         stage_path = args.output_dir / (
-            f"{prefix}_stage{stage}_{size}x{size}_"
-            f"{args.samples_per_stage}_t{args.max_output_tokens}.jsonl"
+            f"{prefix}_stage{stage}_{size}x{size}_{args.samples_per_stage}_t{args.max_output_tokens}.jsonl"
         )
         write_jsonl(stage_path, stage_rows)
         stage_files.append(
@@ -168,10 +160,7 @@ def main() -> int:
         )
         combined_rows.extend(stage_rows)
 
-    combined_path = args.output_dir / (
-        f"{prefix}_{args.samples_per_stage}each_"
-        f"t{args.max_output_tokens}.jsonl"
-    )
+    combined_path = args.output_dir / (f"{prefix}_{args.samples_per_stage}each_t{args.max_output_tokens}.jsonl")
     write_jsonl(combined_path, combined_rows)
 
     index = {

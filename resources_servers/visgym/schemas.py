@@ -155,10 +155,7 @@ class VisGymNeMoGymResponse(NeMoGymResponse):
     group_id: str | None = None
     contains_transitions: bool = False
     seed_obs: list[VisGymEnvStateEasyInputMessage] | None = Field(default=None)
-    output: (
-        list[VisGymNeMoGymResponseOutputItem]
-        | list[list[VisGymNeMoGymResponseOutputItem]]
-    )
+    output: list[VisGymNeMoGymResponseOutputItem] | list[list[VisGymNeMoGymResponseOutputItem]]
 
 
 class VisGymAgentVerifyRequest(BaseModel):

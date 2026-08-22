@@ -279,25 +279,18 @@ class TextActionAgentConfig(BaseResponsesAPIAgentConfig):
     @model_validator(mode="after")
     def _validate_no_boxed_retry_config(self) -> "TextActionAgentConfig":
         if self.max_no_boxed_truncation_retries < 0:
-            raise ValueError(
-                "visgym_agent.max_no_boxed_truncation_retries must be >= 0."
-            )
+            raise ValueError("visgym_agent.max_no_boxed_truncation_retries must be >= 0.")
         if self.no_boxed_truncation_retry_factor < 1.0:
-            raise ValueError(
-                "visgym_agent.no_boxed_truncation_retry_factor must be >= 1.0."
-            )
+            raise ValueError("visgym_agent.no_boxed_truncation_retry_factor must be >= 1.0.")
         if self.done_if_no_boxed_answer and self.max_no_boxed_truncation_retries > 0:
             raise ValueError(
-                "visgym_agent.done_if_no_boxed_answer=true is incompatible "
-                "with max_no_boxed_truncation_retries > 0."
+                "visgym_agent.done_if_no_boxed_answer=true is incompatible with max_no_boxed_truncation_retries > 0."
             )
         if self.unboxed_action_regex is not None:
             try:
                 re.compile(self.unboxed_action_regex)
             except re.error as exc:
-                raise ValueError(
-                    "visgym_agent.unboxed_action_regex must be a valid regex"
-                ) from exc
+                raise ValueError("visgym_agent.unboxed_action_regex must be a valid regex") from exc
         return self
 
 
@@ -313,9 +306,7 @@ class TextActionAgentRunRequest(BaseRunRequest):
 class TextActionAgent(SimpleResponsesAPIAgent):
     config: TextActionAgentConfig
 
-    async def _seed_session(
-        self, task_idx: int, task_row: VisGymTaskRow | None
-    ) -> VisGymSeedSessionResponse:
+    async def _seed_session(self, task_idx: int, task_row: VisGymTaskRow | None) -> VisGymSeedSessionResponse:
         payload = {"task_idx": task_idx}
         if task_row is not None:
             payload["task_row"] = task_row.model_dump(mode="json")
@@ -327,9 +318,7 @@ class TextActionAgent(SimpleResponsesAPIAgent):
                     json=payload,
                 )
                 reset_response.raise_for_status()
-                seed_session_response = VisGymSeedSessionResponse.model_validate(
-                    await reset_response.json()
-                )
+                seed_session_response = VisGymSeedSessionResponse.model_validate(await reset_response.json())
                 if not seed_session_response.obs:
                     raise ValueError("No observations in seed session response")
                 return seed_session_response
@@ -338,7 +327,6 @@ class TextActionAgent(SimpleResponsesAPIAgent):
                     raise
                 await asyncio.sleep(5 * (2**attempt))
         raise AssertionError("unreachable")
-
 
     @staticmethod
     def _extract_assistant_text(output: list[NeMoGymResponseOutputItem]) -> str:
@@ -446,9 +434,7 @@ class TextActionAgent(SimpleResponsesAPIAgent):
         sys_msg = NeMoGymEasyInputMessage(role="system", content=prompt)
         return [sys_msg, *existing]
 
-    def _maybe_inject_rules_summary(
-        self, obs: Sequence[NeMoGymEasyInputMessage]
-    ) -> list[NeMoGymEasyInputMessage]:
+    def _maybe_inject_rules_summary(self, obs: Sequence[NeMoGymEasyInputMessage]) -> list[NeMoGymEasyInputMessage]:
         if not self.config.re_emit_rules_each_turn:
             return list(obs)
         # We intentionally do NOT mutate the env-state message itself: Doc 1 R5
@@ -469,9 +455,7 @@ class TextActionAgent(SimpleResponsesAPIAgent):
         # rate; `system` cuts the leak but the model also uses ~25% more
         # tokens and trips truncation more often. For trajectory collection
         # where the metric is task success, `user` is the right default.
-        reminder = NeMoGymEasyInputMessage(
-            role="user", content=self.config.rules_summary_template
-        )
+        reminder = NeMoGymEasyInputMessage(role="user", content=self.config.rules_summary_template)
         return [*obs, reminder]
 
     @staticmethod
@@ -556,9 +540,7 @@ class TextActionAgent(SimpleResponsesAPIAgent):
                 reset_truncation_budget = False
 
                 try:
-                    request_body = agent_state.model_copy(
-                        update={"max_output_tokens": current_max_output_tokens}
-                    )
+                    request_body = agent_state.model_copy(update={"max_output_tokens": current_max_output_tokens})
                     raw_model_response = await self.server_client.post(
                         server_name=self.config.model_server.name,
                         url_path="/v1/responses",
@@ -578,46 +560,33 @@ class TextActionAgent(SimpleResponsesAPIAgent):
                             "response_keys": sorted(model_response_json.keys())
                             if isinstance(model_response_json, dict)
                             else None,
-                            "output": [
-                                _message_summary(item)
-                                for item in model_response_json.get("output", [])
-                            ]
+                            "output": [_message_summary(item) for item in model_response_json.get("output", [])]
                             if isinstance(model_response_json, dict)
                             else None,
                             "usage": model_response_json.get("usage")
                             if isinstance(model_response_json, dict)
                             else None,
-                            "incomplete_details": model_response_json.get(
-                                "incomplete_details"
-                            )
+                            "incomplete_details": model_response_json.get("incomplete_details")
                             if isinstance(model_response_json, dict)
                             else None,
                             "requested_max_output_tokens": current_max_output_tokens,
                         },
                     )
                 except (json.JSONDecodeError, aiohttp.ClientResponseError) as e:
-                    logger.warning(
-                        f"Error calling /v1/responses: {e!r}. "
-                        f"Response: {raw_model_response.text!r}."
-                    )
+                    logger.warning(f"Error calling /v1/responses: {e!r}. Response: {raw_model_response.text!r}.")
                     termination_reason = "model_error"
                     break
 
                 try:
                     model_response = NeMoGymResponse.model_validate(model_response_json)
                 except ValidationError as e:
-                    logger.warning(
-                        f"Error validating model response: {e!r}. "
-                        f"Response: {model_response_json!r}."
-                    )
+                    logger.warning(f"Error validating model response: {e!r}. Response: {model_response_json!r}.")
                     termination_reason = "model_error"
                     break
 
                 model_output = model_response.output
                 assistant_text = self._extract_assistant_text(model_output)
-                action_string = self._extract_action(
-                    assistant_text, self.config.unboxed_action_regex
-                )
+                action_string = self._extract_action(assistant_text, self.config.unboxed_action_regex)
                 incomplete_reason = self._incomplete_reason(model_response)
                 _debug_dump(
                     "visgym_agent",
@@ -647,8 +616,7 @@ class TextActionAgent(SimpleResponsesAPIAgent):
                         is_truncated = incomplete_reason == "max_output_tokens"
                         if (
                             is_truncated
-                            and consecutive_truncation_retries
-                            < self.config.max_no_boxed_truncation_retries
+                            and consecutive_truncation_retries < self.config.max_no_boxed_truncation_retries
                         ):
                             consecutive_truncation_retries += 1
                             total_truncation_retries += 1
@@ -662,29 +630,20 @@ class TextActionAgent(SimpleResponsesAPIAgent):
                         else:
                             done = True
                             obs = []
-                            termination_reason = (
-                                "no_boxed_retry_cap" if is_truncated else "no_boxed_no_truncation"
-                            )
+                            termination_reason = "no_boxed_retry_cap" if is_truncated else "no_boxed_no_truncation"
                 else:
-                    step_request = VisGymStepRequest(
-                        env_id=env_id, action_string=action_string
-                    )
+                    step_request = VisGymStepRequest(env_id=env_id, action_string=action_string)
                     raw_env_response = await self.server_client.post(
                         server_name=self.config.resources_server.name,
                         url_path="/step",
                         json=step_request.model_dump(exclude_none=True),
                     )
-                    env_response = VisGymStepResponse.model_validate(
-                        await raw_env_response.json()
-                    )
+                    env_response = VisGymStepResponse.model_validate(await raw_env_response.json())
                     obs = self._maybe_inject_rules_summary(env_response.obs)
                     done = env_response.done
                     if done:
                         termination_reason = "env_done"
-                    elif any(
-                        "Invalid action" in str(getattr(message, "content", ""))
-                        for message in env_response.obs
-                    ):
+                    elif any("Invalid action" in str(getattr(message, "content", "")) for message in env_response.obs):
                         reset_truncation_budget = False
                     else:
                         reset_truncation_budget = True
@@ -707,16 +666,10 @@ class TextActionAgent(SimpleResponsesAPIAgent):
                     )
 
                 agent_state = agent_state.model_copy(
-                    update={
-                        "input": agent_state.input
-                        + model_output
-                        + [_as_core_input_message(m) for m in obs]
-                    }
+                    update={"input": agent_state.input + model_output + [_as_core_input_message(m) for m in obs]}
                 )
                 if self.config.return_transitions:
-                    agent_state_history.append(
-                        cast(NeMoGymResponseInput, agent_state.input)
-                    )
+                    agent_state_history.append(cast(NeMoGymResponseInput, agent_state.input))
                 else:
                     all_messages.extend(model_output)
                     if successful_transition:
@@ -733,8 +686,7 @@ class TextActionAgent(SimpleResponsesAPIAgent):
             )
 
         assert model_response is not None, (
-            "Rollout crashed or terminated before first transition completed, "
-            "cannot proceed."
+            "Rollout crashed or terminated before first transition completed, cannot proceed."
         )
 
         output_overrides = {
@@ -751,14 +703,11 @@ class TextActionAgent(SimpleResponsesAPIAgent):
             # tokenized message-log flattening path. See
             # docs/design-docs/seed-obs-persistence-problem.md (Option B).
             "seed_obs": (
-                [m.model_dump(mode="json") if hasattr(m, "model_dump") else m
-                 for m in seed_obs]
+                [m.model_dump(mode="json") if hasattr(m, "model_dump") else m for m in seed_obs]
                 if not self.config.return_transitions
                 else None
             ),
-            "output": (
-                agent_state_history if self.config.return_transitions else all_messages
-            ),
+            "output": (agent_state_history if self.config.return_transitions else all_messages),
         }
         _debug_dump(
             "visgym_agent",
@@ -767,31 +716,20 @@ class TextActionAgent(SimpleResponsesAPIAgent):
                 "task_idx": req.task_idx,
                 "env_id": env_id,
                 "return_transitions": self.config.return_transitions,
-                "seed_obs": [
-                    _message_summary(item)
-                    for item in (output_overrides["seed_obs"] or [])
-                ],
-                "output": [
-                    _message_summary(item)
-                    for item in output_overrides["output"]
-                ]
+                "seed_obs": [_message_summary(item) for item in (output_overrides["seed_obs"] or [])],
+                "output": [_message_summary(item) for item in output_overrides["output"]]
                 if isinstance(output_overrides["output"], list)
                 else None,
             },
         )
-        response = VisGymNeMoGymResponse.model_validate(
-            model_response.model_dump() | output_overrides
-        )
+        response = VisGymNeMoGymResponse.model_validate(model_response.model_dump() | output_overrides)
         _debug_dump(
             "visgym_agent",
             "final_response_after_validation",
             {
                 "task_idx": req.task_idx,
                 "env_id": env_id,
-                "output": [
-                    _message_summary(item)
-                    for item in response.model_dump(mode="json").get("output", [])
-                ],
+                "output": [_message_summary(item) for item in response.model_dump(mode="json").get("output", [])],
             },
         )
         return response
@@ -799,9 +737,7 @@ class TextActionAgent(SimpleResponsesAPIAgent):
     async def run(self, body: TextActionAgentRunRequest) -> VisGymAgentVerifyResponse:
         try:
             response = await self.responses(body)
-            verify_request = VisGymAgentVerifyRequest.model_validate(
-                {"response": response.model_dump()}
-            )
+            verify_request = VisGymAgentVerifyRequest.model_validate({"response": response.model_dump()})
             verify_response = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/verify",

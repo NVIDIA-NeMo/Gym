@@ -18,6 +18,7 @@ Mirrors `responses_api_agents/simple_agent/client.py` for parity. Path B does
 not use tools, so we omit the tools field entirely; the agent extracts the
 last `\\boxed{...}` from the assistant text.
 """
+
 import json
 from asyncio import run
 
