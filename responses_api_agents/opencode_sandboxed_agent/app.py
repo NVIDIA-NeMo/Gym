@@ -307,7 +307,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && echo "OpenCode run finished"
         """
 
-        opencode_config_content = await json.dumps(self._create_opencode_config(request))
+        opencode_config_content = json.dumps(await self._create_opencode_config(request))
 
         if self.config.debug:
             print(f"Running command:\n```bash\n{command}\n```\n", file=sys.stderr)
