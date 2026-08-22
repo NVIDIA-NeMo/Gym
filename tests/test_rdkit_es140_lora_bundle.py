@@ -86,10 +86,19 @@ def test_wandb_internal_id_leaves_room_for_rollout_table_names() -> None:
     config = yaml.safe_load((BUNDLE / "rdkit_no_tool_grpo.yaml").read_text())
     launcher = (BUNDLE / "submit_chain.sh").read_text()
     run_id = "rdkit-es140-grpo-v06-r8"
+    run_name = (
+        "rdkit-nemotron3-nano-grpo-lora-r8-a8-es140-64p16g-i200-"
+        "lr3e-6-32k-iad-p0-64g"
+    )
+    artifact_name = f"run-{run_id}-trainrdkit_chemistry_direct_agentfull_result"
 
     assert f"WANDB_RUN_ID=${{WANDB_RUN_ID:-{run_id}}}" in launcher
+    assert 'if (( ${#WANDB_RUN_ID} > 32 )); then' in launcher
     assert config["logger"]["wandb"]["id"] == f"${{oc.env:WANDB_RUN_ID,{run_id}}}"
+    assert config["logger"]["wandb"]["name"] == f"${{oc.env:WANDB_RUN_NAME,{run_name}}}"
+    assert run_id != run_name
     assert len(run_id) <= 32
+    assert len(artifact_name) <= 128
 
 
 def test_cluster_launch_stages_code_and_caches_node_local() -> None:

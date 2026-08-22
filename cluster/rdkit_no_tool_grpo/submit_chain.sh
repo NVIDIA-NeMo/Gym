@@ -53,6 +53,10 @@ if [[ -z "${WANDB_API_KEY:-}" ]]; then
   echo "WANDB_API_KEY is not present in the submission environment" >&2
   exit 1
 fi
+if (( ${#WANDB_RUN_ID} > 32 )); then
+  echo "WANDB_RUN_ID must be at most 32 characters so rollout-table artifact names remain valid" >&2
+  exit 1
+fi
 
 mkdir -p \
   "${BUNDLE_DIR}/logs" \
