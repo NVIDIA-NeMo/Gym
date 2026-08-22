@@ -24,5 +24,3 @@ simple_strands_agent:
       system_prompt: null
       workspace_root: outputs/simple_strands_agent/workspaces
       keep_workspaces: false
-      ssa_source_root: ${oc.env:SSA_SOURCE_ROOT,null}
-      ssa_python: ${oc.env:SSA_PYTHON,null}

@@ -1,5 +1,4 @@
 # Simple Strands Agent
 
-Set `SSA_SOURCE_ROOT` to use a local `benchmark-harnesses` checkout. Set `SSA_PYTHON` to use an
-existing SSA environment. The native system prompt is retained and additional system prompts are
-appended.
+The pinned Simple Strands Agent dependency is installed with the agent server. The native system
+prompt is retained and additional system prompts are appended.

@@ -7,6 +7,7 @@ import logging
 import os
 import shutil
 import signal
+import sys
 from asyncio import Semaphore
 from contextlib import suppress
 from pathlib import Path
@@ -15,7 +16,7 @@ from typing import Any, Optional
 from uuid import uuid4
 
 from fastapi import Request
-from pydantic import ConfigDict, Field, PrivateAttr
+from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
@@ -35,7 +36,6 @@ from nemo_gym.openai_utils import (
     NeMoGymSummary,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
-from responses_api_agents.simple_strands_agent.setup_ssa import ensure_ssa
 
 
 LOG = logging.getLogger(__name__)
@@ -151,8 +151,6 @@ class SimpleStrandsAgentConfig(BaseResponsesAPIAgentConfig):
     system_prompt: Optional[str] = None
     workspace_root: str = "outputs/simple_strands_agent/workspaces"
     keep_workspaces: bool = False
-    ssa_source_root: Optional[str] = None
-    ssa_python: Optional[str] = None
 
 
 class SimpleStrandsAgentRunRequest(BaseRunRequest):
@@ -169,11 +167,9 @@ class SimpleStrandsAgent(SimpleResponsesAPIAgent):
     config: SimpleStrandsAgentConfig
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
-    _ssa_python: Path = PrivateAttr()
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
-        self._ssa_python = ensure_ssa(self.config.ssa_source_root, self.config.ssa_python)
 
     def _workspace(self) -> Path:
         root = Path(self.config.workspace_root).expanduser()
@@ -190,7 +186,7 @@ class SimpleStrandsAgent(SimpleResponsesAPIAgent):
         request_path.write_text(json.dumps(payload))
         runner = Path(__file__).with_name("ssa_runner.py")
         process = await asyncio.create_subprocess_exec(
-            str(self._ssa_python),
+            sys.executable,
             str(runner),
             str(request_path),
             str(result_path),
@@ -203,23 +199,28 @@ class SimpleStrandsAgent(SimpleResponsesAPIAgent):
             stdout, stderr = await asyncio.wait_for(asyncio.shield(communication), timeout=self.config.timeout)
         except asyncio.TimeoutError:
             await self._terminate_process(process, communication)
-            LOG.warning("SSA timed out after %ds", self.config.timeout)
-            return {}
+            raise RuntimeError(f"SSA timed out after {self.config.timeout}s") from None
         except asyncio.CancelledError:
             await self._terminate_process(process, communication)
             raise
 
-        try:
-            result = json.loads(result_path.read_text()) if result_path.is_file() else {}
-        except (OSError, json.JSONDecodeError) as error:
-            LOG.warning("SSA produced an invalid result: %s", error)
-            return {}
-        if process.returncode != 0 or result.get("error"):
-            detail = result.get("error") or stderr.decode(errors="replace")[-1000:]
+        if process.returncode != 0:
+            detail = stderr.decode(errors="replace")[-1000:]
             if stdout:
                 LOG.debug("SSA stdout: %s", stdout.decode(errors="replace")[-1000:])
-            LOG.warning("SSA failed: %s", detail)
-            return {}
+            raise RuntimeError(f"SSA failed: {detail}")
+        if not result_path.is_file():
+            raise RuntimeError("SSA did not produce a result")
+        try:
+            result = json.loads(result_path.read_text())
+        except (OSError, json.JSONDecodeError) as error:
+            raise RuntimeError(f"SSA produced an invalid result: {error}") from error
+        if not isinstance(result, dict):
+            raise RuntimeError("SSA produced an invalid result: expected a JSON object")
+        if result.get("error"):
+            if stdout:
+                LOG.debug("SSA stdout: %s", stdout.decode(errors="replace")[-1000:])
+            raise RuntimeError(f"SSA failed: {result['error']}")
         return result
 
     @staticmethod

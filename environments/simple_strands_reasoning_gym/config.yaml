@@ -24,8 +24,6 @@ simple_strands_reasoning_gym_agent:
       timeout: 900
       tools: [bash]
       native_user_prompt: false
-      ssa_source_root: ${oc.env:SSA_SOURCE_ROOT,null}
-      ssa_python: ${oc.env:SSA_PYTHON,null}
       system_prompt: |
         This is a standalone reasoning task, not a repository task. Do not edit files. Use bash
         when helpful. Put only the final answer in \boxed{}.
