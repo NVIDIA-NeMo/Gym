@@ -27,6 +27,11 @@ visgym_agent:
       done_if_no_boxed_answer: true
       unboxed_action_regex: "^\\('(?:move|stop)',\\s*(?:[0-3]|'stop')\\)$"
       return_transitions: false
+      # The environment's own prompt says "You succeed if you reach the red
+      # target square", which is not what it scores: walking onto the target
+      # pays 0.0 and does not end the episode. The 1.0 is paid only for
+      # ('stop', 'stop') issued while standing on it. State that here, or the
+      # model navigates correctly and still earns nothing.
       system_prompt: |-
         You control a visual maze one move at a time. Inspect the current image
         and choose only the single best immediate move. Think inside <think> in
@@ -34,12 +39,16 @@ visgym_agent:
         enumerate alternatives, plan the full route, or repeat instructions.
         Close with </think>. On the last line, write \boxed{ immediately
         followed by exactly one legal VisGym action tuple, then write }. Nothing
-        may follow the action.
+        may follow the action. The episode only scores when you end it on the
+        goal: the moment the blue circle is on the red target square, emit
+        ('stop', 'stop') instead of another move. Reaching the target and
+        continuing to move scores nothing.
       re_emit_rules_each_turn: true
       rules_summary_template: |-
         Use at most 25 words inside <think> about only the next move. Close with
         </think>. On the last line write \boxed{, one legal action tuple, and }.
-        Nothing may follow the action.
+        Nothing may follow the action. If the blue circle is already on the red
+        target, the correct action is ('stop', 'stop').
       datasets:
         - name: example
           type: example

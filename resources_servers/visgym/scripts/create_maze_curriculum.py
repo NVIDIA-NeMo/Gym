@@ -52,6 +52,7 @@ def make_row(
     model: str,
     temperature: float,
     max_output_tokens: int,
+    reward_shaping_scale: float = 0.0,
 ) -> dict[str, Any]:
     horizon_cap = horizon_cap_for_size(size)
     return {
@@ -66,6 +67,22 @@ def make_row(
         "act_grammar_regex": ACTION_GRAMMAR,
         "horizon_cap": horizon_cap,
         "task_metadata": {
+            # Terminal reward alone is too sparse to learn from: the maze pays
+            # 1.0 only for ('stop', 'stop') on the target and 0.0 for every
+            # move, so a GRPO group of rollouts ties at zero and the advantage
+            # is degenerate. distance_delta pays the per-step change in
+            # info["distance"], which the server adds on top of the raw reward.
+            **(
+                {
+                    "reward_shaping": {
+                        "type": "distance_delta",
+                        "info_key": "distance",
+                        "scale": reward_shaping_scale,
+                    }
+                }
+                if reward_shaping_scale
+                else {}
+            ),
             "suite": "visgym",
             "task_family": "maze_2d",
             "difficulty": "easy",
@@ -109,18 +126,36 @@ def main() -> int:
     parser.add_argument("--max-output-tokens", type=int, default=1024)
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument(
+        "--reward-shaping-scale",
+        type=float,
+        default=0.0,
+        help=(
+            "Per-step distance_delta shaping coefficient. 0 (default) keeps the "
+            "environment's terminal-only reward. A positive value pays "
+            "scale * (previous_distance - current_distance) on every step, which is "
+            "what keeps GRPO advantages from collapsing to zero on a task that only "
+            "scores a correct stop on the target."
+        ),
+    )
     args = parser.parse_args()
 
     if args.samples_per_stage < 1:
         parser.error("--samples-per-stage must be positive")
     if args.seed_stride < args.samples_per_stage:
         parser.error("--seed-stride must be at least --samples-per-stage to keep stage seed ranges disjoint")
+    if args.reward_shaping_scale < 0:
+        parser.error("--reward-shaping-scale must be >= 0")
     if args.max_output_tokens < 1:
         parser.error("--max-output-tokens must be positive")
 
     sizes: list[int] = args.sizes
     size_slug = "_".join(f"{size}x{size}" for size in sizes)
     curriculum_name = "maze_size_" + "_".join(str(size) for size in sizes)
+    # Suffix carries the shaping coefficient for the same reason the token
+    # budget is in the name: two manifests that differ only in reward would
+    # otherwise be indistinguishable on disk.
+    shaping_suffix = f"_s{args.reward_shaping_scale:g}".replace(".", "p") if args.reward_shaping_scale else ""
     prefix = f"maze_2d_easy_curriculum_{size_slug}"
     stage_files: list[dict[str, Any]] = []
     combined_rows: list[dict[str, Any]] = []
@@ -140,11 +175,12 @@ def main() -> int:
                 model=args.model,
                 temperature=args.temperature,
                 max_output_tokens=args.max_output_tokens,
+                reward_shaping_scale=args.reward_shaping_scale,
             )
             for stage_index in range(args.samples_per_stage)
         ]
         stage_path = args.output_dir / (
-            f"{prefix}_stage{stage}_{size}x{size}_{args.samples_per_stage}_t{args.max_output_tokens}.jsonl"
+            f"{prefix}_stage{stage}_{size}x{size}_{args.samples_per_stage}_t{args.max_output_tokens}{shaping_suffix}.jsonl"
         )
         write_jsonl(stage_path, stage_rows)
         stage_files.append(
@@ -160,7 +196,9 @@ def main() -> int:
         )
         combined_rows.extend(stage_rows)
 
-    combined_path = args.output_dir / (f"{prefix}_{args.samples_per_stage}each_t{args.max_output_tokens}.jsonl")
+    combined_path = args.output_dir / (
+        f"{prefix}_{args.samples_per_stage}each_t{args.max_output_tokens}{shaping_suffix}.jsonl"
+    )
     write_jsonl(combined_path, combined_rows)
 
     index = {
