@@ -42,9 +42,9 @@ jobs. Checkpoints and W&B identity are shared across continuations.
 ## Validation semantics
 
 NeMo-RL v0.6 does not apply `num_val_generations_per_prompt` in the NeMo-Gym
-validation loop. `prepare_direct_data.py` therefore materializes
-`test_eval4.jsonl`, which repeats each of the 1,000 held-out prompts four times.
-The validation-only baseline refuses to pass unless exactly 4,000 rollouts are
+validation loop. Production therefore uses the single-copy `test.jsonl`
+directly, scoring each of the 1,000 held-out prompts exactly once. The
+validation-only baseline refuses to pass unless exactly 1,000 rollouts are
 recorded and accuracy lies in `[0.518, 0.578]`. It exits before an optimizer
 update and writes `results/es140_lora/baseline_step0.json`.
 
@@ -93,10 +93,11 @@ START_DEPENDENCY=afterok:<baseline_job_id> CHAIN_JOBS=3 \
 
 The production submitter also runs a CPU preflight that verifies the current
 Gym commit, data hashes and counts, container stamp, ES adapter, merged-model
-manifest, fixed-prompt parity, and the successful 4,000-rollout baseline.
+manifest, fixed-prompt parity, and the successful 1,000-rollout baseline.
 
-The production W&B ID and name are:
+The production W&B internal ID and display name are:
 
 ```text
-rdkit-nemotron3-nano-grpo-lora-r8-a8-es140-64p16g-i200-lr3e-6-32k-iad-p0-64g
+ID:   rdkit-es140-grpo-v06-r8
+Name: rdkit-nemotron3-nano-grpo-lora-r8-a8-es140-64p16g-i200-lr3e-6-32k-iad-p0-64g
 ```

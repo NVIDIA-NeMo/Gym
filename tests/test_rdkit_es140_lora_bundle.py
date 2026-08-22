@@ -4,6 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,7 +20,7 @@ def load_script(name: str):
     return module
 
 
-def test_prepare_materializes_explicit_four_sample_validation(tmp_path: Path) -> None:
+def test_prepare_uses_each_validation_sample_once(tmp_path: Path) -> None:
     prepare = load_script("prepare_direct_data.py")
     source = tmp_path / "source"
     source.mkdir()
@@ -32,13 +33,12 @@ def test_prepare_materializes_explicit_four_sample_validation(tmp_path: Path) ->
 
     assert prepare.convert_split(tmp_path, source, "train", 123) == 3
     assert prepare.convert_split(tmp_path, source, "test", 123) == 2
-    assert prepare.materialize_repeated_validation(tmp_path) == 8
 
     data = tmp_path / prepare.OUTPUT_REL
     test_rows = (data / "test.jsonl").read_text().splitlines()
-    repeated = (data / "test_eval4.jsonl").read_text().splitlines()
-    assert repeated == [row for row in test_rows for _ in range(4)]
-    first = json.loads(repeated[0])
+    assert len(test_rows) == 2
+    assert not (data / "test_eval4.jsonl").exists()
+    first = json.loads(test_rows[0])
     assert first["responses_create_params"]["max_output_tokens"] == 123
     assert first["responses_create_params"]["tools"] == []
 
@@ -51,6 +51,7 @@ def test_production_config_preserves_batch_and_lora_contract() -> None:
 
     assert grpo["num_prompts_per_step"] == 64
     assert grpo["num_generations_per_prompt"] == 16
+    assert grpo["num_val_generations_per_prompt"] == 1
     assert grpo["max_num_steps"] == 200
     assert grpo["val_period"] == 5
     assert grpo["val_at_start"] is False
@@ -70,7 +71,36 @@ def test_production_config_preserves_batch_and_lora_contract() -> None:
         "a2a_experimental": False,
         "lora_dtype": None,
     }
-    assert config["data"]["validation"]["data_path"].endswith("test_eval4.jsonl")
+    assert config["data"]["validation"]["data_path"].endswith("test.jsonl")
+
+    direct_config = yaml.safe_load((BUNDLE / "rdkit_chemistry_direct.yaml").read_text())
+    datasets = direct_config["rdkit_chemistry_direct_agent"]["responses_api_agents"][
+        "simple_agent"
+    ]["datasets"]
+    validation = [dataset for dataset in datasets if dataset["type"] == "validation"]
+    assert len(validation) == 1
+    assert validation[0]["jsonl_fpath"].endswith("test.jsonl")
+
+
+def test_baseline_gate_requires_one_rollout_per_validation_sample(tmp_path: Path) -> None:
+    validate = load_script("validate_bundle.py")
+    summary_path = tmp_path / "baseline.json"
+    summary = {
+        "schema_version": 1,
+        "validation_only": True,
+        "optimizer_updates": 0,
+        "passed": True,
+        "expected_rollouts": 1000,
+        "observed_rollouts": 1000,
+    }
+    summary_path.write_text(json.dumps(summary))
+    validate.validate_baseline_summary(summary_path)
+
+    summary["expected_rollouts"] = 4000
+    summary["observed_rollouts"] = 4000
+    summary_path.write_text(json.dumps(summary))
+    with pytest.raises(ValueError, match="exactly 1,000 rollouts"):
+        validate.validate_baseline_summary(summary_path)
 
 
 def test_production_launcher_requires_baseline_dependency() -> None:
@@ -84,7 +114,10 @@ def test_production_launcher_requires_baseline_dependency() -> None:
 
 def test_wandb_internal_id_leaves_room_for_rollout_table_names() -> None:
     config = yaml.safe_load((BUNDLE / "rdkit_no_tool_grpo.yaml").read_text())
-    launcher = (BUNDLE / "submit_chain.sh").read_text()
+    launchers = [
+        (BUNDLE / launcher).read_text()
+        for launcher in ("submit_baseline.sh", "submit_chain.sh")
+    ]
     run_id = "rdkit-es140-grpo-v06-r8"
     run_name = (
         "rdkit-nemotron3-nano-grpo-lora-r8-a8-es140-64p16g-i200-"
@@ -92,8 +125,9 @@ def test_wandb_internal_id_leaves_room_for_rollout_table_names() -> None:
     )
     artifact_name = f"run-{run_id}-trainrdkit_chemistry_direct_agentfull_result"
 
-    assert f"WANDB_RUN_ID=${{WANDB_RUN_ID:-{run_id}}}" in launcher
-    assert 'if (( ${#WANDB_RUN_ID} > 32 )); then' in launcher
+    for launcher in launchers:
+        assert f"WANDB_RUN_ID=${{WANDB_RUN_ID:-{run_id}}}" in launcher
+        assert 'if (( ${#WANDB_RUN_ID} > 32 )); then' in launcher
     assert config["logger"]["wandb"]["id"] == f"${{oc.env:WANDB_RUN_ID,{run_id}}}"
     assert config["logger"]["wandb"]["name"] == f"${{oc.env:WANDB_RUN_NAME,{run_name}}}"
     assert run_id != run_name

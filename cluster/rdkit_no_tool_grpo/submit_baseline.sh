@@ -25,7 +25,7 @@ export NRL_MEGATRON_CHECKPOINT_DIR=${NRL_MEGATRON_CHECKPOINT_DIR:-${BUNDLE_DIR}/
 
 RESULTS_DIR=${RESULTS_DIR:-${BUNDLE_DIR}/results/es140_lora}
 BASELINE_SUMMARY=${BASELINE_SUMMARY:-${RESULTS_DIR}/baseline_step0.json}
-export WANDB_RUN_ID=${WANDB_RUN_ID:-rdkit-nemotron3-nano-grpo-lora-r8-a8-es140-64p16g-i200-lr3e-6-32k-iad-p0-64g}
+export WANDB_RUN_ID=${WANDB_RUN_ID:-rdkit-es140-grpo-v06-r8}
 export WANDB_RUN_NAME=${WANDB_RUN_NAME:-rdkit-nemotron3-nano-grpo-lora-r8-a8-es140-64p16g-i200-lr3e-6-32k-iad-p0-64g}
 export WANDB_GROUP=${WANDB_GROUP:-rdkit-es140-lora-grpo}
 export WANDB_ENTITY=${WANDB_ENTITY:-nemo-llm-service}
@@ -38,6 +38,10 @@ if [[ "${NUM_ACTOR_NODES}" -ne 8 || "${GPUS_PER_NODE}" -ne 8 ]]; then
 fi
 if [[ -z "${WANDB_API_KEY:-}" ]]; then
   echo "WANDB_API_KEY is not present in the submission environment" >&2
+  exit 1
+fi
+if (( ${#WANDB_RUN_ID} > 32 )); then
+  echo "WANDB_RUN_ID must be at most 32 characters so rollout-table artifact names remain valid" >&2
   exit 1
 fi
 

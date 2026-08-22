@@ -6,7 +6,7 @@ grpo:
   max_num_epochs: 100000
   num_prompts_per_step: 64
   num_generations_per_prompt: 16
-  num_val_generations_per_prompt: 4
+  num_val_generations_per_prompt: 1
   max_rollout_turns: 1
   max_num_steps: 200
   normalize_rewards: true
@@ -252,10 +252,9 @@ data:
   train:
     data_path: cluster/rdkit_no_tool_grpo/data/train.jsonl
   validation:
-    # NeMo-RL v0.6 does not apply num_val_generations_per_prompt in its
-    # NeMo-Gym validation loop. This file repeats each of 1,000 prompts four
-    # times so the intended 4,000 stochastic validation rollouts are explicit.
-    data_path: cluster/rdkit_no_tool_grpo/data/test_eval4.jsonl
+    # NeMo-RL v0.6 emits one validation rollout per dataset row. Keep the
+    # held-out split single-copy so each of its 1,000 samples is scored once.
+    data_path: cluster/rdkit_no_tool_grpo/data/test.jsonl
   default:
     dataset_name: NemoGymDataset
     env_name: "nemo_gym"

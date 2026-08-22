@@ -27,5 +27,5 @@ rdkit_chemistry_direct_agent:
           license: "TBD"
         - name: validation
           type: validation
-          jsonl_fpath: cluster/rdkit_no_tool_grpo/data/test_eval4.jsonl
+          jsonl_fpath: cluster/rdkit_no_tool_grpo/data/test.jsonl
           license: "TBD"

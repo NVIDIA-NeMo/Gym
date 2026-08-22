@@ -12,7 +12,6 @@ AGENT_REF = {"type": "responses_api_agents", "name": "rdkit_chemistry_direct_age
 SOURCE_REL = Path("data/rdkit-chemistry-no-tool/prepared-train1024-test1000")
 OUTPUT_REL = Path("cluster/rdkit_no_tool_grpo/data")
 SMOKE_LIMITS = {"train": 64, "test": 128}
-VALIDATION_REPEATS = 4
 DEFAULT_MAX_OUTPUT_TOKENS = 32768
 
 
@@ -73,18 +72,6 @@ def convert_split(
     return count
 
 
-def materialize_repeated_validation(root: Path) -> int:
-    source = root / OUTPUT_REL / "test.jsonl"
-    output = root / OUTPUT_REL / "test_eval4.jsonl"
-    count = 0
-    with source.open() as src, output.open("w") as dst:
-        for line in src:
-            for _ in range(VALIDATION_REPEATS):
-                dst.write(line)
-                count += 1
-    return count
-
-
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=gym_root())
@@ -105,11 +92,9 @@ def main() -> None:
     )
     train_count = convert_split(root, source_dir, "train", args.max_output_tokens)
     test_count = convert_split(root, source_dir, "test", args.max_output_tokens)
-    validation_count = materialize_repeated_validation(root)
     print(
         f"Wrote {train_count} train rows and {test_count} test rows under {root / OUTPUT_REL} "
-        f"with max_output_tokens={args.max_output_tokens}; materialized "
-        f"{validation_count} validation rollouts"
+        f"with max_output_tokens={args.max_output_tokens}; validation uses each test row once"
     )
 
 

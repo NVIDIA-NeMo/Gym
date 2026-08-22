@@ -14,7 +14,7 @@ from omegaconf import OmegaConf
 
 EXPECTED = {"train": 1024, "test": 1000}
 SMOKE_EXPECTED = {"train_smoke": 64, "test_smoke": 128}
-VALIDATION_REPEATS = 4
+EXPECTED_VALIDATION_ROLLOUTS = EXPECTED["test"]
 EXPECTED_DATA_HASHES = {
     "train": "7acc2e5b9909ee3279fa26599ef1cba1388e328a2f248c152137bae2652c00cf",
     "test": "b02ee40add79325edbc5f41c785a1c1288dd471de9d633046d063525f59a3303",
@@ -93,27 +93,6 @@ def validate_split(
         raise ValueError(f"{path} has SHA-256 {actual_hash}, expected {expected_hash}")
 
 
-def validate_repeated_validation(data_dir: Path, expected_max_output_tokens: int) -> None:
-    source_path = data_dir / "test.jsonl"
-    repeated_path = data_dir / "test_eval4.jsonl"
-    if not repeated_path.is_file():
-        raise FileNotFoundError(repeated_path)
-    source_rows = source_path.read_text().splitlines()
-    repeated_rows = repeated_path.read_text().splitlines()
-    expected_count = len(source_rows) * VALIDATION_REPEATS
-    if len(repeated_rows) != expected_count:
-        raise ValueError(f"{repeated_path} has {len(repeated_rows)} rows, expected {expected_count}")
-    for index, source_row in enumerate(source_rows):
-        start = index * VALIDATION_REPEATS
-        if repeated_rows[start : start + VALIDATION_REPEATS] != [
-            source_row
-        ] * VALIDATION_REPEATS:
-            raise ValueError(f"{repeated_path} does not repeat test row {index} four times")
-    first = json.loads(repeated_rows[0])
-    if first["responses_create_params"]["max_output_tokens"] != expected_max_output_tokens:
-        raise ValueError(f"{repeated_path} has the wrong output-token budget")
-
-
 def validate_repository_version(root: Path, source_gym_commit: str | None) -> str:
     if source_gym_commit:
         if len(source_gym_commit) != 40 or any(
@@ -167,10 +146,18 @@ def validate_lora_config(bundle: Path) -> None:
         raise ValueError("Expected generated-token limit 32768")
     if config.grpo.num_prompts_per_step != 64 or config.grpo.num_generations_per_prompt != 16:
         raise ValueError("Expected 64 prompts x 16 generations per optimizer step")
-    if config.grpo.num_val_generations_per_prompt != 4:
-        raise ValueError("Expected four generations per validation prompt")
-    if not str(config.data.validation.data_path).endswith("/test_eval4.jsonl"):
-        raise ValueError("Production validation must use the explicit 4,000-row repeat split")
+    if config.grpo.num_val_generations_per_prompt != 1:
+        raise ValueError("Expected one generation per validation prompt")
+    if not str(config.data.validation.data_path).endswith("/test.jsonl"):
+        raise ValueError("Production validation must use the 1,000-row single-copy test split")
+
+    direct_config = OmegaConf.load(bundle / "rdkit_chemistry_direct.yaml")
+    datasets = direct_config[AGENT].responses_api_agents.simple_agent.datasets
+    validation_datasets = [dataset for dataset in datasets if dataset.type == "validation"]
+    if len(validation_datasets) != 1 or not str(
+        validation_datasets[0].jsonl_fpath
+    ).endswith("/test.jsonl"):
+        raise ValueError("The Gym agent must use the 1,000-row single-copy test split")
     if config.cluster.num_nodes != 8 or config.cluster.gpus_per_node != 8:
         raise ValueError("Expected the 64-GPU IAD production layout")
 
@@ -230,8 +217,14 @@ def validate_baseline_summary(path: Path) -> None:
         raise ValueError(f"Unsupported validation-only summary: {path}")
     if summary.get("optimizer_updates") != 0 or summary.get("passed") is not True:
         raise ValueError(f"Step-zero validation gate did not pass: {path}")
-    if summary.get("expected_rollouts") != 4000 or summary.get("observed_rollouts") != 4000:
-        raise ValueError(f"Step-zero validation did not score exactly 4,000 rollouts: {path}")
+    if (
+        summary.get("expected_rollouts") != EXPECTED_VALIDATION_ROLLOUTS
+        or summary.get("observed_rollouts") != EXPECTED_VALIDATION_ROLLOUTS
+    ):
+        raise ValueError(
+            f"Step-zero validation did not score exactly "
+            f"{EXPECTED_VALIDATION_ROLLOUTS:,} rollouts: {path}"
+        )
 
 
 def validate_merge_parity_summary(path: Path) -> None:
@@ -412,7 +405,6 @@ def main() -> None:
         validate_split(data, split, count, args.max_output_tokens)
     for split, count in SMOKE_EXPECTED.items():
         validate_split(data, split, count, args.max_output_tokens)
-    validate_repeated_validation(data, args.max_output_tokens)
 
     direct_config = (bundle / "rdkit_chemistry_direct.yaml").read_text()
     forbidden = ["ns_tools", "sandbox_launcher", "sandbox_venv_path", "NEMO_SKILLS_SANDBOX"]

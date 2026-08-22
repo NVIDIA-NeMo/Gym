@@ -1,6 +1,6 @@
 # Nemotron-3 Nano RDKit ES-Step-140 LoRA GRPO Plan
 
-Last updated: 2026-08-20
+Last updated: 2026-08-22
 
 This experiment adapts the pinned full-rank RDKit GRPO configuration to a
 LoRA-only continuation initialized from the best Inferno ES checkpoint at Step
@@ -37,7 +37,7 @@ preserves the ES-selected policy function without inventing an adapter mapping.
 | Train sample batch | 64 unique prompts × 16 rollouts = 1,024 trajectories |
 | Optimizer steps | 200 |
 | Evaluation | every 5 steps, test only |
-| Validation sample batch | 1,000 prompts × 4 stochastic rollouts = 4,000 |
+| Validation sample batch | 1,000 prompts × 1 stochastic rollout = 1,000 |
 | Completion / total limits | 32,768 / 65,536 tokens |
 | Sampling | temperature 1, top-p 1, thinking enabled, `nano_v3` parser |
 | Task | one-turn direct RDKit answer, no tools |
@@ -64,14 +64,14 @@ known no-gradient Mamba output-projection path.
    similarity of 0.9999 between base+PEFT and merged HF inference.
 5. Run one complete 64-GPU optimizer-step smoke using 64×16 trajectories.
 6. Run a validation-only 64-GPU baseline with no optimizer update. Require
-   exactly 4,000 scored rollouts and accuracy in `[0.518, 0.578]`.
+   exactly 1,000 scored rollouts and accuracy in `[0.518, 0.578]`.
 7. Submit three 12-hour production jobs with `afterok` dependencies, shared
    checkpoint directory, and a single resumed W&B identity.
 
-The explicit repeated validation file is necessary because NeMo-RL v0.6's
-NeMo-Gym validation path does not use the configured
-`num_val_generations_per_prompt`. Without this correction, the nominal 4×
-setting silently produces only one rollout per test row.
+NeMo-RL v0.6's NeMo-Gym validation path does not use the configured
+`num_val_generations_per_prompt`. The production dataset therefore contains
+one copy of each test prompt, making the one-rollout-per-sample contract
+explicit in both the data and configuration.
 
 ## Success and rollback
 
