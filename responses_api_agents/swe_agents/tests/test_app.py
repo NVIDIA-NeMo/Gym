@@ -1590,6 +1590,50 @@ class TestRunOpenHandsAgent:
         config = _make_instance_config(tmpdir, **overrides)
         return RunOpenHandsAgent(config=config)
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "agent_timeout_s, oom, expected_reason, expected_kind",
+        [
+            (0, False, "agent_timeout", "other"),
+            (900, True, "agent_oom", "oom"),
+            (900, False, "agent_command_failure", "other"),
+        ],
+        ids=["timeout", "oom", "other"],
+    )
+    async def test_worker_classifies_agent_failure_reason(
+        self, monkeypatch, agent_timeout_s, oom, expected_reason, expected_kind
+    ) -> None:
+        """The agent-failure path stamps the specific reason at the worker —
+        responses() never refines an already-set failure_reason — and keeps the
+        watchdog's oom error kind instead of clobbering it to "other". The raised
+        exception is deliberately generic: classification must come from the
+        timeout/OOM signals, not the exception type."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            agent = self._make_agent(tmpdir, swebench_agent_timeout=agent_timeout_s)
+
+            async def fake_start(_self, _command, _cmd_str):
+                process = await asyncio.create_subprocess_shell("true")
+                await process.wait()
+                return ActiveContainerCommand(
+                    process=process,
+                    log_file=MagicMock(),
+                    log_file_path=Path(tmpdir) / "log.txt",
+                    watchdog_stats={"oom_killed": True} if oom else {},
+                )
+
+            monkeypatch.setattr(RunOpenHandsAgent, "_start_container_command", fake_start)
+            monkeypatch.setattr(
+                RunOpenHandsAgent, "_finish_container_command", AsyncMock(side_effect=RuntimeError("boom"))
+            )
+            monkeypatch.setattr(RunOpenHandsAgent, "_kill_active_command", AsyncMock())
+
+            assert await agent.process_single_datapoint() is None
+
+            persisted = json.loads(agent.config.metrics_fpath.read_text())
+            assert persisted["mask_sample"] is True
+            assert persisted["failure_reason"] == expected_reason
+            assert persisted["agent_error_kind"] == expected_kind
+
     def test_openhands_dir_copy_from_host_no_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             agent = self._make_agent(tmpdir)
@@ -1738,6 +1782,64 @@ class TestRunOpenHandsAgent:
             active = await agent._start_container_command(cmd, "sleep 100")
             with pytest.raises(ValueError, match="timed out"):
                 await agent._finish_container_command(active, cmd)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("output_state", "grace_s", "expect"),
+        [
+            # run_infer completed but produced NO output: after the grace the
+            # lingering container is killed and the episode fails loudly
+            # instead of burning the full timeout.
+            ("missing", 0.1, "raises"),
+            # Complete output exists but a command the model left running
+            # holds the container open: the episode is the success it is.
+            ("complete", 60.0, "returns"),
+            # Output exists but is still being written (not yet valid JSON):
+            # the grace window lets the writer finish rather than killing the
+            # container mid-flush.
+            ("late", 1.0, "returns"),
+        ],
+    )
+    async def test_finish_agent_rescues_or_fails_lingering_containers(
+        self, monkeypatch, output_state: str, grace_s: float, expect: str
+    ) -> None:
+        monkeypatch.setattr(swe_app, "_CONTAINER_COMMAND_POLL_INTERVAL_S", 0.05)
+        monkeypatch.setattr(swe_app, "_OPENHANDS_OUTPUT_GRACE_S", grace_s)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            agent = self._make_agent(tmpdir)
+            agent.config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            expected_file = Path(tmpdir) / "output.jsonl"
+            writer = None
+            if output_state == "complete":
+                expected_file.write_text("{}")
+            elif output_state == "late":
+                expected_file.touch()
+
+                async def finish_write() -> None:
+                    await asyncio.sleep(0.15)
+                    expected_file.write_text("{}")
+
+                writer = asyncio.create_task(finish_write())
+
+            cmd = ExecuteContainerCommandArgs(
+                command="agent",
+                expected_file_pattern=str(expected_file),
+                mode="agent",
+                timeout=10,
+            )
+            active = await agent._start_container_command(
+                cmd,
+                "printf 'Instances processed: 100%%\\n'; sleep 100",
+            )
+            if expect == "raises":
+                with pytest.raises(RuntimeError, match="finished without output"):
+                    await agent._finish_container_command(active, cmd)
+            else:
+                result = await agent._finish_container_command(active, cmd)
+                assert result == str(expected_file)
+            if writer:
+                await writer
+            assert active.process.returncode is not None
 
     @pytest.mark.asyncio
     async def test_finish_container_command_nonzero_exit(self) -> None:
@@ -2575,7 +2677,14 @@ class TestSWEBenchWrapperRun:
             tools=[],
             metadata={
                 "input": "[]",
-                "metrics": json.dumps({"resolved": False, "patch_exists": True}),
+                "metrics": json.dumps(
+                    {
+                        "resolved": False,
+                        "patch_exists": True,
+                        "mask_sample": True,
+                        "failure_reason": "agent_timeout",
+                    }
+                ),
                 "instance_config": _make_instance_config(tempfile.mkdtemp()).model_dump_json(),
             },
         )
@@ -2601,6 +2710,8 @@ class TestSWEBenchWrapperRun:
             result = await wrapper.run(body)
             assert isinstance(result, SWEBenchVerifyResponse)
             assert result.reward == 0.0
+            assert result.mask_sample is True
+            assert result.failure_reason == "agent_timeout"
 
 
 ########################################
