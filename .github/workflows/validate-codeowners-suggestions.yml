@@ -1,0 +1,29 @@
+name: Validate CODEOWNERS Suggestions
+
+# Every `# suggest:` entry in .github/CODEOWNERS (individual users, and every
+# member of any suggested team) must be a current NVIDIA-NeMo org member.
+# Runs on every PR unconditionally — not just PRs that touch CODEOWNERS —
+# so a suggested reviewer who has since left the org is still caught, not
+# only at the moment someone adds them. Also warns (non-blocking) on
+# redundant CODEOWNERS rules, and runs the shared matcher's own unit tests.
+#
+# Implementation lives in NVIDIA-NeMo/FW-CI-templates so any NeMo repo with a
+# CODEOWNERS file can reuse it the same way. See that repo's
+# .github/workflows/_validate_codeowners_suggestions.yml and .github/scripts/
+# codeowners-suggestions.js (+ its unit tests) for the matching logic.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  validate-codeowners-suggestions:
+    # TODO: pin to a released tag once NVIDIA-NeMo/FW-CI-templates#556 merges.
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_validate_codeowners_suggestions.yml@86d996c29cc8bb4a98941b41bf64851964e83b84
+    with:
+      workflow_ref: 86d996c29cc8bb4a98941b41bf64851964e83b84
+    secrets:
+      NVIDIA_MANAGEMENT_ORG_PAT: ${{ secrets.NVIDIA_MANAGEMENT_ORG_PAT }}
