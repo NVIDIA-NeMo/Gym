@@ -18,6 +18,7 @@ NeMo Skills Tools Resources Server.
 
 This resources server provides:
 - Integration with nemo_skills ToolManager for tool execution (e.g., DirectPythonTool)
+- Optional gym_sandbox backend via nemo_gym.sandbox.AsyncSandbox (stateless Python)
 - Verification delegation to math_with_judge
 """
 
@@ -27,17 +28,19 @@ import json
 import logging
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
 
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
 from nemo_skills.mcp.tool_manager import ToolManager
 from nemo_skills.mcp.utils import locate
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -47,7 +50,17 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ResourcesServerRef
+from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.server_utils import SESSION_ID_KEY
+from resources_servers.sandbox_backend import (
+    SANDBOX_BACKEND_GYM,
+    SANDBOX_BACKEND_SKILLS,
+    build_sandbox_spec_from_mapping,
+    named_configs_from_server_client,
+    normalize_sandbox_backend,
+    resolve_gym_provider_config,
+    resolve_gym_provider_metadata,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -74,9 +87,20 @@ class NSToolsConfig(BaseResourcesServerConfig):
     # Per-tool overrides for nemo_skills tools
     nemo_skills_tool_overrides: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
 
-    # Sandbox configuration for code execution tools
+    # Dual path: skills_sidecar (default) | gym_sandbox (AsyncSandbox; stateless Python)
+    sandbox_backend: str = SANDBOX_BACKEND_SKILLS
+
+    # Sandbox configuration for Skills code execution tools
     sandbox_host: str = "127.0.0.1"
     sandbox_port: str = "6000"
+
+    # gym_sandbox only
+    sandbox_provider: Optional[Union[str, Dict[str, Any]]] = None
+    sandbox_spec: Dict[str, Any] = Field(default_factory=dict)
+    python_code_path: str = "/sandbox/cell.py"
+    python_exec_command: str = "python {code_path}"
+    python_exec_timeout_s: float = 10.0
+    max_output_characters: int = 10000
 
     # Legacy python_tool HTTP server port (only used for pre-main HTTP PythonTool variants)
     python_tool_port: int = 8765
@@ -132,6 +156,17 @@ class NSToolsResourcesServer(SimpleResourcesServer):
     _python_tool_process: Optional[subprocess.Popen] = None
     _timing_by_session: Dict[str, list] = {}  # session_id -> list of timing records
     _uses_python_tool_sidecar: bool = False
+    _sandbox_backend: str = SANDBOX_BACKEND_SKILLS
+    _gym_sessions: Dict[str, AsyncSandbox] = PrivateAttr(default_factory=dict)
+    _gym_session_locks: Dict[str, asyncio.Lock] = PrivateAttr(default_factory=dict)
+    _gym_registry_lock: Optional[asyncio.Lock] = PrivateAttr(default=None)
+
+    def model_post_init(self, context: Any) -> None:
+        super().model_post_init(context)
+        self._sandbox_backend = normalize_sandbox_backend(self.config.sandbox_backend)
+        if self._sandbox_backend == SANDBOX_BACKEND_GYM:
+            named = named_configs_from_server_client(self.server_client)
+            resolve_gym_provider_config(self.config.sandbox_provider, named)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -154,13 +189,17 @@ class NSToolsResourcesServer(SimpleResourcesServer):
 
         # Initialize nemo_skills ToolManager if tools are configured
         if self.config.nemo_skills_tools:
-            self._uses_python_tool_sidecar = any(
-                self._tool_uses_python_tool_sidecar(tool_spec) for tool_spec in self.config.nemo_skills_tools
-            )
-            if self._uses_python_tool_sidecar:
-                # Legacy HTTP PythonTool variants require a local sidecar process.
-                self._start_python_tool_server()
-            self._initialize_nemo_skills_tools()
+            if self._sandbox_backend == SANDBOX_BACKEND_SKILLS:
+                self._uses_python_tool_sidecar = any(
+                    self._tool_uses_python_tool_sidecar(tool_spec) for tool_spec in self.config.nemo_skills_tools
+                )
+                if self._uses_python_tool_sidecar:
+                    # Legacy HTTP PythonTool variants require a local sidecar process.
+                    self._start_python_tool_server()
+                self._initialize_nemo_skills_tools()
+            else:
+                # gym_sandbox: still load tool schemas from ToolManager, but execute via AsyncSandbox.
+                self._initialize_nemo_skills_tools(for_schemas_only=True)
 
             # Register a catch-all endpoint for tool execution
             # This handles any tool name dynamically
@@ -244,7 +283,7 @@ class NSToolsResourcesServer(SimpleResourcesServer):
             self._python_tool_process.wait(timeout=5)
         raise TimeoutError(f"python_tool server did not start within {timeout}s. Check logs above for details.")
 
-    def _initialize_nemo_skills_tools(self):
+    def _initialize_nemo_skills_tools(self, *, for_schemas_only: bool = False):
         """Initialize the nemo_skills ToolManager with configured tools."""
 
         # Reduce verbosity of MCP and httpx loggers (they log every HTTP request at INFO)
@@ -294,7 +333,71 @@ class NSToolsResourcesServer(SimpleResourcesServer):
             logger.info(f"Loaded {len(tools)} nemo_skills tools: {list(self._tool_name_map.keys())}")
 
         asyncio.get_event_loop().run_until_complete(_load_tools())
-        logger.info("NeMo Skills ToolManager initialized successfully")
+        if for_schemas_only:
+            logger.info("NeMo Skills ToolManager initialized for schemas only (gym_sandbox execution path)")
+        else:
+            logger.info("NeMo Skills ToolManager initialized successfully")
+
+    def _truncate(self, text: str) -> str:
+        if len(text) <= self.config.max_output_characters:
+            return text
+        return text[: self.config.max_output_characters]
+
+    async def _acquire_gym_sandbox(self, session_id: str) -> AsyncSandbox:
+        if self._gym_registry_lock is None:
+            self._gym_registry_lock = asyncio.Lock()
+        async with self._gym_registry_lock:
+            lock = self._gym_session_locks.setdefault(session_id, asyncio.Lock())
+
+        async with lock:
+            sandbox = self._gym_sessions.get(session_id)
+            if sandbox is None:
+                named = named_configs_from_server_client(self.server_client)
+                provider_config = resolve_gym_provider_config(self.config.sandbox_provider, named)
+                default_metadata = resolve_gym_provider_metadata(self.config.sandbox_provider, named)
+                spec = build_sandbox_spec_from_mapping(
+                    self.config.sandbox_spec,
+                    default_metadata=default_metadata,
+                )
+                sandbox = await AsyncSandbox(provider_config, spec).start()
+                self._gym_sessions[session_id] = sandbox
+            return sandbox
+
+    async def _close_gym_sandbox(self, session_id: str) -> None:
+        sandbox = self._gym_sessions.pop(session_id, None)
+        self._gym_session_locks.pop(session_id, None)
+        if sandbox is None:
+            return
+        try:
+            await sandbox.stop()
+        except Exception as e:
+            logger.warning("Failed to stop gym sandbox for session %s: %s", session_id[:8], e)
+
+    async def _execute_python_gym(self, code: str, session_id: str) -> Dict[str, Any]:
+        """Stateless Python exec via AsyncSandbox (no persistent IPython kernel)."""
+        code_path = self.config.python_code_path
+        command = self.config.python_exec_command.format(code_path=code_path)
+        timeout = self.config.python_exec_timeout_s
+        try:
+            sandbox = await self._acquire_gym_sandbox(session_id)
+            with tempfile.TemporaryDirectory(prefix="ns-tools-gym-") as tmp:
+                local = Path(tmp) / "cell.py"
+                local.write_text(code, encoding="utf-8")
+                await sandbox.upload(str(local), code_path)
+            result = await sandbox.exec(command, timeout_s=timeout)
+        except TimeoutError:
+            return {"process_status": "timeout", "stdout": "", "stderr": "Client timed out"}
+        except Exception as e:
+            logger.exception("gym_sandbox python exec failed: %s", e)
+            return {"process_status": "error", "stdout": "", "stderr": str(e)}
+
+        stdout = self._truncate(result.stdout or "")
+        stderr = self._truncate(result.stderr or "")
+        if result.error_type == "timeout":
+            return {"process_status": "timeout", "stdout": stdout, "stderr": stderr or "Client timed out"}
+        if result.return_code != 0:
+            return {"process_status": "error", "stdout": stdout, "stderr": stderr}
+        return {"process_status": "completed", "stdout": stdout, "stderr": stderr}
 
     async def execute_tool(self, tool_name: str, request: Request) -> PlainTextResponse:
         """
@@ -304,11 +407,11 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         Returns the result as plain text for simple_agent compatibility.
         Tracks execution timing and timeout detection per session.
         """
-        if not self.tool_manager:
+        if not self.tool_manager and self._sandbox_backend != SANDBOX_BACKEND_GYM:
             return PlainTextResponse(json.dumps({"error": "No tools configured"}))
 
-        # Check if tool is in our known tools
-        if tool_name not in self._tool_name_map:
+        # Check if tool is in our known tools (gym path still populates the map via ToolManager)
+        if self._tool_name_map and tool_name not in self._tool_name_map:
             logger.error(f"Unknown tool requested: {tool_name}")
             return PlainTextResponse(json.dumps({"error": f"Unknown tool: {tool_name}"}))
 
@@ -329,12 +432,18 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         try:
             body = await request.json()
 
-            # Execute the tool
-            result = await self.tool_manager.execute_tool(
-                raw_name=tool_name,
-                args=body,
-                extra_args={"request_id": session_id},
-            )
+            if self._sandbox_backend == SANDBOX_BACKEND_GYM:
+                code = ""
+                if isinstance(body, dict):
+                    code = body.get("code") or body.get("generated_code") or ""
+                result = await self._execute_python_gym(code=str(code), session_id=session_id)
+            else:
+                # Execute the tool via Skills ToolManager
+                result = await self.tool_manager.execute_tool(
+                    raw_name=tool_name,
+                    args=body,
+                    extra_args={"request_id": session_id},
+                )
 
             # Check for internal sandbox timeout (process_status == "timeout")
             try:
@@ -453,8 +562,10 @@ class NSToolsResourcesServer(SimpleResourcesServer):
                 **metrics,
             )
         finally:
-            if self.tool_manager is not None and session_id:
+            if self.tool_manager is not None and session_id and self._sandbox_backend == SANDBOX_BACKEND_SKILLS:
                 await self.tool_manager.cleanup_request(session_id)
+            if session_id and self._sandbox_backend == SANDBOX_BACKEND_GYM:
+                await self._close_gym_sandbox(session_id)
 
     # --------------------------------------------------------
     # Cleanup
@@ -464,6 +575,9 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         """Cleanup resources on server shutdown."""
         if self.tool_manager:
             await self.tool_manager.shutdown()
+
+        for session_id in list(self._gym_sessions.keys()):
+            await self._close_gym_sandbox(session_id)
 
         # Terminate the python_tool subprocess if one was started.
         if self._python_tool_process:

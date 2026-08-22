@@ -33,10 +33,23 @@ ns_tools:
         DirectPythonTool:
           exec_timeout_s: 10
 
-      # Sandbox configuration
-      # Respects NEMO_SKILLS_SANDBOX_HOST/PORT env vars if set, else defaults
+      # Dual path: skills_sidecar (default) | gym_sandbox (AsyncSandbox; stateless Python)
+      sandbox_backend: skills_sidecar
+
+      # Skills sidecar (used when sandbox_backend=skills_sidecar)
       sandbox_host: ${oc.env:NEMO_SKILLS_SANDBOX_HOST,127.0.0.1}
       sandbox_port: ${oc.env:NEMO_SKILLS_SANDBOX_PORT,6000}
+
+      # Gym Sandbox API (used when sandbox_backend=gym_sandbox; include opensandbox.yaml in config_paths)
+      sandbox_provider: sandbox
+      sandbox_spec:
+        image: ${oc.env:NEMO_GYM_PYTHON_SANDBOX_IMAGE,python:3.12-slim}
+        resources:
+          cpu: 1
+          memory_mib: 2048
+      python_code_path: /sandbox/cell.py
+      python_exec_command: "python {code_path}"
+      python_exec_timeout_s: 10.0
 
       # Disable session replay after sandbox worker restarts (improves stability)
       disable_session_restore: true

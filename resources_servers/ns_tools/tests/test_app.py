@@ -451,3 +451,75 @@ class TestSidecarTeardownWiredToLifespan:
 
         proc.terminate.assert_called_once()
         assert server._python_tool_process is None
+
+
+class TestGymSandboxBackend:
+    def test_gym_sandbox_requires_provider(self) -> None:
+        with pytest.raises(ValueError, match="requires sandbox_provider"):
+            NSToolsResourcesServer(
+                config=NSToolsConfig(
+                    host="0.0.0.0",
+                    port=8080,
+                    entrypoint="",
+                    name="ns_tools",
+                    sandbox_backend="gym_sandbox",
+                    sandbox_provider=None,
+                ),
+                server_client=MagicMock(spec=ServerClient),
+            )
+
+    async def test_execute_python_gym_uses_async_sandbox(self) -> None:
+        from uuid import uuid4
+
+        from nemo_gym.sandbox import SandboxExecResult, SandboxHandle, SandboxSpec, SandboxStatus, register_provider
+        from resources_servers.sandbox_backend import SANDBOX_BACKEND_GYM
+
+        provider_name = f"fake-ns-{uuid4().hex}"
+        uploaded: list[tuple[str, str]] = []
+
+        class FakePythonProvider:
+            def __init__(self, **kwargs):
+                del kwargs
+
+            async def create(self, spec: SandboxSpec) -> SandboxHandle:
+                return SandboxHandle(sandbox_id="py-1", provider_name=provider_name, raw={})
+
+            async def exec(self, handle, command, **kwargs):
+                return SandboxExecResult(stdout="42\n", stderr="", return_code=0)
+
+            async def upload_file(self, handle, source_path, target_path):
+                uploaded.append((str(source_path), target_path))
+
+            async def download_file(self, handle, source_path, target_path):
+                return None
+
+            async def status(self, handle):
+                return SandboxStatus.RUNNING
+
+            async def close(self, handle):
+                return None
+
+            async def aclose(self):
+                return None
+
+        register_provider(provider_name, FakePythonProvider)
+
+        server = NSToolsResourcesServer(
+            config=NSToolsConfig(
+                host="0.0.0.0",
+                port=8080,
+                entrypoint="",
+                name="ns_tools",
+                sandbox_backend=SANDBOX_BACKEND_GYM,
+                sandbox_provider={provider_name: {}},
+                python_code_path="/sandbox/cell.py",
+                python_exec_command="python {code_path}",
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        result = await server._execute_python_gym("print(42)", session_id="sess-1")
+        assert result["process_status"] == "completed"
+        assert "42" in result["stdout"]
+        assert uploaded
+        assert uploaded[0][1] == "/sandbox/cell.py"
+        await server._close_gym_sandbox("sess-1")

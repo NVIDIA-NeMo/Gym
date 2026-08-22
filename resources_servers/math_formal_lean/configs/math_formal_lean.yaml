@@ -2,8 +2,19 @@ math_formal_lean:
   resources_servers:
     math_formal_lean:
       entrypoint: app.py
+      # skills_sidecar (default) | gym_sandbox (AsyncSandbox + sandbox_provider)
+      sandbox_backend: skills_sidecar
       sandbox_host: ${oc.env:NEMO_SKILLS_SANDBOX_HOST,127.0.0.1}
       sandbox_port: ${oc.env:NEMO_SKILLS_SANDBOX_PORT,6000}
+      # Used only when sandbox_backend=gym_sandbox (include opensandbox.yaml in config_paths)
+      sandbox_provider: sandbox
+      sandbox_spec:
+        image: ${oc.env:NEMO_GYM_LEAN_SANDBOX_IMAGE,leanprovercommunity/lean4:latest}
+        resources:
+          cpu: 2
+          memory_mib: 4096
+      lean_proof_path: /sandbox/proof.lean
+      lean_compile_command: "lean {proof_path}"
       compilation_timeout: 30.0
       domain: math
       verified: false
