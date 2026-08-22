@@ -717,7 +717,7 @@ class TestTimeoutSalvage:
         _seed_session(home, "session-1", "partial")
 
         async def _run_exec_stub(cmd, *, cwd, env, timeout):
-            if "setup" in cmd:
+            if "onboard" in cmd:
                 return 0, "", ""
             raise TimeoutError("openclaw timed out")
 
@@ -778,7 +778,7 @@ class TestSigtermSalvage:
         registered: dict = {}
 
         async def _run_exec_stub(cmd, *, cwd, env, timeout):
-            if "setup" in cmd:
+            if "onboard" in cmd:
                 return 0, "", ""
             await asyncio.Event().wait()  # hangs until the SIGTERM path cancels it
 
@@ -816,7 +816,7 @@ class TestSigtermSalvage:
             _seed_session(home, "session-1", "partial")
 
         async def _run_exec_stub(cmd, *, cwd, env, timeout):
-            if "setup" in cmd:
+            if "onboard" in cmd:
                 return 0, "", ""
             await asyncio.Event().wait()  # hangs until the SIGTERM path cancels it
 
