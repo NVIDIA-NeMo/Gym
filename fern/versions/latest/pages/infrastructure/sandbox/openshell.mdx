@@ -1,0 +1,200 @@
+---
+title: "OpenShell Provider"
+description: "Configure NeMo Gym sandboxes backed by an OpenShell gateway."
+position: 5
+---
+
+# OpenShell Provider
+
+The `openshell` provider creates sandboxes through an [OpenShell](https://github.com/NVIDIA/OpenShell) gateway. The gateway provisions containers or MicroVMs through its configured compute driver and applies policy-based controls to sandbox network egress. NeMo Gym communicates with the gateway's gRPC control plane through the OpenShell Python SDK.
+
+## Setup
+
+Install the provider's dedicated optional dependency:
+
+```bash
+uv sync --extra openshell
+```
+
+For package installs, use:
+
+```bash
+pip install "nemo-gym[openshell]"
+```
+
+<Note>
+The OpenShell SDK is intentionally separate from the shared `sandbox` extra because its platform-specific wheels are not available on every host supported by NeMo Gym.
+</Note>
+
+The provider requires a reachable OpenShell gateway. For local development, start the gateway with OpenShell's [Docker deployment](https://github.com/NVIDIA/OpenShell/tree/main/deploy/docker):
+
+```bash
+git clone https://github.com/NVIDIA/OpenShell
+cd OpenShell/deploy/docker
+docker compose up -d
+curl -sf http://localhost:8081/healthz
+```
+
+The local deployment exposes its plaintext gRPC control plane at `localhost:8080`. Use authentication and TLS for gateways exposed outside a trusted local development environment.
+
+## Provider Config
+
+NeMo Gym ships an [OpenShell provider config](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/sandbox/providers/openshell/configs/openshell.yaml). It defines a top-level `sandbox` block that agents reference with `sandbox_provider: sandbox`.
+
+```yaml
+sandbox:
+  default_metadata:
+    sandbox-api: openshell-grpc
+  openshell:
+    connection:
+      endpoint: ${oc.env:OPENSHELL_GATEWAY_ENDPOINT,localhost:8080}
+      workspace: ${oc.env:OPENSHELL_WORKSPACE,default}
+      bearer_token: ${oc.env:OPENSHELL_BEARER_TOKEN,null}
+      request_timeout_s: 30
+    create:
+      ready_timeout_s: 300
+      poll_interval_s: 1.0
+      retries: 2
+      retry_delay_s: 1.0
+      retry_max_delay_s: 30.0
+    exec:
+      default_timeout_s: 180
+      concurrency: 32
+      exec_shell: /bin/sh
+      upload_chunk_bytes: 524288
+    probe:
+      command: printf openshell-sandbox-ready
+      expected_stdout: openshell-sandbox-ready
+      timeout_s: 30
+      deadline_s: 60
+      stable_count: 1
+      stable_delay_s: 1.0
+    operations:
+      close_wait_deleted: true
+      close_timeout_s: 60
+      poll_interval_s: 1.0
+```
+
+For a TLS or mTLS gateway, also set `connection.tls_ca_path` and, when required, both `connection.tls_cert_path` and `connection.tls_key_path`.
+
+Run an agent with the provider config alongside the agent and model configs:
+
+```bash
+gym env start \
+  --config responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml \
+  --config nemo_gym/sandbox/providers/openshell/configs/openshell.yaml \
+  --config responses_api_models/vllm_model/configs/vllm_model.yaml
+```
+
+The provider constructor accepts five optional config sections:
+
+| Section | Purpose |
+| --- | --- |
+| `connection` | Gateway endpoint, workspace, bearer token, TLS or mTLS paths, and request timeout. |
+| `create` | READY-phase polling timeout and retry behavior for transient create failures. |
+| `exec` | Command timeout, shell, upload chunk size, and concurrency for shared gateway operations. |
+| `probe` | Post-create command probe used to verify exec readiness before returning the sandbox. |
+| `operations` | Delete polling behavior and timeout during cleanup. |
+
+Providers with identical connection and concurrency settings share one SDK client and bounded worker pool.
+
+## SandboxSpec Provider Options
+
+Set OpenShell-specific create options under `SandboxSpec.provider_options`, or under `sandbox_spec.provider_options` in an agent config:
+
+```yaml
+sandbox_spec:
+  provider_options:
+    providers:
+      - github
+    policy: /path/to/policy.yaml
+    template_resources:
+      cpu: 2
+      memory: 8Gi
+    driver_config:
+      runtime: kata
+```
+
+<Note>
+`template_resources` and `driver_config` are free-form values passed to the OpenShell gateway. Supported keys and values depend on the gateway's compute driver; the example above is illustrative rather than portable across drivers.
+</Note>
+
+| Option | Purpose |
+| --- | --- |
+| `providers` | One credential-provider name or a list of names to attach to the sandbox. |
+| `policy` | An OpenShell `SandboxPolicy` mapping or path to a policy YAML file. When unset, OpenShell uses the policy built into the sandbox image. |
+| `template_resources` | Driver-specific values passed through to `SandboxTemplate.resources`. |
+| `driver_config` | Driver-specific values passed through to `SandboxTemplate.driver_config`. |
+
+Unknown provider option keys raise `ValueError`; values with the wrong type raise `TypeError`.
+
+## Relevant SandboxSpec Fields
+
+| Field | OpenShell behavior |
+| --- | --- |
+| `image` | Passed to `SandboxTemplate.image`. When unset, the gateway uses its configured default image. |
+| `env` | Passed at create and re-applied on each command. Per-command values override sandbox values. |
+| `workdir` | Used as the default working directory for commands; it is not a create-time setting. |
+| `files` | Seed files uploaded through command stdin before the first caller command. |
+| `metadata` | Forwarded as gateway sandbox labels. The provider also adds `nemo-gym.sandbox=1`. |
+| `resources.gpu` | Mapped to the OpenShell GPU count request. |
+| `resources.cpu`, `memory_mib`, `disk_gib`, `gpu_type` | Not mapped directly. Use `provider_options.template_resources` with values supported by the compute driver. |
+| `ttl_s` | Not enforced. The provider warns, and the sandbox lives until `stop()` or gateway-side cleanup. |
+| `entrypoint` | Unsupported. OpenShell's supervisor owns the sandbox entrypoint, so setting this field raises `SandboxCreateError`. |
+| `provider_options` | Credential providers, policy, template resources, and driver configuration described above. |
+
+## Lifecycle
+
+The provider maps the neutral sandbox lifecycle onto the gateway:
+
+| Operation | OpenShell behavior |
+| --- | --- |
+| Create | Creates a named sandbox, polls until its phase is `READY`, then verifies command execution with the configured probe. |
+| Exec | Streams `<exec_shell> -c <command>` through the gateway with a server-enforced timeout. |
+| Status | Maps the gateway sandbox phase onto `SandboxStatus`; a missing sandbox is `STOPPED`. |
+| Close | Deletes the sandbox and, by default, waits until the gateway reports it gone. |
+
+Transient create failures are retried with backoff. The provider reuses the same sandbox name, so a create that committed before the response failed is recovered rather than duplicated. Failed readiness checks trigger best-effort cleanup.
+
+Commands are not retried because they may not be idempotent. Gateway timeouts return code `125` with `error_type="timeout"`; other gateway runtime failures return code `125` with `error_type="sandbox"`.
+
+## File Transfer
+
+The OpenShell SDK does not expose a file-transfer API, so this provider implements transfer through command execution:
+
+- Uploads stream bytes through stdin to `cat`, in chunks controlled by `exec.upload_chunk_bytes`. The target directory must be writable by the sandbox's default user.
+- Downloads run `base64` in the sandbox and decode the result locally. The sandbox image must include `base64`.
+- Downloads buffer the complete base64-expanded file in memory. Use this path for small-to-medium artifacts rather than large archives.
+
+Download needed files before stopping the sandbox.
+
+## Isolation and Security
+
+OpenShell separates the gateway control plane from sandbox compute and enforces the sandbox's resolved egress policy on outbound connections. The strength of compute isolation depends on the gateway driver:
+
+- Docker and Podman sandboxes share a host kernel and provide container isolation.
+- Kubernetes isolation depends on the cluster's configured runtime and security controls.
+- A MicroVM driver provides a separate guest kernel and a stronger boundary for untrusted code.
+
+<Warning>
+The local Docker quickstart uses a plaintext, unauthenticated control plane and is intended for trusted local development. Do not expose it to an untrusted network. Configure a bearer token and TLS or mTLS for remote gateways.
+</Warning>
+
+When `provider_options.policy` is omitted, the provider relies on the policy built into the selected sandbox image. Review that policy before running untrusted workloads. The provider does not enforce `ttl_s`, so always stop sandboxes in cleanup paths and configure gateway-side cleanup appropriate for the deployment.
+
+## User and Runtime Notes
+
+OpenShell's exec API does not accept a user. Supplying `user` to `exec()` logs a warning and commands still run as the sandbox image's default user. The default OpenShell sandbox image uses a non-root user, but custom images may choose a different default.
+
+Exec timeouts are enforced by the gateway. The provider runs the synchronous SDK on a bounded worker pool so async NeMo Gym servers do not block their event loops.
+
+## Troubleshooting
+
+| Symptom | Cause / fix |
+| --- | --- |
+| `OpenShell SDK is required` | Install the dedicated extra with `pip install "nemo-gym[openshell]"` or `uv sync --extra openshell`. |
+| Gateway connection fails | Check `OPENSHELL_GATEWAY_ENDPOINT`, gateway health, authentication, and TLS paths. The endpoint is the gRPC port, not the HTTP health port. |
+| Sandbox reaches `READY` but create still fails | The configured readiness probe could not execute successfully. Check the image shell and gateway exec path. |
+| Upload reports a permission error | Upload into a path writable by the sandbox's default user, such as `/tmp` or that user's home directory. |
+| Download reports missing `base64` | Add coreutils or BusyBox to the sandbox image, or retrieve the artifact through another mechanism. |
+| CPU or memory request is ignored | Express driver-specific limits through `provider_options.template_resources`. |
