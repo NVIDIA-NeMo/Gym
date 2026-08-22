@@ -1,0 +1,2 @@
+# The server shells into a ViBench checkout for grading and uses nemo_gym's sandbox API
+# for the build container, so it needs nothing beyond the core Gym dependencies.
