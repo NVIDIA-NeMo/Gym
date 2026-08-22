@@ -16,6 +16,8 @@ import asyncio
 import json
 import os
 import shutil
+import signal
+import subprocess
 import tempfile
 import time
 from contextlib import ExitStack
@@ -1724,6 +1726,56 @@ class TestRunOpenHandsAgent:
             assert "output2.json" in result  # should pick latest
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("kill_path", ["watchdog_sigkill", "finish_timeout"])
+    async def test_overlay_reaped_after_sigkill_teardown(self, monkeypatch, tmp_path, kill_path) -> None:
+        """SIGKILL teardown never runs the launch shell's trap (the leak); the
+        Python-side kill paths must reap the upperdir by name instead."""
+        wrapper = _create_wrapper(monkeypatch)
+        params = _make_instance_config(str(tmp_path))
+        cmd_args = ExecuteContainerCommandArgs(
+            command="echo hi",
+            expected_file_pattern="output*.jsonl",
+            mode="agent",
+            timeout=1 if kill_path == "finish_timeout" else 60,
+        )
+        apptainer_cmd = wrapper._build_apptainer_command(params, cmd_args)
+
+        stub_bin = tmp_path / "stub_bin"
+        stub_bin.mkdir()
+        (stub_bin / "apptainer").write_text("#!/bin/sh\nsleep 300\n")  # a container that never exits
+        (stub_bin / "apptainer").chmod(0o755)
+        scratch_tmp = tmp_path / "scratch_tmp"
+        scratch_tmp.mkdir()
+        # The spawned shell and the reap read the same process environment.
+        monkeypatch.setenv("PATH", f"{stub_bin}:{os.environ['PATH']}")
+        monkeypatch.setenv("TMPDIR", str(scratch_tmp))
+
+        agent = RunOpenHandsAgent(config=params)
+        active = await agent._start_container_command(cmd_args, apptainer_cmd)
+        assert active.overlay_dirname == cmd_args.overlay_dirname
+        overlay_dir = scratch_tmp / cmd_args.overlay_dirname
+        for _ in range(200):
+            if overlay_dir.is_dir():
+                break
+            await asyncio.sleep(0.05)
+        assert overlay_dir.is_dir()
+
+        if kill_path == "finish_timeout":
+            # The timeout branch SIGKILLs the tree and reaps on its way out.
+            with pytest.raises(ValueError, match="Command timed out"):
+                await agent._finish_container_command(active, cmd_args)
+        else:
+            # Kill the tree the way the watchdog does: the shell dies without
+            # running its trap, so the upperdir outlives the container.
+            os.killpg(os.getpgid(active.process.pid), signal.SIGKILL)
+            await active.process.wait()
+            assert overlay_dir.is_dir()
+            swe_app._reap_overlay_dir(None)  # a command with no overlay is a no-op
+            await agent._kill_active_command(active)
+        assert active.process.returncode is not None
+        assert not overlay_dir.exists()
+
+    @pytest.mark.asyncio
     async def test_finish_container_command_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             agent = self._make_agent(tmpdir)
@@ -2016,8 +2068,73 @@ class TestSWEBenchWrapperBuildApptainerCommand:
             )
             result = wrapper._build_apptainer_command(params, cmd_args)
             assert "apptainer exec" in result
-            assert "--writable-tmpfs" in result
+            # The writable layer is a fresh TMPDIR-backed directory overlay
+            # (the session tmpfs is capped by sessiondir max size, which SWE
+            # working trees exceed).
+            assert '--overlay "$OVERLAY_DIR"' in result
             assert params.container in result
+
+    def test_sandbox_hardening_overlay_wrapper_and_script(self, monkeypatch, tmp_path) -> None:
+        """The writable layer is a fresh TMPDIR-backed directory overlay per
+        container execution, and the container script fixes /etc/hosts
+        non-fatally and grants git safe.directory."""
+        wrapper = _create_wrapper(monkeypatch)
+        params = _make_instance_config(str(tmp_path))
+
+        args = {
+            mode: ExecuteContainerCommandArgs(
+                command=f"echo {mode}", expected_file_pattern="output*.jsonl", mode=mode, timeout=60
+            )
+            for mode in ("agent", "eval")
+        }
+        commands = {mode: wrapper._build_apptainer_command(params, cmd_args) for mode, cmd_args in args.items()}
+
+        for mode, cmd in commands.items():
+            # The upperdir name is recorded on the command args (for the kill-path reap).
+            dirname = args[mode].overlay_dirname
+            assert dirname is not None and dirname.startswith(f"apptainer_overlay_{mode}_")
+            assert f'OVERLAY_DIR="${{TMPDIR:-/tmp}}/{dirname}"' in cmd
+            assert '--overlay "$OVERLAY_DIR"' in cmd
+            assert "trap 'rm -rf \"$OVERLAY_DIR\"' EXIT TERM INT" in cmd
+            assert "--writable-tmpfs" not in cmd
+        assert args["agent"].overlay_dirname != args["eval"].overlay_dirname
+
+        script = (params.persistent_dir / "container_scripts" / "agent_script.sh").read_text()
+        assert "(echo '127.0.0.1 localhost' >>/etc/hosts 2>/dev/null || true)" in script
+        assert "echo '127.0.0.1 localhost' >/etc/hosts" not in script
+        assert "git config --global --add safe.directory '*'" in script
+
+    def test_overlay_upperdir_lives_and_dies_with_the_container(self, monkeypatch, tmp_path) -> None:
+        """Run the built command with a stub apptainer: the upperdir must
+        exist (fresh, under TMPDIR) while the container runs and be removed
+        when the shell exits."""
+        wrapper = _create_wrapper(monkeypatch)
+        params = _make_instance_config(str(tmp_path))
+        cmd_args = ExecuteContainerCommandArgs(
+            command="echo hi", expected_file_pattern="output*.jsonl", mode="agent", timeout=60
+        )
+        cmd = wrapper._build_apptainer_command(params, cmd_args)
+
+        stub_bin = tmp_path / "stub_bin"
+        stub_bin.mkdir()
+        witness = tmp_path / "overlay_during_run.txt"
+        # argv: apptainer exec --overlay <dir> ... -> "$3" is the upperdir.
+        (stub_bin / "apptainer").write_text(
+            f'#!/bin/sh\nprintf "%s\\n" "$3" > {witness}\n[ -d "$3" ] && echo EXISTS >> {witness}\n'
+        )
+        (stub_bin / "apptainer").chmod(0o755)
+        scratch_tmp = tmp_path / "scratch_tmp"
+        scratch_tmp.mkdir()
+
+        env = {**os.environ, "PATH": f"{stub_bin}:{os.environ['PATH']}", "TMPDIR": str(scratch_tmp)}
+        result = subprocess.run(["/bin/sh", "-c", cmd], env=env, capture_output=True, text=True)
+
+        assert result.returncode == 0, result.stderr
+        overlay_path, exists_flag = witness.read_text().splitlines()
+        assert exists_flag == "EXISTS"
+        assert overlay_path.startswith(str(scratch_tmp))
+        assert Path(overlay_path).name == cmd_args.overlay_dirname
+        assert not Path(overlay_path).exists()
 
     def test_eval_mode_swebench_mounts(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
@@ -2515,6 +2632,22 @@ class TestSWEBenchWrapperResponses:
             ):
                 with pytest.raises(RuntimeError, match="test error"):
                     await wrapper.responses(body)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("preserve", [False, True])
+    async def test_episode_scratch_reaped_only_when_preservation_off(self, monkeypatch, tmp_path, preserve) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        monkeypatch.setattr(wrapper.config, "preserve_episode_artifacts", preserve, raising=False)
+        params = _make_instance_config(str(tmp_path))
+        params.eval_private_dir.mkdir(parents=True, exist_ok=True)
+        (params.persistent_dir / "episode_artifact.txt").write_text("heavy")
+
+        monkeypatch.setattr(SWEBenchWrapper, "_setup_params", lambda self, body: (params, MagicMock()))
+        monkeypatch.setattr(SWEBenchWrapper, "_inner_responses", AsyncMock(return_value=MagicMock()))
+
+        await wrapper.responses(NeMoGymResponseCreateParamsNonStreaming(input=[]))
+
+        assert params.persistent_dir.exists() is preserve
 
 
 class TestSWEBenchWrapperRun:
