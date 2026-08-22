@@ -19,7 +19,7 @@ import json
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
@@ -41,6 +41,8 @@ from resources_servers.gdpval.multistage_orchestrator import (
     MultiStageRunConfig,
     StageResume,
     _prepare_resume,
+    aggregate_metrics_path_for,
+    append_journal_record,
     build_file_resume,
     build_stage_rows,
     compute_fingerprint,
@@ -50,6 +52,8 @@ from resources_servers.gdpval.multistage_orchestrator import (
     load_failure_attempts,
     load_failure_timings,
     load_gated_keys,
+    load_latest_attempt_dispositions,
+    load_latest_failures,
     load_persisted_rows,
     load_reuse_cached_keys,
     parse_multistage_config,
@@ -136,6 +140,66 @@ class TestParseConfig:
     def test_empty_stages_raises(self) -> None:
         with pytest.raises(ValueError):
             parse_multistage_config({"enabled": True, "stages": []})
+
+    def test_parses_partial_completion_policy(self) -> None:
+        cfg = parse_multistage_config(
+            {
+                "enabled": True,
+                "stages": [
+                    {
+                        "num_tasks": 45,
+                        "partial_completion": {
+                            "min_success_fraction": 0.9,
+                            "min_per_reference_success_fraction": 0.5,
+                            "min_successful_rows_per_reference": 1,
+                        },
+                    },
+                    {"num_tasks": 220, "num_models": 4},
+                ],
+            }
+        )
+
+        policy = cfg.stages[0].partial_completion
+        assert policy is not None
+        assert policy.min_success_fraction == 0.9
+        assert policy.min_per_reference_success_fraction == 0.5
+        assert policy.min_successful_rows_per_reference == 1
+        assert cfg.stages[1].partial_completion is None
+
+    @pytest.mark.parametrize(
+        "partial_completion",
+        [
+            {"min_success_fraction": 0},
+            {"min_success_fraction": True},
+            {"min_per_reference_success_fraction": 1.1},
+            {"min_successful_rows_per_reference": 0},
+            {"min_successful_rows_per_reference": True},
+            {"allowed_failure_classes": ["transient"]},
+        ],
+    )
+    def test_rejects_unsafe_partial_completion_policy(self, partial_completion: Dict[str, Any]) -> None:
+        with pytest.raises(ValueError):
+            parse_multistage_config(
+                {
+                    "enabled": True,
+                    "stages": [
+                        {"num_tasks": 5, "partial_completion": partial_completion},
+                        {"num_tasks": 10, "num_models": 2},
+                    ],
+                }
+            )
+
+    def test_rejects_partial_completion_on_final_stage(self) -> None:
+        with pytest.raises(ValueError, match="non-final calibration stages"):
+            parse_multistage_config(
+                {
+                    "enabled": True,
+                    "stages": [
+                        {"num_tasks": 5},
+                        {"num_tasks": 10, "partial_completion": {"min_success_fraction": 0.9}},
+                    ],
+                }
+            )
 
 
 class TestFindReferenceElos:
@@ -537,10 +601,13 @@ class RecordingResume(StageResume):
         elapsed_by_stage=None,
         reuse_cached_keys=None,
         attempts_by_stage=None,
+        latest_failures_by_stage=None,
+        latest_attempt_dispositions_by_stage=None,
     ) -> None:
         self.planned: List[Tuple[int, dict]] = []
         self.completed: List[Tuple[int, dict]] = []
         self.appended: Dict[int, List[Dict[str, Any]]] = {}
+        self.restarted: List[int] = []
         rows_by_stage = dict(rows_by_stage or {})
         if gated_keys is None:
             gated_keys = {
@@ -555,9 +622,12 @@ class RecordingResume(StageResume):
             on_plan=lambda i, p: self.planned.append((i, p)),
             on_outcome=lambda i, o: self.completed.append((i, o)),
             on_rows=lambda i, r: self.appended.setdefault(i, []).extend(r),
+            on_restart=self.restarted.append,
             elapsed_by_stage=dict(elapsed_by_stage or {}),
             reuse_cached_keys=dict(reuse_cached_keys or {}),
             attempts_by_stage=dict(attempts_by_stage or {}),
+            latest_failures_by_stage=dict(latest_failures_by_stage or {}),
+            latest_attempt_dispositions_by_stage=dict(latest_attempt_dispositions_by_stage or {}),
         )
 
 
@@ -742,7 +812,61 @@ class TestResumeSeam:
         assert len(results) == len(full_results)
         assert result_summaries[0].get("cached") is not True
 
-    async def test_resumed_empty_fit_preserves_prior_elo_for_next_stage(self) -> None:
+    async def test_reopened_calibration_invalidates_dependent_stage(self) -> None:
+        task_ids = ["t0", "t1", "t2"]
+        rows = _materialized_rows(task_ids)
+        cfg = MultiStageRunConfig(
+            enabled=True,
+            stages=parse_multistage_config({"enabled": True, "stages": ["3", "3:2"]}).stages,
+            seed=0,
+        )
+        baseline_resume = RecordingResume()
+        successful_run = _fake_run_rollouts_factory()
+        baseline_results, _ = await run_multistage_stages(
+            cfg,
+            REF_ELOS,
+            _distribution(task_ids),
+            rows,
+            successful_run,
+            resume=baseline_resume,
+        )
+        rows_by_stage = {
+            stage_index: [row for row in baseline_results if row["stage_index"] == stage_index]
+            for stage_index in (0, 1)
+        }
+        missing = rows_by_stage[0].pop()
+        missing_key = (missing[TASK_INDEX_KEY_NAME], missing[ROLLOUT_INDEX_KEY_NAME])
+        resumed = RecordingResume(
+            plans=dict(baseline_resume.planned),
+            outcomes=dict(baseline_resume.completed),
+            rows_by_stage=rows_by_stage,
+        )
+        dispatched: List[Tuple[int, Tuple[int, int]]] = []
+
+        async def capture(rows_in: List[Dict[str, Any]]):
+            dispatched.extend(
+                (
+                    row["stage_index"],
+                    (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]),
+                )
+                for row in rows_in
+            )
+            return await successful_run(rows_in)
+
+        await run_multistage_stages(
+            cfg,
+            REF_ELOS,
+            _distribution(task_ids),
+            rows,
+            capture,
+            resume=resumed,
+        )
+
+        assert resumed.restarted == [0]
+        assert [key for stage, key in dispatched if stage == 0] == [missing_key]
+        assert len([key for stage, key in dispatched if stage == 1]) == 3
+
+    async def test_resumed_empty_fit_blocks_adaptive_next_stage(self) -> None:
         task_ids = [f"t{i}" for i in range(6)]
         rows = _materialized_rows(task_ids)
         cfg = MultiStageRunConfig(
@@ -804,8 +928,10 @@ class TestResumeSeam:
             resume=resumed,
         )
 
-        assert set(dispatched_stages) == {2}
-        assert resumed_summaries[2]["reference_ids"] == baseline_summaries[2]["reference_ids"]
+        assert dispatched_stages == []
+        assert len(resumed_summaries) == 2
+        assert resumed_summaries[0]["cached"] is True
+        assert resumed_summaries[1]["eval_elo"] is None
 
     async def test_plan_replay_is_deterministic_without_seed(self) -> None:
         task_ids = [f"t{i}" for i in range(10)]
@@ -936,70 +1062,125 @@ class TestResumeSeam:
         assert seen == [(0, False), (1, True)]
 
     async def test_gated_sidecar_artifact_is_produced_for_later_stages(self) -> None:
-        task_ids = ["t0"]
+        task_ids = ["t0", "t1"]
         rows = _materialized_rows(task_ids)
         cfg = MultiStageRunConfig(
             enabled=True,
-            stages=parse_multistage_config({"enabled": True, "stages": ["1", "1"]}).stages,
+            stages=parse_multistage_config(
+                {
+                    "enabled": True,
+                    "stages": [
+                        {
+                            "num_tasks": 2,
+                            "partial_completion": {
+                                "min_success_fraction": 0.5,
+                                "min_per_reference_success_fraction": 0.5,
+                            },
+                        },
+                        {"num_tasks": 2},
+                    ],
+                }
+            ).stages,
             seed=0,
         )
+        cached_success = {
+            **rows[1],
+            "stage_index": 0,
+            "reference_ids": ["a"],
+            "per_reference": {"a": {"wins": 1, "losses": 0, "ties": 0, "reference_elo": REF_ELOS["a"]}},
+        }
         # Stage 0's judge-invalid row exhausted its attempts, but its sidecar
         # flag proves that the reference-independent policy artifact exists.
         resume = RecordingResume(
-            gated_keys={0: {(0, 0)}},
+            plans={
+                0: {
+                    "stage_index": 0,
+                    "status": "planned",
+                    "reference_ids": ["a"],
+                    "task_ids": task_ids,
+                    "task_reference_ids": {task_id: "a" for task_id in task_ids},
+                }
+            },
+            rows_by_stage={0: [cached_success]},
+            gated_keys={0: {(0, 0), (1, 0)}},
             reuse_cached_keys={0: {(0, 0)}},
             attempts_by_stage={0: {(0, 0): 3}},
         )
-        seen: List[Tuple[int, bool]] = []
+        seen: List[Tuple[int, int, bool]] = []
         run = _fake_run_rollouts_factory()
 
         async def capturing_run(rows_in: List[Dict[str, Any]]):
-            seen.extend((row["stage_index"], bool(row.get("reuse_cached_deliverable"))) for row in rows_in)
+            seen.extend(
+                (row["stage_index"], row[TASK_INDEX_KEY_NAME], bool(row.get("reuse_cached_deliverable")))
+                for row in rows_in
+            )
             return await run(rows_in)
 
         await run_multistage_stages(cfg, REF_ELOS, _distribution(task_ids), rows, capturing_run, resume=resume)
 
-        assert seen == [(1, True)]
+        assert sorted(seen) == [(1, 0, True), (1, 1, True)]
 
     async def test_new_terminal_judge_failure_reuses_artifact_in_next_stage(self) -> None:
-        task_ids = ["t0"]
+        task_ids = ["t0", "t1"]
         rows = _materialized_rows(task_ids)
         cfg = MultiStageRunConfig(
             enabled=True,
-            stages=parse_multistage_config({"enabled": True, "stages": ["1", "1"]}).stages,
+            stages=parse_multistage_config(
+                {
+                    "enabled": True,
+                    "stages": [
+                        {
+                            "num_tasks": 2,
+                            "partial_completion": {
+                                "min_success_fraction": 0.5,
+                                "min_per_reference_success_fraction": 0.5,
+                            },
+                        },
+                        {"num_tasks": 2},
+                    ],
+                }
+            ).stages,
             seed=0,
         )
-        seen: List[Tuple[int, bool]] = []
+        seen: List[Tuple[int, int, bool]] = []
         success_run = _fake_run_rollouts_factory()
 
         async def terminal_then_success(rows_in: List[Dict[str, Any]]):
-            seen.extend((row["stage_index"], bool(row.get("reuse_cached_deliverable"))) for row in rows_in)
+            seen.extend(
+                (row["stage_index"], row[TASK_INDEX_KEY_NAME], bool(row.get("reuse_cached_deliverable")))
+                for row in rows_in
+            )
             if rows_in and rows_in[0]["stage_index"] == 0:
-                return [
-                    (
-                        row,
-                        {
-                            NG_FAILURE_CLASS_KEY: "permanent",
-                            NG_TERMINAL_KEY: True,
-                            "reuse_cached_deliverable": True,
-                            "deliverables_dir": "/cached/task_t0/repeat_0",
-                        },
-                    )
-                    for row in rows_in
-                ]
+                pairs = await success_run(rows_in)
+                row, _ = pairs[0]
+                pairs[0] = (
+                    row,
+                    {
+                        NG_FAILURE_CLASS_KEY: "permanent",
+                        NG_TERMINAL_KEY: True,
+                        "reuse_cached_deliverable": True,
+                        "deliverables_dir": "/cached/task_t0/repeat_0",
+                    },
+                )
+                return pairs
             return await success_run(rows_in)
 
         await run_multistage_stages(
             cfg,
-            REF_ELOS,
+            {"a": REF_ELOS["a"]},
             _distribution(task_ids),
             rows,
             terminal_then_success,
         )
 
-        assert seen == [(0, False), (1, True)]
+        assert sorted(seen) == [
+            (0, 0, False),
+            (0, 1, False),
+            (1, 0, True),
+            (1, 1, True),
+        ]
 
-    async def test_third_failure_is_resolved_without_fourth_invocation(self) -> None:
+    async def test_third_failure_stops_adaptive_stage_without_fourth_invocation(self) -> None:
         task_ids = ["t0"]
         rows = _materialized_rows(task_ids)
         cfg = MultiStageRunConfig(
@@ -1023,8 +1204,8 @@ class TestResumeSeam:
             cfg, REF_ELOS, _distribution(task_ids), rows, fail_third_then_succeed, resume=resume
         )
 
-        assert seen_attempts == [(0, 2), (1, None)]
-        assert [index for index, _ in resume.completed] == [0, 1]
+        assert seen_attempts == [(0, 2)]
+        assert resume.completed == []
         assert resume.appended[0][0][ATTEMPT_INDEX_KEY_NAME] == 2
 
     async def test_drained_stage_is_not_marked_complete(self) -> None:
@@ -1087,6 +1268,901 @@ class TestResumeSeam:
         assert [index for index, _ in resume.completed] == [0]
 
 
+class TestPartialStageCompletion:
+    @staticmethod
+    def _config(
+        *,
+        enabled: bool,
+        min_success_fraction: float = 0.6,
+        min_per_reference_success_fraction: float = 0.6,
+        min_successful_rows_per_reference: int = 1,
+    ) -> MultiStageRunConfig:
+        first_stage: Dict[str, Any] = {"num_tasks": 10}
+        if enabled:
+            first_stage["partial_completion"] = {
+                "min_success_fraction": min_success_fraction,
+                "min_per_reference_success_fraction": min_per_reference_success_fraction,
+                "min_successful_rows_per_reference": min_successful_rows_per_reference,
+            }
+        return MultiStageRunConfig(
+            enabled=True,
+            stages=parse_multistage_config(
+                {
+                    "enabled": True,
+                    "stages": [first_stage, {"num_tasks": 10, "num_models": 1}],
+                }
+            ).stages,
+            seed=0,
+        )
+
+    @staticmethod
+    def _balanced_resume(task_ids: List[str]) -> RecordingResume:
+        return RecordingResume(
+            plans={
+                0: {
+                    "stage_index": 0,
+                    "status": "planned",
+                    "reference_ids": ["a", "b"],
+                    "task_ids": task_ids,
+                    "task_reference_ids": {
+                        task_id: ("a" if index % 2 == 0 else "b") for index, task_id in enumerate(task_ids)
+                    },
+                    "seed": None,
+                    "prior_eval_elo": None,
+                }
+            }
+        )
+
+    @staticmethod
+    def _runner(
+        failed_indices: set[int],
+        *,
+        failure_class: str = "timeout_exceeded",
+        no_persist: bool = False,
+        terminal: bool = False,
+        empty_successes: bool = False,
+        dispatched_stages: Optional[List[int]] = None,
+    ):
+        successful_run = _fake_run_rollouts_factory(target_elo=1100.0)
+
+        async def run(rows_in: List[Dict[str, Any]]) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
+            if dispatched_stages is not None:
+                dispatched_stages.extend(row["stage_index"] for row in rows_in)
+            pairs = await successful_run(rows_in)
+            if not rows_in or rows_in[0]["stage_index"] != 0:
+                return pairs
+
+            rewritten: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+            for row, result in pairs:
+                if row[TASK_INDEX_KEY_NAME] in failed_indices:
+                    failure = {NG_FAILURE_CLASS_KEY: failure_class}
+                    if no_persist:
+                        failure[NG_NO_PERSIST_KEY] = True
+                    if terminal:
+                        failure[NG_TERMINAL_KEY] = True
+                    rewritten.append((row, failure))
+                elif empty_successes:
+                    rewritten.append((row, {"task_id": row["task_id"], "per_reference": {}}))
+                else:
+                    rewritten.append((row, result))
+            return rewritten
+
+        return run
+
+    async def test_four_retryable_timeouts_keep_default_retry_stage_open(self) -> None:
+        task_ids = [f"t{i}" for i in range(10)]
+        resume = self._balanced_resume(task_ids)
+        dispatched_stages: List[int] = []
+
+        results, summaries = await run_multistage_stages(
+            self._config(enabled=False),
+            {"a": 1000.0, "b": 1200.0},
+            _distribution(task_ids),
+            _materialized_rows(task_ids),
+            self._runner({0, 1, 2, 3}, dispatched_stages=dispatched_stages),
+            resume=resume,
+        )
+
+        assert set(dispatched_stages) == {0}
+        assert len([row for row in results if row["stage_index"] == 0]) == 6
+        assert len(summaries) == 1
+        assert resume.completed == []
+
+    async def test_existing_41_of_45_timeout_stage_advances_without_redispatch(self, tmp_path: Path) -> None:
+        task_ids = [f"t{i}" for i in range(45)]
+        rows = _materialized_rows(task_ids)
+        reference_elos = {f"ref_{index}": 600.0 + 100.0 * index for index in range(9)}
+        reference_ids = list(reference_elos)
+        strict_cfg = parse_multistage_config(
+            {
+                "enabled": True,
+                "stages": [{"num_tasks": 45}, {"num_tasks": 45, "num_models": 4}],
+                "seed": 0,
+            }
+        )
+        partial_cfg = parse_multistage_config(
+            {
+                "enabled": True,
+                "stages": [
+                    {
+                        "num_tasks": 45,
+                        "partial_completion": {
+                            "min_success_fraction": 0.9,
+                            "min_per_reference_success_fraction": 0.8,
+                            "min_successful_rows_per_reference": 1,
+                        },
+                    },
+                    {"num_tasks": 45, "num_models": 4},
+                ],
+                "seed": 0,
+            }
+        )
+        distribution = _distribution(task_ids)
+        strict_fingerprint = compute_fingerprint(strict_cfg, reference_elos, distribution)
+        partial_fingerprint = compute_fingerprint(partial_cfg, reference_elos, distribution)
+        assert partial_fingerprint == strict_fingerprint
+
+        output = tmp_path / "rollouts.jsonl"
+        output.write_bytes(b"")
+        journal = journal_path_for(output)
+        task_reference_ids = {task_id: reference_ids[index // 5] for index, task_id in enumerate(task_ids)}
+        append_journal_record(
+            journal,
+            {
+                "stage_index": 0,
+                "status": "planned",
+                "reference_ids": reference_ids,
+                "task_ids": task_ids,
+                "task_reference_ids": task_reference_ids,
+                "seed": None,
+                "prior_eval_elo": None,
+            },
+            strict_fingerprint,
+        )
+
+        async def successful(rows_in: List[Dict[str, Any]]):
+            pairs = []
+            for row in rows_in:
+                reference_id = row["reference_ids"][0]
+                reference_elo = reference_elos[reference_id]
+                wins = 6 if reference_elo < 1000 else 4
+                pairs.append(
+                    (
+                        row,
+                        {
+                            "task_id": row["task_id"],
+                            "per_reference": {
+                                reference_id: {
+                                    "wins": wins,
+                                    "losses": 10 - wins,
+                                    "ties": 0,
+                                    "reference_elo": reference_elo,
+                                }
+                            },
+                        },
+                    )
+                )
+            return pairs
+
+        timeout_indices = {0, 5, 10, 15}
+
+        async def first_allocation(rows_in: List[Dict[str, Any]]):
+            assert {row["stage_index"] for row in rows_in} == {0}
+            pairs = await successful(rows_in)
+            return [
+                (row, {NG_FAILURE_CLASS_KEY: "timeout_exceeded"})
+                if row[TASK_INDEX_KEY_NAME] in timeout_indices
+                else (row, result)
+                for row, result in pairs
+            ]
+
+        first_results, first_summaries = await run_multistage_stages(
+            strict_cfg,
+            reference_elos,
+            distribution,
+            rows,
+            first_allocation,
+            resume=build_file_resume(output, journal, strict_fingerprint),
+        )
+        assert len(first_results) == 41
+        assert len(first_summaries) == 1
+        assert read_journal(journal)[1] == {}
+        assert set(load_latest_failures(output)[0]) == {(index, 0) for index in timeout_indices}
+
+        dispatched_stages: List[int] = []
+
+        async def resumed_allocation(rows_in: List[Dict[str, Any]]):
+            dispatched_stages.extend(row["stage_index"] for row in rows_in)
+            if any(row["stage_index"] == 0 for row in rows_in):
+                pytest.fail("persisted Stage-0 timeouts were unexpectedly redispatched")
+            pairs = await successful(rows_in)
+            row, _ = pairs[-1]
+            pairs[-1] = (row, {NG_FAILURE_CLASS_KEY: "kill_shaped", NG_NO_PERSIST_KEY: True})
+            return pairs
+
+        resumed_results, resumed_summaries = await run_multistage_stages(
+            partial_cfg,
+            reference_elos,
+            distribution,
+            rows,
+            resumed_allocation,
+            resume=build_file_resume(output, journal, partial_fingerprint),
+        )
+
+        assert set(dispatched_stages) == {1}
+        assert len([row for row in resumed_results if row["stage_index"] == 0]) == 41
+        assert len([row for row in resumed_results if row["stage_index"] == 1]) == 44
+        assert resumed_summaries[0]["partial"] is True
+        assert resumed_summaries[0]["success_fraction"] == pytest.approx(41 / 45)
+        plans, outcomes, fingerprint = read_journal(journal)
+        assert fingerprint == partial_fingerprint
+        assert 1 in plans
+        assert outcomes[0]["status"] == "partial_complete"
+        assert len(outcomes[0]["omitted_keys"]) == 4
+        assert 1 not in outcomes
+        assert all(record["success_fraction"] >= 0.8 for record in outcomes[0]["per_reference"].values())
+
+        final_dispatches: List[Tuple[int, int]] = []
+
+        async def finish_final_stage(rows_in: List[Dict[str, Any]]):
+            final_dispatches.extend((row["stage_index"], row[TASK_INDEX_KEY_NAME]) for row in rows_in)
+            return await successful(rows_in)
+
+        final_results, final_summaries = await run_multistage_stages(
+            partial_cfg,
+            reference_elos,
+            distribution,
+            rows,
+            finish_final_stage,
+            resume=build_file_resume(output, journal, partial_fingerprint),
+        )
+
+        assert len(final_dispatches) == 1
+        assert final_dispatches[0][0] == 1
+        assert len([row for row in final_results if row["stage_index"] == 0]) == 41
+        assert len([row for row in final_results if row["stage_index"] == 1]) == 45
+        assert len(final_summaries) == 2
+        assert read_journal(journal)[1][1]["status"] == "complete"
+
+    async def test_no_persist_retry_overrides_older_timeout_on_resume(self, tmp_path: Path) -> None:
+        task_ids = [f"t{i}" for i in range(10)]
+        rows = _materialized_rows(task_ids)
+        cfg = parse_multistage_config(
+            {
+                "enabled": True,
+                "stages": [
+                    {
+                        "num_tasks": 10,
+                        "partial_completion": {
+                            "min_success_fraction": 0.8,
+                            "min_per_reference_success_fraction": 0.8,
+                        },
+                    },
+                    {"num_tasks": 10, "num_models": 1},
+                ],
+                "seed": 0,
+            }
+        )
+        reference_elos = {"a": 1000.0}
+        distribution = _distribution(task_ids)
+        output = tmp_path / "rollouts.jsonl"
+        journal = journal_path_for(output)
+        fingerprint = compute_fingerprint(cfg, reference_elos, distribution)
+        successful_run = _fake_run_rollouts_factory(target_elo=1100.0)
+
+        async def first_attempt(rows_in: List[Dict[str, Any]]):
+            pairs = await successful_run(rows_in)
+            return [
+                (row, {NG_FAILURE_CLASS_KEY: "timeout_exceeded"})
+                if row["stage_index"] == 0 and row[TASK_INDEX_KEY_NAME] >= 6
+                else (row, result)
+                for row, result in pairs
+            ]
+
+        _, first_summaries = await run_multistage_stages(
+            cfg,
+            reference_elos,
+            distribution,
+            rows,
+            first_attempt,
+            resume=build_file_resume(output, journal, fingerprint),
+        )
+        assert len(first_summaries) == 1
+
+        async def drained_retry(rows_in: List[Dict[str, Any]]):
+            pairs = await successful_run(rows_in)
+            return [
+                (
+                    row,
+                    {NG_FAILURE_CLASS_KEY: "kill_shaped", NG_NO_PERSIST_KEY: True},
+                )
+                if row[TASK_INDEX_KEY_NAME] >= 8
+                else (row, result)
+                for row, result in pairs
+            ]
+
+        _, second_summaries = await run_multistage_stages(
+            cfg,
+            reference_elos,
+            distribution,
+            rows,
+            drained_retry,
+            resume=build_file_resume(output, journal, fingerprint),
+        )
+        assert len(second_summaries) == 1
+        dispositions = load_latest_attempt_dispositions(journal)[0]
+        assert dispositions[(8, 0)][NG_NO_PERSIST_KEY] is True
+        assert dispositions[(9, 0)][NG_NO_PERSIST_KEY] is True
+
+        dispatched: List[Tuple[int, int]] = []
+
+        async def final_retry(rows_in: List[Dict[str, Any]]):
+            dispatched.extend((row["stage_index"], row[TASK_INDEX_KEY_NAME]) for row in rows_in)
+            return await successful_run(rows_in)
+
+        _, final_summaries = await run_multistage_stages(
+            cfg,
+            reference_elos,
+            distribution,
+            rows,
+            final_retry,
+            resume=build_file_resume(output, journal, fingerprint),
+        )
+
+        assert sorted(index for stage, index in dispatched if stage == 0) == [8, 9]
+        assert {stage for stage, _ in dispatched} == {0, 1}
+        assert len(final_summaries) == 2
+
+    async def test_newer_sidecar_failure_overrides_older_timeout_disposition(self, tmp_path: Path) -> None:
+        task_ids = [f"t{i}" for i in range(5)]
+        rows = _materialized_rows(task_ids)
+        strict_cfg = parse_multistage_config(
+            {
+                "enabled": True,
+                "stages": [{"num_tasks": 5}, {"num_tasks": 5, "num_models": 1}],
+                "seed": 0,
+            }
+        )
+        partial_cfg = parse_multistage_config(
+            {
+                "enabled": True,
+                "stages": [
+                    {
+                        "num_tasks": 5,
+                        "partial_completion": {
+                            "min_success_fraction": 0.8,
+                            "min_per_reference_success_fraction": 0.8,
+                        },
+                    },
+                    {"num_tasks": 5, "num_models": 1},
+                ],
+                "seed": 0,
+            }
+        )
+        reference_elos = {"a": 1000.0}
+        distribution = _distribution(task_ids)
+        output = tmp_path / "rollouts.jsonl"
+        journal = journal_path_for(output)
+        fingerprint = compute_fingerprint(strict_cfg, reference_elos, distribution)
+        assert compute_fingerprint(partial_cfg, reference_elos, distribution) == fingerprint
+        successful_run = _fake_run_rollouts_factory(target_elo=1100.0)
+
+        async def initial_timeout(rows_in: List[Dict[str, Any]]):
+            pairs = await successful_run(rows_in)
+            return [
+                (row, {NG_FAILURE_CLASS_KEY: "timeout_exceeded"}) if row[TASK_INDEX_KEY_NAME] == 4 else (row, result)
+                for row, result in pairs
+            ]
+
+        _, first_summaries = await run_multistage_stages(
+            strict_cfg,
+            reference_elos,
+            distribution,
+            rows,
+            initial_timeout,
+            resume=build_file_resume(output, journal, fingerprint),
+        )
+        assert len(first_summaries) == 1
+        timeout = load_latest_failures(output)[0][(4, 0)]
+        assert load_latest_attempt_dispositions(journal)[0][(4, 0)][NG_FAILURE_CLASS_KEY] == "timeout_exceeded"
+
+        # Simulate a crash after the newer sidecar row is fsynced but before its
+        # disposition is appended to the journal.
+        route_stage_rows(output, [{**timeout, NG_FAILURE_CLASS_KEY: "transient"}])
+        assert load_latest_failures(output)[0][(4, 0)][NG_FAILURE_CLASS_KEY] == "transient"
+        assert load_latest_attempt_dispositions(journal)[0][(4, 0)][NG_FAILURE_CLASS_KEY] == "timeout_exceeded"
+
+        dispatched: List[Tuple[int, int]] = []
+
+        async def capture(rows_in: List[Dict[str, Any]]):
+            dispatched.extend((row["stage_index"], row[TASK_INDEX_KEY_NAME]) for row in rows_in)
+            return await successful_run(rows_in)
+
+        _, summaries = await run_multistage_stages(
+            partial_cfg,
+            reference_elos,
+            distribution,
+            rows,
+            capture,
+            resume=build_file_resume(output, journal, fingerprint),
+        )
+
+        assert [task_index for stage, task_index in dispatched if stage == 0] == [4]
+        assert {stage for stage, _ in dispatched} == {0, 1}
+        assert len(summaries) == 2
+
+    async def test_explicit_timeout_only_policy_advances_with_balanced_coverage(self) -> None:
+        task_ids = [f"t{i}" for i in range(10)]
+        resume = self._balanced_resume(task_ids)
+        dispatched_stages: List[int] = []
+
+        results, summaries = await run_multistage_stages(
+            self._config(enabled=True),
+            {"a": 1000.0, "b": 1200.0},
+            _distribution(task_ids),
+            _materialized_rows(task_ids),
+            self._runner({0, 1, 2, 3}, dispatched_stages=dispatched_stages),
+            resume=resume,
+        )
+
+        assert set(dispatched_stages) == {0, 1}
+        assert len(summaries) == 2
+        assert summaries[0]["partial"] is True
+        assert summaries[0]["success_fraction"] == pytest.approx(0.6)
+        assert summaries[0]["num_omitted"] == 4
+        assert len([row for row in results if row["stage_index"] == 1]) == 10
+        assert [index for index, _ in resume.completed] == [0, 1]
+        outcome = resume.completed[0][1]
+        assert outcome["status"] == "partial_complete"
+        assert len(outcome["included_keys"]) == 6
+        assert len(outcome["omitted_keys"]) == 4
+        assert outcome["per_reference"]["a"]["success_fraction"] == pytest.approx(0.6)
+        assert outcome["per_reference"]["b"]["success_fraction"] == pytest.approx(0.6)
+
+    @pytest.mark.parametrize(
+        ("failure_class", "no_persist"),
+        [("transient", False), ("timeout_exceeded", True)],
+    )
+    async def test_policy_rejects_non_timeout_or_unpersisted_omissions(
+        self, failure_class: str, no_persist: bool
+    ) -> None:
+        task_ids = [f"t{i}" for i in range(10)]
+        resume = self._balanced_resume(task_ids)
+        dispatched_stages: List[int] = []
+
+        _, summaries = await run_multistage_stages(
+            self._config(enabled=True),
+            {"a": 1000.0, "b": 1200.0},
+            _distribution(task_ids),
+            _materialized_rows(task_ids),
+            self._runner(
+                {0, 1, 2, 3},
+                failure_class=failure_class,
+                no_persist=no_persist,
+                dispatched_stages=dispatched_stages,
+            ),
+            resume=resume,
+        )
+
+        assert set(dispatched_stages) == {0}
+        assert len(summaries) == 1
+        assert resume.completed == []
+
+    async def test_policy_rejects_missing_elo_fit(self) -> None:
+        task_ids = [f"t{i}" for i in range(10)]
+        resume = self._balanced_resume(task_ids)
+
+        _, summaries = await run_multistage_stages(
+            self._config(enabled=True),
+            {"a": 1000.0, "b": 1200.0},
+            _distribution(task_ids),
+            _materialized_rows(task_ids),
+            self._runner({0, 1, 2, 3}, empty_successes=True),
+            resume=resume,
+        )
+
+        assert summaries[0]["eval_elo"] is None
+        assert len(summaries) == 1
+        assert resume.completed == []
+
+    async def test_policy_rejects_one_success_row_without_battle_evidence(self) -> None:
+        task_ids = [f"t{i}" for i in range(10)]
+        resume = self._balanced_resume(task_ids)
+        successful_run = _fake_run_rollouts_factory(target_elo=1100.0)
+
+        async def one_empty_battle(rows_in: List[Dict[str, Any]]):
+            pairs = await successful_run(rows_in)
+            if rows_in and rows_in[0]["stage_index"] == 0:
+                row, result = pairs[0]
+                pairs[0] = (row, {**result, "per_reference": {}})
+            return pairs
+
+        _, summaries = await run_multistage_stages(
+            self._config(enabled=True, min_success_fraction=0.8),
+            {"a": 1000.0, "b": 1200.0},
+            _distribution(task_ids),
+            _materialized_rows(task_ids),
+            one_empty_battle,
+            resume=resume,
+        )
+
+        assert len(summaries) == 1
+        assert resume.completed == []
+
+    async def test_policy_requires_evidence_for_every_selected_reference(self) -> None:
+        task_ids = [f"t{i}" for i in range(10)]
+        resume = RecordingResume(
+            plans={
+                0: {
+                    "stage_index": 0,
+                    "status": "planned",
+                    "reference_ids": ["a", "b"],
+                    "task_ids": task_ids,
+                    "task_reference_ids": {task_id: "a" for task_id in task_ids},
+                    "seed": None,
+                    "prior_eval_elo": None,
+                }
+            }
+        )
+
+        _, summaries = await run_multistage_stages(
+            self._config(enabled=True),
+            {"a": 1000.0, "b": 1200.0},
+            _distribution(task_ids),
+            _materialized_rows(task_ids),
+            _fake_run_rollouts_factory(target_elo=1100.0),
+            resume=resume,
+        )
+
+        assert len(summaries) == 1
+        assert resume.completed == []
+
+    async def test_policy_rejects_inadequate_per_reference_coverage(self) -> None:
+        task_ids = [f"t{i}" for i in range(10)]
+        resume = self._balanced_resume(task_ids)
+
+        _, summaries = await run_multistage_stages(
+            self._config(enabled=True),
+            {"a": 1000.0, "b": 1200.0},
+            _distribution(task_ids),
+            _materialized_rows(task_ids),
+            self._runner({0, 2, 4, 6}),
+            resume=resume,
+        )
+
+        assert summaries[0]["eval_elo"] is not None
+        assert len(summaries) == 1
+        assert resume.completed == []
+
+    @pytest.mark.parametrize(
+        ("min_success_fraction", "min_per_reference_success_fraction", "min_successful_rows_per_reference"),
+        [
+            (0.8, 0.5, 1),
+            (0.6, 0.5, 4),
+        ],
+        ids=["overall-fraction", "minimum-rows-per-reference"],
+    )
+    async def test_policy_enforces_independent_coverage_floors(
+        self,
+        min_success_fraction: float,
+        min_per_reference_success_fraction: float,
+        min_successful_rows_per_reference: int,
+    ) -> None:
+        task_ids = [f"t{i}" for i in range(10)]
+        resume = self._balanced_resume(task_ids)
+        cfg = self._config(
+            enabled=True,
+            min_success_fraction=min_success_fraction,
+            min_per_reference_success_fraction=min_per_reference_success_fraction,
+            min_successful_rows_per_reference=min_successful_rows_per_reference,
+        )
+
+        _, summaries = await run_multistage_stages(
+            cfg,
+            {"a": 1000.0, "b": 1200.0},
+            _distribution(task_ids),
+            _materialized_rows(task_ids),
+            self._runner({0, 1, 2, 3}),
+            resume=resume,
+        )
+
+        assert len(summaries) == 1
+        assert resume.completed == []
+
+    async def test_policy_separates_existing_terminal_and_new_timeout_omissions(self) -> None:
+        task_ids = [f"t{i}" for i in range(10)]
+        resume = self._balanced_resume(task_ids)
+        successful_run = _fake_run_rollouts_factory(target_elo=1100.0)
+
+        async def mixed_failures(rows_in: List[Dict[str, Any]]):
+            pairs = await successful_run(rows_in)
+            if not rows_in or rows_in[0]["stage_index"] != 0:
+                return pairs
+            rewritten = []
+            for row, result in pairs:
+                task_index = row[TASK_INDEX_KEY_NAME]
+                if task_index == 0:
+                    rewritten.append((row, {NG_FAILURE_CLASS_KEY: "skipped", NG_TERMINAL_KEY: True}))
+                elif task_index in {1, 2, 3}:
+                    rewritten.append((row, {NG_FAILURE_CLASS_KEY: "timeout_exceeded"}))
+                else:
+                    rewritten.append((row, result))
+            return rewritten
+
+        _, summaries = await run_multistage_stages(
+            self._config(enabled=True),
+            {"a": 1000.0, "b": 1200.0},
+            _distribution(task_ids),
+            _materialized_rows(task_ids),
+            mixed_failures,
+            resume=resume,
+        )
+
+        assert len(summaries) == 2
+        outcome = resume.completed[0][1]
+        assert outcome["status"] == "partial_complete"
+        assert outcome["accepted_unresolved_keys"] == [[1, 0], [2, 0], [3, 0]]
+        assert outcome["already_resolved_omitted_keys"] == [[0, 0]]
+
+    async def test_enabled_policy_is_a_coverage_floor_for_terminal_omissions(self) -> None:
+        task_ids = [f"t{i}" for i in range(10)]
+        resume = self._balanced_resume(task_ids)
+
+        _, summaries = await run_multistage_stages(
+            self._config(
+                enabled=True,
+                min_success_fraction=0.9,
+                min_per_reference_success_fraction=0.5,
+            ),
+            {"a": 1000.0, "b": 1200.0},
+            _distribution(task_ids),
+            _materialized_rows(task_ids),
+            self._runner({0, 1}, failure_class="skipped", terminal=True),
+            resume=resume,
+        )
+
+        assert len(summaries) == 1
+        assert resume.completed == []
+
+    async def test_policy_rejects_undispatched_row(self) -> None:
+        task_ids = [f"t{i}" for i in range(10)]
+        resume = self._balanced_resume(task_ids)
+        successful_run = _fake_run_rollouts_factory(target_elo=1100.0)
+
+        async def omit_one_result(rows_in: List[Dict[str, Any]]):
+            pairs = await successful_run(rows_in)
+            if rows_in and rows_in[0]["stage_index"] == 0:
+                return pairs[:-1]
+            return pairs
+
+        _, summaries = await run_multistage_stages(
+            self._config(enabled=True),
+            {"a": 1000.0, "b": 1200.0},
+            _distribution(task_ids),
+            _materialized_rows(task_ids),
+            omit_one_result,
+            resume=resume,
+        )
+
+        assert len(summaries) == 1
+        assert resume.completed == []
+
+    async def test_direct_final_stage_policy_is_rejected(self) -> None:
+        task_ids = ["t0"]
+        cfg = self._config(enabled=True)
+        cfg.stages[-1].partial_completion = cfg.stages[0].partial_completion
+
+        with pytest.raises(ValueError, match="non-final calibration stages"):
+            await run_multistage_stages(
+                cfg,
+                {"a": 1000.0},
+                _distribution(task_ids),
+                _materialized_rows(task_ids),
+                _fake_run_rollouts_factory(),
+            )
+
+    async def test_invalid_directly_constructed_policy_is_rejected(self) -> None:
+        task_ids = ["t0"]
+        cfg = self._config(enabled=True)
+        assert cfg.stages[0].partial_completion is not None
+        cfg.stages[0].partial_completion.min_success_fraction = 1.1
+
+        with pytest.raises(ValueError, match="min_success_fraction"):
+            await run_multistage_stages(
+                cfg,
+                {"a": 1000.0},
+                _distribution(task_ids),
+                _materialized_rows(task_ids),
+                _fake_run_rollouts_factory(),
+            )
+
+    async def test_cached_partial_snapshot_with_invalid_evidence_is_not_reused(self) -> None:
+        task_ids = [f"t{i}" for i in range(10)]
+        cfg = self._config(enabled=True)
+        initial_resume = self._balanced_resume(task_ids)
+        results, _ = await run_multistage_stages(
+            cfg,
+            {"a": 1000.0, "b": 1200.0},
+            _distribution(task_ids),
+            _materialized_rows(task_ids),
+            self._runner({0, 1, 2, 3}),
+            resume=initial_resume,
+        )
+        stage0_rows = [row for row in results if row["stage_index"] == 0]
+        corrupted_rows = [dict(row, per_reference={}) for row in stage0_rows]
+        outcome = initial_resume.completed[0][1]
+        all_stage0_keys = {(index, 0) for index in range(10)}
+        resumed = RecordingResume(
+            plans={0: initial_resume.plans[0]},
+            outcomes={0: outcome},
+            rows_by_stage={0: corrupted_rows},
+            gated_keys={0: all_stage0_keys},
+        )
+        dispatched_stages: List[int] = []
+
+        with pytest.raises(RuntimeError, match="cached partial stage 0 snapshot is invalid"):
+            await run_multistage_stages(
+                cfg,
+                {"a": 1000.0, "b": 1200.0},
+                _distribution(task_ids),
+                _materialized_rows(task_ids),
+                self._runner(set(), dispatched_stages=dispatched_stages),
+                resume=resumed,
+            )
+
+        assert dispatched_stages == []
+        assert resumed.completed == []
+
+    async def test_cached_partial_snapshot_rejects_changed_valid_evidence(self) -> None:
+        task_ids = [f"t{i}" for i in range(10)]
+        cfg = self._config(enabled=True)
+        initial_resume = self._balanced_resume(task_ids)
+        results, _ = await run_multistage_stages(
+            cfg,
+            {"a": 1000.0, "b": 1200.0},
+            _distribution(task_ids),
+            _materialized_rows(task_ids),
+            self._runner({0, 1, 2, 3}),
+            resume=initial_resume,
+        )
+        stage0_rows = [deepcopy(row) for row in results if row["stage_index"] == 0]
+        reference_id = next(iter(stage0_rows[0]["per_reference"]))
+        counts = stage0_rows[0]["per_reference"][reference_id]
+        counts["wins"] += 1
+        resumed = RecordingResume(
+            plans={0: initial_resume.plans[0]},
+            outcomes={0: initial_resume.completed[0][1]},
+            rows_by_stage={0: stage0_rows},
+            gated_keys={0: {(index, 0) for index in range(10)}},
+        )
+        dispatched_stages: List[int] = []
+
+        with pytest.raises(RuntimeError, match="cached partial stage 0 snapshot is invalid"):
+            await run_multistage_stages(
+                cfg,
+                {"a": 1000.0, "b": 1200.0},
+                _distribution(task_ids),
+                _materialized_rows(task_ids),
+                self._runner(set(), dispatched_stages=dispatched_stages),
+                resume=resumed,
+            )
+
+        assert dispatched_stages == []
+
+    async def test_changed_policy_does_not_reuse_frozen_partial_outcome(self) -> None:
+        task_ids = [f"t{i}" for i in range(10)]
+        initial_cfg = self._config(enabled=True)
+        initial_resume = self._balanced_resume(task_ids)
+        results, _ = await run_multistage_stages(
+            initial_cfg,
+            {"a": 1000.0, "b": 1200.0},
+            _distribution(task_ids),
+            _materialized_rows(task_ids),
+            self._runner({0, 1, 2, 3}),
+            resume=initial_resume,
+        )
+        outcome = initial_resume.completed[0][1]
+        stage0_rows = [row for row in results if row["stage_index"] == 0]
+        resumed = RecordingResume(
+            plans={0: initial_resume.plans[0]},
+            outcomes={0: outcome},
+            rows_by_stage={0: stage0_rows},
+            gated_keys={0: {(index, 0) for index in range(10)}},
+        )
+
+        with pytest.raises(RuntimeError, match="cached partial stage 0 snapshot is invalid"):
+            await run_multistage_stages(
+                self._config(enabled=True, min_success_fraction=0.5),
+                {"a": 1000.0, "b": 1200.0},
+                _distribution(task_ids),
+                _materialized_rows(task_ids),
+                self._runner(set()),
+                resume=resumed,
+            )
+
+    async def test_file_resume_freezes_partial_rows_and_ignores_late_success(self, tmp_path: Path) -> None:
+        task_ids = [f"t{i}" for i in range(5)]
+        rows = _materialized_rows(task_ids)
+        cfg = MultiStageRunConfig(
+            enabled=True,
+            stages=parse_multistage_config(
+                {
+                    "enabled": True,
+                    "stages": [
+                        {
+                            "num_tasks": 5,
+                            "partial_completion": {
+                                "min_success_fraction": 0.8,
+                                "min_per_reference_success_fraction": 0.8,
+                            },
+                        },
+                        {"num_tasks": 5, "num_models": 1},
+                    ],
+                }
+            ).stages,
+            seed=0,
+        )
+        reference_elos = {"a": 1000.0}
+        distribution = _distribution(task_ids)
+        output = tmp_path / "rollouts.jsonl"
+        journal = journal_path_for(output)
+        fingerprint = compute_fingerprint(cfg, reference_elos, distribution)
+
+        first_resume = build_file_resume(output, journal, fingerprint)
+        _, first_summaries = await run_multistage_stages(
+            cfg,
+            reference_elos,
+            distribution,
+            rows,
+            self._runner({4}),
+            resume=first_resume,
+        )
+        plans, outcomes, _ = read_journal(journal)
+        assert outcomes[0]["status"] == "partial_complete"
+        assert first_summaries[0]["num_omitted"] == 1
+        original_stage0_elo = first_summaries[0]["eval_elo"]
+        original_stage1_plan = deepcopy(plans[1])
+
+        omitted_key = tuple(outcomes[0]["omitted_keys"][0])
+        late_base = next(row for row in rows if (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]) == omitted_key)
+        route_stage_rows(
+            output,
+            [
+                {
+                    TASK_INDEX_KEY_NAME: omitted_key[0],
+                    ROLLOUT_INDEX_KEY_NAME: omitted_key[1],
+                    AGENT_REF_KEY_NAME: late_base[AGENT_REF_KEY_NAME],
+                    "stage_index": 0,
+                    "task_id": late_base["task_id"],
+                    "per_reference": {"a": {"wins": 1, "losses": 0, "ties": 0, "reference_elo": 1000.0}},
+                }
+            ],
+        )
+
+        resumed = build_file_resume(output, journal, fingerprint)
+
+        async def no_dispatch(rows_in: List[Dict[str, Any]]):
+            pytest.fail(f"completed partial run unexpectedly dispatched {len(rows_in)} row(s)")
+
+        resumed_results, resumed_summaries = await run_multistage_stages(
+            cfg,
+            reference_elos,
+            distribution,
+            rows,
+            no_dispatch,
+            resume=resumed,
+        )
+
+        resumed_stage0 = [row for row in resumed_results if row["stage_index"] == 0]
+        assert len(resumed_stage0) == 4
+        assert omitted_key not in {(row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]) for row in resumed_stage0}
+        assert resumed_summaries[0]["partial"] is True
+        assert resumed_summaries[0]["num_rollouts"] == 5
+        assert resumed_summaries[0]["num_successful"] == 4
+        assert resumed_summaries[0]["eval_elo"] == pytest.approx(original_stage0_elo)
+        assert resumed.plans[1] == original_stage1_plan
+
+
 class TestFingerprint:
     def test_stable_and_config_sensitive(self) -> None:
         dist = _distribution(["t0", "t1", "t2"])
@@ -1121,6 +2197,35 @@ class TestFingerprint:
             "g1": {"percentage": 0.1, "task_ids": ["t2", "t3"]},
         }
         assert compute_fingerprint(cfg, REF_ELOS, dist_a) != compute_fingerprint(cfg, REF_ELOS, dist_b)
+
+    def test_partial_completion_policy_preserves_rollout_cache_fingerprint(self) -> None:
+        dist = _distribution(["t0", "t1"])
+        strict = parse_multistage_config(
+            {"enabled": True, "stages": [{"num_tasks": 1}, {"num_tasks": 2, "num_models": 1}]}
+        )
+        partial = parse_multistage_config(
+            {
+                "enabled": True,
+                "stages": [
+                    {
+                        "num_tasks": 1,
+                        "partial_completion": {
+                            "min_success_fraction": 0.9,
+                            "min_per_reference_success_fraction": 0.5,
+                        },
+                    },
+                    {"num_tasks": 2, "num_models": 1},
+                ],
+            }
+        )
+        changed_threshold = deepcopy(partial)
+        assert changed_threshold.stages[0].partial_completion is not None
+        changed_threshold.stages[0].partial_completion.min_success_fraction = 0.8
+
+        strict_fingerprint = compute_fingerprint(strict, REF_ELOS, dist)
+        partial_fingerprint = compute_fingerprint(partial, REF_ELOS, dist)
+        assert partial_fingerprint == strict_fingerprint
+        assert compute_fingerprint(changed_threshold, REF_ELOS, dist) == partial_fingerprint
 
     def test_materialized_rows_and_result_affecting_run_config_invalidate(self) -> None:
         cfg = _two_stage_cfg()
@@ -1676,6 +2781,77 @@ class TestFailureRouting:
         all_results, _ = await run_multistage_stages(cfg, REF_ELOS, _distribution(task_ids), rows, mixed_run)
         assert all(NG_FAILURE_CLASS_KEY not in r for r in all_results)
         assert all(not r.get(NG_NO_PERSIST_KEY) for r in all_results)
+
+    async def test_runtime_stale_stage_prunes_file_backed_downstream(self, tmp_path: Path) -> None:
+        task_ids = ["t0", "t1", "t2"]
+        rows = _materialized_rows(task_ids)
+        cfg = MultiStageRunConfig(
+            enabled=True,
+            stages=parse_multistage_config({"enabled": True, "stages": ["3", "3:2"]}).stages,
+            seed=0,
+        )
+        distribution = _distribution(task_ids)
+        output = tmp_path / "rollouts.jsonl"
+        journal = journal_path_for(output)
+        fingerprint = compute_fingerprint(cfg, REF_ELOS, distribution)
+        successful_run = _fake_run_rollouts_factory()
+
+        await run_multistage_stages(
+            cfg,
+            REF_ELOS,
+            distribution,
+            rows,
+            successful_run,
+            resume=build_file_resume(output, journal, fingerprint),
+        )
+        persisted = [json.loads(line) for line in output.read_text().splitlines()]
+        missing = next(row for row in persisted if row["stage_index"] == 0)
+        missing_key = (missing[TASK_INDEX_KEY_NAME], missing[ROLLOUT_INDEX_KEY_NAME])
+        output.write_text(
+            "".join(
+                json.dumps(row) + "\n"
+                for row in persisted
+                if (row["stage_index"], row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]) != (0, *missing_key)
+            )
+        )
+        aggregate_path = aggregate_metrics_path_for(output)
+        aggregate_path.write_text("stale")
+
+        resume = build_file_resume(output, journal, fingerprint)
+        assert set(resume.outcomes) == {0, 1}
+        dispatched: List[Tuple[int, Tuple[int, int]]] = []
+
+        async def fresh_retry(rows_in: List[Dict[str, Any]]):
+            dispatched.extend(
+                (
+                    row["stage_index"],
+                    (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]),
+                )
+                for row in rows_in
+            )
+            pairs = await successful_run(rows_in)
+            return [(row, {**result, "fresh_retry": True}) for row, result in pairs]
+
+        await run_multistage_stages(
+            cfg,
+            REF_ELOS,
+            distribution,
+            rows,
+            fresh_retry,
+            resume=resume,
+        )
+
+        assert [key for stage, key in dispatched if stage == 0] == [missing_key]
+        assert len([key for stage, key in dispatched if stage == 1]) == 3
+        assert not aggregate_path.exists()
+        final_rows = [json.loads(line) for line in output.read_text().splitlines()]
+        assert len([row for row in final_rows if row["stage_index"] == 1]) == 3
+        assert all(row["fresh_retry"] is True for row in final_rows if row["stage_index"] == 1)
+        assert any(
+            json.loads(line).get("status") == "restart_from_stage" and json.loads(line)["stage_index"] == 0
+            for line in journal.read_text().splitlines()
+        )
+        assert set(read_journal(journal)[1]) == {0, 1}
 
     async def test_file_backed_resume_end_to_end(self, tmp_path: Path) -> None:
         task_ids = [f"t{i}" for i in range(10)]
