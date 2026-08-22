@@ -36,7 +36,7 @@ def make_server(tmp_path: Path, **overrides) -> VibenchResourcesServer:
         name="vibench_resources_server",
         vibench_repo_root=str(tmp_path),
         build_image="vibench-base:latest",
-        sandbox_provider="docker",
+        sandbox_provider="sandbox",
         sandbox_config={},
         **overrides,
     )

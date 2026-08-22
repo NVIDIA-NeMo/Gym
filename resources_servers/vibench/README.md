@@ -64,9 +64,15 @@ reference-implementation starting tree that the public ViBench repo does not shi
 
 ## Run
 
+The second `--config` is required: `sandbox_provider: sandbox` is a reference that the
+provider config binds, so without it startup fails with *"Sandbox provider reference
+'sandbox' is not defined in the merged config"*. Swap that one path to move to another
+provider (OpenSandbox, Fargate, Enroot) without editing this config.
+
 ```bash
 gym env start \
     --config resources_servers/vibench/configs/vibench.yaml \
+    --config nemo_gym/sandbox/providers/docker/configs/docker.yaml \
     --model-type openai_model
 
 gym eval run --no-serve \

@@ -30,7 +30,7 @@ vibench_resources_server:
       max_concurrent_test_plans: 2
       keep_evaluation_artifacts: false
 
-      sandbox_provider: docker
+      sandbox_provider: sandbox
       sandbox_config:
         ttl_s: 14400
         ready_timeout_s: 600
@@ -76,7 +76,7 @@ vibench_opencode_agent:
 
       # The agent attaches to the resources server's sandbox, so these only cover the
       # fallback path where it has to create one itself.
-      sandbox_provider: docker
+      sandbox_provider: sandbox
       sandbox_config:
         ttl_s: 14400
         ready_timeout_s: 600
