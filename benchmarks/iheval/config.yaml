@@ -1,0 +1,22 @@
+config_paths:
+  - resources_servers/iheval/configs/iheval.yaml
+
+# Gym-native IHEval benchmark. Inherits the resources server + model wiring from
+# iheval_simple_agent (see resources_servers/iheval/configs/iheval.yaml) and
+# points it at the Responses-shaped whole-dataset JSONL built by prepare.py.
+# No prompt_config: rows already carry a fully-built responses_create_params.input.
+iheval_benchmark_simple_agent:
+  _inherit_from: iheval_simple_agent
+  responses_api_agents:
+    simple_agent:
+      datasets:
+      - name: iheval
+        type: benchmark
+        jsonl_fpath: benchmarks/iheval/data/iheval_benchmark.jsonl
+        prepare_script: benchmarks/iheval/prepare.py
+        # Rows already carry a fully-built responses_create_params.input, so no
+        # prompt template is applied. The key is required by BenchmarkDatasetConfig
+        # (Optional[Path] = value may be null, but the key must be present); null
+        # keeps the pre-built input untouched (see train_data_utils collate path).
+        prompt_config: null
+        license: Apache 2.0

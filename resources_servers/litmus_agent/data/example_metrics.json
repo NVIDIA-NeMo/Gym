@@ -1,0 +1,78 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/litmus_agent/data/example.jsonl",
+    "num_repeats": 1,
+    "source": null,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": null,
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 5,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 23.4,
+        "Min": 19.0,
+        "Max": 29.0,
+        "Standard deviation": 4.04
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "expected_answer": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "answer_type": {
+        "unique_count": 3,
+        "total_count": 4
+    },
+    "answer_format": {
+        "unique_count": 4,
+        "total_count": 4
+    },
+    "method": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "property": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "chembl_id": {
+        "unique_count": 4,
+        "total_count": 5
+    },
+    "smiles": {
+        "unique_count": 4,
+        "total_count": 5
+    },
+    "property_type": {
+        "unique_count": 1,
+        "total_count": 1
+    },
+    "use_box_format": {
+        "Total # non-null values": 1,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    }
+}

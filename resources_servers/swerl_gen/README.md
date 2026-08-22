@@ -191,9 +191,11 @@ Rollout example
 }
 ```
 
+> Empty `*_tokens_per_turn` arrays are placeholders, not zero-token turns. See the
+> [trajectory capability matrix](https://docs.nvidia.com/nemo/gym/main/reference/trajectory-capabilities).
+
 ### Implementation notes
 - The server extracts the last assistant message's text from the Responses output.
 
 ## Licensing information
 Code: Apache 2.0
-

@@ -81,6 +81,7 @@ hermes_agent:
       model_server:
         type: responses_api_models
         name: policy_model
+      model: served-model-name
       enabled_toolsets: [terminal, file, code_execution]
       max_turns: 30
       concurrency: 32
@@ -93,6 +94,7 @@ hermes_agent:
 |-------|---------|-------------|
 | `enabled_toolsets` | `null` (all) | forwarded to `AIAgent(enabled_toolsets=...)` |
 | `disabled_toolsets` | `null` | forwarded to `AIAgent(disabled_toolsets=...)` |
+| `model` | `null` | served model id; defaults to `model_server.name` for backward compatibility |
 | `max_turns` | `30` | maps to `AIAgent.max_iterations` |
 | `concurrency` | `32` | max simultaneous `run()` calls |
 | `temperature` | `1.0` | sampling temperature passed to `AIAgent` |

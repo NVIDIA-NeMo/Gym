@@ -1,0 +1,26 @@
+# Generic local-vLLM profile for base, pretraining, and midtraining checkpoints.
+# The request content must already include any benchmark-specific assistant prefill.
+policy_model:
+  responses_api_models:
+    local_vllm_model:
+      entrypoint: app.py
+      model: ${policy_model_name}
+      return_token_id_information: false
+      uses_reasoning_parser: false
+      uses_interleaved_reasoning: false
+      sequential_reasoning_allowed: false
+      replace_developer_role_with_system: false
+      # Route the already-rendered RULER prompt to vLLM without chat templating.
+      use_completions_api: true
+      render_chat_template: false
+      chat_template_kwargs: null
+      hf_home: null
+      debug: false
+      show_vllm_engine_stats: true
+      vllm_serve_env_vars: {}
+      vllm_serve_kwargs:
+        data_parallel_size: 1
+        tensor_parallel_size: 1
+        pipeline_parallel_size: 1
+        trust_remote_code: true
+        gpu_memory_utilization: 0.9

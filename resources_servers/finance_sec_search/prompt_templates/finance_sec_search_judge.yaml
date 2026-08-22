@@ -1,7 +1,13 @@
 # Finance Agent Judge Prompt Template
 #
-# 3-point scale: [[0]] wrong, [[1]] partial, [[2]] fully correct.
-# Only [[2]] receives reward 1.0 during training.
+# 3-point scale: [[0]] wrong / ungrounded, [[1]] partial, [[2]] fully correct.
+# reward_mode 'binary' scores only [[2]] as 1.0; 'scaled' also gives [[1]] 0.5.
+#
+# Grounding requirement: the candidate must show evidence of having retrieved the
+# relevant SEC filing. Answers that only restate general financial concepts without
+# filing-specific figures, dates, or disclosures are rated [[0]] regardless of
+# conceptual correctness. Removing this rule lets a model score well from parametric
+# knowledge alone, without using the retrieval tools.
 #
 # Placeholders: {question}, {expected_answer}, {generated_answer}
 #
@@ -9,7 +15,7 @@
 # judge_prompt_template as an inline string (inline takes priority over file).
 
 judge_prompt_template: |-
-  You are a meticulous financial analyst grader evaluating answers to questions about SEC filings (10-K, 10-Q). Compare a candidate answer to a GOLD reference and rate the response strictly.
+  You are a meticulous financial analyst grader evaluating answers to questions about SEC filings. The most common filing types are 10-K and 10-Q, but questions may also be answered from 8-K, DEF 14A (proxy), S-1, 20-F, 6-K, and other EDGAR filings — accept whichever filing type is actually relevant to the question. Compare a candidate answer to a GOLD reference and rate the response strictly.
 
   Questions may involve:
   - Specific line items from financial statements
@@ -19,13 +25,16 @@ judge_prompt_template: |-
 
   Grading priorities (in order):
 
-  1) Factual equivalence to GOLD (accept algebraically/formally equivalent formulations for financial ratios and calculations).
+  1) Grounding — the candidate must demonstrate evidence of having consulted the actual SEC filing required by the question (whichever form type is relevant — 10-K, 10-Q, 8-K, proxy, S-1, 20-F, etc.). The agent has tools to search SEC EDGAR, download and parse filings, and retrieve information from them; a correct answer should look like the output of that workflow. Ask yourself: "Could this answer have been written without opening any SEC filing, using only general finance textbook knowledge?" If yes, the candidate did not consult the filing and must receive [[0]]. Signs that the filing was consulted include: specific dollar amounts and figures from the filing, period or filing dates (e.g., "Q1 FY2025", "as of December 31, 2024"), named line items from the financial statements, specific disclosure language, named note series (e.g., "4.75% notes due June 2023"), named individuals from proxy filings, or explicit source references. An answer that is conceptually correct but contains only general financial principles — with no filing-specific numbers, dates, or disclosures — is ungrounded.
 
-  2) Completeness on required parts — the candidate must include the same core parts/subclaims as the GOLD.
+  2) Factual equivalence to GOLD (accept algebraically/formally equivalent formulations for financial ratios and calculations).
+
+  3) Completeness on required parts — the candidate must include the same core parts/subclaims as the GOLD.
 
   Rules:
 
   - Treat GOLD as authoritative for what counts as correct.
+  - Ungrounded answers (generic textbook explanations without filing-specific evidence) always receive [[0]], even when they restate the correct concepts. Conceptual overlap is not sufficient — the agent was given tools to retrieve real filings and was expected to use them.
   - If GOLD is a range or set, the candidate is equivalent only if it lies within that range or is a member of that set.
   - For financial ratios/calculations, accept mathematically identical transformations (e.g., 0.5 = 50% = 1:2).
   - For numerical values, allow strict rounding differences:
@@ -41,11 +50,12 @@ judge_prompt_template: |-
 
   After your explanation, you must rate the response on a scale of 0 to 2 by strictly following this format: [[rating]], for example: The rating is: [[1]], or: My rating is [[0]].
 
-  You should provide a 0 rating when the answer does not match the reference or is factually wrong.
-  You should provide a 1 rating when the answer is partially correct (correct number but missing explanation, or close but not exact).
-  You should provide a 2 rating when the answer is fully correct and complete.
+  Rating criteria:
+  - [[0]] when the answer does not match the reference, is factually wrong, or is ungrounded (general financial knowledge without filing-specific figures, dates, or disclosures).
+  - [[1]] when the answer is grounded in the filing AND partially correct (correct number but missing explanation, or close but not exact).
+  - [[2]] when the answer is grounded in the filing AND fully correct and complete.
 
-  ===== Example 1 (rating 2 - fully correct) =====
+  ===== Example 1 (rating 2 - fully correct, grounded in 10-K) =====
 
   QUESTION:
 
@@ -57,17 +67,17 @@ judge_prompt_template: |-
 
   CANDIDATE:
 
-  The revenue grew by 7.79%.
+  Apple's net sales grew from $394.3B in FY2022 to $383.3B in FY2023, but adjusting for the extra 53rd week the comparable growth was 7.79% as disclosed in the 10-K.
 
-  The candidate provides the same growth rate with minor rounding difference (7.79% vs 7.8%, within ±0.1% tolerance); the meaning and numerical value are equivalent.
+  The candidate cites the specific filing figures ($394.3B, $383.3B, FY2022/FY2023) and arrives at 7.79%, matching GOLD (7.8%) within the ±0.1% tolerance. Answer is both grounded and factually correct.
 
   The rating is: [[2]]
 
-  ===== Example 2 (rating 1 - partially correct) =====
+  ===== Example 2 (rating 1 - partially correct, grounded in 10-K) =====
 
   QUESTION:
 
-  Calculate Microsoft's current ratio and explain what it indicates about the company's liquidity.
+  Calculate Microsoft's current ratio for FY2023 and explain what it indicates about the company's liquidity.
 
   GOLD:
 
@@ -75,31 +85,55 @@ judge_prompt_template: |-
 
   CANDIDATE:
 
-  Current ratio = 2.5
+  Per Microsoft's FY2023 10-K, current assets of $184.3B divided by current liabilities of $73.7B gives a current ratio of 2.5.
 
-  The candidate provides the correct numerical calculation but omits the explanation of what the ratio indicates about liquidity; one core part is missing, so partial credit.
+  The candidate is grounded in the filing (cites specific current assets and current liabilities figures from the FY2023 10-K) and the numerical calculation is correct, but the explanation of what the ratio indicates about liquidity is missing.
 
   The rating is: [[1]]
 
-  ===== Example 3 (rating 0 - incorrect) =====
+  ===== Example 3 (rating 0 - incorrect number, grounded in an 8-K) =====
 
   QUESTION:
 
-  What was the company's ROE for 2023?
+  By how many basis points did ADI beat or miss its Q1 FY2025 adjusted operating margin guidance at the midpoint?
 
   GOLD:
 
-  ROE = 15.2%
+  50 bps beat
 
   CANDIDATE:
 
-  ROE = 8.5%
+  Per ADI's Q1 FY2025 earnings 8-K, the company reported adjusted operating margin of 40.5% vs. the midpoint of prior guidance (41.0%) — a 50 bps miss.
 
-  The candidate provides a significantly different value (8.5% vs 15.2%), outside the ±0.1% tolerance. This is factually incorrect.
+  The candidate is grounded (cites the Q1 FY2025 earnings 8-K and the specific 40.5% actual vs. 41.0% midpoint) but arrives at "50 bps miss" while GOLD says "50 bps beat". Directionally wrong, so factually incorrect.
 
   The rating is: [[0]]
 
-  ===== Example 4 (rating 2 - correct with reasoning) =====
+  ===== Example 4 (rating 0 - ungrounded / generic knowledge) =====
+
+  QUESTION:
+
+  How could concentration in senior notes across multiple maturities and the observed fair-value gaps increase interest-rate or refinancing risk for the company?
+
+  GOLD:
+
+  The company's debt is heavily weighted in a series of senior notes that mature at many different dates (2022-2027, 2034, etc.). Because most of those notes are recorded at amortized cost while their fair-value estimates are consistently below the carrying amounts (e.g., the 4.75% notes due June 2023 have a carrying amount of $951 million but a fair-value of $897 million), the portfolio shows a "fair-value gap" that amplifies both refinancing and interest-rate risk.
+
+  CANDIDATE:
+
+  The concentration of senior notes across multiple maturities and observed fair-value gaps can increase interest-rate and refinancing risks for a company through the following mechanisms:
+
+  1. **Refinancing Risk from Maturity Concentration**: If a company has a large portion of its senior notes maturing within a short timeframe, it faces heightened refinancing risk. This is because the company must raise capital to repay or refinance these obligations, which may be challenging if market conditions deteriorate (e.g., rising interest rates, reduced liquidity).
+
+  2. **Interest-Rate Risk from Fixed-Rate Debt**: Senior notes with fixed interest rates expose the company to interest-rate risk. If market rates rise, the fair value of these notes declines, creating gaps between their book value and market value.
+
+  3. **Fair-Value Gaps and Market Perception**: Significant fair-value gaps may signal market concerns about the company's credit quality, potentially triggering downgrades or higher borrowing costs.
+
+  The candidate restates general financial concepts (refinancing risk from maturity concentration, fair-value gaps as a market signal, fixed-rate debt exposure) and its structure could have been written by any finance textbook. It does NOT reference any filing-specific evidence: no specific maturity years (e.g., "2022-2027, 2034"), no note series or coupon rate (e.g., "4.75% notes due June 2023"), no carrying amounts ($951 million), and no fair-value figures ($897 million). There is no sign the agent consulted the underlying SEC filing. This is ungrounded textbook knowledge.
+
+  The rating is: [[0]]
+
+  ===== Example 5 (rating 2 - correct with reasoning, grounded in 10-Q) =====
 
   QUESTION:
 
@@ -113,7 +147,7 @@ judge_prompt_template: |-
 
   <think>Looking at the 10-Q filing for Q1 2023, the consolidated statements of operations show net sales of $117,154 million. Converting to billions: $117,154M / 1,000 = $117.154B, which rounds to $117.2B.</think> Apple's total revenue in Q1 2023 was $117.2 billion.
 
-  The candidate includes detailed reasoning in <think> tags showing the calculation process. The final answer $117.2 billion matches the GOLD exactly.
+  The candidate is grounded (cites the Q1 2023 10-Q and the specific net sales figure $117,154 million from the consolidated statements of operations). The final answer $117.2 billion matches GOLD exactly.
 
   The rating is: [[2]]
 
