@@ -19,7 +19,7 @@ import json
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import pytest
 
@@ -1276,6 +1276,7 @@ class TestPartialStageCompletion:
         min_success_fraction: float = 0.6,
         min_per_reference_success_fraction: float = 0.6,
         min_successful_rows_per_reference: int = 1,
+        waivable_failure_classes: Optional[Sequence[str]] = None,
     ) -> MultiStageRunConfig:
         first_stage: Dict[str, Any] = {"num_tasks": 10}
         if enabled:
@@ -1284,6 +1285,8 @@ class TestPartialStageCompletion:
                 "min_per_reference_success_fraction": min_per_reference_success_fraction,
                 "min_successful_rows_per_reference": min_successful_rows_per_reference,
             }
+            if waivable_failure_classes is not None:
+                first_stage["partial_completion"]["waivable_failure_classes"] = list(waivable_failure_classes)
         return MultiStageRunConfig(
             enabled=True,
             stages=parse_multistage_config(
@@ -1747,6 +1750,62 @@ class TestPartialStageCompletion:
         assert set(dispatched_stages) == {0}
         assert len(summaries) == 1
         assert resume.completed == []
+
+    async def test_transient_omission_advances_when_explicitly_waivable(self) -> None:
+        """A judge-failure `transient` row is waivable only when the policy says so.
+
+        This is the `dc6c776f3af506df` case: one unresolved `transient` rollout
+        (an empty-PDF 400 from the judge panel) held the whole run at stage 1
+        under the timeout-only default, costing 176 of 220 tasks.
+        """
+        task_ids = [f"t{i}" for i in range(10)]
+        resume = self._balanced_resume(task_ids)
+        dispatched_stages: List[int] = []
+
+        _, summaries = await run_multistage_stages(
+            self._config(enabled=True, waivable_failure_classes=["timeout_exceeded", "transient"]),
+            {"a": 1000.0, "b": 1200.0},
+            _distribution(task_ids),
+            _materialized_rows(task_ids),
+            self._runner(
+                {0, 1, 2, 3},
+                failure_class="transient",
+                dispatched_stages=dispatched_stages,
+            ),
+            resume=resume,
+        )
+
+        assert set(dispatched_stages) == {0, 1}
+        assert len(summaries) == 2
+        assert summaries[0]["partial"] is True
+        assert summaries[0]["num_omitted"] == 4
+        outcome = resume.completed[0][1]
+        assert outcome["status"] == "partial_complete"
+        assert outcome["policy"]["newly_waivable_failure_classes"] == ["timeout_exceeded", "transient"]
+
+    async def test_unknown_waivable_failure_class_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="waivable_failure_classes"):
+            parse_multistage_config(
+                {
+                    "enabled": True,
+                    "stages": [
+                        {"num_tasks": 10, "partial_completion": {"waivable_failure_classes": ["skipped"]}},
+                        {"num_tasks": 10},
+                    ],
+                }
+            )
+
+    async def test_empty_waivable_failure_classes_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="waivable_failure_classes"):
+            parse_multistage_config(
+                {
+                    "enabled": True,
+                    "stages": [
+                        {"num_tasks": 10, "partial_completion": {"waivable_failure_classes": []}},
+                        {"num_tasks": 10},
+                    ],
+                }
+            )
 
     async def test_policy_rejects_missing_elo_fit(self) -> None:
         task_ids = [f"t{i}" for i in range(10)]
