@@ -12,10 +12,12 @@ vibench_resources_server:
       # _harness/runner/scripts/run-seed-then-evaluate.py inside it.
       vibench_repo_root: ${oc.env:VIBENCH_REPO_ROOT}
 
-      # Image the coding agent builds in. Build it once from ViBench:
-      #   docker build -f _harness/runner/docker/Dockerfile.base -t vibench-base:latest .
-      # It must set WORKDIR to app_workdir so sandboxed agents land in the right place.
-      build_image: ${oc.env:VIBENCH_BUILD_IMAGE,vibench-base:latest}
+      # Image the coding agent builds in. This is the same base image ViBench's own
+      # pipeline builds and reuses (see build_base_image_if_needed in
+      # _harness/runner/scripts/common.py), so there is only ever one on the host:
+      #   docker build -f _harness/runner/docker/Dockerfile.base -t app-bench-base:latest .
+      # Its WORKDIR is /app, which is where sandboxed agents land.
+      build_image: ${oc.env:VIBENCH_BUILD_IMAGE,app-bench-base:latest}
       app_workdir: /app
 
       # Supplies AGENT_SEEDING_LLM_* / AGENT_EVALUATION_LLM_* for the grader agents.

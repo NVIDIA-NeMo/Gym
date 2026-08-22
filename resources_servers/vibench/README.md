@@ -32,11 +32,12 @@ Requires Docker and a ViBench checkout.
 ```bash
 git clone https://github.com/ViBench/vibench-public.git ~/vibench
 cd ~/vibench && uv sync && cp .env.template .env   # fill in the grader's provider keys
-docker build -f _harness/runner/docker/Dockerfile.base -t vibench-base:latest .
+docker build -f _harness/runner/docker/Dockerfile.base -t app-bench-base:latest .
 ```
 
-The build image must set `WORKDIR` to `app_workdir` (`/app` by default) — sandboxed agents
-land in the container's working directory.
+`app-bench-base:latest` is the tag ViBench's own pipeline builds and reuses, so the build
+sandbox and the grading stack share one base image. Its `WORKDIR` is `/app`, which is where
+sandboxed agents land; override `app_workdir` only alongside a different image.
 
 ```bash
 export VIBENCH_REPO_ROOT=~/vibench
