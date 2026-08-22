@@ -36,6 +36,8 @@ from nemo_gym.config_types import (
 )
 from nemo_gym.global_config import (
     DEFAULT_HEAD_SERVER_PORT,
+    DEFAULT_PORT_RANGE_HIGH,
+    DEFAULT_PORT_RANGE_LOW,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     USE_ABSOLUTE_IP,
     GlobalConfigDictParser,
@@ -63,10 +65,10 @@ class TestGlobalConfig:
     def _default_global_config_dict_values(self) -> dict:
         return {
             "use_absolute_ip": False,
-            "head_server": {"host": "127.0.0.1", "port": 11000},
-            "disallowed_ports": [11000],
-            "port_range_low": 10_001,
-            "port_range_high": 20_000,
+            "head_server": {"host": "127.0.0.1", "port": DEFAULT_HEAD_SERVER_PORT},
+            "disallowed_ports": [DEFAULT_HEAD_SERVER_PORT],
+            "port_range_low": DEFAULT_PORT_RANGE_LOW,
+            "port_range_high": DEFAULT_PORT_RANGE_HIGH,
             # From self._mock_versions_for_testing
             "head_server_deps": ["ray[default]==test ray version", "openai==test openai version"],
             "python_version": "test python version",
@@ -620,7 +622,7 @@ contested: second_inner
                 "a": {"responses_api_models": {"c": {"entrypoint": "app.py", "host": "127.0.0.1", "port": 12345}}},
                 "b": {"c": {"d": {}}},
                 "c": 2,
-                "disallowed_ports": [11000, 12345],
+                "disallowed_ports": [DEFAULT_HEAD_SERVER_PORT, 12345],
             }
             == global_config_dict
         )
@@ -757,7 +759,7 @@ contested: second_inner
                         }
                     }
                 },
-                "disallowed_ports": [11000, 12345, 123456],
+                "disallowed_ports": [DEFAULT_HEAD_SERVER_PORT, 12345, 123456],
             }
             == global_config_dict
         )
@@ -1197,7 +1199,7 @@ contested: second_inner
         """Test that find_open_port retries when the head server port is returned."""
         randint_mock = MagicMock()
         randint_mock.side_effect = [
-            DEFAULT_HEAD_SERVER_PORT,  # first attempt: 11000 (conflict)
+            DEFAULT_HEAD_SERVER_PORT,  # first attempt: the head server port (conflict)
             12345,  # second attempt (safe)
         ]
         monkeypatch.setattr(nemo_gym.global_config, "randint", randint_mock)
@@ -1209,7 +1211,10 @@ contested: second_inner
         monkeypatch.setattr(nemo_gym.global_config, "socket", socket_mock)
 
         get_global_config_dict_mock = MagicMock()
-        get_global_config_dict_mock.return_value = {"port_range_low": 10_001, "port_range_high": 20_000}
+        get_global_config_dict_mock.return_value = {
+            "port_range_low": DEFAULT_PORT_RANGE_LOW,
+            "port_range_high": DEFAULT_PORT_RANGE_HIGH,
+        }
         monkeypatch.setattr(nemo_gym.global_config, "get_global_config_dict", get_global_config_dict_mock)
 
         port = find_open_port(disallowed_ports=[DEFAULT_HEAD_SERVER_PORT])
@@ -1227,7 +1232,10 @@ contested: second_inner
         monkeypatch.setattr(nemo_gym.global_config, "socket", socket_mock)
 
         get_global_config_dict_mock = MagicMock()
-        get_global_config_dict_mock.return_value = {"port_range_low": 10_001, "port_range_high": 20_000}
+        get_global_config_dict_mock.return_value = {
+            "port_range_low": DEFAULT_PORT_RANGE_LOW,
+            "port_range_high": DEFAULT_PORT_RANGE_HIGH,
+        }
         monkeypatch.setattr(nemo_gym.global_config, "get_global_config_dict", get_global_config_dict_mock)
 
         with raises(RuntimeError) as exc_info:
@@ -1268,10 +1276,10 @@ contested: second_inner
         head_port = global_config_dict["head_server"]["port"]
 
         assert resource_port == 12345
-        assert head_port == 11000
+        assert head_port == DEFAULT_HEAD_SERVER_PORT
         assert resource_port != head_port
         assert "disallowed_ports" in global_config_dict
-        assert 11000 in global_config_dict["disallowed_ports"]
+        assert DEFAULT_HEAD_SERVER_PORT in global_config_dict["disallowed_ports"]
         assert 12345 in global_config_dict["disallowed_ports"]
 
     def test_almost_servers_detection_and_warning(self, monkeypatch) -> None:
@@ -1513,7 +1521,7 @@ contested: second_inner
             "test_resource_3_copy2": {
                 "responses_api_models": {"test_model": {"entrypoint": "app2.py", "host": "127.0.0.1", "port": 12345}},
             },
-            "disallowed_ports": [11000, 12345, 12345, 12345, 12345, 12345],
+            "disallowed_ports": [DEFAULT_HEAD_SERVER_PORT, 12345, 12345, 12345, 12345, 12345],
             "a": {"b": {}},
             "a_prime": {"b_prime": 3},
             "test_resource_3_copy3_delete": {
@@ -1565,7 +1573,7 @@ contested: second_inner
             "policy_model_2": {
                 "responses_api_models": {"test_model": {"entrypoint": "app2.py", "host": "127.0.0.1", "port": 12345}}
             },
-            "disallowed_ports": [11000, 12345, 12345],
+            "disallowed_ports": [DEFAULT_HEAD_SERVER_PORT, 12345, 12345],
             "a": {"b": {}},
             "a_prime": {"b_prime": 3},
         }
@@ -1603,7 +1611,7 @@ contested: second_inner
             )
         )
         expected_global_config_dict = self._default_global_config_dict_values | {
-            "disallowed_ports": [11000, 12345],
+            "disallowed_ports": [DEFAULT_HEAD_SERVER_PORT, 12345],
             "policy_model": {
                 "responses_api_models": {
                     "dummy_model": {
@@ -1655,7 +1663,7 @@ contested: second_inner
             )
         )
         expected_global_config_dict = self._default_global_config_dict_values | {
-            "disallowed_ports": [11000, 12345],
+            "disallowed_ports": [DEFAULT_HEAD_SERVER_PORT, 12345],
             "policy_model": {
                 "responses_api_models": {
                     "test_model": {
@@ -1830,7 +1838,7 @@ class TestConfigLoadErrors:
 
     def test_raise_on_no_server_instances_raises_when_empty(self) -> None:
         parser = GlobalConfigDictParser()
-        config = DictConfig({"config_paths": [], "head_server": {"port": 11000}})
+        config = DictConfig({"config_paths": [], "head_server": {"port": DEFAULT_HEAD_SERVER_PORT}})
         with raises(NoServerInstancesError) as exc_info:
             parser.raise_on_no_server_instances(config)
         assert "gym env start" in str(exc_info.value)
