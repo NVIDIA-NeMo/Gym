@@ -116,6 +116,7 @@ def test_standalone_resources_server_keeps_its_combined_composition(tmp_path: Pa
         "app.py",
         "configs/shared.yaml",
         "data/.gitignore",
+        "example.jsonl",
         "requirements.txt",
         "tests/__init__.py",
         "tests/test_app.py",

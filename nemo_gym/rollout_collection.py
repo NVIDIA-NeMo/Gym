@@ -974,7 +974,8 @@ class RolloutCollectionHelper(BaseModel):
 
             current_pct = 100 * len(results) / len(input_rows)
             if pcts_to_print and current_pct >= pcts_to_print[0]:
-                pcts_to_print.pop(0)
+                while pcts_to_print and current_pct >= pcts_to_print[0]:
+                    pcts_to_print.pop(0)
 
                 time_taken_s = time() - start_time
                 time_taken = timedelta(seconds=int(time_taken_s))
@@ -996,6 +997,16 @@ class RolloutCollectionHelper(BaseModel):
 """
                 # Use tqdm.write here so we can print properly with tqdm being used.
                 tqdm.write(print_str)
+
+                if get_exporters():
+                    step_metrics = {
+                        f"progress/{agent_name}/reward": round(
+                            100 * metrics["reward"] / agent_name_to_counts[agent_name], 2
+                        )
+                        for agent_name, metrics in agent_name_to_metrics.items()
+                    }
+
+                    export_metrics(step_metrics, step=int(current_pct))
 
         results_file.close()
         failures_file.close()

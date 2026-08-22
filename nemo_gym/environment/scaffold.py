@@ -298,13 +298,17 @@ def _asset_config(composition: _Composition) -> str:
     }
     if composition.rollout_driver:
         config["rollout_collection_driver"] = composition.rollout_driver
-    return yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
+
+    res = yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
+    res = f"\n{composition.agent_instance}".join(res.split(composition.agent_instance, maxsplit=1))
+
+    return res
 
 
 def _render_manifest_composition(root: Path, composition: _Composition) -> dict[Path, str]:
     asset = composition.asset_dir
     files = {
-        asset / "__init__.py": _license_header(),
+        asset / "__init__.py": _license_header().removesuffix("\n"),
         asset / "manifest.yaml": dump_manifest(_manifest(composition)),
         asset / "config.yaml": _asset_config(composition),
         asset / "README.md": _asset_readme(composition),
@@ -320,7 +324,7 @@ def _render_manifest_composition(root: Path, composition: _Composition) -> dict[
             }
         )
     else:
-        files[asset / "data" / "example.jsonl"] = _environment_example(composition.agent_instance)
+        files[asset / "data" / "example.jsonl"] = _environment_example()
 
     if composition.reused_verifier is None:
         resource_dir = root / "resources_servers" / composition.module_name
@@ -362,7 +366,7 @@ def _asset_readme(composition: _Composition) -> str:
     )
 
 
-def _environment_example(agent_instance: str) -> str:
+def _environment_example() -> str:
     return (
         json.dumps(
             {
@@ -370,7 +374,6 @@ def _environment_example(agent_instance: str) -> str:
                     "input": [{"role": "user", "content": "What is 6 x 7? Reply with only the answer."}]
                 },
                 "expected_answer": "42",
-                "agent_ref": {"type": "responses_api_agents", "name": agent_instance},
             }
         )
         + "\n"
@@ -437,14 +440,15 @@ def _resource_component_files(
     requirements: str,
 ) -> dict[Path, str]:
     return {
-        directory / "__init__.py": _license_header(),
+        directory / "__init__.py": _license_header().removesuffix("\n"),
         directory / "README.md": readme,
         directory / "app.py": _resources_server_app(module_name),
         directory / "configs" / f"{module_name}.yaml": config,
         directory / "requirements.txt": requirements,
-        directory / "tests" / "__init__.py": _license_header(),
+        directory / "tests" / "__init__.py": _license_header().removesuffix("\n"),
         directory / "tests" / "test_app.py": _resources_server_test(),
         directory / "tests" / "verifier_cases.jsonl": _verifier_cases(),
+        directory / "example.jsonl": _environment_example(),
     }
 
 
@@ -676,7 +680,7 @@ def _agent_files(root: Path, directory: Path, composition: _Composition) -> dict
             " Replace run() with external episode delegation, then make responses() raise NotImplementedError."
         )
     return {
-        directory / "__init__.py": _license_header(),
+        directory / "__init__.py": _license_header().removesuffix("\n"),
         directory / "README.md": f"# {composition.agent_implementation}\n\n{instruction}\n",
         directory / "app.py": _agent_app(composition.module_name, composition.profile),
         directory / "requirements.txt": _requirements(directory, _gym_checkout_root(root)),
