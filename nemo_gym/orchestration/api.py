@@ -50,14 +50,24 @@ class BaseModelServiceConfig(BaseServiceConfig):
 
 
 class VllmServiceDistributedBackend(_StrictModel):
-    """Use vLLM's native data-parallel multi-instance (--data-parallel-size N)."""
+    """Use vLLM's native data-parallel multi-instance (--data-parallel-size N). Single node only."""
 
     type: Literal["mp"] = "mp"
 
 
-# Future backends: add Annotated[RayServeDistributedBackend, Tag("ray_serve")], etc.
+class RayDistributedBackend(_StrictModel):
+    """Use vLLM's Ray executor (--distributed-executor-backend ray) so a single vLLM service can
+    span multiple physical Slurm nodes. This does not use the ray.serve library.
+
+    Named "ray" for now; a separate "ray_serve" backend (using the actual ray.serve library) may
+    be added later.
+    """
+
+    type: Literal["ray"] = "ray"
+
+
 DistributedBackendConfig = Annotated[
-    Annotated[VllmServiceDistributedBackend, Tag("mp")],
+    Annotated[VllmServiceDistributedBackend, Tag("mp")] | Annotated[RayDistributedBackend, Tag("ray")],
     Discriminator("type"),
 ]
 
@@ -79,8 +89,8 @@ class VllmServiceConfig(BaseModelServiceConfig):
 
     @model_validator(mode="after")
     def _validate_distributed_backend(self) -> "VllmServiceConfig":
-        if self.number_of_instances == 1 and self.distributed_backend is not None:
-            raise ValueError("distributed_backend should not be set when number_of_instances == 1")
+        # distributed_backend may still be set explicitly with number_of_instances == 1 (e.g. `ray`,
+        # to span a single instance's tensor/pipeline-parallel footprint across multiple nodes).
         if self.number_of_instances > 1 and self.distributed_backend is None:
             self.distributed_backend = VllmServiceDistributedBackend()
         return self
@@ -181,6 +191,11 @@ class SubmitConfig(_StrictModel):
             raise ValueError(f"Multiple compute resources are not supported yet ({', '.join(sorted(compute_names))}).")
 
         sole_compute = next(iter(compute_names))
+        compute = self.compute[sole_compute]
+        total_nodes = (
+            sum(p.nodes for p in compute.node_pools.values()) if isinstance(compute, SlurmComputeConfig) else 1
+        )
+        is_multi_node = total_nodes > 1
 
         for service_name, service in self.services.items():
             if service.placement is None:
@@ -191,8 +206,25 @@ class SubmitConfig(_StrictModel):
                     f"({', '.join(sorted(compute_names))})."
                 )
 
+            if isinstance(service, VllmServiceConfig) and is_multi_node:
+                # Node count is authoritative: multi-node compute always needs the `ray` backend to
+                # span nodes, regardless of what (if anything) was set/defaulted at the service level.
+                service.distributed_backend = RayDistributedBackend()
+
+            if (
+                is_multi_node
+                and isinstance(service, VllmServiceConfig)
+                and service.number_of_instances > 1
+                and service.number_of_instances % total_nodes != 0
+            ):
+                raise ValueError(
+                    f"Service '{service_name}' has number_of_instances={service.number_of_instances}, which must "
+                    f"be evenly divisible by the number of nodes ({total_nodes}) for multi-node data-parallel "
+                    "deployment - each node hosts an equal share of the data-parallel replicas."
+                )
+
             if isinstance(service, VllmServiceConfig):
-                self._validate_vllm_gpu_footprint(service_name, service)
+                self._validate_vllm_gpu_footprint(service_name, service, total_nodes)
 
         if self.driver.policy_model is not None:
             if self.driver.policy_model not in self.services:
@@ -218,7 +250,7 @@ class SubmitConfig(_StrictModel):
 
         return self
 
-    def _validate_vllm_gpu_footprint(self, service_name: str, service: "VllmServiceConfig") -> None:
+    def _validate_vllm_gpu_footprint(self, service_name: str, service: "VllmServiceConfig", total_nodes: int) -> None:
         compute = self.compute[service.placement]
         if not isinstance(compute, SlurmComputeConfig):
             return
@@ -230,25 +262,53 @@ class SubmitConfig(_StrictModel):
             return
 
         max_gpus_per_node = max(gpus_per_node_values)
-        gpus_needed = service.tensor_parallel_size * service.pipeline_parallel_size * service.number_of_instances
+        tp_pp = service.tensor_parallel_size * service.pipeline_parallel_size
 
-        if gpus_needed > max_gpus_per_node:
-            raise ValueError(
-                f"Service '{service_name}' requires {gpus_needed} GPUs "
-                f"(tensor_parallel_size={service.tensor_parallel_size} x "
-                f"pipeline_parallel_size={service.pipeline_parallel_size} x "
-                f"number_of_instances={service.number_of_instances}), which exceeds the largest available "
-                f"node pool's gpus_per_node ({max_gpus_per_node}) on compute '{service.placement}'. "
-                "Multi-node vLLM services are not supported yet by the 'mp' distributed backend; "
-                "reduce number_of_instances/tensor_parallel_size/pipeline_parallel_size to fit on a single node."
+        if total_nodes > 1 and service.number_of_instances > 1:
+            # Multi-node data-parallel: each node runs its own equal share of the replicas with
+            # local tensor/pipeline parallelism (see _build_vllm_multi_node_dp_command); the
+            # per-node share, not the total footprint, has to fit in that node's GPU count.
+            instances_per_node = service.number_of_instances // total_nodes
+            gpus_needed = tp_pp * instances_per_node
+            gpus_available = max_gpus_per_node
+            footprint = (
+                f"{instances_per_node} local replica(s) per node (number_of_instances="
+                f"{service.number_of_instances} / {total_nodes} nodes) x tensor_parallel_size="
+                f"{service.tensor_parallel_size} x pipeline_parallel_size={service.pipeline_parallel_size}"
             )
-        elif gpus_needed < max_gpus_per_node:
-            warnings.warn(
-                f"Service '{service_name}' requires {gpus_needed} GPUs "
-                f"(tensor_parallel_size={service.tensor_parallel_size} x "
+            scope = f"a single node's gpus_per_node ({max_gpus_per_node})"
+        elif total_nodes > 1:
+            # Single instance's TP/PP footprint spans the whole allocation via the ray backend.
+            gpus_needed = tp_pp
+            gpus_available = sum(
+                pool.nodes * pool.gpus_per_node for pool in compute.node_pools.values() if pool.gpus_per_node
+            )
+            footprint = (
+                f"tensor_parallel_size={service.tensor_parallel_size} x "
+                f"pipeline_parallel_size={service.pipeline_parallel_size}"
+            )
+            scope = f"the total GPUs across all nodes ({gpus_available})"
+        else:
+            gpus_needed = tp_pp * service.number_of_instances
+            gpus_available = max_gpus_per_node
+            footprint = (
+                f"tensor_parallel_size={service.tensor_parallel_size} x "
                 f"pipeline_parallel_size={service.pipeline_parallel_size} x "
-                f"number_of_instances={service.number_of_instances}) but compute '{service.placement}' allocates "
-                f"nodes with {max_gpus_per_node} GPUs each, leaving {max_gpus_per_node - gpus_needed} GPU(s) idle. "
-                "Increase number_of_instances/tensor_parallel_size or reduce gpus_per_node to use the full node.",
+                f"number_of_instances={service.number_of_instances}"
+            )
+            scope = f"the node pool's gpus_per_node ({max_gpus_per_node})"
+
+        if gpus_needed > gpus_available:
+            raise ValueError(
+                f"Service '{service_name}' requires {gpus_needed} GPUs ({footprint}), which exceeds {scope} "
+                f"on compute '{service.placement}'. Reduce number_of_instances/tensor_parallel_size/"
+                "pipeline_parallel_size, or add more nodes/GPUs."
+            )
+        elif gpus_needed < gpus_available:
+            warnings.warn(
+                f"Service '{service_name}' requires {gpus_needed} GPUs ({footprint}) but compute "
+                f"'{service.placement}' provides {scope}, leaving {gpus_available - gpus_needed} GPU(s) idle. "
+                "Increase number_of_instances/tensor_parallel_size or reduce gpus_per_node to use the full "
+                "allocation.",
                 stacklevel=2,
             )
