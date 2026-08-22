@@ -783,21 +783,20 @@ class TestSigtermSalvage:
             await asyncio.Event().wait()  # hangs until the SIGTERM path cancels it
 
         async def _main():
-            loop = asyncio.get_running_loop()
-            loop.add_signal_handler = lambda sig, cb, *a: registered.__setitem__(sig, cb)  # type: ignore[method-assign]
-            loop.remove_signal_handler = lambda sig: registered.pop(sig, None)  # type: ignore[method-assign]
             task = asyncio.ensure_future(agent._run_openclaw("solve", None))
             for _ in range(100):
                 if signal.SIGTERM in registered:
                     break
                 await asyncio.sleep(0)
             assert signal.SIGTERM in registered, "SIGTERM handler was never installed"
-            registered[signal.SIGTERM]()
+            registered[signal.SIGTERM](signal.SIGTERM, None)
             return await task
 
         with (
             patch.object(agent, "_workspace_root", return_value=work_dir),
             patch.object(agent, "_run_exec", _run_exec_stub),
+            patch("signal.getsignal", return_value=signal.SIG_DFL),
+            patch("signal.signal", side_effect=lambda sig, cb: registered.__setitem__(sig, cb)),
         ):
             output, usage, _ = asyncio.run(_main())
 
@@ -820,39 +819,43 @@ class TestSigtermSalvage:
                 return 0, "", ""
             await asyncio.Event().wait()  # hangs until the SIGTERM path cancels it
 
-        registered: dict = {}
         install_calls = 0
         previous_calls = 0
 
-        def _fake_previous(sig, frame) -> None:
+        def _fake_previous() -> None:
             nonlocal previous_calls
             previous_calls += 1
 
         async def _main():
             loop = asyncio.get_running_loop()
+            loop.add_signal_handler(signal.SIGTERM, _fake_previous)
+            process_handler = signal.getsignal(signal.SIGTERM)
+            real_signal = signal.signal
 
-            def _add_signal_handler(sig, cb, *a):
+            def _install_signal(sig, handler):
                 nonlocal install_calls
                 install_calls += 1
-                registered[sig] = cb
+                return real_signal(sig, handler)
 
-            loop.add_signal_handler = _add_signal_handler  # type: ignore[method-assign]
-
-            with patch("signal.getsignal", return_value=_fake_previous):
+            try:
                 work_dirs = iter([work_dir_a, work_dir_b])
                 with (
                     patch.object(agent, "_workspace_root", side_effect=lambda: next(work_dirs)),
                     patch.object(agent, "_run_exec", _run_exec_stub),
+                    patch("signal.signal", side_effect=_install_signal),
                 ):
                     task_a = asyncio.ensure_future(agent._run_openclaw("solve", None))
                     task_b = asyncio.ensure_future(agent._run_openclaw("solve", None))
                     for _ in range(100):
-                        if signal.SIGTERM in registered:
+                        if len(agent.sigterm_events) == 2:
                             break
                         await asyncio.sleep(0)
-                    assert signal.SIGTERM in registered
-                    registered[signal.SIGTERM]()
+                    assert len(agent.sigterm_events) == 2
+                    os.kill(os.getpid(), signal.SIGTERM)
                     return await asyncio.gather(task_a, task_b)
+            finally:
+                real_signal(signal.SIGTERM, process_handler)
+                loop.remove_signal_handler(signal.SIGTERM)
 
         results = asyncio.run(_main())
 

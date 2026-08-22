@@ -525,28 +525,27 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 continue
         return None
 
-    def _install_sigterm_handler(self, loop: asyncio.AbstractEventLoop) -> None:
-        """Install the process's SIGTERM handler once (never removed), chaining to whatever was
-        previously installed — e.g. uvicorn's graceful-shutdown handler — so it still fires.
-        loop.add_signal_handler replaces any existing handler for the signal outright, so
-        installing once per instance and fanning out to a registry of per-run Events is the only
-        way to support concurrent runs without one run's cleanup silently disabling salvage (or
-        graceful shutdown) for every other run sharing this process."""
+    def _install_sigterm_handler(self) -> None:
+        """Install one process-level wrapper that fans SIGTERM out to active runs.
+
+        Keep the event loop's existing handler registered so uvicorn still receives the signal
+        through Python's wakeup fd and performs its normal graceful shutdown.
+        """
         if self.sigterm_handler_installed:
             return
         previous = signal.getsignal(signal.SIGTERM)
 
-        def _on_sigterm() -> None:
+        def _on_sigterm(signum, frame) -> None:
             for event in self.sigterm_events:
                 event.set()
             if callable(previous):
-                previous(signal.SIGTERM, None)
+                previous(signum, frame)
 
         try:
-            loop.add_signal_handler(signal.SIGTERM, _on_sigterm)
+            signal.signal(signal.SIGTERM, _on_sigterm)
             self.sigterm_handler_installed = True
-        except (NotImplementedError, RuntimeError):
-            pass  # signal handlers need the main-thread loop; fall back to timeout-only salvage
+        except ValueError:
+            pass  # signal handlers need the main thread; fall back to timeout-only salvage
 
     async def _run_openclaw(
         self,
@@ -603,8 +602,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             # session off disk, and return it. Returning quickly lets the harness still write the
             # response before the SIGKILL, so no harness change is needed.
             code, stdout, stderr = None, "", ""
-            loop = asyncio.get_running_loop()
-            self._install_sigterm_handler(loop)
+            self._install_sigterm_handler()
             sigterm_hit = asyncio.Event()
             self.sigterm_events.add(sigterm_hit)
             run_task = asyncio.ensure_future(
