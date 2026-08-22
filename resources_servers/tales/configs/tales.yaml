@@ -1,6 +1,7 @@
 tales:
   resources_servers:
     tales:
+      requires_agent: [gymnasium_agent]
       entrypoint: app.py
       domain: games
       verified: false

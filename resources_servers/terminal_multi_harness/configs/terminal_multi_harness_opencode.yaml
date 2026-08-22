@@ -1,6 +1,7 @@
 terminal_multi_harness_opencode_resources_server:
   resources_servers:
     terminal_multi_harness:
+      requires_agent: [tool_simulation_agent]
       entrypoint: app.py
       domain: agent
       tool_call_comparator_config:

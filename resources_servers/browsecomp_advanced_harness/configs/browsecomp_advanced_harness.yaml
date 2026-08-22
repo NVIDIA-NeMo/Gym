@@ -1,6 +1,7 @@
 browsecomp_advanced_harness_resources_server:
   resources_servers:
     browsecomp_advanced_harness:
+      requires_agent: [browsecomp_agent]
       entrypoint: app.py
       domain: agent
       debug: false

@@ -5,6 +5,7 @@ scicode_benchmark_resources_server:
   _inherit_from: scicode
   resources_servers:
     scicode:
+      requires_agent: [scicode_agent]
       # Manually staged SciCode test_data.h5 (see benchmarks/scicode/README.md).
       test_data_fpath: benchmarks/scicode/data/test_data.h5
 

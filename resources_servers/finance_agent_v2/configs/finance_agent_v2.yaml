@@ -12,6 +12,7 @@
 finance_agent_v2_resources_server:
   resources_servers:
     finance_agent_v2:
+      requires_agent: [finance_agent]
       entrypoint: app.py
       domain: agent
       verified: false

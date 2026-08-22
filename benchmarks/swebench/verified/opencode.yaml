@@ -7,6 +7,7 @@ opencode_swebench_verified_resources_server:
 
   resources_servers:
     swebench:
+      requires_agent: [opencode_sandboxed_agent]
       # For SWE Bench Verified, the repos are already clean.
       apply_anti_cheating: false
 

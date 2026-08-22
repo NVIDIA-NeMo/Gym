@@ -4,6 +4,7 @@ config_paths:
 scicode:
   resources_servers:
     scicode:
+      requires_agent: [scicode_agent]
       entrypoint: app.py
       domain: coding
       verified: false
