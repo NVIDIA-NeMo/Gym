@@ -75,7 +75,7 @@ def _optional_token_count(value: Any) -> Optional[int]:
 
 def _usage_detail(usage: Any, detail_group: str, detail_name: str, *top_level_aliases: str) -> Optional[int]:
     """Read one canonical nested token detail, then named provider aliases."""
-    details = getattr(usage, detail_group, None)
+    details = usage.get(detail_group) if isinstance(usage, dict) else getattr(usage, detail_group, None)
     value = details.get(detail_name) if isinstance(details, dict) else getattr(details, detail_name, None)
     value = _optional_token_count(value)
     if value is not None:
@@ -319,10 +319,22 @@ class ResponsesConverter(BaseModel):
                         converted_parts.append({"type": "text", "text": part_param["text"]})
                     case "input_image":
                         image_url = part_param.get("image_url", "")
+                        if isinstance(image_url, dict):
+                            image_url = image_url.get("url", "")
+                        if not image_url:
+                            raise ValueError(f"{part_param['type']} requires a non-empty image_url")
                         detail = part_param.get("detail", "auto")
                         converted_parts.append(
                             {"type": "image_url", "image_url": {"url": image_url, "detail": detail}}
                         )
+                    case "input_video":
+                        source_key = "video_url" if "video_url" in part_param else "video"
+                        video_url = part_param[source_key]
+                        if isinstance(video_url, dict):
+                            video_url = video_url.get("url", "")
+                        if not video_url:
+                            raise ValueError(f"input_video.{source_key} requires a non-empty URL")
+                        converted_parts.append({"type": "video_url", "video_url": {"url": video_url}})
                     case _:
                         raise NotImplementedError(f"Unsupported part param type: {part_param['type']}")
             content = converted_parts
@@ -600,12 +612,10 @@ class ResponsesConverter(BaseModel):
             usage = NeMoGymResponseUsage(
                 input_tokens=chat_completion.usage.prompt_tokens,
                 input_tokens_details=NeMoGymResponseInputTokensDetails(
-                    cached_tokens=cached_tokens if cached_tokens is not None else 0,
+                    cached_tokens=cached_tokens,
                 ),
                 output_tokens=chat_completion.usage.completion_tokens,
-                output_tokens_details=NeMoGymResponseOutputTokensDetails(
-                    reasoning_tokens=reasoning_tokens if reasoning_tokens is not None else 0
-                ),
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=reasoning_tokens),
                 # Provider totals can use accounting that differs from prompt + completion.
                 total_tokens=chat_completion.usage.total_tokens,
             )
