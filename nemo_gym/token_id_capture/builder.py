@@ -18,7 +18,6 @@
 The builder consumes ``TokenEntry`` records from a ``TokenCaptureSnapshot``.
 The snapshot is frozen before the consumer passes its entries to the builder.
 
-``per_request`` creates one training sequence per call.
 It does not infer relationships between calls.
 It can return multiple trajectories.
 
@@ -45,7 +44,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable
 
-from nemo_gym.token_id_capture.records import TokenEntry
+from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry, compute_digest
 
 
 @dataclass
@@ -97,6 +96,10 @@ class BuildNotes:
     unresolved_retries: list[str] = field(default_factory=list)
     # Calls without generated tokens are excluded from the chain.
     empty_generation_calls: list[str] = field(default_factory=list)
+    # Count why recorded parent links were not used.
+    parent_link_failures: dict[str, int] = field(default_factory=dict)
+    # These calls begin fragments after an unproven parent boundary.
+    unresolved_parent_calls: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -106,15 +109,6 @@ class BuildOutput:
     notes: BuildNotes = field(default_factory=lambda: BuildNotes(builder=""))
 
 
-def per_request(entries: list[TokenEntry]) -> BuildOutput:
-    ordered = sorted(entries, key=lambda e: (len(e.prompt_token_ids), e.model_call_id))
-    chains = [
-        Chain(chain_id=f"req-{i}", root_prompt=list(e.prompt_token_ids), links=[ChainLink(entry=e, interstitial=[])])
-        for i, e in enumerate(ordered)
-    ]
-    return BuildOutput(chains=chains, notes=BuildNotes(builder="per_request", chains=len(chains)))
-
-
 @dataclass(eq=False)  # Identity-based equality keeps nodes hashable.
 class _Node:
     entry: TokenEntry
@@ -122,6 +116,7 @@ class _Node:
     parent: "_Node | None" = None
     children: list["_Node"] = field(default_factory=list)
     quarantined: bool = False
+    unresolved_boundary: bool = False
 
 
 @dataclass
@@ -155,17 +150,81 @@ class _PrefixIndex:
         return (best[0], len(best) > 1) if best else (None, False)
 
 
-def _infer_parent(prompt: list[int], index: _PrefixIndex) -> tuple["_Node | None", bool]:
-    """Infer the parent from the longest cumulative prefix.
+def _resolve_parent(
+    node: "_Node",
+    by_call_id: dict[str, "_Node"],
+    prefix_index: _PrefixIndex,
+) -> tuple["_Node | None", bool, str | None]:
+    """Find this call's parent.
 
-    This is the fallback when no verified parent link exists.
-    Identical cumulative sequences are ambiguous.
-    The caller quarantines an ambiguous subtree.
+    New records preserve the request-time parent decision.
+    Token-prefix matching recovers a resolved link whose parent is absent from this build.
+    This can happen when the parent had an empty generation and was filtered out.
+    ``note`` reports why the recorded link was not used as recorded.
     """
-    return index.infer_parent(prompt)
+    prompt = list(node.entry.prompt_token_ids)
+    resolution = node.entry.parent_resolution
+    if resolution == ParentResolutionStatus.ROOT:
+        return None, False, None
+    if resolution == ParentResolutionStatus.UNRESOLVED:
+        return None, False, "parent_unresolved"
+    claimed = node.entry.parent_call_id
+    if resolution == ParentResolutionStatus.RESOLVED or claimed is not None:
+        if claimed is None:
+            return None, False, "resolved_parent_missing_id"
+        parent = by_call_id.get(claimed)
+        if parent is None:
+            # An absent parent is not evidence of conflict.
+            # Prefix matching may attach the child to a verified surviving ancestor.
+            # A digest mismatch remains a hard boundary.
+            inferred, ambiguous = prefix_index.infer_parent(prompt)
+            if inferred is not None and not ambiguous:
+                return inferred, False, "parent_call_id_missing_recovered"
+            return None, False, "parent_call_id_missing"
+        cum_len = parent.entry.cum_len
+        if cum_len is None:
+            cum_len = len(parent.cumulative)
+        if cum_len <= len(prompt) and compute_digest(prompt[:cum_len]) == (
+            parent.entry.digest or compute_digest(parent.cumulative)
+        ):
+            return parent, False, None
+        return None, False, "parent_digest_mismatch"
+    # Every supported record carries a request-time decision.
+    # Never guess a parent for a nonconforming record.
+    return None, False, "missing_resolution"
+
+
+class _NullPrefixIndex:
+    """Stands in when no entry can need prefix inference.
+
+    Every supported entry carries a request-time parent decision.
+    Only missing-parent recovery needs the trie.
+    Avoiding the trie is significant for long multi-call rollouts.
+    """
+
+    def add(self, candidate: "_Node") -> None:
+        return
+
+    def infer_parent(self, prompt: list[int]) -> tuple["_Node | None", bool]:
+        return None, False
 
 
 def prefix_merging(entries: list[TokenEntry]) -> BuildOutput:
+    # An at-least-once transport can deliver one entry twice.
+    # Conflicting payloads for one id are corrupt.
+    deduped: dict[str, TokenEntry] = {}
+    duplicate_conflicts: list[str] = []
+    for candidate in entries:
+        previous = deduped.get(candidate.model_call_id)
+        if previous is None:
+            deduped[candidate.model_call_id] = candidate
+        elif (list(previous.prompt_token_ids), list(previous.generation_token_ids)) != (
+            list(candidate.prompt_token_ids),
+            list(candidate.generation_token_ids),
+        ):
+            duplicate_conflicts.append(candidate.model_call_id)
+    entries = list(deduped.values())
+
     # A call without generated tokens has no training signal.
     # Its cumulative sequence equals its prompt.
     # Keeping it would make it the parent of another call with the same prompt.
@@ -175,7 +234,8 @@ def prefix_merging(entries: list[TokenEntry]) -> BuildOutput:
     entries = [e for e in entries if e.generation_token_ids]
     if not entries:
         return BuildOutput(
-            chains=[], notes=BuildNotes(builder="prefix_merging", empty_generation_calls=empty_generation)
+            chains=[],
+            notes=BuildNotes(builder="prefix_merging", empty_generation_calls=empty_generation),
         )
 
     # Increasing prompt length defines an order from the tokens.
@@ -186,12 +246,29 @@ def prefix_merging(entries: list[TokenEntry]) -> BuildOutput:
     nodes: list[_Node] = []
     roots: list[_Node] = []
     quarantined: list[str] = []
-    prefix_index = _PrefixIndex()
+    # The trie exists only for missing-parent recovery.
+    surviving_ids = {e.model_call_id for e in ordered}
+    needs_prefix_index = any(e.parent_call_id is not None and e.parent_call_id not in surviving_ids for e in ordered)
+    prefix_index = _PrefixIndex() if needs_prefix_index else _NullPrefixIndex()
 
+    nodes_by_call_id: dict[str, _Node] = {}
+    parent_link_failures: dict[str, int] = {}
+    unresolved_parent_calls: list[str] = []
+    for call_id in duplicate_conflicts:
+        parent_link_failures["duplicate_call_id_conflict"] = (
+            parent_link_failures.get("duplicate_call_id_conflict", 0) + 1
+        )
+        unresolved_parent_calls.append(call_id)
     for entry in ordered:
         prompt = list(entry.prompt_token_ids)
         node = _Node(entry=entry, cumulative=prompt + list(entry.generation_token_ids))
-        parent, ambiguous = _infer_parent(prompt, prefix_index)
+        parent, ambiguous, note = _resolve_parent(node, nodes_by_call_id, prefix_index)
+        if note:
+            parent_link_failures[note] = parent_link_failures.get(note, 0) + 1
+            # A recovered fallback found a safe parent.
+            if not note.endswith("_recovered"):
+                node.unresolved_boundary = True
+                unresolved_parent_calls.append(entry.model_call_id)
         if parent is not None:
             node.parent = parent
             if ambiguous:
@@ -203,6 +280,7 @@ def prefix_merging(entries: list[TokenEntry]) -> BuildOutput:
             roots.append(node)
         nodes.append(node)
         prefix_index.add(node)
+        nodes_by_call_id[entry.model_call_id] = node
 
     # Resolve retry siblings.
     # A harness can retry after a timeout, server error, or dropped stream.
@@ -314,12 +392,13 @@ def prefix_merging(entries: list[TokenEntry]) -> BuildOutput:
         delivered_fraction=round(delivered / captured, 4) if captured else 0.0,
         unresolved_retries=unresolved_retries,
         empty_generation_calls=empty_generation,
+        parent_link_failures=parent_link_failures,
+        unresolved_parent_calls=unresolved_parent_calls,
     )
     return BuildOutput(chains=chains, quarantined=quarantined, notes=notes)
 
 
 _BUILDERS: dict[str, Callable[[list[TokenEntry]], BuildOutput]] = {
-    "per_request": per_request,
     "prefix_merging": prefix_merging,
 }
 
@@ -391,8 +470,6 @@ def project_main_chain_response(rollout_id: str, out: BuildOutput, model: str = 
     """
     if not out.chains:
         raise ValueError("capture produced no safe trainable chain")
-    if out.notes.builder == "per_request" and len(out.chains) != 1:
-        raise ValueError("per_request produced multiple trajectories for a single-response delivery")
     mains = [c for c in out.chains if c.chain_id == "main"] or out.chains[:1]
     output = project_chain_to_output_items(mains[0])
     if not any(item.get("generation_token_ids") for item in output):

@@ -19,7 +19,6 @@ Gym rollout collection and trainer finalization use this consumer.
 Gym reads a frozen snapshot from the local token store.
 A trainer freezes the ``TokenSource`` provided by its transport.
 Both paths pass snapshot entries through the same build and projection.
-Single-response delivery rejects ``per_request`` because it can return multiple trajectories.
 
 This module does not import rollout-record or model-server modules.
 The caller supplies the ``rollout_id``.
@@ -97,14 +96,6 @@ def _assemble(
     builder: str,
     model: str,
 ) -> dict:
-    if builder == "per_request":
-        # Single-response delivery cannot represent multiple trajectories.
-        return _failed_build(
-            rollout_id,
-            builder,
-            "per_request returns multiple trajectories and is not supported by single-response delivery",
-            n_calls=len(entries),
-        )
     # Mask a malformed rollout instead of failing the caller.
     # The contiguity check and projection can raise.
     # An uncaught exception could fail a full rollout or training batch.
@@ -140,6 +131,8 @@ def _assemble(
         "delivered_fraction": notes.delivered_fraction,
         "generated_tokens_captured": notes.generated_tokens_captured,
         "generated_tokens_delivered": notes.generated_tokens_delivered,
+        "parent_link_failures": dict(notes.parent_link_failures),
+        "unresolved_parent_calls": len(notes.unresolved_parent_calls),
         # Calls without generated tokens have no training signal.
         # A nonzero count can indicate an output-budget or content-filter cutoff.
         "empty_generation_calls": len(notes.empty_generation_calls),
@@ -152,8 +145,14 @@ def _assemble(
         "metrics": metrics,
         # A retry of the final call can leave two plausible generations.
         # Mask the rollout when the client-selected generation is unknown.
-        "mask_sample": bool(unresolved) or notes.roots != 1 or notes.chains != 1,
+        # An empty delivery must never be trainable, whatever produced it.
+        "mask_sample": bool(unresolved)
+        or bool(notes.unresolved_parent_calls)
+        or notes.roots != 1
+        or notes.chains != 1
+        or not any(item.get("generation_token_ids") for item in response.get("output", [])),
         "unresolved_retries": list(unresolved),
+        "unresolved_parent_calls": list(notes.unresolved_parent_calls),
     }
 
 
