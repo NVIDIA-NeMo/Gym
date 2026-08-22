@@ -143,9 +143,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         return sandbox
 
     async def _create_opencode_config(self, request: Request) -> Dict[str, Any]:
-        base_url = self.base_url_for_run(
-            base_url=f"{get_server_url(self.config.model_server.name)}/v1",
-            body=await request.json(),
+        base_url = (
+            self.base_url_for_run(
+                base_url=get_server_url(self.config.model_server.name),
+                body=await request.json(),
+            )
+            + "/v1"
         )
         return {
             "model": "nemo_gym/dummy_model",
