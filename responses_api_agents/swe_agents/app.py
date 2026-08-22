@@ -673,6 +673,28 @@ EVAL_HARNESS_COMMIT={eval_harness_commit} \\
         )
 
 
+# A jest invocation:
+# runner-prefixed (npx/yarn), or bare `jest` in command position (line start or after &&/;/|),
+# but never inside words ("ts-jest", "config_jest"), quotes (grep '"jest"'), or assignments.
+_JEST_INVOCATION_RE = re.compile(r"((?:^|&&|;|\|)\s*|\b(?:npx|yarn)\s+)(jest\b)")
+
+
+def _serialize_nv_internal_jest(run_script: str) -> str:
+    """Force Jest in-band: large worker pools can wedge rootless Apptainer FUSE mid-eval."""
+    serialized_lines = []
+    for line in run_script.splitlines(keepends=True):
+        if _JEST_INVOCATION_RE.search(line):
+            flags = []
+            if "--runInBand" not in line and "--maxWorkers" not in line:
+                flags.append("--runInBand")
+            if "--forceExit" not in line:
+                flags.append("--forceExit")
+            if flags:
+                line = _JEST_INVOCATION_RE.sub(rf"\1\2 {' '.join(flags)}", line, count=1)
+        serialized_lines.append(line)
+    return "".join(serialized_lines)
+
+
 class NVInternalDatasetProcessor(BaseDatasetHarnessProcessor):
     def get_run_command(self) -> ExecuteContainerCommandArgs:
         instance_dict = json.loads(self.config.problem_info["instance_dict"])
@@ -715,7 +737,7 @@ class NVInternalDatasetProcessor(BaseDatasetHarnessProcessor):
         else:
             test_files = ",".join(test_files_str)
 
-        run_script = instance_dict["run_script.sh"]
+        run_script = _serialize_nv_internal_jest(instance_dict["run_script.sh"])
         parsing_script = instance_dict["parsing_script.py"]
         run_script_path = self.config.persistent_dir / "run_script.sh"
         parsing_script_path = self.config.persistent_dir / "parsing_script.py"
