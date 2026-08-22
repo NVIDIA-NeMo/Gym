@@ -314,6 +314,7 @@ class GDPValVerifyResponse(GDPValVerifyRequest, BaseVerifyResponse):
     verify_mode: Literal["rubric", "comparison"] = "rubric"
     judge_response: Optional[Dict[str, Any]] = None
     invalid_judge_response: Optional[bool] = None
+    invalid_judge_retryable: Optional[bool] = None
     # Majority-decision flags across all (ref_repeat × trial) judge votes —
     # kept for back-compat with older verify responses (still bool-valued).
     win: Optional[bool] = None
@@ -516,7 +517,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 **body.model_dump(),
                 reward=0.0,
                 verify_mode="rubric",
+                judge_response={"scoring_error": "missing_rubric"},
                 invalid_judge_response=True,
+                invalid_judge_retryable=False,
             )
 
         judges = self._resolve_judges()
@@ -701,6 +704,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     base_url=judge.base_url,
                     api_key=judge.api_key,
                     timeout=JUDGE_REQUEST_TIMEOUT_SECONDS,
+                    # comparison.send_judge_request owns the retry policy; the
+                    # SDK default would multiply every explicit attempt by 3.
+                    max_retries=0,
                 )
             return client_cache[key]
 
@@ -904,7 +910,33 @@ class GDPValResourcesServer(SimpleResourcesServer):
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
         if self.config.reward_mode != "comparison":
-            return await super().aggregate_metrics(body)
+            # A scorer-side failure still carries reward=0.0 for schema
+            # compatibility. Do not let those sentinel zeros lower the model's
+            # reward: profile only rows backed by a usable judge response and
+            # expose coverage explicitly so an all-invalid run cannot resemble
+            # a genuinely low-scoring run.
+            valid_responses = [vr for vr in body.verify_responses if not bool(vr.get("invalid_judge_response"))]
+            valid_count = len(valid_responses)
+            invalid_count = len(body.verify_responses) - valid_count
+            total_count = len(body.verify_responses)
+            if valid_responses:
+                base = await super().aggregate_metrics(AggregateMetricsRequest(verify_responses=valid_responses))
+            else:
+                base = AggregateMetrics()
+            # These describe only the rows supplied to aggregation. Runtime
+            # judge failures live in the collection sidecar and are intentionally
+            # not presented as run-level coverage here.
+            coverage: Dict[str, Any] = {
+                "rubric/aggregate_rows_total": total_count,
+                "rubric/aggregate_rows_included": valid_count,
+                "rubric/legacy_invalid_rows_excluded": invalid_count,
+                "rubric/aggregate_rows_included_fraction": valid_count / total_count if total_count else 0.0,
+            }
+            return AggregateMetrics(
+                group_level_metrics=base.group_level_metrics,
+                agent_metrics={**base.agent_metrics, **coverage},
+                key_metrics={**base.key_metrics, **coverage},
+            )
 
         from resources_servers.gdpval.comparison import (
             calculate_elo,
@@ -970,29 +1002,54 @@ class GDPValResourcesServer(SimpleResourcesServer):
         # reference subset each time), so the same ``(task_index, rollout_index)``
         # appears once per stage — distinguished only by ``stage_index``.
         staged: Dict[int, List[Dict[str, Any]]] = {}
+        expected_stage_row_counts: Dict[int, Set[int]] = {}
+        expected_final_stage_values: Set[int] = set()
+        expected_final_stage_rows = 0
         for vr in body.verify_responses:
             stage_index = vr.get("stage_index")
             if stage_index is not None:
-                staged.setdefault(int(stage_index), []).append(vr)
+                normalized_stage_index = int(stage_index)
+                staged.setdefault(normalized_stage_index, []).append(vr)
+                expected_stage_row_count = vr.get("expected_stage_row_count")
+                if expected_stage_row_count is not None:
+                    expected_stage_row_counts.setdefault(normalized_stage_index, set()).add(
+                        int(expected_stage_row_count)
+                    )
+            expected_final_stage_index = vr.get("expected_final_stage_index")
+            if expected_final_stage_index is not None:
+                expected_final_stage_values.add(int(expected_final_stage_index))
+                expected_final_stage_rows += 1
+
+        expected_stage_declared = bool(expected_final_stage_values)
+        expected_stage_consistent = len(expected_final_stage_values) <= 1
+        expected_final_stage_index = (
+            next(iter(expected_final_stage_values)) if len(expected_final_stage_values) == 1 else None
+        )
 
         # RewardProfiler (the base aggregation) keys rollouts by
         # ``(task_index, rollout_index)`` and rejects duplicates. Multi-stage
         # rollouts collide on that key by design, so feed the base profiler the
-        # LAST stage alone — the headline stage, whose keys are unique — instead
-        # of the pooled set. Single-stage / untagged runs use the full body.
+        # selected headline stage alone, whose keys are unique, instead of the
+        # pooled set. New orchestrators declare ``expected_final_stage_index``;
+        # old artifacts retain max-observed-stage behavior for compatibility.
+        # If a declared stage is absent, max-observed is used only for the base
+        # diagnostic profile — it is never promoted to the comparison headline.
         base_body = body
         if staged:
-            base_body = AggregateMetricsRequest(verify_responses=staged[max(staged)])
+            base_stage_index = (
+                expected_final_stage_index
+                if expected_stage_consistent and expected_final_stage_index in staged
+                else max(staged)
+            )
+            base_body = AggregateMetricsRequest(verify_responses=staged[base_stage_index])
 
         # Pooled (across every stage / reference) win stats — always emitted as
         # descriptive metrics regardless of staging.
         wins, losses, ties, per_ref_totals = _accumulate(list(body.verify_responses))
 
         judged = wins + losses + ties
-        if judged == 0:
+        if judged == 0 and not staged:
             return await super().aggregate_metrics(base_body)
-
-        win_rate = (wins + 0.5 * ties) / judged
 
         base = await super().aggregate_metrics(base_body)
         # Total win stats (always emitted).
@@ -1001,8 +1058,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
             "comparison/losses": losses,
             "comparison/ties": ties,
             "comparison/judged": judged,
-            "comparison/win_rate": win_rate,
         }
+        if judged:
+            extra["comparison/win_rate"] = (wins + 0.5 * ties) / judged
 
         # Per-reference win stats (always emitted when present).
         for ref_id, (rw, rl, rt, ref_elo) in per_ref_totals.items():
@@ -1018,37 +1076,79 @@ class GDPValResourcesServer(SimpleResourcesServer):
             if ref_elo is not None:
                 extra[f"comparison/ref/{ref_id}/reference_elo"] = ref_elo
 
-        # When stages are present, fit each stage's ELO independently and report
-        # the LAST stage's fit as the headline ``comparison/eval_elo`` (the
-        # multi-stage design refines on a larger task set vs nearby references in
-        # later stages), while exposing every stage's estimate as a
-        # ``comparison/stage_<k>/*`` extra for visibility. Untagged runs keep the
-        # original single-pass behavior below.
+        # When stages are present, fit each stage independently. New runs name
+        # the required headline stage explicitly; a missing/unfit required stage
+        # is degraded and deliberately emits no ``comparison/eval_elo`` rather
+        # than silently substituting an earlier or pooled fit. Old artifacts
+        # without the expectation field retain max-observed-stage behavior.
         if staged:
             extra["comparison/num_stages"] = len(staged)
-            headline: Optional[tuple[Optional[float], Optional[float], int]] = None
-            last_index = max(staged)
+            stage_fits: Dict[int, tuple[Optional[float], Optional[float], int]] = {}
             for stage_index in sorted(staged):
                 stage_responses = staged[stage_index]
                 _, _, _, stage_ref_totals = _accumulate(stage_responses)
                 stage_elo, stage_norm, stage_nref = _fit_mle(stage_ref_totals)
+                stage_fits[stage_index] = (stage_elo, stage_norm, stage_nref)
                 prefix = f"comparison/stage_{stage_index}"
                 if stage_elo is not None:
                     extra[f"{prefix}/eval_elo"] = stage_elo
                     extra[f"{prefix}/normalized_elo"] = stage_norm
                 extra[f"{prefix}/num_references"] = stage_nref
                 extra[f"{prefix}/num_tasks"] = len({vr.get("task_id") for vr in stage_responses})
-                if stage_index == last_index:
-                    headline = (stage_elo, stage_norm, stage_nref)
 
-            # Headline = last stage's fit. Fall back to the pooled MLE only if
-            # the last stage failed to produce a rating, so the run still
-            # surfaces a number.
+            headline_stage_index: Optional[int] = None
+            headline: Optional[tuple[Optional[float], Optional[float], int]] = None
+            if expected_stage_declared:
+                extra["comparison/expected_final_stage_declared_rows"] = expected_final_stage_rows
+                extra["comparison/expected_final_stage_consistent"] = int(expected_stage_consistent)
+                if expected_final_stage_index is not None:
+                    extra["comparison/expected_final_stage_index"] = expected_final_stage_index
+
+                final_stage_present = expected_stage_consistent and expected_final_stage_index in staged
+                final_stage_rows = staged.get(expected_final_stage_index, [])
+                observed_final_stage_count = len(
+                    {
+                        (
+                            vr.get("_ng_task_index", vr.get("task_id")),
+                            vr.get("_ng_rollout_index", 0),
+                        )
+                        for vr in final_stage_rows
+                    }
+                )
+                expected_count_values = expected_stage_row_counts.get(expected_final_stage_index, set())
+                expected_count_consistent = len(expected_count_values) == 1
+                expected_final_stage_count = next(iter(expected_count_values)) if expected_count_consistent else None
+                final_stage_complete = (
+                    final_stage_present
+                    and expected_final_stage_count is not None
+                    and observed_final_stage_count == expected_final_stage_count
+                )
+                candidate = stage_fits.get(expected_final_stage_index)
+                final_stage_fit = candidate is not None and candidate[0] is not None
+                if final_stage_complete and final_stage_fit:
+                    headline_stage_index = expected_final_stage_index
+                    headline = candidate
+                extra["comparison/final_stage_present"] = int(final_stage_present)
+                extra["comparison/final_stage_complete"] = int(final_stage_complete)
+                extra["comparison/final_stage_fit"] = int(final_stage_fit)
+                extra["comparison/final_stage_degraded"] = int(not (final_stage_complete and final_stage_fit))
+                extra["comparison/observed_final_stage_row_count"] = observed_final_stage_count
+                extra["comparison/expected_final_stage_row_count_consistent"] = int(expected_count_consistent)
+                if expected_final_stage_count is not None:
+                    extra["comparison/expected_final_stage_row_count"] = expected_final_stage_count
+            else:
+                # Backward compatibility for artifacts generated before the
+                # expected-stage field was introduced.
+                headline_stage_index = max(staged)
+                headline = stage_fits[headline_stage_index]
+                if headline[0] is None:
+                    headline = _fit_mle(per_ref_totals)
+                    headline_stage_index = None
+
             if headline is not None and headline[0] is not None:
                 eval_elo, normalized_elo, num_references = headline
-            else:
-                eval_elo, normalized_elo, num_references = _fit_mle(per_ref_totals)
-            if eval_elo is not None:
+                if headline_stage_index is not None:
+                    extra["comparison/headline_stage_index"] = headline_stage_index
                 extra["comparison/eval_elo"] = eval_elo
                 extra["comparison/normalized_elo"] = normalized_elo
                 extra["comparison/num_references"] = num_references
@@ -1078,7 +1178,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                             eval_elo, float(ref_elo)
                         )
             else:
-                eval_elo, normalized_elo = calculate_elo(win_rate, self.config.reference_elo)
+                eval_elo, normalized_elo = calculate_elo((wins + 0.5 * ties) / judged, self.config.reference_elo)
                 extra["comparison/eval_elo"] = eval_elo
                 extra["comparison/normalized_elo"] = normalized_elo
                 extra["comparison/reference_elo"] = self.config.reference_elo

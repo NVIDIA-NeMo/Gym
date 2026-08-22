@@ -41,8 +41,12 @@ from nemo_gym.path_utils import failures_path_for
 from nemo_gym.rollout_collection import (
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
-    NG_TERMINAL_KEY,
     _get_max_rollout_attempts,
+    _is_terminal_failure,
+    _migrate_invalid_judge_main_rows,
+)
+from nemo_gym.rollout_collection import (
+    NG_TERMINAL_KEY as NG_TERMINAL_KEY,
 )
 from nemo_gym.server_utils import (
     ServerClient,
@@ -55,6 +59,8 @@ from nemo_gym.server_utils import (
 
 # Todo after merging branch `edobrowolska/judge_failures_v2`: replace this by importing from judge.py
 JUDGE_FAILED_FAILURE_CLASS = "judge_failed"
+JUDGE_INVALID_FAILURE_CLASS = "judge_invalid"
+_JUDGE_FAILURE_CLASSES = {JUDGE_FAILED_FAILURE_CLASS, JUDGE_INVALID_FAILURE_CLASS}
 
 # Printed at the start of a `--judge-failed-only` run.
 _RECOVERY_TWO_SOURCES_WARNING = (
@@ -280,7 +286,7 @@ def _load_cache_keys_by_status(output_fpaths: OutputPaths) -> CacheKeysByStatus:
                     continue
                 k = (fr[TASK_INDEX_KEY_NAME], fr[ROLLOUT_INDEX_KEY_NAME])
                 attempts_by_key[k] += 1
-                if fr.get(NG_TERMINAL_KEY):
+                if _is_terminal_failure(fr):
                     terminal_keys.add(k)
 
     max_attempts = _get_max_rollout_attempts()
@@ -309,7 +315,7 @@ def summarize_cache_usage(cache: CacheKeysByStatus, all_payloads: List[Dict], fi
         f"""Resumed from cache. Found:
 - {len(all_payloads)} total rows to be re-verified
 - {len(cache.successful_keys)} rows already done (in main jsonl)
-- {len(cache.terminal_keys)} sidecar-terminal (timeout_exceeded / skipped) → not retried
+- {len(cache.terminal_keys)} sidecar-terminal (for example skipped) → not retried
 - {len(cache.maxed_out_keys)} hit max_attempts → not retried
 - {len(filtered_payloads)} rows that still need to be run"""
     )
@@ -325,7 +331,18 @@ def summarize_cache_usage(cache: CacheKeysByStatus, all_payloads: List[Dict], fi
 
 def _is_judge_failure(row: Dict[str, Any]) -> bool:
     """Whether a failures-sidecar row is a judge failure (the only recoverable class)."""
-    return row.get(NG_FAILURE_CLASS_KEY) == JUDGE_FAILED_FAILURE_CLASS
+    return row.get(NG_FAILURE_CLASS_KEY) in _JUDGE_FAILURE_CLASSES
+
+
+def _normalize_invalid_judge_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Route a verifier's invalid judge response through the failure sidecar."""
+    if not result.get("invalid_judge_response") or result.get(NG_FAILURE_CLASS_KEY) is not None:
+        return result
+    retryable = result.get("invalid_judge_retryable") is not False
+    result[NG_FAILURE_CLASS_KEY] = JUDGE_INVALID_FAILURE_CLASS if retryable else "permanent"
+    if not retryable:
+        result[NG_TERMINAL_KEY] = True
+    return result
 
 
 def _recovery_rollout_predicate(
@@ -343,6 +360,11 @@ def _recovery_rollout_predicate(
     seen: set[tuple[Any, Any]] = set()
 
     def predicate(row: Dict[str, Any]) -> bool:
+        if "stage_index" in row:
+            raise ConfigError(
+                "--judge-failed-only does not support multi-stage rows; "
+                "resume the multi-stage rollout collection so stage identity and adaptive references are preserved"
+            )
         if not _is_judge_failure(row):
             return False
         key = (row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME))
@@ -414,7 +436,14 @@ def _yield_inputs_and_rollouts_paired(
 
 
 def _build_verify_payload(pair: InputRolloutPair) -> Dict:
-    return pair.input | {"response": pair.rollout["response"]}
+    payload = pair.input | {"response": pair.rollout["response"]}
+    # File-backed verifiers need the artifact path produced by the rollout, and
+    # adaptive comparison needs the exact reference subset used for that row.
+    # Preserve only verifier inputs, not rewards or failure bookkeeping.
+    for key in ("deliverables_dir", "reference_ids"):
+        if key in pair.rollout:
+            payload[key] = pair.rollout[key]
+    return payload
 
 
 def _prepare_payloads(
@@ -698,6 +727,10 @@ class RolloutReverificationHelper(BaseModel):
 
         if config.judge_failed_only:
             print(_RECOVERY_TWO_SOURCES_WARNING)
+            # Older Gym builds persisted invalid judge responses as apparent
+            # successes. Move them sidecar-first before seeding, otherwise their
+            # keys are copied into the recovery output and skipped forever.
+            _migrate_invalid_judge_main_rows(rollouts_jsonl_fpath)
             reverify_source_fpath = failures_path_for(rollouts_jsonl_fpath)
             # Seed the successes and dedup so the re-verification doesn't judge successes again.
             skip_keys = _seed_output_with_successes(rollouts_jsonl_fpath, output_fpaths.output)
@@ -725,6 +758,8 @@ class RolloutReverificationHelper(BaseModel):
         try:
             for future in _run_verification_payloads(payloads_to_reverify, semaphore=semaphore):
                 row, result = await future
+
+                _normalize_invalid_judge_result(result)
 
                 result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
                 result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]

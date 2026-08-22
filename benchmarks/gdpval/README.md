@@ -69,12 +69,13 @@ the deliverable files (the same layout the Stirrup agent persists).
 Multi-stage ELO estimates the eval model's rating in a sequence of *stages*
 instead of judging every task against every reference. Each stage samples `T`
 tasks (`T` is configurable per stage and **defaults to the full task set** — all
-220 GDPVal tasks) and assigns **each task a single reference model** drawn
-uniformly at random (every included reference weighted equally) from the stage's
-adaptively-chosen set of references. It then fits an anchored Bradley-Terry MLE
-ELO — pooling each reference's win/loss/tie counts over the tasks assigned to it
-— and uses that estimate to pick the references for the next stage (typically
-narrowing to fewer references closest to the estimate, and growing `T`, so each
+220 GDPVal tasks) and assigns **each task a single reference model** from the
+stage's adaptively-chosen set. The default is an independent uniform draw;
+partial-completion stages use a seeded balanced assignment so every selected
+reference gets nearly the same number of planned tasks. It then fits an anchored
+Bradley-Terry MLE ELO — pooling each reference's win/loss/tie counts over the
+tasks assigned to it — and uses that estimate to pick the references for the
+next stage (typically narrowing to fewer references closest to the estimate, and growing `T`, so each
 reference gets a larger share of tasks as the estimate sharpens). Within each
 judged comparison a panel judge is still sampled per trial with equal
 probability. It runs through the **same** `gym eval run` pipeline and emits the
@@ -136,6 +137,35 @@ the full task budget on those instead of distant references like
 `num_tasks` is optional per stage; omit it to judge the full task distribution
 (the default). Every task is still compared against a single sampled reference.
 
+### Accepting partial calibration after timeouts
+
+Calibration stages retry incomplete work by default. To advance after a bounded
+number of persisted task timeouts, opt in on that non-final stage and set both
+overall and per-reference evidence floors:
+
+```bash
+++multistage.stages='[{num_tasks: 45, partial_completion: {min_success_fraction: 0.9, min_per_reference_success_fraction: 0.5, min_successful_rows_per_reference: 1}}, {num_tasks: 220, num_models: 4}]'
+```
+
+This example requires at least 90% of all planned calibration rows, at least 50%
+of each selected reference's assigned rows, and at least one judged row for every
+selected reference. The ELO fit must be finite and include every selected
+reference. Only a latest persisted `timeout_exceeded` failure can waive a row
+that would otherwise be retried; an undispatched, drained/no-persist, or other
+retryable row keeps the stage open. Terminal and max-attempt omissions still
+count against every coverage floor.
+
+For a freshly planned policy-enabled stage, task-to-reference assignments are
+balanced before dispatch. When the policy is added while resuming an existing
+strict run, the recorded assignment remains authoritative so the successful
+rows are reused exactly as collected.
+
+Partial completion is deliberately unavailable on the final stage. Its accepted
+row set and omitted keys are frozen in the stage journal, so resume cannot absorb
+late rows and silently change downstream reference selection. Enabling this
+policy while resuming an incomplete stage reuses its successful rollout evidence
+instead of invalidating the rollout cache.
+
 ### Fresh vs. cached deliverables
 
 - **Fresh** (generate deliverables): nothing extra. The agent persists each
@@ -178,7 +208,7 @@ full run:
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `stages` | *(required)* | List of `{num_tasks?, num_models?, seed?}` (or `"[num_tasks]:[num_models]:seed"` strings). `num_tasks` omitted ⇒ full task set; `num_models` omitted ⇒ all references. |
+| `stages` | *(required)* | List of `{num_tasks?, num_models?, seed?, partial_completion?}` (or `"[num_tasks]:[num_models]:seed"` strings). `num_tasks` omitted ⇒ full task set; `num_models` omitted ⇒ all references. `partial_completion` is an opt-in non-final calibration policy with overall/per-reference success floors. |
 | `column` | `[occupation]` | Dataset column(s) the task sample is drawn proportionally over. |
 | `distribution_path` | *(auto)* | Reuse/write the task-distribution JSON here; built from the dataset when absent. |
 | `dataset_path` | *(prepared dataset)* | Dataset the distribution is built from. |
@@ -188,18 +218,35 @@ full run:
 
 ### Resuming an interrupted multi-stage run
 
-Set `RERUN_INCOMPLETE=true` (with the same `PERSIST_DELIVERABLES_DIR` as the
-original run) to resume a staged run that was cut short. A task whose deliverable
-already **finished** on disk (marked by `finish_params.json`) skips the policy
-rollout and is judged from cache; a task that never finished is re-rolled. On top
-of that, `rerun_incomplete` reuses **cached judgements**: the verify cache is keyed
-by each task's assigned reference, so a resumed stage that reassigns the same
-reference to a task returns its cached judgement instead of re-judging. Each
-stage's sampled tasks and per-task reference assignment are recorded in the stage
-journal (and re-derived deterministically from the stage seed when a recorded
-plan predates them), so they replay identically on resume; use the same
-`multistage.seed` so a fresh re-plan of any not-yet-started stage draws the same
-tasks and assignment. See
+Use the same output path and original run arguments and pass `--resume` to reuse
+the rollout file, failure sidecar, and multi-stage journal. Add the
+`partial_completion` policy shown below when recovering a strict calibration
+stage that ended with bounded timeouts:
+
+```bash
+gym eval run \
+    --resume \
+    --model-type vllm_model --benchmark gdpval --split benchmark \
+    --output results/gdpval_multistage.jsonl \
+    ++gdpval_resources_server.resources_servers.gdpval.reward_mode=comparison \
+    ++multistage.enabled=true \
+    ++multistage.stages='[{num_tasks: 45, partial_completion: {min_success_fraction: 0.9, min_per_reference_success_fraction: 0.5, min_successful_rows_per_reference: 1}}, {num_tasks: 220, num_models: 4}]'
+```
+
+Add `RERUN_INCOMPLETE=true` with the same `PERSIST_DELIVERABLES_DIR` when an
+unfinished task must resume or reuse its policy deliverable. A task whose
+deliverable already **finished** on disk (marked by `finish_params.json`) skips
+the policy rollout and is judged from cache; a task that never finished is
+re-rolled. `rerun_incomplete` also reuses **cached judgements** keyed by the
+task's assigned reference. Each stage's sampled tasks and per-task reference
+assignment are recorded in the stage journal (and re-derived deterministically
+from the stage seed for older plans), so they replay identically on resume. Use
+the same `multistage.seed` so an unplanned stage draws the same tasks.
+
+After a stage has been accepted as partial, its policy, included evidence, and
+omitted keys are frozen. Changing or removing that policy on `--resume` fails
+closed; start a fresh output path if you intentionally want a different
+calibration decision. See
 [Task Re-run Mode](../../responses_api_agents/stirrup_agent/README.md#task-re-run-mode)
 for the full semantics.
 

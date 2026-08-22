@@ -26,10 +26,11 @@ How adaptivity maps onto the single-pass flow:
 * Each stage is one pass of the standard rollout collection over the stage's
   sampled ``T`` tasks (``T`` is configurable per stage and defaults to the full
   task distribution). The stage includes a set of reference models (chosen
-  adaptively — see below) and assigns **each task a single reference** sampled
-  uniformly (equal weight) from that set; the task's row is tagged with that one
-  ``reference_ids=[ref]`` (honored by the GDPVal verifier's per-request reference
-  filter) and a ``stage_index``.
+  adaptively — see below) and assigns **each task a single reference** from that
+  set; the default is an independent uniform sample, while partial-completion
+  stages use a seeded balanced assignment. The task's row is tagged with that
+  one ``reference_ids=[ref]`` (honored by the GDPVal verifier's per-request
+  reference filter) and a ``stage_index``.
 * Between stages we fit the stage's anchored Bradley-Terry MLE ELO (the same
   math the server's ``aggregate_metrics`` uses) — pooling each reference's
   win/loss/tie counts over the tasks assigned to it — to pick the next stage's
@@ -54,7 +55,13 @@ orchestration is unit-testable without any servers.
 from __future__ import annotations
 
 import hashlib
+import math
+import os
 import random
+import secrets
+import tempfile
+import time
+from collections import Counter
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -62,15 +69,24 @@ from typing import AbstractSet, Any, Awaitable, Callable, Dict, List, Mapping, O
 
 import orjson
 
-from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.global_config import (
+    AGENT_REF_KEY_NAME,
+    ATTEMPT_INDEX_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+)
 from nemo_gym.path_utils import failures_path_for
 from nemo_gym.rollout_collection import (
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
-    NG_TERMINAL_KEY,
+    DispatchLatencyTracker,
     _get_max_rollout_attempts,
+    _is_terminal_failure,
+    _migrate_invalid_judge_main_rows,
+    _observed_elapsed,
 )
 from resources_servers.gdpval.multistage_elo import (
+    PartialStagePolicy,
     PerReferenceTotals,
     StageSpec,
     assign_task_references,
@@ -99,6 +115,8 @@ class StageResume:
     ``(task_index, rollout_index)`` not to re-dispatch (success, terminal, or
     max-attempt). ``on_plan``/``on_outcome``/``on_rows`` persist newly produced
     state (``on_rows`` routes success/failure/kill_shaped like ``run_from_config``).
+    ``restart_from(i)`` invokes ``on_restart`` and preserves stage ``i``'s plan
+    and evidence while invalidating its outcome and every dependent later stage.
     """
 
     plans: Mapping[int, dict]
@@ -108,17 +126,271 @@ class StageResume:
     on_plan: Callable[[int, dict], None]
     on_outcome: Callable[[int, dict], None]
     on_rows: Callable[[int, List[Dict[str, Any]]], None]
+    on_restart: Callable[[int], None] = field(default=lambda _index: None, repr=False)
+    # Longest observed failed-attempt duration, keyed by stage then
+    # (task_index, rollout_index). This is the stage-aware equivalent of the
+    # single-pass dispatcher's resume timing map.
+    elapsed_by_stage: Mapping[int, Mapping[Tuple[Any, Any], float]] = field(default_factory=dict)
+    # Failed judging attempts whose persisted policy artifact should be reused
+    # on retry, keyed by stage then (task_index, rollout_index).
+    reuse_cached_keys: Mapping[int, AbstractSet[Tuple[Any, Any]]] = field(default_factory=dict)
+    # Number of sidecar attempts already consumed, keyed stage/task/rollout.
+    attempts_by_stage: Mapping[int, Mapping[Tuple[Any, Any], int]] = field(default_factory=dict)
+    # Latest persisted failure per stage/task/rollout.  An explicit partial-stage
+    # policy may accept an already-recorded timeout without dispatching it again.
+    latest_failures_by_stage: Mapping[int, Mapping[Tuple[Any, Any], Dict[str, Any]]] = field(default_factory=dict)
+    # Latest attempt disposition written by this orchestrator, including
+    # drained/no-persist attempts that deliberately never enter the sidecar.
+    latest_attempt_dispositions_by_stage: Mapping[int, Mapping[Tuple[Any, Any], Dict[str, Any]]] = field(
+        default_factory=dict
+    )
+
+    def restart_from(self, index: int) -> None:
+        """Durably invalidate a stale outcome and every dependent later stage."""
+        self.on_restart(index)
+        self.plans = {stage: value for stage, value in self.plans.items() if stage <= index}
+        self.outcomes = {stage: value for stage, value in self.outcomes.items() if stage < index}
+        for name in (
+            "rows_by_stage",
+            "gated_keys",
+            "elapsed_by_stage",
+            "reuse_cached_keys",
+            "attempts_by_stage",
+            "latest_failures_by_stage",
+            "latest_attempt_dispositions_by_stage",
+        ):
+            values = getattr(self, name)
+            setattr(self, name, {stage: value for stage, value in values.items() if stage <= index})
 
 
 def _is_success_row(row: Mapping[str, Any]) -> bool:
     """A row is a success iff it carries neither a failure class nor no-persist."""
-    return row.get(NG_FAILURE_CLASS_KEY) is None and not row.get(NG_NO_PERSIST_KEY)
+    return (
+        row.get(NG_FAILURE_CLASS_KEY) is None
+        and not row.get(NG_NO_PERSIST_KEY)
+        and not row.get("invalid_judge_response")
+    )
+
+
+def _stage_key(row: Mapping[str, Any]) -> Tuple[Any, Any]:
+    return (row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME))
+
+
+def _fit_eligible_stage_keys(
+    stage_rows: Sequence[Mapping[str, Any]], successful_rows: Sequence[Mapping[str, Any]]
+) -> set[Tuple[Any, Any]]:
+    """Keys whose persisted success contains a usable assigned-reference battle."""
+    planned_by_key = {_stage_key(row): row for row in stage_rows}
+    successful_by_key = {_stage_key(row): row for row in successful_rows if _stage_key(row) in planned_by_key}
+    fit_eligible: set[Tuple[Any, Any]] = set()
+    for key, success in successful_by_key.items():
+        refs = list(planned_by_key[key].get("reference_ids") or [])
+        if not refs:
+            continue
+        counts = (success.get("per_reference") or {}).get(str(refs[0])) or {}
+        if sum(float(counts.get(name, 0) or 0) for name in ("wins", "losses", "ties")) > 0:
+            fit_eligible.add(key)
+    return fit_eligible
+
+
+def _recorded_key_set(record: Mapping[str, Any], field_name: str) -> set[Tuple[Any, Any]]:
+    keys: set[Tuple[Any, Any]] = set()
+    for value in record.get(field_name, []) or []:
+        if isinstance(value, (list, tuple)) and len(value) == 2:
+            keys.add((value[0], value[1]))
+    return keys
+
+
+def _partial_policy_record(policy: PartialStagePolicy) -> Dict[str, Any]:
+    return {
+        "min_success_fraction": policy.min_success_fraction,
+        "min_per_reference_success_fraction": policy.min_per_reference_success_fraction,
+        "min_successful_rows_per_reference": policy.min_successful_rows_per_reference,
+    }
+
+
+def _elo_evidence_sha256(rows: Sequence[Mapping[str, Any]]) -> str:
+    """Hash exactly the pooled battle evidence that determines a stage ELO."""
+    pooled = pool_per_reference(rows)
+    normalized = {
+        str(reference_id): {
+            "wins": int(counts.get("wins", 0) or 0),
+            "losses": int(counts.get("losses", 0) or 0),
+            "ties": int(counts.get("ties", 0) or 0),
+            "reference_elo": counts.get("reference_elo"),
+        }
+        for reference_id, counts in pooled.items()
+    }
+    return hashlib.sha256(orjson.dumps(normalized, option=orjson.OPT_SORT_KEYS)).hexdigest()
+
+
+def _partial_stage_outcome(
+    policy: PartialStagePolicy,
+    stage_rows: Sequence[Mapping[str, Any]],
+    successful_rows: Sequence[Mapping[str, Any]],
+    new_results: Sequence[Mapping[str, Any]],
+    unresolved_keys: AbstractSet[Tuple[Any, Any]],
+    reference_ids: Sequence[str],
+    stage_elo: Optional[float],
+    num_references: int,
+) -> Optional[Dict[str, Any]]:
+    """Return a durable partial outcome when every configured gate passes."""
+    if (
+        stage_elo is None
+        or not math.isfinite(stage_elo)
+        or not stage_rows
+        or not reference_ids
+        or num_references != len(reference_ids)
+    ):
+        return None
+
+    planned_by_key = {_stage_key(row): row for row in stage_rows}
+    if len(planned_by_key) != len(stage_rows):
+        return None
+    successful_by_key = {_stage_key(row): row for row in successful_rows if _stage_key(row) in planned_by_key}
+
+    planned_per_reference: Counter[str] = Counter()
+    successful_per_reference: Counter[str] = Counter()
+    judged_per_reference: Counter[str] = Counter()
+    fit_eligible_keys: set[Tuple[Any, Any]] = set()
+    for key, row in planned_by_key.items():
+        refs = list(row.get("reference_ids") or [])
+        if refs:
+            planned_per_reference[str(refs[0])] += 1
+        success = successful_by_key.get(key)
+        if success is None or not refs:
+            continue
+        reference_id = str(refs[0])
+        successful_per_reference[reference_id] += 1
+        counts = (success.get("per_reference") or {}).get(reference_id) or {}
+        if sum(float(counts.get(name, 0) or 0) for name in ("wins", "losses", "ties")) > 0:
+            judged_per_reference[reference_id] += 1
+            fit_eligible_keys.add(key)
+
+    # A main-file row without a usable battle is not calibration evidence.  Do
+    # not let it masquerade as a success or become part of the frozen snapshot.
+    if set(successful_by_key) - fit_eligible_keys:
+        return None
+
+    success_fraction = len(fit_eligible_keys) / len(planned_by_key)
+    if success_fraction < policy.min_success_fraction:
+        return None
+
+    per_reference_success_fractions: Dict[str, float] = {}
+    for reference_id in reference_ids:
+        planned = planned_per_reference[reference_id]
+        if planned <= 0:
+            return None
+        success_fraction_for_reference = judged_per_reference[reference_id] / planned
+        per_reference_success_fractions[reference_id] = success_fraction_for_reference
+        if (
+            judged_per_reference[reference_id] < policy.min_successful_rows_per_reference
+            or success_fraction_for_reference < policy.min_per_reference_success_fraction
+        ):
+            return None
+
+    planned_keys = list(planned_by_key)
+    included_keys = [key for key in planned_keys if key in fit_eligible_keys]
+    omitted_keys = [key for key in planned_keys if key not in fit_eligible_keys]
+    included_rows = [successful_by_key[key] for key in included_keys]
+    already_resolved_omitted_keys = set(omitted_keys) - set(unresolved_keys)
+    result_by_key = {_stage_key(result): result for result in new_results}
+    for key in unresolved_keys:
+        result = result_by_key.get(key)
+        if result is None or result.get(NG_NO_PERSIST_KEY) or result.get(NG_FAILURE_CLASS_KEY) != "timeout_exceeded":
+            return None
+
+    per_reference = {
+        reference_id: {
+            "planned": planned_per_reference[reference_id],
+            "successful": successful_per_reference[reference_id],
+            "judged": judged_per_reference[reference_id],
+            "success_fraction": per_reference_success_fractions[reference_id],
+        }
+        for reference_id in reference_ids
+    }
+    return {
+        "status": "partial_complete",
+        "included_keys": [list(key) for key in included_keys],
+        "omitted_keys": [list(key) for key in omitted_keys],
+        "accepted_unresolved_keys": [list(key) for key in planned_keys if key in unresolved_keys],
+        "already_resolved_omitted_keys": [list(key) for key in planned_keys if key in already_resolved_omitted_keys],
+        "evidence_sha256": _elo_evidence_sha256(included_rows),
+        "success_fraction": success_fraction,
+        "persisted_success_fraction": len(successful_by_key) / len(planned_by_key),
+        "per_reference": per_reference,
+        "policy": {**_partial_policy_record(policy), "newly_waivable_failure_classes": ["timeout_exceeded"]},
+    }
+
+
+def _cached_partial_snapshot_is_valid(
+    outcome: Mapping[str, Any],
+    expected_policy: Optional[PartialStagePolicy],
+    stage_rows: Sequence[Mapping[str, Any]],
+    persisted_rows: Sequence[Mapping[str, Any]],
+    reference_ids: Sequence[str],
+    reference_elos: Mapping[str, float],
+) -> bool:
+    """Revalidate a frozen partial outcome from its included evidence."""
+    omitted_keys = _recorded_key_set(outcome, "omitted_keys")
+    accepted_unresolved_keys = _recorded_key_set(outcome, "accepted_unresolved_keys")
+    already_resolved_omitted_keys = _recorded_key_set(outcome, "already_resolved_omitted_keys")
+    if (
+        accepted_unresolved_keys & already_resolved_omitted_keys
+        or accepted_unresolved_keys | already_resolved_omitted_keys != omitted_keys
+    ):
+        return False
+
+    policy_record = outcome.get("policy")
+    required_policy_fields = {
+        "min_success_fraction",
+        "min_per_reference_success_fraction",
+        "min_successful_rows_per_reference",
+    }
+    if (
+        expected_policy is None
+        or not isinstance(policy_record, Mapping)
+        or not required_policy_fields <= set(policy_record)
+        or policy_record.get("newly_waivable_failure_classes") != ["timeout_exceeded"]
+        or {field: policy_record[field] for field in required_policy_fields} != _partial_policy_record(expected_policy)
+    ):
+        return False
+    try:
+        policy = _parse_partial_stage_policy({field: policy_record[field] for field in required_policy_fields})
+    except (TypeError, ValueError):
+        return False
+    if policy is None:
+        return False
+
+    included_keys = _recorded_key_set(outcome, "included_keys")
+    frozen_rows = [row for row in persisted_rows if _stage_key(row) in included_keys and _is_success_row(row)]
+    stage_elo, _, num_references = fit_stage_elo(pool_per_reference(frozen_rows), reference_elos)
+    candidate = _partial_stage_outcome(
+        policy,
+        stage_rows,
+        frozen_rows,
+        [],
+        set(),
+        reference_ids,
+        stage_elo,
+        num_references,
+    )
+    return bool(
+        candidate is not None
+        and _recorded_key_set(candidate, "included_keys") == included_keys
+        and _recorded_key_set(candidate, "omitted_keys") == omitted_keys
+        and candidate.get("evidence_sha256") == outcome.get("evidence_sha256")
+    )
 
 
 def compute_fingerprint(
     multistage_config: MultiStageRunConfig,
     reference_elos: Mapping[str, float],
     distribution: Mapping[str, Mapping[str, object]],
+    *,
+    materialized_rows: Optional[Sequence[Mapping[str, Any]]] = None,
+    rollout_collection_config: Optional[Any] = None,
+    resolved_global_config: Optional[Mapping[str, Any]] = None,
 ) -> str:
     """Stable hash of everything that affects stage planning.
 
@@ -126,6 +398,50 @@ def compute_fingerprint(
     journal stale: the plans/outcomes it records were produced under a different
     configuration or task distribution and cannot be safely replayed.
     """
+
+    def jsonable(value: Any) -> Any:
+        if hasattr(value, "model_dump"):
+            return value.model_dump(mode="json")
+        if isinstance(value, Mapping):
+            return {str(key): jsonable(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [jsonable(item) for item in value]
+        if isinstance(value, Path):
+            return str(value)
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return value
+        return repr(value)
+
+    component_types = {"responses_api_agents", "responses_api_models", "resources_servers"}
+
+    def jsonable_runtime_block(block: Mapping[str, Any]) -> Dict[str, Any]:
+        """Serialize a component block without process-local bind addresses."""
+        result: Dict[str, Any] = {}
+        for key, value in block.items():
+            key = str(key)
+            if key not in component_types:
+                result[key] = jsonable(value)
+                continue
+
+            servers = jsonable(value)
+            if not isinstance(servers, Mapping):
+                result[key] = servers
+                continue
+
+            result[key] = {
+                str(server_name): (
+                    {
+                        str(field): field_value
+                        for field, field_value in server_config.items()
+                        if str(field) not in {"host", "port"}
+                    }
+                    if isinstance(server_config, Mapping)
+                    else server_config
+                )
+                for server_name, server_config in servers.items()
+            }
+        return result
+
     payload = {
         "stages": [(s.num_tasks, s.num_models, s.seed) for s in multistage_config.stages],
         "seed": multistage_config.seed,
@@ -141,6 +457,44 @@ def compute_fingerprint(
             for grp in sorted(distribution)
         },
     }
+    # Keep partial completion out of the rollout-cache fingerprint so an
+    # interrupted strict run can opt in without discarding successful rows. Its
+    # recorded plan remains authoritative; only a fresh policy-enabled plan uses
+    # balanced assignment. A persisted partial outcome records the exact policy
+    # and is revalidated on every resume.
+    if materialized_rows is not None:
+        materialized_hasher = hashlib.sha256()
+        for row in materialized_rows:
+            materialized_hasher.update(orjson.dumps(row, option=orjson.OPT_SORT_KEYS))
+            materialized_hasher.update(b"\n")
+        payload["materialized_rows"] = {
+            "count": len(materialized_rows),
+            "sha256": materialized_hasher.hexdigest(),
+        }
+    if rollout_collection_config is not None:
+        result_affecting_fields = (
+            "agent_name",
+            "input_jsonl_fpath",
+            "limit",
+            "num_repeats",
+            "num_repeats_add_seed",
+            "responses_create_params",
+            "prompt_config",
+            "skills",
+        )
+
+        def config_value(name: str) -> Any:
+            if isinstance(rollout_collection_config, Mapping):
+                return rollout_collection_config.get(name)
+            return getattr(rollout_collection_config, name, None)
+
+        payload["rollout_collection_config"] = {name: jsonable(config_value(name)) for name in result_affecting_fields}
+    if resolved_global_config is not None:
+        payload["runtime_components"] = {
+            str(name): jsonable_runtime_block(block)
+            for name, block in resolved_global_config.items()
+            if isinstance(block, Mapping) and component_types.intersection(block)
+        }
     encoded = orjson.dumps(payload, option=orjson.OPT_SORT_KEYS)
     return hashlib.sha256(encoded).hexdigest()
 
@@ -171,10 +525,57 @@ class MultiStageRunConfig:
     reuse_cached_deliverables: bool = True
 
 
+def _validate_partial_stage_policy(policy: PartialStagePolicy) -> None:
+    """Validate parsed and directly constructed partial policies."""
+    for name in ("min_success_fraction", "min_per_reference_success_fraction"):
+        value = getattr(policy, name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value <= 1:
+            raise ValueError(f"partial_completion.{name} must be in (0, 1]")
+    minimum_rows = policy.min_successful_rows_per_reference
+    if isinstance(minimum_rows, bool) or not isinstance(minimum_rows, int) or minimum_rows <= 0:
+        raise ValueError("partial_completion.min_successful_rows_per_reference must be a positive integer")
+
+
+def _parse_partial_stage_policy(raw: Any) -> Optional[PartialStagePolicy]:
+    """Parse and validate an opt-in partial-completion mapping."""
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        raise ValueError("stage partial_completion must be a mapping")
+
+    allowed_fields = {
+        "min_success_fraction",
+        "min_per_reference_success_fraction",
+        "min_successful_rows_per_reference",
+    }
+    unknown_fields = sorted(set(raw) - allowed_fields)
+    if unknown_fields:
+        raise ValueError(f"unknown partial_completion field(s): {', '.join(map(str, unknown_fields))}")
+
+    if any(isinstance(raw.get(field), bool) for field in allowed_fields if field in raw):
+        raise ValueError("partial_completion thresholds must be numeric, not boolean")
+
+    try:
+        raw_minimum_rows = raw.get("min_successful_rows_per_reference", 1)
+        minimum_rows = int(raw_minimum_rows)
+        policy = PartialStagePolicy(
+            min_success_fraction=float(raw.get("min_success_fraction", 1.0)),
+            min_per_reference_success_fraction=float(raw.get("min_per_reference_success_fraction", 1.0)),
+            min_successful_rows_per_reference=minimum_rows,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("partial_completion thresholds must be numeric") from exc
+    if minimum_rows != raw_minimum_rows:
+        raise ValueError("partial_completion.min_successful_rows_per_reference must be a positive integer")
+    _validate_partial_stage_policy(policy)
+    return policy
+
+
 def parse_multistage_config(raw: Mapping[str, Any]) -> MultiStageRunConfig:
     """Build a :class:`MultiStageRunConfig` from a raw config mapping.
 
-    Accepts stages as a list of mappings (``{num_tasks?, num_models?, seed?}``)
+    Accepts stages as a list of mappings (``{num_tasks?, num_models?, seed?,
+    partial_completion?}``)
     or as a list of ``"[num_tasks][:num_models[:seed]]"`` strings (handy for CLI
     overrides). ``num_tasks`` is the per-stage task count and defaults to the full
     task set when omitted (empty leading field in the string form). Raises
@@ -192,6 +593,7 @@ def parse_multistage_config(raw: Mapping[str, Any]) -> MultiStageRunConfig:
                     num_models=int(num_models) if num_models is not None else None,
                     seed=int(seed) if seed is not None else None,
                     num_tasks=int(num_tasks) if num_tasks is not None else None,
+                    partial_completion=_parse_partial_stage_policy(entry.get("partial_completion")),
                 )
             )
         else:
@@ -206,6 +608,8 @@ def parse_multistage_config(raw: Mapping[str, Any]) -> MultiStageRunConfig:
             "multistage.enabled=true but no stages were configured. Set "
             "multistage.stages, e.g. ++multistage.stages='[{num_tasks: 110, num_models: 12}, {num_models: 4}]'."
         )
+    if stages[-1].partial_completion is not None:
+        raise ValueError("partial_completion is allowed only on non-final calibration stages")
 
     column = raw.get("column") or raw.get("columns") or ["occupation"]
     if isinstance(column, str):
@@ -311,6 +715,8 @@ def build_stage_rows(
 def tag_results(
     pairs: Sequence[Tuple[Mapping[str, Any], Mapping[str, Any]]],
     stage_index: int,
+    expected_final_stage_index: Optional[int] = None,
+    expected_stage_row_count: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Attach rollout identity + ``stage_index`` to each stage result row.
 
@@ -318,6 +724,9 @@ def tag_results(
     result (task/rollout indices, agent ref) so the merged rollouts file and the
     standard ``_call_aggregate_metrics`` see well-formed rows, and stamps
     ``stage_index``/``task_id`` so the stage-aware aggregation can group by stage.
+    Multi-stage callers also provide ``expected_final_stage_index`` and
+    ``expected_stage_row_count`` so aggregation can distinguish a complete run
+    from a missing or partially drained final stage.
     """
     tagged: List[Dict[str, Any]] = []
     for row, result in pairs:
@@ -325,7 +734,13 @@ def tag_results(
         out[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
         out[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
         out[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
+        if ATTEMPT_INDEX_KEY_NAME in row:
+            out[ATTEMPT_INDEX_KEY_NAME] = row[ATTEMPT_INDEX_KEY_NAME]
         out["stage_index"] = stage_index
+        if expected_final_stage_index is not None:
+            out["expected_final_stage_index"] = expected_final_stage_index
+        if expected_stage_row_count is not None:
+            out["expected_stage_row_count"] = expected_stage_row_count
         if out.get("task_id") is None:
             tid = row_task_id(row)
             if tid is not None:
@@ -349,17 +764,20 @@ async def run_multistage_stages(
     rng: Optional[random.Random] = None,
     on_event: Optional[Callable[[str, dict], None]] = None,
     resume: Optional[StageResume] = None,
+    dispatch_longest_first: bool = False,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Run every stage and return ``(all_result_rows, stage_summaries)``.
 
     For each stage: sample the stage's ``T`` tasks (``T`` defaults to the full
     task set), select the included references (closest known ELO to the running
-    estimate), assign each sampled task one of them uniformly at random, build the
-    stage's rollout rows, execute them via ``run_rollouts``, tag the results, pool
-    the per-reference votes, and fit the stage ELO (threaded into the next stage's
-    selection). ``all_result_rows`` is the concatenation of every stage's tagged
-    results (ready to write as the standard rollouts file); ``stage_summaries`` is
-    one dict per stage for logging.
+    estimate), assign each sampled task one reference, build the stage's rollout
+    rows, execute them via ``run_rollouts``, tag the results, pool the
+    per-reference votes, and fit the stage ELO (threaded into the next stage's
+    selection). Fresh partial-completion stages balance assignments across the
+    selected references; other fresh stages use independent uniform draws.
+    ``all_result_rows`` is the concatenation of every stage's tagged results
+    (ready to write as the standard rollouts file); ``stage_summaries`` is one
+    dict per stage for logging.
 
     ``rng`` seeds task sampling (defaults to ``multistage_config.seed``); per-task
     reference assignment is seeded independently per stage via
@@ -370,8 +788,8 @@ async def run_multistage_stages(
     interrupted stages re-dispatch only the ``(task, rollout)`` rows without a
     persisted success, and recorded plans (including each stage's per-task
     reference assignment) are replayed so selection is identical even when
-    ``multistage.seed`` is ``None``. ``resume=None`` is byte-for-byte the
-    pre-resume behavior.
+    ``multistage.seed`` is ``None``. ``resume=None`` preserves the same execution
+    semantics without file-backed persistence.
     """
     base_rng = rng or (
         random.Random(multistage_config.seed) if multistage_config.seed is not None else random.Random()
@@ -388,6 +806,11 @@ async def run_multistage_stages(
         nested=multistage_config.nested_tasks,
     )
     total_stages = len(multistage_config.stages)
+    for stage in multistage_config.stages:
+        if stage.partial_completion is not None:
+            _validate_partial_stage_policy(stage.partial_completion)
+    if total_stages and multistage_config.stages[-1].partial_completion is not None:
+        raise ValueError("partial_completion is allowed only on non-final calibration stages")
 
     def _emit(name: str, **data: object) -> None:
         if on_event is not None:
@@ -401,19 +824,105 @@ async def run_multistage_stages(
     # (task_id, rollout_index) deliverables already produced by earlier stages.
     # Later stages reuse these instead of re-running the policy.
     produced: set[Tuple[str, int]] = set()
+    sidecar_produced_by_stage: Dict[int, set[Tuple[str, int]]] = {}
+    if resume is not None and resume.reuse_cached_keys:
+        task_id_by_key: Dict[Tuple[Any, Any], str] = {}
+        for row in materialized_rows:
+            task_id = row_task_id(row)
+            if task_id is not None:
+                task_id_by_key[(row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME))] = task_id
+        for stage_index, keys in resume.reuse_cached_keys.items():
+            for key in keys:
+                task_id = task_id_by_key.get(key)
+                if task_id is not None:
+                    sidecar_produced_by_stage.setdefault(stage_index, set()).add((task_id, int(key[1] or 0)))
+
+    max_attempts = _get_max_rollout_attempts()
     for index, stage in enumerate(multistage_config.stages):
+        # A sidecar reuse flag is emitted only after the policy artifact exists.
+        # Treat it as produced from this stage onward even when the judging row
+        # is terminal/max-attempt gated and therefore never enters the main file.
+        produced.update(sidecar_produced_by_stage.get(index, set()))
         if resume is not None and index in resume.outcomes:
-            eval_elo = _resume_complete_stage(
-                index,
-                total_stages,
-                resume,
-                reference_elos,
-                produced,
-                all_results,
-                stage_summaries,
-                _emit,
+            outcome = resume.outcomes[index]
+            plan = resume.plans.get(index, {})
+            expected_rows = [row for task_id in plan.get("task_ids", []) for row in rows_by_task.get(str(task_id), [])]
+            expected_keys = {(row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME)) for row in expected_rows}
+            resolved_keys = set(resume.gated_keys.get(index, set()))
+            completion_is_covered = len(expected_keys) == len(expected_rows) and expected_keys <= resolved_keys
+            task_reference_ids = {
+                str(key): str(value) for key, value in (plan.get("task_reference_ids") or {}).items()
+            }
+            if not task_reference_ids and plan.get("reference_ids"):
+                assignment_rng = stage_assignment_rng(multistage_config.seed, plan.get("seed"), index)
+                task_reference_ids = assign_task_references(
+                    plan.get("task_ids", []),
+                    plan.get("reference_ids", []),
+                    rng=assignment_rng,
+                )
+            planned_stage_rows = build_stage_rows(rows_by_task, task_reference_ids, index)
+            if outcome.get("status") == "partial_complete":
+                included_keys = _recorded_key_set(outcome, "included_keys")
+                omitted_keys = _recorded_key_set(outcome, "omitted_keys")
+                persisted_success_keys = {_stage_key(row) for row in resume.rows_by_stage.get(index, [])}
+                completion_is_covered = (
+                    completion_is_covered
+                    and not (included_keys & omitted_keys)
+                    and included_keys | omitted_keys == expected_keys
+                    and included_keys <= persisted_success_keys
+                    and _cached_partial_snapshot_is_valid(
+                        outcome,
+                        stage.partial_completion,
+                        planned_stage_rows,
+                        resume.rows_by_stage.get(index, []),
+                        plan.get("reference_ids", []),
+                        reference_elos,
+                    )
+                )
+                if not completion_is_covered:
+                    raise RuntimeError(
+                        f"cached partial stage {index} snapshot is invalid; refusing to recompute "
+                        "adaptive downstream stages from changed evidence"
+                    )
+            elif index < total_stages - 1:
+                # Older runs used "complete" to mean terminal/max-attempt
+                # resolved.  Such an outcome is not safe to reuse for adaptive
+                # reference selection unless every planned row has usable
+                # persisted battle evidence.
+                persisted_rows = resume.rows_by_stage.get(index, [])
+                completion_is_covered = completion_is_covered and (
+                    _fit_eligible_stage_keys(planned_stage_rows, persisted_rows) == expected_keys
+                    and len(planned_stage_rows) == len(expected_rows)
+                )
+            if completion_is_covered:
+                resumed_elo = _resume_complete_stage(
+                    index,
+                    total_stages,
+                    len(expected_rows),
+                    resume,
+                    reference_elos,
+                    produced,
+                    all_results,
+                    stage_summaries,
+                    _emit,
+                )
+                # Match uninterrupted execution: a completed stage with no
+                # usable battles does not erase the last fitted ELO. Later
+                # adaptive stages continue from the most recent valid fit.
+                if resumed_elo is not None:
+                    eval_elo = resumed_elo
+                continue
+            _emit(
+                "stage_completion_stale",
+                index=index,
+                total_stages=total_stages,
+                expected_rows=len(expected_rows),
+                resolved_rows=len(expected_keys & resolved_keys),
             )
-            continue
+            resume.restart_from(index)
+            sidecar_produced_by_stage = {
+                stage_index: keys for stage_index, keys in sidecar_produced_by_stage.items() if stage_index <= index
+            }
 
         reference_ids, task_ids, task_reference_ids, replayed = _plan_stage(
             index, stage, reference_elos, eval_elo, stage_task_sets, multistage_config, resume
@@ -431,6 +940,70 @@ async def run_multistage_stages(
         # failures from the sidecar (mirrors ``_load_from_cache``, stage-keyed).
         gated_keys = set(resume.gated_keys.get(index, set())) if resume is not None else set()
         pending_rows = [r for r in stage_rows if (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) not in gated_keys]
+        if resume is not None:
+            reuse_cached_keys = resume.reuse_cached_keys.get(index, set())
+            attempts_by_key = resume.attempts_by_stage.get(index, {})
+            for row in pending_rows:
+                key = (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
+                if key in reuse_cached_keys:
+                    row["reuse_cached_deliverable"] = True
+                prior_attempts = attempts_by_key.get(key, 0)
+                if prior_attempts > 0:
+                    row[ATTEMPT_INDEX_KEY_NAME] = prior_attempts
+
+        if dispatch_longest_first and resume is not None:
+            elapsed_by_key = resume.elapsed_by_stage.get(index, {})
+            if elapsed_by_key:
+                known = [
+                    row
+                    for row in pending_rows
+                    if (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]) in elapsed_by_key
+                ]
+                unknown = [
+                    row
+                    for row in pending_rows
+                    if (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]) not in elapsed_by_key
+                ]
+                known.sort(
+                    key=lambda row: elapsed_by_key[(row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])],
+                    reverse=True,
+                )
+                pending_rows = known + unknown
+
+        # A run may opt into partial calibration after an allocation ended with
+        # persisted timeouts.  Evaluate that frozen evidence before dispatch so
+        # the already-timed-out rows are not forced through another long attempt.
+        pre_dispatch_partial_outcome: Optional[Dict[str, Any]] = None
+        if resume is not None and index < total_stages - 1 and stage.partial_completion is not None and pending_rows:
+            pending_keys_for_policy = {(row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]) for row in pending_rows}
+            latest_failures = resume.latest_failures_by_stage.get(index, {})
+            latest_dispositions = resume.latest_attempt_dispositions_by_stage.get(index, {})
+            # Persisted failures are fsynced before their journal disposition,
+            # while no-persist tombstones are journaled first. A tombstone must
+            # therefore override an older sidecar; otherwise the sidecar is at
+            # least as new as the journal. If a later persisted attempt crashed
+            # before journaling, preferring its sidecar fails closed correctly.
+            latest_attempts = {
+                key: latest_dispositions[key]
+                if latest_dispositions.get(key, {}).get(NG_NO_PERSIST_KEY)
+                else latest_failures[key]
+                for key in pending_keys_for_policy
+                if latest_dispositions.get(key, {}).get(NG_NO_PERSIST_KEY) or key in latest_failures
+            }
+            persisted_failures = [latest_attempts[key] for key in pending_keys_for_policy if key in latest_attempts]
+            cached_elo, _, cached_num_references = fit_stage_elo(pool_per_reference(cached_rows), reference_elos)
+            candidate = _partial_stage_outcome(
+                stage.partial_completion,
+                stage_rows,
+                cached_rows,
+                persisted_failures,
+                pending_keys_for_policy,
+                reference_ids,
+                cached_elo,
+                cached_num_references,
+            )
+            if candidate is not None:
+                pre_dispatch_partial_outcome = {"stage_index": index, **candidate}
 
         num_reused = sum(1 for r in stage_rows if r.get("reuse_cached_deliverable"))
         _emit(
@@ -446,17 +1019,39 @@ async def run_multistage_stages(
             replayed=replayed,
         )
 
-        pairs = await run_rollouts(pending_rows)
-        new_tagged = tag_results(pairs, index)
+        pairs = [] if pre_dispatch_partial_outcome is not None else await run_rollouts(pending_rows)
+        expected_stage_row_count = len(stage_rows)
+        new_tagged = tag_results(
+            pairs,
+            index,
+            expected_final_stage_index=total_stages - 1,
+            expected_stage_row_count=expected_stage_row_count,
+        )
         if resume is not None:
             resume.on_rows(index, new_tagged)
+        # A verify-side failure can still carry a complete, reusable policy
+        # artifact. Make it available immediately to later stages in this same
+        # process; startup-only sidecar loading covers only resumed runs.
+        for row in new_tagged:
+            if not row.get("reuse_cached_deliverable"):
+                continue
+            tid = row_task_id(row)
+            if tid is not None:
+                produced.add((tid, int(row.get(ROLLOUT_INDEX_KEY_NAME, 0) or 0)))
         # Only successful rows feed pooling / aggregate.
         new_successes = [r for r in new_tagged if _is_success_row(r)]
-        tagged = list(cached_rows) + new_successes
+        tagged = [
+            dict(
+                r,
+                expected_final_stage_index=total_stages - 1,
+                expected_stage_row_count=expected_stage_row_count,
+            )
+            for r in cached_rows
+        ] + new_successes
         all_results.extend(tagged)
 
         # Record this stage's deliverables so later stages can reuse them.
-        for row in stage_rows:
+        for row in tagged:
             tid = row_task_id(row)
             if tid is not None:
                 produced.add((tid, int(row.get(ROLLOUT_INDEX_KEY_NAME, 0) or 0)))
@@ -466,9 +1061,73 @@ async def run_multistage_stages(
         if stage_elo is not None:
             eval_elo = stage_elo
 
-        # Completion marker only; eval_elo is re-fit from rows on resume.
-        if resume is not None:
-            resume.on_outcome(index, {"stage_index": index, "status": "complete"})
+        # Outcomes contain no authoritative ELO; it is re-fit from rows on
+        # resume. A retryable failure or drained row leaves the stage open unless
+        # an explicit non-final partial-completion policy accepts its evidence.
+        returned_keys: set[Tuple[Any, Any]] = set()
+        prior_attempts = resume.attempts_by_stage.get(index, {}) if resume is not None else {}
+        for result in new_tagged:
+            key = (result[TASK_INDEX_KEY_NAME], result[ROLLOUT_INDEX_KEY_NAME])
+            resolved = _is_success_row(result) or _is_terminal_failure(result)
+            if (
+                not resolved
+                and result.get(NG_FAILURE_CLASS_KEY) is not None
+                and not result.get(NG_NO_PERSIST_KEY)
+                and prior_attempts.get(key, 0) + 1 >= max_attempts
+            ):
+                resolved = True
+            if resolved:
+                returned_keys.add(key)
+        pending_keys = {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in pending_rows}
+        unresolved_keys = pending_keys - returned_keys
+        stage_complete = not unresolved_keys
+        partial_outcome = pre_dispatch_partial_outcome
+        coverage_rejected = False
+        successful_keys = {_stage_key(row) for row in tagged}
+        planned_keys = {_stage_key(row) for row in stage_rows}
+        missing_success_keys = planned_keys - successful_keys
+        if index < total_stages - 1:
+            if stage.partial_completion is not None:
+                coverage_outcome = partial_outcome or _partial_stage_outcome(
+                    stage.partial_completion,
+                    stage_rows,
+                    tagged,
+                    new_tagged,
+                    unresolved_keys,
+                    reference_ids,
+                    stage_elo,
+                    num_references,
+                )
+                if missing_success_keys:
+                    partial_outcome = coverage_outcome
+                    if partial_outcome is not None:
+                        if "stage_index" not in partial_outcome:
+                            partial_outcome = {"stage_index": index, **partial_outcome}
+                        stage_complete = True
+                    else:
+                        stage_complete = False
+                        coverage_rejected = not unresolved_keys
+                elif coverage_outcome is None:
+                    # Even a persisted "success" must contain usable battle
+                    # evidence for every configured coverage gate.
+                    stage_complete = False
+                    coverage_rejected = True
+            else:
+                # Terminal/max-attempt means "do not retry", not "safe adaptive
+                # calibration".  Without an explicit partial policy every
+                # planned non-final row must contribute usable battle evidence.
+                if (
+                    stage_elo is None
+                    or not math.isfinite(stage_elo)
+                    or _fit_eligible_stage_keys(stage_rows, tagged) != planned_keys
+                ):
+                    stage_complete = False
+                    coverage_rejected = not unresolved_keys
+        if resume is not None and stage_complete:
+            resume.on_outcome(
+                index,
+                partial_outcome or {"stage_index": index, "status": "complete"},
+            )
 
         _emit(
             "stage_end",
@@ -478,18 +1137,44 @@ async def run_multistage_stages(
             normalized_elo=normalized,
             num_references=num_references,
         )
-        stage_summaries.append(
-            {
-                "stage_index": index,
-                "num_tasks": len(task_ids),
-                "num_rollouts": len(stage_rows),
-                "num_reused": num_reused,
-                "reference_ids": list(reference_ids),
-                "eval_elo": stage_elo,
-                "normalized_elo": normalized,
-                "num_references": num_references,
-            }
-        )
+        summary = {
+            "stage_index": index,
+            "num_tasks": len(task_ids),
+            "num_rollouts": len(stage_rows),
+            "num_reused": num_reused,
+            "reference_ids": list(reference_ids),
+            "eval_elo": stage_elo,
+            "normalized_elo": normalized,
+            "num_references": num_references,
+        }
+        if partial_outcome is not None:
+            summary.update(
+                partial=True,
+                success_fraction=partial_outcome["success_fraction"],
+                num_successful=len(partial_outcome["included_keys"]),
+                num_omitted=len(partial_outcome["omitted_keys"]),
+            )
+            _emit(
+                "stage_partial_complete",
+                index=index,
+                total_stages=total_stages,
+                success_fraction=partial_outcome["success_fraction"],
+                num_omitted=len(partial_outcome["omitted_keys"]),
+            )
+        stage_summaries.append(summary)
+        if not stage_complete:
+            _emit(
+                "stage_incomplete",
+                index=index,
+                total_stages=total_stages,
+                num_pending=len(unresolved_keys),
+                num_omitted=len(missing_success_keys),
+                coverage_blocked=coverage_rejected,
+            )
+            # Later reference selection depends on an accepted ELO. Stop before
+            # creating downstream plans; retryable rows can resume, while a
+            # coverage-only rejection requires an explicit policy/data change.
+            break
 
     return all_results, stage_summaries
 
@@ -509,7 +1194,8 @@ def _plan_stage(
     the ``num_models`` closest to the running ELO estimate). ``task_ids`` is the
     stage's sampled ``T`` tasks (the full task set when ``num_tasks`` is unset).
     ``task_reference_ids`` maps each task to the single reference it is judged
-    against, sampled uniformly (equal weight) from ``reference_ids``.
+    against. Fresh partial-completion stages use a seeded balanced assignment;
+    other fresh stages use independent uniform draws.
 
     ``replayed`` is True when the recorded plan was returned from
     ``resume.plans[index]`` (deterministic replay, even with ``seed=None``), False
@@ -531,7 +1217,12 @@ def _plan_stage(
     reference_ids = select_references(reference_elos, eval_elo, stage.num_models)
     task_ids = list(stage_task_sets[index])
     rng = stage_assignment_rng(multistage_config.seed, stage.seed, index)
-    task_reference_ids = assign_task_references(task_ids, reference_ids, rng=rng)
+    task_reference_ids = assign_task_references(
+        task_ids,
+        reference_ids,
+        rng=rng,
+        balanced=stage.partial_completion is not None,
+    )
     if resume is not None:
         resume.on_plan(
             index,
@@ -551,6 +1242,7 @@ def _plan_stage(
 def _resume_complete_stage(
     index: int,
     total_stages: int,
+    expected_stage_row_count: int,
     resume: StageResume,
     reference_elos: Mapping[str, float],
     produced: set[Tuple[str, int]],
@@ -564,7 +1256,18 @@ def _resume_complete_stage(
     truth) rather than trusting the recorded ``eval_elo`` field, so the value
     threaded to later stages is always consistent with the persisted rows.
     """
-    cached_rows = list(resume.rows_by_stage.get(index, []))
+    outcome = resume.outcomes.get(index, {})
+    partial = outcome.get("status") == "partial_complete"
+    included_keys = _recorded_key_set(outcome, "included_keys") if partial else None
+    cached_rows = [
+        dict(
+            r,
+            expected_final_stage_index=total_stages - 1,
+            expected_stage_row_count=expected_stage_row_count,
+        )
+        for r in resume.rows_by_stage.get(index, [])
+        if included_keys is None or _stage_key(r) in included_keys
+    ]
     plan = resume.plans.get(index, {})
     reference_ids = list(plan.get("reference_ids", []))
     task_ids = list(plan.get("task_ids", []))
@@ -586,20 +1289,28 @@ def _resume_complete_stage(
         normalized_elo=normalized,
         num_references=num_references,
         num_rollouts=len(cached_rows),
+        partial=partial,
     )
-    stage_summaries.append(
-        {
-            "stage_index": index,
-            "num_tasks": len(task_ids),
-            "num_rollouts": len(cached_rows),
-            "num_reused": 0,
-            "reference_ids": reference_ids,
-            "eval_elo": stage_elo,
-            "normalized_elo": normalized,
-            "num_references": num_references,
-            "cached": True,
-        }
-    )
+    summary = {
+        "stage_index": index,
+        "num_tasks": len(task_ids),
+        "num_rollouts": len(cached_rows),
+        "num_reused": 0,
+        "reference_ids": reference_ids,
+        "eval_elo": stage_elo,
+        "normalized_elo": normalized,
+        "num_references": num_references,
+        "cached": True,
+    }
+    if partial:
+        summary.update(
+            partial=True,
+            num_rollouts=expected_stage_row_count,
+            num_successful=len(cached_rows),
+            success_fraction=outcome.get("success_fraction"),
+            num_omitted=len(_recorded_key_set(outcome, "omitted_keys")),
+        )
+    stage_summaries.append(summary)
     return stage_elo
 
 
@@ -621,9 +1332,35 @@ def write_rollouts(all_results: Sequence[Mapping[str, Any]], output_fpath: str |
         deduped.values(),
         key=lambda r: (r.get("stage_index", 0), r.get(TASK_INDEX_KEY_NAME, 0), r.get(ROLLOUT_INDEX_KEY_NAME, 0)),
     )
-    with output_fpath.open("wb") as handle:
-        for row in ordered:
-            handle.write(orjson.dumps(row) + b"\n")
+    prior_mode = output_fpath.stat().st_mode & 0o7777 if output_fpath.exists() else None
+    temp_path: Optional[Path] = None
+    try:
+        # NamedTemporaryFile forces 0600, which would silently make a fresh
+        # shared rollout file owner-only. Create the staging file with the same
+        # 0666+umask semantics as a normal ``open(..., 'wb')`` instead.
+        for _ in range(100):
+            candidate = output_fpath.parent / f".{output_fpath.name}.merge-{secrets.token_hex(8)}"
+            try:
+                fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+            except FileExistsError:
+                continue
+            temp_path = candidate
+            break
+        else:  # pragma: no cover - cryptographically-random collisions
+            raise FileExistsError(f"could not allocate staging file beside {output_fpath}")
+
+        with os.fdopen(fd, "wb") as handle:
+            for row in ordered:
+                handle.write(orjson.dumps(row) + b"\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        if prior_mode is not None:
+            os.chmod(temp_path, prior_mode)
+        os.replace(temp_path, output_fpath)
+        temp_path = None
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
     return output_fpath
 
 
@@ -636,6 +1373,12 @@ def journal_path_for(output_fpath: str | Path) -> Path:
     """``<output_stem>_multistage_state.jsonl`` sibling of the rollouts file."""
     output_fpath = Path(output_fpath)
     return output_fpath.with_name(f"{output_fpath.stem}_multistage_state.jsonl")
+
+
+def aggregate_metrics_path_for(output_fpath: str | Path) -> Path:
+    """Standard aggregate-metrics path associated with a rollout JSONL."""
+    output_fpath = Path(output_fpath)
+    return output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
 
 
 def read_journal(journal_fpath: str | Path) -> Tuple[Dict[int, dict], Dict[int, dict], Optional[str]]:
@@ -660,11 +1403,108 @@ def read_journal(journal_fpath: str | Path) -> Tuple[Dict[int, dict], Dict[int, 
             index = record.get("stage_index")
             if index is None:
                 continue
-            if record.get("status") == "planned":
+            status = record.get("status")
+            if status == "restart_from_stage":
+                restart_stage = int(index)
+                # The marker is durable before downstream files are pruned. It
+                # therefore invalidates old journal state immediately even if
+                # the process dies during cleanup; newer records later in the
+                # journal can repopulate the recomputed stages.
+                plans = {i: plan for i, plan in plans.items() if i <= restart_stage}
+                outcomes = {i: outcome for i, outcome in outcomes.items() if i < restart_stage}
+            elif status == "planned":
                 plans[int(index)] = record
-            elif record.get("status") == "complete":
+            elif status in {"complete", "partial_complete"}:
                 outcomes[int(index)] = record
     return plans, outcomes, fingerprint
+
+
+def load_latest_attempt_dispositions(
+    journal_fpath: str | Path,
+) -> Dict[int, Dict[Tuple[Any, Any], Dict[str, Any]]]:
+    """Load latest failure/no-persist attempt state recorded in the journal."""
+    latest: Dict[int, Dict[Tuple[Any, Any], Dict[str, Any]]] = {}
+    path = Path(journal_fpath)
+    if not path.exists():
+        return latest
+    with path.open("rb") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            record = orjson.loads(line)
+            status = record.get("status")
+            if status == "restart_from_stage":
+                restart_stage = int(record["stage_index"])
+                latest = {index: rows for index, rows in latest.items() if index <= restart_stage}
+                continue
+            if status != "attempt_dispositions":
+                continue
+            stage_index = int(record["stage_index"])
+            stage_latest = latest.setdefault(stage_index, {})
+            for disposition in record.get("attempts", []) or []:
+                if TASK_INDEX_KEY_NAME not in disposition or ROLLOUT_INDEX_KEY_NAME not in disposition:
+                    continue
+                key = (disposition[TASK_INDEX_KEY_NAME], disposition[ROLLOUT_INDEX_KEY_NAME])
+                stage_latest[key] = disposition
+    return latest
+
+
+def _pending_restart_stage(journal_fpath: str | Path) -> Optional[int]:
+    """Return a restart marker whose downstream file cleanup was not acknowledged."""
+    pending: Optional[int] = None
+    path = Path(journal_fpath)
+    if not path.exists():
+        return None
+    with path.open("rb") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            record = orjson.loads(line)
+            status = record.get("status")
+            if status == "restart_from_stage":
+                pending = int(record["stage_index"])
+            elif status == "restart_cleanup_complete" and pending == int(record["stage_index"]):
+                pending = None
+    return pending
+
+
+def _atomic_filter_jsonl(path: Path, keep: Callable[[Mapping[str, Any]], bool]) -> None:
+    """Atomically rewrite ``path`` with only records accepted by ``keep``."""
+    if not path.exists():
+        return
+    mode = path.stat().st_mode & 0o7777
+    temp_path: Optional[Path] = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb", dir=path.parent, prefix=f".{path.name}.prune-", delete=False
+        ) as out:
+            temp_path = Path(out.name)
+            with path.open("rb") as source:
+                for line in source:
+                    stripped = line.strip()
+                    if stripped and keep(orjson.loads(stripped)):
+                        out.write(stripped + b"\n")
+            out.flush()
+            os.fsync(out.fileno())
+        os.chmod(temp_path, mode)
+        os.replace(temp_path, path)
+        temp_path = None
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+
+
+def _prune_downstream_files(output_fpath: str | Path, restart_stage: int) -> None:
+    """Remove persisted main/sidecar rows after ``restart_stage`` atomically."""
+    output_fpath = Path(output_fpath)
+
+    def keep(record: Mapping[str, Any]) -> bool:
+        return int(record.get("stage_index", 0) or 0) <= restart_stage
+
+    _atomic_filter_jsonl(output_fpath, keep)
+    _atomic_filter_jsonl(failures_path_for(output_fpath), keep)
 
 
 def load_persisted_rows(output_fpath: str | Path) -> Dict[int, List[Dict[str, Any]]]:
@@ -723,7 +1563,7 @@ def load_gated_keys(
                 continue
             key = (int(fr.get("stage_index", 0) or 0), fr[TASK_INDEX_KEY_NAME], fr[ROLLOUT_INDEX_KEY_NAME])
             attempts[key] = attempts.get(key, 0) + 1
-            if fr.get(NG_TERMINAL_KEY):
+            if _is_terminal_failure(fr):
                 terminal.add(key)
 
     for key in attempts:
@@ -731,6 +1571,130 @@ def load_gated_keys(
         if key in terminal or attempts[key] >= max_attempts:
             gated.setdefault(stage_index, set()).add((task_index, rollout_index))
     return gated
+
+
+def load_failure_timings(output_fpath: str | Path) -> Dict[int, Dict[Tuple[Any, Any], float]]:
+    """Load longest failed-attempt duration per stage/task/rollout key."""
+    elapsed_by_stage: Dict[int, Dict[Tuple[Any, Any], float]] = {}
+    failures_fpath = failures_path_for(Path(output_fpath))
+    if not failures_fpath.exists():
+        return elapsed_by_stage
+
+    with failures_fpath.open("rb") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            row = orjson.loads(line)
+            if TASK_INDEX_KEY_NAME not in row or ROLLOUT_INDEX_KEY_NAME not in row:
+                continue
+            elapsed = _observed_elapsed(row)
+            if elapsed is None:
+                continue
+            stage_index = int(row.get("stage_index", 0) or 0)
+            key = (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
+            stage_timings = elapsed_by_stage.setdefault(stage_index, {})
+            stage_timings[key] = max(stage_timings.get(key, 0.0), elapsed)
+    return elapsed_by_stage
+
+
+def load_failure_attempts(output_fpath: str | Path) -> Dict[int, Dict[Tuple[Any, Any], int]]:
+    """Load prior sidecar attempt counts per stage/task/rollout key."""
+    attempts_by_stage: Dict[int, Dict[Tuple[Any, Any], int]] = {}
+    failures_fpath = failures_path_for(Path(output_fpath))
+    if not failures_fpath.exists():
+        return attempts_by_stage
+
+    with failures_fpath.open("rb") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            row = orjson.loads(line)
+            if TASK_INDEX_KEY_NAME not in row or ROLLOUT_INDEX_KEY_NAME not in row:
+                continue
+            stage_index = int(row.get("stage_index", 0) or 0)
+            key = (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
+            stage_attempts = attempts_by_stage.setdefault(stage_index, {})
+            stage_attempts[key] = stage_attempts.get(key, 0) + 1
+    return attempts_by_stage
+
+
+def load_latest_failures(output_fpath: str | Path) -> Dict[int, Dict[Tuple[Any, Any], Dict[str, Any]]]:
+    """Load the newest persisted sidecar failure for each stage-row key."""
+    latest_by_stage: Dict[int, Dict[Tuple[Any, Any], Dict[str, Any]]] = {}
+    failures_fpath = failures_path_for(Path(output_fpath))
+    if not failures_fpath.exists():
+        return latest_by_stage
+
+    with failures_fpath.open("rb") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            row = orjson.loads(line)
+            if TASK_INDEX_KEY_NAME not in row or ROLLOUT_INDEX_KEY_NAME not in row:
+                continue
+            stage_index = int(row.get("stage_index", 0) or 0)
+            key = (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
+            latest_by_stage.setdefault(stage_index, {})[key] = row
+    return latest_by_stage
+
+
+def load_retryable_failure_stages(
+    output_fpath: str | Path,
+    gated_keys: Mapping[int, AbstractSet[Tuple[Any, Any]]],
+    rows_by_stage: Mapping[int, Sequence[Mapping[str, Any]]],
+) -> set[int]:
+    """Stages with a persisted failure that still needs another attempt."""
+    retryable: set[int] = set()
+    failures_fpath = failures_path_for(Path(output_fpath))
+    if not failures_fpath.exists():
+        return retryable
+
+    completed_keys = {
+        stage_index: {(row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME)) for row in rows}
+        for stage_index, rows in rows_by_stage.items()
+    }
+
+    with failures_fpath.open("rb") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            row = orjson.loads(line)
+            if TASK_INDEX_KEY_NAME not in row or ROLLOUT_INDEX_KEY_NAME not in row:
+                continue
+            stage_index = int(row.get("stage_index", 0) or 0)
+            key = (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
+            # Historical failures remain in the append-only sidecar after a
+            # later attempt succeeds. Such a key is resolved, not retryable.
+            if key not in completed_keys.get(stage_index, set()) and key not in gated_keys.get(stage_index, set()):
+                retryable.add(stage_index)
+    return retryable
+
+
+def load_reuse_cached_keys(output_fpath: str | Path) -> Dict[int, set[Tuple[Any, Any]]]:
+    """Load stage-aware retry keys that should reuse a persisted deliverable."""
+    reuse_cached_keys: Dict[int, set[Tuple[Any, Any]]] = {}
+    failures_fpath = failures_path_for(Path(output_fpath))
+    if not failures_fpath.exists():
+        return reuse_cached_keys
+
+    with failures_fpath.open("rb") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            row = orjson.loads(line)
+            if not row.get("reuse_cached_deliverable"):
+                continue
+            if TASK_INDEX_KEY_NAME not in row or ROLLOUT_INDEX_KEY_NAME not in row:
+                continue
+            stage_index = int(row.get("stage_index", 0) or 0)
+            key = (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
+            reuse_cached_keys.setdefault(stage_index, set()).add(key)
+    return reuse_cached_keys
 
 
 def append_journal_record(journal_fpath: str | Path, record: Mapping[str, Any], fingerprint: str) -> None:
@@ -741,6 +1705,8 @@ def append_journal_record(journal_fpath: str | Path, record: Mapping[str, Any], 
     out["fingerprint"] = fingerprint
     with path.open("ab") as handle:
         handle.write(orjson.dumps(out) + b"\n")
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def route_stage_rows(output_fpath: str | Path, rows: Sequence[Mapping[str, Any]]) -> None:
@@ -763,13 +1729,78 @@ def route_stage_rows(output_fpath: str | Path, rows: Sequence[Mapping[str, Any]]
                 fail_handle.write(orjson.dumps(row) + b"\n")
             else:
                 main_handle.write(orjson.dumps(row) + b"\n")
+        main_handle.flush()
+        fail_handle.flush()
+        os.fsync(main_handle.fileno())
+        os.fsync(fail_handle.fileno())
+
+
+def _gate_partial_outcome_omissions(
+    outcomes: Mapping[int, Mapping[str, Any]],
+    gated_keys: Dict[int, set[Tuple[Any, Any]]],
+) -> None:
+    """Keep journaled partial omissions closed on deterministic resume."""
+    for stage_index, outcome in outcomes.items():
+        if outcome.get("status") == "partial_complete":
+            gated_keys.setdefault(stage_index, set()).update(_recorded_key_set(outcome, "omitted_keys"))
 
 
 def build_file_resume(output_fpath: str | Path, journal_fpath: str | Path, fingerprint: str) -> StageResume:
     """Build a file-backed :class:`StageResume` from the journal + rollout files."""
+    output_fpath = Path(output_fpath)
+    journal_fpath = Path(journal_fpath)
+    _migrate_invalid_judge_main_rows(output_fpath)
+
+    # Finish an interrupted cleanup before reading any reusable stage state.
+    recovered_restart = _pending_restart_stage(journal_fpath)
+    if recovered_restart is not None:
+        aggregate_metrics_path_for(output_fpath).unlink(missing_ok=True)
+        _prune_downstream_files(output_fpath, recovered_restart)
+        append_journal_record(
+            journal_fpath,
+            {"stage_index": recovered_restart, "status": "restart_cleanup_complete"},
+            fingerprint,
+        )
+
     plans, outcomes, _ = read_journal(journal_fpath)
     rows_by_stage = load_persisted_rows(output_fpath)
     gated_keys = load_gated_keys(output_fpath, rows_by_stage)
+    _gate_partial_outcome_omissions(outcomes, gated_keys)
+    elapsed_by_stage = load_failure_timings(output_fpath)
+    reuse_cached_keys = load_reuse_cached_keys(output_fpath)
+    attempts_by_stage = load_failure_attempts(output_fpath)
+    latest_failures_by_stage = load_latest_failures(output_fpath)
+    latest_attempt_dispositions_by_stage = load_latest_attempt_dispositions(journal_fpath)
+    # Older multistage runs wrote a completion marker even when a retryable
+    # sidecar failure remained. The sidecar is authoritative for retry state;
+    # discard only those stale outcomes so the recorded plan is replayed.
+    retryable_failure_stages = load_retryable_failure_stages(output_fpath, gated_keys, rows_by_stage)
+    if retryable_failure_stages and recovered_restart is None:
+        restart_stage = min(retryable_failure_stages)
+        # Persist the logical invalidation first. If cleanup is interrupted, the
+        # next process sees this marker, refuses stale downstream journal state,
+        # and idempotently finishes pruning the data files.
+        append_journal_record(
+            journal_fpath,
+            {"stage_index": restart_stage, "status": "restart_from_stage"},
+            fingerprint,
+        )
+        aggregate_metrics_path_for(output_fpath).unlink(missing_ok=True)
+        _prune_downstream_files(output_fpath, restart_stage)
+        append_journal_record(
+            journal_fpath,
+            {"stage_index": restart_stage, "status": "restart_cleanup_complete"},
+            fingerprint,
+        )
+        plans, outcomes, _ = read_journal(journal_fpath)
+        rows_by_stage = load_persisted_rows(output_fpath)
+        gated_keys = load_gated_keys(output_fpath, rows_by_stage)
+        _gate_partial_outcome_omissions(outcomes, gated_keys)
+        elapsed_by_stage = load_failure_timings(output_fpath)
+        reuse_cached_keys = load_reuse_cached_keys(output_fpath)
+        attempts_by_stage = load_failure_attempts(output_fpath)
+        latest_failures_by_stage = load_latest_failures(output_fpath)
+        latest_attempt_dispositions_by_stage = load_latest_attempt_dispositions(journal_fpath)
 
     def on_plan(index: int, plan: dict) -> None:
         append_journal_record(journal_fpath, plan, fingerprint)
@@ -778,7 +1809,56 @@ def build_file_resume(output_fpath: str | Path, journal_fpath: str | Path, finge
         append_journal_record(journal_fpath, outcome, fingerprint)
 
     def on_rows(index: int, rows: List[Dict[str, Any]]) -> None:
+        dispositions = [
+            {
+                TASK_INDEX_KEY_NAME: row[TASK_INDEX_KEY_NAME],
+                ROLLOUT_INDEX_KEY_NAME: row[ROLLOUT_INDEX_KEY_NAME],
+                NG_FAILURE_CLASS_KEY: row.get(NG_FAILURE_CLASS_KEY),
+                NG_NO_PERSIST_KEY: bool(row.get(NG_NO_PERSIST_KEY)),
+            }
+            for row in rows
+            if not _is_success_row(row) and TASK_INDEX_KEY_NAME in row and ROLLOUT_INDEX_KEY_NAME in row
+        ]
+        no_persist_dispositions = [row for row in dispositions if row[NG_NO_PERSIST_KEY]]
+        persisted_dispositions = [row for row in dispositions if not row[NG_NO_PERSIST_KEY]]
+        # A no-persist attempt is a tombstone for any older timeout sidecar.
+        # Journal it before routing so a crash can only cause a conservative
+        # retry, never acceptance based on the stale timeout.
+        if no_persist_dispositions:
+            append_journal_record(
+                journal_fpath,
+                {
+                    "stage_index": index,
+                    "status": "attempt_dispositions",
+                    "attempts": no_persist_dispositions,
+                },
+                fingerprint,
+            )
         route_stage_rows(output_fpath, rows)
+        if persisted_dispositions:
+            append_journal_record(
+                journal_fpath,
+                {
+                    "stage_index": index,
+                    "status": "attempt_dispositions",
+                    "attempts": persisted_dispositions,
+                },
+                fingerprint,
+            )
+
+    def on_restart(index: int) -> None:
+        append_journal_record(
+            journal_fpath,
+            {"stage_index": index, "status": "restart_from_stage"},
+            fingerprint,
+        )
+        aggregate_metrics_path_for(output_fpath).unlink(missing_ok=True)
+        _prune_downstream_files(output_fpath, index)
+        append_journal_record(
+            journal_fpath,
+            {"stage_index": index, "status": "restart_cleanup_complete"},
+            fingerprint,
+        )
 
     return StageResume(
         plans=plans,
@@ -788,6 +1868,12 @@ def build_file_resume(output_fpath: str | Path, journal_fpath: str | Path, finge
         on_plan=on_plan,
         on_outcome=on_outcome,
         on_rows=on_rows,
+        on_restart=on_restart,
+        elapsed_by_stage=elapsed_by_stage,
+        reuse_cached_keys=reuse_cached_keys,
+        attempts_by_stage=attempts_by_stage,
+        latest_failures_by_stage=latest_failures_by_stage,
+        latest_attempt_dispositions_by_stage=latest_attempt_dispositions_by_stage,
     )
 
 
@@ -849,6 +1935,16 @@ async def run_e2e_multistage(
     )
 
     semaphore_size = getattr(rollout_collection_config, "num_samples_in_parallel", None)
+    dispatch_budget_s = getattr(rollout_collection_config, "dispatch_budget_s", None)
+    drain_margin_s = getattr(rollout_collection_config, "drain_margin_s", None)
+    if dispatch_budget_s is not None and (semaphore_size is None or semaphore_size <= 0):
+        raise ValueError(
+            "dispatch_budget_s requires a finite positive num_samples_in_parallel; "
+            "unbounded dispatch can POST the entire queue before the budget is re-checked"
+        )
+
+    latency_tracker = DispatchLatencyTracker()
+    dispatch_started_at = time.monotonic()
 
     async def run_rollouts(rows: List[Dict[str, Any]]) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
         semaphore = None
@@ -857,14 +1953,32 @@ async def run_e2e_multistage(
 
             semaphore = Semaphore(semaphore_size)
         results: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
-        for future in helper.run_examples(rows, semaphore=semaphore or nullcontext()):
+        remaining_budget_s = None
+        if dispatch_budget_s is not None:
+            remaining_budget_s = max(0.0, dispatch_budget_s - (time.monotonic() - dispatch_started_at))
+        for future in helper.run_examples(
+            rows,
+            semaphore=semaphore or nullcontext(),
+            dispatch_budget_s=remaining_budget_s,
+            drain_margin_s=drain_margin_s,
+            latency_tracker=latency_tracker,
+        ):
             row, result = await future
             results.append((row, result))
         return results
 
     output_fpath = Path(rollout_collection_config.output_jsonl_fpath)
     journal_fpath = journal_path_for(output_fpath)
-    fingerprint = compute_fingerprint(multistage_config, reference_elos, distribution)
+    fingerprint = compute_fingerprint(
+        multistage_config,
+        reference_elos,
+        distribution,
+        materialized_rows=materialized_rows,
+        rollout_collection_config=rollout_collection_config,
+        resolved_global_config=global_config_dict,
+    )
+    for row in materialized_rows:
+        row["verify_cache_namespace"] = fingerprint
     resume = _prepare_resume(rollout_collection_config, output_fpath, journal_fpath, fingerprint)
 
     all_results, stage_summaries = await run_multistage_stages(
@@ -875,7 +1989,10 @@ async def run_e2e_multistage(
         run_rollouts,
         on_event=_log_event,
         resume=resume,
+        dispatch_longest_first=bool(getattr(rollout_collection_config, "dispatch_longest_first", False)),
     )
+
+    print(latency_tracker.summary())
 
     write_rollouts(all_results, output_fpath)
 
@@ -918,6 +2035,7 @@ def _prepare_resume(
         output_fpath.unlink(missing_ok=True)
         failures_path_for(output_fpath).unlink(missing_ok=True)
         journal_fpath.unlink(missing_ok=True)
+        aggregate_metrics_path_for(output_fpath).unlink(missing_ok=True)
     else:
         print("[multistage-elo] resuming multi-stage run from cache (fingerprint match)", file=sys.stderr, flush=True)
     return build_file_resume(output_fpath, journal_fpath, fingerprint)
@@ -958,9 +2076,30 @@ def _log_event(name: str, data: dict) -> None:  # pragma: no cover
     elif name == "stage_cached":
         elo = data.get("eval_elo")
         elo_str = f"{elo:.1f}" if isinstance(elo, (int, float)) else "unset (no games)"
+        cache_kind = "partial result" if data.get("partial") else "complete result"
         print(
-            f"[multistage-elo] stage {data['index'] + 1}/{data['total_stages']} reused from cache: "
+            f"[multistage-elo] stage {data['index'] + 1}/{data['total_stages']} reused {cache_kind} from cache: "
             f"eval ELO = {elo_str} ({data.get('num_rollouts')} cached rollout(s))",
+            file=sys.stderr,
+            flush=True,
+        )
+    elif name == "stage_partial_complete":
+        print(
+            f"[multistage-elo] stage {data['index'] + 1}/{data['total_stages']} accepted partial calibration: "
+            f"success coverage {data.get('success_fraction', 0):.1%}, omitted "
+            f"{data.get('num_omitted')} rollout(s)",
+            file=sys.stderr,
+            flush=True,
+        )
+    elif name == "stage_incomplete":
+        detail = (
+            f"coverage policy rejected {data.get('num_omitted')} resolved omission(s)"
+            if data.get("coverage_blocked")
+            else f"{data.get('num_pending')} rollout(s) retryable or undispatched"
+        )
+        print(
+            f"[multistage-elo] stage {data['index'] + 1}/{data['total_stages']} remains incomplete "
+            f"({detail}); stopping before downstream stages",
             file=sys.stderr,
             flush=True,
         )

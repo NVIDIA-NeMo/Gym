@@ -16,6 +16,7 @@ import asyncio
 import glob as glob_module
 import json
 import os
+import tempfile
 import time
 import warnings
 from asyncio import Future, Semaphore
@@ -24,7 +25,7 @@ from contextlib import nullcontext
 from copy import deepcopy
 from itertools import repeat
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
+from typing import Any, Dict, Iterator, List, Literal, Mapping, Optional, Tuple, Union
 
 import orjson
 from omegaconf import OmegaConf
@@ -40,6 +41,7 @@ from nemo_gym.base_responses_api_model import (
     model_call_capture_dirs_from_config,
 )
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig, ConfigError, ConfigPathNotFoundError
+from nemo_gym.deliverables import is_deliverable
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
@@ -122,7 +124,9 @@ def _get_max_rollout_attempts() -> int:
 class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
     num_samples_in_parallel: Optional[int] = Field(
-        default=None, description="Limit the number of concurrent samples running at once."
+        default=None,
+        gt=0,
+        description="Limit the number of concurrent samples running at once. Must be positive when set.",
     )
     responses_create_params: Dict[str, Any] = Field(
         default_factory=dict,
@@ -220,16 +224,17 @@ class DispatchLatencyTracker:
 
     def summary(self) -> str:
         if not self._durations:
-            return "No completed rollouts to report latency for."
-        total = sum(self._durations)
-        lines = [
-            f"Per-task latency over {len(self._durations)} completed rollout(s): "
-            f"median {self.quantile(0.5) / 60:.1f} min, "
-            f"p90 {self.quantile(0.9) / 60:.1f} min, "
-            f"p99 {self.quantile(0.99) / 60:.1f} min, "
-            f"max {max(self._durations) / 60:.1f} min",
-            f"Task-time delivered: {total / 3600:.1f} task-hours",
-        ]
+            lines = ["No completed rollouts to report latency for."]
+        else:
+            total = sum(self._durations)
+            lines = [
+                f"Per-task latency over {len(self._durations)} completed rollout(s): "
+                f"median {self.quantile(0.5) / 60:.1f} min, "
+                f"p90 {self.quantile(0.9) / 60:.1f} min, "
+                f"p99 {self.quantile(0.99) / 60:.1f} min, "
+                f"max {max(self._durations) / 60:.1f} min",
+                f"Task-time delivered: {total / 3600:.1f} task-hours",
+            ]
         if self._drained:
             lines.append(
                 f"Drained (not dispatched, no time left in the budget): {self._drained}. "
@@ -252,6 +257,127 @@ def _observed_elapsed(record: Dict[str, Any]) -> Optional[float]:
         except (TypeError, ValueError):
             continue
     return None
+
+
+def _is_terminal_failure(record: Dict[str, Any]) -> bool:
+    """Whether a persisted failure must be gated on resume.
+
+    Older agent builds incorrectly stamped per-attempt timeouts terminal. A
+    timeout reflects the load/remaining walltime of that attempt, so it remains
+    retryable (up to the normal max-attempt cap). A skipped sample is unusable
+    regardless of which agent version wrote the sidecar and stays terminal.
+    """
+    failure_class = record.get(NG_FAILURE_CLASS_KEY)
+    if failure_class == "timeout_exceeded":
+        return False
+    if failure_class == "skipped":
+        return True
+    return bool(record.get(NG_TERMINAL_KEY))
+
+
+_MIGRATED_INVALID_JUDGE_KEY = "_ng_migrated_invalid_judge_response"
+
+
+def _migrate_invalid_judge_main_rows(output_fpath: Path) -> int:
+    """Move legacy invalid-judge rows from the main JSONL into the sidecar.
+
+    Old builds persisted ``invalid_judge_response=True`` as a zero-reward main
+    success, which both contaminated aggregation and gated resume. Sidecar-first
+    migration is idempotent via a marker keyed by
+    stage/task/rollout/attempt; the main file is then atomically rewritten so
+    a crash cannot lose retry state.
+    """
+    if not output_fpath.exists():
+        return 0
+
+    invalid_count = 0
+    with output_fpath.open("rb") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if orjson.loads(stripped).get("invalid_judge_response"):
+                invalid_count += 1
+    if not invalid_count:
+        return 0
+
+    def migration_key(row: Mapping[str, Any]) -> Tuple[Any, Any, Any, Any]:
+        return (
+            int(row.get("stage_index", 0) or 0),
+            row.get(TASK_INDEX_KEY_NAME),
+            row.get(ROLLOUT_INDEX_KEY_NAME),
+            int(row.get(ATTEMPT_INDEX_KEY_NAME, 0) or 0),
+        )
+
+    failures_fpath = failures_path_for(output_fpath)
+    failures_fpath.parent.mkdir(parents=True, exist_ok=True)
+    already_migrated: set[Tuple[Any, Any, Any, Any]] = set()
+    if failures_fpath.exists():
+        with failures_fpath.open("rb") as handle:
+            for line in handle:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                row = orjson.loads(stripped)
+                if row.get(_MIGRATED_INVALID_JUDGE_KEY):
+                    already_migrated.add(migration_key(row))
+
+    mode = output_fpath.stat().st_mode & 0o7777
+    temp_path: Optional[Path] = None
+    try:
+        with (
+            tempfile.NamedTemporaryFile(
+                mode="wb", dir=output_fpath.parent, prefix=f".{output_fpath.name}.migrate-", delete=False
+            ) as output_handle,
+            output_fpath.open("rb") as source,
+            failures_fpath.open("ab") as failures_handle,
+        ):
+            temp_path = Path(output_handle.name)
+            for line in source:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                legacy = orjson.loads(stripped)
+                if not legacy.get("invalid_judge_response"):
+                    output_handle.write(stripped + b"\n")
+                    continue
+
+                key = migration_key(legacy)
+                if key in already_migrated:
+                    continue
+                migrated = dict(legacy)
+                migrated[NG_FAILURE_CLASS_KEY] = migrated.get(NG_FAILURE_CLASS_KEY) or "judge_invalid"
+                migrated.pop(NG_TERMINAL_KEY, None)
+                deliverables_dir = migrated.get("deliverables_dir")
+                try:
+                    has_cached_deliverable = bool(
+                        deliverables_dir
+                        and Path(deliverables_dir).is_dir()
+                        and any(is_deliverable(path) for path in Path(deliverables_dir).iterdir())
+                    )
+                except (OSError, TypeError):
+                    has_cached_deliverable = False
+                if has_cached_deliverable:
+                    migrated["reuse_cached_deliverable"] = True
+                else:
+                    migrated.pop("reuse_cached_deliverable", None)
+                migrated[_MIGRATED_INVALID_JUDGE_KEY] = True
+                failures_handle.write(orjson.dumps(migrated) + b"\n")
+                already_migrated.add(key)
+
+            # Make every retry record durable before removing the corresponding
+            # legacy success from the main file.
+            failures_handle.flush()
+            os.fsync(failures_handle.fileno())
+            output_handle.flush()
+            os.fsync(output_handle.fileno())
+        os.chmod(temp_path, mode)
+        os.replace(temp_path, output_fpath)
+        temp_path = None
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+    return invalid_count
 
 
 def _get_max_rollout_attempts() -> int:
@@ -348,6 +474,15 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
             bad = {name: n for name, n in nr.items() if n < 1}
             if bad:
                 raise ValueError(f"num_repeats dict values must be >= 1, got {bad}")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_dispatch_concurrency(self) -> "RolloutCollectionConfig":
+        if self.dispatch_budget_s is not None and self.num_samples_in_parallel is None:
+            raise ValueError(
+                "dispatch_budget_s requires a finite positive num_samples_in_parallel; "
+                "unbounded dispatch can POST the entire queue before the budget is re-checked"
+            )
         return self
 
     @property
@@ -556,6 +691,7 @@ class RolloutCollectionHelper(BaseModel):
     def _load_from_cache(
         self, config: RolloutCollectionConfig
     ) -> Tuple[List[Dict], List[Dict], List[Dict], List[List[str]]]:
+        _migrate_invalid_judge_main_rows(Path(config.output_jsonl_fpath))
         with config.materialized_jsonl_fpath.open() as f:
             original_input_rows = list(map(orjson.loads, f))
         with Path(config.output_jsonl_fpath).open("rb") as f:
@@ -574,6 +710,7 @@ class RolloutCollectionHelper(BaseModel):
         attempts_by_key: Counter = Counter()
         terminal_keys: set = set()
         elapsed_by_key: Dict[Tuple, float] = {}
+        reuse_cached_keys: set[Tuple[Any, Any]] = set()
         if failures_fpath.exists():
             with failures_fpath.open("rb") as f:
                 for line in f:
@@ -585,8 +722,10 @@ class RolloutCollectionHelper(BaseModel):
                         continue
                     k = (fr[TASK_INDEX_KEY_NAME], fr[ROLLOUT_INDEX_KEY_NAME])
                     attempts_by_key[k] += 1
-                    if fr.get(NG_TERMINAL_KEY):
+                    if _is_terminal_failure(fr):
                         terminal_keys.add(k)
+                    if fr.get("reuse_cached_deliverable"):
+                        reuse_cached_keys.add(k)
                     # A failed attempt still tells us how long this task runs -
                     # the only duration signal available for a task that has not
                     # succeeded yet. Keep the longest attempt seen.
@@ -604,9 +743,15 @@ class RolloutCollectionHelper(BaseModel):
         # captured model calls are keyed separately from the prior attempt's (see
         # maybe_rollout_id_from_run_body). The first attempt (0) is left unstamped -> bare rollout id.
         for row in input_rows:
-            attempt = attempts_by_key.get(get_key(row), 0)
+            key = get_key(row)
+            attempt = attempts_by_key.get(key, 0)
             if attempt > 0:
                 row[ATTEMPT_INDEX_KEY_NAME] = attempt
+            if key in reuse_cached_keys:
+                # A failed judging attempt can still have a valid persisted
+                # policy deliverable. Preserve the sidecar's signal so resume
+                # rejudges that artifact instead of rerunning the policy.
+                row["reuse_cached_deliverable"] = True
 
         # Longest-first: known-long tasks go to the front so they get a whole
         # allocation to finish in rather than being cut off at its boundary.
@@ -632,7 +777,7 @@ class RolloutCollectionHelper(BaseModel):
 - {len(original_input_rows)} original input rows
 - {len(rows)} rows already done (in main jsonl)
 - {sum(attempts_by_key.values())} prior failure attempts ({len(attempts_by_key)} unique tasks) in sidecar
-- {len(terminal_keys)} sidecar-terminal (timeout_exceeded / skipped) → not retried
+- {len(terminal_keys)} sidecar-terminal (for example skipped) → not retried
 - {len(maxed_out)} hit max_attempts={max_attempts} → not retried
 - {len(input_rows)} rows that still need to be run"""
         )
@@ -676,6 +821,12 @@ class RolloutCollectionHelper(BaseModel):
                     f.write(orjson.dumps(row) + b"\n")
 
             output_fpath.unlink(missing_ok=True)
+            # A fresh run must not inherit retry attempts or published metrics
+            # from an older run that used the same output path.
+            failures_path_for(output_fpath).unlink(missing_ok=True)
+            output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json").unlink(
+                missing_ok=True
+            )
 
         semaphore = nullcontext()
         if config.num_samples_in_parallel:

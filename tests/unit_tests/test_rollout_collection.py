@@ -26,7 +26,12 @@ import yaml
 import nemo_gym.rollout_collection
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
-from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.global_config import (
+    AGENT_REF_KEY_NAME,
+    ATTEMPT_INDEX_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+)
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.rollout_collection import (
@@ -666,6 +671,63 @@ class TestRolloutCollection:
         ]
         assert expected_aggregate_metrics == actual_aggregate_metrics
 
+    async def test_fresh_run_clears_stale_failure_and_metrics_artifacts(
+        self, tmp_path: Path, empty_global_config: MagicMock
+    ) -> None:
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes(
+            orjson.dumps(
+                {
+                    "responses_create_params": {"input": []},
+                    AGENT_REF_KEY_NAME: {"name": "agent"},
+                }
+            )
+            + b"\n"
+        )
+        output_fpath = tmp_path / "output.jsonl"
+        output_fpath.write_text('{"stale":true}\n')
+        failures_fpath = _failures_path_for(output_fpath)
+        failures_fpath.write_text(
+            orjson.dumps(
+                {
+                    TASK_INDEX_KEY_NAME: 0,
+                    ROLLOUT_INDEX_KEY_NAME: 0,
+                    NG_FAILURE_CLASS_KEY: "skipped",
+                    NG_TERMINAL_KEY: True,
+                }
+            ).decode()
+            + "\n"
+        )
+        metrics_fpath = tmp_path / "output_aggregate_metrics.json"
+        metrics_fpath.write_text('{"stale":true}\n')
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(output_fpath),
+            resume_from_cache=False,
+            disable_aggregation=True,
+        )
+
+        class Helper(RolloutCollectionHelper):
+            def run_examples(self, examples, *args, **kwargs):
+                [row] = examples
+                future = Future()
+                future.set_result((row, {"reward": 1.0}))
+                return [future]
+
+        await Helper().run_from_config(config)
+
+        assert [orjson.loads(line) for line in output_fpath.read_bytes().splitlines()] == [
+            {
+                "reward": 1.0,
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                AGENT_REF_KEY_NAME: {"name": "agent"},
+            }
+        ]
+        assert failures_fpath.read_bytes() == b""
+        assert not metrics_fpath.exists()
+
     @pytest.mark.parametrize("resume_from_cache", [False, True])
     async def test_run_from_config_replaces_stale_capture_before_dispatch(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resume_from_cache: bool
@@ -1210,6 +1272,7 @@ class TestDispatchBudget:
             input_jsonl_fpath=str(input_jsonl_fpath),
             output_jsonl_fpath=str(tmp_path / "output.jsonl"),
             disable_aggregation=True,
+            num_samples_in_parallel=1,
             dispatch_budget_s=1800.0,
             drain_margin_s=drain_margin_s,
         )
@@ -1231,6 +1294,23 @@ class TestDispatchBudget:
         # run_examples is stubbed here, so nothing was timed; the summary still
         # prints rather than being skipped.
         assert "No completed rollouts to report latency for." in out
+
+    def test_dispatch_budget_requires_finite_concurrency(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="finite positive num_samples_in_parallel"):
+            RolloutCollectionConfig(
+                input_jsonl_fpath=str(tmp_path / "input.jsonl"),
+                output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+                dispatch_budget_s=1800.0,
+            )
+
+    @pytest.mark.parametrize("concurrency", [0, -1])
+    def test_concurrency_must_always_be_positive(self, tmp_path: Path, concurrency: int) -> None:
+        with pytest.raises(ValueError, match="greater than 0"):
+            RolloutCollectionConfig(
+                input_jsonl_fpath=str(tmp_path / "input.jsonl"),
+                output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+                num_samples_in_parallel=concurrency,
+            )
 
     async def test_zero_budget_drains_rather_than_disabling_the_check(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """0.0 is a spent budget, not an absent one -- truthiness gets this wrong."""
@@ -1376,13 +1456,14 @@ class TestLongestFirstDispatch:
         assert [r[TASK_INDEX_KEY_NAME] for r in input_rows] == [0, 1, 2, 3]
 
     def test_timeout_failures_are_retried_not_gated(self, tmp_path: Path) -> None:
-        """A per-task timeout is a statement about load, not about the task."""
+        """A legacy terminal timeout is a statement about load, not the task."""
         failures = [
             {
                 TASK_INDEX_KEY_NAME: 1,
                 ROLLOUT_INDEX_KEY_NAME: 0,
                 "elapsed_seconds": 12600,
                 NG_FAILURE_CLASS_KEY: "timeout_exceeded",
+                NG_TERMINAL_KEY: True,
             }
         ]
         config = self._write_resume_state(tmp_path, failures)
@@ -1390,6 +1471,164 @@ class TestLongestFirstDispatch:
         input_rows, *_ = RolloutCollectionHelper()._load_from_cache(config)
 
         assert 1 in [r[TASK_INDEX_KEY_NAME] for r in input_rows]
+
+    def test_retry_propagates_cached_deliverable_signal(self, tmp_path: Path) -> None:
+        failures = [
+            {
+                TASK_INDEX_KEY_NAME: 2,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                NG_FAILURE_CLASS_KEY: "judge_invalid",
+                "reuse_cached_deliverable": True,
+            }
+        ]
+        config = self._write_resume_state(tmp_path, failures)
+
+        input_rows, *_ = RolloutCollectionHelper()._load_from_cache(config)
+        by_task = {row[TASK_INDEX_KEY_NAME]: row for row in input_rows}
+
+        assert by_task[2]["reuse_cached_deliverable"] is True
+        assert "reuse_cached_deliverable" not in by_task[1]
+
+    def test_legacy_invalid_judge_main_row_migrates_to_retryable_sidecar(self, tmp_path: Path) -> None:
+        config = self._write_resume_state(tmp_path, [])
+        output = Path(config.output_jsonl_fpath)
+        deliverables_dir = tmp_path / "deliverables" / "task-2"
+        deliverables_dir.mkdir(parents=True)
+        (deliverables_dir / "answer.txt").write_text("answer")
+        legacy_row = {
+            TASK_INDEX_KEY_NAME: 2,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            "invalid_judge_response": True,
+            "reward": 0.0,
+            "deliverables_dir": str(deliverables_dir),
+        }
+        output.write_bytes(orjson.dumps(legacy_row) + b"\n")
+
+        input_rows, cached_rows, cached_results, _ = RolloutCollectionHelper()._load_from_cache(config)
+
+        by_task = {row[TASK_INDEX_KEY_NAME]: row for row in input_rows}
+        assert by_task[2]["reuse_cached_deliverable"] is True
+        assert by_task[2][ATTEMPT_INDEX_KEY_NAME] == 1
+        assert cached_rows == []
+        assert cached_results == []
+        assert output.read_bytes() == b""
+        migrated = [orjson.loads(line) for line in _failures_path_for(output).read_bytes().splitlines()]
+        assert len(migrated) == 1
+        assert migrated[0][NG_FAILURE_CLASS_KEY] == "judge_invalid"
+        assert migrated[0]["reuse_cached_deliverable"] is True
+
+        # Simulate a crash after the sidecar append but before the main-file
+        # replacement: replaying the same attempt must not append it twice.
+        replayed_row = dict(legacy_row)
+        replayed_row[ATTEMPT_INDEX_KEY_NAME] = 0
+        output.write_bytes(orjson.dumps(replayed_row) + b"\n")
+        RolloutCollectionHelper()._load_from_cache(config)
+        assert len(_failures_path_for(output).read_bytes().splitlines()) == 1
+
+    def test_legacy_invalid_judge_distinct_attempts_accumulate_and_gate(self, tmp_path: Path) -> None:
+        config = self._write_resume_state(tmp_path, [])
+        output = Path(config.output_jsonl_fpath)
+        legacy_rows = [
+            {
+                TASK_INDEX_KEY_NAME: 2,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                ATTEMPT_INDEX_KEY_NAME: attempt,
+                "invalid_judge_response": True,
+            }
+            for attempt in range(_DEFAULT_MAX_ROLLOUT_ATTEMPTS)
+        ]
+        output.write_bytes(b"\n".join(map(orjson.dumps, legacy_rows)) + b"\n")
+
+        input_rows, *_ = RolloutCollectionHelper()._load_from_cache(config)
+
+        assert 2 not in [row[TASK_INDEX_KEY_NAME] for row in input_rows]
+        migrated = [orjson.loads(line) for line in _failures_path_for(output).read_bytes().splitlines()]
+        assert [row[ATTEMPT_INDEX_KEY_NAME] for row in migrated] == list(range(_DEFAULT_MAX_ROLLOUT_ATTEMPTS))
+
+    def test_legacy_invalid_judge_same_attempt_in_different_stages_stays_distinct(self, tmp_path: Path) -> None:
+        config = self._write_resume_state(tmp_path, [])
+        output = Path(config.output_jsonl_fpath)
+        legacy_rows = [
+            {
+                TASK_INDEX_KEY_NAME: 2,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                "stage_index": stage,
+                "invalid_judge_response": True,
+            }
+            for stage in (0, 1)
+        ]
+        output.write_bytes(b"\n".join(map(orjson.dumps, legacy_rows)) + b"\n")
+
+        RolloutCollectionHelper()._load_from_cache(config)
+
+        migrated = [orjson.loads(line) for line in _failures_path_for(output).read_bytes().splitlines()]
+        assert [row["stage_index"] for row in migrated] == [0, 1]
+
+    def test_legacy_invalid_judge_without_artifact_does_not_request_reuse(self, tmp_path: Path) -> None:
+        config = self._write_resume_state(tmp_path, [])
+        output = Path(config.output_jsonl_fpath)
+        output.write_bytes(
+            orjson.dumps(
+                {
+                    TASK_INDEX_KEY_NAME: 2,
+                    ROLLOUT_INDEX_KEY_NAME: 0,
+                    "invalid_judge_response": True,
+                    "reuse_cached_deliverable": True,
+                    "deliverables_dir": str(tmp_path / "missing-deliverables"),
+                }
+            )
+            + b"\n"
+        )
+
+        input_rows, *_ = RolloutCollectionHelper()._load_from_cache(config)
+
+        by_task = {row[TASK_INDEX_KEY_NAME]: row for row in input_rows}
+        assert "reuse_cached_deliverable" not in by_task[2]
+        migrated = [orjson.loads(line) for line in _failures_path_for(output).read_bytes().splitlines()]
+        assert "reuse_cached_deliverable" not in migrated[0]
+
+    def test_legacy_invalid_judge_with_only_run_state_does_not_request_reuse(self, tmp_path: Path) -> None:
+        config = self._write_resume_state(tmp_path, [])
+        output = Path(config.output_jsonl_fpath)
+        deliverables_dir = tmp_path / "deliverables" / "task-2"
+        deliverables_dir.mkdir(parents=True)
+        (deliverables_dir / "finish_params.json").write_text("{}")
+        (deliverables_dir / "history.json").write_text("[]")
+        (deliverables_dir / "reference_files").mkdir()
+        output.write_bytes(
+            orjson.dumps(
+                {
+                    TASK_INDEX_KEY_NAME: 2,
+                    ROLLOUT_INDEX_KEY_NAME: 0,
+                    "invalid_judge_response": True,
+                    "reuse_cached_deliverable": True,
+                    "deliverables_dir": str(deliverables_dir),
+                }
+            )
+            + b"\n"
+        )
+
+        input_rows, *_ = RolloutCollectionHelper()._load_from_cache(config)
+
+        by_task = {row[TASK_INDEX_KEY_NAME]: row for row in input_rows}
+        assert "reuse_cached_deliverable" not in by_task[2]
+        migrated = [orjson.loads(line) for line in _failures_path_for(output).read_bytes().splitlines()]
+        assert "reuse_cached_deliverable" not in migrated[0]
+
+    def test_skipped_failures_stay_terminal(self, tmp_path: Path) -> None:
+        failures = [
+            {
+                TASK_INDEX_KEY_NAME: 1,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                NG_FAILURE_CLASS_KEY: "skipped",
+                NG_TERMINAL_KEY: True,
+            }
+        ]
+        config = self._write_resume_state(tmp_path, failures)
+
+        input_rows, *_ = RolloutCollectionHelper()._load_from_cache(config)
+
+        assert 1 not in [r[TASK_INDEX_KEY_NAME] for r in input_rows]
 
     def test_explicitly_terminal_rows_stay_gated(self, tmp_path: Path) -> None:
         failures = [{TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, NG_TERMINAL_KEY: True}]

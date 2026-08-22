@@ -137,6 +137,44 @@ def test_provider_openai_messages_convert_nemo_user_messages() -> None:
     assert serialized[1]["tool_call_id"] == "call_1"
 
 
+@pytest.mark.parametrize(
+    "raw_block",
+    [
+        '<tool_call>{"name":"code_exec","arguments":{"cmd":"true"}}</tool_call>',
+        '<function=code_exec>{"cmd":"true"}</function>',
+    ],
+)
+def test_provider_history_strips_unparsed_tool_blocks_without_mutating_history(raw_block: str) -> None:
+    """Malformed call markup must not become an in-context example on the next turn."""
+    original_content = f"short preamble\n{raw_block}\nshort epilogue"
+    message = AssistantMessage(
+        content=original_content,
+        tool_calls=[],
+        token_usage=TokenUsage(input=1, answer=1, reasoning=0),
+    )
+
+    serialized = to_provider_openai_messages([message])
+    provider_text = serialized[0]["content"][0]["text"]
+
+    assert raw_block not in provider_text
+    assert provider_text == "short preamble\n\nshort epilogue"
+    # Sanitization is wire-only; persisted/exported history stays forensic.
+    assert message.content == original_content
+
+
+def test_provider_history_does_not_strip_content_from_a_parsed_tool_call() -> None:
+    message = AssistantMessage(
+        content="calling now <tool_call>diagnostic text</tool_call>",
+        tool_calls=[ToolCall(tool_call_id="call_1", name="code_exec", arguments='{"cmd":"true"}')],
+        token_usage=TokenUsage(input=1, answer=1, reasoning=0),
+    )
+
+    serialized = to_provider_openai_messages([message])
+
+    assert serialized[0]["content"][0]["text"] == message.content
+    assert serialized[0]["tool_calls"][0]["id"] == "call_1"
+
+
 @pytest.mark.asyncio
 async def test_max_completion_tokens_cap_overrides_dynamic_size() -> None:
     """When the dynamic computation exceeds the cap, the cap should win."""
