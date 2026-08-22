@@ -93,6 +93,7 @@ from nemo_gym.base_resources_server import (
     _MCP_TOKEN_SALT,
     NEMO_GYM_MCP_METADATA_KEY,
     NEMO_GYM_MCP_SESSION_TOKEN_HEADER,
+    NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY,
     RESERVED_MCP_TOOL_NAMES,
     MCPServerMetadata,
 )
@@ -618,11 +619,16 @@ def _wrap_seed_session(app: FastAPI, mint_metadata: Callable[[Request, dict], di
 
 
 def _wrap_verify(app: FastAPI, server: Any) -> None:
-    """Wrap the app's current /verify endpoint so MCP-namespaced tool-call names are normalized for
-    scoring only. Verification runs against a deep copy with bare names; the reward response's
-    echoed names are restored to what the model emitted (matched by call_id), so persisted rollout
-    artifacts keep transport provenance. Wrapping whatever handler the route holds at install time
-    covers servers that strip and re-register /verify with their own handler.
+    """Give verification a canonical MCP tool name without rewriting the stored trajectory.
+
+    New agent adapters provide authoritative ``(server_name, tool_name)`` provenance keyed by
+    ``call_id``. A present mapping is complete, so calls absent from it are built-in/non-MCP calls
+    and remain unchanged. ``None`` denotes an older trajectory and enables the narrow Claude Code
+    string fallback. Verification runs against a deep copy; the response restores emitted names so
+    replay and training retain the harness-facing representation.
+
+    Wrapping whatever handler the route holds at install time covers servers that strip and
+    re-register /verify with their own handler.
     """
     idx, route = _take_route(app, "/verify", "its tool-call names are normalized for scoring")
     endpoint = route.endpoint
@@ -654,19 +660,38 @@ def _wrap_verify(app: FastAPI, server: Any) -> None:
             return await result if inspect.isawaitable(result) else result
         key, container = located
 
-        emitted = {item.call_id: item.name for item in _function_calls(container)}
+        calls = _function_calls(container)
+        emitted: dict[str, list[str]] = {}
+        for item in calls:
+            emitted.setdefault(item.call_id, []).append(item.name)
+
         normalized = container.model_copy(deep=True)
+        provenance = getattr(normalized, NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY, None)
+        resources_server_name = server.config.name or type(server).__name__
         for item in _function_calls(normalized):
-            item.name = server.normalize_tool_name(item.name)
+            if provenance is None:
+                item.name = server.normalize_tool_name(item.name)
+                continue
+            # Duplicate IDs make a sidecar lookup ambiguous. Fail closed instead of canonicalizing
+            # either call under provenance that cannot identify one unique emitted action.
+            if len(emitted.get(item.call_id, [])) != 1:
+                continue
+            identity = provenance.get(item.call_id)
+            if identity is not None and identity.server_name == resources_server_name:
+                item.name = identity.tool_name
         kwargs[key] = normalized
 
         result = endpoint(**kwargs)
         if inspect.isawaitable(result):
             result = await result
 
+        restored_counts: dict[str, int] = {}
         for item in _function_calls(result):
-            if item.call_id in emitted:
-                item.name = emitted[item.call_id]
+            index = restored_counts.get(item.call_id, 0)
+            emitted_names = emitted.get(item.call_id, [])
+            if index < len(emitted_names):
+                item.name = emitted_names[index]
+                restored_counts[item.call_id] = index + 1
         return result
 
     _swap_route(app, idx, "/verify", verify_normalized)

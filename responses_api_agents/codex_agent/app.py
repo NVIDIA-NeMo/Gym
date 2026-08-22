@@ -26,13 +26,18 @@ from asyncio import Semaphore
 from copy import deepcopy
 from pathlib import Path
 from time import time
-from typing import Any, Literal, Optional
+from typing import Any, Callable, Literal, Optional
 from uuid import uuid4
 
 from fastapi import Request
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
+from nemo_gym.base_resources_server import (
+    NEMO_GYM_MCP_METADATA_KEY,
+    NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY,
+    BaseRunRequest,
+    BaseVerifyResponse,
+)
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME, get_first_server_config_dict
@@ -128,12 +133,31 @@ def parse_exec_jsonl(stdout: str) -> tuple[list[Any], dict]:
     """
     output_items: list[Any] = []
     buffered_think: Optional[str] = None
-    metadata: dict[str, Any] = {"input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0, "reasoning_tokens": 0}
+    metadata: dict[str, Any] = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_input_tokens": 0,
+        "reasoning_tokens": 0,
+        NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY: {},
+    }
     errors: list[str] = []
 
-    def _add_tool_pair(item: dict[str, Any], name: str, arguments: dict[str, Any], output: str) -> None:
+    def _add_tool_pair(
+        item: dict[str, Any],
+        name: str,
+        arguments: dict[str, Any],
+        output: str,
+        *,
+        mcp_identity: Optional[tuple[str, str]] = None,
+    ) -> None:
         call_id = str(item.get("id") or f"call-{uuid4().hex[:8]}")
         status = "completed" if item.get("status") != "failed" else "incomplete"
+        if mcp_identity is not None:
+            server_name, tool_name = mcp_identity
+            metadata[NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY][call_id] = {
+                "server_name": server_name,
+                "tool_name": tool_name,
+            }
         output_items.append(
             NeMoGymResponseFunctionToolCall(
                 arguments=json.dumps(arguments),
@@ -207,7 +231,20 @@ def parse_exec_jsonl(stdout: str) -> tuple[list[Any], dict]:
                 output = f"{output}\n[exit code: {exit_code}]"
             _add_tool_pair(item, "exec_command", {"cmd": item.get("command") or ""}, output)
         elif itype == "mcp_tool_call":
-            _add_tool_pair(item, str(item.get("tool") or ""), item.get("arguments") or {}, _mcp_result_text(item))
+            server_name = item.get("server")
+            tool_name = item.get("tool")
+            identity = (
+                (server_name, tool_name)
+                if isinstance(server_name, str) and server_name and isinstance(tool_name, str) and tool_name
+                else None
+            )
+            _add_tool_pair(
+                item,
+                str(tool_name or ""),
+                item.get("arguments") or {},
+                _mcp_result_text(item),
+                mcp_identity=identity,
+            )
         elif itype == "file_change":
             _add_tool_pair(item, "apply_patch", {"changes": item.get("changes")}, item.get("status") or "completed")
         elif itype == "web_search":
@@ -563,6 +600,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
         mcp_servers: Optional[dict[str, Any]] = None,
         skills_path: Optional[str] = None,
         rollout_id: Optional[str] = None,
+        provenance_collector: Optional[Callable[[dict[str, dict[str, str]]], None]] = None,
     ) -> NeMoGymResponse:
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
@@ -580,6 +618,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
             rollout_id=rollout_id,
         )
         output_items, usage = parse_exec_jsonl(stdout)
+        if provenance_collector is not None:
+            provenance_collector(dict(usage[NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY]))
 
         if usage.get("errors"):
             LOG.warning("codex reported errors: %s", usage["errors"])
@@ -650,19 +690,28 @@ class CodexAgent(SimpleResponsesAPIAgent):
             # can stage the skills into its per-request CODEX_HOME.
             skills_path = ((body.model_extra or {}).get(SKILLS_REF_KEY_NAME) or {}).get("path")
             rollout_id = self.rollout_id_from_run(body)
+            mcp_tool_call_provenance: dict[str, dict[str, str]] = {}
+
+            def collect_provenance(value: dict[str, dict[str, str]]) -> None:
+                mcp_tool_call_provenance.update(value)
 
             agent_resp = await self._create_response(
                 body.responses_create_params,
                 mcp_servers=self._rollout_mcp_servers(seed_resp_json),
                 skills_path=skills_path,
                 rollout_id=rollout_id,
+                provenance_collector=collect_provenance,
             )
             agent_resp_json = agent_resp.model_dump(mode="json")
 
             verify_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/verify",
-                json=body.model_dump() | {"response": agent_resp_json},
+                json=body.model_dump()
+                | {
+                    "response": agent_resp_json,
+                    NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY: mcp_tool_call_provenance,
+                },
                 cookies=cookies,
             )
             await raise_for_status(verify_resp)
