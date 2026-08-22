@@ -29,6 +29,9 @@ jobs:
 
       - name: Request suggested reviewers from CODEOWNERS `# suggest:` lines
         uses: actions/github-script@v7
+        env:
+          ORG_PAT: ${{ secrets.NVIDIA_MANAGEMENT_ORG_PAT }}
+          SLACK_WEBHOOK: ${{ secrets.SLACK_TEAM_CHANNEL_WEBHOOK }}
         with:
           script: |
             const fs = require('fs');
@@ -39,19 +42,26 @@ jobs:
               return;
             }
 
-            const SUGGEST_PREFIX = /^#\s*suggest:\s*(.+)$/;
+            const lines = fs.readFileSync(codeownersPath, 'utf8').split('\n').map(l => l.trim());
 
-            const rules = fs.readFileSync(codeownersPath, 'utf8')
-              .split('\n')
-              .map(line => line.trim())
-              .map(line => line.match(SUGGEST_PREFIX))
+            function parseRuleLine(line) {
+              const [pattern, ...owners] = line.split(/\s+/);
+              return { pattern, owners };
+            }
+
+            // Real (enforced) CODEOWNERS lines: non-blank, not a comment.
+            const enforcedRules = lines
+              .filter(l => l && !l.startsWith('#'))
+              .map(parseRuleLine);
+
+            // Advisory `# suggest:` lines.
+            const SUGGEST_PREFIX = /^#\s*suggest:\s*(.+)$/;
+            const rules = lines
+              .map(l => l.match(SUGGEST_PREFIX))
               .filter(Boolean)
               .map(m => m[1].trim())
               .filter(Boolean)
-              .map(line => {
-                const [pattern, ...owners] = line.split(/\s+/);
-                return { pattern, owners };
-              });
+              .map(parseRuleLine);
 
             if (rules.length === 0) {
               core.info('No `# suggest:` lines found in CODEOWNERS, skipping.');
@@ -78,6 +88,7 @@ jobs:
             }
 
             const compiledRules = rules.map(r => ({ ...r, regex: toRegex(r.pattern) }));
+            const compiledEnforcedRules = enforcedRules.map(r => ({ ...r, regex: toRegex(r.pattern) }));
 
             const { data: files } = await github.rest.pulls.listFiles({
               owner: context.repo.owner,
@@ -87,6 +98,7 @@ jobs:
             });
 
             const suggested = new Set();
+            const enforcedOwners = new Set();
             for (const file of files) {
               // CODEOWNERS semantics: last matching rule wins for a given path.
               let match = null;
@@ -94,26 +106,72 @@ jobs:
                 if (rule.regex.test(file.filename)) match = rule;
               }
               if (match) match.owners.forEach(o => suggested.add(o));
+
+              let enforcedMatch = null;
+              for (const rule of compiledEnforcedRules) {
+                if (rule.regex.test(file.filename)) enforcedMatch = rule;
+              }
+              if (enforcedMatch) enforcedMatch.owners.forEach(o => enforcedOwners.add(o));
             }
 
+            // Case: a `# suggest:` owner is textually identical to an already-enforced
+            // owner for a file in this PR. GitHub already auto-requests the enforced
+            // owner from the real CODEOWNERS line, so suggesting them again is a pure
+            // duplicate — drop them before we ever build the reviewer lists.
+            for (const owner of enforcedOwners) suggested.delete(owner);
+
+            // Case: a suggested *individual* who is already a member of a *team* that's
+            // enforced for a file in this PR. They're implicitly already on the hook via
+            // the team requirement, so an extra individual request would be noise.
+            const enforcedTeamSlugs = [...enforcedOwners]
+              .filter(o => o.includes('/'))
+              .map(o => o.replace(/^@/, ''));
+
+            const enforcedTeamMembers = new Set();
+            if (enforcedTeamSlugs.length > 0) {
+              if (process.env.ORG_PAT) {
+                const { getOctokit } = require('@actions/github');
+                const orgOctokit = getOctokit(process.env.ORG_PAT);
+                for (const teamPath of enforcedTeamSlugs) {
+                  const [org, team_slug] = teamPath.split('/');
+                  try {
+                    const members = await orgOctokit.paginate(orgOctokit.rest.teams.listMembersInOrg, { org, team_slug });
+                    members.forEach(m => enforcedTeamMembers.add(m.login.toLowerCase()));
+                  } catch (err) {
+                    core.warning(`Could not list members of enforced team ${teamPath}: ${err.message}`);
+                  }
+                }
+              } else {
+                core.warning('NVIDIA_MANAGEMENT_ORG_PAT not available — skipping the enforced-team-membership check for suggested reviewers.');
+              }
+            }
+
+            // GitHub logins/mentions are case-insensitive; compare lowercased so a
+            // casing mismatch between CODEOWNERS and the PR author's login can't
+            // slip the author into their own reviewer batch.
             const prAuthor = context.payload.pull_request.user.login;
-            suggested.delete(`@${prAuthor}`);
-
-            if (suggested.size === 0) {
-              core.info('No suggested reviewers matched the changed files.');
-              return;
-            }
+            const prAuthorLower = prAuthor.toLowerCase();
 
             // `@org/team` entries are team reviewers; plain `@user` entries are user reviewers.
+            // Author exclusion happens once, here.
             const reviewers = [];
             const teamReviewers = [];
             for (const owner of suggested) {
               const name = owner.replace(/^@/, '');
               if (name.includes('/')) {
                 teamReviewers.push(name.split('/')[1]);
-              } else if (name !== prAuthor) {
+              } else if (name.toLowerCase() === prAuthorLower) {
+                continue;
+              } else if (enforcedTeamMembers.has(name.toLowerCase())) {
+                core.info(`Skipping suggested reviewer @${name}: already a member of a team enforced for this PR.`);
+              } else {
                 reviewers.push(name);
               }
+            }
+
+            if (reviewers.length === 0 && teamReviewers.length === 0) {
+              core.info('No suggested reviewers matched the changed files.');
+              return;
             }
 
             // Already-requested/already-reviewed users cause a 422; drop anyone already
@@ -144,6 +202,11 @@ jobs:
               return;
             }
 
+            // Single batch call: GitHub validates the whole payload atomically, so one
+            // invalid entry (no repo access, etc.) fails the entire request. That's an
+            // advisory feature breaking silently, not a CI failure — so on error we warn
+            // in the job log AND post to Slack (so it doesn't just get lost in CI output),
+            // but never fail the workflow itself.
             try {
               await github.rest.pulls.requestReviewers({
                 owner: context.repo.owner,
@@ -153,7 +216,33 @@ jobs:
                 team_reviewers: newTeamReviewers,
               });
             } catch (err) {
-              // e.g. a suggested user has no repo access, or a team has no write access —
-              // don't fail the whole workflow run over an advisory suggestion.
-              core.warning(`Could not request some suggested reviewers: ${err.message}`);
+              const prUrl = context.payload.pull_request.html_url;
+              core.warning(`Could not request suggested reviewers: ${err.message}`);
+
+              if (process.env.SLACK_WEBHOOK) {
+                const message = {
+                  blocks: [{
+                    type: 'section',
+                    text: {
+                      type: 'mrkdwn',
+                      text: `:warning: suggest-reviewers could not request suggested reviewers on <${prUrl}|${context.repo.owner}/${context.repo.repo}#${context.issue.number}>\n\n` +
+                        `• Attempted: ${[...newReviewers.map(r => '@' + r), ...newTeamReviewers.map(t => '@' + t)].join(', ') || '(none)'}\n` +
+                        `• Error: \`${err.message}\`\n` +
+                        `• Workflow: <${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}|View Run>`,
+                    },
+                  }],
+                };
+                try {
+                  const res = await fetch(process.env.SLACK_WEBHOOK, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(message),
+                  });
+                  if (!res.ok) core.warning(`Slack notification failed: ${res.status} ${await res.text()}`);
+                } catch (slackErr) {
+                  core.warning(`Slack notification failed: ${slackErr.message}`);
+                }
+              } else {
+                core.warning('SLACK_TEAM_CHANNEL_WEBHOOK not set — skipping Slack notification.');
+              }
             }
