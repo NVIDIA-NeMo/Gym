@@ -7,6 +7,8 @@ The entrypoint is [`app.py`](app.py), which exposes a `SWEBenchWrapper` (a `Simp
 The wrapper supports two agent harnesses, selected by the `agent_framework` config field:
 
 - **`openhands`** (default) — runs [nv-OpenHands](https://github.com/sdevare-nv/nv-OpenHands), with a custom NeMo-Gym-aware LLM client baked into the fork.
+- **`cline`** — runs the headless Cline CLI in the SWE task image, captures its JSONL events, and extracts the resulting git diff for the existing evaluator. This is draft-quality and currently eval-only; full Apptainer/SWE-bench runtime validation is not included.
+
 - **`opencode`** — runs [opencode](https://opencode.ai)'s real `processor.ts` agentic loop, with a custom `LanguageModelV3` provider (`@opencode-ai/nemo-gym`) that swaps the LLM transport while keeping opencode's tools, prompts, and parsing intact. See [opencode integration](#opencode-integration) below.
 
 ---
@@ -161,7 +163,9 @@ Key details:
 
 ---
 
-## opencode integration
+## Cline integration (draft)
+
+When `agent_framework: cline`, the wrapper runs the headless Cline CLI in the benchmark image. It uses `/cline_setup/deps/bin/cline`, authenticates an isolated `openai-compatible` provider against the configured Gym model server, resolves the dataset workspace path, writes Cline JSONL under the per-run trajectory mount, and captures `git diff --binary` as the model patch. This path is currently eval-only and has not received full Apptainer/SWE-bench runtime validation.
 
 When `agent_framework: opencode`, the agent container runs [opencode](https://opencode.ai)'s real `processor.ts` agentic loop instead of OpenHands. The design rule is **swap the transport, keep the loop**: opencode's tools (`bash`, `edit`, `read`, `glob`, `grep`, `write`, `apply_patch`), prompts, tool-call parsing, and event machinery are unchanged. Only the LLM transport is swapped for a NeMo-Gym-aware provider that threads RL token IDs through.
 
@@ -397,7 +401,7 @@ The full schema lives in `SWEBenchWrapperConfig` (and the per-override `AgentPro
 
 | Field                              | Default                                           | Purpose                                                                 |
 |------------------------------------|---------------------------------------------------|-------------------------------------------------------------------------|
-| `agent_framework`                  | `openhands`                                       | Which agent harness drives the rollout: `openhands` or `opencode`. Switches both the in-SIF runtime mounted (OpenHands vs opencode + Bun) and the `BaseDatasetHarnessProcessor` selected in `_setup_params`. |
+| `agent_framework`                  | `openhands`                                       | Which agent harness drives the rollout: `openhands`, `opencode`, or `cline`. Switches the in-SIF runtime and the `BaseDatasetHarnessProcessor` selected in `_setup_params`. |
 | `agent_framework_repo`             | OpenHands official                                | Fork to clone for the agent runtime.                                    |
 | `agent_framework_commit`           | `HEAD`                                            | Commit to pin.                                                          |
 | `agent_max_turns`                  | `100`                                             | Max agent iterations (OpenHands) / max turns the bench loop will spin (opencode). |

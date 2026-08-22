@@ -60,6 +60,8 @@ from responses_api_agents.swe_agents.app import (
 
 
 SWE_AGENTS_DIR = Path(__file__).resolve().parent.parent
+from responses_api_agents.cline_agent.parser import parse_cline_events
+
 
 
 @pytest.fixture(autouse=True)
@@ -1337,6 +1339,28 @@ class TestExtractInstanceDict:
 
 
 ########################################
+
+
+def test_cline_parser_is_dependency_light():
+    records = '\n'.join([
+        json.dumps({'type': 'agent_event', 'event': {'type': 'content_end', 'contentType': 'text', 'text': 'fixed'}}),
+        json.dumps({'type': 'run_result', 'aggregateUsage': {'inputTokens': 3, 'outputTokens': 2}, 'finishReason': 'completed'}),
+    ])
+    items, metadata = parse_cline_events(records)
+    assert items[0].content[0].text == 'fixed'
+    assert metadata['input_tokens'] == 3
+    assert metadata['output_tokens'] == 2
+
+
+def test_cline_framework_config_and_command(monkeypatch):
+    config = _make_instance_config(tempfile.mkdtemp(), agent_framework='cline')
+    config.cline_setup_dir = Path('/tmp/swe_cline_setup')
+    processor = swe_app.ClineHarnessProcessor(config=config)
+    with patch.object(Path, 'write_text'):
+        command = processor.get_run_command()
+    assert command.mode == 'agent'
+    assert 'cline --json' in command.command
+
 # Per-session host-copy + trajectory extractor tests
 ########################################
 
