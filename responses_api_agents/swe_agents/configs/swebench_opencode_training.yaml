@@ -13,7 +13,7 @@ swe_agents_train:
       agent_max_turns: 100
       # Pinned NeMo-Gym opencode fork (adds bench/cli.ts + the nemo-gym LanguageModelV3 provider).
       agent_framework_repo: https://github.com/sdevare-nv/nv-opencode.git
-      agent_framework_commit: sdd/dev
+      agent_framework_commit: sdd/replay
 
       # Container configuration (same SIFs as the openhands path)
       container_formatter: ???
