@@ -1,0 +1,43 @@
+visgym_resources_server:
+  resources_servers:
+    visgym:
+      entrypoint: app.py
+      domain: games
+      verified: false
+      description: "Env-id-parametric wrapper around VisGym visual environments."
+      task_jsonl_fpaths: []
+      image_format: "PNG"
+      image_jpeg_quality: 90
+      skip_images: false
+      enforce_horizon_cap: true
+      return_transitions: false
+      include_env_feedback: true
+      render_on_missing_image: true
+visgym_agent:
+  responses_api_agents:
+    visgym_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: visgym_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 35
+      done_if_no_boxed_answer: true
+      unboxed_action_regex: "^\\('[a-z_]+',\\s*.+\\)$"
+      return_transitions: false
+      system_prompt: |-
+        Inspect the current image and environment instructions, then output
+        exactly one legal action tuple inside \boxed{ and }. An action is
+        mandatory on every turn, even when uncertain. Do not think aloud,
+        explain, narrate the image, compare alternatives, plan future turns,
+        restate instructions, or output text outside the boxed tuple.
+      re_emit_rules_each_turn: true
+      rules_summary_template: |-
+        Output exactly one legal action tuple inside \boxed{ and }, with no
+        reasoning or other text. Never omit the action.
+      datasets:
+        - name: requested_envs_smoke
+          type: example
+          jsonl_fpath: data/requested_env_manifests/requested_envs_combined_smoke_224_h20_t1024.jsonl

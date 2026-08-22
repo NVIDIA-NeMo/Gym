@@ -1,0 +1,14 @@
+# Optional extras for the VisGym robotics (fetch_*) and refcoco_plus tasks.
+#
+# These two packages are forks that VisGym ships as source inside its own
+# checkout, so there is no PyPI release that matches them and no wheel small
+# enough to keep in git. Build them once from a VisGym checkout:
+#
+#   scripts/build_vendor_wheels.sh /path/to/VisGym
+#
+# then install this file alongside requirements.txt. maze_2d and every other
+# purely rendered task run without it.
+-r requirements.txt
+./vendor_wheels/gymnasium_robotics-1.4.1-py3-none-any.whl
+./vendor_wheels/lvis-0.5.3-py3-none-any.whl
+pycocotools>=2,<3

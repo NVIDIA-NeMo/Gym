@@ -1,0 +1,44 @@
+visgym_resources_server:
+  resources_servers:
+    visgym:
+      entrypoint: app.py
+      domain: games
+      verified: false
+      description: "Env-id-parametric wrapper around VisGym/Gymnasium visual environments."
+      task_jsonl_fpaths: []
+      image_format: "PNG"
+      image_jpeg_quality: 90
+      skip_images: false
+      enforce_horizon_cap: true
+      return_transitions: false
+      include_env_feedback: true
+      render_on_missing_image: true
+visgym_agent:
+  responses_api_agents:
+    visgym_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: visgym_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 15
+      done_if_no_boxed_answer: true
+      unboxed_action_regex: "^(?:\\('place',\\s*\\(\\s*[0-9]+\\s*,\\s*[0-9]+\\s*,\\s*[0-9]+\\s*\\)\\)|\\('remove',\\s*[0-9]+\\s*\\)|\\('stop',\\s*'stop'\\))$"
+      return_transitions: false
+      system_prompt: |-
+        Follow the current visual environment instructions and choose only the
+        single best immediate action. Think inside <think> in at most one short
+        sentence and 25 words. Do not narrate the image, enumerate alternatives,
+        or repeat instructions. Close with </think>. On the last line, write
+        \boxed{ immediately followed by exactly one legal action tuple, then
+        write }. Nothing may follow the action.
+      re_emit_rules_each_turn: true
+      rules_summary_template: |-
+        Use at most 25 words inside <think> about only the next action. Close
+        with </think>, then write one legal action tuple inside \boxed{ and }.
+      datasets:
+        - name: patch_reassembly_starter
+          type: example
+          jsonl_fpath: data/patch_reassembly_easy_4x4_3patch_scale64_t1024.jsonl

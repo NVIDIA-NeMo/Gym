@@ -1,0 +1,46 @@
+visgym_resources_server:
+  resources_servers:
+    visgym:
+      entrypoint: app.py
+      domain: games
+      verified: false
+      description: "Env-id-parametric wrapper around VisGym/Gymnasium visual environments."
+      task_jsonl_fpaths: []
+      image_format: "PNG"
+      image_jpeg_quality: 90
+      skip_images: false
+      enforce_horizon_cap: true
+      return_transitions: false
+      include_env_feedback: true
+      render_on_missing_image: true
+visgym_agent:
+  responses_api_agents:
+    visgym_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: visgym_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 35
+      done_if_no_boxed_answer: true
+      unboxed_action_regex: "^\\('(?:move|stop)',\\s*(?:[0-3]|'stop')\\)$"
+      return_transitions: false
+      system_prompt: |-
+        You control a visual maze one move at a time. Inspect the current image
+        and choose only the single best immediate move. Think inside <think> in
+        at most one short sentence and 25 words. Do not describe the maze,
+        enumerate alternatives, plan the full route, or repeat instructions.
+        Close with </think>. On the last line, write \boxed{ immediately
+        followed by exactly one legal VisGym action tuple, then write }. Nothing
+        may follow the action.
+      re_emit_rules_each_turn: true
+      rules_summary_template: |-
+        Use at most 25 words inside <think> about only the next move. Close with
+        </think>. On the last line write \boxed{, one legal action tuple, and }.
+        Nothing may follow the action.
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: data/maze_2d_easy_example.jsonl
