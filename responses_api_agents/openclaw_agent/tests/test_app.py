@@ -38,6 +38,7 @@ from responses_api_agents.openclaw_agent.app import (
     _decode_last_json_dict_suffix,
     _extract_instruction,
     _text_from_openclaw_payloads,
+    openclaw_mcp_tool_call_provenance,
     openclaw_session_conversation,
     parse_openclaw_output,
     parse_openclaw_session,
@@ -221,6 +222,36 @@ class TestParseOpenclawSession:
     def test_user_messages_ignored(self) -> None:
         line = self._msg("user", [{"type": "text", "text": "hi"}])
         assert parse_openclaw_session(line) == []
+
+    def test_extracts_structured_mcp_provenance_from_tool_result_details(self) -> None:
+        events = [
+            {
+                "type": "message",
+                "message": {
+                    "role": "toolResult",
+                    "toolCallId": "call_mcp",
+                    "details": {
+                        "mcpServer": "workplace_assistant",
+                        "mcpTool": "email_reply_email",
+                    },
+                },
+            },
+            {
+                "type": "message",
+                "message": {
+                    "role": "toolResult",
+                    "toolCallId": "call_builtin",
+                    "details": {"status": "completed"},
+                },
+            },
+        ]
+
+        assert openclaw_mcp_tool_call_provenance(events) == {
+            "call_mcp": {
+                "server_name": "workplace_assistant",
+                "tool_name": "email_reply_email",
+            }
+        }
 
     def test_malformed_lines_skipped(self) -> None:
         line = "not-json\nnull\n[]\n" + self._msg("assistant", [{"type": "text", "text": "ok"}])
@@ -594,8 +625,16 @@ class TestObservability:
             ]
         )
 
-        async def run_openclaw(*args, observation_collector=None, **kwargs):
+        async def run_openclaw(*args, observation_collector=None, provenance_collector=None, **kwargs):
             observation_collector("session-1", parse_openclaw_session_events(session), [], [])
+            provenance_collector(
+                {
+                    "call_mcp": {
+                        "server_name": "workplace_assistant",
+                        "tool_name": "email_reply_email",
+                    }
+                }
+            )
             return parse_openclaw_session(session), {"input_tokens": 1, "output_tokens": 1}, "model"
 
         async def post(server_name, url_path, json=None, cookies=None, **kwargs):
@@ -626,6 +665,13 @@ class TestObservability:
         assert invocation.conversation
         verify_json = agent.server_client.post.await_args_list[-1].kwargs["json"]
         assert "_ng_agent_observations" not in verify_json["response"]
+        assert "_ng_mcp_tool_call_provenance" not in verify_json["response"]
+        assert verify_json["mcp_tool_call_provenance"] == {
+            "call_mcp": {
+                "server_name": "workplace_assistant",
+                "tool_name": "email_reply_email",
+            }
+        }
 
     def test_observation_failure_does_not_change_response(self) -> None:
         agent = _make_agent()
