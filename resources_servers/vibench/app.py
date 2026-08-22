@@ -14,21 +14,27 @@
 # limitations under the License.
 """ViBench resources server (P0).
 
-Topology mirrors ``resources_servers/swebench``:
+ViBench is "case 2" in NVIDIA-NeMo/Gym#2082: the rollout copies an artifact out of its own
+box and the verifier grades it in a fresh one. So this server never touches the agent's
+sandbox -- that would be case 3, which is the one shape that needs the (unmerged) sandbox
+server, and which node-local providers like Docker deliberately cannot support.
 
-  * ``seed_session`` starts the build sandbox from ViBench's codegen image, drops the
-    PRD at ``/app/prd.txt``, and hands the sandbox id back to the agent. Any agent that
-    consumes ``sandbox_handle`` works here -- see ``responses_api_agents/opencode_sandboxed_agent``.
-  * The agent builds the app inside that sandbox. It never sees the test plans.
-  * ``verify`` pulls ``/app`` out of the agent's sandbox and grades it by shelling out to
-    ViBench's existing ``run-seed-then-evaluate.py`` once per test plan. Each run stands up
-    the app + postgres + code-browse in a *fresh* compose project, seeds it with the seeding
-    agent, then scores it with the evaluation agent.
+  * ``seed_session`` returns the PRD text and asset directory for the task. It creates no
+    sandbox and hands out no handle. The agent never sees the test plans.
+  * ``responses_api_agents/vibench_agent`` owns the build sandbox, runs a coding harness in
+    it, tars the finished app, and writes it to ``artifact_dir``.
+  * ``verify`` unpacks that tarball and grades it by shelling out to ViBench's existing
+    ``run-seed-then-evaluate.py`` once per test plan. Each run stands up the app + postgres
+    + code-browse in a *fresh* compose project, seeds it with the seeding agent, then scores
+    it with the evaluation agent.
 
-P0 scope and known gaps are tracked in README.md. The two that matter most: grading runs
-on the resources server's own Docker daemon (not in a Gym sandbox), and the verifier is
-itself an LLM agent, so reward is stochastic -- profile its variance before using this for
-training. ``REVERIFY_MODE`` is ``UNSUPPORTED`` for the same reason.
+``artifact_dir`` is a plain filesystem path shared by the agent and this server. That is not
+a new constraint: grading already shells into a local Docker daemon, so both processes are
+on one host either way.
+
+The verifier is itself an LLM agent driving a browser, so reward is stochastic -- profile
+its variance before using this for training. ``REVERIFY_MODE`` is ``UNSUPPORTED`` because
+grading depends on live app and database state.
 """
 
 import asyncio
@@ -40,9 +46,10 @@ import sys
 import tarfile
 import tempfile
 import time
+from contextlib import suppress
 from pathlib import Path
 from traceback import format_exc
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 from fastapi import Request
 from pydantic import BaseModel
@@ -57,15 +64,7 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.server_utils import SESSION_ID_KEY
 
-
-# ViBench's coding agent reads its brief from this path inside the build container; the
-# seeding/evaluation agents read the same PRD text from /app/prd/ at grade time.
-PRD_PATH_IN_SANDBOX = "prd.txt"
 
 SEED_THEN_EVALUATE_SCRIPT = Path("_harness/runner/scripts/run-seed-then-evaluate.py")
 
@@ -84,13 +83,8 @@ class VibenchResourcesServerConfig(BaseResourcesServerConfig):
     # Absolute path to a ViBench checkout on this host. Grading shells into it.
     vibench_repo_root: str
 
-    # Image the coding agent builds in. ViBench's Dockerfile.base, pre-built and tagged.
-    build_image: str
-    app_workdir: str = "/app"
-
-    # Sandbox config, shaped like resources_servers/swebench/configs/swebench.yaml.
-    sandbox_provider: str
-    sandbox_config: Dict[str, Any]
+    # Directory the agent drops built-app tarballs into, shared with this server.
+    artifact_dir: str
 
     # Wall-clock ceiling for a single test plan's seed+evaluate run.
     evaluation_timeout_s: int = 5400
@@ -104,6 +98,9 @@ class VibenchResourcesServerConfig(BaseResourcesServerConfig):
 
     # Keep per-test-plan output dirs (traces, screenshots, DB dumps) after grading.
     keep_evaluation_artifacts: bool = False
+
+    # Delete the agent's tarball once it has been unpacked.
+    remove_artifact_after_grading: bool = True
 
     REVERIFY_MODE = ReverifyMode.UNSUPPORTED
 
@@ -124,16 +121,20 @@ class VibenchRunRequest(VibenchTaskRequest, BaseRunRequest):
 
 
 class VibenchSeedSessionRequest(VibenchTaskRequest, BaseSeedSessionRequest):
-    sandbox_spec: Optional[Dict[str, Any]] = None
+    pass
 
 
 class VibenchSeedSessionResponse(BaseSeedSessionResponse):
-    sandbox_handle: str
-    workdir: str
+    """Everything the agent needs to set its box up. No sandbox handle: the agent owns
+    the box, so there is nothing here for it to attach to."""
+
+    prd_text: str
+    asset_paths: List[str]
 
 
 class VibenchVerifyRequest(VibenchTaskRequest, BaseVerifyRequest):
-    pass
+    # Tarball of the built app, written by the agent into the shared artifact_dir.
+    artifact_path: Optional[str] = None
 
 
 class PlanResult(BaseModel):
@@ -167,15 +168,15 @@ class VibenchVerifyResponse(BaseMultiRewardVerifyResponse):
 class VibenchResourcesServer(SimpleResourcesServer):
     config: VibenchResourcesServerConfig
 
-    def model_post_init(self, context: Any, /) -> None:
-        super().model_post_init(context)
-        self._session_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
-
     # ---------------------------------------------------------------- helpers
 
     @property
     def _repo_root(self) -> Path:
         return Path(self.config.vibench_repo_root).expanduser().resolve()
+
+    @property
+    def _artifact_root(self) -> Path:
+        return Path(self.config.artifact_dir).expanduser().resolve()
 
     def _resolve(self, rel_path: str) -> Path:
         """Resolve a dataset path against the ViBench checkout, refusing escapes."""
@@ -184,82 +185,31 @@ class VibenchResourcesServer(SimpleResourcesServer):
             raise ValueError(f"Path {rel_path!r} escapes vibench_repo_root")
         return candidate
 
-    async def _create_build_sandbox(self, body: VibenchSeedSessionRequest) -> AsyncSandbox:
-        global_config_dict = get_global_config_dict()
-        provider = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
-        provider_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
+    def _resolve_artifact(self, artifact_path: str) -> Path:
+        """Resolve an agent-supplied tarball path, refusing anything outside artifact_dir."""
+        candidate = Path(artifact_path).expanduser().resolve()
+        if not candidate.is_relative_to(self._artifact_root):
+            raise ValueError(f"Artifact {artifact_path!r} escapes artifact_dir")
+        return candidate
 
-        spec = SandboxSpec(
-            image=self.config.build_image,
-            ttl_s=self.config.sandbox_config.get("ttl_s", None),
-            ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s", None),
-            workdir=self.config.app_workdir,
-            env=self.config.sandbox_config.get("env", {}),
-            files=dict(),
-            metadata=provider_metadata
-            | self.config.sandbox_config.get("metadata", {})
-            | {
-                "nemo_gym_agent": self.config.name,
-                "vibench_app": body.app[:63],
-                "vibench_artifact": body.artifact[:63],
-            },
-            resources=SandboxResources.from_mapping(dict(self.config.sandbox_config.get("resources", {}))),
-            entrypoint=None,
-            provider_options=self.config.sandbox_config.get("provider_options", {}),
-        )
-        sandbox = AsyncSandbox(provider)
-        await sandbox.start(spec)
-        return sandbox
+    def _unpack_artifact(self, artifact: Path, dest: Path) -> None:
+        """Unpack the agent's app tarball, refusing members that escape ``dest``.
 
-    async def _stage_prd(self, sandbox: AsyncSandbox, body: VibenchSeedSessionRequest) -> None:
-        """Write the PRD (and any static assets) into the build sandbox.
-
-        Feature artifacts concatenate their base PRDs in order, matching how ViBench's
-        build-feature path presents prior context to the coding agent.
+        The tarball is written by the agent from a sandbox the model controlled, so its
+        members are untrusted: a path like ``../../etc`` would otherwise write outside the
+        grading directory.
         """
-        prd_text = "\n\n".join(self._resolve(p).read_text() for p in body.prd_files)
-
-        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as fh:
-            fh.write(prd_text)
-            local_prd = Path(fh.name)
-        try:
-            await sandbox.upload(local_prd, f"{self.config.app_workdir}/{PRD_PATH_IN_SANDBOX}")
-        finally:
-            local_prd.unlink(missing_ok=True)
-
-        for asset_dir in body.asset_dirs:
-            src = self._resolve(asset_dir)
-            if not src.is_dir():
-                continue
-            with tempfile.TemporaryDirectory() as tmp:
-                bundle = Path(tmp) / "assets.tar"
-                with tarfile.open(bundle, "w") as tar:
-                    tar.add(src, arcname="assets")
-                remote_bundle = f"{self.config.app_workdir}/assets.tar"
-                await sandbox.upload(bundle, remote_bundle)
-                await sandbox.exec(
-                    f"cd {self.config.app_workdir} && tar -xf assets.tar && rm assets.tar",
-                )
-
-    async def _extract_app(self, sandbox: AsyncSandbox, dest: Path) -> None:
-        """Copy the built app out of the agent's sandbox into ``dest``."""
-        remote_tar = "/tmp/vibench-app.tar"
-        # Exclude the things that would poison a fresh grading build: node_modules is huge
-        # and platform-specific, and prd.txt/assets are re-supplied by the grader.
-        result = await sandbox.exec(
-            f"cd {self.config.app_workdir} && tar "
-            f"--exclude=./node_modules --exclude=./.git --exclude=./prd.txt "
-            f"-cf {remote_tar} .",
-        )
-        if result.return_code != 0:
-            raise RuntimeError(f"Failed to tar app dir: {result.stderr or result.stdout}")
-
-        with tempfile.TemporaryDirectory() as tmp:
-            local_tar = Path(tmp) / "app.tar"
-            await sandbox.download(remote_tar, local_tar)
-            dest.mkdir(parents=True, exist_ok=True)
-            with tarfile.open(local_tar) as tar:
-                tar.extractall(dest)
+        dest.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(artifact) as tar:
+            for member in tar.getmembers():
+                target = (dest / member.name).resolve()
+                if not target.is_relative_to(dest.resolve()):
+                    raise ValueError(f"Refusing tar member escaping the app dir: {member.name!r}")
+                if member.issym() or member.islnk():
+                    link_target = (target.parent / member.linkname).resolve()
+                    if not link_target.is_relative_to(dest.resolve()):
+                        raise ValueError(f"Refusing link escaping the app dir: {member.name!r}")
+            tar.extractall(dest)
 
     def _grader_env(self) -> Dict[str, str]:
         env = dict(os.environ)
@@ -378,36 +328,36 @@ class VibenchResourcesServer(SimpleResourcesServer):
     # ---------------------------------------------------------------- routes
 
     async def seed_session(self, request: Request, body: VibenchSeedSessionRequest) -> VibenchSeedSessionResponse:
-        sandbox = await self._create_build_sandbox(body)
-        await self._stage_prd(sandbox, body)
-        self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = sandbox
-        return VibenchSeedSessionResponse(
-            sandbox_handle=sandbox._handle.sandbox_id,
-            workdir=self.config.app_workdir,
-        )
+        """Hand the agent the task brief. No sandbox is created here -- the agent owns it.
+
+        Feature artifacts concatenate their base PRDs in order, matching how ViBench's
+        build-feature path presents prior context to the coding agent.
+        """
+        prd_text = "\n\n".join(self._resolve(prd).read_text() for prd in body.prd_files)
+        # Only static fixtures the PRD refers to. test_assets/ belongs to the grader and is
+        # deliberately never offered to the builder.
+        asset_paths = [str(self._resolve(d)) for d in body.asset_dirs if self._resolve(d).is_dir()]
+        return VibenchSeedSessionResponse(prd_text=prd_text, asset_paths=asset_paths)
 
     async def verify(self, request: Request, body: VibenchVerifyRequest) -> VibenchVerifyResponse:
-        session_id = request.session[SESSION_ID_KEY]
-        sandbox = self._session_id_to_sandbox.pop(session_id, None)
-
         work_dir = Path(tempfile.mkdtemp(prefix=f"vibench-{body.app}-{body.artifact}-"))
         app_dir = work_dir / "app"
 
         started = time.time()
         build_failed = False
-        if sandbox is None:
+        if not body.artifact_path:
+            # The agent could not produce a tarball at all (sandbox died, harness crashed).
             build_failed = True
         else:
             try:
-                await self._extract_app(sandbox, app_dir)
+                self._unpack_artifact(self._resolve_artifact(body.artifact_path), app_dir)
             except Exception:
-                print(f"Failed to extract app for {body.app}/{body.artifact}", format_exc(), file=sys.stderr)
+                print(f"Failed to unpack artifact for {body.app}/{body.artifact}", format_exc(), file=sys.stderr)
                 build_failed = True
             finally:
-                try:
-                    await sandbox.stop()
-                except Exception:
-                    print("Failed to stop build sandbox", format_exc(), file=sys.stderr)
+                if self.config.remove_artifact_after_grading:
+                    with suppress(Exception):
+                        Path(body.artifact_path).unlink(missing_ok=True)
 
         # An agent that produced nothing runnable is a build failure, not a 0-scoring app.
         if not build_failed and not (app_dir / "package.json").exists():

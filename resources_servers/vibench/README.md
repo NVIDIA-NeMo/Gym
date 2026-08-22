@@ -5,17 +5,24 @@ working web application from a product requirements document. A task hands the a
 and an empty container; grading stands the finished app up for real, seeds it with data
 through its own UI, and then drives it in a browser against a human-written test plan.
 
-This server is the **P0** integration: it owns the build sandbox and delegates grading to
-ViBench's existing `run-seed-then-evaluate.py` pipeline.
+ViBench is **"case 2"** in [#2082](https://github.com/NVIDIA-NeMo/Gym/issues/2082): the
+rollout copies an artifact out of its own box and the verifier grades it in a fresh one. So
+this server never touches the agent's sandbox. That is not a stylistic choice — sharing a box
+is case 3, which needs the (unmerged) sandbox server, and node-local providers like Docker
+deliberately cannot support it. Only OpenSandbox implements `serialize()`/`connect()`.
 
 ## Shape
 
 | Stage | Owner |
 | --- | --- |
 | Task rows (`app`, `artifact`, PRD paths, test-plan paths) | `prepare.py` → `data/*.jsonl` |
-| Build sandbox + PRD staging | `seed_session` in `app.py` |
-| Writing the app | any Gym agent that consumes `sandbox_handle` (P0 pairs with `opencode_sandboxed_agent`) |
+| PRD text + asset paths | `seed_session` in `app.py` (no sandbox, no handle) |
+| Build sandbox, PRD staging, writing the app, harvesting it | `responses_api_agents/vibench_agent` |
 | Seed → evaluate → score | `verify` in `app.py`, shelling into a ViBench checkout |
+
+The agent writes a tarball of the built app into `artifact_dir` and passes the path to
+`/verify`. A plain shared path is enough: grading already shells into a local Docker daemon,
+so both processes are on one host either way.
 
 One row is one `(app, artifact)` pair. Reward is the mean normalized score
 (`score / full_points`) across that artifact's test plans, with the per-plan values exposed
@@ -42,6 +49,7 @@ sandboxed agents land; override `app_workdir` only alongside a different image.
 ```bash
 export VIBENCH_REPO_ROOT=~/vibench
 export VIBENCH_ENV_FILE=~/vibench/.env
+export VIBENCH_ARTIFACT_DIR=/tmp/vibench-artifacts
 ```
 
 `VIBENCH_ENV_FILE` supplies `AGENT_SEEDING_LLM_*` and `AGENT_EVALUATION_LLM_*` for the
@@ -93,8 +101,8 @@ These are known and deliberate; each is a follow-up rather than a bug.
 
 - **Grading runs on the resources server's Docker daemon**, not inside a Gym sandbox,
   because ViBench's grading stack is multi-container (app + postgres + code-browse). Folding
-  it into one supervisord image is the prerequisite for OpenSandbox/Fargate/Enroot and for
-  running this anywhere but a single fat host.
+  it into one supervisord image is the prerequisite for running this on more than one host.
+- **The agent and the resources server must share `artifact_dir`** (see above).
 - **The verifier is itself an LLM agent** driving a browser, so reward is stochastic.
   Profile that variance — repeated grading of one fixed app — before treating this as a
   training signal. `REVERIFY_MODE` is `UNSUPPORTED` for the same reason: scores cannot be

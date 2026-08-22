@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import tarfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -35,9 +36,7 @@ def make_server(tmp_path: Path, **overrides) -> VibenchResourcesServer:
         entrypoint="",
         name="vibench_resources_server",
         vibench_repo_root=str(tmp_path),
-        build_image="vibench-base:latest",
-        sandbox_provider="sandbox",
-        sandbox_config={},
+        artifact_dir=str(tmp_path / "artifacts"),
         **overrides,
     )
     return VibenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
@@ -50,6 +49,7 @@ def make_verify_request(**overrides) -> VibenchVerifyRequest:
         "prd_files": ["prds/notes/prd/mvp.txt"],
         "test_plans": ["prds/notes/tests/mvp/test1.txt", "prds/notes/tests/mvp/test2.txt"],
         "asset_dirs": [],
+        "artifact_path": "/tmp/vibench-artifacts/app.tar",
         "responses_create_params": {"input": [{"role": "user", "content": "build it"}]},
         "response": {
             "id": "resp_1",
@@ -92,6 +92,43 @@ class TestPathResolution:
             server._resolve("../../etc/passwd")
 
 
+class TestArtifactUnpacking:
+    """The tarball comes out of a box the model controlled, so its members are untrusted."""
+
+    def _tar_with(self, tmp_path: Path, arcname: str) -> Path:
+        payload = tmp_path / "payload.txt"
+        payload.write_text("x")
+        archive = tmp_path / "artifacts" / "app.tar"
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(archive, "w") as tar:
+            tar.add(payload, arcname=arcname)
+        return archive
+
+    def test_unpacks_normal_members(self, tmp_path):
+        server = make_server(tmp_path)
+        archive = self._tar_with(tmp_path, "package.json")
+        dest = tmp_path / "app"
+
+        server._unpack_artifact(archive, dest)
+
+        assert (dest / "package.json").read_text() == "x"
+
+    def test_rejects_member_escaping_the_app_dir(self, tmp_path):
+        server = make_server(tmp_path)
+        archive = self._tar_with(tmp_path, "../escaped.txt")
+        dest = tmp_path / "app"
+
+        with pytest.raises(ValueError):
+            server._unpack_artifact(archive, dest)
+        assert not (tmp_path / "escaped.txt").exists()
+
+    def test_rejects_artifact_path_outside_artifact_dir(self, tmp_path):
+        server = make_server(tmp_path)
+        # A compromised agent must not be able to point the verifier at arbitrary host files.
+        with pytest.raises(ValueError):
+            server._resolve_artifact("/etc/passwd")
+
+
 class TestGraderEnv:
     def test_env_file_entries_are_loaded(self, tmp_path):
         env_file = tmp_path / ".env"
@@ -107,11 +144,10 @@ class TestVerifyRewardAggregation:
     is covered by the end-to-end smoke test in README.md, not by unit tests."""
 
     @pytest.mark.asyncio
-    async def test_missing_session_scores_zero_and_flags_build_failure(self, tmp_path, monkeypatch):
+    async def test_missing_artifact_scores_zero_and_flags_build_failure(self, tmp_path, monkeypatch):
         server = make_server(tmp_path)
-        request = _FakeRequest(session_id="absent")
 
-        response = await server.verify(request, make_verify_request())
+        response = await server.verify(_FakeRequest(), make_verify_request(artifact_path=None))
 
         assert response.reward == 0.0
         assert response.build_failed is True
@@ -183,16 +219,11 @@ class _FakeRequest:
 
 
 def _stub_extraction(server: VibenchResourcesServer, monkeypatch) -> None:
-    """Put a fake sandbox in the session map and make artifact extraction produce a valid app."""
+    """Make artifact unpacking produce a minimally valid app."""
 
-    class _FakeSandbox:
-        async def stop(self):
-            return None
-
-    server._session_id_to_sandbox["session-1"] = _FakeSandbox()
-
-    async def fake_extract(sandbox, dest: Path):
+    def fake_unpack(artifact: Path, dest: Path):
         dest.mkdir(parents=True, exist_ok=True)
         (dest / "package.json").write_text(json.dumps({"name": "app"}))
 
-    monkeypatch.setattr(server, "_extract_app", fake_extract)
+    monkeypatch.setattr(server, "_unpack_artifact", fake_unpack)
+    monkeypatch.setattr(server, "_resolve_artifact", lambda p: Path(p))

@@ -1,4 +1,6 @@
-# Resources server: owns the build sandbox and ViBench-backed grading.
+# Resources server: owns the task data and ViBench-backed grading. It creates no sandbox --
+# see NVIDIA-NeMo/Gym#2082 "case 2": the agent copies the built app out, this server grades
+# it in a fresh stack.
 vibench_resources_server:
   resources_servers:
     vibench:
@@ -12,13 +14,10 @@ vibench_resources_server:
       # _harness/runner/scripts/run-seed-then-evaluate.py inside it.
       vibench_repo_root: ${oc.env:VIBENCH_REPO_ROOT}
 
-      # Image the coding agent builds in. This is the same base image ViBench's own
-      # pipeline builds and reuses (see build_base_image_if_needed in
-      # _harness/runner/scripts/common.py), so there is only ever one on the host:
-      #   docker build -f _harness/runner/docker/Dockerfile.base -t app-bench-base:latest .
-      # Its WORKDIR is /app, which is where sandboxed agents land.
-      build_image: ${oc.env:VIBENCH_BUILD_IMAGE,app-bench-base:latest}
-      app_workdir: /app
+      # Shared with the agent: it writes built-app tarballs here, this server unpacks them.
+      # A plain path is enough because grading already needs a local Docker daemon, so both
+      # processes are on one host regardless.
+      artifact_dir: ${oc.env:VIBENCH_ARTIFACT_DIR,/tmp/vibench-artifacts}
 
       # Supplies AGENT_SEEDING_LLM_* / AGENT_EVALUATION_LLM_* for the grader agents.
       # These are the verifier's models, deliberately not the policy model under test.
@@ -30,23 +29,10 @@ vibench_resources_server:
       max_concurrent_test_plans: 2
       keep_evaluation_artifacts: false
 
-      sandbox_provider: sandbox
-      sandbox_config:
-        ttl_s: 14400
-        ready_timeout_s: 600
-        resources:
-          cpu: 4
-          memory_mib: 8192
-          disk_gib: 20
-        metadata:
-          benchmark: vibench
-          harness: opencode
-
-# Agent pairing: reuse the sandboxed OpenCode harness, which connects to the
-# sandbox_handle returned by our seed_session.
+# Agent: owns the build sandbox, runs OpenCode in it, harvests the app.
 vibench_opencode_agent:
   responses_api_agents:
-    opencode_sandboxed_agent:
+    vibench_agent:
       entrypoint: app.py
       num_workers: 4
 
@@ -56,6 +42,16 @@ vibench_opencode_agent:
       model_server:
         type: responses_api_models
         name: policy_model
+
+      # Same base image ViBench's own pipeline builds and reuses (see
+      # build_base_image_if_needed in _harness/runner/scripts/common.py), so the build box
+      # and the grading stack share one image:
+      #   docker build -f _harness/runner/docker/Dockerfile.base -t app-bench-base:latest .
+      # Its WORKDIR is /app, which is where the harness lands.
+      build_image: ${oc.env:VIBENCH_BUILD_IMAGE,app-bench-base:latest}
+      app_workdir: /app
+      artifact_dir: ${oc.env:VIBENCH_ARTIFACT_DIR,/tmp/vibench-artifacts}
+      harvest_timeout_s: 900
 
       debug: false
       opencode_version: 1.17.11
@@ -74,12 +70,17 @@ vibench_opencode_agent:
             "*rm -rf /": deny
             "*rm -rf /*": deny
 
-      # The agent attaches to the resources server's sandbox, so these only cover the
-      # fallback path where it has to create one itself.
       sandbox_provider: sandbox
       sandbox_config:
         ttl_s: 14400
         ready_timeout_s: 600
+        resources:
+          cpu: 4
+          memory_mib: 8192
+          disk_gib: 20
+        metadata:
+          benchmark: vibench
+          harness: opencode
       sandbox_timeout: 5400.0
 
       datasets:
