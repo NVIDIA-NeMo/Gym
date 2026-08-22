@@ -29,6 +29,7 @@ from time import time
 from typing import Any, Callable, ClassVar, Optional
 from uuid import uuid4
 
+import psutil
 from fastapi import Request
 from pydantic import ConfigDict, Field
 
@@ -484,17 +485,31 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
-            proc.kill()
+            self._kill_process_tree(proc.pid)
             await proc.communicate()
             raise TimeoutError(f"Timed out after {timeout}s: {shlex.join(args)}") from None
         except asyncio.CancelledError:
             # Cancellation (e.g. SIGTERM salvage) only stops us from awaiting the process; it does
-            # not stop the process itself. Kill it here so we never leak an orphaned child.
-            proc.kill()
+            # not stop the process itself. Kill it here so we never leak an orphaned process tree.
+            self._kill_process_tree(proc.pid)
             with contextlib.suppress(Exception):
                 await proc.communicate()
             raise
         return proc.returncode or 0, stdout.decode(errors="replace"), stderr.decode(errors="replace")
+
+    @staticmethod
+    def _kill_process_tree(pid: int) -> None:
+        """Kill a subprocess and every descendant it has already started."""
+        try:
+            parent = psutil.Process(pid)
+            children = parent.children(recursive=True)
+        except psutil.NoSuchProcess:
+            return
+        for child in reversed(children):
+            with contextlib.suppress(psutil.NoSuchProcess):
+                child.kill()
+        with contextlib.suppress(psutil.NoSuchProcess):
+            parent.kill()
 
     @staticmethod
     def _session_file(envelope: Optional[dict[str, Any]]) -> Optional[Path]:

@@ -14,13 +14,16 @@
 # limitations under the License.
 
 import asyncio
+import contextlib
 import json
 import os
 import signal
+import sys
 from pathlib import Path
 from typing import Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import psutil
 import yaml
 
 from nemo_gym.config_types import ModelServerRef
@@ -763,6 +766,50 @@ class TestRunExecCancellation:
         asyncio.run(_main())
 
         assert captured["proc"].returncode is not None  # cancellation killed it, not left running
+
+    def test_cancellation_kills_descendant_processes(self) -> None:
+        agent = _make_agent()
+        captured: dict = {}
+        orig_create = asyncio.create_subprocess_exec
+
+        async def _capturing_create(*args, **kwargs):
+            proc = await orig_create(*args, **kwargs)
+            captured["proc"] = proc
+            return proc
+
+        async def _main():
+            with patch("asyncio.create_subprocess_exec", _capturing_create):
+                task = asyncio.ensure_future(
+                    agent._run_exec(
+                        [
+                            sys.executable,
+                            "-c",
+                            "import subprocess, sys, time; "
+                            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+                            "time.sleep(30)",
+                        ],
+                        cwd=None,
+                        env=os.environ.copy(),
+                        timeout=100,
+                    )
+                )
+                for _ in range(200):
+                    proc = captured.get("proc")
+                    children = psutil.Process(proc.pid).children(recursive=True) if proc else []
+                    if children:
+                        break
+                    await asyncio.sleep(0.01)
+                assert children, "descendant process never started"
+                child_pids = [child.pid for child in children]
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+                return child_pids
+
+        child_pids = asyncio.run(_main())
+
+        assert captured["proc"].returncode is not None
+        assert all(not psutil.pid_exists(pid) for pid in child_pids)
 
 
 class TestSigtermSalvage:
