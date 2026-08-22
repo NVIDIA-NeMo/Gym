@@ -82,6 +82,16 @@ def test_production_launcher_requires_baseline_dependency() -> None:
     assert "REQUIRE_BASELINE_GATE=1" in launcher
 
 
+def test_wandb_internal_id_leaves_room_for_rollout_table_names() -> None:
+    config = yaml.safe_load((BUNDLE / "rdkit_no_tool_grpo.yaml").read_text())
+    launcher = (BUNDLE / "submit_chain.sh").read_text()
+    run_id = "rdkit-es140-grpo-v06-r8"
+
+    assert f"WANDB_RUN_ID=${{WANDB_RUN_ID:-{run_id}}}" in launcher
+    assert config["logger"]["wandb"]["id"] == f"${{oc.env:WANDB_RUN_ID,{run_id}}}"
+    assert len(run_id) <= 32
+
+
 def test_cluster_launch_stages_code_and_caches_node_local() -> None:
     ray_sub = (BUNDLE / "nemo_rl_assets/ray.sub").read_text()
     assert "/raid/scratch/${USER}/rdkit-nemo-rl-${SLURM_JOB_ID}" in ray_sub

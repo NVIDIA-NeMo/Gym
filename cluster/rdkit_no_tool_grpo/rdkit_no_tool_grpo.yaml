@@ -287,7 +287,10 @@ logger:
     project: "RDKit Chemistry RL"
     entity: ${oc.env:WANDB_ENTITY,nemo-llm-service}
     name: ${oc.env:WANDB_RUN_NAME,rdkit-nemotron3-nano-grpo-lora-r8-a8-es140-64p16g-i200-lr3e-6-32k-iad-p0-64g}
-    id: ${oc.env:WANDB_RUN_ID,rdkit-nemotron3-nano-grpo-lora-r8-a8-es140-64p16g-i200-lr3e-6-32k-iad-p0-64g}
+    # W&B prefixes table artifact names with the run ID. Keep the internal ID
+    # short so rollout-table metric names remain below W&B's 128-char limit;
+    # `name` above retains the fully descriptive experiment label.
+    id: ${oc.env:WANDB_RUN_ID,rdkit-es140-grpo-v06-r8}
     group: ${oc.env:WANDB_GROUP,rdkit-es140-lora-grpo}
     resume: "allow"
   tensorboard: {}

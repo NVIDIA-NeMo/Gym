@@ -34,7 +34,7 @@ CHECKPOINT_DIR=${CHECKPOINT_DIR:-${RESULTS_DIR}/checkpoints}
 BASELINE_SUMMARY=${BASELINE_SUMMARY:-${RESULTS_DIR}/baseline_step0.json}
 export REQUIRE_BASELINE_GATE=1 BASELINE_SUMMARY
 
-export WANDB_RUN_ID=${WANDB_RUN_ID:-rdkit-nemotron3-nano-grpo-lora-r8-a8-es140-64p16g-i200-lr3e-6-32k-iad-p0-64g}
+export WANDB_RUN_ID=${WANDB_RUN_ID:-rdkit-es140-grpo-v06-r8}
 export WANDB_RUN_NAME=${WANDB_RUN_NAME:-rdkit-nemotron3-nano-grpo-lora-r8-a8-es140-64p16g-i200-lr3e-6-32k-iad-p0-64g}
 export WANDB_GROUP=${WANDB_GROUP:-rdkit-es140-lora-grpo}
 export WANDB_ENTITY=${WANDB_ENTITY:-nemo-llm-service}
