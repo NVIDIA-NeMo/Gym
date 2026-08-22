@@ -18,6 +18,7 @@ VLLM_COMMON_ARGS=(
     --mamba-cache-mode align
     --mamba-ssm-cache-dtype float32
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
+    --speculative-config '{"method": "mtp", "num_speculative_tokens": 5}'
     --enable-expert-parallel
     --data-parallel-size 1
     --api-server-count 1
