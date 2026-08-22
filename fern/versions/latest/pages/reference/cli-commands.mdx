@@ -395,6 +395,10 @@ Commands for developing, running, and inspecting environments. An environment de
 
 Scaffold a resources server, or create a manifest-backed environment or benchmark skeleton. Workload scaffolds include a manifest, Gym config, sample data, and the extension points selected by the integration profile.
 
+<Note>
+`--environment` and `--benchmark` create manifest-backed workloads. `--reuse-verifier` additionally requires the selected resources server to export `VERIFIER_FIXTURE`; scorers that have not adopted that contract remain reusable through legacy config overlays during migration. See [Add a benchmark](/contribute/environments/adding-a-benchmark).
+</Note>
+
 | Option | Description |
 | --- | --- |
 | `--resources-server NAME` | Name of the resources server to create. |
@@ -495,15 +499,22 @@ Exercise a manifest-backed workload's verifier fixture in its resources-server e
 | `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 
 ```bash
-# Exercise a manifest-backed workload verifier
+# Exercise a manifest-backed workload verifier (experimental; requires VERIFIER_FIXTURE)
 gym env test my_eval
 
-# Test a single server
+# Test a single server (pytest only)
 gym env test --resources-server example_single_tool_call
+
+# Same, plus example.jsonl / example_metrics.json / example_rollouts.jsonl (CI always does this)
+gym env test --resources-server example_single_tool_call +should_validate_data=true
 
 # Test all servers
 gym env test
 ```
+
+<Note>
+`gym env test --resources-server NAME` runs pytest in the server venv. The five-row `example.jsonl`, `example_metrics.json`, and `example_rollouts.jsonl` checks run only when `+should_validate_data=true`. Pull-request CI always sets that flag. Overlay-only changes under `benchmarks/**` skip the server unit-test suite. See [New Environment](/contribute/environments/new-environment#4-example-data-and-rollouts).
+</Note>
 
 ### `gym env publish`
 

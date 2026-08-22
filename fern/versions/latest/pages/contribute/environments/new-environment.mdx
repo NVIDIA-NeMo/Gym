@@ -1,286 +1,239 @@
 ---
 title: "New Environment"
-description: ""
+description: "Add a new scorer: scaffold a resources server, implement verify(), and satisfy tests and example artifacts."
+position: 3
 ---
-An environment defines the tasks, verification, and interaction surface being measured. A Gym config composes that environment with an agent server and model server and supplies the runtime wiring. Those execution components are not the environment itself, although an integration profile can make specific agent behavior part of the measurement.
+import { NavButton } from "../../../../../components/NavButton";
 
-The onboarding flow below covers a complete environment or benchmark. A resources server may be a reusable scoring, tool, or state component, or it may ship a runnable composition and data. Manifest-backed onboarding currently writes canonical workloads under `environments/` and `benchmarks/`; runnable configs still colocated under `resources_servers/` remain visible as `no-manifest` migration entries.
+<Info>
+**Goal:** Add a new **scorer** (resources server) when no existing one can grade the task.
 
-<Tip>
-For a guide to building your first resources server, refer to [Single Step Environment](/environment-tutorials/single-step-environment).
+A resources server is the program under `resources_servers/` that implements `verify()` — the function that returns a numeric score. An **overlay** (a named benchmark) comes later, in step 6.
 
-</Tip>
+**Time:** Budget a working session for scoring code, tests, and five example tasks.
 
-## Environment Manifest
+**In this guide you will:**
 
-Each newly onboarded environment or benchmark has a `manifest.yaml`. The manifest gives contributors, reviewers, and tooling one versioned description of authored metadata and mirrored composition without replacing Gym configuration. Gym defines this contract as a Pydantic model and can emit JSON Schema from it when another tool needs a language-neutral representation.
+1. Create `resources_servers/<name>/`
+2. Implement `verify()` (and any tools or session state)
+3. Add unit tests
+4. Produce five example tasks, metrics, and rollouts
+5. Open a pull request that matches CI
+6. Add a named benchmark overlay that points at this scorer
 
-The manifest is the place to read this declaration, but not every field is authored there:
+If `math_with_judge`, `mcqa`, or a similar scorer already fits, stop and follow [Add a benchmark](/contribute/environments/adding-a-benchmark).
+</Info>
 
-| Field group | Authority |
-| --- | --- |
-| Identity and catalog metadata: `name`, `version`, `kind`, `integration_profile`, `domain`, `description`, `modality`, `licensing`, and `authors` | Manifest |
-| Behavioral declarations: `reward`, `determinism`, and optional session, state, sandbox, provenance, and lifecycle fields | Manifest |
-| Composition: `resources_server`, `agent_server`, `model_server`, `datasets`, `rollout_driver`, and `grading_mode` | Gym config; mirrored read-only in the manifest |
-| Benchmark protocol: `canonical_split` and `standard_prompt_config` | Manifest |
+<NavButton href="/contribute/environments/onboarding-decision-tree" label="Onboarding decision tree" direction="back" />
 
-When composition changes, edit the Gym config and update its manifest mirror. The runtime continues to resolve and execute the config; it does not use the manifest as a second wiring system. `version` follows Semantic Versioning and is intended to identify the resolved composition rather than the manifest text alone. Validation reports the version but does not yet enforce immutable composition or require version bumps.
+**Before you start**
 
-### Integration Profiles
+1. [Development setup](/contribute/development-setup) and a gitignored `env.yaml` from the [Quickstart](/get-started/quickstart).
+2. For a full hands-on `verify()` and tool example, work through [Single-Step Environment](/environment-tutorials/single-step-environment) first.
+3. Run every command from the repository root.
 
-`integration_profile` classifies where the episode is driven. `custom-gym-verifier` is the default path; the other profiles describe three existing extension points.
+---
 
-| Profile | Use when | Additional requirement | Generated extension point |
-| --- | --- | --- | --- |
-| `custom-gym-verifier` | Gym drives the standard agent loop and only the model's answers are measured | `model_server` | None |
-| `custom-gym-agent-loop` | Authored agent behavior, such as browsing or planning strategy, is part of the measurement | `model_server` | Agent `responses()` |
-| `external-agent-loop` | An external framework owns the episode and adapts its result back to Gym | None | Agent `responses()` and `run()` |
-| `external-rollout-driver` | Rollout coordination runs above the agent | `rollout_driver` | Rollout-driver module |
+## 1. Scaffold
 
-Every profile also requires a `resources_server`, an `agent_server`, and at least one dataset. `rollout_driver` is valid only for `external-rollout-driver`. A benchmark additionally requires `canonical_split`, `standard_prompt_config`, and at least one benchmark dataset with `prepare_script`; its dataset-level `prompt_config` remains optional.
-
-The profile is an authored classification, not a runtime dispatcher. Validation recognizes the default Gym agent loop, custom Gym agent behavior, external agent adapters, and external rollout drivers. It reports `unknown` when static inspection is inconclusive and warns when the declaration disagrees. Runtime behavior remains config-driven; concrete component versions, capabilities, pinning, and swap constraints are not yet enforced.
-
-## Validation Layers
-
-Environment validation is progressive. Manifest conformance checks the workload declaration. Static manifest validation checks whether that declaration matches the repository configuration. Verifier fixtures exercise representative scoring behavior, while evaluation runs and reward profiling establish runtime behavior and grading quality.
-
-Static manifest validation runs without starting the workload. It:
-
-- validates the manifest schema and workload identity;
-- resolves Gym configuration and inheritance without runtime side effects;
-- compares manifest composition mirrors with the authoritative configuration;
-- reports an inferred integration profile and the static evidence behind it;
-- parses referenced preparation and rollout-driver hooks without importing or executing them; and
-- streams declared JSONL data, applies benchmark prompts row by row, and checks the resulting rollout inputs.
-
-With synchronization enabled, it writes corrected composition mirrors atomically only after every static check passes. Authored metadata remains unchanged.
-
-It does not import components, start services, execute preparation code, call a model, run an evaluation, probe model or resources endpoints, or check evaluation-output writability. Runtime pre-run readiness is a separate validation layer. Component versions and capabilities, profile pinning, and `adopted_from` source resolution are deferred from this initial static validation. Scorer behavior and grading quality require the later validation layers.
-
-## Onboarding Commands
-
-Search the local catalog before creating a workload. The onboarding journey then uses four commands to scaffold, validate, test, and publish it:
+Search first, then generate the folder:
 
 ```bash
-gym search "task description"
+gym search resources-servers "task description"
+gym env init --resources-server my_server
+```
+
+```text
+resources_servers/my_server/
++-- __init__.py
++-- app.py                 # scoring code (starter tests use VerifierFixture — see step 2)
++-- configs/my_server.yaml # block names: my_server_resources_server, my_server_simple_agent
++-- data/
+|   +-- .gitignore
++-- tests/
+|   +-- __init__.py
+|   +-- test_app.py
+|   +-- verifier_cases.jsonl
++-- requirements.txt
++-- README.md
+```
+
+In YAML, the scorer block is `{name}_resources_server` and the agent block is `{name}_simple_agent`. Pass the agent block as `--agent`.
+
+<Note>
+This page follows the standalone scorer path. For a complete environment or benchmark, use `gym env init --environment` or `gym env init --benchmark`; those commands add the manifest and workload composition around the scorer. See [Add a benchmark](/contribute/environments/adding-a-benchmark) for the end-to-end benchmark path.
+</Note>
+
+**Next:** implement `verify()` in `app.py`.
+
+---
+
+## 2. Implement `verify()`
+
+`gym env init --resources-server` generates starter tests around a **VerifierFixture**: `verify()` lives on a `{Name}Verifier` class, `VERIFIER_FIXTURE` is exported, and `tests/test_app.py` runs those cases from `tests/verifier_cases.jsonl`.
+
+<Warning>
+The [Single-Step Environment](/environment-tutorials/single-step-environment) tutorial puts `verify()` on `SimpleResourcesServer` and uses hand-written pytest. Most shipped scorers use that pattern (see [`example_single_tool_call`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_single_tool_call)). Pick one:
+
+1. **Keep the generated tests** — update `verifier_cases.jsonl` and leave `VERIFIER_FIXTURE` in place.
+2. **Switch to the tutorial pattern** — rewrite `tests/test_app.py` so it no longer imports `VERIFIER_FIXTURE`.
+
+Do not mix the two without updating tests.
+</Warning>
+
+Edit `resources_servers/my_server/app.py`. Scoring (and any tools or session state) lives there:
+
+```python
+async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+    # Read the trajectory from body.response. Return a numeric reward.
+    return BaseVerifyResponse(**body.model_dump(), reward=1.0)
+```
+
+If the model output is missing or malformed, return `reward=0.0`. Do not crash the server. Add tools as extra FastAPI handlers on the same class. For per-task memory (`seed_session`, cookies), see [Stateful Environment](/environment-tutorials/stateful-environment). If `simple_agent` is the wrong loop, see [Complex benchmarks](/contribute/environments/adding-a-benchmark#complex-benchmarks).
+
+Worked SimpleResourcesServer example: [Single-Step Environment](/environment-tutorials/single-step-environment). Scoring pattern catalog: [Build Verifiers](/build-verifiers).
+
+In `resources_servers/my_server/configs/my_server.yaml`, set `domain` to one of: `math`, `coding`, `agent`, `knowledge`, `instruction_following`, `long_context`, `safety`, `games`, `translation`, `e2e`, `rlhf`, or `other`. See [Resources Server Fields](/reference/configuration#resources-server-fields).
+
+Fill in `README.md` with licensing. The `add-verified-flag` git hook sets `verified: false` — leave it.
+
+**Next:** add tests, then five example tasks.
+
+---
+
+## 3. Tests
+
+You need at least one test in `tests/test_app.py`. The scaffold already adds `test_verifier_fixture` plus `verifier_cases.jsonl` — replace or extend those when you change how scoring works. Cover a passing score, a failing score, and empty model output.
+
+```bash
+gym env test --resources-server my_server
+```
+
+That command runs pytest only. Add `+should_validate_data=true` after you create the five example files in the next step. Pull-request CI always sets that flag.
+
+**Next:** write `data/example.jsonl` (five lines).
+
+---
+
+## 4. Example data and rollouts
+
+Create `resources_servers/my_server/data/example.jsonl` with **exactly 5** lines **before** you generate metrics. These rows include chat messages (`responses_create_params.input`). Overlay JSONL that uses a prompt file does not — see [Add a benchmark](/contribute/environments/adding-a-benchmark#3-wire-config-prepare-and-data).
+
+```json
+{"responses_create_params": {"input": [{"role": "user", "content": "what's it like in sf?"}]}}
+```
+
+Add whatever fields `verify()` reads (`expected_answer`, `verifier_metadata`, tools). Examples: [`example_single_tool_call/data/example.jsonl`](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/example_single_tool_call/data/example.jsonl) and [Single-Step §2](/environment-tutorials/single-step-environment#2-task-preparation).
+
+CI then requires all three files under `resources_servers/my_server/data/`:
+
+| Artifact | Rule |
+| --- | --- |
+| `example.jsonl` | Exactly **5** rows (often the first five of your train split) |
+| `example_metrics.json` | `"Number of examples": 5` |
+| `example_rollouts.jsonl` | Exactly **5** rollouts (full run records, including `reward`) |
+
+Generate metrics:
+
+```bash
+gym dataset collate \
+  "+config_paths=[resources_servers/my_server/configs/my_server.yaml]" \
+  +output_dirpath=data/my_server \
+  +mode=example_validation
+```
+
+<Note>
+**Before rollouts:** [Development Setup](/contribute/development-setup) (`uv sync --extra dev`) and root `env.yaml` (`policy_base_url`, `policy_api_key`, `policy_model_name`) from the [Quickstart](/get-started/quickstart). Never commit `env.yaml`. Start servers in one terminal, collect in another. `--agent` is `my_server_simple_agent`.
+</Note>
+
+```bash
+gym env start --resources-server my_server --model-type openai_model
+gym eval run --no-serve \
+  --agent my_server_simple_agent \
+  --input resources_servers/my_server/data/example.jsonl \
+  --output resources_servers/my_server/data/example_rollouts.jsonl \
+  --limit null
+```
+
+Then:
+
+```bash
+gym env test --resources-server my_server +should_validate_data=true
+```
+
+Worked example: [`resources_servers/example_multi_step`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_multi_step). `gym env test` (all servers) only discovers directories that contain `README.md`. Do not leave `*conflict*` files under `data/`.
+
+<Note>
+Train and validation dataset entries need a YAML `license` field. The scaffold already sets `license: Apache 2.0` — change it when you publish real splits. Hugging Face `source:` is the public default. GitLab is NVIDIA-internal only. See [Prepare Data](/data).
+</Note>
+
+**Next:** open a pull request, then name the eval in step 6.
+
+---
+
+## 5. Open a PR
+
+- [ ] `tests/test_app.py` and `gym env test --resources-server my_server +should_validate_data=true`
+- [ ] Five-row `example.jsonl`, `example_metrics.json`, `example_rollouts.jsonl`
+- [ ] `domain` on the server YAML; `license` on train/validation datasets
+- [ ] `verified: false` (leave the hook default)
+- [ ] SPDX header on every new file
+- [ ] `git commit -s` (Developer Certificate of Origin; cryptographic `-S` signing is optional)
+- [ ] `pre-commit run --files resources_servers/my_server/**/*` (stage auto-fixes from ruff / `add-verified-flag` / `update-readme-table`)
+- [ ] README with licensing
+- [ ] PR description: what the environment measures, how `verify()` works, data source and domain
+
+Score checks and a training run are optional for merge. They help before `verified: true`. See [Add a benchmark](/contribute/environments/adding-a-benchmark#6-reward-profiling).
+
+**Next:** add a named benchmark overlay so people can run `gym eval run --benchmark …`.
+
+---
+
+## 6. Name the eval
+
+A resources server is the scorer, not the named benchmark. After the server exists, add `benchmarks/<name>/` that points `config_paths` at `resources_servers/my_server/configs/my_server.yaml`. A training mix can live under `environments/<name>/` the same way.
+
+Follow [Add a benchmark](/contribute/environments/adding-a-benchmark) from step 2, and set `config_paths` to **your** server instead of `math_with_judge`.
+
+---
+
+<AccordionGroup>
+<Accordion title="Optional: reward profiling and training">
+If you have compute, inspect reward distribution on at least ~500 prompts with 16 responses each (Qwen3-4B, Qwen 30B A3B, or equivalent). For tool-calling, report tool-call metrics vs reward.
+
+A useful training check isolates this environment (for example GRPO with NeMo RL, 64 prompts per step, 16 rollouts per prompt). Include curves and config links in the PR if you run it.
+</Accordion>
+
+<Accordion title="Manifest-backed workload contract">
+Complete environments and benchmarks use the implemented manifest-backed onboarding path:
+
+```bash
 gym env init --environment my_eval --profile custom-gym-verifier
 gym env validate my_eval
 gym env test my_eval
 gym env publish my_eval
 ```
 
-The scaffold creates a manifest, Gym config, sample data, and README. Names that create Python components must be lowercase Python identifiers. Benchmarks also receive source data, a prompt, and a `prepare()` function. A new scorer adds a resources server and verifier fixture. Non-default templates expose the selected extension point but initially delegate to existing Gym behavior; replace their generated TODO before review. For an external agent loop, replace `run()` with the framework adapter and make `responses()` raise `NotImplementedError`.
+`--reuse-verifier` requires the reused server to export `VERIFIER_FIXTURE`. Scorers that have not adopted that contract remain available through the legacy `config_paths` and `_inherit_from` overlay path during migration.
 
-To reuse a scorer that already exports the verifier-fixture contract, declare its reward contract instead of copying its implementation:
+The fixture contract (full-reward, zero-reward, malformed, plus reseed when `seeded`) is the local bar on that path. Publication records readiness as `experimental`. CODEOWNERS updates, immutable-version enforcement, capability checks, certificate-backed validation, and a hosted catalog index are not automated yet.
 
-```bash
-gym env init --benchmark my_benchmark --profile custom-gym-verifier \
-  --reuse-verifier existing_scorer --reward-range 0 1 --higher-is-better
-```
+Integration profiles (`custom-gym-verifier`, `custom-gym-agent-loop`, `external-agent-loop`, `external-rollout-driver`) classify where the episode is driven. They are authored labels, not a runtime dispatcher. See `nemo_gym/environment/manifest.py` and [CLI: gym env init](/reference/cli-commands#gym-env-init).
+</Accordion>
 
-Scaffolding is non-destructive: an identical rerun is a no-op, and any conflicting file aborts the complete write set. `gym env validate --sync NAME` updates only mirrored composition fields after all static checks pass. `gym env test --update-expected NAME` updates fixture rewards only after every behavioral check passes. `gym env publish NAME` runs validation and the fixture, rejects manifest metadata placeholders, and confirms that the exact manifest is discoverable. The manifest is the registry record, so this structural check is idempotent and does not commit or push changes.
+<Accordion title="Recommended technical design">
+Handlers should be async. Use the NeMo Gym OpenAI client from the top-level `nemo_gym` package, not LiteLLM. Extend `BaseVerifyRequest` / `BaseVerifyResponse` for extra fields. Return tool errors to the model instead of crashing. Pass configuration through Gym YAML, not environment variables.
 
-`gym list environments` and unqualified `gym search` read manifests and legacy runnable configs together. Manifest-backed entries are `experimental`; unmigrated entries are labeled `no-manifest`. Reusable resources-server components without agent composition and datasets remain available through `gym list resources-servers` and are not environment entries.
+On multi-step rollouts, propagate `prompt_token_ids`, `generation_token_ids`, and `generation_log_probs` on later model calls. Details: [Single-Step Environment](/environment-tutorials/single-step-environment) and [`AGENTS.md`](https://github.com/NVIDIA-NeMo/Gym/blob/main/AGENTS.md).
+</Accordion>
+</AccordionGroup>
 
-<Note>
-Publication currently records readiness as `experimental`. CODEOWNERS updates, immutable version enforcement, capability checks, certificate-backed `validated` status, and a hosted catalog index are not yet automated.
-</Note>
+## Related Topics
 
-## Verifier Fixture Contract
+- [Onboarding decision tree](/contribute/environments/onboarding-decision-tree)
+- [Add a benchmark](/contribute/environments/adding-a-benchmark)
+- [Single-Step Environment](/environment-tutorials/single-step-environment)
+- [Environment Components](/about/architecture)
+- [CONTRIBUTING.md](https://github.com/NVIDIA-NeMo/Gym/blob/main/CONTRIBUTING.md)
 
-The resources server owns and exports one `VERIFIER_FIXTURE`, so every workload that reuses the scorer also reuses its scoring tests. The fixture requires three cases, plus a fourth when the manifest declares `seeded`:
-
-- a full-reward case that reaches the better endpoint declared by `higher_is_better`;
-- a zero-reward case that reaches the opposite endpoint;
-- a malformed request that fails as declared; and
-- for a seeded environment, the same request producing the same reward after an explicit reseed on fresh server instances.
-
-Fixture execution runs directly in the resources server's dependency environment and does not start Gym services or Ray. The first run prepares that environment in the same way as existing server tests. Updating expected rewards is explicit and atomic; range, endpoint, malformed-input, and determinism checks still apply. `gym env init --reuse-verifier` checks that the selected resources-server entrypoint declares a fixture, and `gym env test` executes it. A shared fixture attests the scorer itself, so a workload that overrides `grading_mode` needs workload-specific cases.
-
-## Guiding Principles
-
-Adding a training environment has the same local correctness requirements as [Adding A Benchmark](/contribute/environments/adding-a-benchmark): its manifest must validate and its verifier fixture must pass. A full evaluation, reward profile, or training run can provide stronger evidence about measurement quality and training utility, but it is optional and is not a publication or merge compute gate.
-
-When compute is available, a useful training experiment isolates the environment's effect on the targeted capability. GRPO with NeMo RL, 64 prompts per step, and 16 rollouts per prompt is one starting point; adjust it to the environment and available compute.
-
-If you run this experiment, use a model that achieves meaningful performance during reward profiling and include the relevant configuration, curves, and links in the pull request.
-
-## Required Files
-
-Your resources server must include these files:
-
-| File | Description |
-| --- | --- |
-| `app.py` | Main server implementation with `verify` function |
-| `configs/*.yaml` | Configuration with valid `domain` field |
-| `tests/test_app.py` | At least one unit test |
-| Example data | At least one representative input at a path referenced by the workload config |
-| `requirements.txt` | Python dependencies |
-| `README.md` | Documentation with licensing information |
-
-Optional rollout evidence may be saved in `data/example_rollouts.jsonl`.
-
-## Contribution Workflow
-
-Contributing a resources server follows this sequence:
-
-| Step | Phase | Description |
-| --- | --- | --- |
-| 1 | Curate Tasks | Collect or generate training tasks and create example data |
-| 2 | Implementation | Build resources server with verification logic |
-| 3 | Testing | Write and run unit tests |
-| 4 | Example Rollouts | Optionally capture runtime evidence |
-| 5 | Reward Profiling | Optionally inspect reward distribution |
-| 6 | Training Validation | Optionally test training utility |
-| 7 | Submit PR | Submit pull request with all required information |
-| 8 | Review | Address feedback on the required local checks and contribution metadata |
-
-## Detailed Steps
-
-### 1. Curate Training Tasks
-
-Prepare the dataset for your environment:
-
-- Collect or generate prompts/tasks for your environment
-- Create `data/example.jsonl` with at least one representative task example
-
-### 2. Resources Server Implementation
-
-Build your resources server:
-
-- Run `gym env init --resources-server my_server` to scaffold the new resources server
-- Follow the [Single Step Environment](/environment-tutorials/single-step-environment) guide to implement your specific logic
-- Implement verification logic for your tasks by defining the `verify()` function
-- Set the `domain` field in your resources server configuration (see `Domain`).
-- Complete the auto-generated `README.md` with licensing information
-
-### 3. Testing
-
-Write and run tests for your resources server:
-
-- At least one test per server is required for PR approval
-- You are responsible for ensuring your tests adequately cover your server's functionality
-
-### 4. Generate Example Rollouts (Optional)
-
-When a policy endpoint and compute are available, generate example rollouts as additional runtime evidence:
-
-- Document the command used to start your server, for example, `gym env start --resources-server my_server`
-- If useful for review, save representative outputs to `data/example_rollouts.jsonl`
-
-This evidence is not required to publish or merge the environment.
-
-### 5. Reward Profiling (Optional)
-
-Run inference to inspect reward distribution:
-
-- Use a ~500 sample subset (minimum)
-- Use Qwen3-4B, Qwen3 30B A3B, or equivalent model
-- Generate 16 responses per prompt
-- Report reward distribution
-- **For tool calling**: Provide tool call metrics and correlation with rewards
-
-### 6. Training-Based Validation (Optional)
-
-Validate with actual training:
-
-- Train with GRPO on Qwen3-4B, Qwen 30B A3B Instruct, or equivalent model
-- Include training accuracy curve
-- Include test benchmark accuracy curve (if applicable)
-
-### 7. Submit PR
-
-Include the following in your pull request description:
-
-- Description of the environment
-- Description of the verification logic
-- Description of the prompts/tasks: What is the source? Which domain does it cover?
-- Provide relevant license information for data and software. If models were used for synthetic data generation, note this in your PR description
-
-### 8. PR Review Process
-
-After submitting your PR:
-
-1. A team member reviews the manifest, composition, fixture, and licensing information
-2. Address any feedback from reviewers
-3. After approval, maintainers merge the contribution
-
-Reviewers may inspect optional rollout or training evidence when provided, but do not need to reproduce a compute-heavy run for the contribution to merge.
-
-## Recommended Technical Design
-
-For optimal performance and scalability, we recommend following these design patterns:
-
-### Async-First Design
-
-Endpoint handlers should be asynchronous to handle concurrent requests efficiently during training:
-
-```python
-# Recommended: async function
-async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
-    return BaseVerifyResponse(**body.model_dump(), reward=1.0)
-```
-
-Avoid spawning additional threads or processes unless necessary. A single Gym instance can handle tens of thousands of concurrent requests when properly implemented.
-
-### NeMo Gym OpenAI Client
-
-We recommend using the NeMo Gym OpenAI client. Import it and the core types from the top-level `nemo_gym` package:
-
-```python
-from nemo_gym import (
-    NeMoGymAsyncOpenAI,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
-```
-
-The NeMo Gym client is optimized for scale and provides consistent behavior. External clients like LiteLLM often preprocess or postprocess inputs and outputs in ways that can interfere with training data collection.
-
-### Pydantic Models
-
-Consider using Pydantic models for request and response validation by extending base classes imported from the top-level `nemo_gym` package:
-
-```python
-from pydantic import BaseModel
-from nemo_gym import BaseVerifyRequest, BaseVerifyResponse
-
-class MyVerifyRequest(BaseVerifyRequest):
-    expected_result: str
-    difficulty: int
-```
-
-### Error Handling
-
-Tool execution errors should be propagated back to the model rather than crashing the server, enabling the model to learn from mistakes:
-
-```python
-async def execute_tool(self, path: str, body: ToolRequest) -> ToolResponse:
-    try:
-        result = self.tool_functions[path](**body.model_dump())
-        return ToolResponse(output=result)
-    except Exception as e:
-        # Return error to model so it can correct itself
-        return ToolResponse(output=f"Error executing tool '{path}': {str(e)}")
-```
-
-### Configuration
-
-Pass configuration through NeMo Gym config files rather than environment variables for better reproducibility:
-
-```yaml
-# configs/my_server.yaml
-host: 0.0.0.0
-port: 8000
-domain: agent
-```
-
-### Multi-Step Rollouts
-
-For multi-step scenarios, the model returns training information on response messages (`prompt_token_ids`, `generation_token_ids`, `generation_log_probs`). When constructing messages for subsequent model calls, propagate this information from previous responses to maintain the training data chain.
-
-## Reference
-
-- [Single Step Environment](/environment-tutorials/single-step-environment) - Introductory tutorial for creating your first resources server
-- [Environment Components](/about/architecture) - Environment component architecture
+<NavButton href="/contribute/environments/adding-a-benchmark" label="Next: name the eval as a benchmark" direction="next" />

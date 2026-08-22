@@ -1,0 +1,57 @@
+---
+title: "Onboarding decision tree"
+description: "Choose whether to reuse a scorer, create a new one, or add a different agent."
+position: 1
+---
+import { NavButton } from "../../../../../components/NavButton";
+
+<NavButton href="/contribute/environments" label="Contribute environments" direction="back" />
+
+<Info>
+You have a benchmark to contribute. First decide whether Gym already has a **scorer** — the program that grades the model's answer.
+
+**Before you start:** [Development Setup](/contribute/development-setup) and the [Quickstart](/get-started/quickstart) (create root `env.yaml` with your model API key).
+</Info>
+
+A **scorer** lives under `resources_servers/` and implements `verify()`. A benchmark manifest describes the versioned workload that composes a dataset, scorer, agent, and model. Gym's default agent is `simple_agent` (one turn, no GUI or sandbox).
+
+Search for an existing scorer. A bare `gym search "…"` searches environments, not scorers — include the type:
+
+```bash
+gym search resources-servers "grade school math"
+gym list resources-servers
+gym search benchmarks math
+```
+
+Pick the row that matches what you need to add, then open that guide:
+
+| You need | You create | Open this guide |
+| --- | --- | --- |
+| Same scorer, new dataset | Manifest-backed benchmark with `--reuse-verifier` | [Add a benchmark](/contribute/environments/adding-a-benchmark) |
+| New scoring code | Manifest-backed benchmark that generates a scorer | [Add a benchmark](/contribute/environments/adding-a-benchmark) |
+| Reusable scorer only | Standalone folder under `resources_servers/` | [New Environment](/contribute/environments/new-environment) |
+| GUI, sandbox, or external runner | A non-default integration profile | [Choose a profile](/contribute/environments/adding-a-benchmark#2-choose-an-integration-profile) |
+
+<Cards>
+  <Card title="Reuse a scorer" href="/contribute/environments/adding-a-benchmark">
+    Scaffold a benchmark with `--reuse-verifier`. If the scorer has not adopted `VERIFIER_FIXTURE`, use the legacy overlay migration path.
+
+    <Badge intent="success" minimal outlined>most common</Badge>
+  </Card>
+  <Card title="Create a new scorer" href="/contribute/environments/new-environment">
+    Add a reusable scoring component, tests, and example tasks. For a complete benchmark, let `gym env init --benchmark` generate it with the workload.
+
+    <Badge minimal outlined>new resources server</Badge>
+  </Card>
+  <Card title="Different agent or wrap a library" href="/environment-tutorials/integrate-external-environments">
+    The scorer exists, but the model must use a GUI, sandbox, or third-party runner.
+
+    <Badge minimal outlined>advanced</Badge>
+  </Card>
+</Cards>
+
+<Note>
+If an existing scorer can grade the task, reuse it. Create a new resources server only when you must change how the score is computed. Legacy overlays remain a migration fallback for scorers without the fixture contract.
+</Note>
+
+**Next:** open the matching card. If you are unsure, start with [Add a benchmark](/contribute/environments/adding-a-benchmark).

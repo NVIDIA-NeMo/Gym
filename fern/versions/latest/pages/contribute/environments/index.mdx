@@ -1,17 +1,53 @@
 ---
 title: "Environments"
-description: ""
+description: "Onboard a benchmark overlay or a new resources server."
 position: 3
 ---
-Help advance RL training for the community by contributing new environments. There are several ways to get involved:
 
----
+<Info>
+A **scorer** (resources server) grades the model's answer. A **benchmark** is usually a new dataset and prompt on top of an existing scorer, not new scoring code. Most contributions copy a folder under `benchmarks/` and never write `app.py`.
+</Info>
+
+<Tip>
+[Development Setup](/contribute/development-setup) first (`uv sync`, `pre-commit install`, `git commit -s`). Using an AI assistant? See [Agent Skills](/contribute/agent-skills).
+</Tip>
+
+Open the decision tree, then only the matching how-to.
 
 <Cards>
 
-<Card title="Contribute New Environments" href="/contribute/environments/new-environment">
-Contribute novel training environments to NeMo Gym!
+<Card title="Onboarding decision tree" href="/contribute/environments/onboarding-decision-tree">
+Can Gym already score this task? Pick overlay, new scorer, or a different agent.
 
-<Badge minimal outlined>new-environment</Badge>
+<Badge intent="success" minimal outlined>start here</Badge>
 </Card>
+
+<Card title="Add a benchmark" href="/contribute/environments/adding-a-benchmark">
+Copy an example folder, write `prepare.py`, run `gym eval`.
+
+<Badge intent="tip" minimal outlined>reuse a scorer</Badge>
+</Card>
+
+<Card title="New Environment" href="/contribute/environments/new-environment">
+Add scoring code, tests, and five example tasks.
+
+<Badge minimal outlined>new scorer</Badge>
+</Card>
+
+<Card title="Single-step tutorial" href="/environment-tutorials/single-step-environment">
+Build a weather-tool server: tools, scoring, tests, and rollouts.
+
+<Badge minimal outlined>hands-on depth</Badge>
+</Card>
+
+<Card title="Wrap an external library" href="/environment-tutorials/integrate-external-environments">
+The model must use a GUI, sandbox, or third-party runner instead of Gym's default agent.
+
+<Badge minimal outlined>advanced</Badge>
+</Card>
+
+<Card title="Onboarding FAQ" href="/reference/faq#how-do-i-choose-an-onboarding-path">
+Which path to take, which commands to run, and what CI requires.
+</Card>
+
 </Cards>

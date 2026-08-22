@@ -16,10 +16,13 @@ description: >
 
 Before starting, determine which type of benchmark you're adding:
 
-**Native benchmark** — verification logic implemented directly in a Gym resources server:
+**Manifest-backed benchmark** — use `gym env init --benchmark <name> --profile <profile>`. Reuse an existing resources server with `--reuse-verifier` when it exports `VERIFIER_FIXTURE`; otherwise use the documented legacy overlay migration path. Human docs: `fern/versions/latest/pages/contribute/environments/adding-a-benchmark.mdx`.
+
+**Native new scorer** — verification logic implemented directly in a Gym resources server:
 - Resources server implements `verify()` with reward logic
 - Agent server orchestrates model calls (use `simple_agent` for single-turn, or custom agent for multi-turn)
 - Example: `code_gen`, `instruction_following`, `math_with_judge`
+- CI requires `data/example.jsonl` (5), `data/example_metrics.json`, `data/example_rollouts.jsonl` (5); local `gym env test --resources-server` skips data checks unless `+should_validate_data=true`
 
 **External benchmark** — wrapping a 3rd-party library that has its own orchestration:
 - Integrate at the agent server level (not resources server)
@@ -30,9 +33,46 @@ Before starting, determine which type of benchmark you're adding:
 
 ## Workflow
 
+Search environments and scorers before creating anything. The default benchmark path is:
+
+```bash
+gym search "task description"
+gym env init --benchmark my_benchmark --profile custom-gym-verifier
+```
+
+When `math_with_judge`, `mcqa`, `code_gen`, or a similar scorer exports `VERIFIER_FIXTURE`, pass `--reuse-verifier`, `--reward-range`, and the reward direction. If the scorer has not migrated to that fixture contract, copy the closest legacy overlay and stop after prepare + CLI wiring:
+
+| Task | Copy |
+| --- | --- |
+| Math / short answer | `benchmarks/gsm8k` |
+| Multiple choice | `benchmarks/gpqa` |
+| Unit-test code | `benchmarks/livecodebench/v5_2408_2502` |
+
+Human walkthrough: `fern/versions/latest/pages/contribute/environments/adding-a-benchmark.mdx`. Only scaffold a standalone resources server when you are contributing a reusable scorer without a complete benchmark.
+
+When the overlay sets `prompt_config`, JSONL rows are raw fields (`question`, `expected_answer`, …). Do **not** bake `responses_create_params.input` into those rows. `prepare()` must return a `Path` equal to `jsonl_fpath`. Keep generated JSONL gitignored.
+
+Search scorers with `gym search resources-servers "…"` (bare `gym search` defaults to environments).
+
+Manifest-backed local checks and smoke test (output is required):
+
+```bash
+gym env validate my_benchmark
+gym env test my_benchmark
+gym eval prepare --benchmark my_benchmark
+gym eval run --benchmark my_benchmark \
+  --model-type openai_model \
+  --split benchmark \
+  --output results/my_benchmark_rollouts.jsonl \
+  --limit 2
+gym env publish my_benchmark
+```
+
+Legacy overlays use `gym env validate --benchmark my_bench` and do not support workload `test` or `publish`. `--no-serve` also needs `--agent`, `--input`, `--prompt-config`, and `--output`.
+
 ### Step 1: Scaffold the server
 
-Run `gym env init` to generate the directory structure:
+For a standalone scorer only, run `gym env init` to generate the directory structure:
 
 ```bash
 gym env init --resources-server my_benchmark
@@ -53,7 +93,17 @@ For external benchmarks, create the agent server manually under `responses_api_a
 
 ### Step 2: Prepare data
 
-Convert your source dataset to Gym JSONL format. Each line must have `responses_create_params.input` (OpenAI message format). Task-specific verification data goes in `verifier_metadata`.
+Convert your source dataset to Gym JSONL format.
+
+**Overlay with `prompt_config`:** write raw fields the prompt and verifier need. Do not include `responses_create_params.input`. Example (`math_with_judge`):
+
+```json
+{"question": "Natalia sold clips to 48 of her friends in April, and then she sold half as many clips in May. How many clips did Natalia sell altogether in April and May?", "expected_answer": 72}
+```
+
+MCQA: see `benchmarks/gpqa/prepare.py` (`question`, `problem`, `options`, `expected_answer`). `prepare()` must return a `Path` equal to `jsonl_fpath`. Keep generated JSONL gitignored.
+
+**New resources server example rows / no prompt_config:** each line has `responses_create_params.input` (OpenAI message format). Task-specific verification data goes in `verifier_metadata` or top-level scorer fields:
 
 ```json
 {
@@ -70,7 +120,7 @@ Convert your source dataset to Gym JSONL format. Each line must have `responses_
 }
 ```
 
-**Data conversion**: Write conversion scripts in the **source repo** (e.g. your dataset repository), not in NeMo-Gym. Prompt files also belong in the source repo. Exception: when there is no external source repo. See `references/patterns.md` § "Data Conversion Script Pattern".
+**Data conversion:** Overlay `prepare.py` lives next to `benchmarks/<name>/config.yaml`. For a new resources server, conversion scripts often live in the source dataset repo; exception when there is no external source repo. See `references/patterns.md` § "Data Conversion Script Pattern".
 
 **`example.jsonl`**: Generate 5 entries for smoke testing. This file is committed directly to git in `data/example.jsonl`.
 
@@ -234,7 +284,7 @@ pre-commit run --all-files
 
 First run may fail as hooks auto-modify files (`verified: false` flag, README table). Stage changes and run again.
 
-Set `verified: true` in YAML config after successful baselining. Include W&B links and screenshots of results in the PR description.
+Leave `verified: false` on the first PR. Maintainers flip it after reward profiling. Include W&B links and screenshots in the PR if you already ran profiling.
 
 To avoid committing unrelated auto-fixes from other servers, scope pre-commit to your files:
 ```bash
@@ -253,7 +303,7 @@ git checkout -- resources_servers/other_server/
 - Code must run on Linux
 - `/run` endpoint must be async
 - Errors from tool execution or bad model output must return error responses, not crash
-- All commits require DCO sign-off (`-s`) and cryptographic signature (`-S`)
+- All commits require DCO sign-off (`-s`). Cryptographic signing (`-S`) is optional.
 
 ## Reference
 
