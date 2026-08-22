@@ -487,6 +487,35 @@ class TestResponses:
         assert data["usage"]["input_tokens_details"]["cached_tokens"] == 4
         assert data["usage"]["output_tokens_details"]["reasoning_tokens"] == 2
 
+    async def test_responses_preserve_unknown_usage_details(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        server = _make_server()
+        server.server_client.global_config_dict = {
+            "observability_enabled": True,
+            "model_call_capture_dir": str(tmp_path),
+        }
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        mock_data = _mock_chat_response(content="Hi!")
+        mock_data["usage"] = {
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+        }
+
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(return_value=mock_data)
+
+        response = client.post("/ng-rollout/0-0/v1/responses", json={"input": "hello"})
+        data = response.json()
+
+        assert data["usage"]["input_tokens_details"]["cached_tokens"] is None
+        assert data["usage"]["output_tokens_details"]["reasoning_tokens"] is None
+        [record] = read_model_call_records(CaptureStore(tmp_path), "0-0")
+        assert record.cache_hit is None
+        assert record.cached_tokens is None
+        assert record.tokens_reasoning is None
+
     async def test_responses_incomplete_max_tokens(self, monkeypatch: MonkeyPatch) -> None:
         server = _make_server()
         app = server.setup_webserver()
