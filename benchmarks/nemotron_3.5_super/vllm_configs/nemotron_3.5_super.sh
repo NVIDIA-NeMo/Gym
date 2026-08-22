@@ -10,8 +10,8 @@ VLLM_COMMON_ARGS=(
     --enable-auto-tool-choice
     --tool-call-parser qwen3_coder
     --reasoning-parser nemotron_v3
-    --enable-chunked-prefill
-    --enable-prefix-caching
+    --no-enable-chunked-prefill
+    --no-enable-prefix-caching
     --kv-cache-dtype fp8
     --no-disable-hybrid-kv-cache-manager
     --no-async-scheduling
