@@ -1006,9 +1006,9 @@ class TestMultiReference:
         # MLE ELO over both references.
         assert m["comparison/num_references"] == 2
         assert abs(m["comparison/eval_elo"] - 1200.0) < 1.0
-        # Every emitted metric value must be numeric (downstream coerces each
-        # into a float Score — a string value fails parsing and fails the run).
-        assert all(isinstance(v, (int, float)) for v in m.values())
+        # Every score value outside the reserved stats bundle must remain
+        # numeric for downstream float coercion.
+        assert all(isinstance(v, (int, float)) for k, v in m.items() if k != "stats")
 
     def test_single_stage_matches_unstaged_full_run(self) -> None:
         """A one-stage run is a special case of the full run: tagging the same
@@ -1123,7 +1123,7 @@ class TestMultiReference:
         # Pooled descriptive win stats still cover every stage.
         assert m["comparison/wins"] == 13
         assert m["comparison/judged"] == 20
-        assert all(isinstance(v, (int, float)) for v in m.values())
+        assert all(isinstance(v, (int, float)) for k, v in m.items() if k != "stats")
 
     def test_aggregate_metrics_handles_repeated_task_across_stages(self) -> None:
         """The same ``(task_index, rollout_index)`` may recur across stages (one
