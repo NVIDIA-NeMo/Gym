@@ -1,3 +1,6 @@
+config_paths:
+  - responses_api_agents/scicode_agent/configs/scicode_agent.yaml
+
 scicode:
   resources_servers:
     scicode:
@@ -13,15 +16,8 @@ scicode:
 scicode_agent:
   responses_api_agents:
     scicode_agent:
-      entrypoint: app.py
       resources_server:
-        type: resources_servers
         name: scicode
-      model_server:
-        type: responses_api_models
-        name: policy_model
-      prompt_fpath: benchmarks/scicode/prompts/background.yaml
-      with_background: true
       datasets:
         - name: example
           type: example

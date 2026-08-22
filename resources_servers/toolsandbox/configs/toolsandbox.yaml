@@ -1,3 +1,6 @@
+config_paths:
+  - responses_api_agents/toolsandbox_agent/configs/toolsandbox_agent.yaml
+
 # Standalone gym config for the ToolSandbox benchmark.
 #
 # Brings up the ToolSandbox resources server (holds per-episode sandbox state,
@@ -45,18 +48,8 @@ toolsandbox:
 toolsandbox_agent:
   responses_api_agents:
     toolsandbox_agent:
-      entrypoint: app.py
       resources_server:
-        type: resources_servers
         name: toolsandbox
-      model_server:
-        type: responses_api_models
-        name: policy_model
-      max_steps: 30
-      # Emit a single flat trajectory (list of output items), not per-step
-      # transition snapshots. response.output is consumed as a flat list;
-      # transitions (list-of-lists) break downstream text extraction.
-      return_transitions: false
       datasets:
       - name: example
         type: example

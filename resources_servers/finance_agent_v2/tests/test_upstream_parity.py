@@ -30,7 +30,6 @@ import re
 from pathlib import Path
 
 import finance_agent.get_agent as upstream_get_agent
-import yaml
 from finance_agent.exceptions import RetryExhaustedError
 
 # Imported by name: `finance_agent.get_agent` is a function as well as a module, and
@@ -38,7 +37,9 @@ from finance_agent.exceptions import RetryExhaustedError
 from finance_agent.get_agent import MAX_TIME_SECONDS
 from finance_agent.get_agent import Parameters as UpstreamParameters
 from finance_agent.tools import VALID_TOOLS, SubmitFinalResult
+from omegaconf import OmegaConf
 
+from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from responses_api_agents.finance_agent.app import FinanceAgentConfig
 
 
@@ -46,8 +47,21 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _agent_block(config_fpath: Path, instance: str) -> dict:
-    config = yaml.safe_load((_REPO_ROOT / config_fpath).read_text())
-    return config[instance]["responses_api_agents"]["finance_agent"]
+    """The agent block as the server starts with it. Resolved rather than read straight from the
+    file, because a profile may pull shared fields in through `config_paths`."""
+    initial = OmegaConf.merge(
+        GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+        {"config_paths": [str(_REPO_ROOT / config_fpath)]},
+    )
+    resolved = GlobalConfigDictParser().parse(
+        GlobalConfigDictParserConfig(
+            initial_global_config_dict=initial,
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+            offline=True,
+        )
+    )
+    return OmegaConf.to_container(resolved[instance]["responses_api_agents"]["finance_agent"], resolve=True)
 
 
 _FABV2 = _agent_block(Path("resources_servers/finance_agent_v2/configs/finance_agent_v2.yaml"), "finance_agent_v2")
