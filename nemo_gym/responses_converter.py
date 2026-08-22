@@ -486,10 +486,16 @@ class ResponsesConverter(BaseModel):
     # Chat Completion to Response
     # =======================================================
 
-    def postprocess_chat_response(self, choice: NeMoGymChoice) -> List[NeMoGymResponseOutputItem]:
-        return self.postprocess_assistant_message_dict(choice.message.model_dump(exclude_none=True))
+    def postprocess_chat_response(
+        self, choice: NeMoGymChoice, completion_id: Optional[str] = None
+    ) -> List[NeMoGymResponseOutputItem]:
+        return self.postprocess_assistant_message_dict(
+            choice.message.model_dump(exclude_none=True), completion_id=completion_id
+        )
 
-    def postprocess_assistant_message_dict(self, message_dict: Dict[str, Any]) -> List[NeMoGymResponseOutputItem]:
+    def postprocess_assistant_message_dict(
+        self, message_dict: Dict[str, Any], completion_id: Optional[str] = None
+    ) -> List[NeMoGymResponseOutputItem]:
         response_output = []
 
         content = message_dict.get("content") or ""
@@ -545,10 +551,13 @@ class ResponsesConverter(BaseModel):
         if token_information is not None:
             last_response_output_item = response_output[-1]
             train_cls = training_variant_of(last_response_output_item.__class__)
-            response_output[-1] = train_cls(
+            train_kwargs = {
                 **last_response_output_item.model_dump(),
                 **token_information.model_dump(exclude_none=True),
-            )
+            }
+            if completion_id:
+                train_kwargs.setdefault("completion_id", completion_id)
+            response_output[-1] = train_cls(**train_kwargs)
 
         return response_output
 
@@ -591,7 +600,7 @@ class ResponsesConverter(BaseModel):
     ) -> NeMoGymResponse:
         choice = chat_completion.choices[0]
 
-        response_output = self.postprocess_chat_response(choice)
+        response_output = self.postprocess_chat_response(choice, completion_id=chat_completion.id)
         response_output_dicts = [item.model_dump() for item in response_output]
 
         usage = None
@@ -628,7 +637,7 @@ class ResponsesConverter(BaseModel):
 
         # Chat Completion -> Response
         return NeMoGymResponse(
-            id=f"resp_{uuid4().hex}",
+            id=chat_completion.id or f"resp_{uuid4().hex}",
             created_at=chat_completion.created,
             model=responses_create_params.model,
             object="response",

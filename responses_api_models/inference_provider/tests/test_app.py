@@ -285,7 +285,7 @@ class TestResponses:
         assert response.status_code == 200
         data = response.json()
 
-        assert data["id"] == f"resp_{FIXED_UUID}"
+        assert data["id"] == "chatcmpl-test"
         assert data["model"] == "test-model"
         assert data["object"] == "response"
         assert data["status"] == "completed"

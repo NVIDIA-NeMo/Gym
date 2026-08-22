@@ -146,11 +146,12 @@ class NemoGymLLM(BaseLLM):
 
         # Detect silently-swallowed context-length errors from the Gym proxy.
         # When vLLM returns 400 "maximum context length", the proxy catches it
-        # and returns a fake 200 with id="chtcmpl-123" and content=None.
-        if response_dict.get("id") == "chtcmpl-123":
+        # and returns a fake 200 with content=None and an id prefixed "chtcmpl-123".
+        response_id = response_dict.get("id") or ""
+        if response_id.startswith("chtcmpl-123"):
             self.context_length_exceeded = True
             raise ContextLengthExceededError(
-                f"Model {self._model_name} context length exceeded (detected fake response id='chtcmpl-123')"
+                f"Model {self._model_name} context length exceeded (detected fake response id={response_id!r})"
             )
 
         choices = response_dict.get("choices", [])

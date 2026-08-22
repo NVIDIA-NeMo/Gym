@@ -255,11 +255,12 @@ async def test_context_length_error_from_http_400():
 
 
 @pytest.mark.asyncio
-async def test_fake_response_id_raises_context_length_error():
-    """Gym proxy returns fake 200 with id='chtcmpl-123' for context-length overflow."""
+@pytest.mark.parametrize("fake_id", ["chtcmpl-123", "chtcmpl-123-0a1b2c3d4e5f"])
+async def test_fake_response_id_raises_context_length_error(fake_id):
+    """Gym proxy returns fake 200 with a 'chtcmpl-123'-prefixed id for context-length overflow."""
     llm = _make_llm()
     with pytest.raises(ContextLengthExceededError, match="chtcmpl-123"):
-        await _call(llm, _mock_response(content=None, id="chtcmpl-123"), prompt="hello")
+        await _call(llm, _mock_response(content=None, id=fake_id), prompt="hello")
 
 
 @pytest.mark.asyncio
