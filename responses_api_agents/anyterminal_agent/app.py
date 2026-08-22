@@ -122,14 +122,14 @@ def _safe_config_json(params: "AnyTerminalInstanceConfig", indent: Optional[int]
 
     def redact(value: Any) -> Any:
         if isinstance(value, dict):
-            return {
-                key: (
-                    "***"
-                    if any(secret in key.lower() for secret in ("api_key", "secret", "password", "token"))
-                    else redact(item)
+            result = {}
+            for key, item in value.items():
+                normalized_key = key.lower().replace("_", "").replace("-", "")
+                is_secret = any(part in normalized_key for part in ("apikey", "password", "secret")) or (
+                    normalized_key.endswith("token")
                 )
-                for key, item in value.items()
-            }
+                result[key] = "***" if is_secret else redact(item)
+            return result
         if isinstance(value, list):
             return [redact(item) for item in value]
         return value
