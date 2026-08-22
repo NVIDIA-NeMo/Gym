@@ -463,6 +463,13 @@ include = [
     "nemo_gym",
     "nemo_gym.*",
 ]
+exclude = [
+    # Runtime SWE-agent outputs can contain hundreds of thousands of nested
+    # directories.  They are not Python packages and must not be traversed
+    # while building the editable nemo-gym install.
+    "responses_api_agents.swe_agents.results",
+    "responses_api_agents.swe_agents.results.*",
+]
 
 ################################################
 # Testing
