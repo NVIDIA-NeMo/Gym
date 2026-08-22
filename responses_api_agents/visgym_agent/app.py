@@ -130,9 +130,7 @@ def _content_summary(content: Any) -> Any:
     return {"kind": "list", "len": len(content), "parts": parts}
 
 
-def _as_core_input_message(
-    message: VisGymEnvStateEasyInputMessage | NeMoGymEasyInputMessage | Any,
-) -> Any:
+def _as_core_input_message(message: Any) -> Any:
     """Downcast a VisGym observation to the message type the core union declares.
 
     ``VisGymEnvStateEasyInputMessage`` subclasses ``NeMoGymEasyInputMessage`` to
@@ -149,7 +147,7 @@ def _as_core_input_message(
     in the rollout output, which are typed by VisGym's own union.
     """
     if isinstance(message, VisGymEnvStateEasyInputMessage):
-        return NeMoGymEasyInputMessage(role=message.role, content=message.content)
+        return NeMoGymEasyInputMessage(role=message.role, content=message.content, type=message.type)
     return message
 
 
