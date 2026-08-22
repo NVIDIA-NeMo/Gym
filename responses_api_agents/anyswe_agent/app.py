@@ -651,13 +651,18 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             meta, response.metadata = response.metadata, None
             metrics = SWEBenchMetrics.model_validate_json(meta["metrics"])
 
+            instance_config = AnySweInstanceConfig.model_validate_json(meta["instance_config"])
+
             return AnySweVerifyResponse(
                 responses_create_params=body.responses_create_params.model_dump()
                 | {"input": json.loads(meta["input"]), "tools": [t.model_dump() for t in (response.tools or [])]},
                 response=response,
                 reward=1.0 if metrics.resolved else 0.0,
+                # Report it on the contract as well; `instance_config.mask_sample` stays
+                # for one release so existing consumers keep working.
+                mask_sample=bool(instance_config.mask_sample),
                 **metrics.model_dump(),
-                instance_config=AnySweInstanceConfig.model_validate_json(meta["instance_config"]).model_dump(),
+                instance_config=instance_config.model_dump(),
             )
 
 

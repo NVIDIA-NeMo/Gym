@@ -96,6 +96,20 @@ class BaseVerifyRequest(BaseRunRequest):
 class BaseVerifyResponse(BaseVerifyRequest):
     reward: float
 
+    # True when ``reward`` does not reflect policy quality because the environment or its
+    # infrastructure failed: a lost session, an unavailable judge, an OOM-killed container,
+    # a reset that timed out. Gym states the fact and stops there — whether to mask the
+    # loss, resample the episode, exclude the sample from group statistics or drop the
+    # group is the training framework's decision, and frameworks legitimately differ.
+    #
+    # Environments that do not set it are unaffected: the default means "this reward is
+    # the policy's". Consumers should prefer this field over any agent-specific location.
+    mask_sample: bool = False
+
+    # Human-readable cause, for triage and logs. Not intended for programmatic branching;
+    # use ``mask_sample`` for that.
+    failure_reason: Optional[str] = None
+
 
 class BaseMultiRewardVerifyResponse(BaseVerifyResponse):
     """Base verify response for environments with multiple reward objectives.

@@ -3828,14 +3828,17 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             if "subagent_trajectories" in metadata:
                 subagent_trajectories = json.loads(metadata["subagent_trajectories"])
 
+            instance_config = SWEBenchWrapperInstanceConfig.model_validate_json(metadata["instance_config"])
+
             return SWEBenchVerifyResponse(
                 responses_create_params=responses_create_params,
                 response=response,
                 reward=1.0 if metrics.resolved else 0.0,
+                # Report it on the contract as well; `instance_config.mask_sample` stays
+                # for one release so existing consumers keep working.
+                mask_sample=instance_config.mask_sample,
                 **metrics.model_dump(),
-                instance_config=SWEBenchWrapperInstanceConfig.model_validate_json(
-                    metadata["instance_config"]
-                ).model_dump(),
+                instance_config=instance_config.model_dump(),
                 subagent_trajectories=subagent_trajectories,
             )
 
