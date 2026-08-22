@@ -10,7 +10,7 @@ source "${PORTABLE_PYTHON_SH:-$SCRIPT_DIR/_portable_python.sh}"
 : "${DEPS_DIR:?DEPS_DIR must be set}"
 : "${NEMO_GYM_ROOT:?NEMO_GYM_ROOT must be set}"
 NODE_VERSION="${NODE_VERSION:-22.19.0}"
-OPENCLAW_SPEC="${OPENCLAW_SPEC:-openclaw}"
+OPENCLAW_SPEC="${OPENCLAW_SPEC:-openclaw@2026.6.11}"
 
 install_portable_python
 install_nemo_gym_deps
