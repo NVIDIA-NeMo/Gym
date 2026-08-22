@@ -41,10 +41,8 @@ from responses_api_agents.anyterminal_agent.app import (
     RunTerminalAgent,
     _build_provider,
     _format_container,
-    _full_config_dict,
     _instruction_from_input,
     _read_task_meta,
-    _redact_secrets,
     _safe_config_json,
     update_metrics,
 )
@@ -298,11 +296,30 @@ class TestSafeConfigJson:
         assert result["agent_kwargs"]["api_key"] == "***"
         assert result["agent_kwargs"]["model"] == "gpt-4"
 
-    def test_secret_token_password_redacted(self, tmp_path: Path) -> None:
-        cfg = _make_instance_config(tmp_path, agent_kwargs={"my_secret": "x", "auth_token": "y", "password": "z"})
+    def test_secret_key_variants_redacted(self, tmp_path: Path) -> None:
+        cfg = _make_instance_config(
+            tmp_path,
+            agent_kwargs={
+                "my_secret": "x",
+                "auth_token": "y",
+                "hf_token": "hf",
+                "password": "z",
+                "anthropic_api_key": "a",
+                "apiKey": "b",
+            },
+        )
         result = json.loads(_safe_config_json(cfg))
-        for key in ("my_secret", "auth_token", "password"):
+        for key in ("my_secret", "auth_token", "hf_token", "password", "anthropic_api_key", "apiKey"):
             assert result["agent_kwargs"][key] == "***"
+
+    def test_max_output_tokens_preserved_for_round_trip(self, tmp_path: Path) -> None:
+        body = NeMoGymResponseCreateParamsNonStreaming(
+            input=[{"role": "user", "content": "solve this"}], model="test-model", max_output_tokens=12288
+        )
+        cfg = _make_instance_config(tmp_path, body=body)
+
+        roundtripped = AnyTerminalInstanceConfig.model_validate_json(_safe_config_json(cfg))
+        assert roundtripped.body.max_output_tokens == 12288
 
     def test_nested_provider_api_key_redacted(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(
@@ -319,50 +336,6 @@ class TestSafeConfigJson:
     def test_indent_produces_multiline(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(tmp_path)
         assert "\n" in _safe_config_json(cfg, indent=2)
-
-
-# ── _full_config_dict / round-trip (regression: max_output_tokens redaction crash) ────────────────
-
-
-class TestFullConfigDictRoundTrip:
-    """meta["instance_config"] is built from _full_config_dict and later re-parsed via
-    AnyTerminalInstanceConfig.model_validate_json() in run(). It must never go through _redact_secrets
-    first — max_output_tokens (and anything else that happens to contain "token") would get clobbered
-    to the literal string "***", which fails to parse back as int | None."""
-
-    def test_max_output_tokens_none_survives_round_trip(self, tmp_path: Path) -> None:
-        cfg = _make_instance_config(tmp_path, body=_make_body())
-        assert cfg.body.max_output_tokens is None
-
-        roundtripped = AnyTerminalInstanceConfig.model_validate_json(json.dumps(_full_config_dict(cfg)))
-        assert roundtripped.body.max_output_tokens is None
-
-    def test_max_output_tokens_int_survives_round_trip(self, tmp_path: Path) -> None:
-        body = NeMoGymResponseCreateParamsNonStreaming(
-            input=[{"role": "user", "content": "solve this"}], model="test-model", max_output_tokens=12288
-        )
-        cfg = _make_instance_config(tmp_path, body=body)
-
-        roundtripped = AnyTerminalInstanceConfig.model_validate_json(json.dumps(_full_config_dict(cfg)))
-        assert roundtripped.body.max_output_tokens == 12288
-
-    def test_redacting_before_round_trip_would_break_it(self, tmp_path: Path) -> None:
-        """Documents *why* the round-trip payload must stay unredacted: this is the exact bug that
-        crashed run() in production before the fix (see git history for the incident)."""
-        cfg = _make_instance_config(tmp_path, body=_make_body())
-        redacted = json.dumps(_redact_secrets(_full_config_dict(cfg)))
-        with pytest.raises(Exception):  # pydantic ValidationError
-            AnyTerminalInstanceConfig.model_validate_json(redacted)
-
-    def test_full_config_dict_is_unredacted(self, tmp_path: Path) -> None:
-        """_full_config_dict is for internal round-tripping only — callers must redact before this
-        data is written to disk or returned over HTTP (see _safe_config_json)."""
-        cfg = _make_instance_config(tmp_path, agent_kwargs={"api_key": "sk-secret"})
-        assert _full_config_dict(cfg)["agent_kwargs"]["api_key"] == "sk-secret"
-
-    def test_agent_command_str_excluded(self, tmp_path: Path) -> None:
-        cfg = _make_instance_config(tmp_path, agent_command_str="/agent_deps_mount/bin/python ...")
-        assert "agent_command_str" not in _full_config_dict(cfg)
 
 
 # ── AnyTerminalInstanceConfig properties ──────────────────────────────────────────
