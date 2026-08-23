@@ -31,11 +31,18 @@ def test_extract_instruction() -> None:
             NeMoGymEasyInputMessage(role="system", content="Be precise"),
             NeMoGymEasyInputMessage(role="developer", content="Use tools"),
             NeMoGymEasyInputMessage(role="user", content="Old task"),
+            {"role": "assistant", "content": "Previous answer"},
             NeMoGymEasyInputMessage(role="user", content="Solve this"),
         ]
     )
-    assert instruction == "Solve this"
+    assert instruction == "User: Old task\n\nAssistant: Previous answer\n\nUser: Solve this"
     assert system == "Be precise\n\nUse tools"
+
+
+def test_extract_single_turn_instruction_unchanged() -> None:
+    instruction, system = _extract_instruction([NeMoGymEasyInputMessage(role="user", content="Solve this")])
+    assert instruction == "Solve this"
+    assert system is None
 
 
 def test_trajectory_preserves_reasoning_and_tools() -> None:

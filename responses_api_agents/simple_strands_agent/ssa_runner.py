@@ -102,7 +102,6 @@ def _build_config(payload: dict[str, Any], output_dir: Path):
                 "base_url": payload["model_base_url"],
                 "api_key": "gym",  # pragma: allowlist secret
                 "timeout": payload["model_timeout"],
-                "max_retries": 0,
             },
         }
     )

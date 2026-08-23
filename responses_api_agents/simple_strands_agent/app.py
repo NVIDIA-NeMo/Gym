@@ -58,7 +58,7 @@ def _content_text(content: Any) -> str:
 
 
 def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
-    user_message = ""
+    conversation = []
     system_messages = []
     for item in body_input:
         role = getattr(item, "role", None) or (item.get("role") if isinstance(item, dict) else None)
@@ -66,9 +66,12 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
         text = _content_text(content)
         if role in {"system", "developer"}:
             system_messages.append(text)
-        elif role == "user" and text:
-            user_message = text
-    return user_message, "\n\n".join(system_messages) or None
+        elif role in {"user", "assistant"} and text:
+            conversation.append((role, text))
+    instruction = conversation[0][1] if len(conversation) == 1 else "\n\n".join(
+        f"{role.title()}: {text}" for role, text in conversation
+    )
+    return instruction, "\n\n".join(system_messages) or None
 
 
 def _tool_output(block: dict[str, Any]) -> str:
