@@ -2,18 +2,24 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 import signal
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponseFunctionToolCall,
 )
+from nemo_gym.server_utils import ServerClient
 from responses_api_agents.simple_strands_agent.app import (
     SimpleStrandsAgent,
+    SimpleStrandsAgentConfig,
+    SimpleStrandsAgentRunRequest,
     _extract_instruction,
     trajectory_to_output_items,
 )
@@ -73,6 +79,49 @@ def test_trajectory_preserves_reasoning_and_tools() -> None:
     assert isinstance(output[1], NeMoGymResponseFunctionToolCall)
     assert output[2].output == "42"
     assert output[3].content[0].text == "\\boxed{42}"
+
+
+@pytest.mark.asyncio
+async def test_run_skips_verification() -> None:
+    config = SimpleStrandsAgentConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="simple_strands_agent",
+        model_server=ModelServerRef(type="responses_api_models", name="policy"),
+        resources_server=ResourcesServerRef(type="resources_servers", name="reasoning_gym"),
+        skip_verification=True,
+        skip_verification_reward=0.25,
+    )
+    client = MagicMock(spec=ServerClient)
+    seed_response = AsyncMock(cookies={"session": "seeded"})
+    agent_response = AsyncMock(cookies={"session": "agent"})
+    agent_response.read.return_value = json.dumps(
+        {
+            "id": "response_id",
+            "created_at": 1,
+            "model": "model",
+            "object": "response",
+            "output": [],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+    ).encode()
+    client.post = AsyncMock(side_effect=[seed_response, agent_response])
+    agent = SimpleStrandsAgent(config=config, server_client=client)
+
+    result = await agent.run(
+        SimpleNamespace(cookies={}),
+        SimpleStrandsAgentRunRequest(responses_create_params={"input": []}),
+    )
+
+    assert result.reward == 0.25
+    assert result.model_extra["verification_skipped"] is True
+    assert [call.kwargs["url_path"] for call in client.post.call_args_list] == [
+        "/seed_session",
+        "/v1/responses",
+    ]
 
 
 @pytest.mark.asyncio

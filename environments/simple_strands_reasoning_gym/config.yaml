@@ -3,7 +3,7 @@ reasoning_gym:
     reasoning_gym:
       entrypoint: app.py
       domain: agent
-      verified: true
+      verified: false
       description: Simple Strands Agent harness with reasoning gym tasks
       value: Improve reasoning capabilities with Simple Strands Agent
 

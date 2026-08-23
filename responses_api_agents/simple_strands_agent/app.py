@@ -326,19 +326,26 @@ class SimpleStrandsAgent(SimpleResponsesAPIAgent):
             await raise_for_status(agent_response)
             cookies = agent_response.cookies
             response_json = await get_response_json(agent_response)
-            verify_response = await self.server_client.post(
-                server_name=self.config.resources_server.name,
-                url_path="/verify",
-                json=body.model_dump() | {"response": response_json},
-                cookies=cookies,
-            )
-            await raise_for_status(verify_response)
-            verify_json = await get_response_json(verify_response)
+            if self.config.skip_verification:
+                result = body.model_dump() | {
+                    "response": response_json,
+                    "reward": float(self.config.skip_verification_reward),
+                    "verification_skipped": True,
+                }
+            else:
+                verify_response = await self.server_client.post(
+                    server_name=self.config.resources_server.name,
+                    url_path="/verify",
+                    json=body.model_dump() | {"response": response_json},
+                    cookies=cookies,
+                )
+                await raise_for_status(verify_response)
+                result = await get_response_json(verify_response)
             response = NeMoGymResponse.model_validate(response_json)
             turns = sum(1 for item in response.output if getattr(item, "type", None) == "message")
             last = response.output[-1] if response.output else None
             return SimpleStrandsAgentVerifyResponse.model_validate(
-                verify_json
+                result
                 | {
                     "turns_used": turns,
                     "finished_naturally": getattr(last, "type", None) == "message",
