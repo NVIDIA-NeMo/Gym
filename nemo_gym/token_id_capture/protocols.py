@@ -51,6 +51,8 @@ class LineageMatch:
     model_call_id: str
     cumulative_token_ids: tuple[int, ...]
     digest: str
+    staging_chain: tuple[str, ...] = ()
+    prev_len: int = 0
 
 
 @runtime_checkable
@@ -79,6 +81,8 @@ class LineageStore(Protocol):
         response_items: list[dict],
         cumulative_token_ids: list[int],
         digest: str,
+        *,
+        staging_chain: list[str] | None = None,
     ) -> None:
         """Publish a completed call for later request-time resolution.
 
@@ -102,7 +106,8 @@ class CaptureLedger(LineageStore, Protocol):
     the token-free ``CallRecord`` custody columns (passed to ``record`` as
     keyword arguments: ``parent_call_id``, ``staging_key``, ``weight_version``,
     ``prev_len``/``delta_len``/``cum_len``, ``staging_digest``,
-    ``extras_digest``, ``mode``, ``logical_request_id``, ``admitted_at``),
+    ``extras_digest``, ``mode``, ``logical_request_id``, ``admitted_at``,
+    ``staging_chain``),
     poison rows are
     appended with ``record_failure``, and the framework reads the rollout back
     token-free through ``manifest``.

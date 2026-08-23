@@ -99,6 +99,7 @@ class CaptureContext:
     # byte-identical.
     admitted_at: float | None = None
     capture_admission: CaptureAdmission | None = None
+    parent_staging_chain: list[str] = field(default_factory=list)
     # The request items as received from the harness, stashed by
     # ``resolve_parent`` so the commit hook can publish the ledger row with
     # the exact representation the next request will echo.
@@ -178,6 +179,7 @@ async def resolve_parent(request_messages: list | None) -> None:
     if parent is not None:
         context.parent_call_id = parent.model_call_id
         context.parent_tokens = list(parent.cumulative_token_ids)
+        context.parent_staging_chain = list(parent.staging_chain)
     if not context.external_staging or context.capture_admission is not None:
         return
 
@@ -190,9 +192,10 @@ async def resolve_parent(request_messages: list | None) -> None:
             rollout_id=context.rollout_id,
             model_call_id=context.model_call_id,
             parent_call_id=parent.model_call_id,
-            prev_len=len(context.parent_tokens),
+            prev_len=parent.prev_len,
             mode="token_in",
-            required_prefix_token_ids=list(context.parent_tokens),
+            required_prefix_token_ids=[],
+            staging_chain=list(parent.staging_chain),
         )
         return
     fingerprint = assistant_fingerprint(list(request_messages))

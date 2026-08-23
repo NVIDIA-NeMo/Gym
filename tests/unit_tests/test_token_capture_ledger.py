@@ -28,6 +28,8 @@ from nemo_gym.token_id_capture.staging.records import RolloutManifest
 USER_1 = {"role": "user", "content": "solve the task"}
 ASSISTANT_1 = {"role": "assistant", "content": "first answer"}
 USER_2 = {"role": "user", "content": "tool result"}
+ASSISTANT_2 = {"role": "assistant", "content": "second answer"}
+USER_3 = {"role": "user", "content": "follow up"}
 ASSISTANT_SEEDED = {"role": "assistant", "content": "seeded turn nobody served"}
 
 TOKENS_1 = list(range(900))
@@ -59,6 +61,7 @@ async def _record_call_1(store, rollout_id: str = "r1") -> None:
         [ASSISTANT_1],
         TOKENS_1,
         compute_digest(TOKENS_1),
+        staging_chain=[f"{rollout_id}/c1"],
         **_custody("c1"),
     )
 
@@ -149,14 +152,54 @@ async def _admit(store, request_items, rollout_id="r1", model_call_id="c2"):
 
 
 @pytest.mark.asyncio
-async def test_admission_match_is_token_in_with_exact_prefix(store):
+async def test_admission_match_uses_staging_chain_without_wire_prefix(store):
     await _record_call_1(store)
     context = await _admit(store, [USER_1, ASSISTANT_1, USER_2])
     admission = context.capture_admission
     assert admission is not None and admission.mode == "token_in"
     assert admission.parent_call_id == "c1"
-    assert admission.required_prefix_token_ids == TOKENS_1
+    assert admission.required_prefix_token_ids == []
+    assert admission.staging_chain == ["r1/c1"]
+    assert admission.prev_len == len(TOKENS_1)
+    assert context.parent_staging_chain == ["r1/c1"]
     assert context.request_items == [USER_1, ASSISTANT_1, USER_2]
+
+
+@pytest.mark.asyncio
+async def test_staging_chain_grows_across_external_calls(store):
+    await _record_call_1(store)
+    tokens_2 = TOKENS_1 + [901, 902]
+    await store.record(
+        "r1",
+        "c2",
+        [USER_1, ASSISTANT_1, USER_2],
+        [ASSISTANT_2],
+        tokens_2,
+        compute_digest(tokens_2),
+        parent_call_id="c1",
+        staging_key="r1/c2",
+        weight_version=17,
+        prev_len=len(TOKENS_1),
+        delta_len=2,
+        cum_len=len(tokens_2),
+        staging_digest=STAGING_DIGEST,
+        extras_digest=EMPTY_EXTRAS_DIGEST,
+        mode="token_in",
+        staging_chain=["r1/c1", "r1/c2"],
+    )
+
+    context = await _admit(
+        store,
+        [USER_1, ASSISTANT_1, USER_2, ASSISTANT_2, USER_3],
+        model_call_id="c3",
+    )
+
+    admission = context.capture_admission
+    assert admission is not None
+    assert admission.parent_call_id == "c2"
+    assert admission.prev_len == len(tokens_2)
+    assert admission.staging_chain == ["r1/c1", "r1/c2"]
+    assert admission.required_prefix_token_ids == []
 
 
 @pytest.mark.asyncio
