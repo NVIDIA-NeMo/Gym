@@ -363,6 +363,33 @@ def _ensure_visgym_importable(env_id: str | None = None) -> Any:
     return gym
 
 
+_PATH_LIKE_ENV_KWARGS = ("sample_dir", "asset_dir", "data_dir", "dataset_dir", "sample_path", "asset_root")
+
+
+def _resolve_asset_kwargs(env_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Resolve relative asset paths in env_kwargs against Gym's search roots.
+
+    Asset-backed VisGym tasks (jigsaw, colorization, mental_rotation_2d,
+    zoom_in_puzzle, ...) point at rendered image directories. Manifests carry
+    those as repo-relative paths so the same row works from a checkout, a code
+    snapshot or a container mount; only an absolute path is taken literally.
+    Without this the rows have to hard-code one deployment's layout, and the
+    environment fails at reset everywhere else.
+    """
+    from nemo_gym import _resolve_under_cwd_or_install
+
+    resolved = dict(env_kwargs)
+    for key in _PATH_LIKE_ENV_KWARGS:
+        value = resolved.get(key)
+        if not isinstance(value, str) or not value:
+            continue
+        candidate = Path(value)
+        if candidate.is_absolute():
+            continue
+        resolved[key] = str(_resolve_under_cwd_or_install(candidate))
+    return resolved
+
+
 class VisGymResourcesServer(SimpleResourcesServer):
     """Env-id-parametric server wrapping VisGym/Gymnasium envs."""
 
@@ -401,7 +428,7 @@ class VisGymResourcesServer(SimpleResourcesServer):
 
     async def seed_session(self, request: Request, body: VisGymSeedSessionRequest) -> VisGymSeedSessionResponse:
         row = self._resolve_task_row(body)
-        env_kwargs = dict(row.env_kwargs)
+        env_kwargs = _resolve_asset_kwargs(row.env_kwargs)
         if row.seed_key:
             env_kwargs[row.seed_key] = row.seed
 
@@ -695,6 +722,24 @@ class VisGymResourcesServer(SimpleResourcesServer):
         reward_state = self.env_id_to_reward_state.setdefault(env_id, {})
         previous_distance = reward_state.get("previous_distance")
         if current_distance is None:
+            # A shaping block naming a key the environment never reports is
+            # indistinguishable from no shaping at all: every step silently
+            # falls through to the terminal-only reward, and the run just
+            # learns slowly for no visible reason. Say it once per session.
+            if not reward_state.get("warned_missing_info_key"):
+                reward_state["warned_missing_info_key"] = True
+                logger.warning(
+                    "VisGym reward_shaping is configured with info_key=%r, but the "
+                    "environment did not report it on this step; the shaped term is "
+                    "inactive and only the terminal reward will be paid. Available "
+                    "numeric info keys: %s",
+                    info_key,
+                    sorted(
+                        k for k, v in (info or {}).items() if isinstance(v, (int, float)) and not isinstance(v, bool)
+                    )
+                    if isinstance(info, dict)
+                    else "<non-mapping info>",
+                )
             return raw_reward
         reward_state["previous_distance"] = current_distance
         if previous_distance is None:

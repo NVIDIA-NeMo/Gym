@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -376,3 +377,69 @@ async def test_close_closes_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
 
     assert response.success is True
     assert env.closed is True
+
+
+@pytest.mark.asyncio
+async def test_relative_asset_paths_resolve_against_search_roots(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A repo-relative sample_dir must reach the environment as an absolute path.
+
+    Manifests carry asset directories relative to the Gym root so that one row
+    works from a checkout, a code snapshot and a container mount alike. Baking
+    an absolute path into the data instead is how those rows end up running on
+    exactly one machine.
+    """
+    env = StubVisGymEnv()
+    stub_gym = StubGym(env)
+    monkeypatch.setattr(visgym_app, "gym", stub_gym)
+    monkeypatch.setattr(visgym_app, "_ensure_visgym_importable", lambda: stub_gym)
+    relative = "resources_servers/visgym/data/requested_env_assets/images"
+    server = _server(tmp_path, [_row(env_kwargs={"sample_dir": relative})])
+
+    await server.seed_session(_request(), VisGymSeedSessionRequest(task_idx=0))
+
+    _, kwargs = stub_gym.make_calls[0]
+    assert Path(kwargs["sample_dir"]).is_absolute()
+    assert kwargs["sample_dir"].endswith(relative)
+
+
+@pytest.mark.asyncio
+async def test_shaping_with_unknown_info_key_warns_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Shaping that names a key the environment never reports must say so.
+
+    It is otherwise indistinguishable from no shaping at all: every step pays
+    the raw reward, the run merely learns slowly, and nothing in the logs
+    points at the inert shaped term.
+    """
+    env = StubVisGymEnv()
+    stub_gym = StubGym(env)
+    monkeypatch.setattr(visgym_app, "gym", stub_gym)
+    monkeypatch.setattr(visgym_app, "_ensure_visgym_importable", lambda: stub_gym)
+    server = _server(
+        tmp_path,
+        [
+            _row(
+                task_metadata={
+                    "reward_shaping": {
+                        "type": "distance_delta",
+                        "info_key": "not_a_real_key",
+                        "scale": 0.5,
+                    }
+                }
+            )
+        ],
+    )
+    seeded = await server.seed_session(_request(), VisGymSeedSessionRequest(task_idx=0))
+
+    with caplog.at_level(logging.WARNING):
+        first = await server.step(_request(), VisGymStepRequest(env_id=seeded.env_id, action_string="a"))
+        second = await server.step(_request(), VisGymStepRequest(env_id=seeded.env_id, action_string="b"))
+
+    warned = [r for r in caplog.records if "reward_shaping is configured" in r.getMessage()]
+    assert len(warned) == 1, "expected exactly one warning across repeated steps"
+    assert "not_a_real_key" in warned[0].getMessage()
+    # The raw environment reward still flows through untouched.
+    assert (first.reward, second.reward) == (0.0, 1.0)

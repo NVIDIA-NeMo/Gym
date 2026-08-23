@@ -17,9 +17,11 @@ from PIL import Image, ImageDraw, ImageFont
 VISGYM_ROOT = Path(__file__).resolve().parents[1]
 DATA_ROOT = VISGYM_ROOT / "data"
 ASSET_ROOT = DATA_ROOT / "requested_env_assets"
-CONTAINER_ASSET_ROOT = Path(
-    "/opt/nemo-rl/3rdparty/Gym-workspace/Gym/resources_servers/visgym/data/requested_env_assets"
-)
+# Asset paths go into the manifests repo-relative, not as an absolute path
+# into one deployment's container. The resource server resolves them at reset
+# against NeMo-Gym's component search roots, so the same row works from a
+# checkout, a code snapshot or a container mount.
+CONTAINER_ASSET_ROOT = Path("resources_servers/visgym/data/requested_env_assets")
 
 
 @dataclass(frozen=True)
@@ -203,6 +205,14 @@ ENV_SPECS = {
             "image_size": 128,
             "tolerance": 10.0,
         },
+        # The environment reports rotation_error on every step, so the same
+        # progress signal the 3D variant uses is available here too -- but in
+        # DEGREES (0-180, tolerance 10), where the 3D variant's error is
+        # already normalized. Reusing the 3D coefficient of 0.25 pays tens of
+        # reward per step and drowns the terminal 1.0. Scale so that fully
+        # correcting a worst-case 180-degree error is worth ~0.4, the same
+        # fraction of the terminal reward the maze shaping uses.
+        reward_shaping={"type": "distance_delta", "info_key": "rotation_error", "scale": 0.002},
     ),
     "zoom_in_puzzle": EnvironmentSpec(
         env_id="zoom_in_puzzle/easy",
@@ -546,6 +556,7 @@ def create_manifests(
     max_output_tokens: int,
     selected_slug: str | None = None,
     horizon_cap: int | None = None,
+    combine_slugs: tuple[str, ...] | None = None,
 ) -> None:
     manifest_dir = DATA_ROOT / "requested_env_manifests"
     horizon_suffix = f"_h{horizon_cap}" if horizon_cap is not None else ""
@@ -591,8 +602,14 @@ def create_manifests(
             "horizon_cap": horizon_cap if horizon_cap is not None else spec.horizon_cap,
         }
 
-    combined_train = [rows_by_slug[slug][sample_index] for sample_index in range(samples) for slug in ENV_SPECS]
-    combined_smoke = [row for slug in ENV_SPECS for row in smoke_rows_by_slug[slug]]
+    # Which environments make it into the blended manifest. Defaults to all of
+    # them, but several need assets or forked wheels that a given checkout may
+    # not have (counting needs lvis, fetch_* need gymnasium_robotics), and a
+    # blend containing an environment that cannot start fails the rollout batch
+    # rather than that one row. Callers pass the subset they have verified.
+    combine = tuple(combine_slugs) if combine_slugs else tuple(ENV_SPECS)
+    combined_train = [rows_by_slug[slug][sample_index] for sample_index in range(samples) for slug in combine]
+    combined_smoke = [row for slug in combine for row in smoke_rows_by_slug[slug]]
     combined_train_path = manifest_dir / (
         f"requested_envs_combined_train_{len(combined_train)}{horizon_suffix}_t{max_output_tokens}.jsonl"
     )
@@ -615,6 +632,7 @@ def create_manifests(
         index[f"combined_train_h{horizon_cap}_manifest"] = str(combined_train_path.relative_to(VISGYM_ROOT))
     index["combined_train_rows"] = len(combined_train)
     index["combined_train_order"] = "round_robin_by_environment"
+    index["combined_environments"] = list(combine)
     index_path = manifest_dir / f"requested_env_manifest_index{horizon_suffix}.json"
     with index_path.open("w", encoding="utf-8") as handle:
         json.dump(index, handle, indent=2, sort_keys=True)
@@ -630,6 +648,14 @@ def main() -> None:
     parser.add_argument("--env", choices=tuple(ENV_SPECS), help="Regenerate only one environment's manifests")
     parser.add_argument("--horizon-cap", type=int, help="Use one horizon for every generated environment")
     parser.add_argument("--skip-assets", action="store_true", help="Do not regenerate deterministic image assets")
+    parser.add_argument(
+        "--combine-envs",
+        help=(
+            "Comma-separated environments to include in the blended manifests "
+            "(default: all). Use this to blend only the environments whose "
+            "dependencies and assets are present in this checkout."
+        ),
+    )
     args = parser.parse_args()
     if args.samples != 20 * 64:
         raise SystemExit("--samples must equal 20 steps * 64 prompts = 1280")
@@ -648,6 +674,12 @@ def main() -> None:
         create_colorization_images()
     elif not args.skip_assets and args.env == "refcoco_plus":
         create_refcoco_plus_dataset()
+    combine_slugs = None
+    if args.combine_envs:
+        combine_slugs = tuple(s.strip() for s in args.combine_envs.split(",") if s.strip())
+        unknown = [s for s in combine_slugs if s not in ENV_SPECS]
+        if unknown:
+            raise SystemExit(f"--combine-envs has unknown environments: {', '.join(unknown)}")
     create_manifests(
         args.samples,
         args.smoke_samples,
@@ -655,6 +687,7 @@ def main() -> None:
         args.max_output_tokens,
         args.env,
         args.horizon_cap,
+        combine_slugs,
     )
 
 
