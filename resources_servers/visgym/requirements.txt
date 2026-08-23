@@ -4,7 +4,12 @@
 # this venv -- refuses to parse its pyproject (duplicate normalized extras).
 # Build it once with: scripts/build_visgym_wheel.sh
 gymnasium @ ./vendor_wheels/gymnasium-1.1.1-py3-none-any.whl
-opencv-python-headless==4.11.0.86
+opencv-python-headless>=4.11
+# referring_dot_pointing (refcoco_plus) and counting read their datasets
+# through these; without them those environments fail at reset rather than at
+# import, which surfaces as a failed rollout batch mid-run.
+scikit-image>=0.22
+pycocotools>=2,<3
 trimesh>=4,<5
 ursina>=6,<8
 mujoco>=3,<4
