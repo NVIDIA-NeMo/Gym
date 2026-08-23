@@ -1,6 +1,5 @@
 #!/bin/bash
 
-# @bxyu-nvidia: `--skip-mm-profiling` Is needed to get Super VL checkpoint working, even with text benchmarks
 VLLM_COMMON_ARGS=(
     --trust-remote-code
     --disable-uvicorn-access-log
@@ -12,16 +11,14 @@ VLLM_COMMON_ARGS=(
     --reasoning-parser nemotron_v3
     --enable-chunked-prefill
     --enable-prefix-caching
-    --max-model-len 262144
     --kv-cache-dtype fp8
     --no-disable-hybrid-kv-cache-manager
-    --async-scheduling
+    --no-async-scheduling
     --block-size 128
     --mamba-cache-mode align
     --mamba-ssm-cache-dtype float32
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
     --enable-expert-parallel
-    --skip-mm-profiling
     --data-parallel-size 1
     --api-server-count 1
 )
