@@ -5,3 +5,5 @@ policy_model:
         max_output_tokens: null
         max_tokens: null
         max_completion_tokens: null
+        temperature: 1.0
+        top_p: 0.95
