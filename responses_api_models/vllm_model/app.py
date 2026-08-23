@@ -714,6 +714,10 @@ class VLLMModel(SimpleResponsesAPIModel):
             return body_dict
         if not parent_tokens:
             return body_dict
+        if context.external_staging:
+            # External path: worker fetches prefix from TQ via staging_chain in ng_capture.
+            # Do not put the large token array in the request body.
+            return body_dict
         body_dict["required_prefix_token_ids"] = parent_tokens
         # This records intent only.
         # ``prefix_supplied`` remains false until generation-time prompt_token_ids prove application.
@@ -1025,6 +1029,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             cumulative = list(context.parent_tokens) + [int(token) for token in coords.token_ids_delta]
             if len(cumulative) != coords.cum_len:
                 raise ValueError(f"coordinates for {coords.model_call_id} diverge from cumulative length")
+            child_staging_chain = list(context.parent_staging_chain) + [str(coords.staging_key)]
             response_items, _ = strip_token_fields(response_to_output_items(payload))
             await context.lineage_store.record(
                 context.rollout_id,
@@ -1044,6 +1049,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 mode=admission.mode,
                 logical_request_id=context.logical_request_id or (str(payload["id"]) if payload.get("id") else None),
                 admitted_at=context.admitted_at,
+                staging_chain=child_staging_chain,
             )
             mark_external_staging_committed(
                 rollout_id=coords.rollout_id,
