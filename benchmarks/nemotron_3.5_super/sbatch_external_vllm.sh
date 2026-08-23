@@ -31,7 +31,7 @@ DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT=5700
 ROUTER_SERVER_PORT=8000
 WORKER_SERVER_PORT=8001
 
-EVAL_COMMAND=$(cat <<EOF
+eval_command=$(cat <<EOF
 set -euo pipefail
 
 # Activate environment in container and cd into Gym. The Gym path here may be mounted.
@@ -85,7 +85,7 @@ fi
 EOF
 )
 
-command=$(cat <<EOF
+pd_command=$(cat <<EOF
 #!/bin/bash
 
 set -euo pipefail
@@ -181,7 +181,7 @@ srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 \
         set -euo pipefail
         cd "\$SLURM_SUBMIT_DIR"
         exec "\$@"
-    ' bash bash -lc "\$VLLM_PD_WORKLOAD" &
+    ' bash bash -lc "\$vllm_command" &
 server_step=\$!
 
 cleanup_server() {
@@ -212,7 +212,7 @@ if (( $should_run_eval )); then
         bash -lc '
             set -euo pipefail
             cd "\$SLURM_SUBMIT_DIR"
-            exec bash -lc "\$EVAL_COMMAND"
+            exec bash -lc "\$eval_command"
         ' &
     eval_step=\$!
 
@@ -241,9 +241,9 @@ EOF
 )
 
 # --segment > 0 otherwise the engine will hang on the second or third engine step.
-VLLM_PD_WORKLOAD="$command" \
-EVAL_COMMAND="$EVAL_COMMAND" \
-VLLM_PD_BATCH_COMMAND="$batch_command" \
+vllm_command="$pd_command" \
+eval_command="$eval_command" \
+batch_command="$batch_command" \
 sbatch \
     --nodes=$NUM_NODES \
     --time=04:00:00 \
@@ -253,4 +253,4 @@ sbatch \
     --comment="$SLURM_COMMENT" \
     --exclusive \
     --segment=$NUM_NODES \
-    --wrap 'exec bash -lc "$VLLM_PD_BATCH_COMMAND"'
+    --wrap 'exec bash -lc "$batch_command"'
