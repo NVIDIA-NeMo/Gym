@@ -68,8 +68,10 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
             system_messages.append(text)
         elif role in {"user", "assistant"} and text:
             conversation.append((role, text))
-    instruction = conversation[0][1] if len(conversation) == 1 else "\n\n".join(
-        f"{role.title()}: {text}" for role, text in conversation
+    instruction = (
+        conversation[0][1]
+        if len(conversation) == 1
+        else "\n\n".join(f"{role.title()}: {text}" for role, text in conversation)
     )
     return instruction, "\n\n".join(system_messages) or None
 
