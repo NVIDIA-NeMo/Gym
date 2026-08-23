@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -443,3 +444,58 @@ async def test_shaping_with_unknown_info_key_warns_once(
     assert "not_a_real_key" in warned[0].getMessage()
     # The raw environment reward still flows through untouched.
     assert (first.reward, second.reward) == (0.0, 1.0)
+
+
+def test_mental_rotation_3d_render_and_close_are_serialized(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Concurrent render and close must not interleave.
+
+    The environment drives matplotlib's global pyplot registry: it renders with
+    plt.figure and its close() calls plt.close("all"). Letting a teardown run
+    inside another session's render drops that session's axes and raises
+    `KeyError: <Axes3D: >` -- intermittently, and only under concurrency, which
+    is why it survived every single-threaded probe and only appeared twice in a
+    16-node run.
+    """
+    import threading as _threading
+    import types
+
+    overlaps = []
+    active = {"render": False}
+    barrier_lock = _threading.Lock()
+
+    class FakeEnv:
+        image_size = (8, 8)
+
+        def _render(self, rotation):
+            with barrier_lock:
+                if active["render"]:
+                    overlaps.append("render-in-render")
+                active["render"] = True
+            time.sleep(0.01)
+            with barrier_lock:
+                active["render"] = False
+            return np.zeros((8, 8, 3), dtype=np.uint8)
+
+        def close(self):
+            with barrier_lock:
+                if active["render"]:
+                    overlaps.append("close-during-render")
+
+    module = types.ModuleType("gymnasium.envs.mental_rotation_3d_cube.mental_rotation_3d_cube")
+    module.MentalRotation3DCubeEnv = FakeEnv
+    monkeypatch.setattr(visgym_app.importlib, "import_module", lambda name: module)
+
+    visgym_app._install_mental_rotation_3d_renderer_compatibility()
+
+    env = FakeEnv()
+    threads = [
+        _threading.Thread(target=lambda: FakeEnv._render(env, None)),
+        _threading.Thread(target=lambda: FakeEnv.close(env)),
+        _threading.Thread(target=lambda: FakeEnv._render(env, None)),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert overlaps == [], f"figure operations interleaved: {overlaps}"

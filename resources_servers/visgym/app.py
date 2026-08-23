@@ -9,6 +9,7 @@ import logging
 import math
 import os
 import sys
+import threading
 import types
 import uuid
 from collections import defaultdict
@@ -85,8 +86,19 @@ def _install_skimage_io_compatibility() -> None:
     sys.modules.setdefault("skimage.io", io_module)
 
 
+# Serializes every mental_rotation_3d_cube figure operation in this process.
+# The environment renders through the pyplot state machine (plt.figure, then
+# plt.close) and its close() calls plt.close("all") / plt.clf() / plt.cla(),
+# all of which mutate matplotlib's *global* figure registry. This server runs
+# sessions concurrently in a threadpool, so one session tearing down its
+# environment while another is mid-render drops the second one's axes out of
+# the registry and raises `KeyError: <Axes3D: >`. It is intermittent and
+# invisible to a single-threaded probe: a blended 16-node run hit it twice.
+_MENTAL_ROTATION_3D_FIGURE_LOCK = threading.RLock()
+
+
 def _install_mental_rotation_3d_renderer_compatibility() -> None:
-    """Keep rendered frames consistent with the environment observation space."""
+    """Keep rendered frames consistent with the observation space, and thread-safe."""
     module = importlib.import_module("gymnasium.envs.mental_rotation_3d_cube.mental_rotation_3d_cube")
     if getattr(module, "_nemo_gym_renderer_size_installed", False):
         return
@@ -95,9 +107,11 @@ def _install_mental_rotation_3d_renderer_compatibility() -> None:
     from PIL import Image
 
     original_render = module.MentalRotation3DCubeEnv._render
+    original_close = module.MentalRotation3DCubeEnv.close
 
     def render(env: Any, rotation: Any) -> Any:
-        image = original_render(env, rotation)
+        with _MENTAL_ROTATION_3D_FIGURE_LOCK:
+            image = original_render(env, rotation)
         height, width = (int(value) for value in env.image_size)
         if image.shape[:2] != (height, width):
             image = np.asarray(
@@ -106,7 +120,12 @@ def _install_mental_rotation_3d_renderer_compatibility() -> None:
             )
         return image
 
+    def close(env: Any) -> Any:
+        with _MENTAL_ROTATION_3D_FIGURE_LOCK:
+            return original_close(env)
+
     module.MentalRotation3DCubeEnv._render = render
+    module.MentalRotation3DCubeEnv.close = close
     module._nemo_gym_renderer_size_installed = True
 
 
