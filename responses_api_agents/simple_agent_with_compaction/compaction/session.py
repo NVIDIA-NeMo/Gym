@@ -12,6 +12,11 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from nemo_gym.openai_utils import (
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseInput,
+)
 from responses_api_agents.simple_agent_with_compaction.compaction.config import ContextHistoryConfig
 from responses_api_agents.simple_agent_with_compaction.compaction.controller import (
     HistoryController,
@@ -41,11 +46,6 @@ from responses_api_agents.simple_agent_with_compaction.compaction.history import
     stable_id,
 )
 from responses_api_agents.simple_agent_with_compaction.compaction.policies import build_history_policy
-from nemo_gym.openai_utils import (
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseInput,
-)
 
 
 LOGGER = logging.getLogger(__name__)

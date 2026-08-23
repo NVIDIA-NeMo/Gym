@@ -7,6 +7,6 @@ simple_agent_with_compaction:
         name: ???
       model_server:
         type: responses_api_models
-        name: policy_model
+        name: policy_model_for_compaction
       context_history:
         enabled: true

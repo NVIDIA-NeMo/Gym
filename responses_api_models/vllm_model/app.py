@@ -230,18 +230,6 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
         return super().model_post_init(context)
 
 
-class VLLMContextCompactionResponseCreateParams(NeMoGymResponseCreateParamsNonStreaming):
-    """vLLM-local Responses extension for exact physical-trace continuation."""
-
-    required_prefix_token_ids: Optional[List[int]] = None
-
-
-class VLLMContextCompactionChatCompletionCreateParams(NeMoGymChatCompletionCreateParamsNonStreaming):
-    """Chat Completions counterpart of the context-compaction extension."""
-
-    required_prefix_token_ids: Optional[List[int]] = None
-
-
 class VLLMModel(SimpleResponsesAPIModel):
     config: VLLMModelConfig
 
@@ -251,14 +239,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         "tools",
         "chat_template_kwargs",
         "mm_processor_kwargs",
-        "required_prefix_token_ids",
     )
-
-    def setup_webserver(self):
-        app = super().setup_webserver()
-        app.post("/tokenize")(self.tokenize)
-        app.post("/v1/responses/context-compaction")(self.responses_with_context_compaction)
-        return app
 
     def get_converter(self) -> "VLLMConverter":
         """Return the converter used for Responses API <-> Chat Completions mapping.
@@ -355,65 +336,6 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         return self._converter.chat_completion_to_response(
             responses_create_params=body, chat_completion=chat_completion_response
-        )
-
-    async def tokenize(
-        self,
-        request: Request,
-        body: VLLMContextCompactionResponseCreateParams = Body(),
-    ) -> Dict[str, List[int]]:
-        """Tokenize an admitted request for context-limit guard evaluation.
-
-        The returned IDs are diagnostic preflight information. Generation
-        evidence continues to come from the IDs returned by the generation
-        request itself.
-        """
-
-        _, chat_params = self._context_compaction_chat_params(body)
-        body_dict = chat_params.model_dump(exclude_unset=True)
-        body_dict = self._preprocess_chat_completion_create_params(request, body_dict)
-        tokenize_body = self._get_tokenize_chat_body(body_dict)
-        result = await self._resolve_client(request).create_tokenize(**tokenize_body)
-        return {
-            "tokens": self._require_token_id_list(
-                result.get("tokens"),
-                f"{self.config.name}.tokenize.tokens",
-            )
-        }
-
-    def _context_compaction_chat_params(
-        self,
-        body: VLLMContextCompactionResponseCreateParams,
-    ) -> tuple[NeMoGymResponseCreateParamsNonStreaming, VLLMContextCompactionChatCompletionCreateParams]:
-        """Convert semantic input while retaining vLLM's exact-prefix transport control."""
-
-        required_prefix_token_ids = body.required_prefix_token_ids
-        standard_body = NeMoGymResponseCreateParamsNonStreaming.model_validate(
-            body.model_dump(exclude={"required_prefix_token_ids"})
-        )
-        standard_chat_params = self._converter.responses_to_chat_completion_create_params(standard_body)
-        chat_params = VLLMContextCompactionChatCompletionCreateParams.model_validate(
-            standard_chat_params.model_dump(exclude_unset=True)
-            | {"required_prefix_token_ids": required_prefix_token_ids}
-        )
-        return standard_body, chat_params
-
-    async def responses_with_context_compaction(
-        self,
-        request: Request,
-        body: VLLMContextCompactionResponseCreateParams = Body(),
-    ) -> NeMoGymResponse:
-        """Generate from a compacted context while preserving an exact token prefix."""
-
-        if self.config.is_responses_native:
-            raise NotImplementedError("Context compaction currently requires the vLLM Chat Completions adapter")
-
-        standard_body, chat_params = self._context_compaction_chat_params(body)
-        standard_body.model = self.config.model
-        chat_completion_response = await self.chat_completions(request, chat_params)
-        return self._converter.chat_completion_to_response(
-            responses_create_params=standard_body,
-            chat_completion=chat_completion_response,
         )
 
     def _apply_sampling_overrides(self, body_dict: Dict[str, Any]) -> Dict[str, Any]:
@@ -852,6 +774,13 @@ class VLLMModel(SimpleResponsesAPIModel):
                             "vLLM response generation token IDs disagree with choice logprob token IDs."
                         )
                 else:
+                    if self.config.request_prompt_and_generation_token_ids:
+                        raise RuntimeError(
+                            f"`{self.config.name}` requested generation-consumed prompt and sampled token IDs "
+                            "from vLLM (return_token_ids=True), but the response contained neither "
+                            "prompt_token_ids nor choice.token_ids. Refusing to reconstruct on-policy "
+                            "training evidence with a separate /tokenize request."
+                        )
                     tokenize_response = await client.create_tokenize(**self._get_tokenize_chat_body(body_dict))
                     prompt_token_ids = self._require_token_id_list(
                         tokenize_response.get("tokens"),

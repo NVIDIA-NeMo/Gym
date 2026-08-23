@@ -21,12 +21,6 @@ from fastapi import Response
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
-from responses_api_agents.simple_agent_with_compaction.compaction import (
-    ContextCompactionSession,
-    ContextHistoryConfig,
-    build_generation_contract,
-    normalize_semantic_items,
-)
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -48,6 +42,12 @@ from responses_api_agents.simple_agent_with_compaction.app import (
     SimpleAgentWithCompaction,
     SimpleAgentWithCompactionConfig,
     SimpleAgentWithCompactionRunRequest,
+)
+from responses_api_agents.simple_agent_with_compaction.compaction import (
+    ContextCompactionSession,
+    ContextHistoryConfig,
+    build_generation_contract,
+    normalize_semantic_items,
 )
 
 
@@ -315,7 +315,7 @@ class TestApp:
             call for call in server.server_client.post.call_args_list if call.kwargs["server_name"] == "model"
         ]
         assert len(model_calls) == 2
-        assert all(call.kwargs["url_path"] == "/v1/responses/context-compaction" for call in model_calls)
+        assert all(call.kwargs["url_path"] == "/v1/responses" for call in model_calls)
         first_input = model_calls[0].kwargs["json"].input
         second_input = model_calls[1].kwargs["json"].input
         assert len(first_input) == 1

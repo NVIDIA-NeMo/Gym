@@ -244,11 +244,7 @@ class SimpleAgentWithCompaction(SimpleResponsesAPIAgent):
 
             model_response = await self.server_client.post(
                 server_name=self.config.model_server.name,
-                url_path=(
-                    model_url_path.removesuffix("/v1/responses") + "/v1/responses/context-compaction"
-                    if context_session is not None
-                    else model_url_path
-                ),
+                url_path=model_url_path,
                 json=new_body,
                 cookies=model_server_cookies,
             )
