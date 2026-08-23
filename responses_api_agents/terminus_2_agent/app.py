@@ -65,20 +65,23 @@ def _message_text(item: Any) -> str:
 
 
 def _extract_instruction(body_input: Any) -> tuple[str, Optional[str]]:
-    """Return the last user instruction and all leading system/developer text."""
+    """Flatten Responses input into Terminus-2's single instruction."""
     if isinstance(body_input, str):
         return body_input, None
 
-    system_parts: list[str] = []
-    user_message = ""
+    messages: list[tuple[str, str]] = []
     for item in body_input or []:
         role = getattr(item, "role", None) if not isinstance(item, dict) else item.get("role")
         text = _message_text(item)
-        if role in {"system", "developer"} and text:
-            system_parts.append(text)
-        elif role == "user" and text:
-            user_message = text
-    return user_message, "\n\n".join(system_parts) or None
+        if role and text:
+            messages.append((role, text))
+
+    conversation = [(role, text) for role, text in messages if role in {"user", "assistant"}]
+    if len(conversation) <= 1 and (not conversation or conversation[0][0] == "user"):
+        user_message = conversation[0][1] if conversation else ""
+        system_text = "\n\n".join(text for role, text in messages if role in {"system", "developer"})
+        return user_message, system_text or None
+    return "\n\n".join(f"{role.title()}: {text}" for role, text in messages), None
 
 
 class LocalEnvironment:
@@ -360,10 +363,12 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
 
     async def responses(
         self,
-        request: Request,
+        request: Optional[Request],
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
         body = body.model_copy(deep=True)
+        if body.temperature is None:
+            body.temperature = self.config.temperature
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
 

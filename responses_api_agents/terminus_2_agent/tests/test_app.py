@@ -46,13 +46,24 @@ class TestInstructionExtraction:
     def test_string_input(self) -> None:
         assert _extract_instruction("do the task") == ("do the task", None)
 
-    def test_system_and_latest_user(self) -> None:
+    def test_single_user_keeps_existing_format(self) -> None:
+        items = [
+            NeMoGymEasyInputMessage(role="system", content="be careful"),
+            NeMoGymEasyInputMessage(role="user", content="solve it"),
+        ]
+        assert _extract_instruction(items) == ("solve it", "be careful")
+
+    def test_multiturn_history_is_preserved_with_roles(self) -> None:
         items = [
             NeMoGymEasyInputMessage(role="system", content="be careful"),
             NeMoGymEasyInputMessage(role="user", content="first"),
+            NeMoGymEasyInputMessage(role="assistant", content="previous answer"),
             NeMoGymEasyInputMessage(role="user", content="second"),
         ]
-        assert _extract_instruction(items) == ("second", "be careful")
+        assert _extract_instruction(items) == (
+            "System: be careful\n\nUser: first\n\nAssistant: previous answer\n\nUser: second",
+            None,
+        )
 
 
 class TestLocalEnvironment:
@@ -157,6 +168,7 @@ class TestResponses:
             response = await agent.responses(request=None, body=body)
 
         assert response.model == "test-model"
+        assert response.temperature == 0.7
         assert [item.type for item in response.output] == ["message", "function_call", "function_call_output"]
         assert response.usage.total_tokens == 14
         assert '"finished_naturally": true' in response.metadata["terminus_2"]
