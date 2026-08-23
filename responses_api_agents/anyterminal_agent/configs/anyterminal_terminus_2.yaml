@@ -12,6 +12,7 @@ anyterminal_terminus_2:
       agent_kwargs:
         model: ${policy_model_name}
         timeout: 12500
+        workspace_root: "."
 
       container_formatter: "docker://{docker_image}"
       concurrency: 6

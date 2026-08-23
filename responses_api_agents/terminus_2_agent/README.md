@@ -3,8 +3,8 @@
 Runs [Harbor's Terminus-2](https://github.com/harbor-framework/harbor/tree/main/src/harbor/agents/terminus_2)
 as a NeMo Gym Responses API agent.
 
-Terminus-2 executes terminal commands in the agent process working directory. Use
-`anyterminal_agent` when each rollout should run inside a Terminal Bench task container.
+Terminus-2 executes terminal commands in a fresh temporary workspace by default. Set
+`workspace_root` to run in an existing directory instead.
 
 ## AnyTerminal
 
@@ -25,9 +25,8 @@ gym eval run \
 ```
 
 Use `configs/terminus_2_agent.yaml` to connect the standalone agent to another
-resources server. The working directory must provide `bash`, `tmux`, and `script`.
-Standalone rollouts share that working directory; use separate agent servers and
-workspaces if they must run concurrently.
+resources server. The host must provide `bash`, `tmux`, and `script`. AnyTerminal
+sets `workspace_root: "."` because each task already runs in an isolated container.
 
 The agent converts the Terminus-2 trajectory to Responses API messages and tool
 calls. Sampling parameters are forwarded to the configured model server.

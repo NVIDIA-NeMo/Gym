@@ -275,13 +275,6 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
 
-    def _workspace(self) -> Path:
-        workspace = Path(self.config.workspace_root).expanduser() if self.config.workspace_root else Path.cwd()
-        workspace = workspace.resolve()
-        if not workspace.is_dir():
-            raise FileNotFoundError(f"Terminus-2 workspace does not exist: {workspace}")
-        return workspace
-
     def _logs_dir(self) -> Path:
         if not self.config.keep_logs:
             return Path(tempfile.mkdtemp(prefix="nemo-gym-terminus-2-"))
@@ -337,11 +330,19 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         api_base: str,
     ) -> tuple[dict[str, Any], AgentContext, dict[str, bool], bool, bool]:
         logs_dir = self._logs_dir()
-        environment = LocalEnvironment(self._workspace(), self.config.command_timeout_sec)
-        context = AgentContext()
-        agent = self._build_agent(body, logs_dir, api_base)
-        timed_out = False
+        temporary_workspace: Optional[Path] = None
         try:
+            if self.config.workspace_root:
+                workspace = Path(self.config.workspace_root).expanduser().resolve()
+                if not workspace.is_dir():
+                    raise FileNotFoundError(f"Terminus-2 workspace does not exist: {workspace}")
+            else:
+                workspace = temporary_workspace = Path(tempfile.mkdtemp(prefix="nemo-gym-terminus-2-workspace-"))
+
+            environment = LocalEnvironment(workspace, self.config.command_timeout_sec)
+            context = AgentContext()
+            agent = self._build_agent(body, logs_dir, api_base)
+            timed_out = False
             try:
                 await agent.setup(environment)
                 try:
@@ -360,6 +361,8 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         finally:
             if not self.config.keep_logs:
                 shutil.rmtree(logs_dir, ignore_errors=True)
+            if temporary_workspace is not None:
+                shutil.rmtree(temporary_workspace, ignore_errors=True)
 
     async def responses(
         self,

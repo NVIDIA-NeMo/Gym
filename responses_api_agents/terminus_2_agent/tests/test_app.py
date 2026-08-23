@@ -132,6 +132,28 @@ class TestStandaloneTerminus2:
 
 class TestResponses:
     @pytest.mark.asyncio
+    async def test_default_workspace_is_temporary_and_removed(self) -> None:
+        agent = _make_agent()
+        seen_workspace: Path | None = None
+        terminus = MagicMock(finished_naturally=True)
+        terminus.setup = AsyncMock()
+        terminus.close = AsyncMock()
+
+        async def capture_workspace(_instruction, environment, _context) -> None:
+            nonlocal seen_workspace
+            seen_workspace = environment.cwd
+            assert seen_workspace.is_dir()
+
+        terminus.run = AsyncMock(side_effect=capture_workspace)
+        agent._build_agent = MagicMock(return_value=terminus)
+        body = NeMoGymResponseCreateParamsNonStreaming(model="model", input="task")
+
+        await agent._run_terminus(body, "task", "http://model/v1")
+
+        assert seen_workspace is not None
+        assert not seen_workspace.exists()
+
+    @pytest.mark.asyncio
     async def test_converts_terminus_trajectory(self) -> None:
         agent = _make_agent(system_prompt="system config", model="test-model")
         trajectory = {
