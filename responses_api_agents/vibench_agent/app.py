@@ -42,7 +42,6 @@ from uuid import uuid4
 
 from fastapi import Request
 
-from nemo_gym.base_resources_server import BaseRunRequest
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
@@ -50,6 +49,7 @@ from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, is_nemo_gym
 from responses_api_agents.opencode_sandboxed_agent.app import (
     OpenCodeSandboxedAgent,
     OpenCodeSandboxedAgentConfig,
+    OpenCodeSandboxedAgentRunRequest,
     OpenCodeSandboxedAgentVerifyRequest,
     OpenCodeSandboxedAgentVerifyResponse,
 )
@@ -143,7 +143,12 @@ class VibenchAgent(OpenCodeSandboxedAgent):
 
         return str(local)
 
-    async def run(self, request: Request, body: BaseRunRequest) -> OpenCodeSandboxedAgentVerifyResponse:
+    async def run(
+        self, request: Request, body: OpenCodeSandboxedAgentRunRequest
+    ) -> OpenCodeSandboxedAgentVerifyResponse:
+        # OpenCodeSandboxedAgentRunRequest is extra="allow"; BaseRunRequest is not, and
+        # typing body as the latter silently drops the ViBench task fields (app, artifact,
+        # prd_files, test_plans) so /seed_session rejects the request as missing 'app'.
         cookies = request.cookies
 
         seed_session_response = await self.server_client.post(
