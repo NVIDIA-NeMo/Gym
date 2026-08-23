@@ -187,6 +187,22 @@ class TestResponses:
         assert len(response.output) == 1
         assert response.output[0].type == "message"
 
+    @pytest.mark.asyncio
+    async def test_direct_response_waits_for_concurrency_slot(self) -> None:
+        agent = _make_agent()
+        agent.sem = asyncio.Semaphore(0)
+        agent._run_terminus = AsyncMock(return_value=({"steps": []}, AgentContext(), {}, False, False))
+        body = NeMoGymResponseCreateParamsNonStreaming(model="model", input="task")
+
+        with patch.object(Terminus2Agent, "resolve_model_base_url", return_value="http://model/v1"):
+            task = asyncio.create_task(agent.responses(request=None, body=body))
+            await asyncio.sleep(0)
+            agent._run_terminus.assert_not_awaited()
+            agent.sem.release()
+            await task
+
+        agent._run_terminus.assert_awaited_once()
+
 
 class TestConfig:
     def test_defaults(self) -> None:

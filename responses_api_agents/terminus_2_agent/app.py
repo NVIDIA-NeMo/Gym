@@ -380,9 +380,10 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             self.config.model_server.name,
             self._rollout_id(request),
         )
-        trajectory, context, flags, timed_out, finished_naturally = await self._run_terminus(
-            body, instruction, api_base
-        )
+        async with self.sem:
+            trajectory, context, flags, timed_out, finished_naturally = await self._run_terminus(
+                body, instruction, api_base
+            )
         output_items = HarborAgentUtils.trajectory_to_responses(trajectory)
         if not output_items:
             output_items = [
@@ -432,60 +433,59 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         return NeMoGymResponse.model_validate(response)
 
     async def run(self, request: Request, body: Terminus2AgentRunRequest) -> Terminus2AgentVerifyResponse:
-        async with self.sem:
-            cookies = request.cookies
-            seed_response = await self.server_client.post(
-                server_name=self.config.resources_server.name,
-                url_path="/seed_session",
-                json=body.model_dump(),
-                cookies=cookies,
-            )
-            await raise_for_status(seed_response)
-            cookies = seed_response.cookies
+        cookies = request.cookies
+        seed_response = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/seed_session",
+            json=body.model_dump(),
+            cookies=cookies,
+        )
+        await raise_for_status(seed_response)
+        cookies = seed_response.cookies
 
-            agent_response = await self.server_client.post(
-                server_name=self.config.name,
-                url_path=self.url_path_for_run("/v1/responses", body),
-                json=body.responses_create_params,
-                cookies=cookies,
-            )
-            await raise_for_status(agent_response)
-            cookies = agent_response.cookies
-            response_json = await get_response_json(agent_response)
+        agent_response = await self.server_client.post(
+            server_name=self.config.name,
+            url_path=self.url_path_for_run("/v1/responses", body),
+            json=body.responses_create_params,
+            cookies=cookies,
+        )
+        await raise_for_status(agent_response)
+        cookies = agent_response.cookies
+        response_json = await get_response_json(agent_response)
 
-            verify_response = await self.server_client.post(
-                server_name=self.config.resources_server.name,
-                url_path="/verify",
-                json=body.model_dump() | {"response": response_json},
-                cookies=cookies,
-            )
-            await raise_for_status(verify_response)
-            verify_json = await get_response_json(verify_response)
+        verify_response = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/verify",
+            json=body.model_dump() | {"response": response_json},
+            cookies=cookies,
+        )
+        await raise_for_status(verify_response)
+        verify_json = await get_response_json(verify_response)
 
-            gym_response = NeMoGymResponse.model_validate(response_json)
-            turns = sum(
-                1
-                for item in gym_response.output
-                if getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
-            )
-            terminus_metadata_json = (gym_response.metadata or {}).get("terminus_2", "{}")
-            try:
-                terminus_metadata = json.loads(terminus_metadata_json)
-            except (json.JSONDecodeError, TypeError):
-                terminus_metadata = {}
-            flags = terminus_metadata.get("agent_error_flags", {})
-            timed_out = bool(terminus_metadata.get("timed_out"))
-            naturally = bool(terminus_metadata.get("finished_naturally"))
+        gym_response = NeMoGymResponse.model_validate(response_json)
+        turns = sum(
+            1
+            for item in gym_response.output
+            if getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
+        )
+        terminus_metadata_json = (gym_response.metadata or {}).get("terminus_2", "{}")
+        try:
+            terminus_metadata = json.loads(terminus_metadata_json)
+        except (json.JSONDecodeError, TypeError):
+            terminus_metadata = {}
+        flags = terminus_metadata.get("agent_error_flags", {})
+        timed_out = bool(terminus_metadata.get("timed_out"))
+        naturally = bool(terminus_metadata.get("finished_naturally"))
 
-            return Terminus2AgentVerifyResponse.model_validate(
-                verify_json
-                | {
-                    "turns_used": turns,
-                    "finished_naturally": naturally and not timed_out,
-                    "agent_timeout_error": int(timed_out),
-                    "context_length_exceeded_error": int(flags.get("context_length_exceeded", False)),
-                }
-            )
+        return Terminus2AgentVerifyResponse.model_validate(
+            verify_json
+            | {
+                "turns_used": turns,
+                "finished_naturally": naturally and not timed_out,
+                "agent_timeout_error": int(timed_out),
+                "context_length_exceeded_error": int(flags.get("context_length_exceeded", False)),
+            }
+        )
 
 
 if __name__ == "__main__":
