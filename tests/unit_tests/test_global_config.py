@@ -12,17 +12,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import importlib.metadata
 import sys
 from contextlib import nullcontext as does_not_raise
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, PropertyMock
 
 from omegaconf import OmegaConf
-from pytest import MonkeyPatch, mark, raises
+from pytest import LogCaptureFixture, MonkeyPatch, mark, raises
 
 import nemo_gym.global_config
 import nemo_gym.server_utils
-from nemo_gym import CACHE_DIR, NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, WORKING_DIR
+from nemo_gym import CACHE_DIR, NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, RESULTS_DIR, WORKING_DIR
 from nemo_gym.config_types import (
     AlmostServerError,
     ConfigError,
@@ -31,16 +32,20 @@ from nemo_gym.config_types import (
     MalformedConfigPathsError,
     NoServerInstancesError,
     ServerRefNotFoundError,
+    WANDBConfig,
 )
 from nemo_gym.global_config import (
     DEFAULT_HEAD_SERVER_PORT,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
+    USE_ABSOLUTE_IP,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
+    _openai_version_matches_nemo_gym_constraint,
     find_open_port,
     get_first_server_config_dict,
     get_global_config_dict,
 )
+from nemo_gym.secret_utils import recursively_hide_secrets
 from nemo_gym.server_utils import (
     DictConfig,
 )
@@ -68,8 +73,11 @@ class TestGlobalConfig:
             "skip_venv_if_present": False,
             "dry_run": False,
             "model_endpoint_readiness_timeout_seconds": 600,
-            "uv_cache_dir": str(CACHE_DIR / "uv"),
+            "allow_openai_version_skew": False,
+            "uv_cache_dir": str(CACHE_DIR.expanduser().resolve() / "uv"),
             "uv_venv_dir": str(WORKING_DIR),
+            "results_dir": str(RESULTS_DIR.expanduser().resolve()),
+            "cache_dir": str(CACHE_DIR.expanduser().resolve()),
         }
 
     def test_get_global_config_dict_sanity(self, monkeypatch: MonkeyPatch) -> None:
@@ -97,6 +105,129 @@ class TestGlobalConfig:
 
         global_config_dict = get_global_config_dict()
         assert self._default_global_config_dict_values == global_config_dict
+
+    def test_offline_resolution_uses_invalid_port_without_probing(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+        monkeypatch.delenv("UV_CACHE_DIR", raising=False)
+        probe = MagicMock(side_effect=AssertionError("offline resolution must not probe sockets"))
+        hostname = MagicMock(side_effect=AssertionError("offline resolution must not resolve hostnames"))
+        setup_exporters = MagicMock(side_effect=AssertionError("offline resolution must not start exporters"))
+        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", probe)
+        monkeypatch.setattr(nemo_gym.global_config, "gethostbyname", hostname)
+        monkeypatch.setattr(nemo_gym.global_config, "setup_exporters", setup_exporters)
+        monkeypatch.setattr(WANDBConfig, "is_available", PropertyMock(return_value=True))
+
+        config = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=DictConfig(
+                    {
+                        USE_ABSOLUTE_IP: True,
+                        "worker": {"resources_servers": {"example": {"entrypoint": "app.py", "domain": "other"}}},
+                    }
+                ),
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+        assert config.worker.resources_servers.example.port == -1
+        assert config.worker.resources_servers.example.host == "127.0.0.1"
+        probe.assert_not_called()
+        hostname.assert_not_called()
+        setup_exporters.assert_not_called()
+        assert "UV_CACHE_DIR" not in nemo_gym.global_config.environ
+
+    def _mock_parse_environment(self, monkeypatch: MonkeyPatch, config_dict: "DictConfig") -> None:
+        """Standard parser mocks (no env var, no .env.yaml, fixed hydra config)."""
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        exists_mock = MagicMock()
+        exists_mock.return_value = False
+        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+
+        hydra_main_mock = MagicMock()
+        hydra_main_mock.return_value = lambda fn: (lambda: fn(config_dict))
+        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+
+    def _mock_openai_topology(self, monkeypatch: MonkeyPatch, parent_version: str) -> None:
+        """Parent process on `parent_version`; nemo-gym's own constraint is openai<=2.7.2."""
+        monkeypatch.setattr(nemo_gym.global_config, "openai_version", parent_version)
+        monkeypatch.setattr(nemo_gym.global_config, "ray_version", "test ray version")
+        monkeypatch.setattr(nemo_gym.global_config, "python_version", MagicMock(return_value="test python version"))
+        monkeypatch.setattr(importlib.metadata, "requires", lambda name: ["openai<=2.7.2"])
+
+    def test_head_server_deps_pins_compatible_parent_openai(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_openai_topology(monkeypatch, parent_version="2.6.0")
+        self._mock_parse_environment(monkeypatch, DictConfig({}))
+
+        global_config_dict = get_global_config_dict()
+        assert "openai==2.6.0" in global_config_dict["head_server_deps"]
+
+    def test_head_server_deps_raises_on_incompatible_parent_openai(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_openai_topology(monkeypatch, parent_version="2.52.0")
+        self._mock_parse_environment(monkeypatch, DictConfig({}))
+
+        with raises(ConfigError, match="allow_openai_version_skew") as excinfo:
+            get_global_config_dict()
+        # The error must name both sides of the conflict.
+        assert "openai==2.52.0" in str(excinfo.value)
+        assert "openai<=2.7.2" in str(excinfo.value)
+
+    def test_head_server_deps_omits_pin_with_explicit_skew_opt_in(
+        self, monkeypatch: MonkeyPatch, caplog: LogCaptureFixture
+    ) -> None:
+        self._mock_openai_topology(monkeypatch, parent_version="2.52.0")
+        self._mock_parse_environment(monkeypatch, DictConfig({"allow_openai_version_skew": True}))
+
+        with caplog.at_level("WARNING"):
+            global_config_dict = get_global_config_dict()
+        assert not any(dep.startswith("openai") for dep in global_config_dict["head_server_deps"])
+        assert global_config_dict["allow_openai_version_skew"] is True
+        # The warning must name both sides of the skew.
+        assert "openai==2.52.0" in caplog.text
+        assert "openai<=2.7.2" in caplog.text
+
+    def test_head_server_deps_rejects_non_boolean_skew_opt_in(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_openai_topology(monkeypatch, parent_version="2.52.0")
+        # YAML/CLI plumbing can hand the key through as a string; "false" is
+        # truthy and must not silently enable the skew.
+        self._mock_parse_environment(monkeypatch, DictConfig({"allow_openai_version_skew": "false"}))
+
+        with raises(ConfigError, match="must be a boolean"):
+            get_global_config_dict()
+
+    def test_get_global_config_dict_artifact_dir_overrides(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+        self._mock_parse_environment(
+            monkeypatch, DictConfig({"results_dir": "/shared/results", "cache_dir": "/local/cache"})
+        )
+
+        global_config_dict = get_global_config_dict()
+        assert global_config_dict["results_dir"] == "/shared/results"
+        assert global_config_dict["cache_dir"] == "/local/cache"
+        # uv_cache_dir defaults under the (overridden) cache root.
+        assert global_config_dict["uv_cache_dir"] == str(Path("/local/cache") / "uv")
+
+    def test_get_global_config_dict_artifact_dir_normalization(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+        self._mock_parse_environment(
+            monkeypatch, DictConfig({"results_dir": "relative/results", "cache_dir": "~/gym-cache"})
+        )
+
+        global_config_dict = get_global_config_dict()
+        # Children resolve relative paths against their own cwd; the parser
+        # must hand them an absolute path.
+        assert global_config_dict["results_dir"] == str((Path.cwd() / "relative/results").resolve())
+        assert global_config_dict["cache_dir"] == str((Path.home() / "gym-cache").resolve())
+
+    def test_get_global_config_dict_artifact_dir_rejects_non_string(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+        self._mock_parse_environment(monkeypatch, DictConfig({"results_dir": 123}))
+
+        with raises(ConfigError, match="results_dir must be a non-empty path string"):
+            get_global_config_dict()
 
     def test_get_global_config_dict_global_exists(self, monkeypatch: MonkeyPatch) -> None:
         # Clear any lingering env vars.
@@ -149,6 +280,56 @@ class TestGlobalConfig:
             | {
                 "config_paths": ["/var", "var"],
                 "extra_dot_env_key": 2,
+            }
+            == global_config_dict
+        )
+
+    def test_get_global_config_dict_config_paths_ordering(self, monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+
+        # Clear any lingering env vars.
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        (tmp_path / "config1.yaml").write_text(f"""\
+config_paths:
+- {tmp_path}/config2.yaml
+
+a: 1
+        """)
+        (tmp_path / "config2.yaml").write_text("""a: 2
+b: 2
+        """)
+
+        # Explicitly handle any local .env.yaml files. Either read or don't read.
+        exists_mock = MagicMock()
+        exists_mock.return_value = True
+        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+
+        # Override the hydra main wrapper call. At runtime, this will use sys.argv.
+        # Here we assume that the user sets sys.argv correctly (we are not trying to test Hydra) and just return some DictConfig for our test.
+        hydra_main_mock = MagicMock()
+
+        def hydra_main_wrapper(fn):
+            config_dict = DictConfig({"config_paths": [f"{tmp_path}/config1.yaml"]})
+            return lambda: fn(config_dict)
+
+        hydra_main_mock.return_value = hydra_main_wrapper
+        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+
+        # Override OmegaConf.load to avoid file reads.
+        omegaconf_load_mock = MagicMock()
+        original_load = OmegaConf.load
+        omegaconf_load_mock.side_effect = lambda path: (DictConfig({}) if "env" in str(path) else original_load(path))
+        monkeypatch.setattr(nemo_gym.server_utils.OmegaConf, "load", omegaconf_load_mock)
+
+        global_config_dict = get_global_config_dict()
+        assert (
+            self._default_global_config_dict_values
+            | {
+                "config_paths": [f"{tmp_path}/config1.yaml", f"{tmp_path}/config2.yaml"],
+                "a": 1,
+                "b": 2,
             }
             == global_config_dict
         )
@@ -208,6 +389,196 @@ class TestGlobalConfig:
             == global_config_dict
         )
 
+    def _mock_config_paths_env(self, monkeypatch: MonkeyPatch, config_paths: list[str]) -> None:
+        """Scaffolding shared by the sibling-ordering tests: stub .env.yaml, hydra and
+        the loader so only the config_paths merge order is under test."""
+        # Clear any lingering env vars.
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        # Explicitly handle any local .env.yaml files. Either read or don't read.
+        exists_mock = MagicMock()
+        exists_mock.return_value = True
+        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+
+        # Override the hydra main wrapper call. At runtime, this will use sys.argv.
+        hydra_main_mock = MagicMock()
+
+        def hydra_main_wrapper(fn):
+            config_dict = DictConfig({"config_paths": config_paths})
+            return lambda: fn(config_dict)
+
+        hydra_main_mock.return_value = hydra_main_wrapper
+        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+
+        # Override OmegaConf.load to avoid file reads.
+        omegaconf_load_mock = MagicMock()
+        original_load = OmegaConf.load
+        omegaconf_load_mock.side_effect = lambda path: (DictConfig({}) if "env" in str(path) else original_load(path))
+        monkeypatch.setattr(nemo_gym.server_utils.OmegaConf, "load", omegaconf_load_mock)
+
+    def test_get_global_config_dict_config_paths_later_sibling_wins(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Two configs passed by the caller, neither referencing the other: the later
+        entry overrides the earlier one, which is how an override config is layered on
+        top of a base config."""
+        self._mock_versions_for_testing(monkeypatch)
+
+        (tmp_path / "base.yaml").write_text("""a: base
+b: base
+        """)
+        (tmp_path / "override.yaml").write_text("""a: override
+        """)
+
+        self._mock_config_paths_env(monkeypatch, [f"{tmp_path}/base.yaml", f"{tmp_path}/override.yaml"])
+
+        global_config_dict = get_global_config_dict()
+        assert (
+            self._default_global_config_dict_values
+            | {
+                "config_paths": [f"{tmp_path}/base.yaml", f"{tmp_path}/override.yaml"],
+                "a": "override",
+                "b": "base",
+            }
+            == global_config_dict
+        )
+
+    def test_get_global_config_dict_config_paths_outer_beats_inner_across_siblings(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Nesting and sibling order applied together. ``override.yaml`` is listed after
+        ``base.yaml`` so it wins on ``a``; ``base.yaml`` pulls in ``inner.yaml``, so it
+        wins on ``b`` despite ``inner.yaml`` being merged as part of the same list."""
+        self._mock_versions_for_testing(monkeypatch)
+
+        (tmp_path / "base.yaml").write_text(f"""\
+config_paths:
+- {tmp_path}/inner.yaml
+
+a: base
+b: base
+        """)
+        (tmp_path / "inner.yaml").write_text("""b: inner
+c: inner
+        """)
+        (tmp_path / "override.yaml").write_text("""a: override
+        """)
+
+        self._mock_config_paths_env(monkeypatch, [f"{tmp_path}/base.yaml", f"{tmp_path}/override.yaml"])
+
+        global_config_dict = get_global_config_dict()
+        assert (
+            self._default_global_config_dict_values
+            | {
+                "config_paths": [
+                    f"{tmp_path}/base.yaml",
+                    f"{tmp_path}/override.yaml",
+                    f"{tmp_path}/inner.yaml",
+                ],
+                "a": "override",
+                "b": "base",
+                "c": "inner",
+            }
+            == global_config_dict
+        )
+
+    def test_get_global_config_dict_config_paths_outer_beats_inner_two_levels_deep(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Precedence follows nesting depth rather than position, at every level:
+        outer overrides middle, which overrides inner."""
+        self._mock_versions_for_testing(monkeypatch)
+
+        (tmp_path / "outer.yaml").write_text(f"""\
+config_paths:
+- {tmp_path}/middle.yaml
+
+a: outer
+        """)
+        (tmp_path / "middle.yaml").write_text(f"""\
+config_paths:
+- {tmp_path}/inner.yaml
+
+a: middle
+b: middle
+        """)
+        (tmp_path / "inner.yaml").write_text("""a: inner
+b: inner
+c: inner
+        """)
+
+        self._mock_config_paths_env(monkeypatch, [f"{tmp_path}/outer.yaml"])
+
+        global_config_dict = get_global_config_dict()
+        assert (
+            self._default_global_config_dict_values
+            | {
+                "config_paths": [
+                    f"{tmp_path}/outer.yaml",
+                    f"{tmp_path}/middle.yaml",
+                    f"{tmp_path}/inner.yaml",
+                ],
+                "a": "outer",
+                "b": "middle",
+                "c": "inner",
+            }
+            == global_config_dict
+        )
+
+    def test_get_global_config_dict_config_paths_later_sibling_subtree_wins_at_uneven_depth(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Sibling order covers everything a sibling pulled in, whatever depth it sits
+        at. ``first.yaml`` nests one level and ``second.yaml`` two, and the key both of
+        their innermost configs set resolves to the later sibling's."""
+        self._mock_versions_for_testing(monkeypatch)
+
+        (tmp_path / "first.yaml").write_text(f"""\
+config_paths:
+- {tmp_path}/first_inner.yaml
+
+first: first
+        """)
+        (tmp_path / "first_inner.yaml").write_text("""first: first_inner
+contested: first_inner
+        """)
+        (tmp_path / "second.yaml").write_text(f"""\
+config_paths:
+- {tmp_path}/second_middle.yaml
+
+second: second
+        """)
+        (tmp_path / "second_middle.yaml").write_text(f"""\
+config_paths:
+- {tmp_path}/second_inner.yaml
+
+second: second_middle
+        """)
+        (tmp_path / "second_inner.yaml").write_text("""second: second_inner
+contested: second_inner
+        """)
+
+        self._mock_config_paths_env(monkeypatch, [f"{tmp_path}/first.yaml", f"{tmp_path}/second.yaml"])
+
+        global_config_dict = get_global_config_dict()
+        assert (
+            self._default_global_config_dict_values
+            | {
+                "config_paths": [
+                    f"{tmp_path}/first.yaml",
+                    f"{tmp_path}/second.yaml",
+                    f"{tmp_path}/first_inner.yaml",
+                    f"{tmp_path}/second_middle.yaml",
+                    f"{tmp_path}/second_inner.yaml",
+                ],
+                "first": "first",
+                "second": "second",
+                "contested": "second_inner",
+            }
+            == global_config_dict
+        )
+
     def test_get_global_config_dict_server_host_port_defaults(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_versions_for_testing(monkeypatch)
 
@@ -253,6 +624,59 @@ class TestGlobalConfig:
             }
             == global_config_dict
         )
+
+    def test_get_global_config_dict_skip_verification_defaults_for_agents(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+
+        find_open_port_mock = MagicMock()
+        find_open_port_mock.side_effect = [12345, 12346, 12347]
+        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock)
+
+        parser = GlobalConfigDictParser()
+        global_config_dict = parser.parse_no_environment(
+            DictConfig(
+                {
+                    "skip_verification": True,
+                    "skip_verification_reward": -1.5,
+                    "agent_name": {
+                        "responses_api_agents": {
+                            "agent_type": {
+                                "entrypoint": "app.py",
+                            }
+                        }
+                    },
+                    "explicit_agent_name": {
+                        "responses_api_agents": {
+                            "agent_type": {
+                                "entrypoint": "app.py",
+                                "skip_verification": False,
+                                "skip_verification_reward": 0.25,
+                            }
+                        }
+                    },
+                    "resources_name": {
+                        "resources_servers": {
+                            "resources_type": {
+                                "entrypoint": "app.py",
+                                "domain": "other",
+                            }
+                        }
+                    },
+                }
+            )
+        )
+
+        agent_config = global_config_dict["agent_name"]["responses_api_agents"]["agent_type"]
+        assert agent_config["skip_verification"] is True
+        assert agent_config["skip_verification_reward"] == -1.5
+
+        explicit_agent_config = global_config_dict["explicit_agent_name"]["responses_api_agents"]["agent_type"]
+        assert explicit_agent_config["skip_verification"] is False
+        assert explicit_agent_config["skip_verification_reward"] == 0.25
+
+        resources_config = global_config_dict["resources_name"]["resources_servers"]["resources_type"]
+        assert "skip_verification" not in resources_config
+        assert "skip_verification_reward" not in resources_config
 
     def test_get_global_config_dict_server_refs_sanity(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_versions_for_testing(monkeypatch)
@@ -1018,7 +1442,7 @@ class TestGlobalConfig:
                 "not": "not",
             }
         )
-        GlobalConfigDictParser()._recursively_hide_secrets(dict_config)
+        recursively_hide_secrets(dict_config)
         assert OmegaConf.to_container(dict_config) == {
             "dict": {"key": "****", "not": "not"},
             "list": [{"key": "****", "not": "not"}],
@@ -1415,3 +1839,37 @@ class TestConfigLoadErrors:
         parser = GlobalConfigDictParser()
         config = DictConfig({"my_server": {"resources_servers": {"x": {"entrypoint": "app.py", "domain": "other"}}}})
         parser.raise_on_no_server_instances(config)
+
+
+class TestOpenAIVersionMatchesNemoGymConstraint:
+    @mark.parametrize(
+        "requirements, version, expected",
+        [
+            # Parent openai satisfies nemo-gym's constraint -> keep pinning it.
+            (["openai<=2.7.2"], "2.7.2", True),
+            (["openai<=2.7.2"], "2.6.0", True),
+            # Parent openai violates the constraint -> the pin would be unsatisfiable.
+            (["openai<=2.7.2"], "2.52.0", False),
+            (["openai>=2.0,<3"], "2.52.0", True),
+            # No openai requirement at all -> preserve the pin-the-parent behavior.
+            (["ray[default]==2.49.0"], "2.52.0", True),
+            # Package names are case-insensitive (PEP 503): still recognized.
+            (["OpenAI<=2.7.2"], "2.52.0", False),
+            # Marker'd requirements are skipped (conservative fallback).
+            (['openai<=2.7.2; extra == "adapters"'], "2.52.0", True),
+            # importlib.metadata.requires may return None.
+            (None, "2.52.0", True),
+        ],
+    )
+    def test_constraint_matching(
+        self, monkeypatch: MonkeyPatch, requirements: list, version: str, expected: bool
+    ) -> None:
+        monkeypatch.setattr(importlib.metadata, "requires", lambda name: requirements)
+        assert _openai_version_matches_nemo_gym_constraint(version) is expected
+
+    def test_falls_back_to_pinning_when_constraint_lookup_fails(self, monkeypatch: MonkeyPatch) -> None:
+        def raise_not_found(name: str) -> None:
+            raise importlib.metadata.PackageNotFoundError(name)
+
+        monkeypatch.setattr(importlib.metadata, "requires", raise_not_found)
+        assert _openai_version_matches_nemo_gym_constraint("2.52.0") is True

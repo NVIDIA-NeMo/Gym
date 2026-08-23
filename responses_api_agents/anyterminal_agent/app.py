@@ -120,20 +120,16 @@ def update_metrics(metrics_fpath: Path, update_dict: Dict[str, Any]) -> None:
 def _safe_config_json(params: "AnyTerminalInstanceConfig", indent: Optional[int] = None) -> str:
     """Serialize config without secrets."""
 
-    def is_secret_key(key: str) -> bool:
-        lowered = key.lower()
-        return (
-            "api_key" in lowered
-            or "secret" in lowered
-            or "password" in lowered
-            or lowered == "token"
-            or lowered.endswith("_token")
-            or lowered.startswith("token_")
-        )
-
     def redact(value: Any) -> Any:
         if isinstance(value, dict):
-            return {key: "***" if is_secret_key(key) else redact(item) for key, item in value.items()}
+            result = {}
+            for key, item in value.items():
+                normalized_key = key.lower().replace("_", "").replace("-", "")
+                is_secret = any(part in normalized_key for part in ("apikey", "password", "secret")) or (
+                    normalized_key.endswith("token")
+                )
+                result[key] = "***" if is_secret else redact(item)
+            return result
         if isinstance(value, list):
             return [redact(item) for item in value]
         return value
@@ -162,6 +158,10 @@ INSTRUCTION  = Path("/trajectories_mount/instruction.txt").read_text()
 AGENT_KWARGS = json.loads(os.environ.get("NGTB_AGENT_KWARGS", "{{}}"))
 SAMPLING     = json.loads(os.environ.get("NGTB_SAMPLING", "{{}}"))
 
+openclaw_defaults = AGENT_KWARGS.get("openclaw_config", {{}}).get("agents", {{}}).get("defaults", {{}})
+if openclaw_defaults.get("workspace") == ".":
+    openclaw_defaults["workspace"] = str(Path.cwd())
+
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymEasyInputMessage
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.server_utils import ServerClient
@@ -189,9 +189,9 @@ if MODEL_URL:
     if hasattr(agent, "resolve_model_base_url"):
         object.__setattr__(agent, "resolve_model_base_url", lambda *args, **kwargs: _v1)
     if hasattr(agent, "_resolve_model_base_url"):
-        agent._resolve_model_base_url = lambda: _v1
+        agent._resolve_model_base_url = lambda *args, **kwargs: _v1
     if hasattr(agent, "_resolve_base_url"):
-        agent._resolve_base_url = lambda: MODEL_URL
+        agent._resolve_base_url = lambda *args, **kwargs: MODEL_URL
 
 body = NeMoGymResponseCreateParamsNonStreaming(
     input=[NeMoGymEasyInputMessage(role="user", content=INSTRUCTION)],

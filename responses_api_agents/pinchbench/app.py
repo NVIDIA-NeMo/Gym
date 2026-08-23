@@ -96,7 +96,12 @@ class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
     max_concurrent: int = 4
     max_tokens: int = 16384
     context_window: int = 131072
+    provider_headers: Optional[dict[str, str]] = None
     openclaw_provider_timeout_seconds: Optional[int] = None
+    openclaw_agent_timeout_seconds: Optional[int] = None
+    openclaw_judge_timeout_seconds: Optional[int] = None
+    # OpenClaw `diagnostics.stuckSessionAbortMs`. None keeps its default.
+    openclaw_stuck_session_abort_seconds: Optional[int] = None
     work_root: str = "/tmp/pinchbench_gym"
     transcripts_dir: str = "/tmp/pinchbench_gym/transcripts"
     max_agent_id_length: int = 64
@@ -223,6 +228,14 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         }
         if self.config.openclaw_provider_timeout_seconds:
             env["PINCHBENCH_PROVIDER_TIMEOUT_SECONDS"] = str(self.config.openclaw_provider_timeout_seconds)
+        if self.config.provider_headers is not None:
+            env["PINCHBENCH_PROVIDER_HEADERS"] = json.dumps(self.config.provider_headers)
+        if self.config.openclaw_agent_timeout_seconds:
+            env["PINCHBENCH_AGENT_TIMEOUT_SECONDS"] = str(self.config.openclaw_agent_timeout_seconds)
+        if self.config.openclaw_judge_timeout_seconds:
+            env["PINCHBENCH_JUDGE_TIMEOUT_SECONDS"] = str(self.config.openclaw_judge_timeout_seconds)
+        if self.config.openclaw_stuck_session_abort_seconds:
+            env["PINCHBENCH_STUCK_SESSION_ABORT_SECONDS"] = str(self.config.openclaw_stuck_session_abort_seconds)
         if self.config.brave_api_key:
             env["BRAVE_API_KEY"] = self.config.brave_api_key
         if self.config.tavily_api_key:
@@ -308,7 +321,22 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             api_key = os.environ.get("MODEL_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
             max_tokens = int(os.environ.get("PINCHBENCH_MAX_TOKENS", "65536"))
             context_window = int(os.environ.get("PINCHBENCH_CONTEXT_WINDOW", "131072"))
+            provider_headers = (
+                json.loads(os.environ["PINCHBENCH_PROVIDER_HEADERS"])
+                if os.environ.get("PINCHBENCH_PROVIDER_HEADERS")
+                else None
+            )
             provider_timeout_s = int(os.environ["PINCHBENCH_PROVIDER_TIMEOUT_SECONDS"]) if os.environ.get("PINCHBENCH_PROVIDER_TIMEOUT_SECONDS") else None
+            agent_timeout_s = (
+                int(os.environ["PINCHBENCH_AGENT_TIMEOUT_SECONDS"])
+                if os.environ.get("PINCHBENCH_AGENT_TIMEOUT_SECONDS")
+                else None
+            )
+            stuck_abort_s = (
+                int(os.environ["PINCHBENCH_STUCK_SESSION_ABORT_SECONDS"])
+                if os.environ.get("PINCHBENCH_STUCK_SESSION_ABORT_SECONDS")
+                else None
+            )
             runtime_params = {
                 "temperature": 1,
                 "top_p": 0.95,
@@ -344,6 +372,8 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             }
             if provider_timeout_s is not None:
                 custom_provider["timeoutSeconds"] = provider_timeout_s
+            if provider_headers is not None:
+                custom_provider["headers"] = provider_headers
             models = cfg.setdefault("models", {})
             models["mode"] = "merge"
             models.setdefault("providers", {})["custom"] = custom_provider
@@ -352,11 +382,10 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             agent_model = f"custom/{model_id}"
             defaults.setdefault("models", {})[agent_model] = {"params": runtime_params}
             defaults.setdefault("model", {})["primary"] = agent_model
-            if provider_timeout_s is not None:
-                defaults["timeoutSeconds"] = provider_timeout_s
-                for agent in agents.get("list", []):
-                    if isinstance(agent, dict):
-                        agent["timeoutSeconds"] = provider_timeout_s
+            if agent_timeout_s is not None:
+                defaults["timeoutSeconds"] = agent_timeout_s
+            if stuck_abort_s is not None:
+                cfg.setdefault("diagnostics", {})["stuckSessionAbortMs"] = stuck_abort_s * 1000
             cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), "utf-8")
             PYCFG
 

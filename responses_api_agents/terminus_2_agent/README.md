@@ -8,6 +8,12 @@ Terminus-2 executes terminal commands in the agent process working directory. Us
 
 ## AnyTerminal
 
+Prepare the Terminal Bench dataset first:
+
+```bash
+python responses_api_agents/anyterminal_agent/prepare.py --no-build-sif
+```
+
 ```bash
 gym eval run \
   --config responses_api_agents/anyterminal_agent/configs/anyterminal_terminus_2.yaml \
