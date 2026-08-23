@@ -180,7 +180,7 @@ class TestConfig:
     def test_defaults(self) -> None:
         config = _config()
         assert config.parser_name == "json"
-        assert config.concurrency == 8
+        assert config.concurrency == 1
         assert config.record_terminal_session is False
         assert config.trajectory_config == {"raw_content": False}
 

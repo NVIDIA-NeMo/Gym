@@ -8,7 +8,7 @@ terminus_2_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      concurrency: 8
+      concurrency: 1
       model: null
       workspace_root: null
       system_prompt: null

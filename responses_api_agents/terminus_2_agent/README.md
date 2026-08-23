@@ -26,6 +26,8 @@ gym eval run \
 
 Use `configs/terminus_2_agent.yaml` to connect the standalone agent to another
 resources server. The working directory must provide `bash`, `tmux`, and `script`.
+Standalone rollouts share that working directory; use separate agent servers and
+workspaces if they must run concurrently.
 
 The agent converts the Terminus-2 trajectory to Responses API messages and tool
 calls. Sampling parameters are forwarded to the configured model server.

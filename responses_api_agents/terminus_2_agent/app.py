@@ -217,7 +217,7 @@ class StandaloneTerminus2(Terminus2NemoGym):
 class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
-    concurrency: int = 8
+    concurrency: int = 1
     model: Optional[str] = None
     workspace_root: Optional[str] = None
     system_prompt: Optional[str] = None
