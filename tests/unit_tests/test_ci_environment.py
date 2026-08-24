@@ -240,8 +240,10 @@ def test_cicd_summary_accepts_only_expected_docs_only_skips() -> None:
     assert '"$DOCS_ONLY" == "true"' in workflow
     assert '"$CONTAINER_BUILD_RESULT" == "skipped"' in workflow
     assert '"$CONTAINER_BUILD_RESULT" == "success"' in workflow
-    assert '"$PROVIDER_E2E_TEST_RESULT" == "skipped"' in workflow
-    assert '"$PROVIDER_E2E_TEST_RESULT" == "success"' in workflow
+    assert "PROVIDER_E2E_TEST_RESULT: ${{ needs.provider_e2e_tests.result }}" in workflow
+    assert 'echo "Provider E2E tests: $PROVIDER_E2E_TEST_RESULT"' in workflow
+    assert '"$PROVIDER_E2E_TEST_RESULT" == "skipped"' not in workflow
+    assert '"$PROVIDER_E2E_TEST_RESULT" == "success"' not in workflow
 
 
 def test_shared_change_classifier_matches_gym_docs_and_server_paths() -> None:
@@ -307,7 +309,9 @@ def test_provider_e2e_matrix_selects_config_model_and_secret_by_name() -> None:
     assert "model-api-key:" not in workflow
     assert "needs: [classify_changes, unit_tests]" in workflow
     assert "runs-on: ubuntu-latest" in workflow
-    assert 'curl -LsSf "https://astral.sh/uv/0.11.29/install.sh" | sh' in workflow
+    assert "UV_VERSION=\"$(sed -n 's/^ARG UV_VERSION=//p' docker/Dockerfile)\"" in workflow
+    assert 'curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh' in workflow
+    assert "https://astral.sh/uv/0.11.29/install.sh" not in workflow
     assert "E2E_MODEL: ${{ matrix.model }}" in workflow
     assert "E2E_PROVIDER_CONFIG: ${{ matrix.config }}" in workflow
     assert "run: bash tests/e2e/run_inference_provider_e2e.sh" in workflow

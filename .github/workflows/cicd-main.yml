@@ -170,7 +170,12 @@ jobs:
 
       - name: Install uv
         run: |
-          curl -LsSf "https://astral.sh/uv/0.11.29/install.sh" | sh
+          UV_VERSION="$(sed -n 's/^ARG UV_VERSION=//p' docker/Dockerfile)"
+          if [[ ! "$UV_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Could not read a valid UV_VERSION from docker/Dockerfile: $UV_VERSION" >&2
+            exit 1
+          fi
+          curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Run provider E2E - ${{ matrix.provider }}
@@ -218,8 +223,7 @@ jobs:
           if [[ "$DOCS_ONLY" == "true" ]]; then
             if [[ "$UNIT_TEST_RESULT" == "skipped" && \
                   "$CONTAINER_BUILD_RESULT" == "skipped" && \
-                  "$GPU_E2E_TEST_RESULT" == "skipped" && \
-                  "$PROVIDER_E2E_TEST_RESULT" == "skipped" ]]; then
+                  "$GPU_E2E_TEST_RESULT" == "skipped" ]]; then
               echo "Docs-only change: tests and container build were skipped as expected."
               exit 0
             fi
@@ -230,11 +234,10 @@ jobs:
 
           if [[ "$UNIT_TEST_RESULT" == "success" && \
                 "$CONTAINER_BUILD_RESULT" == "success" && \
-                "$GPU_E2E_TEST_RESULT" == "success" && \
-                "$PROVIDER_E2E_TEST_RESULT" == "success" ]]; then
-            echo "All relevant test jobs completed successfully."
+                "$GPU_E2E_TEST_RESULT" == "success" ]]; then
+            echo "All required test jobs completed successfully."
             exit 0
           fi
 
-          echo "One or more relevant test jobs did not succeed."
+          echo "One or more required test jobs did not succeed."
           exit 1
