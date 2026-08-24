@@ -3,8 +3,10 @@
 
 from glob import glob
 from pathlib import Path
+from sys import stderr
 from tempfile import NamedTemporaryFile
 from time import time
+from traceback import format_exc
 from typing import Any, ClassVar, Dict, Optional
 
 from fastapi import Request
@@ -33,6 +35,8 @@ class TerminalBench21ResourcesServerConfig(BaseResourcesServerConfig):
     # Sandbox config
     sandbox_provider: str
     sandbox_config: Dict[str, Any]
+
+    debug: bool = False
 
 
 class TerminalBench21SeedSessionResponse(BaseSeedSessionResponse):
@@ -143,6 +147,8 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
 
             evaluation_completed = True
         except:
+            if self.config.debug:
+                print(f"Hit an exception downloading and converting reward: {format_exc()}", file=stderr)
             evaluation_completed = False
             reward = 0.0
 
