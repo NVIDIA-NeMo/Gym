@@ -24,11 +24,13 @@ Migrates the repo from agent-coupled datasets to the task_source design:
   phase 2 (--pin-benchmarks):  add an explicit `agent: <agent instance>` key to
                                `type: benchmark` dataset entries so the binding no
                                longer depends on which block declares the dataset.
-  phase 3 (--convert-fanout):  report-only for now. Detects same-RS multi-agent
-                               cross-product configs (genrm_compare,
-                               jailbreak_detection) and emits the proposed run-level
-                               fan-out YAML in the report. TODO: apply once the
-                               fan-out schema is finalized in the resolver PR.
+  phase 3 (--convert-fanout):  convert same-RS multi-agent cross-product configs
+                               (genrm_compare, jailbreak_detection): keep one dataset
+                               declaration (on the RS block), delete the per-agent
+                               duplicates, add a top-level `fan_out: {rs: [agents]}`
+                               key — the rollout config reads it from the merged dict
+                               and dispatches each row once per agent, matching
+                               today's behavior.
   phase 4 (--rewrite-jsonl):   strip `agent_ref` from committed dataset rows.
                                `--fold-task-data` additionally folds loose top-level
                                extras into `task_data` (off by default; schema pending
@@ -41,13 +43,15 @@ Migrates the repo from agent-coupled datasets to the task_source design:
 
 Special cases:
   * remote-backed datasets (gitlab/huggingface identifiers, file not on disk) are
-    skipped and reported — their uploaded rows need a separate re-upload pass or the
-    strip-on-load shim.
-  * legal_agent_bench: TODO stub (--fix-legal-agent-bench) — its harbor agent binds to
-    the RS only via ${...} interpolations; needs a structured resources_server edge.
-  * swe_agents_val/swe_agents_train alias configs: TODO stub (--drop-swe-aliases) —
-    they exist only to satisfy rows with baked-in agent_ref and are deleted once rows
-    are clean.
+    skipped and reported. No shim is needed: collate overwrites any stale agent_ref
+    when it dual-stamps, and the dispatch resolver honors legacy row agent_refs, so
+    remote rows keep working until they are re-uploaded clean.
+  * legal_agent_bench (--fix-legal-agent-bench): its harbor agent binds to the RS only
+    via ${...} interpolations; a structured resources_server edge is added so
+    inversion and reverify can see it.
+  * swe_agents_val/swe_agents_train alias configs (--drop-swe-aliases): they exist
+    only to satisfy rows with baked-in agent_ref and are deleted; the rows are
+    stripped in the same run.
 
 Default is a dry run: nothing is written except the report. Pass --apply to write.
 
@@ -111,6 +115,15 @@ DATA_GLOBS = [
     "benchmarks/*/data/*.jsonl",
     "responses_api_agents/*/data/*.jsonl",
 ]
+
+
+def _is_run_artifact(path: Path) -> bool:
+    """Rollout outputs and collate sidecars committed under data/ are run artifacts, not
+    datasets — they legitimately carry agent_ref (provenance) and must not be rewritten."""
+    name = path.name
+    return "_rollouts" in name or name.endswith("rollouts.jsonl") or "_prepare" in name
+
+
 # Row keys that are part of the (current or reserved) row contract rather than
 # task content. agent_ref is hashed OUT on both sides so the manifest is
 # invariant across the migration.
@@ -180,6 +193,32 @@ def _structured_rs_name(agent_cfg: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _merged_rs_impl_key(config_path: Path, rs_name: str) -> Optional[str]:
+    """The inner implementation key of resources-server instance `rs_name` as seen in this
+    config's MERGED view (config_paths chain + _inherit_from swaps applied).
+
+    Needed for `_inherit_from` stubs: the file contains `<rs_name>: {_inherit_from: base}` with
+    no resources_servers block of its own, so the implementation key only exists after the merge.
+    Returns None when the parse fails or the instance is not a resources server.
+    """
+    try:
+        from omegaconf import DictConfig, OmegaConf
+
+        from nemo_gym.discovery import _parse_no_environment_tolerating_unset_values
+        from nemo_gym.global_config import GlobalConfigDictParserConfig
+
+        initial = OmegaConf.merge(
+            OmegaConf.load(config_path), GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT
+        )
+        merged = _parse_no_environment_tolerating_unset_values(initial)
+        block = merged.get(rs_name)
+        if isinstance(block, DictConfig) and "resources_servers" in block:
+            return str(next(iter(block["resources_servers"])))
+    except Exception:
+        return None
+    return None
+
+
 def migrate_config_file(path: Path, report: Report, pin_benchmarks: bool, move_datasets: bool) -> bool:
     """Phases 1 + 2 for one file. Returns True if the parsed tree was modified."""
     cfg = load_yaml(path)
@@ -206,12 +245,20 @@ def migrate_config_file(path: Path, report: Report, pin_benchmarks: bool, move_d
         if rs_name is None:
             report.self_contained_left.append(f"{path}::{agent_name}")
             continue
-        if rs_name not in rs_by_name:
-            # Cross-file RS: the skeleton only rewrites same-file declarations.
+
+        rs_cfg = rs_by_name.get(rs_name)
+        if rs_cfg is None and rs_name in cfg and isinstance(cfg[rs_name], dict) and "_inherit_from" in cfg[rs_name]:
+            # An _inherit_from stub (benchmark manifests): the RS block only materializes at
+            # parse time; learn its implementation key from the merged view and create the block.
+            impl_key = _merged_rs_impl_key(path, rs_name)
+            if impl_key is not None:
+                rs_cfg = cfg[rs_name].setdefault("resources_servers", {}).setdefault(impl_key, {})
+        if rs_cfg is None:
+            # RS defined in another file: variants declare different datasets against a shared
+            # RS, so moving them there would collide. The declaration stays on the agent.
             report.cross_file_rs_skipped.append(f"{path}::{agent_name}->{rs_name}")
             continue
 
-        rs_cfg = rs_by_name[rs_name]
         existing = rs_cfg.get("datasets")
         if isinstance(existing, list):
             existing.extend(datasets)
@@ -228,9 +275,14 @@ def migrate_config_file(path: Path, report: Report, pin_benchmarks: bool, move_d
     return changed
 
 
-def propose_fanout(path: Path, report: Report) -> None:
-    """Phase 3 (report-only): emit a proposed run-level fan-out block for same-RS
-    multi-agent cross-product files. TODO: apply once the fan-out schema lands."""
+def convert_fanout(path: Path, report: Report, apply: bool) -> None:
+    """Phase 3: same-RS multi-agent cross-product files (genrm_compare, jailbreak_detection).
+
+    Today these run the same tasks under N agents by declaring the same jsonl N times, once per
+    agent alias. Conversion: keep ONE declaration (moved to the RS block), delete the duplicates,
+    and add a top-level `fan_out: {rs: [agents]}` key — the rollout config picks it up from the
+    merged dict and dispatches each row once per agent, which is exactly today's behavior.
+    """
     cfg = load_yaml(path)
     if not isinstance(cfg, dict):
         return
@@ -239,11 +291,94 @@ def propose_fanout(path: Path, report: Report) -> None:
         rs_name = _structured_rs_name(agent_cfg)
         if rs_name:
             by_rs.setdefault(rs_name, []).append(agent_name)
+
+    rs_by_name = _rs_entries(cfg)
+    changed = False
     for rs_name, agents in by_rs.items():
-        if len(agents) >= 2:
-            proposal = {"run": {"fan_out": {rs_name: agents}}}
-            report.fanout_proposals[f"{path}::{rs_name}"] = json.dumps(proposal)
-            report.todos.append(f"fan-out apply pending final schema: {path} rs={rs_name} agents={agents}")
+        if len(agents) < 2 or rs_name not in rs_by_name:
+            continue
+        # Collect the aliases' dataset declarations; keep one copy per distinct jsonl_fpath.
+        kept: Dict[str, Dict[str, Any]] = {}
+        for agent_name, agent_cfg in _agent_entries(cfg):
+            if _structured_rs_name(agent_cfg) != rs_name:
+                continue
+            for entry in agent_cfg.get("datasets") or []:
+                if isinstance(entry, dict) and entry.get("jsonl_fpath"):
+                    kept.setdefault(str(entry["jsonl_fpath"]), entry)
+            if "datasets" in agent_cfg:
+                del agent_cfg["datasets"]
+                changed = True
+        if kept:
+            rs_cfg = rs_by_name[rs_name]
+            existing = rs_cfg.get("datasets")
+            if isinstance(existing, list):
+                existing.extend(kept.values())
+            else:
+                rs_cfg["datasets"] = list(kept.values())
+        cfg["fan_out"] = {**(cfg.get("fan_out") or {}), rs_name: agents}
+        report.fanout_proposals[f"{path}::{rs_name}"] = json.dumps({"fan_out": {rs_name: agents}})
+        changed = True
+
+    if changed:
+        report.configs_changed.append(str(path))
+        if apply:
+            dump_yaml(cfg, path)
+
+
+LEGAL_AGENT_BENCH_EDGES = {
+    # file -> {agent top-level key: resources-server instance name to reference}
+    "resources_servers/legal_agent_bench/configs/legal_agent_bench.yaml": {
+        "legal_agent_bench_harbor_agent": "legal_agent_bench",
+    },
+    "benchmarks/legal_agent_bench/config.yaml": {
+        "legal_agent_bench_benchmark_harbor_agent": "legal_agent_bench_benchmark_resources_server",
+    },
+}
+
+
+def fix_legal_agent_bench(repo_root: Path, report: Report, apply: bool) -> None:
+    """The harbor agent binds to its RS only via ${...} interpolations; give it the structured
+    resources_server edge every other agent has, so inversion and reverify can see it."""
+    for rel, edges in LEGAL_AGENT_BENCH_EDGES.items():
+        path = repo_root / rel
+        if not path.is_file():
+            report.todos.append(f"legal_agent_bench fix: {rel} not found")
+            continue
+        cfg = load_yaml(path)
+        changed = False
+        for agent_key, rs_name in edges.items():
+            block = cfg.get(agent_key) if isinstance(cfg, dict) else None
+            if not isinstance(block, dict) or "responses_api_agents" not in block:
+                report.todos.append(f"legal_agent_bench fix: {rel}::{agent_key} not an agent block")
+                continue
+            inner = list(block["responses_api_agents"].values())[0]
+            if isinstance(inner, dict) and "resources_server" not in inner:
+                inner["resources_server"] = {"type": "resources_servers", "name": rs_name}
+                changed = True
+        if changed:
+            report.configs_changed.append(str(path))
+            if apply:
+                dump_yaml(cfg, path)
+
+
+SWE_ALIAS_KEYS = ("swe_agents_val", "swe_agents_train")
+
+
+def drop_swe_aliases(repo_root: Path, report: Report, apply: bool) -> None:
+    """The swe_agents_val/swe_agents_train alias instances exist only so rows with baked-in
+    agent_ref names resolve. Rows are stripped in this migration, so the aliases go."""
+    for path in sorted((repo_root / "responses_api_agents" / "swe_agents" / "configs").glob("*.yaml")):
+        cfg = load_yaml(path)
+        if not isinstance(cfg, dict):
+            continue
+        removed = [key for key in SWE_ALIAS_KEYS if key in cfg]
+        for key in removed:
+            del cfg[key]
+        if removed:
+            report.configs_changed.append(str(path))
+            report.todos.append(f"dropped swe aliases {removed} from {path}")
+            if apply:
+                dump_yaml(cfg, path)
 
 
 def content_hash(row: Dict[str, Any]) -> str:
@@ -330,8 +465,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--fold-task-data", action="store_true", help="Fold loose extras into task_data (schema pending RFC)."
     )
-    parser.add_argument("--fix-legal-agent-bench", action="store_true", help="TODO stub.")
-    parser.add_argument("--drop-swe-aliases", action="store_true", help="TODO stub.")
+    parser.add_argument("--fix-legal-agent-bench", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--drop-swe-aliases", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args(argv)
 
     report = Report(dry_run=not args.apply)
@@ -344,28 +479,30 @@ def main(argv: Optional[List[str]] = None) -> int:
     config_paths = sorted({p for g in CONFIG_GLOBS for p in args.repo_root.glob(g) if p.is_file()})
     report.configs_scanned = len(config_paths)
     collect_remote_backed(config_paths, report, args.repo_root)
+    if args.fix_legal_agent_bench:
+        # Before the sweep, so the added edge lets the sweep move those datasets too.
+        fix_legal_agent_bench(args.repo_root, report, apply=args.apply)
     for path in config_paths:
         try:
             if args.convert_fanout and any(h in str(path) for h in FANOUT_CONFIG_HINTS):
-                propose_fanout(path, report)
-                continue  # cross-product files are converted by hand once the schema lands
+                convert_fanout(path, report, apply=args.apply)
+                continue
             migrate_config_file(path, report, pin_benchmarks=args.pin_benchmarks, move_datasets=args.move_datasets)
         except Exception as exc:  # keep the sweep going; surface in report
             report.todos.append(f"config migration failed: {path}: {exc}")
+    if args.drop_swe_aliases:
+        drop_swe_aliases(args.repo_root, report, apply=args.apply)
 
     if args.rewrite_jsonl:
-        data_paths = sorted({p for g in DATA_GLOBS for p in args.repo_root.glob(g) if p.is_file()})
+        data_paths = sorted(
+            {p for g in DATA_GLOBS for p in args.repo_root.glob(g) if p.is_file() and not _is_run_artifact(p)}
+        )
         report.jsonl_scanned = len(data_paths)
         for path in data_paths:
             try:
                 rewrite_jsonl_file(path, report, fold_task_data=args.fold_task_data)
             except Exception as exc:
                 report.todos.append(f"jsonl rewrite failed: {path}: {exc}")
-
-    if args.fix_legal_agent_bench:
-        report.todos.append("TODO: add structured resources_server edge to legal_agent_bench harbor agent")
-    if args.drop_swe_aliases:
-        report.todos.append("TODO: delete swe_agents_val/swe_agents_train alias configs once rows are clean")
 
     args.report.write_text(report.to_json())
     print(
