@@ -113,6 +113,22 @@ Start with `--limit 1`. A single rollout builds an app and then runs a full comp
 per test plan; wall-clock is tens of minutes and the box needs headroom for
 `max_concurrent_test_plans` simultaneous Postgres + app + Playwright stacks.
 
+## Validation
+
+Run end to end on a Docker host. A single `notes/mvp` task graded 3/3 test plans, and the
+reward tracks model capability rather than merely completing:
+
+| policy model | reward | steps passed | outcome |
+| --- | --- | --- | --- |
+| weaker | 0.0 | 0/19 | app built but unreachable (missing build output) |
+| stronger | 1.0 | 19/19 | full marks on all three plans |
+
+Same code, dataset and grader agents in both cases. `data/example_rollouts.jsonl` holds the
+scoring run.
+
+`verified: false` still stands: that flag means baselined and reviewed, which needs a
+profiling sweep across many tasks, not one.
+
 ## P0 limitations
 
 These are known and deliberate; each is a follow-up rather than a bug.
