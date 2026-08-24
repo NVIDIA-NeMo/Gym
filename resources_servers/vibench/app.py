@@ -42,7 +42,6 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 import tarfile
 import tempfile
@@ -182,6 +181,10 @@ class VibenchVerifyResponse(BaseMultiRewardVerifyResponse):
 class VibenchResourcesServer(SimpleResourcesServer):
     config: VibenchResourcesServerConfig
 
+    # Derived once per server: env_creator is a subprocess and the result is identical for
+    # every plan, so recomputing it per grading call is pure overhead.
+    _cached_grader_env: Optional[Dict[str, str]] = None
+
     # ---------------------------------------------------------------- helpers
 
     @property
@@ -225,7 +228,7 @@ class VibenchResourcesServer(SimpleResourcesServer):
                         raise ValueError(f"Refusing link escaping the app dir: {member.name!r}")
             tar.extractall(dest)
 
-    def _grader_env(self) -> Dict[str, str]:
+    async def _grader_env(self) -> Dict[str, str]:
         """Environment for ViBench's grading subprocesses.
 
         The compose template reads AGENT_SEEDING_LLM_* / AGENT_EVALUATION_LLM_* straight out
@@ -238,6 +241,9 @@ class VibenchResourcesServer(SimpleResourcesServer):
         env_creator is invoked in a subprocess so ViBench's module never has to import into
         this process. Values are secrets and are never logged.
         """
+        if self._cached_grader_env is not None:
+            return dict(self._cached_grader_env)
+
         env = dict(os.environ)
         env_file = self.config.vibench_env_file
         if env_file:
@@ -253,21 +259,25 @@ class VibenchResourcesServer(SimpleResourcesServer):
             "import json, sys; sys.path.insert(0, %r); import env_creator; "
             "print(json.dumps(env_creator.get_env_dict(%r)))" % (str(scripts_dir), self.config.grader_model_name)
         )
-        try:
-            result = subprocess.run(
-                [sys.executable, "-c", probe],
-                cwd=str(self._repo_root),
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=120,
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            probe,
+            cwd=str(self._repo_root),
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+        if proc.returncode != 0:
+            # Failing loudly matters: degrading to an empty grader env makes every plan die
+            # inside the container with "LLM API KEYS is not set", which points debugging at
+            # credentials rather than at this call.
+            raise RuntimeError(
+                f"env_creator failed (rc={proc.returncode}) for grader_model_name="
+                f"{self.config.grader_model_name!r}: {stderr.decode(errors='replace')[-500:]}"
             )
-            if result.returncode == 0:
-                env.update({k: str(v) for k, v in json.loads(result.stdout).items() if v is not None})
-            else:
-                print(f"env_creator failed (rc={result.returncode}): {result.stderr[-500:]}", file=sys.stderr)
-        except Exception:
-            print("Failed to derive grader env from env_creator", format_exc(), file=sys.stderr)
+        env.update({k: str(v) for k, v in json.loads(stdout).items() if v is not None})
 
         # ViBench's in-container agent validates AGENT_LLM_*, AGENT_SEEDING_LLM_* and
         # AGENT_EVALUATION_LLM_* together and refuses to start if any is unset
@@ -282,6 +292,7 @@ class VibenchResourcesServer(SimpleResourcesServer):
                 if seeded:
                     env[f"AGENT_LLM_{suffix}"] = seeded
 
+        self._cached_grader_env = dict(env)
         return env
 
     async def _run_vibench_script(self, cmd: List[str]) -> tuple[int, str]:
@@ -294,7 +305,7 @@ class VibenchResourcesServer(SimpleResourcesServer):
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=str(self._repo_root),
-                env=self._grader_env(),
+                env=await self._grader_env(),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )
@@ -308,7 +319,8 @@ class VibenchResourcesServer(SimpleResourcesServer):
             await proc.wait()
             return 1, f"timed out after {self.config.evaluation_timeout_s}s: {' '.join(cmd)}"
 
-        return proc.returncode or 0, (stdout or b"").decode(errors="replace")
+        code = proc.returncode if proc.returncode is not None else 1
+        return code, (stdout or b"").decode(errors="replace")
 
     async def _grade_one_test_plan(
         self,
@@ -427,15 +439,20 @@ class VibenchResourcesServer(SimpleResourcesServer):
             # The agent could not produce a tarball at all (sandbox died, harness crashed).
             build_failed = True
         else:
+            # Resolve first and never touch the raw path: deleting an unvalidated,
+            # agent-supplied path would remove arbitrary files even when the path was
+            # rejected for reading.
+            artifact: Optional[Path] = None
             try:
-                self._unpack_artifact(self._resolve_artifact(body.artifact_path), app_dir)
+                artifact = self._resolve_artifact(body.artifact_path)
+                self._unpack_artifact(artifact, app_dir)
             except Exception:
                 print(f"Failed to unpack artifact for {body.app}/{body.artifact}", format_exc(), file=sys.stderr)
                 build_failed = True
             finally:
-                if self.config.remove_artifact_after_grading:
+                if artifact is not None and self.config.remove_artifact_after_grading:
                     with suppress(Exception):
-                        Path(body.artifact_path).unlink(missing_ok=True)
+                        artifact.unlink(missing_ok=True)
 
         # An agent that produced nothing runnable is a build failure, not a 0-scoring app.
         if not build_failed and not (app_dir / "package.json").exists():

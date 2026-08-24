@@ -123,6 +123,19 @@ class TestArtifactUnpacking:
             server._unpack_artifact(archive, dest)
         assert not (tmp_path / "escaped.txt").exists()
 
+    @pytest.mark.asyncio
+    async def test_rejected_artifact_path_is_not_deleted(self, tmp_path):
+        """A rejected path must not be unlinked: deleting an unvalidated, agent-supplied
+        path is arbitrary file deletion, and the rejection branch used to do exactly that."""
+        server = make_server(tmp_path)
+        victim = tmp_path / "IMPORTANT_FILE"
+        victim.write_text("do not delete")
+
+        response = await server.verify(_FakeRequest(), make_verify_request(artifact_path=str(victim)))
+
+        assert response.build_failed is True
+        assert victim.exists(), "verify deleted a file outside artifact_dir"
+
     def test_rejects_artifact_path_outside_artifact_dir(self, tmp_path):
         server = make_server(tmp_path)
         # A compromised agent must not be able to point the verifier at arbitrary host files.
@@ -130,44 +143,91 @@ class TestArtifactUnpacking:
             server._resolve_artifact("/etc/passwd")
 
 
+class _FakeProc:
+    """Stand-in for asyncio.create_subprocess_exec's return value."""
+
+    def __init__(self, returncode: int, stdout: str = "", stderr: str = ""):
+        self.returncode = returncode
+        self._out = stdout.encode()
+        self._err = stderr.encode()
+
+    async def communicate(self):
+        return self._out, self._err
+
+
+def _patch_env_creator(monkeypatch, proc: _FakeProc) -> None:
+    async def fake_exec(*a, **k):
+        return proc
+
+    monkeypatch.setattr("resources_servers.vibench.app.asyncio.create_subprocess_exec", fake_exec)
+
+
 class TestGraderEnv:
-    def test_env_file_entries_are_loaded(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_env_file_entries_are_loaded(self, tmp_path, monkeypatch):
         env_file = tmp_path / ".env"
         env_file.write_text('# comment\nPROVIDER_KEY="secret-value"\n\nBLANK\n')
         server = make_server(tmp_path, vibench_env_file=str(env_file))
-        env = server._grader_env()
+        _patch_env_creator(monkeypatch, _FakeProc(0, "{}"))
+
+        env = await server._grader_env()
+
         assert env["PROVIDER_KEY"] == "secret-value"
         assert "BLANK" not in env
 
-    def test_env_creator_output_is_merged(self, tmp_path, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_env_creator_output_is_merged(self, tmp_path, monkeypatch):
         """The grader agents get their model and tool list from env_creator, not the .env."""
         server = make_server(tmp_path)
         derived = {
             "AGENT_SEEDING_LLM_MODEL": "some/seeding-model",
             "AGENT_SEEDING_LLM_TOOLS": "TerminalTool,FileEditorTool",
+            "AGENT_SEEDING_LLM_API_KEY": "k",
         }
+        _patch_env_creator(monkeypatch, _FakeProc(0, json.dumps(derived)))
 
-        class _Result:
-            returncode = 0
-            stdout = json.dumps(derived)
-            stderr = ""
+        env = await server._grader_env()
 
-        monkeypatch.setattr("resources_servers.vibench.app.subprocess.run", lambda *a, **k: _Result())
-        env = server._grader_env()
         assert env["AGENT_SEEDING_LLM_MODEL"] == "some/seeding-model"
         assert env["AGENT_SEEDING_LLM_TOOLS"] == "TerminalTool,FileEditorTool"
 
-    def test_env_creator_failure_does_not_raise(self, tmp_path, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_unset_builder_slot_is_filled_from_seeding(self, tmp_path, monkeypatch):
+        """ViBench validates the builder slot even though grading never uses it."""
         server = make_server(tmp_path)
+        derived = {"AGENT_SEEDING_LLM_API_KEY": "k", "AGENT_SEEDING_LLM_MODEL": "m"}
+        _patch_env_creator(monkeypatch, _FakeProc(0, json.dumps(derived)))
 
-        class _Result:
-            returncode = 1
-            stdout = ""
-            stderr = "boom"
+        env = await server._grader_env()
 
-        monkeypatch.setattr("resources_servers.vibench.app.subprocess.run", lambda *a, **k: _Result())
-        # A broken ViBench checkout should degrade to a failed grade, not crash the server.
-        assert isinstance(server._grader_env(), dict)
+        assert env["AGENT_LLM_API_KEY"] == "k"
+        assert env["AGENT_LLM_MODEL"] == "m"
+
+    @pytest.mark.asyncio
+    async def test_env_creator_failure_raises(self, tmp_path, monkeypatch):
+        """Degrading to an empty env sends debugging to credentials instead of here."""
+        server = make_server(tmp_path)
+        _patch_env_creator(monkeypatch, _FakeProc(1, "", "no such model key"))
+
+        with pytest.raises(RuntimeError, match="env_creator failed"):
+            await server._grader_env()
+
+    @pytest.mark.asyncio
+    async def test_env_is_derived_once_and_cached(self, tmp_path, monkeypatch):
+        server = make_server(tmp_path)
+        calls = []
+
+        async def fake_exec(*a, **k):
+            calls.append(1)
+            return _FakeProc(0, json.dumps({"AGENT_SEEDING_LLM_API_KEY": "k"}))
+
+        monkeypatch.setattr("resources_servers.vibench.app.asyncio.create_subprocess_exec", fake_exec)
+
+        await server._grader_env()
+        await server._grader_env()
+
+        # Six grading calls per rollout must not mean six subprocesses.
+        assert len(calls) == 1
 
 
 class TestVerifyRewardAggregation:
