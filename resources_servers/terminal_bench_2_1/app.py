@@ -8,6 +8,7 @@ from typing import Any, ClassVar, Dict, Optional
 
 from fastapi import Request
 
+from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseSeedSessionResponse,
@@ -97,11 +98,18 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         return TerminalBench21SeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)
 
     async def _upload_folder(self, sandbox: AsyncSandbox, local_dirpath: Path, target_dirpath: str) -> None:
-        for file in glob(str(local_dirpath / "**"), recursive=True):
-            await sandbox.upload(
-                local_path=local_dirpath / file,
-                remote_path=f"{target_dirpath}/{file}",
-            )
+        if not local_dirpath.is_absolute():
+            local_dirpath = PARENT_DIR / local_dirpath
+
+        for file in glob("**", root_dir=str(local_dirpath), recursive=True):
+            local_fpath = local_dirpath / file
+            if not local_fpath.is_file():
+                continue
+
+            target_fpath = f"{target_dirpath}/{file}"
+            mkdir_result = await sandbox.exec(f"mkdir -p {Path(target_fpath).parent}")
+            assert mkdir_result.return_code == 0, mkdir_result
+            await sandbox.upload(local_path=local_fpath, remote_path=target_fpath)
 
     async def verify(self, request: Request, body: TerminalBench21VerifyRequest) -> TerminalBench21VerifyResponse:
         task_folder = Path(body.task_folder)
