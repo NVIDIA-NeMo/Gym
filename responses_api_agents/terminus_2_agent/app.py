@@ -32,6 +32,7 @@ from typing import Any, Literal, Optional
 from uuid import uuid4
 
 from fastapi import Request
+from harbor.agents.terminus_2.terminus_2 import Terminus2
 from harbor.agents.terminus_2.tmux_session import TmuxSession
 from harbor.environments.base import ExecResult
 from harbor.models.agent.context import AgentContext
@@ -44,12 +45,15 @@ from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    NeMoGymResponseOutputTokensDetails,
+    NeMoGymResponseUsage,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
-from responses_api_agents.harbor_agent.custom_agents.terminus_2_nemo_gym import Terminus2NemoGym
-from responses_api_agents.harbor_agent.utils import HarborAgentUtils
+from responses_api_agents.terminus_2_agent.llm import NemoGymLLM
+from responses_api_agents.terminus_2_agent.output import trajectory_to_responses
 
 
 LOG = logging.getLogger(__name__)
@@ -172,7 +176,7 @@ class LocalTmuxSession(TmuxSession):
         )
 
 
-class StandaloneTerminus2(Terminus2NemoGym):
+class StandaloneTerminus2(Terminus2):
     """Run Terminus-2 in a unique tmux session."""
 
     async def _handle_llm_interaction(self, *args: Any, **kwargs: Any) -> tuple[Any, ...]:
@@ -187,6 +191,47 @@ class StandaloneTerminus2(Terminus2NemoGym):
     @property
     def finished_naturally(self) -> bool:
         return getattr(self, "_consecutive_completion_claims", 0) >= 2
+
+    async def run(self, instruction: str, environment: LocalEnvironment, context: AgentContext) -> None:
+        """Keep completed turns when Terminus fails so Gym can score the partial trajectory."""
+        self.context_length_exceeded = False
+        try:
+            await super().run(instruction, environment, context)
+        except Exception as exc:
+            self.logger.info("Agent error: %s: %s. Returning completed turns.", type(exc).__name__, exc)
+        finally:
+            self._attach_routed_experts_to_trajectory()
+            llm = getattr(self, "_llm", None)
+            if isinstance(llm, NemoGymLLM):
+                self.context_length_exceeded = llm.context_length_exceeded
+                try:
+                    await llm.aclose()
+                except Exception:
+                    pass
+
+    def _attach_routed_experts_to_trajectory(self) -> None:
+        llm = getattr(self, "_llm", None)
+        if not isinstance(llm, NemoGymLLM):
+            return
+
+        modified = False
+        for step in getattr(self, "_trajectory_steps", []):
+            if getattr(step, "source", None) != "agent" or step.metrics is None:
+                continue
+            routed_experts = llm.pop_routed_experts_for_rollout_details(
+                step.metrics.prompt_token_ids,
+                step.metrics.completion_token_ids,
+                step.metrics.logprobs,
+            )
+            if routed_experts is None:
+                continue
+            extra = step.metrics.extra or {}
+            extra["routed_experts"] = routed_experts
+            step.metrics.extra = extra
+            modified = True
+
+        if modified:
+            self._dump_trajectory()
 
     async def setup(self, environment: LocalEnvironment) -> None:
         self._consecutive_completion_claims = 0
@@ -300,9 +345,18 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         api_base: str,
     ) -> StandaloneTerminus2:
         temperature = body.temperature if body.temperature is not None else self.config.temperature
+        model_name = self._model_name(body)
+        llm = NemoGymLLM(
+            model_name=model_name,
+            api_base=api_base,
+            collect_rollout_details=self.config.collect_rollout_details,
+            model_info=self.config.model_info,
+            responses_create_params=body.model_dump(exclude_none=True),
+            timeout_sec=self.config.model_timeout_sec,
+        )
         return StandaloneTerminus2(
             logs_dir=logs_dir,
-            model_name=self._model_name(body),
+            model_name=model_name,
             max_turns=self.config.max_turns,
             parser_name=self.config.parser_name,
             api_base=api_base,
@@ -319,8 +373,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             store_all_messages=self.config.store_all_messages,
             record_terminal_session=self.config.record_terminal_session,
             interleaved_thinking=self.config.interleaved_thinking,
-            responses_create_params=body.model_dump(exclude_none=True),
-            nemo_model_server_timeout_sec=self.config.model_timeout_sec,
+            llm=llm,
         )
 
     async def _run_terminus(
@@ -354,9 +407,8 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                 await agent.close(environment)
 
             trajectory_path = logs_dir / "trajectory.json"
-            flags_path = logs_dir / "agent_error_flags.json"
             trajectory = json.loads(trajectory_path.read_text()) if trajectory_path.exists() else {"steps": []}
-            flags = json.loads(flags_path.read_text()) if flags_path.exists() else {}
+            flags = {"context_length_exceeded": agent.context_length_exceeded}
             return trajectory, context, flags, timed_out, agent.finished_naturally
         finally:
             if not self.config.keep_logs:
@@ -366,7 +418,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
 
     async def responses(
         self,
-        request: Optional[Request],
+        request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
         body = body.model_copy(deep=True)
@@ -387,7 +439,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             trajectory, context, flags, timed_out, finished_naturally = await self._run_terminus(
                 body, instruction, api_base
             )
-        output_items = HarborAgentUtils.trajectory_to_responses(trajectory)
+        output_items = trajectory_to_responses(trajectory)
         if not output_items:
             output_items = [
                 NeMoGymResponseOutputMessage(
@@ -399,41 +451,52 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                 ).model_dump()
             ]
 
-        usage = HarborAgentUtils.extract_usage(
-            {
-                "agent_result": {
-                    "n_input_tokens": context.n_input_tokens or 0,
-                    "n_output_tokens": context.n_output_tokens or 0,
-                    "n_cache_tokens": context.n_cache_tokens or 0,
-                }
+        final_metrics = trajectory.get("final_metrics", {})
+        input_tokens = final_metrics.get("total_prompt_tokens", 0)
+        output_tokens = final_metrics.get("total_completion_tokens", 0)
+        cached_tokens = final_metrics.get("total_cached_tokens", 0)
+        if input_tokens == 0 and output_tokens == 0:
+            input_tokens = context.n_input_tokens or 0
+            output_tokens = context.n_output_tokens or 0
+            cached_tokens = context.n_cache_tokens or 0
+
+        return NeMoGymResponse(
+            id=f"resp_{uuid4().hex}",
+            created_at=int(time()),
+            model=self._model_name(body),
+            object="response",
+            output=output_items,
+            parallel_tool_calls=False,
+            temperature=body.temperature,
+            top_p=body.top_p,
+            tool_choice=body.tool_choice,
+            tools=body.tools,
+            background=False,
+            reasoning={"effort": None, "generate_summary": None, "summary": None},
+            service_tier="default",
+            status="completed",
+            text={"format": {"type": "text"}, "verbosity": "medium"},
+            top_logprobs=0,
+            truncation="disabled",
+            store=True,
+            usage=NeMoGymResponseUsage(
+                input_tokens=input_tokens,
+                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=cached_tokens),
+                output_tokens=output_tokens,
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+                total_tokens=input_tokens + output_tokens,
+            ),
+            metadata={
+                "terminus_2": json.dumps(
+                    {
+                        "context": context.model_dump(mode="json"),
+                        "agent_error_flags": flags,
+                        "timed_out": timed_out,
+                        "finished_naturally": finished_naturally,
+                    }
+                )
             },
-            trajectory,
         )
-        response = HarborAgentUtils.get_default_response_object()
-        response.update(
-            {
-                "created_at": int(time()),
-                "model": self._model_name(body),
-                "output": output_items,
-                "parallel_tool_calls": False,
-                "temperature": body.temperature,
-                "top_p": body.top_p,
-                "tool_choice": body.tool_choice,
-                "tools": body.tools,
-                "usage": usage,
-                "metadata": {
-                    "terminus_2": json.dumps(
-                        {
-                            "context": context.model_dump(mode="json"),
-                            "agent_error_flags": flags,
-                            "timed_out": timed_out,
-                            "finished_naturally": finished_naturally,
-                        }
-                    )
-                },
-            }
-        )
-        return NeMoGymResponse.model_validate(response)
 
     async def run(self, request: Request, body: Terminus2AgentRunRequest) -> Terminus2AgentVerifyResponse:
         cookies = request.cookies

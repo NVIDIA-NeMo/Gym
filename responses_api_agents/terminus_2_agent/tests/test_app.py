@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import yaml
+from harbor.agents.terminus_2.terminus_2 import Terminus2
 from harbor.models.agent.context import AgentContext
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -18,9 +19,9 @@ from responses_api_agents.terminus_2_agent.app import (
     StandaloneTerminus2,
     Terminus2Agent,
     Terminus2AgentConfig,
-    Terminus2NemoGym,
     _extract_instruction,
 )
+from responses_api_agents.terminus_2_agent.output import trajectory_to_responses
 
 
 def _config(**kwargs) -> Terminus2AgentConfig:
@@ -117,17 +118,43 @@ class TestStandaloneTerminus2:
         non_completion = ([], False, "", "analysis", "plan", MagicMock())
         completion = ([], True, "", "analysis", "plan", MagicMock())
 
-        with patch.object(
-            Terminus2NemoGym, "_handle_llm_interaction", new=AsyncMock(side_effect=[completion, completion])
-        ):
+        with patch.object(Terminus2, "_handle_llm_interaction", new=AsyncMock(side_effect=[completion, completion])):
             await agent._handle_llm_interaction()
             assert agent.finished_naturally is False
             await agent._handle_llm_interaction()
             assert agent.finished_naturally is True
 
-        with patch.object(Terminus2NemoGym, "_handle_llm_interaction", new=AsyncMock(return_value=non_completion)):
+        with patch.object(Terminus2, "_handle_llm_interaction", new=AsyncMock(return_value=non_completion)):
             await agent._handle_llm_interaction()
         assert agent.finished_naturally is False
+
+
+class TestTrajectoryOutput:
+    def test_raw_content_preserves_training_fields_and_commands(self) -> None:
+        trajectory = {
+            "steps": [
+                {
+                    "source": "agent",
+                    "message": 'prefix {"commands":[{"keystrokes":"ls\\n","duration":0.1}]} suffix',
+                    "reasoning_content": "inspect",
+                    "metrics": {
+                        "prompt_token_ids": [1],
+                        "completion_token_ids": [2],
+                        "logprobs": [-0.1],
+                        "extra": {"routed_experts": [[[3]]]},
+                    },
+                    "observation": {"results": [{"content": "file.txt"}]},
+                }
+            ]
+        }
+
+        output = trajectory_to_responses(trajectory)
+
+        assert [item["type"] for item in output] == ["message", "function_call", "function_call_output"]
+        assert output[0]["content"][0]["text"].startswith("<think>inspect</think>")
+        assert output[0]["generation_token_ids"] == [2]
+        assert output[0]["routed_experts"] == [[[3]]]
+        assert output[1]["call_id"] == output[2]["call_id"] == "call_0_1"
 
 
 class TestResponses:
@@ -227,6 +254,9 @@ class TestResponses:
 
 
 class TestConfig:
+    def test_webserver_routes_build(self) -> None:
+        _make_agent().setup_webserver()
+
     def test_defaults(self) -> None:
         config = _config()
         assert config.parser_name == "json"
