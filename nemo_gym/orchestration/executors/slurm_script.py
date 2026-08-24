@@ -30,6 +30,8 @@ from nemo_gym.orchestration.executors.script_templates import (
     render_driver_entrypoint,
     render_gym_cmd,
     render_health_check,
+    render_ray_prelude,
+    render_vllm_ray_symmetric_run,
 )
 from nemo_gym.orchestration.executors.utils import flatten_run_args
 
@@ -48,22 +50,6 @@ _SCRIPT_TEMPLATE = """\
 
 {driver_command}
 """
-
-
-# Resolves the head node from Slurm's node list, mirroring scripts/sbatch_base.sh.
-# Runs once in the main sbatch shell (before any srun step) so $SLURM_JOB_NODELIST is available.
-# Used by both multi-node code paths below: HEAD_NODE_IP for vLLM's own --data-parallel-address
-# (data-parallel spanning nodes), RAY_HEAD_NODE_IP for `ray start`/`ray symmetric-run` (tensor/
-# pipeline-parallel spanning nodes).
-_RAY_PRELUDE = """\
-# Resolve the head node IP for multi-node vLLM services (distributed_backend: ray).
-nodes=$(scontrol show hostnames "$SLURM_JOB_NODELIST")
-nodes_array=($nodes)
-head_node_hostname=${nodes_array[0]}
-head_node_ip=$(getent hosts "$head_node_hostname" | awk '{print $1}')
-export HEAD_NODE_IP="$head_node_ip"
-export RAY_HEAD_NODE_IP="$head_node_ip:6379"
-echo "Head node IP address: $HEAD_NODE_IP\""""
 
 
 def _render_directives(compute: SlurmComputeConfig, remote_bench_dir: Path, benchmark_name: str) -> str:
@@ -155,7 +141,7 @@ def _build_vllm_command(service: VllmServiceConfig) -> str:
     return cmd
 
 
-def _build_vllm_multi_node_tp_command(service: VllmServiceConfig, total_nodes: int) -> str:
+def _build_vllm_single_instance_multi_node_command(service: VllmServiceConfig, total_nodes: int) -> str:
     # A single instance's tensor/pipeline-parallel footprint spans nodes. Uses vLLM's own Ray
     # *core* executor (--distributed-executor-backend ray) - not the ray.serve library, no Serve
     # deployment/ingress/HTTP proxy is involved.
@@ -163,34 +149,15 @@ def _build_vllm_multi_node_tp_command(service: VllmServiceConfig, total_nodes: i
     resource_flags = (
         "--num-cpus=${SLURM_CPUS_PER_TASK:-$SLURM_CPUS_ON_NODE} --num-gpus=${SLURM_GPUS_PER_TASK:-$SLURM_GPUS_ON_NODE}"
     )
-    # ray symmetric-run starts/joins a Ray cluster across every task and runs the entrypoint
-    # only on the elected head node, mirroring scripts/sbatch_base.sh. It requires Ray >= 2.50, so
-    # containers with an older pin fall back to manually starting head/worker Ray processes, keyed
-    # on Slurm's per-node task rank ($SLURM_NODEID). vLLM's Ray executor blocks on placement-group
-    # scheduling until every node's GPUs join, so the fallback needs no separate cluster-ready wait.
     # Model-serving images (e.g. vllm/vllm-openai) don't necessarily bundle the ray CLI - vLLM only
     # needs ray as a runtime dependency when the ray executor backend is actually selected - so
-    # install it on the fly if it's missing before relying on either code path above.
-    return (
-        "bash -lc '\n"
-        '    command -v ray >/dev/null 2>&1 || pip install -q "ray[default]"\n'
-        "    if ray symmetric-run --help >/dev/null 2>&1; then\n"
-        "        ray symmetric-run \\\n"
-        '            --address "$RAY_HEAD_NODE_IP" \\\n'
-        f"            --min-nodes {total_nodes} \\\n"
-        f"            {resource_flags} \\\n"
-        f"            -- {inner_cmd}\n"
-        '    elif [ "$SLURM_NODEID" = "0" ]; then\n'
-        f"        ray start --head --port=6379 {resource_flags}\n"
-        f"        {inner_cmd}\n"
-        "    else\n"
-        f'        ray start --address="$RAY_HEAD_NODE_IP" {resource_flags} --block\n'
-        "    fi\n"
-        "'"
-    )
+    # render_vllm_ray_symmetric_run installs it on the fly if it's missing. vLLM's Ray executor
+    # blocks on placement-group scheduling until every node's GPUs join, so the fallback path there
+    # needs no separate cluster-ready wait.
+    return render_vllm_ray_symmetric_run(inner_cmd, total_nodes, resource_flags)
 
 
-def _build_vllm_multi_node_dp_command(service: VllmServiceConfig, total_nodes: int) -> str:
+def _build_vllm_multi_instance_multi_node_command(service: VllmServiceConfig, total_nodes: int) -> str:
     # Data-parallel replicas span nodes. vLLM's Ray-based DP auto-placement doesn't spread ranks
     # across physical nodes - launching a single `vllm serve --data-parallel-size N` from one node
     # only sees that node's own GPUs when placing DP ranks. Real multi-node DP instead needs one
@@ -198,11 +165,8 @@ def _build_vllm_multi_node_dp_command(service: VllmServiceConfig, total_nodes: i
     # worker nodes run `--headless` with a --data-parallel-start-rank offset. This is vLLM's
     # documented multi-node data-parallel deployment pattern and doesn't use Ray at all - each
     # node's tensor-parallel ranks stay local via vLLM's default (mp) executor backend.
-    if service.number_of_instances % total_nodes != 0:
-        raise ValueError(
-            f"number_of_instances ({service.number_of_instances}) must be evenly divisible by the number of "
-            f"nodes ({total_nodes}) for multi-node data-parallel deployment."
-        )
+    # number_of_instances is guaranteed evenly divisible by total_nodes here - api.py's
+    # SubmitConfig validation enforces this before build_sbatch_script is ever called.
     dp_size_local = service.number_of_instances // total_nodes
     common = _vllm_base_flags(service)
     dp_flags = (
@@ -233,8 +197,8 @@ def _build_vllm_multi_node_dp_command(service: VllmServiceConfig, total_nodes: i
 
 def _build_vllm_ray_command(service: VllmServiceConfig, total_nodes: int) -> str:
     if service.number_of_instances > 1:
-        return _build_vllm_multi_node_dp_command(service, total_nodes)
-    return _build_vllm_multi_node_tp_command(service, total_nodes)
+        return _build_vllm_multi_instance_multi_node_command(service, total_nodes)
+    return _build_vllm_single_instance_multi_node_command(service, total_nodes)
 
 
 def _build_ray_command(_service: RayServiceConfig) -> str:
@@ -247,14 +211,15 @@ _BUILDERS = {
 }
 
 
-def _uses_ray_distributed_backend(service: VllmServiceConfig | RayServiceConfig) -> bool:
-    return isinstance(service, VllmServiceConfig) and (
-        service.distributed_backend is not None and service.distributed_backend.type == "ray"
-    )
+def _vllm_spans_multiple_nodes(service: VllmServiceConfig | RayServiceConfig, total_nodes: int) -> bool:
+    # Node count alone determines this: multi-node compute always spans a vLLM service across
+    # nodes via Ray, regardless of number_of_instances (single instance's TP/PP, or DP replicas).
+    # Non-vLLM services (e.g. a plain Ray head) never span nodes this way.
+    return isinstance(service, VllmServiceConfig) and total_nodes > 1
 
 
 def _build_service_command(service: VllmServiceConfig | RayServiceConfig, total_nodes: int) -> str:
-    if _uses_ray_distributed_backend(service):
+    if _vllm_spans_multiple_nodes(service, total_nodes):
         return _build_vllm_ray_command(service, total_nodes)
     return _BUILDERS[type(service)](service)
 
@@ -277,7 +242,11 @@ def build_sbatch_script(
     total_nodes, total_ntasks = _node_totals(compute)
     is_multi_node = total_nodes > 1
 
-    ray_prelude = _RAY_PRELUDE if any(_uses_ray_distributed_backend(s) for s in config.services.values()) else ""
+    ray_prelude = (
+        render_ray_prelude()
+        if any(_vllm_spans_multiple_nodes(s, total_nodes) for s in config.services.values())
+        else ""
+    )
 
     service_commands = "\n\n".join(
         _render_service_command(
@@ -286,8 +255,11 @@ def build_sbatch_script(
             _build_service_command(service, total_nodes),
             service.env or None,
             service.mounts or None,
-            nodes=total_nodes if is_multi_node else None,
-            ntasks=total_ntasks if is_multi_node else None,
+            # Only services that actually span multiple nodes need the whole allocation's --nodes/
+            # --ntasks - not every service in a multi-node job (e.g. a plain Ray head service runs
+            # on a single node regardless of how many nodes the overall job spans).
+            nodes=total_nodes if _vllm_spans_multiple_nodes(service, total_nodes) else None,
+            ntasks=total_ntasks if _vllm_spans_multiple_nodes(service, total_nodes) else None,
         )
         for name, service in config.services.items()
     )

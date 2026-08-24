@@ -99,31 +99,20 @@ def test_service_unknown_field_raises():
 
 
 # ---------------------------------------------------------------------------
-# number_of_instances / distributed_backend
+# number_of_instances
 # ---------------------------------------------------------------------------
 
-_MULTI_SERVICE = {**SERVICE, "number_of_instances": 4, "distributed_backend": {"type": "mp"}}
+_MULTI_SERVICE = {**SERVICE, "number_of_instances": 4}
 
 
-def test_number_of_instances_with_backend_accepted():
+def test_number_of_instances_accepted():
     config = SubmitConfig.model_validate(_config(services={"svc": _MULTI_SERVICE}))
-    svc = config.services["svc"]
-    assert svc.number_of_instances == 4
-    assert svc.distributed_backend is not None
-    assert svc.distributed_backend.type == "mp"
+    assert config.services["svc"].number_of_instances == 4
 
 
 def test_number_of_instances_defaults_to_1():
     config = SubmitConfig.model_validate(_config())
     assert config.services["svc"].number_of_instances == 1
-    assert config.services["svc"].distributed_backend is None
-
-
-def test_multi_instance_without_backend_defaults_to_mp():
-    config = SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "number_of_instances": 4}}))
-    svc = config.services["svc"]
-    assert svc.distributed_backend is not None
-    assert svc.distributed_backend.type == "mp"
 
 
 def test_number_of_instances_zero_raises():
@@ -131,8 +120,15 @@ def test_number_of_instances_zero_raises():
         SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "number_of_instances": 0}}))
 
 
+def test_distributed_backend_is_not_a_settable_field():
+    # distributed_backend (ray vs single-node mp) is an internal implementation detail, fully
+    # derived from node count / number_of_instances - not part of the public schema.
+    with pytest.raises(ValidationError):
+        SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "distributed_backend": {"type": "ray"}}}))
+
+
 # ---------------------------------------------------------------------------
-# ray distributed_backend (multi-node)
+# multi-node (ray-backed) deployment
 # ---------------------------------------------------------------------------
 
 COMPUTE_MULTI_NODE = {
@@ -145,59 +141,24 @@ COMPUTE_MULTI_NODE = {
 }
 
 
-def test_ray_backend_with_single_instance_accepted():
-    # ray is valid even with number_of_instances == 1: it's needed to span nodes for
-    # a single instance's tensor/pipeline-parallel footprint, not just for data-parallel replicas.
-    config = SubmitConfig.model_validate(
-        _config(services={"svc": {**SERVICE, "distributed_backend": {"type": "ray"}}})
-    )
-    assert config.services["svc"].distributed_backend.type == "ray"
-
-
-def test_mp_backend_on_multi_node_compute_overridden_to_ray():
-    # Node count is authoritative: an explicit (or auto-defaulted) `mp` backend is overridden to
-    # `ray` on multi-node compute instead of raising, so users don't have to spell it out.
-    config = SubmitConfig.model_validate(_config(services={"svc": _MULTI_SERVICE}, compute=COMPUTE_MULTI_NODE))
-    assert config.services["svc"].distributed_backend.type == "ray"
-
-
-def test_no_backend_on_multi_node_compute_defaults_to_ray():
+def test_multi_node_single_instance_accepted():
+    # Node count alone is enough to span a single instance's TP/PP footprint across nodes.
     config = SubmitConfig.model_validate(_config(compute=COMPUTE_MULTI_NODE))
-    assert config.services["svc"].distributed_backend.type == "ray"
+    assert config.services["svc"].number_of_instances == 1
 
 
-def test_ray_backend_on_multi_node_compute_accepted():
-    config = SubmitConfig.model_validate(
-        _config(
-            services={"svc": {**SERVICE, "distributed_backend": {"type": "ray"}}},
-            compute=COMPUTE_MULTI_NODE,
-        )
-    )
-    assert config.services["svc"].distributed_backend.type == "ray"
-
-
-def test_ray_backend_multi_node_dp_evenly_divisible_accepted():
+def test_multi_node_dp_evenly_divisible_accepted():
     # COMPUTE_MULTI_NODE has 2 nodes; 4 instances split evenly (2 per node).
     config = SubmitConfig.model_validate(
-        _config(
-            services={
-                "svc": {**SERVICE, "number_of_instances": 4, "distributed_backend": {"type": "ray"}},
-            },
-            compute=COMPUTE_MULTI_NODE,
-        )
+        _config(services={"svc": {**SERVICE, "number_of_instances": 4}}, compute=COMPUTE_MULTI_NODE)
     )
     assert config.services["svc"].number_of_instances == 4
 
 
-def test_ray_backend_multi_node_dp_uneven_split_raises():
+def test_multi_node_dp_uneven_split_raises():
     with pytest.raises(ValidationError, match="evenly divisible"):
         SubmitConfig.model_validate(
-            _config(
-                services={
-                    "svc": {**SERVICE, "number_of_instances": 3, "distributed_backend": {"type": "ray"}},
-                },
-                compute=COMPUTE_MULTI_NODE,
-            )
+            _config(services={"svc": {**SERVICE, "number_of_instances": 3}}, compute=COMPUTE_MULTI_NODE)
         )
 
 
@@ -225,14 +186,7 @@ def test_multi_node_dp_per_node_footprint_exact_fit_accepted():
     # 4 instances / 2 nodes = 2 local replicas/node; TP2 x 2 local replicas = 4 GPUs, matches gpus_per_node.
     config = SubmitConfig.model_validate(
         _config(
-            services={
-                "svc": {
-                    **SERVICE,
-                    "tensor_parallel_size": 2,
-                    "number_of_instances": 4,
-                    "distributed_backend": {"type": "ray"},
-                }
-            },
+            services={"svc": {**SERVICE, "tensor_parallel_size": 2, "number_of_instances": 4}},
             compute=COMPUTE_MULTI_NODE,
         )
     )
@@ -244,14 +198,20 @@ def test_multi_node_dp_per_node_footprint_exceeds_raises():
     with pytest.raises(ValidationError, match="exceeds a single node's gpus_per_node"):
         SubmitConfig.model_validate(
             _config(
-                services={
-                    "svc": {
-                        **SERVICE,
-                        "tensor_parallel_size": 3,
-                        "number_of_instances": 4,
-                        "distributed_backend": {"type": "ray"},
-                    }
-                },
+                services={"svc": {**SERVICE, "tensor_parallel_size": 3, "number_of_instances": 4}},
+                compute=COMPUTE_MULTI_NODE,
+            )
+        )
+
+
+def test_multi_instance_per_instance_multi_node_tp_not_supported():
+    # Each instance's own TP/PP footprint (TP5) already exceeds a single node's GPU count (4), so
+    # spreading 2 such instances across nodes would require each instance to itself span multiple
+    # nodes - that's not supported (only whole-instance placement across nodes is).
+    with pytest.raises(ValidationError, match="not supported"):
+        SubmitConfig.model_validate(
+            _config(
+                services={"svc": {**SERVICE, "tensor_parallel_size": 5, "number_of_instances": 2}},
                 compute=COMPUTE_MULTI_NODE,
             )
         )
@@ -272,34 +232,19 @@ COMPUTE_8_GPUS_PER_NODE = {
 
 
 def test_gpu_footprint_exact_fit_accepted():
-    service = {
-        **SERVICE,
-        "tensor_parallel_size": 2,
-        "number_of_instances": 4,
-        "distributed_backend": {"type": "mp"},
-    }
+    service = {**SERVICE, "tensor_parallel_size": 2, "number_of_instances": 4}
     config = SubmitConfig.model_validate(_config(services={"svc": service}, compute=COMPUTE_8_GPUS_PER_NODE))
     assert config.services["svc"].number_of_instances == 4
 
 
 def test_gpu_footprint_exceeds_node_raises():
-    service = {
-        **SERVICE,
-        "tensor_parallel_size": 2,
-        "number_of_instances": 8,
-        "distributed_backend": {"type": "mp"},
-    }
+    service = {**SERVICE, "tensor_parallel_size": 2, "number_of_instances": 8}
     with pytest.raises(ValidationError, match="exceeds the node pool's gpus_per_node"):
         SubmitConfig.model_validate(_config(services={"svc": service}, compute=COMPUTE_8_GPUS_PER_NODE))
 
 
 def test_gpu_footprint_underutilized_warns():
-    service = {
-        **SERVICE,
-        "tensor_parallel_size": 2,
-        "number_of_instances": 2,
-        "distributed_backend": {"type": "mp"},
-    }
+    service = {**SERVICE, "tensor_parallel_size": 2, "number_of_instances": 2}
     with pytest.warns(UserWarning, match="leaving 4 GPU"):
         config = SubmitConfig.model_validate(_config(services={"svc": service}, compute=COMPUTE_8_GPUS_PER_NODE))
     assert config.services["svc"].number_of_instances == 2

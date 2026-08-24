@@ -177,7 +177,6 @@ def test_build_vllm_command_multi_instance():
         container="vllm:latest",
         model="org/model",
         number_of_instances=4,
-        distributed_backend={"type": "mp"},
     )
     cmd = _build_vllm_command(service)
     assert "--data-parallel-size 4" in cmd
@@ -243,7 +242,6 @@ def test_build_vllm_ray_command_dp_does_not_use_ray():
         container="vllm:latest",
         model="org/model",
         number_of_instances=4,
-        distributed_backend={"type": "ray"},
     )
     cmd = _build_vllm_ray_command(service, total_nodes=2)
     assert "ray" not in cmd
@@ -256,7 +254,6 @@ def test_build_vllm_ray_command_dp_head_and_worker_branches():
         container="vllm:latest",
         model="org/model",
         number_of_instances=4,
-        distributed_backend={"type": "ray"},
     )
     cmd = _build_vllm_ray_command(service, total_nodes=2)
     assert 'if [ "$SLURM_NODEID" = "0" ]; then' in cmd
@@ -266,18 +263,6 @@ def test_build_vllm_ray_command_dp_head_and_worker_branches():
     assert '--data-parallel-address "$HEAD_NODE_IP"' in cmd
     assert "--data-parallel-rpc-port 13345" in cmd
     assert "--data-parallel-start-rank $(( SLURM_NODEID * 2 ))" in cmd
-
-
-def test_build_vllm_ray_command_dp_uneven_split_raises():
-    service = VllmServiceConfig(
-        type="vllm",
-        container="vllm:latest",
-        model="org/model",
-        number_of_instances=3,
-        distributed_backend={"type": "ray"},
-    )
-    with pytest.raises(ValueError, match="evenly divisible"):
-        _build_vllm_ray_command(service, total_nodes=2)
 
 
 # ---------------------------------------------------------------------------
@@ -779,7 +764,6 @@ def _multi_node_config():
                     "container": "vllm:latest",
                     "model": "org/model",
                     "tensor_parallel_size": 8,
-                    "distributed_backend": {"type": "ray"},
                 }
             },
             "compute": {
@@ -796,31 +780,9 @@ def _multi_node_config():
     )
 
 
-def test_build_sbatch_script_multi_node_no_backend_config_defaults_to_ray(bench_dir):
-    # Node count alone should be enough to select the ray backend - no distributed_backend needed.
-    config = SubmitConfig.model_validate(
-        {
-            "services": {
-                "vllm_model": {
-                    "type": "vllm",
-                    "container": "vllm:latest",
-                    "model": "org/model",
-                    "tensor_parallel_size": 8,
-                }
-            },
-            "compute": {
-                "cluster": {
-                    "type": "slurm",
-                    "account": "my-account",
-                    "hostname": "foo",
-                    "node_pools": {"main": {"partition": "gpu", "nodes": 4, "ntasks_per_node": 1}},
-                }
-            },
-            "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}},
-            "job": {"output_path": "/remote/jobs"},
-        }
-    )
-    assert config.services["vllm_model"].distributed_backend.type == "ray"
+def test_build_sbatch_script_multi_node_selects_ray_by_node_count(bench_dir):
+    # Node count alone is enough to span the vLLM service via ray - no explicit config needed.
+    config = _multi_node_config()
     benchmark = config.driver.benchmarks["gsm8k"]
     compute = next(iter(config.compute.values()))
     script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
@@ -881,6 +843,42 @@ def test_build_sbatch_script_single_node_pool_omits_node_flags_from_srun(bench_d
     driver_line = next(line for line in script.splitlines() if "python:3.12" in line)
     assert "--nodes=" not in vllm_line
     assert "--nodes=" not in driver_line
+
+
+def test_build_sbatch_script_non_vllm_service_omits_node_flags_in_multi_node_job(bench_dir):
+    # A plain Ray head service doesn't span nodes itself, even when the vLLM service alongside it
+    # does - it must not get the whole allocation's --nodes/--ntasks (that would launch
+    # `ray start --head` once per node instead of once).
+    config = SubmitConfig.model_validate(
+        {
+            "services": {
+                "vllm_model": {
+                    "type": "vllm",
+                    "container": "vllm:latest",
+                    "model": "org/model",
+                    "tensor_parallel_size": 8,
+                },
+                "ray_head": {"type": "ray", "container": "ray:latest"},
+            },
+            "compute": {
+                "cluster": {
+                    "type": "slurm",
+                    "account": "my-account",
+                    "hostname": "foo",
+                    "node_pools": {"main": {"partition": "gpu", "nodes": 4, "ntasks_per_node": 1}},
+                }
+            },
+            "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}},
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    vllm_line = next(line for line in script.splitlines() if "vllm:latest" in line)
+    ray_line = next(line for line in script.splitlines() if "ray:latest" in line)
+    assert "--nodes=4" in vllm_line
+    assert "--nodes=" not in ray_line
 
 
 # ---------------------------------------------------------------------------

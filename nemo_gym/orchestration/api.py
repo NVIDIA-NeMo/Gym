@@ -49,36 +49,12 @@ class BaseModelServiceConfig(BaseServiceConfig):
     port: int = 8000
 
 
-class VllmServiceDistributedBackend(_StrictModel):
-    """Use vLLM's native data-parallel multi-instance (--data-parallel-size N). Single node only."""
-
-    type: Literal["mp"] = "mp"
-
-
-class RayDistributedBackend(_StrictModel):
-    """Use vLLM's Ray executor (--distributed-executor-backend ray) so a single vLLM service can
-    span multiple physical Slurm nodes. This does not use the ray.serve library.
-
-    Named "ray" for now; a separate "ray_serve" backend (using the actual ray.serve library) may
-    be added later.
-    """
-
-    type: Literal["ray"] = "ray"
-
-
-DistributedBackendConfig = Annotated[
-    Annotated[VllmServiceDistributedBackend, Tag("mp")] | Annotated[RayDistributedBackend, Tag("ray")],
-    Discriminator("type"),
-]
-
-
 class VllmServiceConfig(BaseModelServiceConfig):
     type: Literal["vllm"]
     tensor_parallel_size: int = 1
     pipeline_parallel_size: int = 1
     trust_remote_code: bool = False
     number_of_instances: int = 1
-    distributed_backend: DistributedBackendConfig | None = None
 
     @field_validator("number_of_instances")
     @classmethod
@@ -86,14 +62,6 @@ class VllmServiceConfig(BaseModelServiceConfig):
         if v < 1:
             raise ValueError(f"number_of_instances must be >= 1, got {v}")
         return v
-
-    @model_validator(mode="after")
-    def _validate_distributed_backend(self) -> "VllmServiceConfig":
-        # distributed_backend may still be set explicitly with number_of_instances == 1 (e.g. `ray`,
-        # to span a single instance's tensor/pipeline-parallel footprint across multiple nodes).
-        if self.number_of_instances > 1 and self.distributed_backend is None:
-            self.distributed_backend = VllmServiceDistributedBackend()
-        return self
 
     @model_validator(mode="after")
     def _default_health_check(self) -> "VllmServiceConfig":
@@ -206,11 +174,6 @@ class SubmitConfig(_StrictModel):
                     f"({', '.join(sorted(compute_names))})."
                 )
 
-            if isinstance(service, VllmServiceConfig) and is_multi_node:
-                # Node count is authoritative: multi-node compute always needs the `ray` backend to
-                # span nodes, regardless of what (if anything) was set/defaulted at the service level.
-                service.distributed_backend = RayDistributedBackend()
-
             if (
                 is_multi_node
                 and isinstance(service, VllmServiceConfig)
@@ -265,9 +228,24 @@ class SubmitConfig(_StrictModel):
         tp_pp = service.tensor_parallel_size * service.pipeline_parallel_size
 
         if total_nodes > 1 and service.number_of_instances > 1:
+            if tp_pp > max_gpus_per_node:
+                # Each instance's own TP/PP footprint already exceeds a single node's GPU count, so
+                # spreading multiple such instances across nodes would require every instance to
+                # itself span multiple nodes. That's not supported: multi-node data-parallel only
+                # distributes whole instances across nodes with tensor/pipeline parallelism kept
+                # local to each node (see _build_vllm_multi_instance_multi_node_command).
+                raise ValueError(
+                    f"Service '{service_name}' sets number_of_instances={service.number_of_instances} with "
+                    f"tensor_parallel_size={service.tensor_parallel_size} x "
+                    f"pipeline_parallel_size={service.pipeline_parallel_size}={tp_pp}, which exceeds a single "
+                    f"node's gpus_per_node ({max_gpus_per_node}). Multiple instances where each instance's own "
+                    "tensor/pipeline-parallel footprint spans multiple nodes is not supported - reduce "
+                    "tensor_parallel_size/pipeline_parallel_size to fit within one node, or set "
+                    "number_of_instances=1 to let a single instance span nodes."
+                )
             # Multi-node data-parallel: each node runs its own equal share of the replicas with
-            # local tensor/pipeline parallelism (see _build_vllm_multi_node_dp_command); the
-            # per-node share, not the total footprint, has to fit in that node's GPU count.
+            # local tensor/pipeline parallelism (see _build_vllm_multi_instance_multi_node_command);
+            # the per-node share, not the total footprint, has to fit in that node's GPU count.
             instances_per_node = service.number_of_instances // total_nodes
             gpus_needed = tp_pp * instances_per_node
             gpus_available = max_gpus_per_node
