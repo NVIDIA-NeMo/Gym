@@ -65,10 +65,13 @@ class LineageMatch:
     """Describe a uniquely verified parent from a shared lineage store."""
 
     model_call_id: str
+    # Empty for token-free external custody rows; populated for internal
+    # lineage rows (prefix injection) and legacy external rows.
     cumulative_token_ids: tuple[int, ...]
     digest: str
     staging_chain: tuple[str, ...] = ()
     prev_len: int = 0
+    chain_hash: str = ""
 
 
 @dataclass(frozen=True)
@@ -154,7 +157,7 @@ class CaptureLedger(LineageStore, Protocol):
     keyword arguments: ``parent_call_id``, ``staging_key``, ``weight_version``,
     ``prev_len``/``delta_len``/``cum_len``, ``staging_digest``,
     ``extras_digest``, ``mode``, ``logical_request_id``, ``admitted_at``,
-    ``staging_chain``),
+    ``staging_chain``, ``chain_hash``, ``cumulative_hash``),
     poison rows are
     appended with ``record_failure``, and the framework reads the rollout back
     token-free through ``manifest``.

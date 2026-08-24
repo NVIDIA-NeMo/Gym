@@ -53,7 +53,6 @@ from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 from nemo_gym.token_id_capture import (
     NG_CAPTURE_FIELD,
     NG_COMMIT_COORDS_FIELD,
-    compute_digest,
     current_capture_context,
     mark_external_staging_committed,
 )
@@ -1026,18 +1025,19 @@ class VLLMModel(SimpleResponsesAPIModel):
                 return
             if coords.parent_call_id != admission.parent_call_id or coords.prev_len != admission.prev_len:
                 raise ValueError(f"coordinates for {coords.model_call_id} diverge from admission")
-            cumulative = list(context.parent_tokens) + [int(token) for token in coords.token_ids_delta]
-            if len(cumulative) != coords.cum_len:
-                raise ValueError(f"coordinates for {coords.model_call_id} diverge from cumulative length")
             child_staging_chain = list(context.parent_staging_chain) + [str(coords.staging_key)]
             response_items, _ = strip_token_fields(response_to_output_items(payload))
+            # Custody rows are token-free: the worker's chained ``chain_hash``
+            # replaces the cumulative token array, and its whole-sequence
+            # ``cumulative_hash`` becomes the row digest. Finalization
+            # re-verifies both against the staged deltas in TQ.
             await context.lineage_store.record(
                 context.rollout_id,
                 context.model_call_id,
                 list(context.request_items or []),
                 response_items,
-                cumulative,
-                compute_digest(cumulative),
+                [],
+                coords.cumulative_hash or "",
                 parent_call_id=coords.parent_call_id,
                 staging_key=coords.staging_key,
                 weight_version=coords.weight_version,
@@ -1050,6 +1050,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                 logical_request_id=context.logical_request_id or (str(payload["id"]) if payload.get("id") else None),
                 admitted_at=context.admitted_at,
                 staging_chain=child_staging_chain,
+                chain_hash=coords.chain_hash,
+                cumulative_hash=coords.cumulative_hash,
             )
             mark_external_staging_committed(
                 rollout_id=coords.rollout_id,

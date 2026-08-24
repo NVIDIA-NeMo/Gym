@@ -102,6 +102,7 @@ class CaptureContext:
     admitted_at: float | None = None
     capture_admission: CaptureAdmission | None = None
     parent_staging_chain: list[str] = field(default_factory=list)
+    parent_chain_hash: str = ""
     # The request items as received from the harness, stashed by
     # ``resolve_parent`` so the commit hook can publish the ledger row with
     # the exact representation the next request will echo.
@@ -233,6 +234,7 @@ async def resolve_parent(request_messages: list | None) -> None:
     resolved_match = context.parent_resolution.match if context.parent_resolution is not None else None
     if resolved_match is not None:
         context.parent_staging_chain = list(resolved_match.staging_chain)
+        context.parent_chain_hash = resolved_match.chain_hash
     if not context.external_staging or context.capture_admission is not None or context.lineage_store is None:
         return
 
@@ -241,15 +243,33 @@ async def resolve_parent(request_messages: list | None) -> None:
 
     match = context.parent_resolution.match if context.parent_resolution is not None else None
     if match is not None:
-        context.capture_admission = CaptureAdmission(
-            rollout_id=context.rollout_id,
-            model_call_id=context.model_call_id,
-            parent_call_id=match.model_call_id,
-            prev_len=match.prev_len,
-            mode="token_in",
-            required_prefix_token_ids=[],
-            staging_chain=list(match.staging_chain),
-        )
+        # A legacy external parent row without a chain hash cannot anchor a
+        # chained child; the CaptureAdmission validator rejects it and the
+        # except path below poisons the call (fail closed).
+        try:
+            context.capture_admission = CaptureAdmission(
+                rollout_id=context.rollout_id,
+                model_call_id=context.model_call_id,
+                parent_call_id=match.model_call_id,
+                prev_len=match.prev_len,
+                mode="token_in",
+                required_prefix_token_ids=[],
+                staging_chain=list(match.staging_chain),
+                parent_chain_hash=match.chain_hash or None,
+            )
+        except ValueError:
+            logger.warning(
+                "Parent %s of model call %s (rollout %s) cannot admit a chained child; poisoning the call.",
+                match.model_call_id,
+                context.model_call_id,
+                context.rollout_id,
+                exc_info=True,
+            )
+            await context.lineage_store.record_failure(
+                context.rollout_id,
+                context.model_call_id,
+                UNRESOLVED_PARENT_REASON,
+            )
         return
     is_root = context.parent_resolution is not None and context.parent_resolution.status == ParentResolutionStatus.ROOT
     if is_root or not await context.lineage_store.has_rows(context.rollout_id):

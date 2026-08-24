@@ -71,6 +71,7 @@ class CaptureAdmission(_WireModel):
     mode: CaptureMode
     required_prefix_token_ids: list[StrictInt] = Field(default_factory=list)
     staging_chain: list[str] = Field(default_factory=list)
+    parent_chain_hash: DigestHex | None = None
 
     @model_validator(mode="after")
     def _validate_prefix_contract(self) -> Self:
@@ -79,6 +80,8 @@ class CaptureAdmission(_WireModel):
         if self.mode == "token_in":
             if self.parent_call_id is None or self.prev_len == 0:
                 raise ValueError("token_in admission requires a parent_call_id and prev_len > 0")
+            if self.parent_chain_hash is None:
+                raise ValueError("token_in admission requires the parent's chain hash")
             # When staging_chain is supplied the worker fetches the prefix from TQ;
             # required_prefix_token_ids is allowed to be empty on the wire.
             if not self.staging_chain and len(self.required_prefix_token_ids) != self.prev_len:
@@ -88,6 +91,7 @@ class CaptureAdmission(_WireModel):
             or self.prev_len != 0
             or self.required_prefix_token_ids
             or self.staging_chain
+            or self.parent_chain_hash is not None
         ):
             raise ValueError("text admission must be a parentless root with no required prefix")
         return self
@@ -199,7 +203,8 @@ class CommitCoords(_DigestWireModel):
     digest: DigestHex | None = None
     extras_digest: DigestHex | None = None
     staging_key: Identifier | None = None
-    token_ids_delta: list[StrictInt] = Field(default_factory=list)
+    chain_hash: DigestHex | None = None
+    cumulative_hash: DigestHex | None = None
 
     @model_validator(mode="after")
     def _validate_disposition(self) -> Self:
@@ -207,18 +212,20 @@ class CommitCoords(_DigestWireModel):
             raise ValueError("parentless coordinates must have prev_len == 0")
         if self.parent_call_id is not None and self.prev_len == 0:
             raise ValueError("child coordinates must have prev_len > 0")
-        if any(token_id < 0 for token_id in self.token_ids_delta):
-            raise ValueError("token_ids_delta must be non-negative")
         if self.cum_len != self.prev_len + self.delta_len:
             raise ValueError("cum_len must equal prev_len + delta_len")
+        staged_payload = (self.digest, self.extras_digest, self.staging_key, self.chain_hash, self.cumulative_hash)
         if self.disposition == "staged":
-            if self.digest is None or self.extras_digest is None or self.staging_key is None:
-                raise ValueError("staged coordinates require digest, extras_digest, and staging_key")
-            if self.delta_len == 0 or len(self.token_ids_delta) != self.delta_len:
-                raise ValueError("staged coordinates require exactly delta_len token IDs")
-        elif any(value is not None for value in (self.digest, self.extras_digest, self.staging_key)):
+            if any(value is None for value in staged_payload):
+                raise ValueError(
+                    "staged coordinates require digest, extras_digest, staging_key, "
+                    "chain_hash, and cumulative_hash"
+                )
+            if self.delta_len == 0:
+                raise ValueError("staged coordinates require a non-empty delta")
+        elif any(value is not None for value in staged_payload):
             raise ValueError("capture_failed coordinates cannot carry staged payload metadata")
-        elif self.delta_len != 0 or self.token_ids_delta:
+        elif self.delta_len != 0:
             raise ValueError("capture_failed coordinates cannot carry token deltas")
         return self
 
