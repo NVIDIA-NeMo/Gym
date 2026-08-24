@@ -52,6 +52,7 @@ class TerminalBench21VerifyResponse(BaseVerifyResponse):
 
     task_name: str
     test_output: str
+    golden_patch_output: Optional[str]
 
 
 class TerminalBench21ResourcesServer(SimpleResourcesServer):
@@ -121,9 +122,11 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                 "bash /solution/solve.sh", timeout_s=self.config.evaluation_timeout
             )
             assert golden_patch_result.return_code == 0, golden_patch_result
+            golden_patch_output = (golden_patch_result.stderr + "") + (golden_patch_result.stdout + "")
         else:
             # Re-use the original sandbox
             eval_sandbox = self._session_id_to_sandbox.pop(request.session[SESSION_ID_KEY])
+            golden_patch_output = None
             raise NotImplementedError
 
         start_time = time()
@@ -149,6 +152,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             reward=reward,
             verification_time_taken=verification_time_taken,
             test_output=test_output,
+            golden_patch_output=golden_patch_output,
         )
 
 
