@@ -296,11 +296,44 @@ class TestSafeConfigJson:
         assert result["agent_kwargs"]["api_key"] == "***"
         assert result["agent_kwargs"]["model"] == "gpt-4"
 
-    def test_secret_token_password_redacted(self, tmp_path: Path) -> None:
-        cfg = _make_instance_config(tmp_path, agent_kwargs={"my_secret": "x", "auth_token": "y", "password": "z"})
+    def test_secret_key_variants_redacted(self, tmp_path: Path) -> None:
+        cfg = _make_instance_config(
+            tmp_path,
+            agent_kwargs={
+                "my_secret": "x",
+                "auth_token": "y",
+                "hf_token": "hf",
+                "password": "z",
+                "anthropic_api_key": "a",
+                "apiKey": "b",
+                "aws_secret_access_key": "c",
+                "password_hash": "d",
+                "api_key_id": "e",
+            },
+        )
         result = json.loads(_safe_config_json(cfg))
-        for key in ("my_secret", "auth_token", "password"):
+        secret_keys = (
+            "my_secret",
+            "auth_token",
+            "hf_token",
+            "password",
+            "anthropic_api_key",
+            "apiKey",
+            "aws_secret_access_key",
+            "password_hash",
+            "api_key_id",
+        )
+        for key in secret_keys:
             assert result["agent_kwargs"][key] == "***"
+
+    def test_max_output_tokens_preserved_for_round_trip(self, tmp_path: Path) -> None:
+        body = NeMoGymResponseCreateParamsNonStreaming(
+            input=[{"role": "user", "content": "solve this"}], model="test-model", max_output_tokens=12288
+        )
+        cfg = _make_instance_config(tmp_path, body=body)
+
+        roundtripped = AnyTerminalInstanceConfig.model_validate_json(_safe_config_json(cfg))
+        assert roundtripped.body.max_output_tokens == 12288
 
     def test_nested_provider_api_key_redacted(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(
