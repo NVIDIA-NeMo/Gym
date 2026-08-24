@@ -112,15 +112,17 @@ class TestLoadAndValidateServerInstanceConfigs:
             global_config_dict=load_example_multi_step_test_global_config_dict(),
         )
 
+        # Post dataset-decoupling migration: the declaring instance is the resources server.
         expected_agent_configs_with_data_dict = [
             {
-                "name": "example_multi_step_simple_agent",
-                "responses_api_agents": {
-                    "simple_agent": {
+                "name": "example_multi_step_resources_server",
+                "resources_servers": {
+                    "example_multi_step": {
                         "host": "127.0.0.1",
                         "port": 12345,
-                        "entrypoint": "app.py",
                         "num_workers": None,
+                        "entrypoint": "app.py",
+                        "domain": "instruction_following",
                         "datasets": [
                             {
                                 "name": "example",
@@ -133,14 +135,8 @@ class TestLoadAndValidateServerInstanceConfigs:
                                 "license": None,
                             }
                         ],
-                        "resources_server": {
-                            "type": "resources_servers",
-                            "name": "example_multi_step_resources_server",
-                        },
-                        "model_server": {
-                            "type": "responses_api_models",
-                            "name": "policy_model",
-                        },
+                        "verified": False,
+                        "description": "Multi-step tool calling",
                     }
                 },
             }
