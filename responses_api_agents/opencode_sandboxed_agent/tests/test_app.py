@@ -135,7 +135,7 @@ class TestOpenCodeSandboxedAgent:
 
         sandbox_mock = AsyncMock()
         monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox_mock})
-        monkeypatch.setattr(server, "_create_opencode_config", lambda: dict())
+        monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value=dict()))
 
         sandbox_mock.return_value.exec.return_value = MagicMock()
         sandbox_mock.return_value.exec.return_value.stdout = "my dir"
