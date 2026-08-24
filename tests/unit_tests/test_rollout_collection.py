@@ -2349,3 +2349,162 @@ class TestValidateAgentNames:
         cfg = self._cfg(agents=["math_agent"], extra={"math_rs": {"resources_servers": {"impl": {}}}})
         with pytest.raises(ValueError, match="exists but is not an agent instance"):
             RolloutCollectionHelper._validate_agent_names(self._rows("math_rs"), cfg)
+
+
+# A merged config shaped like real ones: one RS instance, agents pointing at RSes via the
+# resources_server.name edge, plus a self-contained agent that declares no RS.
+_RESOLVER_CONFIG = {
+    "math_rs": {"resources_servers": {"math_rs_impl": {"entrypoint": "app.py"}}},
+    "math_agent": {
+        "responses_api_agents": {
+            "simple_agent": {"resources_server": {"type": "resources_servers", "name": "math_rs"}}
+        }
+    },
+    "tau2_agent": {"responses_api_agents": {"tau2": {"entrypoint": "app.py"}}},
+    "shared_rs": {"resources_servers": {"impl": {}}},
+    "shared_agent_a": {"responses_api_agents": {"a": {"resources_server": {"name": "shared_rs"}}}},
+    "shared_agent_b": {"responses_api_agents": {"b": {"resources_server": {"name": "shared_rs"}}}},
+    "orphan_rs": {"resources_servers": {"impl": {}}},
+}
+
+
+class TestResolveTaskSources:
+    """Pins the task_source -> agent resolution contract (dataset-decoupling RFC)."""
+
+    def _resolve(self, rows):
+        RolloutCollectionHelper.resolve_task_sources(rows, OmegaConf.create(_RESOLVER_CONFIG))
+        return rows
+
+    def test_rs_task_source_inverts_to_unique_agent(self) -> None:
+        rows = [{"task_source": "math_rs"}]
+        assert self._resolve(rows)[0]["agent_ref"] == {"name": "math_agent"}
+
+    def test_agent_task_source_routes_directly(self) -> None:
+        """Self-contained environments: the declaring instance IS the agent."""
+        rows = [{"task_source": "tau2_agent"}]
+        assert self._resolve(rows)[0]["agent_ref"] == {"name": "tau2_agent"}
+
+    def test_existing_agent_ref_wins_over_task_source(self) -> None:
+        rows = [{"task_source": "math_rs", "agent_ref": {"name": "tau2_agent"}}]
+        assert self._resolve(rows)[0]["agent_ref"] == {"name": "tau2_agent"}
+
+    def test_no_task_source_rows_is_noop(self) -> None:
+        rows = [{"agent_ref": {"name": "math_agent"}}]
+        assert self._resolve(rows) == [{"agent_ref": {"name": "math_agent"}}]
+
+    def test_unknown_task_source_raises_with_suggestion(self) -> None:
+        with pytest.raises(ValueError, match="did you mean 'math_rs'"):
+            self._resolve([{"task_source": "math_rss"}])
+
+    def test_ambiguous_rs_raises_naming_agent_map(self) -> None:
+        with pytest.raises(ValueError, match=r"2 agents reference this resources server.*agent_map"):
+            self._resolve([{"task_source": "shared_rs"}])
+
+    def test_rs_with_no_agent_raises(self) -> None:
+        with pytest.raises(ValueError, match="no agent in the running config references"):
+            self._resolve([{"task_source": "orphan_rs"}])
+
+    def test_task_source_survives_resolution(self) -> None:
+        """The stamp stays on the row (provenance); only agent_ref is added."""
+        rows = self._resolve([{"task_source": "math_rs"}])
+        assert rows[0]["task_source"] == "math_rs"
+
+
+class TestFanOut:
+    def _write_rows(self, tmp_path, rows):
+        fpath = tmp_path / "input.jsonl"
+        fpath.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        return fpath
+
+    def _rcp_row(self, **extra):
+        return {"responses_create_params": {"input": [{"role": "user", "content": "q"}]}, **extra}
+
+    def test_fan_out_by_task_source_emits_one_copy_per_agent(self, tmp_path) -> None:
+        fpath = self._write_rows(tmp_path, [self._rcp_row(task_source="shared_rs")])
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            fan_out={"shared_rs": ["shared_agent_a", "shared_agent_b"]},
+        )
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert [r["agent_ref"]["name"] for r in rows] == ["shared_agent_a", "shared_agent_b"]
+        assert [r[ROLLOUT_INDEX_KEY_NAME] for r in rows] == [0, 1]
+        assert len({r[TASK_INDEX_KEY_NAME] for r in rows}) == 1
+
+    def test_fan_out_by_agent_ref_name(self, tmp_path) -> None:
+        fpath = self._write_rows(tmp_path, [self._rcp_row(agent_ref={"name": "agent_a"})])
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            fan_out={"agent_a": ["agent_x", "agent_y"]},
+        )
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert [r["agent_ref"]["name"] for r in rows] == ["agent_x", "agent_y"]
+
+    def test_fan_out_composes_with_per_agent_num_repeats(self, tmp_path) -> None:
+        fpath = self._write_rows(tmp_path, [self._rcp_row(task_source="shared_rs")])
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            fan_out={"shared_rs": ["shared_agent_a", "shared_agent_b"]},
+            num_repeats={"shared_agent_a": 2, "shared_agent_b": 1},
+        )
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert [r["agent_ref"]["name"] for r in rows] == ["shared_agent_a", "shared_agent_a", "shared_agent_b"]
+        assert [r[ROLLOUT_INDEX_KEY_NAME] for r in rows] == [0, 1, 2]
+
+    def test_unmatched_rows_pass_through_fan_out(self, tmp_path) -> None:
+        fpath = self._write_rows(tmp_path, [self._rcp_row(agent_ref={"name": "other"})])
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            fan_out={"shared_rs": ["shared_agent_a"]},
+        )
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert [r["agent_ref"]["name"] for r in rows] == ["other"]
+
+
+class TestTaskSourcePreprocess:
+    def _write_rows(self, tmp_path, rows):
+        fpath = tmp_path / "input.jsonl"
+        fpath.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        return fpath
+
+    def _rcp_row(self, **extra):
+        return {"responses_create_params": {"input": [{"role": "user", "content": "q"}]}, **extra}
+
+    def test_task_source_row_defers_resolution(self, tmp_path) -> None:
+        """Preprocess leaves task_source rows without agent_ref; resolution happens at dispatch prep."""
+        fpath = self._write_rows(tmp_path, [self._rcp_row(task_source="math_rs")])
+        config = RolloutCollectionConfig(input_jsonl_fpath=str(fpath), output_jsonl_fpath=str(tmp_path / "o.jsonl"))
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert "agent_ref" not in rows[0]
+        assert rows[0]["task_source"] == "math_rs"
+
+    def test_agent_map_keyed_by_task_source(self, tmp_path) -> None:
+        fpath = self._write_rows(tmp_path, [self._rcp_row(task_source="math_rs")])
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "o.jsonl"),
+            agent_map={"math_rs": "some_agent"},
+        )
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert rows[0]["agent_ref"] == {"name": "some_agent"}
+
+    def test_agent_default_covers_task_source_rows(self, tmp_path) -> None:
+        fpath = self._write_rows(tmp_path, [self._rcp_row(task_source="math_rs")])
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath), output_jsonl_fpath=str(tmp_path / "o.jsonl"), agent_name="z"
+        )
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert rows[0]["agent_ref"] == {"name": "z"}
+
+    def test_num_repeats_keyed_by_task_source(self, tmp_path) -> None:
+        fpath = self._write_rows(tmp_path, [self._rcp_row(task_source="math_rs")])
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "o.jsonl"),
+            num_repeats={"math_rs": 3},
+        )
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert len(rows) == 3
