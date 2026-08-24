@@ -120,26 +120,6 @@ class LineageStore(Protocol):
         """Return whether separate model-server workers share committed entries."""
         ...
 
-    async def record(
-        self,
-        rollout_id: str,
-        model_call_id: str,
-        request_items: list[dict],
-        response_items: list[dict],
-        cumulative_token_ids: list[int],
-        digest: str,
-        *,
-        staging_chain: list[str] | None = None,
-    ) -> None:
-        """Publish a completed call for later request-time resolution.
-
-        Request and response items retain their wire representations.
-        Repeating a model call ID with the same payload is a no-op.
-        Reusing a model call ID with different data must fail.
-        Return only after every serving worker can read the record.
-        """
-        ...
-
     async def close(self) -> None:
         """Release resources. Idempotent.
 
@@ -157,11 +137,35 @@ class CaptureLedger(LineageStore, Protocol):
     keyword arguments: ``parent_call_id``, ``staging_key``, ``weight_version``,
     ``prev_len``/``delta_len``/``cum_len``, ``staging_digest``,
     ``extras_digest``, ``mode``, ``logical_request_id``, ``admitted_at``,
-    ``staging_chain``, ``chain_hash``, ``cumulative_hash``),
+    ``staging_chain``, ``chain_hash``, ``cumulative_hash``, ``response_id``,
+    ``output_fingerprint``, ``continuation_fingerprint``,
+    ``fingerprint_version``),
     poison rows are
     appended with ``record_failure``, and the framework reads the rollout back
     token-free through ``manifest``.
     """
+
+    async def record(
+        self,
+        rollout_id: str,
+        model_call_id: str,
+        request_items: list[dict],
+        response_items: list[dict],
+        cumulative_token_ids: list[int],
+        digest: str,
+        *,
+        staging_chain: list[str] | None = None,
+    ) -> None:
+        """Publish a completed call for later request-time resolution.
+
+        Request and response items retain their wire representations.
+        Repeating a model call ID with the same payload is a no-op.
+        Reusing a model call ID with different data must fail.
+        Return only after every serving worker can read the record.
+        Implementations accept the custody columns as additional keyword
+        arguments (see the class docstring).
+        """
+        ...
 
     async def record_failure(self, rollout_id: str, model_call_id: str, reason: str) -> None:
         """Append a poison row for a call whose capture did not commit.

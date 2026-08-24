@@ -57,6 +57,10 @@ from nemo_gym.token_id_capture import (
     mark_external_staging_committed,
 )
 from nemo_gym.token_id_capture.config import token_id_capture_config
+from nemo_gym.token_id_capture.lineage import (
+    LINEAGE_FINGERPRINT_VERSION,
+    assistant_fingerprint,
+)
 from nemo_gym.token_id_capture.records import (
     TOKEN_FIELDS,
     response_to_output_items,
@@ -1025,8 +1029,27 @@ class VLLMModel(SimpleResponsesAPIModel):
                 return
             if coords.parent_call_id != admission.parent_call_id or coords.prev_len != admission.prev_len:
                 raise ValueError(f"coordinates for {coords.model_call_id} diverge from admission")
+            # The served envelope id is the terminal-attribution join key: the
+            # agent proves which response it kept by possessing it. Observe the
+            # payload's own id; never mint one. A served completion without an
+            # id is a stamping bug and fails closed (poisons the call below).
+            response_id = str(payload.get("id") or "")
+            if not response_id:
+                raise ValueError(f"served response for {coords.model_call_id} carries no envelope id")
             child_staging_chain = list(context.parent_staging_chain) + [str(coords.staging_key)]
             response_items, _ = strip_token_fields(response_to_output_items(payload))
+            # Content-witness keys, hashed while the response is still
+            # server-side: this call's own output, and request + output (the
+            # cumulative reading). Unfingerprintable content abstains (None)
+            # rather than poisoning a valid completion.
+            try:
+                output_fingerprint = assistant_fingerprint(list(response_items)) or None
+                continuation_fingerprint = (
+                    assistant_fingerprint(list(context.request_items or []) + list(response_items)) or None
+                )
+            except (TypeError, ValueError):
+                output_fingerprint = None
+                continuation_fingerprint = None
             # Custody rows are token-free: the worker's chained ``chain_hash``
             # replaces the cumulative token array, and its whole-sequence
             # ``cumulative_hash`` becomes the row digest. Finalization
@@ -1047,11 +1070,15 @@ class VLLMModel(SimpleResponsesAPIModel):
                 staging_digest=coords.digest,
                 extras_digest=coords.extras_digest,
                 mode=admission.mode,
-                logical_request_id=context.logical_request_id or (str(payload["id"]) if payload.get("id") else None),
+                logical_request_id=context.logical_request_id,
                 admitted_at=context.admitted_at,
                 staging_chain=child_staging_chain,
                 chain_hash=coords.chain_hash,
                 cumulative_hash=coords.cumulative_hash,
+                response_id=response_id,
+                output_fingerprint=output_fingerprint,
+                continuation_fingerprint=continuation_fingerprint,
+                fingerprint_version=LINEAGE_FINGERPRINT_VERSION,
             )
             mark_external_staging_committed(
                 rollout_id=coords.rollout_id,

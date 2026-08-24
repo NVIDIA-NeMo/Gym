@@ -65,6 +65,12 @@ FINGERPRINT_VERSION = 1
 _FINGERPRINT_DOMAIN = b"nemo-gym-lineage"
 _CONTEXT_DOMAIN = b"nemo-gym-lineage-context"
 
+# Canonicalization version of ``assistant_fingerprint``. Stamped on ledger
+# custody rows beside the recorded fingerprints; terminal attribution ignores
+# fingerprints stamped with a different version. Increment when the hash
+# layout or content normalization changes.
+LINEAGE_FINGERPRINT_VERSION = 1
+
 # Names of the token-free CallRecord custody columns a ledger row carries.
 # ``staging_digest`` is the worker's staged-record digest; the row's ``digest``
 # key remains the lineage digest over the cumulative token IDs.
@@ -83,6 +89,10 @@ _CUSTODY_FIELDS = (
     "staging_chain",
     "chain_hash",
     "cumulative_hash",
+    "response_id",
+    "output_fingerprint",
+    "continuation_fingerprint",
+    "fingerprint_version",
 )
 
 
@@ -101,6 +111,10 @@ def _custody_columns(
     staging_chain: list[str] | None = None,
     chain_hash: str | None = None,
     cumulative_hash: str | None = None,
+    response_id: str | None = None,
+    output_fingerprint: str | None = None,
+    continuation_fingerprint: str | None = None,
+    fingerprint_version: int = 0,
 ) -> dict:
     """Return the ledger custody columns, or an empty dict for a lineage-only row."""
     if staging_key is None:
@@ -120,6 +134,10 @@ def _custody_columns(
         "staging_chain": list(staging_chain) if staging_chain else [],
         "chain_hash": chain_hash,
         "cumulative_hash": cumulative_hash,
+        "response_id": response_id,
+        "output_fingerprint": output_fingerprint or None,
+        "continuation_fingerprint": continuation_fingerprint or None,
+        "fingerprint_version": fingerprint_version,
     }
 
 
@@ -148,6 +166,17 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
                 )
             )
         elif row.get("staging_key") is not None:
+            if not row.get("response_id"):
+                # A custody row without a served response id is a stamping
+                # bug, not a tolerated legacy shape. Poison the rollout
+                # (fail-closed) instead of crashing the manifest route.
+                failures.append(
+                    ManifestFailure(
+                        model_call_id=str(row["model_call_id"]),
+                        reason="ledger_row_missing_response_id",
+                    )
+                )
+                continue
             records.append(
                 CallRecord(
                     model_call_id=str(row["model_call_id"]),
@@ -162,8 +191,12 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
                     mode=str(row["mode"]),
                     chain_hash=row.get("chain_hash"),
                     cumulative_hash=row.get("cumulative_hash"),
+                    response_id=str(row["response_id"]),
                     logical_request_id=row.get("logical_request_id"),
                     admitted_at=row.get("admitted_at"),
+                    output_fingerprint=row.get("output_fingerprint") or None,
+                    continuation_fingerprint=row.get("continuation_fingerprint") or None,
+                    fingerprint_version=int(row.get("fingerprint_version") or 0),
                 )
             )
     manifest = RolloutManifest(rollout_id=rollout_id, records=records, failures=failures)
@@ -668,6 +701,10 @@ class InMemoryLineageStore:
         staging_chain: list[str] | None = None,
         chain_hash: str | None = None,
         cumulative_hash: str | None = None,
+        response_id: str | None = None,
+        output_fingerprint: str | None = None,
+        continuation_fingerprint: str | None = None,
+        fingerprint_version: int = 0,
     ) -> None:
         # Custody rows are token-free (mirrors FileLineageStore): the chain
         # hash covers continuity, so the index keeps tokens only for
@@ -698,6 +735,10 @@ class InMemoryLineageStore:
             staging_chain,
             chain_hash,
             cumulative_hash,
+            response_id,
+            output_fingerprint,
+            continuation_fingerprint,
+            fingerprint_version,
         )
         if custody:
             rows = self._ledgers.setdefault(rollout_id, [])
@@ -1062,6 +1103,10 @@ class FileLineageStore(IncrementalLineageStore):
         staging_chain: list[str] | None = None,
         chain_hash: str | None = None,
         cumulative_hash: str | None = None,
+        response_id: str | None = None,
+        output_fingerprint: str | None = None,
+        continuation_fingerprint: str | None = None,
+        fingerprint_version: int = 0,
     ) -> None:
         custody = _custody_columns(
             parent_call_id,
@@ -1078,6 +1123,10 @@ class FileLineageStore(IncrementalLineageStore):
             staging_chain,
             chain_hash,
             cumulative_hash,
+            response_id,
+            output_fingerprint,
+            continuation_fingerprint,
+            fingerprint_version,
         )
         await asyncio.to_thread(
             self._record,

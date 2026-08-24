@@ -30,7 +30,7 @@ import logging
 import threading
 import time
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from nemo_gym.token_id_capture.lineage import assistant_fingerprint, stamp_continuation
