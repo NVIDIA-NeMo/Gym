@@ -1397,12 +1397,15 @@ class TestDeclaringInstanceValidation:
         with raises(ValueError, match="cannot be declared on model servers"):
             self._validate({"my_model": {"responses_api_models": {"impl": {"entrypoint": "a.py", "datasets": [d]}}}})
 
-    def test_agent_with_rs_edge_dataset_warns_deprecation(self, tmp_path) -> None:
-        import pytest
+    def test_agent_declarations_do_not_warn_yet(self, tmp_path) -> None:
+        """Both declaration homes are equally supported until the config migration lands;
+        the deprecation warning ships with that PR (see NOTE(dataset-decoupling))."""
+        import warnings as _warnings
 
         d = _dataset(tmp_path, "d6", [{"responses_create_params": {"input": []}}])
-        with pytest.warns(DeprecationWarning, match="Move each `datasets:` list"):
-            self._validate(
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("error", DeprecationWarning)
+            out = self._validate(
                 {
                     "my_agent": {
                         "responses_api_agents": {
@@ -1415,14 +1418,4 @@ class TestDeclaringInstanceValidation:
                     }
                 }
             )
-
-    def test_self_contained_agent_dataset_does_not_warn(self, tmp_path) -> None:
-        import warnings as _warnings
-
-        d = _dataset(tmp_path, "d7", [{"responses_create_params": {"input": []}}])
-        with _warnings.catch_warnings():
-            _warnings.simplefilter("error", DeprecationWarning)
-            out = self._validate(
-                {"tau2_agent": {"responses_api_agents": {"impl": {"entrypoint": "a.py", "datasets": [d]}}}}
-            )
-        assert [c.name for c in out] == ["tau2_agent"]
+        assert [c.name for c in out] == ["my_agent"]

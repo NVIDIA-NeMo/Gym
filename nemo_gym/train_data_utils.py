@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-import warnings
 from abc import abstractmethod
 from collections import Counter, defaultdict
 from math import sqrt
@@ -401,21 +400,10 @@ class TrainDataProcessor(BaseModel):
             elif agent_config.SERVER_TYPE == "responses_api_agents":
                 agent_configs_without_data.append(agent_config)
 
-        agents_with_rs_edge_and_data = [
-            c
-            for c in agent_configs_with_data
-            if c.SERVER_TYPE == "responses_api_agents"
-            and (c.get_inner_run_server_config().model_extra or {}).get("resources_server")
-        ]
-        if agents_with_rs_edge_and_data:
-            warnings.warn(
-                "Datasets declared on agent instances that reference a resources server: "
-                f"{sorted(c.name for c in agents_with_rs_edge_and_data)}. Move each `datasets:` list "
-                "into the referenced resources server's block; agent-block declarations are deprecated "
-                "(self-contained agents without a resources_server edge are exempt).",
-                DeprecationWarning,
-                stacklevel=2,
-            )
+        # NOTE(dataset-decoupling): the deprecation warning for datasets declared on agents that
+        # reference a resources server ships with the config migration PR, not here — otherwise
+        # every un-migrated in-repo config would warn about a move the migration performs anyway.
+        # Until then both declaration homes are equally supported.
 
         server_names_list_str = "\n- ".join([""] + [f"{c.name} ({c.SERVER_TYPE})" for c in agent_configs_without_data])
         print(
