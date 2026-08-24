@@ -1,0 +1,31 @@
+gym_v:
+  resources_servers:
+    gym_v:
+      entrypoint: app.py
+      domain: games
+      description: Env-id-parametric gym-v visual RL wrapper (~78 envs)
+      value: Multi-turn visual reasoning and RL
+      task_jsonl_fpaths: []
+      image_format: "PNG"
+      image_jpeg_quality: 90
+      max_image_wh: null
+      enforce_horizon_cap: true
+      return_transitions: false
+      disable_text_feedback: true
+gym_v_agent:
+  responses_api_agents:
+    gymv_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: gym_v
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 64
+      done_if_no_boxed_answer: false
+      return_transitions: false
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: environments/gym_v/data/example.jsonl
