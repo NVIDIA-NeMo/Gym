@@ -49,7 +49,7 @@ import time
 from contextlib import suppress
 from pathlib import Path
 from traceback import format_exc
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import Request
 from pydantic import BaseModel
@@ -226,7 +226,9 @@ class VibenchResourcesServer(SimpleResourcesServer):
                     link_target = (target.parent / member.linkname).resolve()
                     if not link_target.is_relative_to(dest.resolve()):
                         raise ValueError(f"Refusing link escaping the app dir: {member.name!r}")
-            tar.extractall(dest)
+            # filter="data" is the stdlib's own guard (and the 3.14 default); the explicit
+            # checks above stay because they give a named error instead of a generic one.
+            tar.extractall(dest, filter="data")
 
     async def _grader_env(self) -> Dict[str, str]:
         """Environment for ViBench's grading subprocesses.
@@ -295,17 +297,33 @@ class VibenchResourcesServer(SimpleResourcesServer):
         self._cached_grader_env = dict(env)
         return env
 
+    def _redact(self, text: str, env: Dict[str, str]) -> str:
+        """Strip grader credentials out of captured output.
+
+        Captured stdout is stored in PlanResult.error and ships in the rollout JSONL, which
+        gets committed. The env these scripts run with holds AGENT_*_API_KEY, so one `set -x`
+        upstream would otherwise put a live key in a public file. Scrubbing at the capture
+        point means that cannot happen regardless of what ViBench prints.
+        """
+        for key, value in env.items():
+            if not value or len(value) < 8:
+                continue
+            if any(marker in key for marker in ("API_KEY", "TOKEN", "SECRET", "PASSWORD")):
+                text = text.replace(value, f"<redacted:{key}>")
+        return text
+
     async def _run_vibench_script(self, cmd: List[str]) -> tuple[int, str]:
         """Run one ViBench grading script, returning (return_code, merged output).
 
         A timeout is a failed grade, not an exception: one wedged compose stack should score
         zero rather than take the whole rollout down.
         """
+        env = await self._grader_env()
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=str(self._repo_root),
-                env=await self._grader_env(),
+                env=env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )
@@ -320,7 +338,7 @@ class VibenchResourcesServer(SimpleResourcesServer):
             return 1, f"timed out after {self.config.evaluation_timeout_s}s: {' '.join(cmd)}"
 
         code = proc.returncode if proc.returncode is not None else 1
-        return code, (stdout or b"").decode(errors="replace")
+        return code, self._redact((stdout or b"").decode(errors="replace"), env)
 
     async def _grade_one_test_plan(
         self,
@@ -492,6 +510,35 @@ class VibenchResourcesServer(SimpleResourcesServer):
             artifact_extraction_time_s=artifact_extraction_time_s,
             grading_time_s=grading_time_s,
         )
+
+    def compute_metrics(self, verify_responses: List[Dict[str, Any]]) -> Dict[str, float]:
+        """Report where rollouts fail, not just what they scored.
+
+        A mean reward alone cannot distinguish "the model wrote a weak app" from "the app
+        never built" or "grading could not seed it" -- and those need completely different
+        responses. Every zero in this environment has one of three causes, so they are
+        surfaced separately.
+        """
+        if not verify_responses:
+            return {}
+        n = len(verify_responses)
+        rewards = [float(r.get("reward", 0) or 0) for r in verify_responses]
+        plans = sum(int(r.get("test_plans_total", 0) or 0) for r in verify_responses)
+        graded = sum(int(r.get("test_plans_graded", 0) or 0) for r in verify_responses)
+        return {
+            "mean_reward": sum(rewards) / n,
+            "perfect_rate": sum(1 for x in rewards if x >= 1.0) / n,
+            "zero_rate": sum(1 for x in rewards if x <= 0.0) / n,
+            "build_failure_rate": sum(1 for r in verify_responses if r.get("build_failed")) / n,
+            "mean_seeding_failure_rate": sum(float(r.get("seeding_failure_rate", 0) or 0) for r in verify_responses)
+            / n,
+            # The share of plans that produced a scorecard at all: the health check that
+            # separates a working verifier from a broken one.
+            "plans_graded_rate": (graded / plans) if plans else 0.0,
+        }
+
+    def get_key_metrics(self) -> List[str]:
+        return ["mean_reward", "plans_graded_rate", "build_failure_rate"]
 
 
 if __name__ == "__main__":

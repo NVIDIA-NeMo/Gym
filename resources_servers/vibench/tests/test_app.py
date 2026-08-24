@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import json
 import tarfile
 from pathlib import Path
@@ -155,6 +156,13 @@ class _FakeProc:
         return self._out, self._err
 
 
+def _const_env(env: dict):
+    async def _inner():
+        return dict(env)
+
+    return _inner
+
+
 def _patch_env_creator(monkeypatch, proc: _FakeProc) -> None:
     async def fake_exec(*a, **k):
         return proc
@@ -228,6 +236,252 @@ class TestGraderEnv:
 
         # Six grading calls per rollout must not mean six subprocesses.
         assert len(calls) == 1
+
+
+class TestRedaction:
+    def test_grader_credentials_are_scrubbed_from_captured_output(self, tmp_path):
+        """Captured output ships in the rollout JSONL, which gets committed."""
+        server = make_server(tmp_path)
+        env = {"AGENT_SEEDING_LLM_API_KEY": "super-secret-value", "AGENT_SEEDING_LLM_MODEL": "m"}
+
+        out = server._redact("connecting with key=super-secret-value now", env)
+
+        assert "super-secret-value" not in out
+        assert "<redacted:AGENT_SEEDING_LLM_API_KEY>" in out
+
+    def test_non_secret_values_are_left_alone(self, tmp_path):
+        server = make_server(tmp_path)
+        env = {"AGENT_SEEDING_LLM_MODEL": "anthropic/some-model"}
+
+        assert server._redact("model anthropic/some-model", env) == "model anthropic/some-model"
+
+    def test_short_values_are_not_scrubbed(self, tmp_path):
+        """A short key would match everywhere and destroy the log's usefulness."""
+        server = make_server(tmp_path)
+        assert server._redact("the app is ok", {"AGENT_LLM_API_KEY": "ok"}) == "the app is ok"
+
+
+class TestAggregateMetrics:
+    def test_separates_the_three_causes_of_a_zero(self, tmp_path):
+        server = make_server(tmp_path)
+        responses = [
+            {
+                "reward": 1.0,
+                "test_plans_total": 3,
+                "test_plans_graded": 3,
+                "build_failed": False,
+                "seeding_failure_rate": 0.0,
+            },
+            {
+                "reward": 0.0,
+                "test_plans_total": 3,
+                "test_plans_graded": 0,
+                "build_failed": True,
+                "seeding_failure_rate": 0.0,
+            },
+            {
+                "reward": 0.5,
+                "test_plans_total": 4,
+                "test_plans_graded": 4,
+                "build_failed": False,
+                "seeding_failure_rate": 0.25,
+            },
+        ]
+
+        m = server.compute_metrics(responses)
+
+        assert m["mean_reward"] == pytest.approx(0.5)
+        assert m["perfect_rate"] == pytest.approx(1 / 3)
+        assert m["zero_rate"] == pytest.approx(1 / 3)
+        assert m["build_failure_rate"] == pytest.approx(1 / 3)
+        assert m["plans_graded_rate"] == pytest.approx(7 / 10)
+
+    def test_empty_input_is_not_a_division_error(self, tmp_path):
+        assert make_server(tmp_path).compute_metrics([]) == {}
+
+    def test_key_metrics_surface_verifier_health(self, tmp_path):
+        # plans_graded_rate is what tells a reader the verifier ran at all.
+        assert "plans_graded_rate" in make_server(tmp_path).get_key_metrics()
+
+
+class TestRunVibenchScript:
+    @pytest.mark.asyncio
+    async def test_returns_code_and_merged_output(self, tmp_path, monkeypatch):
+        server = make_server(tmp_path)
+        monkeypatch.setattr(server, "_grader_env", _const_env({}))
+        _patch_env_creator(monkeypatch, _FakeProc(0, "hello"))
+
+        code, log = await server._run_vibench_script(["/bin/true"])
+
+        assert (code, log) == (0, "hello")
+
+    @pytest.mark.asyncio
+    async def test_credentials_are_scrubbed_from_the_returned_log(self, tmp_path, monkeypatch):
+        """This log is stored on PlanResult.error and ships in the rollout JSONL."""
+        server = make_server(tmp_path)
+        monkeypatch.setattr(server, "_grader_env", _const_env({"AGENT_SEEDING_LLM_API_KEY": "leaky-secret-key"}))
+        _patch_env_creator(monkeypatch, _FakeProc(0, "using leaky-secret-key here"))
+
+        _, log = await server._run_vibench_script(["/bin/true"])
+
+        assert "leaky-secret-key" not in log
+
+    @pytest.mark.asyncio
+    async def test_spawn_failure_is_a_failed_grade_not_an_exception(self, tmp_path, monkeypatch):
+        server = make_server(tmp_path)
+        monkeypatch.setattr(server, "_grader_env", _const_env({}))
+
+        async def boom(*a, **k):
+            raise OSError("cannot spawn")
+
+        monkeypatch.setattr("resources_servers.vibench.app.asyncio.create_subprocess_exec", boom)
+
+        code, log = await server._run_vibench_script(["/bin/true"])
+
+        assert code == 1
+        assert "cannot spawn" in log
+
+    @pytest.mark.asyncio
+    async def test_timeout_kills_the_process_and_fails_the_plan(self, tmp_path, monkeypatch):
+        """One wedged compose stack must not take the whole rollout down."""
+        server = make_server(tmp_path, evaluation_timeout_s=1)
+        monkeypatch.setattr(server, "_grader_env", _const_env({}))
+        killed = []
+
+        class _Hanging:
+            returncode = None
+
+            async def communicate(self):
+                raise asyncio.TimeoutError()
+
+            def kill(self):
+                killed.append(True)
+
+            async def wait(self):
+                return None
+
+        async def fake_exec(*a, **k):
+            return _Hanging()
+
+        monkeypatch.setattr("resources_servers.vibench.app.asyncio.create_subprocess_exec", fake_exec)
+
+        code, log = await server._run_vibench_script(["/bin/sleep", "99"])
+
+        assert code == 1
+        assert killed == [True]
+        assert "timed out" in log
+
+
+class TestGradeOneTestPlan:
+    def _plan(self, tmp_path: Path) -> str:
+        plan = tmp_path / "prds" / "notes" / "tests" / "mvp" / "test1.txt"
+        plan.parent.mkdir(parents=True, exist_ok=True)
+        plan.write_text("<step>x<skippable>n</skippable></step>")
+        return "prds/notes/tests/mvp/test1.txt"
+
+    @pytest.mark.asyncio
+    async def test_seeding_failure_is_reported_as_such(self, tmp_path, monkeypatch):
+        server = make_server(tmp_path)
+        rel = self._plan(tmp_path)
+
+        async def fake_run(cmd):
+            return 1, "seeding blew up"
+
+        monkeypatch.setattr(server, "_run_vibench_script", fake_run)
+
+        r = await server._grade_one_test_plan(tmp_path / "app", rel, tmp_path / "work", None)
+
+        assert r.seeding_failed is True
+        assert r.normalized_score == 0.0
+
+    @pytest.mark.asyncio
+    async def test_missing_report_after_seeding_is_an_evaluation_failure(self, tmp_path, monkeypatch):
+        """Blaming seeding here sent debugging to the wrong stage once already."""
+        server = make_server(tmp_path)
+        rel = self._plan(tmp_path)
+        work = tmp_path / "work"
+
+        async def fake_run(cmd):
+            # Seeding succeeds (creates its output dir); evaluation writes no report.
+            if "run-seed.py" in " ".join(cmd):
+                (work / "test1" / "seed" / "seeding").mkdir(parents=True, exist_ok=True)
+            return 0, "no report produced"
+
+        monkeypatch.setattr(server, "_run_vibench_script", fake_run)
+
+        r = await server._grade_one_test_plan(tmp_path / "app", rel, work, None)
+
+        assert r.seeding_failed is False
+        assert r.normalized_score == 0.0
+
+    @pytest.mark.asyncio
+    async def test_parses_a_scorecard_and_counts_passed_steps(self, tmp_path, monkeypatch):
+        server = make_server(tmp_path, keep_evaluation_artifacts=True)
+        rel = self._plan(tmp_path)
+        work = tmp_path / "work"
+
+        async def fake_run(cmd):
+            out = work / "test1"
+            if "run-seed.py" in " ".join(cmd):
+                (out / "seed" / "seeding").mkdir(parents=True, exist_ok=True)
+            else:
+                (out / "evaluation-finished.json").write_text(
+                    json.dumps(
+                        {"score": 30, "full_points": 50, "steps": [{"points": 10}, {"points": 20}, {"points": 0}]}
+                    )
+                )
+            return 0, ""
+
+        monkeypatch.setattr(server, "_run_vibench_script", fake_run)
+
+        r = await server._grade_one_test_plan(tmp_path / "app", rel, work, None)
+
+        assert (r.score, r.full_points) == (30.0, 50.0)
+        assert r.normalized_score == pytest.approx(0.6)
+        assert (r.steps_total, r.steps_passed) == (3, 2)
+
+    @pytest.mark.asyncio
+    async def test_test_assets_are_passed_only_to_evaluation(self, tmp_path, monkeypatch):
+        """The builder must never see them; the evaluation agent needs them."""
+        server = make_server(tmp_path)
+        rel = self._plan(tmp_path)
+        work = tmp_path / "work"
+        assets = tmp_path / "prds" / "notes" / "test_assets"
+        assets.mkdir(parents=True)
+        seen = []
+
+        async def fake_run(cmd):
+            seen.append(" ".join(cmd))
+            if "run-seed.py" in " ".join(cmd):
+                (work / "test1" / "seed" / "seeding").mkdir(parents=True, exist_ok=True)
+            return 0, ""
+
+        monkeypatch.setattr(server, "_run_vibench_script", fake_run)
+
+        await server._grade_one_test_plan(tmp_path / "app", rel, work, "prds/notes/test_assets")
+
+        assert "--test-assets" not in seen[0]
+        assert "--test-assets" in seen[1]
+
+    @pytest.mark.asyncio
+    async def test_zero_full_points_does_not_divide_by_zero(self, tmp_path, monkeypatch):
+        server = make_server(tmp_path)
+        rel = self._plan(tmp_path)
+        work = tmp_path / "work"
+
+        async def fake_run(cmd):
+            out = work / "test1"
+            if "run-seed.py" in " ".join(cmd):
+                (out / "seed" / "seeding").mkdir(parents=True, exist_ok=True)
+            else:
+                (out / "evaluation-finished.json").write_text(json.dumps({"score": 0, "full_points": 0, "steps": []}))
+            return 0, ""
+
+        monkeypatch.setattr(server, "_run_vibench_script", fake_run)
+
+        r = await server._grade_one_test_plan(tmp_path / "app", rel, work, None)
+
+        assert r.normalized_score == 0.0
 
 
 class TestVerifyRewardAggregation:
