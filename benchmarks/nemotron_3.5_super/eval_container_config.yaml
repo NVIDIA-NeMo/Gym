@@ -5,21 +5,14 @@ config_paths:
 - benchmarks/aalcr/config.yaml
 - benchmarks/scicode/config.yaml
 - benchmarks/omniscience/config.yaml
-- benchmarks/critpt/config.yaml
 - benchmarks/nemotron_3.5_super/benchmark_configs/hle_no_tools.yaml
-- responses_api_models/vllm_model/configs/vllm_model.yaml
-# TODO @bxyu-nvidia: Implementing in the harness x benchmark decoupling effort.
 - benchmarks/swebench/verified/opencode.yaml
+- benchmarks/swebench/multilingual/opencode.yaml
+- benchmarks/deepswe/opencode.yaml
+- responses_api_models/vllm_model/configs/vllm_model.yaml
 # - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
-# SWE Bench Multilingual
 # SWE Bench Pro
 # Terminal Bench 2.1
-# TODO @bxyu-nvidia: need clarification from arajfer and config update in gym
-# HLE w/o tool
-# TODO @bxyu-nvidia: need test efficiency
-# BrowseComp
-# TODO @bxyu-nvidia: need pipeclean (may be very complex)
-# GDPVal-AA-V2
 
 ########################################
 # START Secrets
@@ -101,14 +94,18 @@ policy_model:
     vllm_model:
       num_workers: 16
 
-# TODO @bxyu-nvidia: Remove this to turn on SWE Verified after it is validated. This is a placeholder for container build.
+# TODO @bxyu-nvidia: Remove these overrides to turn on various benchmarks after we do batched eval studies. This is a placeholder for container build.
 opencode_sandboxed_agent_swebench_verified:
-  _inherit_from: opencode_sandboxed_agent
   responses_api_agents:
     opencode_sandboxed_agent:
-      resources_server:
-        type: resources_servers
-        name: opencode_swebench_verified_resources_server
+      datasets: []
+opencode_sandboxed_agent_swebench_multilingual:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      datasets: []
+opencode_sandboxed_agent_deepswe:
+  responses_api_agents:
+    opencode_sandboxed_agent:
       datasets: []
 
 ########################################

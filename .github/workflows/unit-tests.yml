@@ -18,6 +18,12 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
   workflow_call:
+    inputs:
+      base-ref:
+        description: Base commit or ref used to classify changes
+        required: false
+        type: string
+        default: ""
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -34,91 +40,21 @@ jobs:
     outputs:
       run_full: ${{ steps.changes.outputs.run_full }}
       run_servers: ${{ steps.changes.outputs.run_servers }}
-      server_all_changed_files: ${{ steps.changed-files.outputs.server_all_changed_files }}
+      docs_only: ${{ steps.changes.outputs.docs_only }}
+      server_all_changed_files: ${{ steps.changes.outputs.server_all_changed_files }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           submodules: 'recursive'
-
-      - name: Detect changed files
-        id: changed-files
-        uses: step-security/changed-files@3dbe17c78367e7d60f00d78ae6781a35be47b4a1 # v45.0.1
-        with:
-          # 'files' input enables global other_changed_files_count for uncategorized files
-          files: |
-            **.md
-            fern/**
-            LICENSE
-            resources_servers/**
-            responses_api_agents/**
-            responses_api_models/**
-            benchmarks/**
-          files_yaml: |
-            doc:
-              - '**.md'
-              - fern/**
-              - LICENSE
-              - benchmarks/**
-            server:
-              - resources_servers/**
-              - responses_api_agents/**
-              - responses_api_models/**
+          fetch-depth: 0
 
       - name: Classify changes
         id: changes
-        run: |
-          # workflow_call or non-PR context: run everything
-          if [[ "${{ github.event_name }}" != "pull_request" ]]; then
-            echo "run_full=true" >> $GITHUB_OUTPUT
-            echo "run_servers=false" >> $GITHUB_OUTPUT
-            echo "No PR context - running full suite"
-            exit 0
-          fi
-
-          DOC_CHANGED="${{ steps.changed-files.outputs.doc_any_changed }}"
-          SERVER_CHANGED="${{ steps.changed-files.outputs.server_any_changed }}"
-          OTHER_COUNT="${{ steps.changed-files.outputs.other_changed_files_count }}"
-
-          echo "============================================"
-          echo "File change categorization"
-          echo "============================================"
-          echo ""
-          echo "Categories:"
-          echo "  doc (skip tests):          **.md, fern/**, LICENSE, benchmarks/**"
-          echo "  server (test changed):     resources_servers/**, responses_api_agents/**, responses_api_models/**"
-          echo "  other (full suite):        everything else (core library, CI, scripts, etc.)"
-          echo "  Priority:                  other > server > doc"
-          echo ""
-          echo "This PR:"
-          echo "  doc changed:               $DOC_CHANGED"
-          echo "  server changed:            $SERVER_CHANGED"
-          echo "  other (uncategorized):     ${OTHER_COUNT:-0} file(s)"
-          if [[ "${OTHER_COUNT:-0}" -gt 0 ]]; then
-            echo "  other files:               ${{ steps.changed-files.outputs.other_changed_files }}"
-          fi
-          echo ""
-
-          # Files outside doc/server categories (CI, core library, config, etc.) → full suite
-          if [[ "${OTHER_COUNT:-0}" -gt 0 ]]; then
-            echo "Decision: FULL TEST SUITE"
-            echo "Reason:   ${OTHER_COUNT} file(s) outside doc/server categories"
-            echo "run_full=true" >> $GITHUB_OUTPUT
-            echo "run_servers=false" >> $GITHUB_OUTPUT
-          # Only server files changed (possibly with doc changes) → test changed servers
-          elif [[ "$SERVER_CHANGED" == "true" ]]; then
-            echo "Decision: SERVER TESTS ONLY"
-            echo "Reason:   only server files changed (+ possibly docs)"
-            echo "run_full=false" >> $GITHUB_OUTPUT
-            echo "run_servers=true" >> $GITHUB_OUTPUT
-          # Only doc files changed → skip tests
-          else
-            echo "Decision: SKIP TESTS"
-            echo "Reason:   only doc/benchmark files changed"
-            echo "run_full=false" >> $GITHUB_OUTPUT
-            echo "run_servers=false" >> $GITHUB_OUTPUT
-          fi
-          echo "============================================"
+        uses: ./.github/actions/classify-changes
+        with:
+          base-ref: ${{ inputs.base-ref || github.event.pull_request.base.sha || '' }}
+          force-run-all: ${{ inputs.base-ref == '' && github.event_name != 'pull_request' }}
 
   # Core library unit tests (run once on a full run) + the changed-servers path. The full
   # server suite is sharded into the parallel `server-suite` matrix below.
@@ -146,11 +82,13 @@ jobs:
             uv-${{ runner.os }}-
 
       - name: Install system test dependencies
-        timeout-minutes: 5
+        timeout-minutes: 20
         run: |
-          APT_OPTS="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
-          sudo apt-get update $APT_OPTS
-          sudo apt-get install -y --no-install-recommends $APT_OPTS git curl ca-certificates
+          for i in 1 2 3 4; do
+            timeout 5m sudo bash -c "apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates" && exit 0
+            echo "apt-get attempt $i/4 failed or timed out after 5m; retrying"
+          done
+          exit 1
 
       - name: Core unit tests
         if: needs.detect.outputs.run_full == 'true'
@@ -232,11 +170,13 @@ jobs:
             uv-${{ runner.os }}-
 
       - name: Install system test dependencies
-        timeout-minutes: 5
+        timeout-minutes: 20
         run: |
-          APT_OPTS="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
-          sudo apt-get update $APT_OPTS
-          sudo apt-get install -y --no-install-recommends $APT_OPTS git curl ca-certificates
+          for i in 1 2 3 4; do
+            timeout 5m sudo bash -c "apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates" && exit 0
+            echo "apt-get attempt $i/4 failed or timed out after 5m; retrying"
+          done
+          exit 1
 
       - name: Server tests (shard ${{ matrix.shard }}/${{ env.NUM_SHARDS }})
         run: ./scripts/ci/server_tests.sh "${{ matrix.shard }}" "${{ env.NUM_SHARDS }}"

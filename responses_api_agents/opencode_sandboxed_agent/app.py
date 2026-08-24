@@ -65,6 +65,7 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     remote_opencode_install_script_path: Optional[str] = None
     remote_opencode_binary_path: Optional[str] = None
     opencode_config: Dict[str, Any] = Field(default_factory=dict)
+    opencode_max_context_window: int
 
     # Sandbox config
     sandbox_provider: str
@@ -141,7 +142,14 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         return sandbox
 
-    def _create_opencode_config(self) -> Dict[str, Any]:
+    async def _create_opencode_config(self, request: Request) -> Dict[str, Any]:
+        base_url = (
+            self.base_url_for_run(
+                base_url=get_server_url(self.config.model_server.name),
+                body=await request.json(),
+            )
+            + "/v1"
+        )
         return {
             "model": "nemo_gym/dummy_model",
             "$schema": "https://opencode.ai/config.json",
@@ -150,18 +158,18 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     # TODO @bxyu-nvidia: We should use @ai-sdk/openai here but there is some /v1/responses streaming error.
                     "npm": "@ai-sdk/openai-compatible",
                     "options": {
-                        "baseURL": f"{get_server_url(self.config.model_server.name)}/v1",
+                        "baseURL": base_url,
                         "apiKey": "dummy_key",  # pragma: allowlist secret
+                        "timeout": False,
+                        "chunkTimeout": 600000,  # in milliseconds, 10 min
                     },
                     "models": {
                         "dummy_model": {
                             "limit": {
-                                "context": 0,
-                                "input": 0,
-                                # @bxyu-nvidia: OpenCode defaults to 32k here https://github.com/anomalyco/opencode/blob/58a99916bb96edf5cf605dc03e1be1e4bacf9ff7/packages/opencode/src/provider/transform.ts#L21
-                                # and there is no way to set it to null.
-                                # We set it here to explicitly acknowledge that this parameter is set.
-                                "output": 32_000,
+                                "context": self.config.opencode_max_context_window,
+                                "input": self.config.opencode_max_context_window,
+                                # See the OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX flag below for more information.
+                                "output": self.config.opencode_max_context_window,
                             },
                         },
                     },
@@ -298,11 +306,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && {install_str} \
         && export PATH=$HOME/.opencode/bin:$PATH \
         && echo "Installed OpenCode" \
-        && opencode run {opencode_debug_str} {opencode_thinking_str} {quote(query)} \
+        && opencode run {opencode_debug_str} {opencode_thinking_str} -- {quote(query)} \
         && echo "OpenCode run finished"
         """
 
-        opencode_config_content = json.dumps(self._create_opencode_config())
+        opencode_config_content = json.dumps(await self._create_opencode_config(request))
 
         if self.config.debug:
             print(f"Running command:\n```bash\n{command}\n```\n", file=sys.stderr)
@@ -312,7 +320,14 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             result = await sandbox.exec(
                 command=command,
                 timeout_s=self.config.sandbox_timeout,
-                env={"OPENCODE_CONFIG_CONTENT": opencode_config_content},
+                env={
+                    "OPENCODE_CONFIG_CONTENT": opencode_config_content,
+                    # @bxyu-nvidia: OpenCode defaults to 32k here https://github.com/anomalyco/opencode/blob/58a99916bb96edf5cf605dc03e1be1e4bacf9ff7/packages/opencode/src/provider/transform.ts#L21
+                    # and there is no way to set it to null.
+                    # Here, we set an exorbitantly high number that cannot ever be reached.
+                    # In future versions of OpenCode, this can be directly passed via maxOutputTokens in the limit config above https://github.com/anomalyco/opencode/blob/1b18a50418f730aca32630ccfcde850f2b5fc360/packages/opencode/src/provider/transform.ts#L1418
+                    "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": str(1_000_000_000),
+                },
             )
         except:
             result = None
@@ -326,6 +341,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         try:
             export_result = await sandbox.exec(
                 command=f"""export PATH=$HOME/.opencode/bin:$PATH \
+            && (command -v jq >/dev/null 2>&1 || (apt-get update && apt-get install -y --no-install-recommends jq)) \
             && session_id=$(opencode session list --format json | jq -r '.[0].id') \
             && opencode export $session_id > {export_fname}"""
             )
@@ -353,6 +369,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 await sandbox.download(str(results_remote_fpath), results_local_fpath)
             except:
                 print(f"Failed to download export results to {results_local_fpath}", format_exc(), file=sys.stderr)
+                if export_result:
+                    print("Export stdout:\n", export_result.stdout, file=sys.stderr)
+                    print("Export stderr:\n", export_result.stderr, file=sys.stderr)
 
         opencode_export = dict()
         if results_local_fpath.exists():
