@@ -1,9 +1,4 @@
 # autobot-policy.yaml — NeMo-Gym repo config for review-approve-pr
-#
-# Repo-side config owned by the Gym team.
-# Platform config lives in CI-Events-Workflows.
-# Linear: AUT-1098
-# DEV INPUT REQUIRED: confirm protected_paths and high_risk_requiring_human_review before Phase 1.
 
 protected_paths:
   - "nemo_gym/verifier/**"
