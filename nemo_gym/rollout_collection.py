@@ -58,7 +58,7 @@ from nemo_gym.global_config import (
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
-    get_first_server_config_dict,
+    agents_by_resources_server,
     get_global_config_dict,
 )
 from nemo_gym.path_utils import failures_path_for
@@ -1399,19 +1399,7 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         if not unresolved:
             return
 
-        # Invert the agent->resources_server edges once. Template placeholders (name: ???) and
-        # malformed blocks are skipped: they are not routable candidates.
-        agents_by_rs: Dict[str, List[str]] = defaultdict(list)
-        for instance_name, block in global_config_dict.items():
-            if not isinstance(block, DictConfig) or "responses_api_agents" not in block:
-                continue
-            try:
-                inner = get_first_server_config_dict(global_config_dict, instance_name)
-                rs_name = (inner.get("resources_server") or {}).get("name")
-            except Exception:
-                continue
-            if isinstance(rs_name, str):
-                agents_by_rs[rs_name].append(str(instance_name))
+        agents_by_rs = agents_by_resources_server(global_config_dict)
 
         resolution: Dict[str, str] = {}
         errors: List[str] = []

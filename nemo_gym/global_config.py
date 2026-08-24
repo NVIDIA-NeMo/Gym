@@ -25,7 +25,7 @@ from pathlib import Path
 from platform import python_version
 from random import randint
 from socket import gethostbyname, gethostname, socket
-from typing import ClassVar, List, Optional, Tuple, Type
+from typing import ClassVar, Dict, List, Optional, Tuple, Type
 
 import hydra
 import rich
@@ -1019,6 +1019,28 @@ def get_first_server_config_dict(global_config_dict: DictConfig, top_level_path:
     server_config_dict = list(server_config_dict.values())[0]
 
     return server_config_dict
+
+
+def agents_by_resources_server(global_config_dict: DictConfig) -> Dict[str, List[str]]:
+    """Invert the agent -> resources_server edges of a merged config.
+
+    Returns {resources server instance name: [agent instance names referencing it]}. This is the
+    lookup that routes task_source-stamped rows to an agent (and, transitionally, lets collate
+    dual-stamp a legacy agent_ref). Template placeholders (``name: ???``) and malformed blocks are
+    skipped: they are not routable candidates.
+    """
+    result: Dict[str, List[str]] = defaultdict(list)
+    for instance_name, block in global_config_dict.items():
+        if not isinstance(block, DictConfig) or "responses_api_agents" not in block:
+            continue
+        try:
+            inner = get_first_server_config_dict(global_config_dict, instance_name)
+            rs_name = (inner.get("resources_server") or {}).get("name")
+        except Exception:
+            continue
+        if isinstance(rs_name, str):
+            result[rs_name].append(str(instance_name))
+    return result
 
 
 def find_open_port(

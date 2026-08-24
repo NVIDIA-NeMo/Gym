@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import json
+import warnings
 from asyncio import Future, Semaphore
 from collections import Counter, defaultdict
 from contextlib import nullcontext
@@ -35,6 +36,7 @@ from nemo_gym.global_config import (
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
+    TASK_SOURCE_KEY_NAME,
 )
 from nemo_gym.path_utils import failures_path_for
 from nemo_gym.rollout_collection import (
@@ -185,7 +187,8 @@ def _agent_to_rs_mapping_from_resources_only_config(
     global_config_dict: Union[Dict[str, Any], "DictConfig"],
 ) -> Dict[str, str]:
     # The rollout rows still carry agent names that were never started, so fall back to the
-    # single resources server for EVERY requested key.
+    # single resources server for EVERY requested key — loudly, since this also absorbs typos
+    # and stale agent names that would otherwise be routing errors.
     resources_server_names = [
         str(name)
         for name, block in global_config_dict.items()
@@ -193,6 +196,12 @@ def _agent_to_rs_mapping_from_resources_only_config(
     ]
     if len(resources_server_names) == 1:
         only = resources_server_names[0]
+        warnings.warn(
+            f"reverify: config has no agent blocks; routing EVERY rollout agent name to the only "
+            f"resources server {only!r}. Mismatched or stale agent names cannot be detected in "
+            "this mode.",
+            stacklevel=2,
+        )
         return defaultdict(lambda: only)  # any key → the one resources server instance
     if not resources_server_names:
         raise ConfigError("reverify: no resources server found in the config.")
@@ -200,6 +209,32 @@ def _agent_to_rs_mapping_from_resources_only_config(
         f"reverify: multiple resources servers {resources_server_names} and no agent blocks to "
         "route by. Use a config with agent blocks."
     )
+
+
+def _rs_for_row(
+    row: Dict[str, Any],
+    agent_to_rs: Dict[str, str],
+    global_config_dict: Union[Dict[str, Any], "DictConfig"],
+) -> str:
+    """The resources server that verifies this row.
+
+    A task_source naming a resources server is authoritative (it is the declaring instance the
+    dataset was stamped with — no agent indirection needed). Otherwise fall back to the rollout's
+    agent_ref via the config's agent->rs edges.
+    """
+    ts = row.get(TASK_SOURCE_KEY_NAME)
+    if ts is not None:
+        block = global_config_dict.get(ts)
+        if isinstance(block, (dict, DictConfig)) and "resources_servers" in block:
+            return str(ts)
+    agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+    try:
+        return agent_to_rs[agent_name]
+    except KeyError:
+        raise ConfigError(
+            f"reverify: cannot find a resources server for row (agent_ref.name={agent_name!r}, "
+            f"task_source={ts!r}). Known agents: {sorted(agent_to_rs)}."
+        ) from None
 
 
 def _build_agent_to_resources_server_mapping(
@@ -449,7 +484,7 @@ def _run_verification_payloads(
 
     async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
         async with semaphore:
-            rs_name = agent_to_rs[row[AGENT_REF_KEY_NAME]["name"]]
+            rs_name = _rs_for_row(row, agent_to_rs, server_client.global_config_dict)
             res = await server_client.post(server_name=rs_name, url_path="/verify", json=row)
             try:
                 await raise_for_status(

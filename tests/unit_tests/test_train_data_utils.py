@@ -1301,3 +1301,128 @@ class TestCollateSamples:
         assert list(write_filenames_to_mock.keys()) == [
             Path("example_metrics_conflict.json"),
         ]
+
+
+def _instance(name: str, server_type: str, impl: dict):
+    from omegaconf import OmegaConf
+
+    from nemo_gym.config_types import maybe_get_server_instance_config
+
+    cfg, err = maybe_get_server_instance_config(name, OmegaConf.create({server_type: {"impl": impl}}))
+    assert err is None, err
+    return cfg
+
+
+def _dataset(tmp_path: Path, name: str, rows: list) -> dict:
+    fpath = tmp_path / f"{name}.jsonl"
+    fpath.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    return {"name": name, "type": "example", "jsonl_fpath": str(fpath)}
+
+
+class TestCollateTaskSourceStamping:
+    """Pins the collate stamping contract (dataset-decoupling RFC): task_source = declaring
+    instance; legacy agent_ref dual-stamped for one deprecation cycle."""
+
+    ROWS = [{"responses_create_params": {"input": []}, "question": "q1"}]
+
+    def _collate(self, tmp_path, monkeypatch, configs, agents_by_rs):
+        monkeypatch.chdir(tmp_path)
+        return TrainDataProcessor()._collate_samples_single_type(
+            type="example", server_instance_configs=configs, agents_by_rs=agents_by_rs
+        )
+
+    def _read(self, path: Path) -> list:
+        return [json.loads(line) for line in open(path)]
+
+    def test_rs_declared_dataset_stamps_task_source_and_dual_agent_ref(self, tmp_path, monkeypatch) -> None:
+        rs = _instance(
+            "math_rs",
+            "resources_servers",
+            {"entrypoint": "app.py", "domain": "math", "datasets": [_dataset(tmp_path, "d1", self.ROWS)]},
+        )
+        paths = self._collate(tmp_path, monkeypatch, [rs], {"math_rs": ["math_agent"]})
+        rows = self._read(paths[0])
+        assert rows[0]["task_source"] == "math_rs"
+        assert rows[0]["agent_ref"] == {"type": "responses_api_agents", "name": "math_agent"}
+
+    def test_ambiguous_rs_stamps_task_source_only(self, tmp_path, monkeypatch) -> None:
+        rs = _instance(
+            "shared_rs",
+            "resources_servers",
+            {"entrypoint": "app.py", "domain": "math", "datasets": [_dataset(tmp_path, "d2", self.ROWS)]},
+        )
+        paths = self._collate(tmp_path, monkeypatch, [rs], {"shared_rs": ["agent_a", "agent_b"]})
+        rows = self._read(paths[0])
+        assert rows[0]["task_source"] == "shared_rs"
+        assert "agent_ref" not in rows[0]
+
+    def test_agent_declared_dataset_keeps_legacy_stamp_plus_task_source(self, tmp_path, monkeypatch) -> None:
+        agent = _instance(
+            "tau2_agent",
+            "responses_api_agents",
+            {"entrypoint": "app.py", "datasets": [_dataset(tmp_path, "d3", self.ROWS)]},
+        )
+        paths = self._collate(tmp_path, monkeypatch, [agent], {})
+        rows = self._read(paths[0])
+        assert rows[0]["task_source"] == "tau2_agent"
+        assert rows[0]["agent_ref"] == {"type": "responses_api_agents", "name": "tau2_agent"}
+
+    def test_same_fpath_two_declarations_get_distinct_prepare_files(self, tmp_path, monkeypatch) -> None:
+        """Previously the second declaration silently truncated the first's prepared file."""
+        shared = _dataset(tmp_path, "shared", self.ROWS)
+        a = _instance("agent_a", "responses_api_agents", {"entrypoint": "app.py", "datasets": [dict(shared)]})
+        b = _instance("agent_b", "responses_api_agents", {"entrypoint": "app.py", "datasets": [dict(shared)]})
+        paths = self._collate(tmp_path, monkeypatch, [a, b], {})
+        assert len(paths) == len(set(paths)) == 2
+        stamps = [self._read(p)[0]["task_source"] for p in paths]
+        assert sorted(stamps) == ["agent_a", "agent_b"]
+
+
+class TestDeclaringInstanceValidation:
+    def _validate(self, configs_dict):
+        from omegaconf import OmegaConf
+
+        cfg = TrainDataProcessorConfig(output_dirpath="out", mode="example_validation")
+        return TrainDataProcessor().load_and_validate_server_instance_configs(cfg, OmegaConf.create(configs_dict))
+
+    def test_rs_declared_datasets_are_in_scope(self, tmp_path) -> None:
+        d = _dataset(tmp_path, "d4", [{"responses_create_params": {"input": []}}])
+        out = self._validate(
+            {"my_rs": {"resources_servers": {"impl": {"entrypoint": "a.py", "domain": "math", "datasets": [d]}}}}
+        )
+        assert [c.name for c in out] == ["my_rs"]
+
+    def test_model_server_datasets_rejected(self, tmp_path) -> None:
+        d = _dataset(tmp_path, "d5", [{"responses_create_params": {"input": []}}])
+        with raises(ValueError, match="cannot be declared on model servers"):
+            self._validate({"my_model": {"responses_api_models": {"impl": {"entrypoint": "a.py", "datasets": [d]}}}})
+
+    def test_agent_with_rs_edge_dataset_warns_deprecation(self, tmp_path) -> None:
+        import pytest
+
+        d = _dataset(tmp_path, "d6", [{"responses_create_params": {"input": []}}])
+        with pytest.warns(DeprecationWarning, match="Move each `datasets:` list"):
+            self._validate(
+                {
+                    "my_agent": {
+                        "responses_api_agents": {
+                            "impl": {
+                                "entrypoint": "a.py",
+                                "resources_server": {"type": "resources_servers", "name": "some_rs"},
+                                "datasets": [d],
+                            }
+                        }
+                    }
+                }
+            )
+
+    def test_self_contained_agent_dataset_does_not_warn(self, tmp_path) -> None:
+        import warnings as _warnings
+
+        d = _dataset(tmp_path, "d7", [{"responses_create_params": {"input": []}}])
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("error", DeprecationWarning)
+            out = self._validate(
+                {"tau2_agent": {"responses_api_agents": {"impl": {"entrypoint": "a.py", "datasets": [d]}}}}
+            )
+        assert [c.name for c in out] == ["tau2_agent"]
