@@ -43,7 +43,7 @@ def is_mine(i):
 
 page, mine, total = 1, [], 0
 while True:
-    req = urllib.request.Request(f"{base}/v1/sandboxes?page={page}&pageSize=100", headers=headers)
+    req = urllib.request.Request(f"{base}/v1/sandboxes?page={page}&pageSize=100&metadata=nemo-gym.nvidia.com/user={match_user}", headers=headers)
     d = json.load(urllib.request.urlopen(req, timeout=30))
 
     mine.extend(filter(is_mine, d.get("items", [])))
