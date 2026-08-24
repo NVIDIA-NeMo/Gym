@@ -1,0 +1,107 @@
+# autobot-policy.yaml — NeMo-Gym repo config for review-approve-pr
+#
+# This file is the REPO-SIDE config owned by the Gym team.
+# The platform-side config (eligible_teams, attempt limits) lives in
+# CI-Events-Workflows: apps/workflows/capability/review-approve-pr/config/repos/NVIDIA-NeMo/Gym.yaml
+#
+# Changes here go through a PR to this repo (triggers Gym's Claude review).
+# DEV INPUT REQUIRED: review protected_paths and high_risk_requiring_human_review before Phase 1 launch.
+# These are living config — the dev/CI team will iterate as phases roll out.
+#
+# Linear: AUT-1098
+# RFC: https://linear.app/nvidia/document/rfc-pr-auto-approve-via-review-approve-aut-1098-920ab6ffb5b7
+
+# ─── Two complementary safety mechanisms ──────────────────────────────────────
+#
+# protected_paths       — WHERE the code lives (file path glob match)
+#   • Deterministic: pure code check, no LLM
+#   • A file matching this glob = PERMANENT BLOCK, no retry ever
+#   • Catches: known dangerous files regardless of what the change does
+#
+# high_risk_requiring_human_review — WHAT the change is trying to do (intent)
+#   • LLM-based: Stage 1 reads the diff and classifies semantic intent
+#   • A flagged intent = decline this run, author can fix and re-trigger
+#   • Catches: semantic risk in ANY file, even ones that look safe by path
+#
+# Example: a change to tests/test_scoring.py won't match any protected_path
+# glob, but if it rewrites scoring logic, Stage 1 should flag it under
+# "evaluation metrics or scoring aggregation".
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ─── Protected paths (always high-risk, always require human) ─────────────────
+# Glob patterns. A PR touching any of these paths can NEVER be auto-approved,
+# regardless of any other signal. Deterministic — no LLM involved.
+# DEV INPUT REQUIRED: confirm this list is complete and correct for Gym.
+protected_paths:
+  # Core correctness / reward logic
+  - "nemo_gym/verifier/**"
+  - "nemo_gym/scorer/**"
+  - "**/verify.py"
+  - "**/scorer.py"
+  - "**/reward*.py"
+  # Async / Ray patterns (subtle bugs, silent failures)
+  - "nemo_gym/server_utils.py"
+  - "nemo_gym/ray_utils.py"
+  # Public API surface
+  - "nemo_gym/base_server.py"
+  - "nemo_gym/simple_server.py"
+  - "nemo_gym/responses_api*.py"
+  # Performance and metrics
+  - "**/perf/**"
+  - "**/metrics/**"
+  - "**/benchmark*.py"
+  # CLI
+  - "nemo_gym/cli/**"
+  - "nemo_gym/gym_cli*.py"
+  # Infrastructure — never auto-approve changes to CI, Docker, or deps
+  - ".github/**"
+  - "Dockerfile*"
+  - "docker/**"
+  - "pyproject.toml"
+  - ".pre-commit-config.yaml"
+  # Secrets / security
+  - "**/.env*"
+  - "**/secrets/**"
+
+# ─── Low-risk path patterns ───────────────────────────────────────────────────
+# A PR is eligible for the "low" tier only if EVERY changed file matches
+# at least one of these AND none match a protected path.
+low_risk_paths:
+  - "**/*.md"
+  - "docs/**"
+  - "fern/**"
+  - "tests/**"
+  - "resources_servers/*/configs/**"
+
+# ─── Accepted change types ────────────────────────────────────────────────────
+# dep bumps (pyproject.toml) and CI config (.github/**) are in protected_paths
+# above and will always hard-decline before any agent runs.
+accepted_change_types: {}
+
+# ─── Areas that always require human review ───────────────────────────────────
+# If the PR's intent touches any of these areas, it is declined for auto-approve
+# regardless of file paths. Injected verbatim into the intent classifier prompt.
+# Be specific — vague entries cause false positives.
+# DEV INPUT REQUIRED: what's missing from this list?
+high_risk_requiring_human_review:
+  - "verifier correctness or reward logic"
+  - "rollout collection or trajectory processing"
+  - "async or Ray execution patterns"
+  - "public API or Responses API contract"
+  - "evaluation metrics or scoring aggregation"
+  - "performance-critical paths"
+  - "CLI commands or user-facing configuration"
+  - "authentication, secrets, or security"
+
+# ─── Intent classifier prompt (custom per repo) ───────────────────────────────
+# Injected before the high_risk_requiring_human_review list in the Stage 1 prompt.
+# Explains to the agent what Gym is and why the listed areas matter.
+intent_classifier_prompt: |
+  You are reviewing a pull request to NeMo Gym — a library that provides
+  evaluation and training infrastructure for LLMs and agents. Gym runs
+  multi-turn agent trajectories at scale; evaluation results ship to model
+  reports and training signals feed RLHF pipelines.
+
+  A bug in the areas listed below can silently corrupt scores or hang a
+  training run that a team depends on. Be conservative — if the PR's intent
+  is unclear, flag it. You are classifying intent only, not judging quality.
