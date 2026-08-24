@@ -2499,6 +2499,30 @@ class TestTaskSourcePreprocess:
         rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
         assert rows[0]["agent_ref"] == {"name": "z"}
 
+    def test_agent_map_task_source_key_matches_dual_stamped_row(self, tmp_path) -> None:
+        """Derived artifacts carry BOTH task_source and a resolved agent_ref; a map entry
+        keyed by either must re-route them (agent-name entry wins over task_source entry)."""
+        fpath = self._write_rows(tmp_path, [self._rcp_row(task_source="math_rs", agent_ref={"name": "math_agent"})])
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "o.jsonl"),
+            agent_map={"math_rs": "swe_agent"},
+        )
+        with pytest.warns(UserWarning, match="overrode agent_ref"):
+            rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert rows[0]["agent_ref"] == {"name": "swe_agent"}
+
+    def test_agent_map_agent_key_beats_task_source_key(self, tmp_path) -> None:
+        fpath = self._write_rows(tmp_path, [self._rcp_row(task_source="math_rs", agent_ref={"name": "math_agent"})])
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "o.jsonl"),
+            agent_map={"math_agent": "by_agent", "math_rs": "by_source"},
+        )
+        with pytest.warns(UserWarning, match="overrode agent_ref"):
+            rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert rows[0]["agent_ref"] == {"name": "by_agent"}
+
     def test_num_repeats_keyed_by_task_source(self, tmp_path) -> None:
         fpath = self._write_rows(tmp_path, [self._rcp_row(task_source="math_rs")])
         config = RolloutCollectionConfig(

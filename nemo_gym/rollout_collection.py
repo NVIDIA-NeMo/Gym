@@ -698,7 +698,16 @@ class RolloutCollectionHelper(BaseModel):
             agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
             basis = agent_name if agent_name is not None else row.get(TASK_SOURCE_KEY_NAME)
             if config.agent_map:
-                mapped = config.agent_map.get(basis) if basis is not None else None
+                # A row may carry both an agent_ref and a task_source (derived artifacts do);
+                # a map entry for either re-routes it, the agent name taking precedence.
+                mapped = next(
+                    (
+                        config.agent_map[key]
+                        for key in (agent_name, row.get(TASK_SOURCE_KEY_NAME))
+                        if key is not None and key in config.agent_map
+                    ),
+                    None,
+                )
                 if mapped is None:
                     mapped = config.agent_map.get("_default")
                 if mapped is not None:
