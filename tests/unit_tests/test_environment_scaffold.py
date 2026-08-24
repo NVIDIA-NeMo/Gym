@@ -124,8 +124,10 @@ def test_standalone_resources_server_keeps_its_combined_composition(tmp_path: Pa
     }
     config = yaml.safe_load((server / "configs/shared.yaml").read_text(encoding="utf-8"))
     assert config["shared_resources_server"]["resources_servers"]["shared"]["verified"] is False
-    datasets = config["shared_simple_agent"]["responses_api_agents"]["simple_agent"]["datasets"]
+    # Datasets are declared on the resources server (dataset-decoupling); the agent block carries none.
+    datasets = config["shared_resources_server"]["resources_servers"]["shared"]["datasets"]
     assert [dataset["type"] for dataset in datasets] == ["train", "validation", "example"]
+    assert "datasets" not in config["shared_simple_agent"]["responses_api_agents"]["simple_agent"]
     assert not (tmp_path / "environments").exists()
     assert not (tmp_path / "benchmarks").exists()
 

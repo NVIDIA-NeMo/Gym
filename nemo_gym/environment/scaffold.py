@@ -277,11 +277,21 @@ def _manifest(composition: _Composition) -> EnvironmentManifest:
 
 
 def _asset_config(composition: _Composition) -> str:
+    # Datasets are declared on the resources server (which defines what the rows mean and how
+    # they are scored), never on the agent — the agent is a run-time choice. Benchmarks pin
+    # their harness explicitly with the dataset-level `agent:` key, since scores depend on it.
+    dataset_dict = composition.dataset.model_dump(mode="json", exclude_none=True)
+    if composition.kind == EnvironmentKind.BENCHMARK:
+        dataset_dict["agent"] = composition.agent_instance
     agent_config: dict[str, Any] = {
         "resources_server": {"type": "resources_servers", "name": composition.resource_instance},
         "model_server": {"type": "responses_api_models", "name": "policy_model"},
-        "datasets": [composition.dataset.model_dump(mode="json", exclude_none=True)],
     }
+    # When reusing a verifier from another config we do not know its inner implementation key, so
+    # a partial resources-server override could not be merged safely; the dataset stays on the
+    # agent block there (still supported).
+    if composition.reused_verifier is not None:
+        agent_config["datasets"] = [dataset_dict]
     reused_agent = composition.reused_verifier.agent_instance if composition.reused_verifier else None
     if reused_agent:
         agent_entry: dict[str, Any] = {
@@ -296,6 +306,10 @@ def _asset_config(composition: _Composition) -> str:
         "config_paths": [composition.config_reference],
         composition.agent_instance: agent_entry,
     }
+    if composition.reused_verifier is None:
+        config[composition.resource_instance] = {
+            "resources_servers": {composition.resource_implementation: {"datasets": [dataset_dict]}}
+        }
     if composition.rollout_driver:
         config["rollout_collection_driver"] = composition.rollout_driver
 
@@ -490,24 +504,14 @@ def _standalone_resources_server_config(module_name: str) -> str:
     return dedent(
         f"""\
         # Resources server: owns this environment's task verification (verify()) and reward.
+        # Datasets are declared here — the resources server defines what the rows mean and how
+        # they are scored. Which agent runs them is chosen at run time.
         {module_name}_resources_server:          # instance name — how agents/CLI refer to this server
           resources_servers:                    # server type: resources_servers | responses_api_agents | responses_api_models
             {module_name}:                      # implementation directory under resources_servers/
               entrypoint: app.py                # server entry module
               domain: other                     # task domain; change to the closest supported domain
               verified: false                   # set true once the benchmark has been baselined and reviewed
-
-        # Pair the server with the default agent and dataset slots.
-        {module_name}_simple_agent:             # pass this instance as --agent to gym eval run
-          responses_api_agents:
-            simple_agent:
-              entrypoint: app.py
-              resources_server:
-                type: resources_servers
-                name: {module_name}_resources_server
-              model_server:
-                type: responses_api_models
-                name: policy_model
               datasets:
               - name: train
                 type: train
@@ -524,6 +528,18 @@ def _standalone_resources_server_config(module_name: str) -> str:
                 type: example
                 jsonl_fpath: resources_servers/{module_name}/data/example.jsonl
                 num_repeats: 1
+
+        # Pair the server with the default agent.
+        {module_name}_simple_agent:             # pass this instance as --agent to gym eval run
+          responses_api_agents:
+            simple_agent:
+              entrypoint: app.py
+              resources_server:
+                type: resources_servers
+                name: {module_name}_resources_server
+              model_server:
+                type: responses_api_models
+                name: policy_model
         """
     )
 
@@ -551,9 +567,8 @@ def _standalone_data_gitignore() -> str:
         """\
         *train.jsonl
         *validation.jsonl
-        *train_prepare.jsonl
-        *validation_prepare.jsonl
-        *example_prepare.jsonl
+        *_prepare.jsonl
+        *_prepare.*.jsonl
         """
     )
 

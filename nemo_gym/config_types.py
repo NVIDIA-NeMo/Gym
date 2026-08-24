@@ -533,6 +533,14 @@ class BenchmarkDatasetConfig(BaseModel):
     prepare_script: Path
     prompt_config: Optional[Path] = None
     num_repeats: int = Field(default=1, ge=1)
+    agent: Optional[str] = Field(
+        default=None,
+        description=(
+            "Agent instance that runs this benchmark (a top-level key of the merged config). "
+            "A benchmark's score depends on the harness, so pinning it explicitly is preferred "
+            "over inferring it from which block declares the dataset."
+        ),
+    )
 
 
 ########################################

@@ -24,12 +24,13 @@ from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.config_types import BenchmarkDatasetConfig
+from nemo_gym.config_types import BenchmarkDatasetConfig, ConfigError
 from nemo_gym.discovery import _parse_no_environment_tolerating_unset_values, discover_components
 from nemo_gym.global_config import (
     POLICY_MODEL_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
+    agents_by_resources_server,
     get_first_server_config_dict,
 )
 
@@ -69,11 +70,21 @@ class BenchmarkConfig(BaseModel):
         else:
             global_config_dict = _parse_no_environment_tolerating_unset_values(initial_config_dict)
 
+        # A benchmark dataset may be declared by an agent block (legacy) or a resources server
+        # block (decoupled layout). The agent that runs the benchmark resolves, first hit wins:
+        # 1. the dataset's explicit `agent:` key (preferred: a benchmark's score depends on the
+        #    harness, so the manifest should pin it);
+        # 2. the declaring agent block itself (legacy inference);
+        # 3. the unique agent referencing the declaring resources server.
         datasets: List[BenchmarkDatasetConfig] = []
-        candidate_agent_server_instance_names: List[str] = []
+        candidate_agent_server_instance_names: List[Optional[str]] = []
+        declaring_instance_names: List[str] = []
         for server_instance_name in global_config_dict:
             server_config = global_config_dict[server_instance_name]
-            if not isinstance(server_config, (dict, DictConfig)) or "responses_api_agents" not in server_config:
+            if not isinstance(server_config, (dict, DictConfig)):
+                continue
+            is_agent = "responses_api_agents" in server_config
+            if not is_agent and "resources_servers" not in server_config:
                 continue
 
             inner_server_config = get_first_server_config_dict(global_config_dict, server_instance_name)
@@ -83,7 +94,8 @@ class BenchmarkConfig(BaseModel):
                     continue
 
                 datasets.append(BenchmarkDatasetConfig.model_validate(dataset))
-                candidate_agent_server_instance_names.append(server_instance_name)
+                candidate_agent_server_instance_names.append(str(server_instance_name) if is_agent else None)
+                declaring_instance_names.append(str(server_instance_name))
 
         if len(datasets) < 1:
             return
@@ -93,10 +105,22 @@ class BenchmarkConfig(BaseModel):
 
         dataset = datasets[0]
 
+        agent_name = dataset.agent or candidate_agent_server_instance_names[0]
+        if agent_name is None:
+            declaring_rs = declaring_instance_names[0]
+            candidates = agents_by_resources_server(global_config_dict).get(declaring_rs, [])
+            if len(candidates) != 1:
+                raise ConfigError(
+                    f"Benchmark config {path}: dataset {dataset.name!r} is declared by resources server "
+                    f"{declaring_rs!r}, which {len(candidates)} agents reference. Pin the harness with an "
+                    "`agent:` key on the dataset declaration."
+                )
+            agent_name = candidates[0]
+
         return cls(
             name=dataset.name,
             path=path,
-            agent_name=candidate_agent_server_instance_names[0],
+            agent_name=agent_name,
             num_repeats=dataset.num_repeats,
             dataset=dataset,
         )

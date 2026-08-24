@@ -163,17 +163,57 @@ def _resolve_manifest_composition(config_path: Path) -> ResolvedComposition:
     servers = parser.filter_for_server_instance_configs(resolved)
     by_instance = {server.name: server for server in servers}
     agents = [server for server in servers if server.SERVER_TYPE == "responses_api_agents"]
-    selected_agent = _select_dataset_agent(agents)
+
+    # Datasets may live on a resources server (decoupled layout) or on an agent (legacy and
+    # self-contained layouts). The dataset-bearing instance also determines the agent: an
+    # explicit dataset-level `agent:` pin wins, else the unique agent referencing the RS.
+    rs_with_data = [s for s in servers if s.SERVER_TYPE == "resources_servers" and s.datasets]
+    dataset_rs = None
+    if len(rs_with_data) > 1:
+        names = ", ".join(s.name for s in rs_with_data)
+        raise EnvironmentValidationError(
+            f"Workload config must define exactly one dataset-bearing instance; found resources servers: {names}."
+        )
+    if rs_with_data:
+        dataset_rs = rs_with_data[0]
+        pinned = next((getattr(d, "agent", None) for d in dataset_rs.datasets if getattr(d, "agent", None)), None)
+        if pinned is not None:
+            selected_agent = by_instance.get(pinned)
+            if selected_agent is None:
+                raise EnvironmentValidationError(
+                    f"Dataset on {dataset_rs.name!r} pins agent {pinned!r}, which is not defined in the config."
+                )
+        else:
+            referencing = [
+                a
+                for a in agents
+                if (a.get_inner_run_server_config_dict().get("resources_server") or {}).get("name") == dataset_rs.name
+            ]
+            if len(referencing) != 1:
+                raise EnvironmentValidationError(
+                    f"Datasets on resources server {dataset_rs.name!r} need exactly one agent referencing it "
+                    f"(found {len(referencing)}), or an explicit dataset-level `agent:` pin."
+                )
+            selected_agent = referencing[0]
+    else:
+        selected_agent = _select_dataset_agent(agents)
 
     agent_server = _implementation_name(selected_agent)
     agent_config = selected_agent.get_inner_run_server_config_dict()
     resources_ref = agent_config.get("resources_server") or {}
     model_ref = agent_config.get("model_server") or {}
-    resources_instance = by_instance.get(resources_ref.get("name")) if isinstance(resources_ref, DictConfig) else None
+    resources_instance = (
+        dataset_rs
+        if dataset_rs is not None
+        else by_instance.get(resources_ref.get("name"))
+        if isinstance(resources_ref, DictConfig)
+        else None
+    )
 
     resources_server = _implementation_name(resources_instance) if resources_instance is not None else None
     model_server = model_ref.get("name") if isinstance(model_ref, DictConfig) else None
-    datasets = tuple(_manifest_dataset(dataset) for dataset in (selected_agent.datasets or []))
+    dataset_owner = dataset_rs if dataset_rs is not None else selected_agent
+    datasets = tuple(_manifest_dataset(dataset) for dataset in (dataset_owner.datasets or []))
     grading_mode = None
     if resources_instance is not None:
         grading_mode = resources_instance.get_inner_run_server_config_dict().get("grading_mode")

@@ -514,3 +514,90 @@ class TestPrepareBenchmark:
             prepare_benchmark()
 
         assert mock_module.prepare.call_count == 0
+
+
+class TestBenchmarkAgentResolution:
+    """Pins how a benchmark finds its agent (dataset-decoupling): explicit `agent:` pin >
+    declaring agent block > unique agent referencing the declaring resources server."""
+
+    def _benchmark_dataset(self, **extra):
+        return {
+            "name": "bench",
+            "type": "benchmark",
+            "jsonl_fpath": "data/bench.jsonl",
+            "prepare_script": "prepare.py",
+            **extra,
+        }
+
+    def _agent(self, rs_name):
+        return {
+            "responses_api_agents": {
+                "impl": {"entrypoint": "app.py", "resources_server": {"type": "resources_servers", "name": rs_name}}
+            }
+        }
+
+    def _config(self, **top_level):
+        from nemo_gym.benchmarks import BenchmarkConfig
+
+        return BenchmarkConfig.from_initial_config_dict(
+            path=Path("bench/config.yaml"), initial_config_dict=OmegaConf.create(top_level), strict=False
+        )
+
+    def test_declaring_agent_block_still_wins_without_pin(self) -> None:
+        cfg = self._config(
+            my_agent={
+                "responses_api_agents": {"impl": {"entrypoint": "app.py", "datasets": [self._benchmark_dataset()]}}
+            }
+        )
+        assert cfg.agent_name == "my_agent"
+
+    def test_explicit_agent_pin_wins_over_declaring_block(self) -> None:
+        cfg = self._config(
+            my_agent={
+                "responses_api_agents": {
+                    "impl": {"entrypoint": "app.py", "datasets": [self._benchmark_dataset(agent="other_agent")]}
+                }
+            }
+        )
+        assert cfg.agent_name == "other_agent"
+
+    def test_rs_declared_dataset_resolves_via_unique_referencing_agent(self) -> None:
+        cfg = self._config(
+            my_rs={
+                "resources_servers": {
+                    "impl": {"entrypoint": "app.py", "domain": "other", "datasets": [self._benchmark_dataset()]}
+                }
+            },
+            my_agent=self._agent("my_rs"),
+        )
+        assert cfg.agent_name == "my_agent"
+
+    def test_rs_declared_dataset_with_two_agents_requires_pin(self) -> None:
+        from nemo_gym.config_types import ConfigError
+
+        with pytest.raises(ConfigError, match="Pin the harness with an `agent:` key"):
+            self._config(
+                my_rs={
+                    "resources_servers": {
+                        "impl": {"entrypoint": "app.py", "domain": "other", "datasets": [self._benchmark_dataset()]}
+                    }
+                },
+                agent_a=self._agent("my_rs"),
+                agent_b=self._agent("my_rs"),
+            )
+
+    def test_rs_declared_dataset_with_pin_needs_no_inversion(self) -> None:
+        cfg = self._config(
+            my_rs={
+                "resources_servers": {
+                    "impl": {
+                        "entrypoint": "app.py",
+                        "domain": "other",
+                        "datasets": [self._benchmark_dataset(agent="agent_b")],
+                    }
+                }
+            },
+            agent_a=self._agent("my_rs"),
+            agent_b=self._agent("my_rs"),
+        )
+        assert cfg.agent_name == "agent_b"
