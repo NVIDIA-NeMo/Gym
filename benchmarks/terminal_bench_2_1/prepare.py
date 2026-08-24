@@ -11,7 +11,7 @@ from subprocess import run
 
 
 BENCHMARK_DIR = Path(__file__).parent
-OUTPUT_PATH = BENCHMARK_DIR / "data" / "example.jsonl"
+OUTPUT_PATH = BENCHMARK_DIR / "data" / "benchmark.jsonl"
 
 
 def prepare() -> Path:
