@@ -22,6 +22,7 @@ import verifiers.v1 as vf
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 
 def main() -> None:
@@ -30,6 +31,11 @@ def main() -> None:
     parser.add_argument("--taskset-config", default="{}", help="Additional taskset config as JSON")
     parser.add_argument("--size", type=int, default=-1)
     parser.add_argument("--offset", type=int, default=0)
+    parser.add_argument(
+        "--agent-name",
+        default="verifiers_agent",
+        help="Agent instance name written into each row's agent_ref",
+    )
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
 
@@ -52,8 +58,10 @@ def main() -> None:
                 "responses_create_params": params,
                 "agent_ref": {
                     "type": "responses_api_agents",
-                    "name": "verifiers_agent",
+                    "name": args.agent_name,
                 },
+                **({"task": data["domain"]} if data.get("domain") else {}),
+                **({"example_id": data["source_id"]} if data.get("source_id") is not None else {}),
             }
         )
 

@@ -1,4 +1,6 @@
 -e nemo-gym[dev] @ ../../
 verifiers[ta]==0.3.0
+# AutomationBench schema, API tools, and rubric used by the V1 benchmark taskset.
+automation-bench @ git+https://github.com/mikasenghaas/AutomationBench.git@6f0e683
 # NLTK 3.10 rejects imports from Gym's component-local virtualenv.
 nltk<3.10

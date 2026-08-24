@@ -25,7 +25,8 @@ gym eval run --no-serve \
 ```
 
 The `verifiers` block in `configs/example.yaml` is a normal V1 environment config. Change its
-`taskset` and role harness fields to use another installed V1 taskset or harness.
+`taskset` and role harness fields to use another installed V1 taskset or harness. Role names are
+environment-specific: TextArena uses `player`, while a plain single-agent taskset uses `agent`.
 The agent loads the taskset once, keeps the V1 serving resources alive with the Gym server,
 and runs the task selected by each row's `task_idx`.
 TextArena's game engine supplies each follow-up turn and scores the finished game.

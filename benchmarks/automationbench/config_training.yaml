@@ -1,0 +1,33 @@
+# V1 AutomationBench task files staged at data/tasks by prepare.py --tasks-dir.
+automationbench_benchmark_agent:
+  responses_api_agents:
+    verifiers_agent:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      description: AutomationBench-compatible V1 tasks for evaluation and NeMo RL training.
+      value: Train multi-step business workflow execution over simulated SaaS APIs.
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      verifiers:
+        taskset:
+          id: automationbench_v1
+          tasks_dir: benchmarks/automationbench/data/tasks
+          domains: all
+          num_examples: -1
+        agent:
+          harness:
+            id: "null"
+          max_turns: 50
+      group_size: 1
+      max_concurrent_generation: -1
+      max_concurrent_scoring: -1
+      max_tokens: 4096
+      temperature: 1.0
+      top_p: 1.0
+      datasets:
+        - name: v1_tasks
+          type: train
+          jsonl_fpath: benchmarks/automationbench/data/v1_tasks.jsonl
+          license: NVIDIA Internal Use Only, Do Not Distribute

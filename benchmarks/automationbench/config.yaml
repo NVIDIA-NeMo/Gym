@@ -1,0 +1,36 @@
+automationbench_benchmark_agent:
+  responses_api_agents:
+    verifiers_agent:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      description: Zapier AutomationBench running through the Verifiers V1 task and tool lifecycle.
+      value: Improve multi-step business workflow execution over simulated SaaS APIs.
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      verifiers:
+        taskset:
+          id: automationbench_v1
+          domains: all
+          num_examples: -1
+        agent:
+          harness:
+            id: "null"
+          max_turns: 50
+      group_size: 1
+      max_concurrent_generation: -1
+      max_concurrent_scoring: -1
+      max_tokens: 4096
+      temperature: 1.0
+      top_p: 1.0
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: benchmarks/automationbench/data/example.jsonl
+        - name: automationbench
+          type: benchmark
+          jsonl_fpath: benchmarks/automationbench/data/automationbench_benchmark.jsonl
+          prompt_config: null
+          prepare_script: benchmarks/automationbench/prepare.py
+          num_repeats: 1

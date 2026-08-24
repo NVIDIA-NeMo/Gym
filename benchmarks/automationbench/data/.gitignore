@@ -1,0 +1,14 @@
+tasks
+*train.jsonl
+*validation.jsonl
+*train_prepare.jsonl
+*validation_prepare.jsonl
+*train_metrics.json
+*validation_metrics.json
+automationbench_benchmark.jsonl
+v1_tasks.jsonl
+v1_tasks_metrics.json
+v1_tasks_prepare.jsonl
+
+# Keep the five-row public smoke dataset in Git.
+!example.jsonl
