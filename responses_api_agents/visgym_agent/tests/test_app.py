@@ -13,8 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import uuid
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
+import aiohttp
 import pytest
 
 from nemo_gym.openai_utils import (
@@ -22,8 +24,8 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import ServerClient
+from responses_api_agents.visgym_agent import app as visgym_agent_app
 from responses_api_agents.visgym_agent.app import (
-    BOXED_PATTERN,
     ModelServerRef,
     ResourcesServerRef,
     TextActionAgent,
@@ -115,10 +117,32 @@ class TestExtractBoxed:
         text = "before \\boxed{0 0 1\n1 0 0\n0 1 0} after"
         assert TextActionAgent._extract_boxed(text) == "0 0 1\n1 0 0\n0 1 0"
 
-    def test_pattern_constant_matches_string_match(self) -> None:
-        # Doc 2 R7: BOXED_PATTERN must stay byte-equal with string_match's copy.
-        # If string_match's pattern changes, this test must be updated alongside it.
-        assert BOXED_PATTERN.pattern == r"\\boxed\{\s*(.*?)\s*\}"
+    def test_nested_braces_match_string_match_semantics(self) -> None:
+        # Doc 2 R7: visgym_agent's boxed extraction is a ported copy of
+        # resources_servers/string_match/app.py's _extract_boxed (brace-depth
+        # scanning, not a regex), because visgym_agent runs in its own
+        # per-server venv and cannot import string_match directly. A prior
+        # version of this test asserted a regex literal against itself, which
+        # could never detect the two implementations diverging: it stayed
+        # green while this file's old non-greedy regex silently truncated any
+        # \boxed{\text{...}} wrapper at the first '}'. Import string_match's
+        # real extractor here and cross-check behavior instead.
+        from resources_servers.string_match.app import _extract_boxed as string_match_extract_boxed
+
+        cases = [
+            "before \\boxed{\\text{('move', 0)}} after",
+            "first \\boxed{example} then \\boxed{[up]}",
+            "\\boxed{('reorder', [{'a': 1}, {'b': 2}])}",
+        ]
+        for text in cases:
+            assert TextActionAgent._extract_boxed(text) == string_match_extract_boxed(text), text
+
+    def test_nested_braces_are_not_truncated(self) -> None:
+        # The regression this test exists to catch: \boxed{\text{...}} has a
+        # brace nested inside the outer pair. A non-greedy regex stops at the
+        # FIRST '}' and captures the unbalanced fragment "\text{('move', 0)".
+        text = "\\boxed{\\text{('move', 0)}}"
+        assert TextActionAgent._extract_boxed(text) == "('move', 0)"
 
 
 class TestExtractAction:
@@ -989,3 +1013,95 @@ class TestSeedRetryDoesNotLeakSessions:
             if c[1]["url_path"] == "/close" and c[1]["json"]["env_id"] == orphan_env_id
         ]
         assert closes, "the orphaned session was never closed"
+
+
+class _FakeErrorResponse:
+    """Minimal aiohttp.ClientResponse shape for nemo_gym.server_utils.raise_for_status.
+
+    ``ok`` is False and ``raise_for_status()`` raises a real
+    aiohttp.ClientResponseError with no ``response_content`` attribute set --
+    exactly what the framework helper is responsible for adding before the
+    exception middleware sees it.
+    """
+
+    def __init__(self, body: bytes) -> None:
+        self.ok = False
+        self._body = body
+        self.request_info = SimpleNamespace(
+            url="http://resources-server/seed_session",
+            method="POST",
+            headers={},
+            real_url="http://resources-server/seed_session",
+        )
+        self.content = SimpleNamespace(read=AsyncMock(return_value=body))
+
+    def raise_for_status(self) -> None:
+        raise aiohttp.ClientResponseError(
+            request_info=self.request_info, history=(), status=500, message="Internal Server Error"
+        )
+
+
+class TestRaiseForStatusCarriesResponseContent:
+    """The framework's raise_for_status, not aiohttp's bare method, must be used."""
+
+    async def test_seed_session_http_error_carries_response_content(self) -> None:
+        # nemo_gym's exception middleware asserts every ClientResponseError it
+        # catches has a response_content attribute -- set only by
+        # nemo_gym.server_utils.raise_for_status, never by aiohttp's own
+        # response.raise_for_status(). Using the bare method here would trip
+        # that assert on a real HTTP failure and replace the server's actual
+        # error body with an opaque AssertionError instead of surfacing it.
+        agent = _make_agent(max_steps=1)
+        error_response = _FakeErrorResponse(b'{"detail": "resources server exploded"}')
+        agent.server_client.post = AsyncMock(return_value=error_response)
+
+        with pytest.raises(aiohttp.ClientResponseError) as exc_info:
+            with patch("asyncio.sleep", new=AsyncMock()):
+                await agent._seed_session(task_idx=0, task_row=None)
+
+        assert exc_info.value.response_content == b'{"detail": "resources server exploded"}'
+
+
+class TestDebugPayloadsAreNotBuiltWhenDisabled:
+    """Debug-dump payload dicts must not be constructed when debug dumping is off."""
+
+    async def test_message_summary_is_never_called_without_the_debug_env_var(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Python evaluates a call's arguments before the call itself, so
+        # `_debug_dump(..., {"output": [_message_summary(m) for m in obs], ...})`
+        # builds the whole payload -- including _message_summary, which calls
+        # model_dump(mode="json") and SHA-256-hashes every base64 image data
+        # URL via _image_url_summary -- even when _debug_dump immediately
+        # no-ops because NEMO_RL_DEBUG_RESPONSES_PIPELINE_DIR is unset. Every
+        # call site must gate on _debug_enabled() before building the payload,
+        # not just rely on _debug_dump's internal early return.
+        monkeypatch.delenv("NEMO_RL_DEBUG_RESPONSES_PIPELINE_DIR", raising=False)
+
+        def _boom(*args: object, **kwargs: object) -> None:
+            raise AssertionError("_message_summary was called with debug dumping disabled")
+
+        monkeypatch.setattr(visgym_agent_app, "_message_summary", _boom)
+
+        agent = _make_agent(max_steps=1)
+        env_id = str(uuid.uuid4())
+
+        dotjson_mock = AsyncMock()
+        dotjson_mock.json.side_effect = [
+            _seed_session(env_id=env_id),
+            _model_response("\\boxed{step}"),
+            _step(done=True, reward=1.0),
+            {"message": "ok", "success": True},
+        ]
+        dotjson_mock.raise_for_status = MagicMock()
+        dotjson_mock.cookies = None
+        agent.server_client.post = AsyncMock(return_value=dotjson_mock)
+
+        # No exception means _message_summary (and therefore every debug
+        # payload dict) was never evaluated during a full rollout.
+        await agent.responses(
+            TextActionAgentRunRequest(
+                task_idx=0,
+                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            )
+        )

@@ -46,6 +46,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseInput,
     NeMoGymResponseOutputItem,
 )
+from nemo_gym.server_utils import raise_for_status
 from resources_servers.visgym.schemas import (
     VisGymAgentVerifyRequest,
     VisGymAgentVerifyResponse,
@@ -179,6 +180,19 @@ def _message_summary(message: Any) -> dict[str, Any]:
     }
 
 
+def _debug_enabled() -> bool:
+    """Cheap gate for the debug-dump env var.
+
+    Call this *before* building a debug payload, not just before calling
+    _debug_dump. Python evaluates a call's arguments before the call itself,
+    so `_debug_dump(..., {expensive dict})` builds the dict even when debug
+    dumping is off -- and every payload here runs _message_summary over full
+    message content, including SHA-256 over each base64 image data URL
+    (_image_url_summary), on every single turn.
+    """
+    return bool(os.environ.get("NEMO_RL_DEBUG_RESPONSES_PIPELINE_DIR"))
+
+
 def _debug_dump(component: str, event: str, payload: dict[str, Any]) -> None:
     path = _debug_jsonl_path(component)
     if path is None:
@@ -188,14 +202,50 @@ def _debug_dump(component: str, event: str, payload: dict[str, Any]) -> None:
         f.write(json.dumps(row, default=str) + "\n")
 
 
-# Inline copy of resources_servers/string_match/app.py's BOXED_PATTERN (Doc 2
-# Revision R7). Kept inline rather than imported because visgym_agent runs
-# in its own per-server venv and importing from string_match would couple the
-# two servers' dependency closures. The regex hasn't changed in string_match's
-# history; manual sync is essentially zero maintenance. Anyone updating
-# string_match's BOXED_PATTERN should grep for r"\\boxed\\{" across the tree.
-BOXED_PATTERN = re.compile(r"\\boxed\{\s*(.*?)\s*\}", re.S)
+# Brace-depth scanner ported from resources_servers/string_match/app.py's
+# _extract_boxed (Doc 2 Revision R7). Ported rather than imported because
+# visgym_agent runs in its own per-server venv and importing from
+# string_match would couple the two servers' dependency closures.
+#
+# The naive r"\\boxed\{\s*(.*?)\s*\}" alternative -- what this file used to
+# define as BOXED_PATTERN -- is non-greedy and stops at the FIRST closing
+# brace, so it truncates any nested-brace content, most commonly a model
+# wrapping its action in \\boxed{\\text{('move', 0)}}: it would capture
+# "\\text{('move', 0)" (an unbalanced fragment) instead of "('move', 0)". A
+# regression test (test_pattern_constant_matches_string_match) asserted this
+# constant against its own literal, so it could never have caught the two
+# implementations diverging; it now round-trips a nested-brace string through
+# both extractors instead.
+BOXED_START_PATTERN = re.compile(r"\\boxed\{")
+LATEX_TEXT_WRAP = re.compile(r"\\text\{\s*(.*?)\s*\}", re.S)
 TERMINAL_CHAT_TOKENS = ("<|im_end|>", "<|eot_id|>")
+
+
+def _strip_latex_wrappers(value: str) -> str:
+    while True:
+        match = LATEX_TEXT_WRAP.fullmatch(value)
+        if not match:
+            break
+        value = match.group(1)
+    return value
+
+
+def _iter_boxed_contents(text: str) -> list[str]:
+    """Return every top-level ``\\boxed{...}`` payload, in order, brace-balanced."""
+    contents = []
+    for match in BOXED_START_PATTERN.finditer(text):
+        depth = 1
+        inner_start = match.end()
+        for index, char in enumerate(text[inner_start:], start=inner_start):
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+            if depth == 0:
+                inner = text[inner_start:index].strip()
+                contents.append(_strip_latex_wrappers(inner).strip())
+                break
+    return contents
 
 
 class TextActionAgentConfig(BaseResponsesAPIAgentConfig):
@@ -336,7 +386,13 @@ class TextActionAgent(SimpleResponsesAPIAgent):
                     url_path="/seed_session",
                     json=payload,
                 )
-                reset_response.raise_for_status()
+                # Not aiohttp's bare raise_for_status(): the exception
+                # middleware asserts every ClientResponseError carries
+                # response_content, which only this framework helper sets. A
+                # bare raise_for_status() trips that assert on a real HTTP
+                # failure, replacing the server's actual error body with an
+                # opaque AssertionError.
+                await raise_for_status(reset_response)
                 payload_json = await reset_response.json()
                 seed_session_response = VisGymSeedSessionResponse.model_validate(payload_json)
                 if not seed_session_response.obs:
@@ -396,10 +452,10 @@ class TextActionAgent(SimpleResponsesAPIAgent):
         rather than passed verbatim to /step (where it would fail the env's
         parser with a less useful error message).
         """
-        matches = BOXED_PATTERN.findall(text)
+        matches = _iter_boxed_contents(text)
         if not matches:
             return None
-        return matches[-1].strip() or None
+        return matches[-1] or None
 
     @staticmethod
     def _extract_action(text: str, unboxed_action_regex: str | None = None) -> str | None:
@@ -556,18 +612,19 @@ class TextActionAgent(SimpleResponsesAPIAgent):
                 "tools": list(body.tools or []),
             }
         )
-        _debug_dump(
-            "visgym_agent",
-            "initial_agent_state",
-            {
-                "task_idx": req.task_idx,
-                "env_id": seed_session_response.env_id,
-                "body_input": [_message_summary(m) for m in body.input],
-                "seed_obs": [_message_summary(m) for m in seed_obs],
-                "agent_state_input_len": len(agent_state.input),
-                "max_output_tokens": body.max_output_tokens,
-            },
-        )
+        if _debug_enabled():
+            _debug_dump(
+                "visgym_agent",
+                "initial_agent_state",
+                {
+                    "task_idx": req.task_idx,
+                    "env_id": seed_session_response.env_id,
+                    "body_input": [_message_summary(m) for m in body.input],
+                    "seed_obs": [_message_summary(m) for m in seed_obs],
+                    "agent_state_input_len": len(agent_state.input),
+                    "max_output_tokens": body.max_output_tokens,
+                },
+            )
 
         env_id = seed_session_response.env_id
         model_response: NeMoGymResponse | None = None
@@ -597,31 +654,35 @@ class TextActionAgent(SimpleResponsesAPIAgent):
                         json=request_body,
                         cookies=model_server_cookies,
                     )
-                    raw_model_response.raise_for_status()
+                    # See the comment on the /seed_session raise_for_status
+                    # call: aiohttp's bare method omits response_content,
+                    # which the exception middleware asserts on.
+                    await raise_for_status(raw_model_response)
                     model_server_cookies = raw_model_response.cookies
                     model_response_json = await raw_model_response.json()
-                    _debug_dump(
-                        "visgym_agent",
-                        "raw_model_response_json",
-                        {
-                            "task_idx": req.task_idx,
-                            "env_id": env_id,
-                            "step": step,
-                            "response_keys": sorted(model_response_json.keys())
-                            if isinstance(model_response_json, dict)
-                            else None,
-                            "output": [_message_summary(item) for item in model_response_json.get("output", [])]
-                            if isinstance(model_response_json, dict)
-                            else None,
-                            "usage": model_response_json.get("usage")
-                            if isinstance(model_response_json, dict)
-                            else None,
-                            "incomplete_details": model_response_json.get("incomplete_details")
-                            if isinstance(model_response_json, dict)
-                            else None,
-                            "requested_max_output_tokens": current_max_output_tokens,
-                        },
-                    )
+                    if _debug_enabled():
+                        _debug_dump(
+                            "visgym_agent",
+                            "raw_model_response_json",
+                            {
+                                "task_idx": req.task_idx,
+                                "env_id": env_id,
+                                "step": step,
+                                "response_keys": sorted(model_response_json.keys())
+                                if isinstance(model_response_json, dict)
+                                else None,
+                                "output": [_message_summary(item) for item in model_response_json.get("output", [])]
+                                if isinstance(model_response_json, dict)
+                                else None,
+                                "usage": model_response_json.get("usage")
+                                if isinstance(model_response_json, dict)
+                                else None,
+                                "incomplete_details": model_response_json.get("incomplete_details")
+                                if isinstance(model_response_json, dict)
+                                else None,
+                                "requested_max_output_tokens": current_max_output_tokens,
+                            },
+                        )
                 except (json.JSONDecodeError, aiohttp.ClientResponseError) as e:
                     logger.warning(f"Error calling /v1/responses: {e!r}. Response: {raw_model_response.text!r}.")
                     termination_reason = "model_error"
@@ -638,22 +699,23 @@ class TextActionAgent(SimpleResponsesAPIAgent):
                 assistant_text = self._extract_assistant_text(model_output)
                 action_string = self._extract_action(assistant_text, self.config.unboxed_action_regex)
                 incomplete_reason = self._incomplete_reason(model_response)
-                _debug_dump(
-                    "visgym_agent",
-                    "validated_model_output",
-                    {
-                        "task_idx": req.task_idx,
-                        "env_id": env_id,
-                        "step": step,
-                        "output": [_message_summary(item) for item in model_output],
-                        "assistant_text_len": len(assistant_text),
-                        "assistant_text_preview": _preview_text(assistant_text),
-                        "extracted_action": action_string,
-                        "incomplete_reason": incomplete_reason,
-                        "requested_max_output_tokens": current_max_output_tokens,
-                        "consecutive_truncation_retries": consecutive_truncation_retries,
-                    },
-                )
+                if _debug_enabled():
+                    _debug_dump(
+                        "visgym_agent",
+                        "validated_model_output",
+                        {
+                            "task_idx": req.task_idx,
+                            "env_id": env_id,
+                            "step": step,
+                            "output": [_message_summary(item) for item in model_output],
+                            "assistant_text_len": len(assistant_text),
+                            "assistant_text_preview": _preview_text(assistant_text),
+                            "extracted_action": action_string,
+                            "incomplete_reason": incomplete_reason,
+                            "requested_max_output_tokens": current_max_output_tokens,
+                            "consecutive_truncation_retries": consecutive_truncation_retries,
+                        },
+                    )
 
                 done = False
                 obs: Sequence[VisGymEnvStateEasyInputMessage | NeMoGymEasyInputMessage]
@@ -699,20 +761,21 @@ class TextActionAgent(SimpleResponsesAPIAgent):
                     if reset_truncation_budget:
                         consecutive_truncation_retries = 0
                         current_max_output_tokens = base_max_output_tokens
-                    _debug_dump(
-                        "visgym_agent",
-                        "env_step_response",
-                        {
-                            "task_idx": req.task_idx,
-                            "env_id": env_id,
-                            "step": step,
-                            "action_string": action_string,
-                            "done": done,
-                            "obs": [_message_summary(m) for m in obs],
-                            "consecutive_truncation_retries": consecutive_truncation_retries,
-                            "requested_max_output_tokens": current_max_output_tokens,
-                        },
-                    )
+                    if _debug_enabled():
+                        _debug_dump(
+                            "visgym_agent",
+                            "env_step_response",
+                            {
+                                "task_idx": req.task_idx,
+                                "env_id": env_id,
+                                "step": step,
+                                "action_string": action_string,
+                                "done": done,
+                                "obs": [_message_summary(m) for m in obs],
+                                "consecutive_truncation_retries": consecutive_truncation_retries,
+                                "requested_max_output_tokens": current_max_output_tokens,
+                            },
+                        )
 
                 agent_state = agent_state.model_copy(
                     update={"input": agent_state.input + model_output + [_as_core_input_message(m) for m in obs]}
@@ -764,29 +827,31 @@ class TextActionAgent(SimpleResponsesAPIAgent):
             ),
             "output": (agent_state_history if self.config.return_transitions else all_messages),
         }
-        _debug_dump(
-            "visgym_agent",
-            "final_response_before_validation",
-            {
-                "task_idx": req.task_idx,
-                "env_id": env_id,
-                "return_transitions": self.config.return_transitions,
-                "seed_obs": [_message_summary(item) for item in (output_overrides["seed_obs"] or [])],
-                "output": [_message_summary(item) for item in output_overrides["output"]]
-                if isinstance(output_overrides["output"], list)
-                else None,
-            },
-        )
+        if _debug_enabled():
+            _debug_dump(
+                "visgym_agent",
+                "final_response_before_validation",
+                {
+                    "task_idx": req.task_idx,
+                    "env_id": env_id,
+                    "return_transitions": self.config.return_transitions,
+                    "seed_obs": [_message_summary(item) for item in (output_overrides["seed_obs"] or [])],
+                    "output": [_message_summary(item) for item in output_overrides["output"]]
+                    if isinstance(output_overrides["output"], list)
+                    else None,
+                },
+            )
         response = VisGymNeMoGymResponse.model_validate(model_response.model_dump() | output_overrides)
-        _debug_dump(
-            "visgym_agent",
-            "final_response_after_validation",
-            {
-                "task_idx": req.task_idx,
-                "env_id": env_id,
-                "output": [_message_summary(item) for item in response.model_dump(mode="json").get("output", [])],
-            },
-        )
+        if _debug_enabled():
+            _debug_dump(
+                "visgym_agent",
+                "final_response_after_validation",
+                {
+                    "task_idx": req.task_idx,
+                    "env_id": env_id,
+                    "output": [_message_summary(item) for item in response.model_dump(mode="json").get("output", [])],
+                },
+            )
         return response, body
 
     async def run(self, body: TextActionAgentRunRequest) -> VisGymAgentVerifyResponse:
