@@ -24,32 +24,30 @@ def prepare() -> Path:
             cwd=str(BENCHMARK_DIR),
         )
 
+    num_samples = 0
     f_out = open(OUTPUT_PATH, "w")
     for task_dir in glob(f"{repo_path}/tasks/*"):
-        sample = dict()
-
         task_dir = repo_path / "tasks" / task_dir
-
-        solution_files = list((task_dir / "solution").iterdir())
-        assert len(solution_files) == 1, solution_files
-        sample["solve.sh"] = (task_dir / "solution" / "solve.sh").read_text()
-
-        test_files = list((task_dir / "tests").iterdir())
-        assert len(test_files) == 2, test_files
-        sample["test.sh"] = (task_dir / "tests" / "test.sh").read_text()
-        sample["test_outputs.py"] = (task_dir / "tests" / "test_outputs.py").read_text()
-
-        sample["responses_create_params"] = {
-            "input": [{"role": "user", "content": (task_dir / "instruction.md").read_text()}]
-        }
+        if not task_dir.is_dir():
+            continue
 
         with open(task_dir / "task.toml", "rb") as file:
             task_toml = tomllib.load(file)
 
-        sample["task.name"] = task_toml["task"]["name"]
-        sample["docker_image"] = task_toml["environment"]["docker_image"]
+        sample = {
+            "responses_create_params": {
+                "input": [{"role": "user", "content": (task_dir / "instruction.md").read_text()}]
+            },
+            "task_name": task_toml["task"]["name"],
+            "docker_image": task_toml["environment"]["docker_image"],
+            "task_folder": str(task_dir.relative_to(BENCHMARK_DIR.parent.parent)),
+        }
 
         f_out.write(json.dumps(sample) + "\n")
+        num_samples += 1
+    f_out.close()
+
+    assert num_samples == 89, num_samples
 
     return OUTPUT_PATH
 
