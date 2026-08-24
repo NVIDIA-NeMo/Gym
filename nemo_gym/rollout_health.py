@@ -140,6 +140,14 @@ class _AgentStep:
         return self.has_message or self.has_tool_calls or bool(self.model_call_refs)
 
 
+@dataclass(frozen=True, slots=True)
+class _TaskRepeat:
+    rollout_index: int | str
+    verdict: Verdict
+    capture_observed: bool
+    successful_model_calls: int
+
+
 def _subject(task_index: int | str, rollout_index: int | str | None = None) -> dict[str, int | str]:
     subject: dict[str, int | str] = {TASK_INDEX_KEY: task_index}
     if rollout_index is not None:
@@ -778,8 +786,28 @@ def _index_jsonl(paths: Sequence[Path]) -> list[_LineSlice]:
     return slices
 
 
+def _unique_task_repeats(digests: list[RolloutDigest]) -> list[_TaskRepeat]:
+    """Collapse duplicate persisted records for task-level repeat semantics."""
+    grouped: dict[int | str, list[RolloutDigest]] = defaultdict(list)
+    for digest in digests:
+        grouped[digest.rollout_index].append(digest)
+
+    repeats: list[_TaskRepeat] = []
+    for rollout_index, copies in grouped.items():
+        verdicts = {copy.verdict for copy in copies}
+        repeats.append(
+            _TaskRepeat(
+                rollout_index=rollout_index,
+                verdict=verdicts.pop() if len(verdicts) == 1 else "unobserved",
+                capture_observed=all(copy.capture_observed for copy in copies),
+                successful_model_calls=max(copy.successful_model_calls for copy in copies),
+            )
+        )
+    return repeats
+
+
 def _task_findings(
-    grouped: dict[int | str, list[RolloutDigest]],
+    grouped: dict[int | str, list[_TaskRepeat]],
 ) -> tuple[dict[int | str, list[Finding]], dict[str, dict[str, int]]]:
     findings: dict[int | str, list[Finding]] = defaultdict(list)
     coverage = {spec.id: {"evaluated": 0, "unobserved": 0} for spec in _TASK_SPECS}
@@ -810,9 +838,10 @@ def _task_findings(
 
 
 def _reduce(digests: list[RolloutDigest]) -> dict[str, Any]:
-    grouped: dict[int | str, list[RolloutDigest]] = defaultdict(list)
+    records_by_task: dict[int | str, list[RolloutDigest]] = defaultdict(list)
     for digest in digests:
-        grouped[digest.task_index].append(digest)
+        records_by_task[digest.task_index].append(digest)
+    grouped = {task_index: _unique_task_repeats(records) for task_index, records in records_by_task.items()}
     task_findings, task_coverage = _task_findings(grouped)
 
     coverage = {spec.id: {"evaluated": 0, "unobserved": 0} for spec in CHECK_REGISTRY}

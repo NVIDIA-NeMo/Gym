@@ -507,6 +507,30 @@ def test_correspondence_uses_bound_calls_and_gym_ids_for_replay(tmp_path: Path) 
     assert result.summary["run"]["stats"]["duplicated_calls"] == {"replayed": 0, "rollouts": 0}
 
 
+def test_duplicate_rollout_identity_counts_once_at_task_scope(tmp_path: Path) -> None:
+    duplicate = _record(7, 0, answer=None)
+    rollout_path = tmp_path / "rollouts.jsonl"
+    rollout_path.write_bytes(
+        orjson.dumps(duplicate, option=orjson.OPT_APPEND_NEWLINE)
+        + orjson.dumps(duplicate, option=orjson.OPT_APPEND_NEWLINE)
+    )
+
+    result = run_health_checks(rollout_path, capture_enabled=False, workers=1)
+
+    assert result.summary["run"]["verdicts"] == {"healthy": 0, "unhealthy": 2, "unobserved": 0}
+    assert result.summary["tasks"]["7"] == {
+        "repeats": 1,
+        "healthy": 0,
+        "unhealthy": 1,
+        "unobserved": 0,
+        "flags": [],
+    }
+    assert result.summary["run"]["artifacts"]["coverage"]["consistently_unhealthy_task"] == {
+        "evaluated": 0,
+        "unobserved": 1,
+    }
+
+
 def test_explicit_deterministic_dispatch_and_nonempty_length_response_are_exempt(tmp_path: Path) -> None:
     rollout_path, capture_dir = _write_fixture(
         tmp_path,
