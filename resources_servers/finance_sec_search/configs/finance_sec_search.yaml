@@ -15,6 +15,8 @@ finance_sec_search_resources_server:
       tavily_api_key: ${oc.select:tavily_api_key,null}
       local_edgar_index_path: ${oc.select:local_edgar_index_path,null}
       local_edgar_metrics_dir: ${oc.select:local_edgar_metrics_dir,null}
+      # null => use the sidecar sitting beside the index if one is present.
+      local_edgar_metadata_path: ${oc.select:local_edgar_metadata_path,null}
       retrieval_model_server:
         type: responses_api_models
         name: policy_model

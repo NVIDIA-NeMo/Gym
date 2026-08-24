@@ -1,9 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """SQLite-backed implementation of the agent-facing EDGAR search contract."""
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -15,11 +31,63 @@ from pathlib import Path
 from typing import Any, Optional
 
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_START_DATE = "1900-01-01"
 MAX_END_DATE = "2025-04-07"
 PAGE_SIZE = 100
 TOKEN_RE = re.compile(r'"(?:[^"]|"")*"|\S+')
 BAREWORD_RE = re.compile(r"^[A-Za-z0-9_]+$")
+
+SIDECAR_SCHEMA_VERSION = 1
+SIDECAR_SUFFIX = ".metadata"
+SIDECAR_ALIAS = "meta"
+SIDECAR_TABLE = f"{SIDECAR_ALIAS}.documents_meta"
+FINGERPRINT_SAMPLES = 64
+
+# Mirrored into the sidecar so that swapping the metadata source leaves every
+# column name the search query references unchanged.
+METADATA_COLUMNS = (
+    "id",
+    "accession_number",
+    "cik",
+    "ticker",
+    "company_name",
+    "form_type",
+    "document_type",
+    "description",
+    "filing_date",
+    "url",
+)
+
+
+def default_sidecar_path(index_path: str | Path) -> Path:
+    return Path(str(index_path) + SIDECAR_SUFFIX)
+
+
+def fingerprint_source_index(connection: sqlite3.Connection) -> str:
+    """Fingerprint the row identity of an index.
+
+    The sidecar is joined to the full-text index on rowid, so a rebuilt index
+    that reassigns rowids would silently pair filings with the wrong metadata.
+    Sampling by primary key keeps this cheap enough to verify on every startup.
+    """
+    highest = connection.execute("SELECT MAX(id) FROM documents").fetchone()[0]
+    if not highest:
+        return "empty"
+    stride = max(1, highest // FINGERPRINT_SAMPLES)
+    sampled = [1 + offset * stride for offset in range(FINGERPRINT_SAMPLES)]
+    placeholders = ",".join("?" for _ in sampled)
+    rows = connection.execute(
+        f"SELECT id, accession_number, filing_date FROM documents WHERE id IN ({placeholders}) ORDER BY id",
+        sampled,
+    ).fetchall()
+    digest = hashlib.sha256()
+    digest.update(f"{highest}\x1e".encode())
+    for row in rows:
+        digest.update("\x1f".join(str(value) for value in row).encode())
+        digest.update(b"\x1e")
+    return digest.hexdigest()
 
 
 @dataclass(frozen=True)
@@ -164,25 +232,116 @@ class LocalEdgarSearch:
         *,
         max_end_date: str = MAX_END_DATE,
         metrics_dir: str | Path | None = None,
+        metadata_path: str | Path | None = None,
     ):
         self.index_path = Path(index_path)
         if not self.index_path.is_file():
             raise FileNotFoundError(f"Local EDGAR index not found: {self.index_path}")
         self._validate_index()
+        self.metadata_path = self._resolve_metadata_path(metadata_path)
         self.max_end_date = _date_value("max_end_date", max_end_date)
         self.metrics_path: Path | None = None
         self._metrics_lock = threading.Lock()
+        self._local = threading.local()
         if metrics_dir:
             destination = Path(metrics_dir)
             destination.mkdir(parents=True, exist_ok=True)
             identity = os.environ.get("SLURM_JOB_ID") or str(os.getpid())
             self.metrics_path = destination / f"search-{identity}-{os.getpid()}.jsonl"
 
+    @property
+    def uses_metadata_sidecar(self) -> bool:
+        return self.metadata_path is not None
+
+    def _resolve_metadata_path(self, metadata_path: str | Path | None) -> Path | None:
+        """Locate the metadata sidecar, requiring it to match the index if present.
+
+        A configured-but-unusable sidecar is an error rather than a downgrade:
+        searches would still answer correctly without it, but orders of magnitude
+        more slowly, and that is worth failing loudly for.
+        """
+        if metadata_path is None:
+            candidate = default_sidecar_path(self.index_path)
+            if not candidate.is_file():
+                logger.info(
+                    "No metadata sidecar at %s — searches will read filing metadata from "
+                    "the full-text index, which is substantially slower",
+                    candidate,
+                )
+                return None
+        else:
+            candidate = Path(metadata_path)
+            if not candidate.is_file():
+                raise FileNotFoundError(f"Local EDGAR metadata sidecar not found: {candidate}")
+
+        self._validate_metadata_sidecar(candidate)
+        logger.info("Local EDGAR metadata sidecar initialized from %s", candidate)
+        return candidate
+
+    def _validate_metadata_sidecar(self, candidate: Path) -> None:
+        sidecar = sqlite3.connect(f"file:{candidate}?mode=ro", uri=True)
+        try:
+            recorded = {str(row[0]): str(row[1]) for row in sidecar.execute("SELECT key, value FROM sidecar_metadata")}
+        except sqlite3.DatabaseError as error:
+            raise ValueError(f"Metadata sidecar {candidate} is not readable: {error}") from error
+        finally:
+            sidecar.close()
+
+        version = recorded.get("schema_version")
+        if version != str(SIDECAR_SCHEMA_VERSION):
+            raise ValueError(
+                f"Metadata sidecar {candidate} has schema version {version!r}, "
+                f"expected {SIDECAR_SCHEMA_VERSION}. Rebuild it with "
+                f"scripts/build_local_edgar_metadata.py."
+            )
+
+        connection = self._connect()
+        try:
+            documents = connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+            fingerprint = fingerprint_source_index(connection)
+        finally:
+            connection.close()
+
+        if recorded.get("document_count") != str(documents):
+            raise ValueError(
+                f"Metadata sidecar {candidate} covers {recorded.get('document_count')} documents "
+                f"but the index holds {documents}. Rebuild it with "
+                f"scripts/build_local_edgar_metadata.py."
+            )
+        if recorded.get("source_fingerprint") != fingerprint:
+            raise ValueError(
+                f"Metadata sidecar {candidate} was built from a different index. Rebuild it with "
+                f"scripts/build_local_edgar_metadata.py."
+            )
+
     def _connect(self) -> sqlite3.Connection:
         uri = f"file:{self.index_path}?mode=ro&immutable=1"
         connection = sqlite3.connect(uri, uri=True)
         connection.row_factory = sqlite3.Row
         return connection
+
+    def _session(self) -> sqlite3.Connection:
+        """Return this thread's connection, reusing it across searches.
+
+        Reuse matters more than it looks: a fresh connection starts with an empty
+        page cache, so every search would re-read the index pages it just read.
+        """
+        connection: sqlite3.Connection | None = getattr(self._local, "connection", None)
+        if connection is None:
+            connection = self._connect()
+            if self.metadata_path is not None:
+                connection.execute(
+                    "ATTACH DATABASE ? AS " + SIDECAR_ALIAS,
+                    (f"file:{self.metadata_path}?mode=ro",),
+                )
+            self._local.connection = connection
+        return connection
+
+    def close(self) -> None:
+        connection: sqlite3.Connection | None = getattr(self._local, "connection", None)
+        if connection is not None:
+            connection.close()
+            self._local.connection = None
 
     def _validate_index(self) -> None:
         connection = self._connect()
@@ -252,7 +411,21 @@ class LocalEdgarSearch:
             parameters.extend(request.ciks)
         parameters.extend([request.top_n_results, (request.page - 1) * PAGE_SIZE])
 
-        source = "documents AS d" if match_all else "documents_fts JOIN documents AS d ON d.id = documents_fts.rowid"
+        # The metadata source mirrors the index's column names, so switching it
+        # leaves the filters, ordering and paging below unchanged and the results
+        # identical.
+        table = SIDECAR_TABLE if self.metadata_path is not None else "documents"
+        if match_all:
+            # Browsing has no full-text term to rank, so the filter columns are
+            # the only way in and their index is what makes it quick.
+            source = f"{table} AS d"
+        else:
+            # NOT INDEXED forces the full-text match to drive the join and the
+            # metadata to be fetched by rowid. Left to its own judgement the
+            # planner sometimes inverts this, scanning every filing that matches
+            # the form and date filters and probing the full-text index once per
+            # row, which costs hundreds of times more.
+            source = f"documents_fts JOIN {table} AS d NOT INDEXED ON d.id = documents_fts.rowid"
         ordering = "d.filing_date DESC, d.url" if match_all else "bm25(documents_fts), d.filing_date DESC, d.url"
         statement = f"""
             SELECT
@@ -270,12 +443,8 @@ class LocalEdgarSearch:
             ORDER BY {ordering}
             LIMIT ? OFFSET ?
         """
-        connection = self._connect()
-        try:
-            results = [dict(row) for row in connection.execute(statement, parameters)]
-        finally:
-            connection.close()
-        return results
+        connection = self._session()
+        return [dict(row) for row in connection.execute(statement, parameters)]
 
     async def search_async(self, **arguments: Any) -> list[dict[str, Any]]:
         return await asyncio.to_thread(self.search, **arguments)

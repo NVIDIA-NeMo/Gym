@@ -57,8 +57,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json
-
-from .local_edgar_search import LocalEdgarSearch
+from resources_servers.finance_sec_search.local_edgar_search import LocalEdgarSearch
 
 
 logger = logging.getLogger(__name__)
@@ -147,6 +146,12 @@ class FinanceAgentResourcesServerConfig(BaseResourcesServerConfig):
     local_edgar_metrics_dir: Optional[str] = Field(
         default=None,
         description="Optional directory for per-search latency records.",
+    )
+    local_edgar_metadata_path: Optional[str] = Field(
+        default=None,
+        description="Metadata sidecar for the local EDGAR index, built by "
+        "scripts/build_local_edgar_metadata.py. Defaults to the index path plus "
+        "'.metadata' when that file exists. Searches are far slower without it.",
     )
     max_end_date: Optional[str] = Field(
         default=None,
@@ -455,10 +460,12 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                 self.config.local_edgar_index_path,
                 max_end_date=self.config.max_end_date or "2025-04-07",
                 metrics_dir=self.config.local_edgar_metrics_dir,
+                metadata_path=self.config.local_edgar_metadata_path,
             )
             logger.info(
-                "Local EDGAR search initialized from %s",
+                "Local EDGAR search initialized from %s (metadata sidecar: %s)",
                 self.config.local_edgar_index_path,
+                self._local_edgar_search.metadata_path or "none",
             )
         else:
             logger.info("local_edgar_index_path is not configured — edgar_search will be unavailable")
@@ -929,10 +936,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         if self._local_edgar_search is None:
             return EdgarSearchResponse(
                 results=json.dumps(
-                    {
-                        "error": "edgar_search is not available. "
-                        "local_edgar_index_path is not configured."
-                    }
+                    {"error": "edgar_search is not available. local_edgar_index_path is not configured."}
                 )
             )
 

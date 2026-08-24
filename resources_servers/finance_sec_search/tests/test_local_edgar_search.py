@@ -1,3 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 from __future__ import annotations
 
 import json
@@ -15,9 +29,11 @@ from resources_servers.finance_sec_search.app import (
 )
 from resources_servers.finance_sec_search.local_edgar_search import (
     LocalEdgarSearch,
+    default_sidecar_path,
     normalize_request,
     translate_query,
 )
+from resources_servers.finance_sec_search.scripts.build_local_edgar_metadata import build
 from resources_servers.finance_sec_search.scripts.convert_questions import (
     EDGAR_SEARCH_TOOL,
     PROMPT,
@@ -234,6 +250,144 @@ async def test_server_routes_edgar_search_to_local_index(tmp_path: Path) -> None
     metric = json.loads(metric_files[0].read_text(encoding="utf-8"))
     assert metric["result_count"] == 1
     assert "completed_at_unix_seconds" in metric
+
+
+def _varied_index(path: Path, documents: int = 400) -> Path:
+    """An index broad enough that filters, paging and ranking all have work to do."""
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE documents (
+            id INTEGER PRIMARY KEY,
+            accession_number TEXT NOT NULL,
+            cik TEXT NOT NULL,
+            company_name TEXT NOT NULL,
+            ticker TEXT NOT NULL,
+            description TEXT,
+            form_type TEXT NOT NULL,
+            document_type TEXT NOT NULL,
+            filing_date TEXT NOT NULL,
+            url TEXT NOT NULL,
+            body TEXT NOT NULL
+        );
+        CREATE VIRTUAL TABLE documents_fts USING fts5(
+            body,
+            content='documents',
+            content_rowid='id'
+        );
+        """
+    )
+    rows = []
+    for number in range(1, documents + 1):
+        company = number % 7
+        rows.append(
+            (
+                number,
+                f"000-{number:06d}",
+                str(300000 + company),
+                f"Company {company}",
+                f"TCK{company}",
+                "10-K" if number % 2 else "EX-1",
+                "10-K" if number % 2 else "8-K",
+                "10-K" if number % 2 else "EX-1",
+                f"202{number % 5}-0{1 + number % 9}-1{number % 9}",
+                f"https://example.test/{number}.htm",
+                ("revenue growth " * (number % 9 + 1)) + ("pineapple" if number % 13 == 0 else ""),
+            )
+        )
+    connection.executemany(
+        """
+        INSERT INTO documents (
+            id, accession_number, cik, company_name, ticker, description,
+            form_type, document_type, filing_date, url, body
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+    connection.executemany(
+        "INSERT INTO documents_fts(rowid, body) VALUES (?, ?)",
+        [(row[0], row[-1]) for row in rows],
+    )
+    connection.commit()
+    connection.close()
+    return path
+
+
+SIDECAR_PARITY_QUERIES = [
+    {"search_query": "revenue"},
+    {"search_query": "revenue", "form_types": ["10-K"]},
+    {"search_query": "revenue", "ciks": ["300001"]},
+    {"search_query": "revenue", "form_types": ["10-K"], "ciks": ["300003"]},
+    {"search_query": "pineapple"},
+    {"search_query": "revenue growth"},
+    {"search_query": "revenue OR pineapple"},
+    {"search_query": "reven*"},
+    {"search_query": "revenue NOT pineapple"},
+    {"search_query": "*", "form_types": ["10-K"]},
+    {"search_query": "revenue", "top_n_results": 7, "page": 2},
+    {"search_query": "revenue", "start_date": "2022-01-01", "end_date": "2024-12-31"},
+    {"search_query": "Company annual report", "ciks": ["300002"]},
+]
+
+
+@pytest.mark.parametrize("query", SIDECAR_PARITY_QUERIES, ids=lambda q: q["search_query"])
+def test_metadata_sidecar_returns_identical_results(tmp_path: Path, query: dict) -> None:
+    index = _varied_index(tmp_path / "index.sqlite")
+    without_sidecar = LocalEdgarSearch(index, max_end_date="2030-01-01")
+    assert not without_sidecar.uses_metadata_sidecar
+
+    build(index, default_sidecar_path(index))
+    with_sidecar = LocalEdgarSearch(index, max_end_date="2030-01-01")
+    assert with_sidecar.uses_metadata_sidecar
+
+    assert with_sidecar.search(**query) == without_sidecar.search(**query)
+
+
+def test_sidecar_beside_the_index_is_discovered(tmp_path: Path) -> None:
+    index = _varied_index(tmp_path / "index.sqlite")
+    build(index, default_sidecar_path(index))
+
+    assert LocalEdgarSearch(index).metadata_path == default_sidecar_path(index)
+
+
+def test_configured_sidecar_must_exist(tmp_path: Path) -> None:
+    index = _index(tmp_path / "index.sqlite")
+
+    with pytest.raises(FileNotFoundError, match="sidecar"):
+        LocalEdgarSearch(index, metadata_path=tmp_path / "absent.metadata")
+
+
+def test_sidecar_built_from_another_index_is_rejected(tmp_path: Path) -> None:
+    index = _varied_index(tmp_path / "index.sqlite")
+    other = _varied_index(tmp_path / "other.sqlite", documents=200)
+    build(other, default_sidecar_path(other))
+
+    with pytest.raises(ValueError, match="Rebuild it"):
+        LocalEdgarSearch(index, metadata_path=default_sidecar_path(other))
+
+
+@pytest.mark.asyncio
+async def test_server_uses_sidecar_when_configured(tmp_path: Path) -> None:
+    index = _index(tmp_path / "index.sqlite")
+    sidecar = default_sidecar_path(index)
+    build(index, sidecar)
+
+    server = FinanceAgentResourcesServer(
+        config=_server_config(
+            tmp_path,
+            local_edgar_index_path=str(index),
+            local_edgar_metadata_path=str(sidecar),
+            max_end_date="2025-04-07",
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+
+    response = await server.edgar_search(
+        _request(),
+        EdgarSearchRequest(search_query="quantum pineapple", form_types=["10-K"]),
+    )
+
+    assert json.loads(response.results)[0]["ticker"] == "AAPL"
 
 
 @pytest.mark.asyncio

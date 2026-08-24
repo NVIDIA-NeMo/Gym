@@ -40,10 +40,27 @@ local_edgar_index_path: /path/to/sap500_sec_fts.sqlite
 
 # Optional per-process JSONL latency records.
 local_edgar_metrics_dir: /path/to/search_metrics
+
+# Optional. Defaults to the index path plus '.metadata' when that file exists.
+local_edgar_metadata_path: /path/to/sap500_sec_fts.sqlite.metadata
 ```
 
 The config uses `${oc.select:tavily_api_key,null}`, so `web_search` is disabled
 when `tavily_api_key` is omitted or null.
+
+## Local EDGAR index
+
+`edgar_search` reads a read-only SQLite full-text index of SEC filings. Build
+its metadata sidecar once per index, which is what keeps common queries under a
+second instead of tens of seconds:
+
+```bash
+python resources_servers/finance_sec_search/scripts/build_local_edgar_metadata.py \
+  --index /path/to/sap500_sec_fts.sqlite
+```
+
+See [docs/local-edgar-index.md](docs/local-edgar-index.md) for the schema an
+index must have, the column formats that matter, and how to obtain one.
 
 ## Cache Management
 
