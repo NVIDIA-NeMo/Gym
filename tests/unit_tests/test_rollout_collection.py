@@ -24,6 +24,7 @@ from unittest.mock import AsyncMock, MagicMock
 import orjson
 import pytest
 import yaml
+from omegaconf import OmegaConf
 
 import nemo_gym.rollout_collection
 import nemo_gym.token_id_capture.delivery
@@ -358,6 +359,7 @@ class TestRolloutCollection:
 
         mock_server_client = MagicMock()
         mock_server_client.post = AsyncMock(return_value=response)
+        mock_server_client.global_config_dict = OmegaConf.create({"my_agent": {}})
 
         monkeypatch.setattr(
             nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
@@ -2241,3 +2243,96 @@ class TestE2EInputJsonlFpathRejected:
             {"output_jsonl_fpath": "out.jsonl", "input_jsonl_fpath": "my_data.jsonl"}
         )
         assert config.input_jsonl_fpath == "my_data.jsonl"
+
+
+class TestAgentMapRouting:
+    """Pins the agent_map / agent_name routing contract (see dataset-decoupling RFC).
+
+    These exist to fail loudly if the precedence semantics are ever changed silently
+    (the #761 failure mode, where override quietly became backfill).
+    """
+
+    def _write_rows(self, tmp_path, rows):
+        fpath = tmp_path / "input.jsonl"
+        fpath.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        return fpath
+
+    def _config(self, tmp_path, fpath, **kwargs):
+        return RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath), output_jsonl_fpath=str(tmp_path / "out.jsonl"), **kwargs
+        )
+
+    def _rcp_row(self, agent=None, content="q"):
+        row = {"responses_create_params": {"input": [{"role": "user", "content": content}]}}
+        if agent is not None:
+            row["agent_ref"] = {"name": agent}
+        return row
+
+    def test_agent_name_overrides_existing_agent_ref(self, tmp_path) -> None:
+        """agent_name re-routes ALL rows (restored #568 semantics), warning about the override."""
+        fpath = self._write_rows(tmp_path, [self._rcp_row("old_agent"), self._rcp_row()])
+        config = self._config(tmp_path, fpath, agent_name="new_agent")
+        with pytest.warns(UserWarning, match="overrode agent_ref"):
+            rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert [r["agent_ref"]["name"] for r in rows] == ["new_agent", "new_agent"]
+
+    def test_agent_name_is_sugar_for_agent_map_default(self, tmp_path) -> None:
+        config = self._config(tmp_path, self._write_rows(tmp_path, [self._rcp_row()]), agent_name="a")
+        assert config.agent_map == {"_default": "a"}
+
+    def test_agent_name_conflicting_with_agent_map_default_raises(self, tmp_path) -> None:
+        fpath = self._write_rows(tmp_path, [self._rcp_row()])
+        with pytest.raises(ValueError, match="conflicts with agent_map._default"):
+            self._config(tmp_path, fpath, agent_name="a", agent_map={"_default": "b"})
+
+    def test_agent_map_specific_beats_default(self, tmp_path) -> None:
+        fpath = self._write_rows(tmp_path, [self._rcp_row("x"), self._rcp_row("y"), self._rcp_row()])
+        config = self._config(tmp_path, fpath, agent_map={"x": "mapped_x", "_default": "fallback"})
+        with pytest.warns(UserWarning, match="overrode agent_ref"):
+            rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert [r["agent_ref"]["name"] for r in rows] == ["mapped_x", "fallback", "fallback"]
+
+    def test_agent_map_without_default_leaves_unmapped_rows_alone(self, tmp_path) -> None:
+        fpath = self._write_rows(tmp_path, [self._rcp_row("x"), self._rcp_row("y")])
+        config = self._config(tmp_path, fpath, agent_map={"x": "mapped_x"})
+        with pytest.warns(UserWarning, match="overrode agent_ref"):
+            rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert [r["agent_ref"]["name"] for r in rows] == ["mapped_x", "y"]
+
+    def test_row_agent_ref_wins_when_no_map(self, tmp_path) -> None:
+        fpath = self._write_rows(tmp_path, [self._rcp_row("x")])
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, self._config(tmp_path, fpath))
+        assert rows[0]["agent_ref"]["name"] == "x"
+
+    def test_missing_agent_still_hard_errors(self, tmp_path) -> None:
+        fpath = self._write_rows(tmp_path, [self._rcp_row()])
+        config = self._config(tmp_path, fpath, agent_map={"x": "y"})
+        with pytest.raises(ValueError, match="No agent specified"):
+            RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+    def test_identity_mapping_does_not_warn(self, tmp_path) -> None:
+        fpath = self._write_rows(tmp_path, [self._rcp_row("a")])
+        config = self._config(tmp_path, fpath, agent_name="a")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert rows[0]["agent_ref"]["name"] == "a"
+
+
+class TestValidateAgentNames:
+    def _rows(self, *names):
+        return [{"agent_ref": {"name": n}} for n in names]
+
+    def test_all_known_passes(self) -> None:
+        cfg = OmegaConf.create({"agent_a": {}, "agent_b": {}})
+        RolloutCollectionHelper._validate_agent_names(self._rows("agent_a", "agent_b"), cfg)
+
+    def test_unknown_agent_raises_with_suggestion(self) -> None:
+        cfg = OmegaConf.create({"math_with_judge_simple_agent": {}})
+        with pytest.raises(ValueError, match="did you mean 'math_with_judge_simple_agent'"):
+            RolloutCollectionHelper._validate_agent_names(self._rows("math_with_judge_simple_agnet"), cfg)
+
+    def test_unknown_agent_without_close_match_raises(self) -> None:
+        cfg = OmegaConf.create({"a": {}})
+        with pytest.raises(ValueError, match="not present in the running config"):
+            RolloutCollectionHelper._validate_agent_names(self._rows("zzz_completely_unrelated"), cfg)

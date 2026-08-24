@@ -23,13 +23,14 @@ from collections import Counter, defaultdict
 from contextlib import nullcontext
 from copy import deepcopy
 from datetime import timedelta
+from difflib import get_close_matches
 from itertools import repeat
 from pathlib import Path
 from time import time
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, Field, field_validator, model_validator
 from tqdm.asyncio import tqdm
 
@@ -505,7 +506,20 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
 
     agent_name: Optional[str] = Field(
         default=None,
-        description="The agent to collect rollouts from. If not specified, uses agent_ref from each data row.",
+        description=(
+            "The agent to collect rollouts from. Routes every row to this agent, overriding any "
+            "agent_ref already present in the data (a warning lists overridden values). "
+            "Shorthand for agent_map={_default: <agent_name>}."
+        ),
+    )
+    agent_map: Optional[Dict[str, str]] = Field(
+        default=None,
+        description=(
+            "Explicit per-agent re-routing, keyed by the agent_ref.name found in the data "
+            "(e.g. {old_agent: new_agent}). The special key '_default' applies to every row "
+            "whose agent_ref.name has no specific entry, including rows with no agent_ref at all. "
+            "Precedence: agent_map[<row value>] > agent_map._default > row agent_ref."
+        ),
     )
     input_jsonl_fpath: str = Field(
         description="The input data source to use to collect rollouts, in the form of a file path to a jsonl file."
@@ -547,6 +561,20 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         return 1 if v is None else v
 
     @model_validator(mode="after")
+    def _fold_agent_name_into_agent_map(self) -> "RolloutCollectionConfig":
+        # agent_name is sugar for agent_map._default; fold it so downstream code has one knob.
+        if self.agent_name is None:
+            return self
+        existing_default = (self.agent_map or {}).get("_default")
+        if existing_default is not None and existing_default != self.agent_name:
+            raise ValueError(
+                f"agent_name={self.agent_name!r} conflicts with agent_map._default={existing_default!r}. "
+                "Set only one of them."
+            )
+        self.agent_map = {**(self.agent_map or {}), "_default": self.agent_name}
+        return self
+
+    @model_validator(mode="after")
     def _validate_num_repeats(self) -> "RolloutCollectionConfig":
         nr = self.num_repeats
         if isinstance(nr, int):
@@ -586,8 +614,8 @@ class RolloutCollectionHelper(BaseModel):
                 "Adding unique `seed` values to each input via metadata.extra_body (only honored by vLLM model servers)"
             )
 
-        if config.agent_name:
-            print(f"Using `{config.agent_name}` for rows that do not already have an agent ref")
+        if config.agent_map:
+            print(f"Routing rows via agent_map {config.agent_map}")
 
         if config.responses_create_params:
             print(f"Overriding responses_create_params fields with {config.responses_create_params}")
@@ -651,13 +679,21 @@ class RolloutCollectionHelper(BaseModel):
         row_idxs_missing_agent_ref: List[int] = []
         agents_missing_from_num_repeats: set[str] = set()
         rows: List[Dict] = []
+        overridden_agents: set[Tuple[str, str]] = set()
         for row_idx, row_str, row in raw_rows:
-            # Resolve agent name. Missing agent_ref is a hard error reported in
-            # bulk after the loop; skip the row immediately so the rest of the
-            # body can assume agent_name is non-None.
-            if config.agent_name:
-                row.setdefault(AGENT_REF_KEY_NAME, {"name": config.agent_name})
+            # Resolve agent name: agent_map[<row value>] > agent_map._default > row agent_ref.
+            # Missing resolution is a hard error reported in bulk after the loop; skip the row
+            # immediately so the rest of the body can assume agent_name is non-None.
             agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+            if config.agent_map:
+                mapped = config.agent_map.get(agent_name) if agent_name is not None else None
+                if mapped is None:
+                    mapped = config.agent_map.get("_default")
+                if mapped is not None:
+                    if agent_name is not None and agent_name != mapped:
+                        overridden_agents.add((agent_name, mapped))
+                    agent_name = mapped
+                    row[AGENT_REF_KEY_NAME] = {"name": agent_name}
             if agent_name is None:
                 row_idxs_missing_agent_ref.append(row_idx)
                 continue
@@ -707,9 +743,18 @@ class RolloutCollectionHelper(BaseModel):
 
                 rows.append(row)
 
+        if overridden_agents:
+            warnings.warn(
+                "agent_map overrode agent_ref values already present in the data: "
+                f"{sorted(overridden_agents)}. Prior to this release, +agent_name only filled rows "
+                "missing an agent_ref; it now re-routes every row.",
+                stacklevel=2,
+            )
+
         if row_idxs_missing_agent_ref:
             raise ValueError(
-                f"No agent specified for rows {row_idxs_missing_agent_ref}. Either provide +agent_name config or include agent_ref in data."
+                f"No agent specified for rows {row_idxs_missing_agent_ref}. Provide +agent_name (or "
+                "+agent_map with a _default entry), or include agent_ref in the data."
             )
 
         if agents_missing_from_num_repeats:
@@ -1201,6 +1246,27 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
 
         return metrics_fpath
 
+    @staticmethod
+    def _validate_agent_names(examples: List[Dict], global_config_dict: DictConfig) -> None:
+        """Fail before any dispatch when a row names an agent absent from the running config.
+
+        Without this, the first bad row dies mid-collection with a raw omegaconf ConfigKeyError
+        after valid rows have already been dispatched.
+        """
+        requested = {name for row in examples if (name := (row.get(AGENT_REF_KEY_NAME) or {}).get("name")) is not None}
+        available = set(global_config_dict.keys())
+        unknown = sorted(requested - available)
+        if not unknown:
+            return
+        hints = []
+        for name in unknown:
+            close = get_close_matches(name, available, n=1)
+            hints.append(f"{name!r}" + (f" (did you mean {close[0]!r}?)" if close else ""))
+        raise ValueError(
+            f"Rows reference agents not present in the running config: {', '.join(hints)}. "
+            "Include the agent's config in the run, or re-route with +agent_map/+agent_name."
+        )
+
     def run_examples(
         self,
         examples: List[Dict],
@@ -1211,6 +1277,7 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         We provide this function as a lower level interface for running rollout collection.
         """
         server_client = self.setup_server_client(head_server_config)
+        self._validate_agent_names(examples, server_client.global_config_dict)
         semaphore = semaphore or nullcontext()
 
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
