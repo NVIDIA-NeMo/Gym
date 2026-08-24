@@ -115,19 +115,32 @@ per test plan; wall-clock is tens of minutes and the box needs headroom for
 
 ## Validation
 
-Run end to end on a Docker host. A single `notes/mvp` task graded 3/3 test plans, and the
-reward tracks model capability rather than merely completing:
+Run end to end on a Docker host. All five example tasks graded, and the reward tracks model
+capability rather than merely completing:
 
-| policy model | reward | steps passed | outcome |
-| --- | --- | --- | --- |
-| weaker | 0.0 | 0/19 | app built but unreachable (missing build output) |
-| stronger | 1.0 | 19/19 | full marks on all three plans |
+| app | reward | plans graded |
+| --- | --- | --- |
+| barber | 1.00 | 3/3 |
+| quiz | 1.00 | 3/3 |
+| market_place | 0.97 | 3/3 |
+| wedding | 0.51 | 4/4 |
+| notes | 0.00 | 0/3 |
 
-Same code, dataset and grader agents in both cases. `data/example_rollouts.jsonl` holds the
-scoring run.
+Mean 0.696. The spread matters more than the mean: `wedding` at roughly half marks shows the
+scale is not saturated, and `market_place` at 0.97 shows partial credit works. `notes` scored
+zero because that build crashed on startup (`Cannot read properties of undefined` in its DB
+init), which the grader attributed correctly rather than reporting as a harness error.
+
+An earlier run of the same task with a weaker policy model scored 0.0 with 0/19 steps, so the
+environment discriminates between models. `data/example_rollouts.jsonl` holds the five-task run.
+
+Reward varies across repeats because the model does not build the same app twice — `notes`
+scored 1.00 in one run and 0.00 in another. That is a property to measure during reward
+profiling, not a defect; profiling with repeats is what separates model variance from any
+variance in the LLM-driven verifier.
 
 `verified: false` still stands: that flag means baselined and reviewed, which needs a
-profiling sweep across many tasks, not one.
+profiling sweep across many tasks, not five.
 
 ## P0 limitations
 
