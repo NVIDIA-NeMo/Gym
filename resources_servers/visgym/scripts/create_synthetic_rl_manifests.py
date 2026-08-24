@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """Create synthetic VisGym seed-sweep manifests for online multiturn RL.
 
 These manifests do not contain offline trajectories.  Each row is a task seed

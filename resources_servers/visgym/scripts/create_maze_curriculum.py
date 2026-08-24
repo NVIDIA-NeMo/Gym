@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """Create an ordered maze-size curriculum for online VisGym RL.
 
 Rows are grouped by ascending maze size. NeMo-RL must use ``data.shuffle=false``
@@ -210,7 +212,10 @@ def main() -> int:
         "combined": {"path": f"./{combined_path.name}", "rows": len(combined_rows)},
         "stages": stage_files,
     }
-    index_path = args.output_dir / f"{prefix}_manifest_index.json"
+    # Same suffixes as the manifests it points at. Without them a second
+    # variant silently overwrites the first index, and whoever reads it to
+    # pick stage files gets the wrong token budget or shaping coefficient.
+    index_path = args.output_dir / f"{prefix}_manifest_index_t{args.max_output_tokens}{shaping_suffix}.json"
     index_path.write_text(
         json.dumps(index, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",

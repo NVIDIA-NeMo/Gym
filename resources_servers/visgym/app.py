@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib
 import json
 import logging
@@ -22,7 +23,11 @@ from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import SimpleResourcesServer
 from resources_servers.visgym._metadata import sanitize_metadata
-from resources_servers.visgym._observation import attach_env_info, observation_to_user_message
+from resources_servers.visgym._observation import (
+    attach_env_info,
+    coerce_images,
+    observation_to_user_message,
+)
 from resources_servers.visgym.schemas import (
     VisGymAgentVerifyRequest,
     VisGymAgentVerifyResponse,
@@ -324,10 +329,32 @@ def _render_fetch_state(env: Any, obs: dict[str, Any]) -> Any:
     return np.array(image, dtype=np.uint8, copy=True)
 
 
-def _install_fetch_headless_renderer() -> None:
-    """Keep Fetch physics while replacing its EGL-dependent image renderer."""
+@contextlib.contextmanager
+def _fetch_gl_environment() -> Any:
+    """Scope Fetch's GLFW rendering settings to the calling block.
+
+    Setting these process-wide is order-dependent poison in a blended
+    manifest: `_ensure_headless_defaults` uses setdefault, so once a fetch_*
+    session flips MUJOCO_GL to glfw and drops PYOPENGL_PLATFORM, nothing
+    restores egl and every later EGL-dependent environment in that worker
+    (maze_3d, mental_rotation_3d, ...) fails at reset -- unless the fetch rows
+    happened to be scheduled last.
+    """
+    previous = {name: os.environ.get(name) for name in ("MUJOCO_GL", "PYOPENGL_PLATFORM")}
     os.environ["MUJOCO_GL"] = "glfw"
     os.environ.pop("PYOPENGL_PLATFORM", None)
+    try:
+        yield
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+def _install_fetch_headless_renderer() -> None:
+    """Keep Fetch physics while replacing its EGL-dependent image renderer."""
 
     module_names = (
         "gymnasium_robotics.envs.fetch.pick_and_place_discrete",
@@ -382,7 +409,18 @@ def _ensure_visgym_importable(env_id: str | None = None) -> Any:
     return gym
 
 
-_PATH_LIKE_ENV_KWARGS = ("sample_dir", "asset_dir", "data_dir", "dataset_dir", "sample_path", "asset_root")
+_PATH_LIKE_ENV_KWARGS = (
+    "sample_dir",
+    "asset_dir",
+    "data_dir",
+    "dataset_dir",
+    "sample_path",
+    "asset_root",
+    # counting/easy carries this alongside sample_dir; resolving one but not
+    # the other is worse than resolving neither, because the images load and
+    # only the annotations go missing.
+    "annotation_file",
+)
 
 
 def _resolve_asset_kwargs(env_kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -461,7 +499,10 @@ class VisGymResourcesServer(SimpleResourcesServer):
                 _install_maze3d_headless_renderer()
             if row.env_id.startswith("fetch_"):
                 _install_fetch_headless_renderer()
-            env = await run_in_threadpool(gym_module.make, row.env_id, **env_kwargs)
+                with _fetch_gl_environment():
+                    env = await run_in_threadpool(gym_module.make, row.env_id, **env_kwargs)
+            else:
+                env = await run_in_threadpool(gym_module.make, row.env_id, **env_kwargs)
             obs, info = await self._reset_env(env, row)
             info = self._augment_info(env, info, row.env_id)
         except Exception as exc:
@@ -490,6 +531,14 @@ class VisGymResourcesServer(SimpleResourcesServer):
         obs_msg = attach_env_info(obs_msg, self._env_info(info, row.env_id))
 
         return VisGymSeedSessionResponse(env_id=env_id, obs=[obs_msg])
+
+    def _horizon_reached(self, env_id: str, row_dict: dict[str, Any]) -> bool:
+        """True when this session has used up its per-task horizon_cap."""
+        return bool(
+            self.config.enforce_horizon_cap
+            and row_dict.get("horizon_cap") is not None
+            and self.env_id_to_turn_count[env_id] >= row_dict["horizon_cap"]
+        )
 
     async def step(self, request: Request, body: VisGymStepRequest) -> VisGymStepResponse:
         if body.env_id not in self.env_id_to_env:
@@ -523,11 +572,17 @@ class VisGymResourcesServer(SimpleResourcesServer):
                 skip_images=self.config.skip_images,
             )
             recovery = attach_env_info(recovery, {"env_step_exception": str(exc)})
+            # A rejected action still costs a turn. Returning early without
+            # counting it means horizon_cap can never terminate an episode of
+            # nothing but invalid actions, leaving the agent's max_steps as the
+            # only bound -- and that defaults to None.
+            self.env_id_to_turn_count[body.env_id] += 1
+            horizon_terminated = self._horizon_reached(body.env_id, row_dict)
             return VisGymStepResponse(
                 obs=[recovery],
                 reward=0.0,
-                done=False,
-                horizon_terminated=False,
+                done=horizon_terminated,
+                horizon_terminated=horizon_terminated,
             )
 
         self.env_id_to_turn_count[body.env_id] += 1
@@ -541,14 +596,9 @@ class VisGymResourcesServer(SimpleResourcesServer):
         self.env_id_to_total_reward[body.env_id] += training_step_reward
         done = bool(terminated or truncated)
 
-        horizon_terminated = False
-        if (
-            self.config.enforce_horizon_cap
-            and row_dict.get("horizon_cap") is not None
-            and self.env_id_to_turn_count[body.env_id] >= row_dict["horizon_cap"]
-        ):
+        horizon_terminated = self._horizon_reached(body.env_id, row_dict)
+        if horizon_terminated:
             done = True
-            horizon_terminated = True
 
         env_info = self._env_info(info, env_id_str)
         env_info.update(
@@ -645,11 +695,27 @@ class VisGymResourcesServer(SimpleResourcesServer):
         return await run_in_threadpool(env.step, action_string)
 
     async def _image_value(self, env: Any, obs: Any, env_id: str) -> Any:
-        if obs is not None:
+        """Return something image-like for this observation, rendering if needed.
+
+        The config field and the README both promise a render fallback when the
+        observation "is not image-like", but only checking for None means an
+        environment returning a state vector or a text-only dict silently sends
+        the model a message with no image at all.
+        """
+        if obs is not None and coerce_images(obs):
             return obs
         if self.config.render_on_missing_image:
-            return await self._safe_render(env, env_id)
-        return None
+            rendered = await self._safe_render(env, env_id)
+            if rendered is not None:
+                return rendered
+            if obs is not None:
+                logger.warning(
+                    "VisGym env_id=%s produced a non-image observation (%s) and "
+                    "env.render() returned nothing; the model will see text only.",
+                    env_id,
+                    type(obs).__name__,
+                )
+        return obs
 
     async def _safe_render(self, env: Any, env_id: str) -> Any:
         try:

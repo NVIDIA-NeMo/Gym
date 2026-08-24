@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """Create NeMo Gym VisGym RL manifests from Hugging Face VisGym trajectories.
 
 The HF dataset stores full trajectories, including image/history payloads.  For

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import uuid
-from unittest.mock import AsyncMock, MagicMock, call
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -854,3 +854,138 @@ class TestNeMoRLResultContract:
         assert {"reward", "responses_create_params", "response"} <= set(wire)
         assert "input" in wire["responses_create_params"]
         assert "output" in wire["response"]
+
+
+class TestVerifyEchoesEffectivePrompt:
+    """/verify must carry the params the policy saw, not the caller's copy."""
+
+    async def test_verify_params_include_the_injected_system_prompt(self) -> None:
+        # NeMo-RL rebuilds a rollout's initial prompt from
+        # responses_create_params.input on the verify result. Every shipped
+        # task row has input: [], and the agent injects its system prompt into
+        # a deep copy, so echoing the caller's copy reconstructs an empty
+        # prefix that disagrees with the recorded prompt_token_ids.
+        agent = _make_agent(max_steps=1, system_prompt="MAZE RULES: stop on the target.")
+        env_id = str(uuid.uuid4())
+
+        dotjson_mock = AsyncMock()
+        dotjson_mock.json.side_effect = [
+            _seed_session(env_id=env_id),
+            _model_response("\\boxed{step}"),
+            _step(done=True, reward=1.0),
+            {
+                "reward": 1.0,
+                "responses_create_params": {"input": []},
+                "response": {
+                    "id": "resp_1",
+                    "created_at": 1753983920.0,
+                    "model": "dummy_model",
+                    "object": "response",
+                    "env_id": env_id,
+                    "group_id": "0",
+                    "contains_transitions": False,
+                    "output": [],
+                    "parallel_tool_calls": True,
+                    "tool_choice": "auto",
+                    "tools": [],
+                },
+            },
+        ]
+        dotjson_mock.raise_for_status = MagicMock()
+        dotjson_mock.cookies = None
+        agent.server_client.post = AsyncMock(return_value=dotjson_mock)
+
+        await agent.run(
+            TextActionAgentRunRequest(
+                task_idx=0,
+                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            )
+        )
+
+        verify_call = [c for c in agent.server_client.post.await_args_list if c[1]["url_path"] == "/verify"][0]
+        echoed = verify_call[1]["json"]["responses_create_params"]["input"]
+        assert echoed, "verify echoed an empty prompt; NeMo-RL would rebuild the wrong prefix"
+        roles_and_text = [(m.get("role"), str(m.get("content"))) for m in echoed]
+        assert any(r == "system" and "MAZE RULES" in c for r, c in roles_and_text), roles_and_text
+
+
+class TestTruncationRetryIsRecorded:
+    """A retry's recovery message belongs in the recorded trajectory."""
+
+    async def test_recovery_message_appears_between_assistant_turns(self) -> None:
+        # The retry's assistant turn is generated *with* the recovery message
+        # in its prefix. Dropping it from the output leaves two adjacent
+        # assistant turns, so anything that re-flattens the trajectory builds a
+        # prefix that no longer matches the recorded prompt_token_ids.
+        agent = _make_agent(
+            max_steps=2,
+            done_if_no_boxed_answer=False,
+            max_no_boxed_truncation_retries=1,
+        )
+        env_id = str(uuid.uuid4())
+
+        dotjson_mock = AsyncMock()
+        dotjson_mock.json.side_effect = [
+            _seed_session(env_id=env_id),
+            _model_response("no action here", resp_id="r1", incomplete_reason="max_output_tokens"),
+            _model_response("\\boxed{step}", resp_id="r2"),
+            _step(done=True, reward=1.0),
+            {"message": "ok", "success": True},
+        ]
+        dotjson_mock.raise_for_status = MagicMock()
+        dotjson_mock.cookies = None
+        agent.server_client.post = AsyncMock(return_value=dotjson_mock)
+
+        result = await agent.responses(
+            TextActionAgentRunRequest(
+                task_idx=0,
+                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            )
+        )
+
+        roles = [item.role for item in result.output]
+        adjacent_assistants = [
+            i for i in range(len(roles) - 1) if roles[i] == "assistant" and roles[i + 1] == "assistant"
+        ]
+        assert not adjacent_assistants, f"recovery turn missing from the record: {roles}"
+
+
+class TestSeedRetryDoesNotLeakSessions:
+    """A seed attempt that fails after the server registered the env must close it."""
+
+    async def test_unusable_seed_response_is_closed_before_retrying(self) -> None:
+        # The server registers env_id_to_env before building its response, so a
+        # response that arrives empty (or fails to parse) leaves a live
+        # environment holding a MuJoCo context / matplotlib figure / Ursina
+        # scene. Retrying without closing leaks one per attempt.
+        agent = _make_agent(max_steps=1)
+        good_env_id = str(uuid.uuid4())
+        orphan_env_id = str(uuid.uuid4())
+
+        dotjson_mock = AsyncMock()
+        dotjson_mock.json.side_effect = [
+            {"env_id": orphan_env_id, "obs": [], "tools": []},  # registered, but unusable
+            {"message": "ok", "success": True},  # the /close we expect
+            _seed_session(env_id=good_env_id),  # retry succeeds
+            _model_response("\\boxed{step}"),
+            _step(done=True, reward=1.0),
+            {"message": "ok", "success": True},
+        ]
+        dotjson_mock.raise_for_status = MagicMock()
+        dotjson_mock.cookies = None
+        agent.server_client.post = AsyncMock(return_value=dotjson_mock)
+
+        with patch("asyncio.sleep", new=AsyncMock()):
+            await agent.responses(
+                TextActionAgentRunRequest(
+                    task_idx=0,
+                    responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+                )
+            )
+
+        closes = [
+            c
+            for c in agent.server_client.post.await_args_list
+            if c[1]["url_path"] == "/close" and c[1]["json"]["env_id"] == orphan_env_id
+        ]
+        assert closes, "the orphaned session was never closed"

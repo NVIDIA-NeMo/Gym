@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import io
+import logging
 from typing import Any
 
 from PIL import Image
@@ -28,6 +29,9 @@ def image_to_data_url(image: Image.Image, fmt: str = "PNG", jpeg_quality: int = 
 
     encoded = base64.b64encode(buf.getvalue()).decode("utf-8")
     return f"data:image/{mime};base64,{encoded}"
+
+
+logger = logging.getLogger(__name__)
 
 
 def _is_numpy_array(value: Any) -> bool:
@@ -59,7 +63,18 @@ def coerce_images(value: Any) -> list[Image.Image]:
     if isinstance(value, Image.Image):
         return [value]
     if _is_numpy_array(value):
-        return [_array_to_image(value)]
+        try:
+            return [_array_to_image(value)]
+        except ValueError:
+            # A state vector, a (H,W,2) mask, anything not image-shaped. This
+            # is called from /step and /seed_session outside their try/except,
+            # so raising here surfaces as an unhandled 500 that kills the whole
+            # rollout batch -- and in seed_session the environment has already
+            # been registered, so it leaks too. An environment that returns a
+            # non-image observation is a normal thing to handle, not a crash:
+            # the caller falls back to env.render() when configured.
+            logger.debug("Observation array is not image-like; ignoring for image extraction")
+            return []
     if isinstance(value, (list, tuple)):
         images: list[Image.Image] = []
         for item in value:

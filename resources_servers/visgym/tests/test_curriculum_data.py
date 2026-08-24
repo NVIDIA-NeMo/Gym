@@ -14,7 +14,9 @@ from resources_servers.visgym.schemas import VisGymTaskRow
 
 VISGYM_ROOT = Path(__file__).resolve().parents[1]
 GENERATOR = VISGYM_ROOT / "scripts" / "create_maze_curriculum.py"
-INDEX_NAME = "maze_2d_easy_curriculum_5x5_7x7_9x9_11x11_manifest_index.json"
+# The generator's default budget; the index carries it so two variants cannot
+# overwrite each other's index.
+INDEX_NAME = "maze_2d_easy_curriculum_5x5_7x7_9x9_11x11_manifest_index_t1024.json"
 
 
 def _generate_curriculum(output_dir: Path) -> Path:

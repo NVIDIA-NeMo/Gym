@@ -59,6 +59,16 @@ from resources_servers.visgym.schemas import (
 
 
 logger = logging.getLogger(__name__)
+
+
+class _SeededButUnusable(RuntimeError):
+    """A session was created server-side but its response cannot be used."""
+
+    def __init__(self, message: str, *, env_id: str | None = None) -> None:
+        super().__init__(message)
+        self.env_id = env_id
+
+
 DEFAULT_VISGYM_SYSTEM_PROMPT = (
     "Inspect the current visual state and choose exactly one legal VisGym action. "
     "Put the action in \\boxed{...} as the final item in your response."
@@ -304,6 +314,17 @@ class TextActionAgentRunRequest(BaseRunRequest):
 class TextActionAgent(SimpleResponsesAPIAgent):
     config: TextActionAgentConfig
 
+    async def _close_session(self, env_id: str) -> None:
+        """Best-effort /close so a failed attempt does not leak an environment."""
+        try:
+            await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/close",
+                json={"env_id": env_id},
+            )
+        except Exception:
+            logger.warning("Failed to close orphaned VisGym session %s", env_id, exc_info=True)
+
     async def _seed_session(self, task_idx: int, task_row: VisGymTaskRow | None) -> VisGymSeedSessionResponse:
         payload = {"task_idx": task_idx}
         if task_row is not None:
@@ -316,11 +337,26 @@ class TextActionAgent(SimpleResponsesAPIAgent):
                     json=payload,
                 )
                 reset_response.raise_for_status()
-                seed_session_response = VisGymSeedSessionResponse.model_validate(await reset_response.json())
+                payload_json = await reset_response.json()
+                seed_session_response = VisGymSeedSessionResponse.model_validate(payload_json)
                 if not seed_session_response.obs:
-                    raise ValueError("No observations in seed session response")
+                    raise _SeededButUnusable(
+                        "No observations in seed session response",
+                        env_id=seed_session_response.env_id,
+                    )
                 return seed_session_response
-            except Exception:
+            except Exception as exc:
+                # The server registers the environment before it finishes
+                # building the response, so an attempt that fails after that
+                # point leaves a live env (MuJoCo context, matplotlib figure,
+                # Ursina scene) and an undrained reward entry behind. Retrying
+                # without closing it leaks one per attempt, and the resources
+                # server grows for the life of the run.
+                orphan_env_id = getattr(exc, "env_id", None) or (
+                    payload_json.get("env_id") if isinstance(locals().get("payload_json"), dict) else None
+                )
+                if orphan_env_id:
+                    await self._close_session(orphan_env_id)
                 if attempt == 2:
                     raise
                 await asyncio.sleep(5 * (2**attempt))
@@ -468,6 +504,23 @@ class TextActionAgent(SimpleResponsesAPIAgent):
             raise
 
     async def responses(self, req: TextActionAgentRunRequest) -> VisGymNeMoGymResponse:
+        response, _ = await self._run_episode(req)
+        return response
+
+    async def _run_episode(
+        self, req: TextActionAgentRunRequest
+    ) -> tuple[VisGymNeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming]:
+        """Play one episode and return it alongside the params the policy saw.
+
+        The effective params are not the caller's: this method deep-copies the
+        request and prepends the agent's system prompt, so the conversation the
+        model was actually conditioned on differs from the task row (whose
+        `input` is empty for every shipped config). NeMo-RL rebuilds a
+        rollout's initial prompt from `responses_create_params.input` on the
+        verify result, so echoing the caller's copy there reconstructs an empty
+        prefix that disagrees with the recorded prompt_token_ids -- exactly the
+        off-policy mismatch the token metadata exists to prevent.
+        """
         task_row = self._task_row_from_request(req)
         req = req.model_copy(deep=True)
         body = req.responses_create_params
@@ -534,7 +587,6 @@ class TextActionAgent(SimpleResponsesAPIAgent):
                     termination_reason = "max_steps"
                     break
                 step += 1
-                successful_transition = True
                 reset_truncation_budget = False
 
                 try:
@@ -624,7 +676,6 @@ class TextActionAgent(SimpleResponsesAPIAgent):
                                 consecutive_truncation_retries,
                             )
                             obs = [self._no_boxed_recovery()]
-                            successful_transition = False
                         else:
                             done = True
                             obs = []
@@ -670,8 +721,14 @@ class TextActionAgent(SimpleResponsesAPIAgent):
                     agent_state_history.append(cast(NeMoGymResponseInput, agent_state.input))
                 else:
                     all_messages.extend(model_output)
-                    if successful_transition:
-                        all_messages.extend(obs)
+                    # Record every observation the model was conditioned on,
+                    # including a truncation-retry recovery message. Skipping
+                    # it here while adding it to agent_state above leaves two
+                    # consecutive assistant turns in the output whose
+                    # prompt_token_ids were produced *with* the recovery
+                    # message in the prefix, so re-flattening the trajectory
+                    # rebuilds a prefix that no longer matches those ids.
+                    all_messages.extend(obs)
 
                 if done:
                     break
@@ -730,17 +787,19 @@ class TextActionAgent(SimpleResponsesAPIAgent):
                 "output": [_message_summary(item) for item in response.model_dump(mode="json").get("output", [])],
             },
         )
-        return response
+        return response, body
 
     async def run(self, body: TextActionAgentRunRequest) -> VisGymAgentVerifyResponse:
         try:
-            response = await self.responses(body)
+            response, effective_params = await self._run_episode(body)
             verify_request = VisGymAgentVerifyRequest.model_validate(
                 {
                     "response": response.model_dump(),
                     # Echoed back through /verify because NeMo-RL reads it off
-                    # the rollout result, not off the task row.
-                    "responses_create_params": body.responses_create_params.model_dump(),
+                    # the rollout result, not off the task row -- and it has to
+                    # be the params the policy saw (system prompt injected),
+                    # not the caller's untouched copy.
+                    "responses_create_params": effective_params.model_dump(),
                 }
             )
             verify_response = await self.server_client.post(
