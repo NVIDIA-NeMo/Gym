@@ -22,6 +22,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import ServerClient
 from resources_servers.gdpval.app import (
     GDPValResourcesServer,
@@ -214,8 +215,17 @@ class TestApp:
         assert judge.base_url == "http://localhost:9999/v1"
         assert judge.create_overrides == {"max_tokens": 16384, "temperature": 0.0}
 
+    @pytest.mark.parametrize(
+        ("rollout_id", "expected_base_url"),
+        [
+            pytest.param("7-3", "http://localhost:9999/ng-rollout/7-3/v1", id="observed"),
+            pytest.param(None, "http://localhost:9999/v1", id="unobserved"),
+        ],
+    )
     @pytest.mark.asyncio
-    async def test_verify_rubric_samples_from_judge_panel(self) -> None:
+    async def test_verify_rubric_samples_from_judge_panel(
+        self, rollout_id: str | None, expected_base_url: str
+    ) -> None:
         """A configured ``judge_panel`` reaches the scoring fn as multiple judges.
 
         Each member resolves to its own model + reasoning knobs; members without
@@ -244,6 +254,7 @@ class TestApp:
         body = _verify_request(rubric_json=[{"criterion": "clarity", "score": 1}])
 
         with (
+            rollout_context(rollout_id),
             patch("resources_servers.gdpval.scoring.score_with_rubric", side_effect=fake_score_with_rubric),
             patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
         ):
@@ -259,7 +270,7 @@ class TestApp:
         assert judges[0].create_overrides == {"reasoning_effort": "medium"}
         assert judges[2].weight == 2.0
         # All share the single proxy base_url.
-        assert {j.base_url for j in judges} == {"http://localhost:9999/v1"}
+        assert {j.base_url for j in judges} == {expected_base_url}
         # A seeded rng is threaded through for reproducible sampling.
         assert captured["rng"] is not None
 

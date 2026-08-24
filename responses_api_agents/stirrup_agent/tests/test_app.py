@@ -125,6 +125,41 @@ class TestApp:
         )
         StirrupAgentWrapper(config=config, server_client=MagicMock(spec=ServerClient))
 
+    @pytest.mark.parametrize(
+        ("observability_enabled", "expected_rollout_id"),
+        [pytest.param(True, "7-3", id="observed"), pytest.param(False, None, id="unobserved")],
+    )
+    @pytest.mark.asyncio
+    async def test_run_explicitly_routes_rollout_correlation(
+        self, tmp_path, observability_enabled: bool, expected_rollout_id: str | None
+    ) -> None:
+        config = _make_config(execute_only=True, persist_deliverables_dir=str(tmp_path))
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {"observability_enabled": observability_enabled}
+        server_client.post = AsyncMock(side_effect=RuntimeError("no server in unit test"))
+        wrapper = StirrupAgentWrapper(config=config, server_client=server_client)
+
+        params = NeMoGymResponseCreateParamsNonStreaming(
+            input="ignored",
+            metadata={"task_id": "task-1", "prompt": "do the thing", "_ng_rollout_index": 3},
+        )
+        body = StirrupRunRequest(
+            responses_create_params=params,
+            task_id="task-1",
+            prompt="do the thing",
+            _ng_task_index=7,
+            _ng_rollout_index=3,
+        )
+        request = MagicMock()
+        request.cookies = {}
+
+        responses_mock = AsyncMock(return_value=_fake_response())
+        with patch.object(StirrupAgentWrapper, "responses", responses_mock):
+            await wrapper.run(request, body)
+
+        responses_mock.assert_awaited_once()
+        assert responses_mock.await_args.args[1] == expected_rollout_id
+
     def test_output_history_preserves_nemo_user_tool_results(self) -> None:
         """Run-history export should keep NeMo user-role tool results as tool outputs."""
         history = [
