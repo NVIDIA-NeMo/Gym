@@ -133,11 +133,41 @@ class TestArtifactUnpacking:
 class TestGraderEnv:
     def test_env_file_entries_are_loaded(self, tmp_path):
         env_file = tmp_path / ".env"
-        env_file.write_text('# comment\nAGENT_EVALUATION_LLM_MODEL="anthropic/claude-sonnet-4-5"\n\nBLANK\n')
+        env_file.write_text('# comment\nPROVIDER_KEY="secret-value"\n\nBLANK\n')
         server = make_server(tmp_path, vibench_env_file=str(env_file))
         env = server._grader_env()
-        assert env["AGENT_EVALUATION_LLM_MODEL"] == "anthropic/claude-sonnet-4-5"
+        assert env["PROVIDER_KEY"] == "secret-value"
         assert "BLANK" not in env
+
+    def test_env_creator_output_is_merged(self, tmp_path, monkeypatch):
+        """The grader agents get their model and tool list from env_creator, not the .env."""
+        server = make_server(tmp_path)
+        derived = {
+            "AGENT_SEEDING_LLM_MODEL": "some/seeding-model",
+            "AGENT_SEEDING_LLM_TOOLS": "TerminalTool,FileEditorTool",
+        }
+
+        class _Result:
+            returncode = 0
+            stdout = json.dumps(derived)
+            stderr = ""
+
+        monkeypatch.setattr("resources_servers.vibench.app.subprocess.run", lambda *a, **k: _Result())
+        env = server._grader_env()
+        assert env["AGENT_SEEDING_LLM_MODEL"] == "some/seeding-model"
+        assert env["AGENT_SEEDING_LLM_TOOLS"] == "TerminalTool,FileEditorTool"
+
+    def test_env_creator_failure_does_not_raise(self, tmp_path, monkeypatch):
+        server = make_server(tmp_path)
+
+        class _Result:
+            returncode = 1
+            stdout = ""
+            stderr = "boom"
+
+        monkeypatch.setattr("resources_servers.vibench.app.subprocess.run", lambda *a, **k: _Result())
+        # A broken ViBench checkout should degrade to a failed grade, not crash the server.
+        assert isinstance(server._grader_env(), dict)
 
 
 class TestVerifyRewardAggregation:

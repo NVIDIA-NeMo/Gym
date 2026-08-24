@@ -42,6 +42,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -99,9 +100,12 @@ class VibenchResourcesServerConfig(BaseResourcesServerConfig):
     # many run at once *within one rollout*; Gym's own concurrency multiplies on top of this.
     max_concurrent_test_plans: int = 2
 
-    # .env supplying AGENT_SEEDING_LLM_* / AGENT_EVALUATION_LLM_* keys for the grader agents.
-    # These are the *verifier's* models and are deliberately not the policy model.
+    # .env holding the raw provider keys ViBench's env_creator maps onto the grader
+    # agents' AGENT_SEEDING_LLM_* / AGENT_EVALUATION_LLM_* variables. These are the
+    # *verifier's* models and are deliberately not the policy model under test.
     vibench_env_file: Optional[str] = None
+    # ViBench model key passed to env_creator.get_env_dict when deriving that env.
+    grader_model_name: str = "Sonnet_4.5"
 
     # Keep per-test-plan output dirs (traces, screenshots, DB dumps) after grading.
     keep_evaluation_artifacts: bool = False
@@ -222,6 +226,18 @@ class VibenchResourcesServer(SimpleResourcesServer):
             tar.extractall(dest)
 
     def _grader_env(self) -> Dict[str, str]:
+        """Environment for ViBench's grading subprocesses.
+
+        The compose template reads AGENT_SEEDING_LLM_* / AGENT_EVALUATION_LLM_* straight out
+        of the environment (``${AGENT_LLM_API_KEY:-}`` and friends), and run-seed.py does not
+        populate them. Loading the .env alone is not enough: raw provider keys have to be
+        mapped onto those variables by ViBench's own env_creator, which is also what supplies
+        each grader agent's tool list. Skip it and the seeding agent starts with no model and
+        no tools, exits immediately, and the run reports a fully failed seeding rate.
+
+        env_creator is invoked in a subprocess so ViBench's module never has to import into
+        this process. Values are secrets and are never logged.
+        """
         env = dict(os.environ)
         env_file = self.config.vibench_env_file
         if env_file:
@@ -231,6 +247,28 @@ class VibenchResourcesServer(SimpleResourcesServer):
                     continue
                 key, _, value = line.partition("=")
                 env[key.strip()] = value.strip().strip('"').strip("'")
+
+        scripts_dir = self._repo_root / "_harness" / "runner" / "scripts"
+        probe = (
+            "import json, sys; sys.path.insert(0, %r); import env_creator; "
+            "print(json.dumps(env_creator.get_env_dict(%r)))" % (str(scripts_dir), self.config.grader_model_name)
+        )
+        try:
+            result = subprocess.run(
+                [sys.executable, "-c", probe],
+                cwd=str(self._repo_root),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if result.returncode == 0:
+                env.update({k: str(v) for k, v in json.loads(result.stdout).items() if v is not None})
+            else:
+                print(f"env_creator failed (rc={result.returncode}): {result.stderr[-500:]}", file=sys.stderr)
+        except Exception:
+            print("Failed to derive grader env from env_creator", format_exc(), file=sys.stderr)
+
         return env
 
     async def _run_vibench_script(self, cmd: List[str]) -> tuple[int, str]:
