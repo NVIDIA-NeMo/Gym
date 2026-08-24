@@ -37,7 +37,8 @@ apt-get install -y --no-install-recommends \
     git \
     wget \
     less \
-    vim
+    vim \
+    gnupg
 
 apt-get purge -y \
     ffmpeg \
@@ -61,6 +62,19 @@ curl -fSsL -o /tmp/enroot.deb \
     "https://github.com/NVIDIA/enroot/releases/download/v${ENROOT_VERSION}/enroot_${ENROOT_VERSION}-1_${arch}.deb"
 apt-get install -y /tmp/enroot.deb
 rm /tmp/enroot.deb
+
+# Install nvidia-container-toolkit so enroot's NVIDIA hook
+# (/etc/enroot/hooks.d/98-nvidia.sh) can find nvidia-container-cli to inject
+# GPUs into enroot sandboxes. Without this, enroot sandboxes that request a
+# GPU fail at the hook step even though the outer container has GPU access.
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+    | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+    | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+    > /etc/apt/sources.list.d/nvidia-container-toolkit.list
+apt-get update
+apt-get install -y nvidia-container-toolkit
+rm -f /etc/apt/sources.list.d/nvidia-container-toolkit.list /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
 
 apt-get clean
 rm -rf /var/lib/apt/lists/*
