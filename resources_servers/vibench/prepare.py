@@ -96,6 +96,9 @@ def build_row(
     # Static fixtures the PRD refers to (CSV lookups and the like). test_assets/ is
     # deliberately excluded: those belong to the grader, not the builder.
     asset_dirs = [str((app_dir / "assets").relative_to(root))] if (app_dir / "assets").is_dir() else []
+    # Grader-only fixtures the evaluation agent uploads while driving the app.
+    test_assets = app_dir / "test_assets"
+    test_assets_dir = str(test_assets.relative_to(root)) if test_assets.is_dir() else None
 
     prompt = TASK_INSTRUCTIONS.format(prd_path=f"{workdir}/prd.txt", workdir=workdir)
     messages = []
@@ -109,6 +112,7 @@ def build_row(
         "prd_files": [str(p.relative_to(root)) for p in prds],
         "test_plans": [str(p.relative_to(root)) for p in test_plans],
         "asset_dirs": asset_dirs,
+        "test_assets_dir": test_assets_dir,
         "responses_create_params": {"input": messages},
     }
 

@@ -66,7 +66,14 @@ from nemo_gym.base_resources_server import (
 )
 
 
-SEED_THEN_EVALUATE_SCRIPT = Path("_harness/runner/scripts/run-seed-then-evaluate.py")
+# ViBench's two-phase grading path. run-seed-then-evaluate.py looks like a convenient
+# single call, but its build context omits the `seeding/` directory that
+# Dockerfile.completed-app requires, so it always dies at `COPY seeding /seeding` -- every
+# sibling script creates that directory (run-seed.py:95 makes an empty one). The two-phase
+# path is also what ViBench's own results tree drives, and it is the only one that accepts
+# --test-assets, which the evaluation agent needs and the builder must never see.
+SEED_SCRIPT = Path("_harness/runner/scripts/run-seed.py")
+EVALUATE_SCRIPT = Path("_harness/runner/scripts/run-evaluate-post-seeding.py")
 
 # ViBench scores a test plan by having the evaluation agent fill in <pass>/<comment> tags
 # after every <skippable> block. populate_results_folder.py does this when it materializes
@@ -114,6 +121,9 @@ class VibenchTaskRequest(BaseModel):
     prd_files: List[str]
     test_plans: List[str]
     asset_dirs: List[str] = []
+    # Fixtures the evaluation agent uploads while driving the app. Grader-only: never
+    # staged into the build sandbox.
+    test_assets_dir: Optional[str] = None
 
 
 class VibenchRunRequest(VibenchTaskRequest, BaseRunRequest):
@@ -223,35 +233,12 @@ class VibenchResourcesServer(SimpleResourcesServer):
                 env[key.strip()] = value.strip().strip('"').strip("'")
         return env
 
-    async def _grade_one_test_plan(
-        self,
-        app_dir: Path,
-        test_plan_rel: str,
-        prd_paths: List[Path],
-        work_dir: Path,
-    ) -> PlanResult:
-        """Run ViBench's seed-then-evaluate for a single test plan and parse its score."""
-        started = time.time()
-        name = Path(test_plan_rel).stem
-        out_dir = work_dir / name
-        out_dir.mkdir(parents=True, exist_ok=True)
+    async def _run_vibench_script(self, cmd: List[str]) -> tuple[int, str]:
+        """Run one ViBench grading script, returning (return_code, merged output).
 
-        plan_path = out_dir / "test-plan.txt"
-        plan_path.write_text(add_evaluation_tags(self._resolve(test_plan_rel).read_text()))
-
-        cmd = [
-            sys.executable,
-            str(self._repo_root / SEED_THEN_EVALUATE_SCRIPT),
-            "--app-dir",
-            str(app_dir),
-            "--test-plan",
-            str(plan_path),
-            "--output-dir",
-            str(out_dir),
-            "--prd-files",
-            *[str(p) for p in prd_paths],
-        ]
-
+        A timeout is a failed grade, not an exception: one wedged compose stack should score
+        zero rather than take the whole rollout down.
+        """
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -260,23 +247,36 @@ class VibenchResourcesServer(SimpleResourcesServer):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )
-            try:
-                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=self.config.evaluation_timeout_s)
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
-                return PlanResult(
-                    test_plan=name,
-                    score=0.0,
-                    full_points=0.0,
-                    normalized_score=0.0,
-                    steps_total=0,
-                    steps_passed=0,
-                    seeding_failed=False,
-                    error=f"timed out after {self.config.evaluation_timeout_s}s",
-                    duration_s=time.time() - started,
-                )
         except Exception:
+            return 1, format_exc()
+
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=self.config.evaluation_timeout_s)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return 1, f"timed out after {self.config.evaluation_timeout_s}s: {' '.join(cmd)}"
+
+        return proc.returncode or 0, (stdout or b"").decode(errors="replace")
+
+    async def _grade_one_test_plan(
+        self,
+        app_dir: Path,
+        test_plan_rel: str,
+        prd_paths: List[Path],
+        work_dir: Path,
+        test_assets_dir: Optional[str],
+    ) -> PlanResult:
+        """Seed, then evaluate, a single test plan and parse its score."""
+        started = time.time()
+        name = Path(test_plan_rel).stem
+        out_dir = work_dir / name
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        plan_path = out_dir / "test-plan.txt"
+        plan_path.write_text(add_evaluation_tags(self._resolve(test_plan_rel).read_text()))
+
+        def fail(seeding_failed: bool, error: str) -> PlanResult:
             return PlanResult(
                 test_plan=name,
                 score=0.0,
@@ -284,16 +284,55 @@ class VibenchResourcesServer(SimpleResourcesServer):
                 normalized_score=0.0,
                 steps_total=0,
                 steps_passed=0,
-                seeding_failed=False,
-                error=format_exc(),
+                seeding_failed=seeding_failed,
+                error=error,
                 duration_s=time.time() - started,
             )
+
+        seed_dir = out_dir / "seed"
+        seed_dir.mkdir(parents=True, exist_ok=True)
+        code, log = await self._run_vibench_script(
+            [
+                sys.executable,
+                str(self._repo_root / SEED_SCRIPT),
+                "--app-dir",
+                str(app_dir),
+                "--test-plan",
+                str(plan_path),
+                "--output-dir",
+                str(seed_dir),
+            ]
+        )
+        # ViBench refuses to evaluate an app it could not seed; that is a real zero, tracked
+        # separately from a bad build so aggregate metrics can tell them apart.
+        if code != 0 or not (seed_dir / "seeding").is_dir():
+            return fail(seeding_failed=True, error=log[-2000:])
+
+        evaluate_cmd = [
+            sys.executable,
+            str(self._repo_root / EVALUATE_SCRIPT),
+            "--app-dir",
+            str(app_dir),
+            "--seeding",
+            str(seed_dir / "seeding"),
+            "--test-plan",
+            str(plan_path),
+            "--output-dir",
+            str(out_dir),
+        ]
+        if test_assets_dir:
+            # The evaluation agent uploads these during the run. They are deliberately never
+            # staged into the build sandbox.
+            evaluate_cmd += ["--test-assets", str(self._resolve(test_assets_dir))]
+        evaluate_cmd += ["--prd-files", *[str(pth) for pth in prd_paths]]
+
+        code, log = await self._run_vibench_script(evaluate_cmd)
 
         report_path = out_dir / "evaluation-finished.json"
         if not report_path.exists():
             # ViBench refuses to evaluate when seeding fails; that is a real zero, but we
             # track it separately so aggregate metrics can tell it apart from a bad build.
-            tail = (stdout or b"").decode(errors="replace")[-2000:]
+            tail = log[-2000:]
             return PlanResult(
                 test_plan=name,
                 score=0.0,
@@ -372,7 +411,7 @@ class VibenchResourcesServer(SimpleResourcesServer):
 
             async def run(plan: str) -> PlanResult:
                 async with semaphore:
-                    return await self._grade_one_test_plan(app_dir, plan, prd_paths, work_dir)
+                    return await self._grade_one_test_plan(app_dir, plan, prd_paths, work_dir, body.test_assets_dir)
 
             results = list(await asyncio.gather(*(run(p) for p in body.test_plans)))
         grading_time_s = time.time() - grading_started

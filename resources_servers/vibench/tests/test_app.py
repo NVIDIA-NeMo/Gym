@@ -50,6 +50,7 @@ def make_verify_request(**overrides) -> VibenchVerifyRequest:
         "test_plans": ["prds/notes/tests/mvp/test1.txt", "prds/notes/tests/mvp/test2.txt"],
         "asset_dirs": [],
         "artifact_path": "/tmp/vibench-artifacts/app.tar",
+        "test_assets_dir": None,
         "responses_create_params": {"input": [{"role": "user", "content": "build it"}]},
         "response": {
             "id": "resp_1",
@@ -161,7 +162,7 @@ class TestVerifyRewardAggregation:
 
         scores = iter([1.0, 0.5])
 
-        async def fake_grade(app_dir, test_plan_rel, prd_paths, work_dir):
+        async def fake_grade(app_dir, test_plan_rel, prd_paths, work_dir, test_assets_dir):
             normalized = next(scores)
             return PlanResult(
                 test_plan=Path(test_plan_rel).stem,
@@ -190,7 +191,7 @@ class TestVerifyRewardAggregation:
 
         outcomes = iter([(1.0, False), (0.0, True)])
 
-        async def fake_grade(app_dir, test_plan_rel, prd_paths, work_dir):
+        async def fake_grade(app_dir, test_plan_rel, prd_paths, work_dir, test_assets_dir):
             normalized, seeding_failed = next(outcomes)
             return PlanResult(
                 test_plan=Path(test_plan_rel).stem,
