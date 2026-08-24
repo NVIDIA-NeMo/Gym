@@ -141,7 +141,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
 
         try:
             with NamedTemporaryFile(mode="w", suffix=".txt") as temp_file:
-                await eval_sandbox.download("/logs/verifier/reward.txt", temp_file.file)
+                await eval_sandbox.download("/logs/verifier/reward.txt", temp_file.name)
                 temp_file.seek(0)
                 reward = float(temp_file.read())
 
