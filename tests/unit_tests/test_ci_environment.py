@@ -269,9 +269,6 @@ def test_test_template_runs_cpu_or_gpu_script_in_container() -> None:
     assert "gpu_args=(--runtime=nvidia --gpus all)" in action
     assert 'docker pull "$CONTAINER_IMAGE"' in action
     assert '--volume "$TEST_DATA_PATH:$TEST_DATA_PATH"' in action
-    assert "--env E2E_MODEL" in action
-    assert "--env E2E_PROVIDER_CONFIG" in action
-    assert "--env MODEL_API_KEY" in action
     assert '-e -u -o pipefail "$TEST_SCRIPT"' in action
     assert "continue-on-error: true" in action
     assert "      if: always()" in action
@@ -308,10 +305,12 @@ def test_provider_e2e_matrix_selects_config_model_and_secret_by_name() -> None:
     assert "MODEL_API_KEY: ${{ secrets[matrix.model_api_key_secret_name] }}" in workflow
     assert workflow.count("secrets[matrix.model_api_key_secret_name]") == 1
     assert "model-api-key:" not in workflow
-    assert "script: ./tests/e2e/run_inference_provider_e2e.sh" in workflow
-    assert "test-type: cpu" in workflow
-    assert "provider-config: ${{ matrix.config }}" in workflow
-    assert "model: ${{ matrix.model }}" in workflow
+    assert "needs: [classify_changes, unit_tests]" in workflow
+    assert "runs-on: ubuntu-latest" in workflow
+    assert 'curl -LsSf "https://astral.sh/uv/0.11.29/install.sh" | sh' in workflow
+    assert "E2E_MODEL: ${{ matrix.model }}" in workflow
+    assert "E2E_PROVIDER_CONFIG: ${{ matrix.config }}" in workflow
+    assert "run: bash tests/e2e/run_inference_provider_e2e.sh" in workflow
 
     script = INFERENCE_PROVIDER_E2E_SCRIPT.read_text()
     assert "E2E_PROVIDER_CONFIG" in script
