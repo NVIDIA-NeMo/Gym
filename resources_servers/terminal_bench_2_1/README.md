@@ -9,6 +9,7 @@ Data links: ?
 gym env start \
     --config resources_servers/terminal_bench_2_1/configs/terminal_bench_2_1.yaml \
     --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
+    +terminal_bench_2_1_resources_server.resources_servers.terminal_bench_2_1.debug=true \
     +terminal_bench_2_1_resources_server.resources_servers.terminal_bench_2_1.is_verifying_golden_patch=true
 ```
 
