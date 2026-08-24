@@ -26,9 +26,9 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 def verify_rollout(rollout: dict[str, Any]) -> None:
     response = rollout["response"]
-    assert response["status"] == "completed", response["status"]
     assert response.get("error") is None, response.get("error")
     assert response.get("incomplete_details") is None, response.get("incomplete_details")
+    assert response["status"] == "completed", response["status"]
 
     usage = response["usage"]
     assert usage["input_tokens"] > 0, usage

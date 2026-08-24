@@ -318,7 +318,7 @@ def test_provider_e2e_matrix_selects_config_model_and_secret_by_name() -> None:
     assert "MODEL_API_KEY" in script
     assert "--model-api-key" not in script
     assert "resources_servers/example_single_tool_call/data/example.jsonl" in script
-    assert "--max-output-tokens 1024" in script
+    assert "--max-output-tokens 4096" in script
 
     env_config = (REPO_ROOT / "tests" / "e2e" / "inference_provider_env.yaml").read_text()
     assert "max_steps: 2" in env_config
@@ -393,6 +393,25 @@ def test_inference_provider_rollout_verifier_accepts_completed_tool_loop(tmp_pat
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_inference_provider_rollout_verifier_reports_incomplete_reason(tmp_path: Path) -> None:
+    rollout = _valid_inference_provider_rollout()
+    rollout["response"].update(
+        status="incomplete",
+        incomplete_details={"reason": "max_output_tokens"},
+    )
+    rollouts_path = tmp_path / "rollouts.jsonl"
+    rollouts_path.write_text(f"{json.dumps(rollout)}\n")
+
+    result = subprocess.run(
+        [sys.executable, str(INFERENCE_PROVIDER_ROLLOUT_VERIFIER), "--rollouts", str(rollouts_path)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "max_output_tokens" in result.stderr
 
 
 def test_runner_disk_reclamation_fails_fast_when_space_is_still_low(tmp_path: Path) -> None:
