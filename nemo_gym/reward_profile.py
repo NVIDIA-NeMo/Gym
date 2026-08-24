@@ -21,6 +21,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
 import orjson
 from pandas import DataFrame, Series, notna
 from pandas.core.groupby.generic import DataFrameGroupBy
@@ -301,7 +302,10 @@ class RewardProfiler:
 
         aggregated_metrics = []
         for agent_name, group in df.groupby("agent_name"):
-            entry: Dict[str, Any] = {AGENT_REF_KEY_NAME: {"name": agent_name}}
+            entry: Dict[str, Any] = {
+                AGENT_REF_KEY_NAME: {"name": agent_name},
+                "agent_metric_statistics": {},
+            }
             for col in numeric_cols:
                 col_data = group[col].dropna()
                 n = len(col_data)
@@ -310,15 +314,18 @@ class RewardProfiler:
                 mean = float(col_data.mean())
                 std = float(col_data.std(ddof=1)) if n > 1 else 0.0
                 se = std / n**0.5
-                entry[f"mean_across_repeats/{col}"] = mean
-                entry[f"median_across_repeats/{col}"] = float(col_data.median())
-                entry[f"se_across_repeats/{col}"] = se
+                across_repeats = {
+                    "mean": mean,
+                    "median": float(col_data.median()),
+                    "se": se,
+                }
                 if ci := self._confidence_interval(mean, se, n):
-                    entry[f"ci_low_95_across_repeats/{col}"], entry[f"ci_high_95_across_repeats/{col}"] = ci
+                    across_repeats["ci_lower"], across_repeats["ci_upper"] = ci
+                entry["agent_metric_statistics"][col] = {"across_repeats": across_repeats}
             aggregated_metrics.append(entry)
         return aggregated_metrics
 
-    def _append_repeat_level_aggregates_to_agent_level_metrics(
+    def _append_repeat_level_statistics_to_agent_level_metrics(
         self, agent_level_metrics: List[Dict[str, Any]], repeat_level_metrics: List[Dict[str, Any]]
     ) -> None:
         repeat_level_aggregates_by_agent = {
@@ -328,7 +335,7 @@ class RewardProfiler:
         for agent_metrics in agent_level_metrics:
             aggregate = repeat_level_aggregates_by_agent.get(agent_metrics[AGENT_REF_KEY_NAME]["name"])
             if aggregate is not None:
-                agent_metrics.update({k: v for k, v in aggregate.items() if k != AGENT_REF_KEY_NAME})
+                agent_metrics["agent_metric_statistics"] = aggregate["agent_metric_statistics"]
 
     def profile_from_data(
         self,
@@ -401,7 +408,7 @@ class RewardProfiler:
             agent_metrics[AGENT_REF_KEY_NAME] = {"name": agent_metrics.pop("agent_name")}
 
         repeat_level_metrics = self._compute_repeat_level_metrics(df)
-        self._append_repeat_level_aggregates_to_agent_level_metrics(agent_level_metrics, repeat_level_metrics)
+        self._append_repeat_level_statistics_to_agent_level_metrics(agent_level_metrics, repeat_level_metrics)
 
         return group_level_metrics, agent_level_metrics, repeat_level_metrics
 
@@ -760,6 +767,76 @@ def _group_by_task(verify_responses: List[Dict[str, Any]]) -> List[List[Dict[str
     return [groups[k] for k in sorted(groups)]
 
 
+def _bootstrap_mean_ci(
+    values: List[float],
+    n_bootstrap: int = 10_000,
+    seed: Optional[int] = 42,
+) -> Tuple[float, float, float]:
+    """Return the mean and a 95% percentile bootstrap confidence interval."""
+    samples = np.asarray(values, dtype=np.float64)
+    mean = float(samples.mean())
+    if len(samples) < 2:
+        return mean, mean, mean
+
+    rng = np.random.default_rng(seed)
+    bootstrap_means = np.array(
+        [rng.choice(samples, size=len(samples), replace=True).mean() for _ in range(n_bootstrap)]
+    )
+    return mean, float(np.percentile(bootstrap_means, 2.5)), float(np.percentile(bootstrap_means, 97.5))
+
+
+def _pass_at_k(n_attempts: int, n_correct: int, k: int) -> float:
+    """Return the unbiased pass@k estimate for one problem."""
+    if n_correct == 0:
+        return 0.0
+    if n_correct >= n_attempts:
+        return 1.0
+    return 1.0 - math.comb(n_attempts - n_correct, k) / math.comb(n_attempts, k)
+
+
+def compute_reward_bootstrap_metrics(tasks: List[List[Dict[str, Any]]]) -> Dict[str, Dict[str, float]]:
+    """Compute problem-grouped reward metrics with bootstrap confidence intervals.
+
+    Rewards are reduced within each problem before any cross-problem
+    statistics are computed. Fractional rewards emit ``mean/reward`` with a
+    bootstrap interval over per-problem means. Binary rewards emit ``pass@1``
+    and, when the run contains multiple repeats, ``pass@n`` with bootstrap
+    intervals over the corresponding per-problem estimates.
+    """
+    per_problem_rewards = [
+        [float(rollout["reward"]) for rollout in rollouts if rollout.get("reward") is not None] for rollouts in tasks
+    ]
+    per_problem_rewards = [rewards for rewards in per_problem_rewards if rewards]
+    if not per_problem_rewards:
+        return {}
+
+    all_rewards = [reward for rewards in per_problem_rewards for reward in rewards]
+    if any(reward not in (0.0, 1.0) for reward in all_rewards):
+        per_problem_means = [sum(rewards) / len(rewards) for rewards in per_problem_rewards]
+        mean, lower, upper = _bootstrap_mean_ci(per_problem_means)
+        return {
+            "mean/reward": {
+                "value": round(mean, 4),
+                "bootstrap_ci_lower": round(lower, 4),
+                "bootstrap_ci_upper": round(upper, 4),
+            }
+        }
+
+    problem_results = [(len(rewards), sum(1 for reward in rewards if reward > 0)) for rewards in per_problem_rewards]
+    n_repeats = max(n_attempts for n_attempts, _ in problem_results)
+    metrics: Dict[str, Dict[str, float]] = {}
+    for k in [1] + ([n_repeats] if n_repeats > 1 else []):
+        valid_results = [(n_attempts, n_correct) for n_attempts, n_correct in problem_results if n_attempts >= k]
+        pass_values = [_pass_at_k(n_attempts, n_correct, k) for n_attempts, n_correct in valid_results]
+        entry = {"value": round(sum(pass_values) / len(pass_values), 4)}
+        _, bootstrap_lower, bootstrap_upper = _bootstrap_mean_ci(pass_values)
+        entry["bootstrap_ci_lower"] = round(bootstrap_lower, 4)
+        entry["bootstrap_ci_upper"] = round(bootstrap_upper, 4)
+        metrics[f"pass@{k}"] = entry
+
+    return metrics
+
+
 def compute_aggregate_metrics(
     verify_responses: List[Dict[str, Any]],
     compute_metrics_fn=None,
@@ -795,11 +872,15 @@ def compute_aggregate_metrics(
 
     group_level_metrics, agent_level_metrics, repeat_level_metrics = rp.profile_from_data(rows, results)
 
-    # Flatten agent_level_metrics (one entry since we use a single agent name)
+    # Flatten agent_level_metrics (one entry since we use a single agent name),
+    # keeping structured statistics in their own output field.
     agent_metrics: Dict[str, Any] = {}
+    agent_metric_statistics: Dict[str, Dict[str, Any]] = {}
     for entry in agent_level_metrics:
         for k, v in entry.items():
-            if k != "agent_ref":
+            if k == "agent_metric_statistics":
+                agent_metric_statistics.update(v)
+            elif k != "agent_ref":
                 agent_metrics[k] = v
 
     # Same as agent_level_metrics above — callers nest this list under the real agent_ref.
@@ -816,9 +897,15 @@ def compute_aggregate_metrics(
 
     serialized_agent = rp.prepare_for_serialization([agent_metrics])[0] if agent_metrics else {}
 
+    # Reward confidence intervals are shared by every benchmark, including
+    # benchmarks that override compute_metrics().
+    tasks = _group_by_task(verify_responses)
+    reward_stats = compute_reward_bootstrap_metrics(tasks)
+    for metric_name, statistics in reward_stats.items():
+        agent_metric_statistics.setdefault(metric_name, {}).update(statistics)
+
     # Custom metrics computed from all raw verify responses grouped by task
     if compute_metrics_fn:
-        tasks = _group_by_task(verify_responses)
         custom = compute_metrics_fn(tasks)
 
         # Merge per_task_metrics into group_level_metrics (keyed by task_index)
@@ -843,6 +930,7 @@ def compute_aggregate_metrics(
     return AggregateMetrics(
         group_level_metrics=serialized_group,
         agent_metrics=serialized_agent,
+        agent_metric_statistics=agent_metric_statistics,
         key_metrics=key_metrics,
         repeat_level_metrics=serialized_repeat_level_metrics,
     )

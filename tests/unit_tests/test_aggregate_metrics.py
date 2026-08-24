@@ -30,6 +30,7 @@ from nemo_gym.reward_profile import (
     add_avg_sample_std_dev,
     compute_aggregate_metrics,
     compute_pass_majority_metrics,
+    compute_reward_bootstrap_metrics,
     compute_subset_metrics,
     highest_k_metrics,
 )
@@ -98,6 +99,7 @@ class TestAggregateMetricsRoute:
 
         assert result.group_level_metrics == []
         assert result.agent_metrics == {}
+        assert result.agent_metric_statistics == {}
 
     @pytest.mark.asyncio
     async def test_agent_metrics_has_overall_stats(self) -> None:
@@ -132,6 +134,96 @@ class TestAggregateMetricsRoute:
         for group in result.group_level_metrics:
             assert not any(k.startswith("histogram") for k in group), f"Histogram key found in group: {group.keys()}"
         assert not any(k.startswith("histogram") for k in result.agent_metrics)
+
+
+class TestRewardBootstrapMetrics:
+    def test_empty_input(self) -> None:
+        assert compute_reward_bootstrap_metrics([]) == {}
+        assert compute_reward_bootstrap_metrics([[]]) == {}
+        assert compute_reward_bootstrap_metrics([[{"response": {}}]]) == {}
+
+    def test_fractional_rewards_bootstrap_per_problem_means(self) -> None:
+        tasks = [
+            [{"reward": 0.7}, {"reward": 0.8}],
+            [{"reward": 0.5}, {"reward": 0.6}],
+            [{"reward": 0.0}, {"reward": 1.0}],
+            [{"reward": 0.3}, {"reward": 0.4}],
+        ]
+
+        metrics = compute_reward_bootstrap_metrics(tasks)
+
+        assert set(metrics) == {"mean/reward"}
+        assert metrics["mean/reward"]["value"] == pytest.approx(0.5375)
+        assert set(metrics["mean/reward"]) == {"value", "bootstrap_ci_lower", "bootstrap_ci_upper"}
+        assert metrics["mean/reward"]["bootstrap_ci_lower"] <= metrics["mean/reward"]["value"]
+        assert metrics["mean/reward"]["value"] <= metrics["mean/reward"]["bootstrap_ci_upper"]
+        assert metrics == compute_reward_bootstrap_metrics(tasks)
+
+    def test_fractional_rewards_are_not_pooled_across_problems(self) -> None:
+        responses = [
+            {TASK_INDEX_KEY_NAME: 10, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.5},
+            *[
+                {TASK_INDEX_KEY_NAME: 20, ROLLOUT_INDEX_KEY_NAME: rollout_idx, "reward": 0.0}
+                for rollout_idx in range(3)
+            ],
+        ]
+
+        result = compute_aggregate_metrics(responses)
+
+        assert result.agent_metric_statistics["mean/reward"]["value"] == pytest.approx(0.25)
+        assert "stats" not in result.agent_metrics
+
+    def test_binary_rewards_emit_only_bootstrap_intervals(self) -> None:
+        tasks = [
+            [{"reward": 1.0}, {"reward": 1.0}],
+            [{"reward": 1.0}, {"reward": 0.0}],
+            [{"reward": 0.0}, {"reward": 0.0}],
+            [{"reward": 1.0}, {"reward": 1.0}],
+        ]
+
+        metrics = compute_reward_bootstrap_metrics(tasks)
+
+        assert set(metrics) == {"pass@1", "pass@2"}
+        assert metrics["pass@1"]["value"] == pytest.approx(0.625)
+        assert set(metrics["pass@1"]) == {
+            "value",
+            "bootstrap_ci_lower",
+            "bootstrap_ci_upper",
+        }
+        assert metrics["pass@2"]["value"] == pytest.approx(0.75)
+        assert set(metrics["pass@2"]) == {"value", "bootstrap_ci_lower", "bootstrap_ci_upper"}
+
+    def test_single_repeat_emits_bootstrap_interval(self) -> None:
+        tasks = [[{"reward": 1.0}], [{"reward": 0.0}], [{"reward": 1.0}]]
+
+        metrics = compute_reward_bootstrap_metrics(tasks)
+
+        assert set(metrics) == {"pass@1"}
+        assert set(metrics["pass@1"]) == {"value", "bootstrap_ci_lower", "bootstrap_ci_upper"}
+        assert metrics["pass@1"]["value"] == pytest.approx(2.0 / 3.0, abs=1e-4)
+
+    def test_binary_rewards_are_not_pooled_across_problems(self) -> None:
+        responses = [
+            {TASK_INDEX_KEY_NAME: 10, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0},
+            *[
+                {TASK_INDEX_KEY_NAME: 20, ROLLOUT_INDEX_KEY_NAME: rollout_idx, "reward": 0.0}
+                for rollout_idx in range(9)
+            ],
+        ]
+
+        result = compute_aggregate_metrics(responses)
+
+        assert result.agent_metric_statistics["pass@1"]["value"] == pytest.approx(0.5)
+
+    def test_integration_97_problems_five_binary_repeats(self) -> None:
+        tasks = [[{"reward": float(rollout_idx < task_idx % 6)} for rollout_idx in range(5)] for task_idx in range(97)]
+
+        metrics = compute_reward_bootstrap_metrics(tasks)
+
+        expected_pass_at_1 = sum(min(task_idx % 6, 5) / 5 for task_idx in range(97)) / 97
+        assert metrics["pass@1"]["value"] == pytest.approx(expected_pass_at_1, abs=1e-4)
+        for metric in metrics.values():
+            assert metric["bootstrap_ci_lower"] <= metric["value"] <= metric["bootstrap_ci_upper"]
 
 
 class TestComputeMetricsHook:
@@ -178,6 +270,7 @@ class TestComputeMetricsHook:
         assert result.agent_metrics["pass@k"] == pytest.approx(2.0 / 3.0)
         assert "pass@k" in result.key_metrics
         assert "pass@1_avg_of_k" in result.key_metrics
+        assert result.agent_metric_statistics["pass@1"]["value"] == pytest.approx(0.5)
 
     @pytest.mark.asyncio
     async def test_compute_metrics_sees_custom_verify_fields(self) -> None:
@@ -609,7 +702,7 @@ class TestConfidenceIntervalZeroSem:
 
     def test_end_to_end_identical_per_repeat_means_yield_point_ci(self) -> None:
         """Reproduces the exact case from production: 2 repeats whose per-task rewards differ
-        but whose per-repeat means happen to be identical (both 0.5) -> se_across_repeats/mean/reward == 0.0,
+        but whose per-repeat means happen to be identical (both 0.5), so the across-repeat SE is 0.0
         so the cross-repeat CI should collapse to a point instead of being null.
         """
         responses = [
@@ -621,9 +714,10 @@ class TestConfidenceIntervalZeroSem:
         with pytest.warns(UserWarning, match="Standard error is 0"):
             result = compute_aggregate_metrics(responses)
 
-        assert result.agent_metrics["se_across_repeats/mean/reward"] == pytest.approx(0.0)
-        assert result.agent_metrics["ci_low_95_across_repeats/mean/reward"] == pytest.approx(0.5)
-        assert result.agent_metrics["ci_high_95_across_repeats/mean/reward"] == pytest.approx(0.5)
+        across_repeats = result.agent_metric_statistics["mean/reward"]["across_repeats"]
+        assert across_repeats["se"] == pytest.approx(0.0)
+        assert across_repeats["ci_lower"] == pytest.approx(0.5)
+        assert across_repeats["ci_upper"] == pytest.approx(0.5)
 
 
 class TestAggregateRepeatLevelMetrics:
@@ -644,9 +738,10 @@ class TestAggregateRepeatLevelMetrics:
 
         assert len(result) == 1
         assert result[0][AGENT_REF_KEY_NAME] == {"name": "agent"}
-        assert result[0]["mean_across_repeats/mean/reward"] == pytest.approx(0.75)
-        assert result[0]["median_across_repeats/mean/reward"] == pytest.approx(0.75)
-        assert result[0]["se_across_repeats/mean/reward"] == pytest.approx(0.0)
+        across_repeats = result[0]["agent_metric_statistics"]["mean/reward"]["across_repeats"]
+        assert across_repeats["mean"] == pytest.approx(0.75)
+        assert across_repeats["median"] == pytest.approx(0.75)
+        assert across_repeats["se"] == pytest.approx(0.0)
 
     def test_known_values_across_repeats(self) -> None:
         """3 repeats with per-repeat means 1, 2, 3 -> mean=2, median=2, se=std([1,2,3])/sqrt(3)."""
@@ -658,9 +753,10 @@ class TestAggregateRepeatLevelMetrics:
 
         assert len(result) == 1
         entry = result[0]
-        assert entry["mean_across_repeats/mean/reward"] == pytest.approx(2.0)
-        assert entry["median_across_repeats/mean/reward"] == pytest.approx(2.0)
-        assert entry["se_across_repeats/mean/reward"] == pytest.approx(1.0 / (3**0.5))
+        across_repeats = entry["agent_metric_statistics"]["mean/reward"]["across_repeats"]
+        assert across_repeats["mean"] == pytest.approx(2.0)
+        assert across_repeats["median"] == pytest.approx(2.0)
+        assert across_repeats["se"] == pytest.approx(1.0 / (3**0.5))
 
     def test_skewed_repeats_median_differs_from_mean(self) -> None:
         """An outlier repeat pulls the mean away from the median, demonstrating both are useful."""
@@ -672,9 +768,10 @@ class TestAggregateRepeatLevelMetrics:
         result = RewardProfiler()._aggregate_repeat_level_metrics(repeat_level_metrics)
 
         entry = result[0]
-        assert entry["median_across_repeats/mean/reward"] == pytest.approx(0.0)
-        assert entry["mean_across_repeats/mean/reward"] == pytest.approx(3.0)
-        assert entry["mean_across_repeats/mean/reward"] != entry["median_across_repeats/mean/reward"]
+        across_repeats = entry["agent_metric_statistics"]["mean/reward"]["across_repeats"]
+        assert across_repeats["median"] == pytest.approx(0.0)
+        assert across_repeats["mean"] == pytest.approx(3.0)
+        assert across_repeats["mean"] != across_repeats["median"]
 
     def test_per_agent_grouping(self) -> None:
         """Repeats from different agents are aggregated independently, not pooled together."""
@@ -688,14 +785,16 @@ class TestAggregateRepeatLevelMetrics:
 
         by_agent = {entry[AGENT_REF_KEY_NAME]["name"]: entry for entry in result}
         assert set(by_agent) == {"agent_a", "agent_b"}
-        assert by_agent["agent_a"]["mean_across_repeats/mean/reward"] == pytest.approx(1.0)
-        assert by_agent["agent_a"]["se_across_repeats/mean/reward"] > 0
-        assert by_agent["agent_b"]["mean_across_repeats/mean/reward"] == pytest.approx(10.0)
-        assert by_agent["agent_b"]["se_across_repeats/mean/reward"] == pytest.approx(0.0)
+        agent_a = by_agent["agent_a"]["agent_metric_statistics"]["mean/reward"]["across_repeats"]
+        agent_b = by_agent["agent_b"]["agent_metric_statistics"]["mean/reward"]["across_repeats"]
+        assert agent_a["mean"] == pytest.approx(1.0)
+        assert agent_a["se"] > 0
+        assert agent_b["mean"] == pytest.approx(10.0)
+        assert agent_b["se"] == pytest.approx(0.0)
 
-    def test_merged_into_agent_level_metrics_via_compute_aggregate_metrics(self) -> None:
-        """End-to-end: the aggregated repeat-level stats land in the public agent_metrics dict,
-        without disturbing the original (non-repeat-aggregated) agent_metrics keys.
+    def test_merged_into_agent_metric_statistics_via_compute_aggregate_metrics(self) -> None:
+        """End-to-end: repeat and bootstrap stats share the per-metric statistics entry,
+        without disturbing the flat agent_metrics keys.
         """
         # 4 tasks x 3 repeats; each repeat has a different, internally-constant reward so the
         # per-repeat "mean/reward" values are exactly 0.0, 1.0, 2.0.
@@ -706,10 +805,18 @@ class TestAggregateRepeatLevelMetrics:
 
         # Original per-rollout agent-level stat is untouched.
         assert result.agent_metrics["mean/reward"] == pytest.approx(1.0)
-        # Cross-repeat aggregate of the per-repeat means [0, 1, 2].
-        assert result.agent_metrics["mean_across_repeats/mean/reward"] == pytest.approx(1.0)
-        assert result.agent_metrics["median_across_repeats/mean/reward"] == pytest.approx(1.0)
-        assert result.agent_metrics["se_across_repeats/mean/reward"] == pytest.approx(1.0 / (3**0.5))
+        assert not any("across_repeats" in key for key in result.agent_metrics)
+        reward_statistics = result.agent_metric_statistics["mean/reward"]
+        assert set(reward_statistics) == {
+            "value",
+            "bootstrap_ci_lower",
+            "bootstrap_ci_upper",
+            "across_repeats",
+        }
+        across_repeats = reward_statistics["across_repeats"]
+        assert across_repeats["mean"] == pytest.approx(1.0)
+        assert across_repeats["median"] == pytest.approx(1.0)
+        assert across_repeats["se"] == pytest.approx(1.0 / (3**0.5))
 
 
 class TestAddAvgSampleStdDev:

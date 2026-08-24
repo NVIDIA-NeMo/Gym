@@ -267,8 +267,8 @@ class TestRewardProfile:
         ]
         assert expected_group_level_metrics == actual_group_level_metrics
 
-        # profile_from_data also merges in cross-repeat aggregates (mean/median/se of each
-        # per-repeat estimate, e.g. "mean_across_repeats/mean/reward") since there are 2 rollout_indices here.
+        # profile_from_data also adds structured cross-repeat statistics for each
+        # per-repeat estimate since there are 2 rollout_indices here.
         # Check those separately below rather than pinning the full exploded key set.
         assert len(actual_agent_level_metrics) == 1
         actual_agent_metrics = actual_agent_level_metrics[0]
@@ -298,11 +298,14 @@ class TestRewardProfile:
         # rollout_index 0 always has reward=0/bool=1 across all 3 tasks, rollout_index 1 always
         # has reward=1/bool=0 -- so the per-repeat mean is constant within each repeat but differs
         # by 1.0 between the two repeats, giving a cross-repeat mean of 0.5 and se of 0.5.
-        assert actual_agent_metrics["mean_across_repeats/mean/reward"] == pytest.approx(0.5)
-        assert actual_agent_metrics["median_across_repeats/mean/reward"] == pytest.approx(0.5)
-        assert actual_agent_metrics["se_across_repeats/mean/reward"] == pytest.approx(0.5)
-        assert actual_agent_metrics["mean_across_repeats/mean/abc usage"] == pytest.approx(1.0)
-        assert actual_agent_metrics["se_across_repeats/mean/abc usage"] == pytest.approx(0.0)
+        statistics = actual_agent_metrics["agent_metric_statistics"]
+        reward_across_repeats = statistics["mean/reward"]["across_repeats"]
+        usage_across_repeats = statistics["mean/abc usage"]["across_repeats"]
+        assert reward_across_repeats["mean"] == pytest.approx(0.5)
+        assert reward_across_repeats["median"] == pytest.approx(0.5)
+        assert reward_across_repeats["se"] == pytest.approx(0.5)
+        assert usage_across_repeats["mean"] == pytest.approx(1.0)
+        assert usage_across_repeats["se"] == pytest.approx(0.0)
 
     def test_profile_from_data_series(self) -> None:
         rows = [

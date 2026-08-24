@@ -585,6 +585,7 @@ async def _call_aggregate_metrics(
         agent_entry = {
             AGENT_REF_KEY_NAME: {"name": agent_name},
             "agent_metrics": agg_result.agent_metrics,
+            "agent_metric_statistics": agg_result.agent_metric_statistics,
             "key_metrics": agg_result.key_metrics,
             "group_level_metrics": agg_result.group_level_metrics,
             "repeat_level_metrics": agg_result.repeat_level_metrics,

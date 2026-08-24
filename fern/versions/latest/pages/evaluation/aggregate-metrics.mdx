@@ -12,7 +12,7 @@ After rollout collection, NeMo Gym computes **aggregate metrics** for each agent
 1. **Rollouts complete** — `gym eval run --no-serve` gathers verify responses (reward + custom fields) for every task/rollout pair.
 2. **Group by agent** — responses are partitioned by agent name.
 3. **Call `/aggregate_metrics`** — for each agent, the stripped verify responses are POSTed to the agent's `/aggregate_metrics` endpoint.
-4. **Compute stats** — per-task and overall statistics (`mean`, `max`, `min`, `median`, `std`) are computed for every numeric field. If the resources server overrides `compute_metrics()` or `get_key_metrics()`, those are called to add additional metrics.
+4. **Compute stats** — per-task and overall statistics (`mean`, `max`, `min`, `median`, `std`) are computed for every numeric field. Reward bootstrap confidence intervals are computed across problems, and any resources-server overrides of `compute_metrics()` or `get_key_metrics()` add benchmark-specific metrics.
 5. **Compute variability stats** — when an agent has two or more repeats, per-repeat statistics are computed for every numeric field and summarized across repeats. See [Repeat-Level Metrics](#repeat-level-metrics).
 6. **Write results** — all per-agent metrics are written to `<output>_aggregate_metrics.json`.
 
@@ -29,13 +29,21 @@ The output file is a JSON array with one entry per agent:
       "max/reward": 1.0,
       "min/reward": 0.0,
       "median/reward": 1.0,
-      "std/reward": 0.433,
-
-      "mean_across_repeats/mean/reward": 0.75,
-      "median_across_repeats/mean/reward": 0.75,
-      "se_across_repeats/mean/reward": 0.042,
-      "ci_low_95_across_repeats/mean/reward": 0.66,
-      "ci_high_95_across_repeats/mean/reward": 0.84
+      "std/reward": 0.433
+    },
+    "agent_metric_statistics": {
+      "mean/reward": {
+        "value": 0.75,
+        "bootstrap_ci_lower": 0.66,
+        "bootstrap_ci_upper": 0.83,
+        "across_repeats": {
+          "mean": 0.75,
+          "median": 0.75,
+          "se": 0.042,
+          "ci_lower": 0.66,
+          "ci_upper": 0.84
+        }
+      }
     },
     "key_metrics": {
       "mean/reward": 0.75
@@ -55,7 +63,8 @@ The output file is a JSON array with one entry per agent:
 | Field | Description |
 |---|---|
 | `agent_ref` | Agent identity (`{"name": "..."}`) |
-| `agent_metrics` | Overall stats across all rollouts, plus any custom metrics from `compute_metrics()`, plus cross-repeat aggregates |
+| `agent_metrics` | Overall scalar stats across all rollouts, plus any custom metrics from `compute_metrics()` |
+| `agent_metric_statistics` | Structured statistics keyed by metric name, including reward bootstrap intervals and cross-repeat summaries |
 | `key_metrics` | Headline numbers (default: all `mean/*` entries from `agent_metrics`) |
 | `group_level_metrics` | Per-task breakdown — one entry per task with stats across that task's rollouts |
 | `repeat_level_metrics` | Per-repeat breakdown — one entry per `_ng_rollout_index` with stats across that repeat's tasks. Empty unless the agent has two or more repeats |
@@ -100,18 +109,18 @@ To check real coverage, use the numbers that *are* measured against the material
 
 ### Across repeats
 
-The per-repeat `mean/{field}` values are themselves summarized and merged into `agent_metrics`, treating each repeat as one observation. This answers a different question than the keys above: not "how much do tasks vary within a repeat" but "how much does the headline score move if I run the whole benchmark again."
+The per-repeat `mean/{field}` values are themselves summarized under `agent_metric_statistics["mean/{field}"]["across_repeats"]`, treating each repeat as one observation. This answers a different question than the keys above: not "how much do tasks vary within a repeat" but "how much does the headline score move if I run the whole benchmark again."
 
 | Key | Description |
 |---|---|
-| `mean_across_repeats/mean/{field}` | Mean of the per-repeat means |
-| `median_across_repeats/mean/{field}` | Median of the per-repeat means |
-| `se_across_repeats/mean/{field}` | Standard error across repeats  |
-| `ci_low_95_across_repeats/mean/{field}`, `ci_high_95_across_repeats/mean/{field}` | 95% confidence interval of that mean |
+| `mean` | Mean of the per-repeat means |
+| `median` | Median of the per-repeat means |
+| `se` | Standard error across repeats |
+| `ci_lower`, `ci_upper` | 95% confidence interval of that mean |
 
 
 <Note>
-`mean_across_repeats/mean/{field}` and the per-rollout `mean/{field}` answer different questions but coincide numerically when every repeat covers the same tasks. 
+`agent_metric_statistics["mean/{field}"]["across_repeats"]["mean"]` and the per-rollout `agent_metrics["mean/{field}"]` answer different questions but coincide numerically when every repeat covers the same tasks.
 </Note>
 
 ### Per task, across repeats
@@ -135,10 +144,20 @@ The same statistics are laid out differently depending on which command produced
 
 | Command | File | Layout |
 |---|---|---|
-| `gym eval run`, `gym eval aggregate` | `<output>_aggregate_metrics.json` | `repeat_level_metrics` nested inside each agent's object |
-| `gym eval profile` | `<rollouts>_repeat_level_metrics.json` | A separate flat list, each entry carrying its own `agent_ref` |
+| `gym eval run`, `gym eval aggregate` | `<output>_aggregate_metrics.json` | `repeat_level_metrics` and top-level `agent_metric_statistics` inside each agent's object |
+| `gym eval profile` | `<rollouts>_repeat_level_metrics.json` and `<rollouts>_agent_metrics.json` | Per-repeat rows in the first file; structured cross-repeat statistics nested in each agent row in the second |
 
-`gym eval profile` always writes its file, containing `[]` when there is only one repeat. Either way, the cross-repeat aggregates (`mean_across_repeats/mean/*`, `se_across_repeats/mean/*`, and the CI bounds) live in `agent_metrics`.
+`gym eval profile` always writes its repeat-level file, containing `[]` when there is only one repeat.
+
+### Reward confidence intervals
+
+`agent_metric_statistics` uses NeMo Evaluator's `bootstrap_ci_lower` and `bootstrap_ci_upper` field names. Rewards are always grouped by task before aggregation; repeats are never treated as independent problems.
+
+- Fractional rewards emit `mean/reward` with `value`, `bootstrap_ci_lower`, and `bootstrap_ci_upper` from a 10,000-resample percentile bootstrap over per-task mean rewards.
+- Binary rewards emit `pass@1` with `value`, `bootstrap_ci_lower`, and `bootstrap_ci_upper` from a bootstrap over per-task pass@1 values.
+- Binary runs with multiple repeats also emit `pass@n`, where `n` is the number of repeats, with bootstrap confidence bounds.
+
+Bootstrap results are deterministic (seed 42). With one repeat per task, `pass@1` still contains a value and bootstrap bounds across tasks.
 
 ---
 

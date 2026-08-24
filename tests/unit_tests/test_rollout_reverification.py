@@ -1159,7 +1159,14 @@ class TestCallAggregateMetrics:
     and output_fpath to determine the written file path.
     """
 
-    _EMPTY_AGG = {"agent_metrics": {"reward_mean": 0.5}, "key_metrics": {"score": 0.5}, "group_level_metrics": []}
+    _EMPTY_AGG = {
+        "agent_metrics": {"reward_mean": 0.5},
+        "agent_metric_statistics": {
+            "reward_mean": {"value": 0.5, "bootstrap_ci_lower": 0.25, "bootstrap_ci_upper": 0.75}
+        },
+        "key_metrics": {"score": 0.5},
+        "group_level_metrics": [],
+    }
 
     def _patch(
         self,
@@ -1270,6 +1277,8 @@ class TestCallAggregateMetrics:
         assert returned_path is not None
         assert returned_path == tmp_path / "my_run_rollouts_aggregate_metrics.json"
         assert returned_path.exists()
+        written = orjson.loads(returned_path.read_bytes())
+        assert written[0]["agent_metric_statistics"]["reward_mean"]["bootstrap_ci_lower"] == 0.25
 
     async def test_returns_none_when_no_results(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """No results → no aggregate file written and None returned."""

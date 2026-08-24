@@ -910,12 +910,13 @@ class TestRolloutCollection:
             assert entry["mean/abc usage"] == pytest.approx(1.0)
             assert entry["std/abc usage"] == pytest.approx(0.0)
 
-        # Cross-repeat aggregates (mean/median/se of the per-repeat "mean/abc usage" estimate)
-        # are merged into agent_metrics -- both repeats agree exactly (constant "abc usage"=1),
+        # Cross-repeat statistics summarize the per-repeat "mean/abc usage" estimate.
+        # Both repeats agree exactly (constant "abc usage"=1),
         # so the cross-repeat mean/median equal 1.0 and the SE across repeats is 0.
-        assert agent_metrics["mean_across_repeats/mean/abc usage"] == pytest.approx(1.0)
-        assert agent_metrics["median_across_repeats/mean/abc usage"] == pytest.approx(1.0)
-        assert agent_metrics["se_across_repeats/mean/abc usage"] == pytest.approx(0.0)
+        across_repeats = actual_aggregate_metrics[0]["agent_metric_statistics"]["mean/abc usage"]["across_repeats"]
+        assert across_repeats["mean"] == pytest.approx(1.0)
+        assert across_repeats["median"] == pytest.approx(1.0)
+        assert across_repeats["se"] == pytest.approx(0.0)
 
     async def test_run_from_config_repeat_level_metrics_e2e(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
@@ -1621,6 +1622,9 @@ class TestRolloutCollection:
 
         agg = AggregateMetrics(
             agent_metrics={"mean/reward": 0.5},
+            agent_metric_statistics={
+                "mean/reward": {"value": 0.5, "bootstrap_ci_lower": 0.25, "bootstrap_ci_upper": 0.75}
+            },
             key_metrics={"mean/reward": 0.5},
             group_level_metrics=[{"mean/reward": 1.0}, {"mean/reward": 0.0}],
         )
@@ -1669,6 +1673,7 @@ class TestRolloutCollection:
         assert len(written) == 1
         assert written[0][AGENT_REF_KEY_NAME] == {"name": "my_agent"}
         assert written[0]["agent_metrics"]["mean/reward"] == 0.5
+        assert written[0]["agent_metric_statistics"]["mean/reward"]["bootstrap_ci_lower"] == 0.25
         assert written[0]["key_metrics"]["mean/reward"] == 0.5
         assert len(written[0]["group_level_metrics"]) == 2
 

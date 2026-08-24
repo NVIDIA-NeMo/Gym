@@ -903,6 +903,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
         return AggregateMetrics(
             group_level_metrics=base.group_level_metrics,
             agent_metrics=merged_agent,
+            agent_metric_statistics=base.agent_metric_statistics,
             key_metrics=merged_key,
             repeat_level_metrics=base.repeat_level_metrics,
         )
