@@ -150,8 +150,38 @@ jobs:
           container-image: ${{ needs.container_build.outputs.image }}
           test-data-path: ${{ needs.pre-flight.outputs.test_data_path }}
 
+  provider_e2e_tests:
+    name: ${{ matrix.provider }}-e2e
+    needs: [pre-flight, classify_changes, unit_tests, container_build]
+    if: needs.classify_changes.outputs.docs_only != 'true'
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - provider: fireworks
+            config: responses_api_models/inference_provider/configs/fireworks.yaml
+            model: accounts/fireworks/models/gpt-oss-20b
+            model_api_key_secret_name: FIREWORKS
+    runs-on: ${{ needs.pre-flight.outputs.runner_prefix }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Run provider E2E - ${{ matrix.provider }}
+        uses: ./.github/actions/test-template
+        env:
+          MODEL_API_KEY: ${{ secrets[matrix.model_api_key_secret_name] }}
+        with:
+          script: ./tests/e2e/run_fireworks_e2e.sh
+          test-type: cpu
+          container-image: ${{ needs.container_build.outputs.image }}
+          test-data-path: ${{ needs.pre-flight.outputs.test_data_path }}
+          provider-config: ${{ matrix.config }}
+          model: ${{ matrix.model }}
+
   Nemo_CICD_Test:
-    needs: [pre-flight, classify_changes, unit_tests, container_build, gpu_e2e_tests]
+    needs: [pre-flight, classify_changes, unit_tests, container_build, gpu_e2e_tests, provider_e2e_tests]
     if: always() && !cancelled()
     runs-on: ubuntu-latest
     steps:
@@ -164,6 +194,7 @@ jobs:
           UNIT_TEST_RESULT: ${{ needs.unit_tests.result }}
           CONTAINER_BUILD_RESULT: ${{ needs.container_build.result }}
           GPU_E2E_TEST_RESULT: ${{ needs.gpu_e2e_tests.result }}
+          PROVIDER_E2E_TEST_RESULT: ${{ needs.provider_e2e_tests.result }}
         run: |
           echo "Pre-flight: $PREFLIGHT_RESULT"
           echo "Classify changes: $CLASSIFY_RESULT"
@@ -171,6 +202,7 @@ jobs:
           echo "Unit tests: $UNIT_TEST_RESULT"
           echo "Container build: $CONTAINER_BUILD_RESULT"
           echo "GPU E2E tests: $GPU_E2E_TEST_RESULT"
+          echo "Provider E2E tests: $PROVIDER_E2E_TEST_RESULT"
 
           if [[ "$PREFLIGHT_RESULT" != "success" ]]; then
             echo "Pre-flight did not succeed."
@@ -185,7 +217,8 @@ jobs:
           if [[ "$DOCS_ONLY" == "true" ]]; then
             if [[ "$UNIT_TEST_RESULT" == "skipped" && \
                   "$CONTAINER_BUILD_RESULT" == "skipped" && \
-                  "$GPU_E2E_TEST_RESULT" == "skipped" ]]; then
+                  "$GPU_E2E_TEST_RESULT" == "skipped" && \
+                  "$PROVIDER_E2E_TEST_RESULT" == "skipped" ]]; then
               echo "Docs-only change: tests and container build were skipped as expected."
               exit 0
             fi
@@ -196,7 +229,8 @@ jobs:
 
           if [[ "$UNIT_TEST_RESULT" == "success" && \
                 "$CONTAINER_BUILD_RESULT" == "success" && \
-                "$GPU_E2E_TEST_RESULT" == "success" ]]; then
+                "$GPU_E2E_TEST_RESULT" == "success" && \
+                "$PROVIDER_E2E_TEST_RESULT" == "success" ]]; then
             echo "All relevant test jobs completed successfully."
             exit 0
           fi

@@ -1,0 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+policy_api_key: ${oc.env:MODEL_API_KEY}
+policy_model_name: ${oc.env:E2E_MODEL}

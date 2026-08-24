@@ -1,9 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -14,6 +16,8 @@ CICD_MAIN_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "cicd-main.yml"
 CLASSIFY_CHANGES_ACTION = REPO_ROOT / ".github" / "actions" / "classify-changes" / "action.yml"
 FULL_TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "full-test-suite.yml"
 GPU_E2E_SCRIPT = REPO_ROOT / "tests" / "e2e" / "gpu_e2e_test.sh"
+FIREWORKS_E2E_SCRIPT = REPO_ROOT / "tests" / "e2e" / "run_fireworks_e2e.sh"
+FIREWORKS_ROLLOUT_VERIFIER = REPO_ROOT / "tests" / "e2e" / "verify_fireworks_rollout.py"
 GITLAB_PIPELINE = REPO_ROOT / ".gitlab-ci.yml"
 IS_RETRYABLE_FULL_SUITE_FAILURE = REPO_ROOT / "scripts" / "ci" / "is_retryable_full_suite_failure.sh"
 RECLAIM_RUNNER_DISK = REPO_ROOT / "scripts" / "ci" / "reclaim_runner_disk.sh"
@@ -198,7 +202,7 @@ def test_cicd_main_wires_preflight_cpu_and_gpu_workflows() -> None:
     assert "base-ref: ${{ needs.pre-flight.outputs.base_ref }}" in workflow
     assert "needs: [pre-flight, classify_changes, unit_tests]" in workflow
     assert "needs: [pre-flight, classify_changes, unit_tests, container_build]" in workflow
-    assert workflow.count("if: needs.classify_changes.outputs.docs_only != 'true'") == 3
+    assert workflow.count("if: needs.classify_changes.outputs.docs_only != 'true'") == 4
     assert "needs.pre-flight.outputs.docs_only" not in workflow
     assert "runs-on: ${{ needs.pre-flight.outputs.runner_prefix }}" in workflow
     assert "matrix:" in workflow
@@ -226,13 +230,18 @@ def test_cicd_container_build_pushes_sha_image_after_unit_tests() -> None:
 def test_cicd_summary_accepts_only_expected_docs_only_skips() -> None:
     workflow = CICD_MAIN_WORKFLOW.read_text()
 
-    assert "needs: [pre-flight, classify_changes, unit_tests, container_build, gpu_e2e_tests]" in workflow
+    assert (
+        "needs: [pre-flight, classify_changes, unit_tests, container_build, gpu_e2e_tests, provider_e2e_tests]"
+        in workflow
+    )
     assert "if: always() && !cancelled()" in workflow
     assert '"$PREFLIGHT_RESULT" != "success"' in workflow
     assert '"$CLASSIFY_RESULT" != "success"' in workflow
     assert '"$DOCS_ONLY" == "true"' in workflow
     assert '"$CONTAINER_BUILD_RESULT" == "skipped"' in workflow
     assert '"$CONTAINER_BUILD_RESULT" == "success"' in workflow
+    assert '"$PROVIDER_E2E_TEST_RESULT" == "skipped"' in workflow
+    assert '"$PROVIDER_E2E_TEST_RESULT" == "success"' in workflow
 
 
 def test_shared_change_classifier_matches_gym_docs_and_server_paths() -> None:
@@ -260,6 +269,9 @@ def test_test_template_runs_cpu_or_gpu_script_in_container() -> None:
     assert "gpu_args=(--runtime=nvidia --gpus all)" in action
     assert 'docker pull "$CONTAINER_IMAGE"' in action
     assert '--volume "$TEST_DATA_PATH:$TEST_DATA_PATH"' in action
+    assert "--env E2E_MODEL" in action
+    assert "--env E2E_PROVIDER_CONFIG" in action
+    assert "--env MODEL_API_KEY" in action
     assert '-e -u -o pipefail "$TEST_SCRIPT"' in action
     assert "continue-on-error: true" in action
     assert "      if: always()" in action
@@ -281,6 +293,101 @@ def test_gpu_e2e_matrix_uses_placeholder_script() -> None:
     assert "script: ./tests/e2e/gpu_e2e_test.sh" in workflow
     assert "test_type: gpu" in workflow
     assert GPU_E2E_SCRIPT.read_text().rstrip().endswith("nvidia-smi")
+
+
+def test_provider_e2e_matrix_selects_config_model_and_secret_by_name() -> None:
+    workflow = CICD_MAIN_WORKFLOW.read_text()
+
+    assert "provider_e2e_tests:" in workflow
+    assert "name: ${{ matrix.provider }}-e2e" in workflow
+    assert "timeout-minutes: 20" in workflow
+    assert "provider: fireworks" in workflow
+    assert "config: responses_api_models/inference_provider/configs/fireworks.yaml" in workflow
+    assert "model: accounts/fireworks/models/gpt-oss-20b" in workflow
+    assert "model_api_key_secret_name: FIREWORKS" in workflow
+    assert "MODEL_API_KEY: ${{ secrets[matrix.model_api_key_secret_name] }}" in workflow
+    assert workflow.count("secrets[matrix.model_api_key_secret_name]") == 1
+    assert "model-api-key:" not in workflow
+    assert "script: ./tests/e2e/run_fireworks_e2e.sh" in workflow
+    assert "test-type: cpu" in workflow
+    assert "provider-config: ${{ matrix.config }}" in workflow
+    assert "model: ${{ matrix.model }}" in workflow
+
+    script = FIREWORKS_E2E_SCRIPT.read_text()
+    assert "E2E_PROVIDER_CONFIG" in script
+    assert "E2E_MODEL" in script
+    assert "MODEL_API_KEY" in script
+    assert "--model-api-key" not in script
+    assert "inference_provider_tool_smoke.jsonl" in script
+
+
+def _valid_inference_provider_rollout() -> dict:
+    return {
+        "reward": 1.0,
+        "response": {
+            "status": "completed",
+            "error": None,
+            "incomplete_details": None,
+            "usage": {"input_tokens": 30, "output_tokens": 12, "total_tokens": 42},
+            "output": [
+                {
+                    "type": "function_call",
+                    "name": "get_weather",
+                    "arguments": '{"city": "San Francisco"}',
+                    "call_id": "weather-call",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "weather-call",
+                    "output": (
+                        '{"city": "San Francisco", "weather_description": "The weather in San Francisco is cold."}'
+                    ),
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "It is cold in San Francisco."}],
+                },
+            ],
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda rollout: rollout["response"].update(status="incomplete"),
+        lambda rollout: rollout["response"]["usage"].update(input_tokens=0),
+        lambda rollout: rollout["response"]["usage"].update(output_tokens=0),
+        lambda rollout: rollout["response"]["output"][-1].update(content=[]),
+    ],
+)
+def test_fireworks_rollout_verifier_rejects_invalid_response_structure(tmp_path: Path, mutate) -> None:
+    rollout = _valid_inference_provider_rollout()
+    mutate(rollout)
+    rollouts_path = tmp_path / "rollouts.jsonl"
+    rollouts_path.write_text(f"{json.dumps(rollout)}\n")
+
+    result = subprocess.run(
+        [sys.executable, str(FIREWORKS_ROLLOUT_VERIFIER), "--rollouts", str(rollouts_path)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+
+
+def test_fireworks_rollout_verifier_accepts_completed_response_shape(tmp_path: Path) -> None:
+    rollouts_path = tmp_path / "rollouts.jsonl"
+    rollouts_path.write_text(f"{json.dumps(_valid_inference_provider_rollout())}\n")
+
+    result = subprocess.run(
+        [sys.executable, str(FIREWORKS_ROLLOUT_VERIFIER), "--rollouts", str(rollouts_path)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_runner_disk_reclamation_fails_fast_when_space_is_still_low(tmp_path: Path) -> None:

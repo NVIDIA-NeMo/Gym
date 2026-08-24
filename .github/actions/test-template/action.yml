@@ -29,6 +29,14 @@ inputs:
   test-data-path:
     description: Test data path selected by CI pre-flight
     required: true
+  provider-config:
+    description: Optional inference provider config path for model-server E2E tests
+    required: false
+    default: ""
+  model:
+    description: Optional hosted model identifier for model-server E2E tests
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -39,6 +47,8 @@ runs:
       shell: bash -e -u -o pipefail {0}
       env:
         CONTAINER_IMAGE: ${{ inputs.container-image }}
+        E2E_MODEL: ${{ inputs.model }}
+        E2E_PROVIDER_CONFIG: ${{ inputs.provider-config }}
         TEST_DATA_PATH: ${{ inputs.test-data-path }}
         TEST_SCRIPT: ${{ inputs.script }}
         TEST_TYPE: ${{ inputs.test-type }}
@@ -66,6 +76,9 @@ runs:
         docker run --rm \
           "${gpu_args[@]}" \
           --shm-size=64g \
+          --env E2E_MODEL \
+          --env E2E_PROVIDER_CONFIG \
+          --env MODEL_API_KEY \
           --env TEST_DATA_PATH="$TEST_DATA_PATH" \
           --volume "$TEST_DATA_PATH:$TEST_DATA_PATH" \
           --entrypoint bash \
