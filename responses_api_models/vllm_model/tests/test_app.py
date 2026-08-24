@@ -4787,37 +4787,6 @@ class TestTopLogprobsHandling:
         assert "prompt_token_ids" not in data
         assert "token_ids" not in data["choices"][0]
 
-    def test_capture_path_fails_closed_when_requested_vllm_token_ids_are_missing(self) -> None:
-        model = _make_top_logprobs_model(
-            return_token_id_information=True,
-            request_prompt_and_generation_token_ids=True,
-        )
-        app = model.setup_webserver()
-
-        async def mock_create_chat_completion(**kwargs):
-            assert kwargs["return_token_ids"] is True
-            return self._capture_chat_completion_dict(
-                logprobs={
-                    "content": [
-                        {"token": "token_id:123", "logprob": -0.1, "bytes": None, "top_logprobs": []},
-                    ]
-                }
-            )
-
-        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
-        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
-        mock_client.create_tokenize = AsyncMock(
-            side_effect=AssertionError("missing generation evidence must not fall back to /tokenize")
-        )
-        model._clients = [mock_client]
-
-        with raises(RuntimeError, match="Refusing to reconstruct on-policy training evidence"):
-            TestClient(app).post(
-                "/v1/chat/completions",
-                json={"messages": [{"role": "user", "content": "hi"}]},
-            )
-        mock_client.create_tokenize.assert_not_awaited()
-
     def test_capture_path_accepts_framework_message_bundle(self) -> None:
         model = _make_top_logprobs_model(return_token_id_information=True)
         app = model.setup_webserver()
@@ -4884,6 +4853,7 @@ class TestTopLogprobsHandling:
             return_token_id_information=True,
             extra_body={
                 "mm_processor_kwargs": {"fps": 2},
+                "required_prefix_token_ids": [1, 2, 3],
             },
         )
         app = model.setup_webserver()
@@ -4912,6 +4882,7 @@ class TestTopLogprobsHandling:
             model="dummy_model",
             messages=[{"role": "user", "content": "hi"}],
             mm_processor_kwargs={"fps": 2},
+            required_prefix_token_ids=[1, 2, 3],
         )
 
     def test_capture_path_rejects_partial_message_bundle(self) -> None:

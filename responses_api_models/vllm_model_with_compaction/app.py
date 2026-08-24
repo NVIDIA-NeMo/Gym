@@ -59,6 +59,23 @@ class VLLMModelWithCompaction(VLLMModel):
         app.post("/tokenize")(self.tokenize)
         return app
 
+    @classmethod
+    def _get_tokenize_chat_body(cls, body_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Reject post-generation retokenization in this exact-token adapter."""
+
+        raise RuntimeError(
+            "The context-compaction model requested generation-consumed prompt and sampled token IDs "
+            "from vLLM (return_token_ids=True), but the response contained neither prompt_token_ids nor "
+            "choice.token_ids. Refusing to reconstruct on-policy training evidence with a separate "
+            "/tokenize request."
+        )
+
+    @classmethod
+    def _get_context_guard_tokenize_body(cls, body_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Build the pre-generation context-guard request using the shared field selection."""
+
+        return super()._get_tokenize_chat_body(body_dict)
+
     async def responses_dispatch(self, request: Request, body: dict = Body()):
         """Serve the compaction extension on the standard `/v1/responses` path."""
 
@@ -92,7 +109,7 @@ class VLLMModelWithCompaction(VLLMModel):
         _, chat_params = self._context_compaction_chat_params(body)
         body_dict = chat_params.model_dump(exclude_unset=True)
         body_dict = self._preprocess_chat_completion_create_params(request, body_dict)
-        tokenize_body = self._get_tokenize_chat_body(body_dict)
+        tokenize_body = self._get_context_guard_tokenize_body(body_dict)
         result = await self._resolve_client(request).create_tokenize(**tokenize_body)
         return {
             "tokens": self._require_token_id_list(

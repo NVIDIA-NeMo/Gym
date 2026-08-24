@@ -239,6 +239,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         "tools",
         "chat_template_kwargs",
         "mm_processor_kwargs",
+        "required_prefix_token_ids",
     )
 
     def get_converter(self) -> "VLLMConverter":
@@ -774,13 +775,6 @@ class VLLMModel(SimpleResponsesAPIModel):
                             "vLLM response generation token IDs disagree with choice logprob token IDs."
                         )
                 else:
-                    if self.config.request_prompt_and_generation_token_ids:
-                        raise RuntimeError(
-                            f"`{self.config.name}` requested generation-consumed prompt and sampled token IDs "
-                            "from vLLM (return_token_ids=True), but the response contained neither "
-                            "prompt_token_ids nor choice.token_ids. Refusing to reconstruct on-policy "
-                            "training evidence with a separate /tokenize request."
-                        )
                     tokenize_response = await client.create_tokenize(**self._get_tokenize_chat_body(body_dict))
                     prompt_token_ids = self._require_token_id_list(
                         tokenize_response.get("tokens"),
