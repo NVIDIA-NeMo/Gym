@@ -23,6 +23,8 @@ protected_paths:
   - ".pre-commit-config.yaml"
   - "**/.env*"
   - "**/secrets/**"
+  # This file — changes to the approval policy always require human review
+  - "autobot/approve-policy.yaml"
 
 low_risk_paths:
   - "**/*.md"
