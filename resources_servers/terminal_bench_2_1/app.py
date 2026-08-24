@@ -3,6 +3,7 @@
 
 from glob import glob
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from time import time
 from typing import Any, ClassVar, Dict, Optional
 
@@ -131,27 +132,26 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
 
         start_time = time()
         await self._upload_folder(eval_sandbox, task_folder / "tests", "/tests")
-        eval_result = await eval_sandbox.exec(
-            'bash /tests/test.sh | echo "Reward: $(cat /logs/verifier/reward.txt)"',
-            timeout_s=self.config.evaluation_timeout,
-        )
+        eval_result = await eval_sandbox.exec("bash /tests/test.sh", timeout_s=self.config.evaluation_timeout)
         verification_time_taken = time() - start_time
 
-        test_output = (eval_result.stderr or "") + (eval_result.stdout or "")
-        split = test_output.rsplit("Reward: ", maxsplit=1)
-        if len(split) == 1:
+        try:
+            with NamedTemporaryFile(mode="w", suffix=".txt") as temp_file:
+                await eval_sandbox.download("/logs/verifier/reward.txt", temp_file.file)
+                temp_file.seek(0)
+                reward = float(temp_file.read())
+
+            evaluation_completed = True
+        except:
             evaluation_completed = False
             reward = 0.0
-        else:
-            evaluation_completed = True
-            reward = float(split[-1].strip())
 
         return TerminalBench21VerifyResponse(
             **body.model_dump(),
             evaluation_completed=evaluation_completed,
             reward=reward,
             verification_time_taken=verification_time_taken,
-            test_output=test_output,
+            test_output=(eval_result.stderr or "") + (eval_result.stdout or ""),
             golden_patch_output=golden_patch_output,
         )
 
