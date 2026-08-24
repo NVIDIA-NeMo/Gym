@@ -192,7 +192,7 @@ class TestVerifyRewardAggregation:
 
         scores = iter([1.0, 0.5])
 
-        async def fake_grade(app_dir, test_plan_rel, prd_paths, work_dir, test_assets_dir):
+        async def fake_grade(app_dir, test_plan_rel, work_dir, test_assets_dir):
             normalized = next(scores)
             return PlanResult(
                 test_plan=Path(test_plan_rel).stem,
@@ -221,7 +221,7 @@ class TestVerifyRewardAggregation:
 
         outcomes = iter([(1.0, False), (0.0, True)])
 
-        async def fake_grade(app_dir, test_plan_rel, prd_paths, work_dir, test_assets_dir):
+        async def fake_grade(app_dir, test_plan_rel, work_dir, test_assets_dir):
             normalized, seeding_failed = next(outcomes)
             return PlanResult(
                 test_plan=Path(test_plan_rel).stem,

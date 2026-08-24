@@ -314,7 +314,6 @@ class VibenchResourcesServer(SimpleResourcesServer):
         self,
         app_dir: Path,
         test_plan_rel: str,
-        prd_paths: List[Path],
         work_dir: Path,
         test_assets_dir: Optional[str],
     ) -> PlanResult:
@@ -375,26 +374,15 @@ class VibenchResourcesServer(SimpleResourcesServer):
             # The evaluation agent uploads these during the run. They are deliberately never
             # staged into the build sandbox.
             evaluate_cmd += ["--test-assets", str(self._resolve(test_assets_dir))]
-        evaluate_cmd += ["--prd-files", *[str(pth) for pth in prd_paths]]
 
         code, log = await self._run_vibench_script(evaluate_cmd)
 
         report_path = out_dir / "evaluation-finished.json"
         if not report_path.exists():
-            # ViBench refuses to evaluate when seeding fails; that is a real zero, but we
-            # track it separately so aggregate metrics can tell it apart from a bad build.
-            tail = log[-2000:]
-            return PlanResult(
-                test_plan=name,
-                score=0.0,
-                full_points=0.0,
-                normalized_score=0.0,
-                steps_total=0,
-                steps_passed=0,
-                seeding_failed=True,
-                error=tail,
-                duration_s=time.time() - started,
-            )
+            # Seeding already succeeded to get here, so this is an evaluation failure.
+            # Reporting it as a seeding failure would point debugging at the wrong stage --
+            # which is exactly what it did the first time this fired.
+            return fail(seeding_failed=False, error=log[-4000:])
 
         data = json.loads(report_path.read_text())
         score = float(data.get("score", 0) or 0)
@@ -457,12 +445,11 @@ class VibenchResourcesServer(SimpleResourcesServer):
         results: List[PlanResult] = []
         grading_started = time.time()
         if not build_failed:
-            prd_paths = [self._resolve(p) for p in body.prd_files]
             semaphore = asyncio.Semaphore(self.config.max_concurrent_test_plans)
 
             async def run(plan: str) -> PlanResult:
                 async with semaphore:
-                    return await self._grade_one_test_plan(app_dir, plan, prd_paths, work_dir, body.test_assets_dir)
+                    return await self._grade_one_test_plan(app_dir, plan, work_dir, body.test_assets_dir)
 
             results = list(await asyncio.gather(*(run(p) for p in body.test_plans)))
         grading_time_s = time.time() - grading_started
