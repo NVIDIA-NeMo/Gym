@@ -95,6 +95,9 @@ class BaseVerifyRequest(BaseRunRequest):
 
 class BaseVerifyResponse(BaseVerifyRequest):
     reward: float
+    # Stable machine-readable grouping key.
+    # Custom environments may use namespaced values outside the shared registry.
+    failure_kind: Optional[str] = None
 
 
 class BaseMultiRewardVerifyResponse(BaseVerifyResponse):
