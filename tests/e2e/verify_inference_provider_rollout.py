@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import argparse
 import json
@@ -23,6 +35,20 @@ def verify_rollout(rollout: dict[str, Any]) -> None:
     assert usage["output_tokens"] > 0, usage
 
     output = response["output"]
+    function_calls = [item for item in output if item.get("type") == "function_call"]
+    assert len(function_calls) == 1, function_calls
+    function_call = function_calls[0]
+    assert function_call["name"] == "get_weather", function_call
+
+    arguments = json.loads(function_call["arguments"])
+    assert isinstance(arguments.get("city"), str) and arguments["city"].strip(), arguments
+
+    function_outputs = [item for item in output if item.get("type") == "function_call_output"]
+    matching_outputs = [item for item in function_outputs if item.get("call_id") == function_call["call_id"]]
+    assert len(matching_outputs) == 1, function_outputs
+    tool_output = json.loads(matching_outputs[0]["output"])
+    assert tool_output.get("weather_description"), tool_output
+
     messages = [item for item in output if item.get("type") == "message" and item.get("role") == "assistant"]
     assert messages, output
     output_text = [

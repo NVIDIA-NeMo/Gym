@@ -173,7 +173,7 @@ jobs:
         env:
           MODEL_API_KEY: ${{ secrets[matrix.model_api_key_secret_name] }}
         with:
-          script: ./tests/e2e/run_fireworks_e2e.sh
+          script: ./tests/e2e/run_inference_provider_e2e.sh
           test-type: cpu
           container-image: ${{ needs.container_build.outputs.image }}
           test-data-path: ${{ needs.pre-flight.outputs.test_data_path }}

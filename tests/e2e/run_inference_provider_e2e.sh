@@ -95,9 +95,10 @@ GYM_PID=$!
 "$VENV_DIR/bin/gym" eval run \
   --no-serve \
   --agent example_single_tool_call_simple_agent \
-  --input "$ROOT_DIR/tests/e2e/inference_provider_tool_smoke.jsonl" \
+  --input "$ROOT_DIR/resources_servers/example_single_tool_call/data/example.jsonl" \
   --output "$RESULTS_DIR/rollouts.jsonl" \
-  --limit 1
+  --limit 1 \
+  --max-output-tokens 1024
 
-"$VENV_DIR/bin/python" "$ROOT_DIR/tests/e2e/verify_fireworks_rollout.py" \
+"$VENV_DIR/bin/python" "$ROOT_DIR/tests/e2e/verify_inference_provider_rollout.py" \
   --rollouts "$RESULTS_DIR/rollouts.jsonl"

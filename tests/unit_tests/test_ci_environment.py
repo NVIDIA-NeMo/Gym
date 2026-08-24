@@ -16,8 +16,8 @@ CICD_MAIN_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "cicd-main.yml"
 CLASSIFY_CHANGES_ACTION = REPO_ROOT / ".github" / "actions" / "classify-changes" / "action.yml"
 FULL_TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "full-test-suite.yml"
 GPU_E2E_SCRIPT = REPO_ROOT / "tests" / "e2e" / "gpu_e2e_test.sh"
-FIREWORKS_E2E_SCRIPT = REPO_ROOT / "tests" / "e2e" / "run_fireworks_e2e.sh"
-FIREWORKS_ROLLOUT_VERIFIER = REPO_ROOT / "tests" / "e2e" / "verify_fireworks_rollout.py"
+INFERENCE_PROVIDER_E2E_SCRIPT = REPO_ROOT / "tests" / "e2e" / "run_inference_provider_e2e.sh"
+INFERENCE_PROVIDER_ROLLOUT_VERIFIER = REPO_ROOT / "tests" / "e2e" / "verify_inference_provider_rollout.py"
 GITLAB_PIPELINE = REPO_ROOT / ".gitlab-ci.yml"
 IS_RETRYABLE_FULL_SUITE_FAILURE = REPO_ROOT / "scripts" / "ci" / "is_retryable_full_suite_failure.sh"
 RECLAIM_RUNNER_DISK = REPO_ROOT / "scripts" / "ci" / "reclaim_runner_disk.sh"
@@ -308,17 +308,21 @@ def test_provider_e2e_matrix_selects_config_model_and_secret_by_name() -> None:
     assert "MODEL_API_KEY: ${{ secrets[matrix.model_api_key_secret_name] }}" in workflow
     assert workflow.count("secrets[matrix.model_api_key_secret_name]") == 1
     assert "model-api-key:" not in workflow
-    assert "script: ./tests/e2e/run_fireworks_e2e.sh" in workflow
+    assert "script: ./tests/e2e/run_inference_provider_e2e.sh" in workflow
     assert "test-type: cpu" in workflow
     assert "provider-config: ${{ matrix.config }}" in workflow
     assert "model: ${{ matrix.model }}" in workflow
 
-    script = FIREWORKS_E2E_SCRIPT.read_text()
+    script = INFERENCE_PROVIDER_E2E_SCRIPT.read_text()
     assert "E2E_PROVIDER_CONFIG" in script
     assert "E2E_MODEL" in script
     assert "MODEL_API_KEY" in script
     assert "--model-api-key" not in script
-    assert "inference_provider_tool_smoke.jsonl" in script
+    assert "resources_servers/example_single_tool_call/data/example.jsonl" in script
+    assert "--max-output-tokens 1024" in script
+
+    env_config = (REPO_ROOT / "tests" / "e2e" / "inference_provider_env.yaml").read_text()
+    assert "max_steps: 2" in env_config
 
 
 def _valid_inference_provider_rollout() -> dict:
@@ -359,17 +363,19 @@ def _valid_inference_provider_rollout() -> dict:
         lambda rollout: rollout["response"].update(status="incomplete"),
         lambda rollout: rollout["response"]["usage"].update(input_tokens=0),
         lambda rollout: rollout["response"]["usage"].update(output_tokens=0),
+        lambda rollout: rollout["response"]["output"].__setitem__(slice(0, 1), []),
+        lambda rollout: rollout["response"]["output"][1].update(call_id="wrong-call"),
         lambda rollout: rollout["response"]["output"][-1].update(content=[]),
     ],
 )
-def test_fireworks_rollout_verifier_rejects_invalid_response_structure(tmp_path: Path, mutate) -> None:
+def test_inference_provider_rollout_verifier_rejects_invalid_tool_loop(tmp_path: Path, mutate) -> None:
     rollout = _valid_inference_provider_rollout()
     mutate(rollout)
     rollouts_path = tmp_path / "rollouts.jsonl"
     rollouts_path.write_text(f"{json.dumps(rollout)}\n")
 
     result = subprocess.run(
-        [sys.executable, str(FIREWORKS_ROLLOUT_VERIFIER), "--rollouts", str(rollouts_path)],
+        [sys.executable, str(INFERENCE_PROVIDER_ROLLOUT_VERIFIER), "--rollouts", str(rollouts_path)],
         capture_output=True,
         text=True,
     )
@@ -377,12 +383,12 @@ def test_fireworks_rollout_verifier_rejects_invalid_response_structure(tmp_path:
     assert result.returncode != 0
 
 
-def test_fireworks_rollout_verifier_accepts_completed_response_shape(tmp_path: Path) -> None:
+def test_inference_provider_rollout_verifier_accepts_completed_tool_loop(tmp_path: Path) -> None:
     rollouts_path = tmp_path / "rollouts.jsonl"
     rollouts_path.write_text(f"{json.dumps(_valid_inference_provider_rollout())}\n")
 
     result = subprocess.run(
-        [sys.executable, str(FIREWORKS_ROLLOUT_VERIFIER), "--rollouts", str(rollouts_path)],
+        [sys.executable, str(INFERENCE_PROVIDER_ROLLOUT_VERIFIER), "--rollouts", str(rollouts_path)],
         capture_output=True,
         text=True,
     )
