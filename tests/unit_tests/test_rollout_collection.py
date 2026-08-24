@@ -2453,6 +2453,49 @@ class TestFanOut:
         assert [r["agent_ref"]["name"] for r in rows] == ["shared_agent_a", "shared_agent_a", "shared_agent_b"]
         assert [r[ROLLOUT_INDEX_KEY_NAME] for r in rows] == [0, 1, 2]
 
+    async def test_fanned_copies_dispatch_to_distinct_agents(self, tmp_path, monkeypatch) -> None:
+        """End-to-end through run_examples: each fan-out copy is POSTed to its own agent server."""
+        fpath = self._write_rows(tmp_path, [self._rcp_row(task_source="shared_rs")])
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            fan_out={"shared_rs": ["shared_agent_a", "shared_agent_b"]},
+        )
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+        posted = []
+
+        async def fake_post(server_name, url_path, **kwargs):
+            posted.append(server_name)
+            response = MagicMock()
+            response.ok = True
+            response.read = AsyncMock(return_value=b"{}")
+            return response
+
+        mock_client = MagicMock()
+        mock_client.post = fake_post
+        mock_client.global_config_dict = OmegaConf.create(
+            {name: {"responses_api_agents": {"impl": {}}} for name in ("shared_agent_a", "shared_agent_b")}
+        )
+        monkeypatch.setattr(nemo_gym.rollout_collection, "setup_server_client_utils", lambda *a, **k: mock_client)
+        for fut in RolloutCollectionHelper().run_examples(rows):
+            await fut
+        assert sorted(posted) == ["shared_agent_a", "shared_agent_b"]
+
+    def test_fan_out_keys_match_data_side_name_and_win_over_agent_map(self, tmp_path) -> None:
+        """fan_out keys match the name the DATA carries (pre-override); its targets are final,
+        so a competing agent_map rewrite does not leak into fanned copies."""
+        fpath = self._write_rows(tmp_path, [self._rcp_row(agent_ref={"name": "agent_a"})])
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            agent_map={"agent_a": "agent_z"},
+            fan_out={"agent_a": ["agent_x", "agent_y"]},
+        )
+        with pytest.warns(UserWarning, match="overrode agent_ref"):
+            rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert [r["agent_ref"]["name"] for r in rows] == ["agent_x", "agent_y"]
+
     def test_unmatched_rows_pass_through_fan_out(self, tmp_path) -> None:
         fpath = self._write_rows(tmp_path, [self._rcp_row(agent_ref={"name": "other"})])
         config = RolloutCollectionConfig(
