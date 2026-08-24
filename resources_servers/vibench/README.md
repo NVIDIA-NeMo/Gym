@@ -34,7 +34,11 @@ partial credit is the signal the benchmark is built around.
 
 ## Setup
 
-Requires Docker and a ViBench checkout.
+Requires Docker and a ViBench checkout. ViBench's grading scripts invoke the legacy
+`docker-compose` name, which Docker 29.x no longer ships; without it seeding fails in
+seconds and reports a fully failed seeding rate, which reads like a bad app rather than a
+missing binary.
+
 
 ```bash
 git clone https://github.com/ViBench/vibench-public.git ~/vibench
