@@ -1,0 +1,59 @@
+# autobot-policy.yaml — NeMo-Gym repo config for review-approve-pr
+#
+# Repo-side config owned by the Gym team.
+# Platform config lives in CI-Events-Workflows.
+# Linear: AUT-1098
+# DEV INPUT REQUIRED: confirm protected_paths and high_risk_requiring_human_review before Phase 1.
+
+protected_paths:
+  - "nemo_gym/verifier/**"
+  - "nemo_gym/scorer/**"
+  - "**/verify.py"
+  - "**/scorer.py"
+  - "**/reward*.py"
+  - "nemo_gym/server_utils.py"
+  - "nemo_gym/ray_utils.py"
+  - "nemo_gym/base_server.py"
+  - "nemo_gym/simple_server.py"
+  - "nemo_gym/responses_api*.py"
+  - "**/perf/**"
+  - "**/metrics/**"
+  - "**/benchmark*.py"
+  - "nemo_gym/cli/**"
+  - "nemo_gym/gym_cli*.py"
+  - ".github/**"
+  - "Dockerfile*"
+  - "docker/**"
+  - "pyproject.toml"
+  - ".pre-commit-config.yaml"
+  - "**/.env*"
+  - "**/secrets/**"
+
+low_risk_paths:
+  - "**/*.md"
+  - "docs/**"
+  - "fern/**"
+  - "tests/**"
+  - "resources_servers/*/configs/**"
+
+accepted_change_types: {}
+
+high_risk_requiring_human_review:
+  - "verifier correctness or reward logic"
+  - "rollout collection or trajectory processing"
+  - "async or Ray execution patterns"
+  - "public API or Responses API contract"
+  - "evaluation metrics or scoring aggregation"
+  - "performance-critical paths"
+  - "CLI commands or user-facing configuration"
+  - "authentication, secrets, or security"
+
+intent_classifier_prompt: |
+  You are reviewing a pull request to NeMo Gym — a library that provides
+  evaluation and training infrastructure for LLMs and agents. Gym runs
+  multi-turn agent trajectories at scale; evaluation results ship to model
+  reports and training signals feed RLHF pipelines.
+
+  A bug in the areas listed below can silently corrupt scores or hang a
+  training run that a team depends on. Be conservative — if unclear, flag it.
+  You are classifying intent only, not judging quality.
