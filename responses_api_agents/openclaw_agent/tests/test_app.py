@@ -540,7 +540,7 @@ class TestRolloutMCPConfig:
         assert servers["workplace_assistant"]["transport"] == transport
 
     def test_rejects_unsupported_transport_without_exposing_token(self, caplog) -> None:
-        secret = "do-not-log-this-token"
+        secret = "do-not-log-this-token"  # pragma: allowlist secret
         agent = _make_agent()
 
         with pytest.raises(ValueError) as exc_info:
@@ -551,7 +551,7 @@ class TestRolloutMCPConfig:
         assert secret not in caplog.text
 
     def test_rejects_malformed_headers_without_exposing_token(self, caplog) -> None:
-        secret = "do-not-log-this-token"
+        secret = "do-not-log-this-token"  # pragma: allowlist secret
         seed = _mcp_seed()
         seed["mcp"]["headers"] = {"Authorization": {"token": secret}}
         agent = _make_agent()
