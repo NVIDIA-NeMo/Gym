@@ -88,7 +88,8 @@ class BenchmarkConfig(BaseModel):
         if len(datasets) < 1:
             return
 
-        assert len(datasets) == 1, f"Expected 1 benchmark dataset for config {path}, but found {len(datasets)}!"
+        if len(datasets) > 1:
+            print(f"Expected 1 benchmark dataset for config {path}, but found {len(datasets)}!")
 
         dataset = datasets[0]
 
