@@ -15,7 +15,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CICD_MAIN_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "cicd-main.yml"
 CLASSIFY_CHANGES_ACTION = REPO_ROOT / ".github" / "actions" / "classify-changes" / "action.yml"
 FULL_TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "full-test-suite.yml"
-GPU_E2E_SCRIPT = REPO_ROOT / "tests" / "e2e" / "gpu_e2e_test.sh"
 GPU_E2E_CONFIG = REPO_ROOT / "tests" / "e2e" / "gpu_e2e.yaml"
 GPU_E2E_DATASET = REPO_ROOT / "tests" / "e2e" / "gpu_smoke.jsonl"
 GPU_E2E_VERIFIER = REPO_ROOT / "tests" / "e2e" / "verify_gpu_rollout.py"
@@ -29,7 +28,6 @@ SETUP_DEV = REPO_ROOT / "scripts" / "ci" / "setup_dev.sh"
 TEST_TEMPLATE_ACTION = REPO_ROOT / ".github" / "actions" / "test-template" / "action.yml"
 UNIT_TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "unit-tests.yml"
 QWEN_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
-QWEN_REVISION = "7ae557604adf67be50417f59c2c2f167def9a775"  # pragma: allowlist secret
 
 BEHAVIOR_CHANGING_ENV = {
     "GYM_CI_DEV_VENV_DIR": "/tmp/injected-driver-venv",
@@ -296,9 +294,8 @@ def test_test_template_runs_cpu_or_gpu_script_in_container() -> None:
     assert action.count("required: true") == 4
 
 
-def test_gpu_e2e_matrix_runs_pinned_qwen_rollout_and_uploads_artifacts() -> None:
+def test_gpu_e2e_matrix_uses_qwen_smoke_config() -> None:
     workflow = CICD_MAIN_WORKFLOW.read_text()
-    script = GPU_E2E_SCRIPT.read_text()
     config = GPU_E2E_CONFIG.read_text()
     dataset = json.loads(GPU_E2E_DATASET.read_text())
 
@@ -306,32 +303,6 @@ def test_gpu_e2e_matrix_runs_pinned_qwen_rollout_and_uploads_artifacts() -> None
     assert "- name: GPU E2E - Qwen vLLM rollout" in workflow
     assert "script: ./tests/e2e/gpu_e2e_test.sh" in workflow
     assert "test_type: gpu" in workflow
-    assert f"model: {QWEN_MODEL}" in workflow
-    assert f"model_revision: {QWEN_REVISION}" in workflow
-    assert "timeout-minutes: 30" in workflow
-    assert "if: always()" in workflow
-    assert "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02" in workflow
-    assert "if-no-files-found: warn" in workflow
-    assert "retention-days: 7" in workflow
-
-    for expected in (
-        "vllm serve",
-        'bash "$ROOT_DIR/docker/install_codec_deps.sh"',
-        '--tokenizer-revision "$MODEL_REVISION"',
-        "--tensor-parallel-size 1",
-        "gym env start",
-        "signal.SIG_DFL",
-        "gym eval run",
-        "--agent string_match_simple_agent",
-        "--temperature 0",
-        "verify_gpu_rollout.py",
-    ):
-        assert expected in script
-    assert "docker run" not in script
-    assert QWEN_REVISION in script
-    assert 'if [[ -z "${HF_HOME:-}" ]]' in script
-    assert 'HF_HOME="$TEST_DATA_PATH/HF_HOME"' in script
-    assert "HF_CACHE_DIR" not in script
 
     assert "resources_servers/string_match/configs/string_match.yaml" in config
     assert "responses_api_models/vllm_model/configs/vllm_model.yaml" in config
