@@ -206,6 +206,7 @@ def _partial_policy_record(policy: PartialStagePolicy) -> Dict[str, Any]:
         "min_success_fraction": policy.min_success_fraction,
         "min_per_reference_success_fraction": policy.min_per_reference_success_fraction,
         "min_successful_rows_per_reference": policy.min_successful_rows_per_reference,
+        "newly_waivable_failure_classes": sorted(policy.waivable_failure_classes),
     }
 
 
@@ -297,7 +298,11 @@ def _partial_stage_outcome(
     result_by_key = {_stage_key(result): result for result in new_results}
     for key in unresolved_keys:
         result = result_by_key.get(key)
-        if result is None or result.get(NG_NO_PERSIST_KEY) or result.get(NG_FAILURE_CLASS_KEY) != "timeout_exceeded":
+        if (
+            result is None
+            or result.get(NG_NO_PERSIST_KEY)
+            or result.get(NG_FAILURE_CLASS_KEY) not in policy.waivable_failure_classes
+        ):
             return None
 
     per_reference = {
@@ -319,7 +324,7 @@ def _partial_stage_outcome(
         "success_fraction": success_fraction,
         "persisted_success_fraction": len(successful_by_key) / len(planned_by_key),
         "per_reference": per_reference,
-        "policy": {**_partial_policy_record(policy), "newly_waivable_failure_classes": ["timeout_exceeded"]},
+        "policy": _partial_policy_record(policy),
     }
 
 
@@ -346,17 +351,23 @@ def _cached_partial_snapshot_is_valid(
         "min_success_fraction",
         "min_per_reference_success_fraction",
         "min_successful_rows_per_reference",
+        "newly_waivable_failure_classes",
     }
     if (
         expected_policy is None
         or not isinstance(policy_record, Mapping)
         or not required_policy_fields <= set(policy_record)
-        or policy_record.get("newly_waivable_failure_classes") != ["timeout_exceeded"]
         or {field: policy_record[field] for field in required_policy_fields} != _partial_policy_record(expected_policy)
     ):
         return False
+    # The durable record spells the waiver set `newly_waivable_failure_classes`;
+    # the config field is `waivable_failure_classes`. Map it back before parsing.
+    replayed_policy_fields = {
+        field: policy_record[field] for field in required_policy_fields if field != "newly_waivable_failure_classes"
+    }
+    replayed_policy_fields["waivable_failure_classes"] = policy_record["newly_waivable_failure_classes"]
     try:
-        policy = _parse_partial_stage_policy({field: policy_record[field] for field in required_policy_fields})
+        policy = _parse_partial_stage_policy(replayed_policy_fields)
     except (TypeError, ValueError):
         return False
     if policy is None:
@@ -525,6 +536,13 @@ class MultiStageRunConfig:
     reuse_cached_deliverables: bool = True
 
 
+# Failure classes a partial-calibration policy may newly waive. A waived row is
+# omitted from the fit and still counts against every coverage floor, so this is
+# a bound on which *causes* are acceptable, not on how much may be missing.
+# `skipped` is excluded: an unusable sample is not evidence of anything.
+_WAIVABLE_FAILURE_CLASSES = frozenset({"timeout_exceeded", "transient"})
+
+
 def _validate_partial_stage_policy(policy: PartialStagePolicy) -> None:
     """Validate parsed and directly constructed partial policies."""
     for name in ("min_success_fraction", "min_per_reference_success_fraction"):
@@ -534,6 +552,15 @@ def _validate_partial_stage_policy(policy: PartialStagePolicy) -> None:
     minimum_rows = policy.min_successful_rows_per_reference
     if isinstance(minimum_rows, bool) or not isinstance(minimum_rows, int) or minimum_rows <= 0:
         raise ValueError("partial_completion.min_successful_rows_per_reference must be a positive integer")
+    waivable = policy.waivable_failure_classes
+    if isinstance(waivable, (str, bytes)) or not isinstance(waivable, Sequence) or not waivable:
+        raise ValueError("partial_completion.waivable_failure_classes must be a non-empty sequence of strings")
+    unknown_classes = sorted(set(map(str, waivable)) - _WAIVABLE_FAILURE_CLASSES)
+    if unknown_classes:
+        raise ValueError(
+            "partial_completion.waivable_failure_classes may only contain "
+            f"{sorted(_WAIVABLE_FAILURE_CLASSES)}; got {unknown_classes}"
+        )
 
 
 def _parse_partial_stage_policy(raw: Any) -> Optional[PartialStagePolicy]:
@@ -547,13 +574,20 @@ def _parse_partial_stage_policy(raw: Any) -> Optional[PartialStagePolicy]:
         "min_success_fraction",
         "min_per_reference_success_fraction",
         "min_successful_rows_per_reference",
+        "waivable_failure_classes",
     }
     unknown_fields = sorted(set(raw) - allowed_fields)
     if unknown_fields:
         raise ValueError(f"unknown partial_completion field(s): {', '.join(map(str, unknown_fields))}")
 
-    if any(isinstance(raw.get(field), bool) for field in allowed_fields if field in raw):
+    numeric_fields = allowed_fields - {"waivable_failure_classes"}
+    if any(isinstance(raw.get(field), bool) for field in numeric_fields if field in raw):
         raise ValueError("partial_completion thresholds must be numeric, not boolean")
+
+    raw_waivable = raw.get("waivable_failure_classes", ("timeout_exceeded",))
+    if isinstance(raw_waivable, (str, bytes)) or not isinstance(raw_waivable, Sequence):
+        raise ValueError("partial_completion.waivable_failure_classes must be a sequence of strings")
+    waivable = tuple(str(value) for value in raw_waivable)
 
     try:
         raw_minimum_rows = raw.get("min_successful_rows_per_reference", 1)
@@ -562,6 +596,7 @@ def _parse_partial_stage_policy(raw: Any) -> Optional[PartialStagePolicy]:
             min_success_fraction=float(raw.get("min_success_fraction", 1.0)),
             min_per_reference_success_fraction=float(raw.get("min_per_reference_success_fraction", 1.0)),
             min_successful_rows_per_reference=minimum_rows,
+            waivable_failure_classes=waivable,
         )
     except (TypeError, ValueError) as exc:
         raise ValueError("partial_completion thresholds must be numeric") from exc
