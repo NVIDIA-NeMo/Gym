@@ -417,6 +417,15 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
             "afterward by `gym eval aggregate`."
         ),
     )
+    disable_health_check: bool = Field(
+        default=False,
+        description="Skip post-aggregation rollout quality verification and report writing.",
+    )
+    health_check_workers: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Number of rollout-health worker processes (defaults to min(cpus, 8)).",
+    )
     rollout_collection_driver: Optional[str] = Field(
         default=None,
         description=(
@@ -1041,6 +1050,7 @@ class RolloutCollectionHelper(BaseModel):
         # Compute and write aggregate metrics via /aggregate_metrics using only the
         # rows written to the main rollouts jsonl so runtime aggregation matches
         # `gym eval aggregate`.
+        health_result = None
         if config.disable_aggregation:
             print(
                 "Skipping aggregate-metrics computation because disable_aggregation=True. "
@@ -1053,10 +1063,23 @@ class RolloutCollectionHelper(BaseModel):
                 persisted_results, persisted_rows, output_fpath
             )
 
+            if not config.disable_health_check:
+                from nemo_gym.rollout_health import format_health_report, run_health_checks
+
+                health_result = run_health_checks(
+                    output_fpath,
+                    capture_dirs=capture_dirs,
+                    capture_enabled=bool(capture_dirs),
+                    workers=config.health_check_workers,
+                )
+
         print(f"""Finished rollout collection! View results at:
 Fully materialized inputs: {config.materialized_jsonl_fpath}
 Rollouts: {output_fpath}
 Aggregate metrics: {aggregate_metrics_fpath}""")
+
+        if health_result is not None:
+            print(format_health_report(health_result))
 
         return results
 
@@ -1239,6 +1262,15 @@ class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
         default=True,
         description="Concatenate the matched shard JSONLs into output_jsonl_fpath alongside the metrics file.",
     )
+    disable_health_check: bool = Field(
+        default=False,
+        description="Skip post-aggregation rollout quality verification and report writing.",
+    )
+    health_check_workers: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Number of rollout-health worker processes (defaults to min(cpus, 8)).",
+    )
 
 
 def loads_jsonl_line(raw, fpath, line_no: int):
@@ -1265,7 +1297,9 @@ def _expand_input_glob(input_glob: str) -> List[str]:
 
 
 class RolloutAggregationHelper(BaseModel):
-    async def run_from_config(self, config: RolloutAggregationConfig) -> Optional[Path]:
+    async def run_from_config(
+        self, config: RolloutAggregationConfig, *, capture_dirs: tuple[Path, ...] = ()
+    ) -> Optional[Path]:
         input_paths = _expand_input_glob(config.input_glob)
         if not input_paths:
             raise ConfigPathNotFoundError(f"No shards matched input_glob={config.input_glob!r}")
@@ -1299,9 +1333,24 @@ class RolloutAggregationHelper(BaseModel):
         helper = RolloutCollectionHelper()
         aggregate_metrics_fpath = await helper._call_aggregate_metrics(results, results, output_fpath)
 
+        health_result = None
+        if not config.disable_health_check:
+            from nemo_gym.rollout_health import format_health_report, run_health_checks
+
+            health_result = run_health_checks(
+                output_fpath if config.merge_shards else [Path(path) for path in input_paths],
+                output_dir=output_fpath.parent,
+                capture_dirs=capture_dirs,
+                capture_enabled=bool(capture_dirs),
+                workers=config.health_check_workers,
+            )
+
         print(f"""Finished rollout aggregation! View results at:
 Merged rollouts: {output_fpath if config.merge_shards else "<not merged>"}
 Aggregate metrics: {aggregate_metrics_fpath}""")
+
+        if health_result is not None:
+            print(format_health_report(health_result))
 
         return aggregate_metrics_fpath
 

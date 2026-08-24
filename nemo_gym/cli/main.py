@@ -452,6 +452,14 @@ def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
     dispatch(target, overrides)
 
 
+def _eval_health_check(args: argparse.Namespace, overrides: list[str]) -> None:
+    if overrides:
+        args._parser.error("health-check does not accept Hydra overrides")
+    from nemo_gym.cli.eval import health_check_rollouts
+
+    health_check_rollouts(args.run_dir, workers=args.workers)
+
+
 def _has_override(overrides: list[str], key: str) -> bool:
     return any(override.lstrip("+").split("=", 1)[0] == key for override in overrides)
 
@@ -792,6 +800,8 @@ COMMANDS = {
                 "disable_aggregation",
                 "Skip post-run aggregate-metrics computation. Use with gym eval aggregate for sharded jobs.",
             ),
+            _bool_flag("no-health-check", "disable_health_check", "Skip post-run rollout health checks."),
+            _value_flag("health-check-workers", "health_check_workers", "Number of rollout-health worker processes."),
         ),
     ),
     "eval aggregate": Command(
@@ -811,6 +821,16 @@ COMMANDS = {
                 "Path for the merged rollouts and aggregate-metrics file.",
                 aliases=("-o",),
             ),
+            _bool_flag("no-health-check", "disable_health_check", "Skip post-aggregation rollout health checks."),
+            _value_flag("health-check-workers", "health_check_workers", "Number of rollout-health worker processes."),
+        ),
+    ),
+    "eval health-check": Command(
+        target=_eval_health_check,
+        summary="Verify rollout quality for an existing run directory.",
+        flags=(
+            Flag(register=lambda p: p.add_argument("run_dir", metavar="RUN_DIR")),
+            Flag(register=lambda p: p.add_argument("--workers", type=int, help="Number of worker processes.")),
         ),
     ),
     "eval reverify": Command(

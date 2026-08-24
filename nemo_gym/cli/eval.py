@@ -378,6 +378,12 @@ def e2e_rollout_collection():  # pragma: no cover
     # ``rollout_collection_driver`` config field (a ``module.path:function``).
     # The default path runs the built-in single-pass helper.
     driver_path = e2e_rollout_collection_config.rollout_collection_driver
+    health_check_enabled = (
+        not rollout_collection_config.disable_aggregation and not rollout_collection_config.disable_health_check
+    )
+    # This E2E entry point prints health only after its server-shutdown phase.
+    # The no-serve entry point calls the collection helper directly.
+    rollout_collection_config.disable_health_check = True
 
     print(
         f"""Output artifacts:
@@ -387,6 +393,7 @@ def e2e_rollout_collection():  # pragma: no cover
 {f"Rollout collection driver: {driver_path}" if driver_path else ""}
 """
     )
+    collection_completed = False
     try:
         if driver_path:
             module_name, _, fn_name = driver_path.partition(":")
@@ -397,10 +404,25 @@ def e2e_rollout_collection():  # pragma: no cover
             asyncio.run(driver_fn(rollout_collection_config, resolved_config))
         else:
             asyncio.run(rch.run_from_config(rollout_collection_config))
+        collection_completed = True
     except KeyboardInterrupt:
         pass
     finally:
         rh.shutdown()
+
+    if health_check_enabled and collection_completed:
+        from nemo_gym.base_responses_api_model import model_call_capture_dirs_from_config
+        from nemo_gym.rollout_health import format_health_report, run_health_checks
+
+        capture_dirs = model_call_capture_dirs_from_config(global_config_dict)
+        health_result = run_health_checks(
+            output_fpath,
+            capture_dirs=capture_dirs,
+            capture_enabled=bool(capture_dirs),
+            workers=rollout_collection_config.health_check_workers,
+            driver_bypass=bool(driver_path),
+        )
+        print(format_health_report(health_result))
 
 
 @exit_cleanly_on_config_error
@@ -415,12 +437,22 @@ def collect_rollouts():  # pragma: no cover
 
 @exit_cleanly_on_config_error
 def aggregate_rollouts():  # pragma: no cover
+    from nemo_gym.base_responses_api_model import model_call_capture_dirs_from_config
     from nemo_gym.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
 
-    config = RolloutAggregationConfig.model_validate(get_global_config_dict())
+    global_config = get_global_config_dict()
+    config = RolloutAggregationConfig.model_validate(global_config)
     rah = RolloutAggregationHelper()
+    capture_dirs = tuple(model_call_capture_dirs_from_config(global_config))
 
-    asyncio.run(rah.run_from_config(config))
+    asyncio.run(rah.run_from_config(config, capture_dirs=capture_dirs))
+
+
+def health_check_rollouts(run_dir: str | Path, *, workers: int | None = None):
+    """Run rollout quality verification for an existing run directory."""
+    from nemo_gym.rollout_health import health_check_run_dir
+
+    return health_check_run_dir(run_dir, workers=workers)
 
 
 @exit_cleanly_on_config_error
