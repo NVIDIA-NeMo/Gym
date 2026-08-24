@@ -15,6 +15,7 @@
 import asyncio
 import importlib
 import json
+from collections.abc import Sequence
 from copy import deepcopy
 from multiprocessing import Pool
 from pathlib import Path
@@ -421,6 +422,7 @@ def e2e_rollout_collection():  # pragma: no cover
             capture_enabled=bool(capture_dirs),
             workers=rollout_collection_config.health_check_workers,
             driver_bypass=bool(driver_path),
+            ignored_checks=rollout_collection_config.health_check_ignored_checks,
         )
         print(format_health_report(health_result))
 
@@ -448,11 +450,16 @@ def aggregate_rollouts():  # pragma: no cover
     asyncio.run(rah.run_from_config(config, capture_dirs=capture_dirs))
 
 
-def health_check_rollouts(run_dir: str | Path, *, workers: int | None = None):
+def health_check_rollouts(
+    run_dir: str | Path,
+    *,
+    workers: int | None = None,
+    ignored_checks: Sequence[str] = (),
+):
     """Run rollout quality verification for an existing run directory."""
     from nemo_gym.rollout_health import health_check_run_dir
 
-    return health_check_run_dir(run_dir, workers=workers)
+    return health_check_run_dir(run_dir, workers=workers, ignored_checks=ignored_checks)
 
 
 @exit_cleanly_on_config_error

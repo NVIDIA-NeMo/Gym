@@ -164,6 +164,10 @@ class TestEvalRunFlags:
             (["--resume"], "+resume_from_cache=true"),
             (["--no-health-check"], "+disable_health_check=true"),
             (["--health-check-workers", "4"], "+health_check_workers=4"),
+            (
+                ["--health-check-ignore", "missed_metrics,zero_token_turns"],
+                '+health_check_ignored_checks=["missed_metrics","zero_token_turns"]',
+            ),
         ],
     )
     def test_flag_maps_to_single_override(self, monkeypatch: MonkeyPatch, flag_argv, expected_override) -> None:
@@ -482,6 +486,8 @@ class TestEvalAggregateFlags:
                 "--no-health-check",
                 "--health-check-workers",
                 "3",
+                "--health-check-ignore",
+                "missed_metrics,zero_token_turns",
             ],
         )
         assert target == "nemo_gym.cli.eval:aggregate_rollouts"
@@ -490,6 +496,7 @@ class TestEvalAggregateFlags:
             "+output_jsonl_fpath=out.jsonl",
             "+disable_health_check=true",
             "+health_check_workers=3",
+            '+health_check_ignored_checks=["missed_metrics","zero_token_turns"]',
         }
 
 

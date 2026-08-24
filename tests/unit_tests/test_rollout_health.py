@@ -252,18 +252,37 @@ async def test_health_on_and_off_leave_collection_and_metrics_byte_identical(
     assert artifacts[False] == artifacts[True]
 
 
-def test_health_check_cli_accepts_run_dir_and_workers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_health_check_cli_accepts_run_dir_workers_and_ignored_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     received = {}
 
-    def fake_health_check(run_dir, *, workers=None):
-        received.update(run_dir=run_dir, workers=workers)
+    def fake_health_check(run_dir, *, workers=None, ignored_checks=()):
+        received.update(run_dir=run_dir, workers=workers, ignored_checks=ignored_checks)
 
     monkeypatch.setattr(cli_eval, "health_check_rollouts", fake_health_check)
-    monkeypatch.setattr(sys, "argv", ["gym", "eval", "health-check", str(tmp_path), "--workers", "3"])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "gym",
+            "eval",
+            "health-check",
+            str(tmp_path),
+            "--workers",
+            "3",
+            "--ignore-checks",
+            "missed_metrics,zero_token_turns",
+        ],
+    )
 
     cli_main.main()
 
-    assert received == {"run_dir": str(tmp_path), "workers": 3}
+    assert received == {
+        "run_dir": str(tmp_path),
+        "workers": 3,
+        "ignored_checks": ["missed_metrics", "zero_token_turns"],
+    }
 
 
 def test_persisted_trajectory_and_invocation_conversation_are_valid_capture_inputs(tmp_path: Path) -> None:
@@ -391,6 +410,55 @@ def test_missing_all_bindings_is_unobserved_and_embedded_capture_is_used(tmp_pat
     assert digest.unobserved == ["missed_metrics"]
     assert digest.verdict == "unobserved"
     assert not any(finding.check in {"hollow_steps", "missed_metrics"} for finding in digest.findings)
+
+
+def test_ignored_check_is_excluded_from_execution_and_verdict(tmp_path: Path) -> None:
+    record = {
+        "_ng_task_index": 0,
+        "_ng_rollout_index": 0,
+        "response": {"output": [{"type": "message", "role": "assistant", "content": "ok"}]},
+        "ng_model_call_capture": {"calls": [_call()]},
+    }
+    rollout_path = tmp_path / "rollouts.jsonl"
+    rollout_path.write_bytes(orjson.dumps(record, option=orjson.OPT_APPEND_NEWLINE))
+
+    result = run_health_checks(rollout_path, ignored_checks=["missed_metrics"], workers=1)
+
+    [digest] = result.rollouts
+    assert digest.verdict == "healthy"
+    assert digest.unobserved == []
+    assert not any(finding.check == "missed_metrics" for finding in digest.findings)
+    assert result.summary["run"]["ignored_checks"] == ["missed_metrics"]
+    assert result.summary["run"]["artifacts"]["coverage"]["missed_metrics"] == {
+        "evaluated": 0,
+        "unobserved": 0,
+        "ignored": 1,
+    }
+    assert "(ignored: missed_metrics)" in health.format_health_report(result)
+
+
+def test_ignored_failing_and_task_checks_do_not_emit_findings(tmp_path: Path) -> None:
+    rollout_path, capture_dir = _write_fixture(
+        tmp_path,
+        [(_record(0, 0), [_call(tokens_out=0)]), (_record(0, 1), [_call(tokens_out=0)])],
+    )
+
+    result = run_health_checks(
+        rollout_path,
+        capture_dirs=[capture_dir],
+        capture_enabled=True,
+        ignored_checks=["zero_token_turns", "consistently_unhealthy_task"],
+        workers=1,
+    )
+
+    assert result.summary["run"]["verdicts"] == {"healthy": 2, "unhealthy": 0, "unobserved": 0}
+    assert result.summary["run"]["issues"]["zero_token_turns"] == 0
+    assert result.summary["tasks"]["0"]["flags"] == []
+    assert result.summary["run"]["artifacts"]["coverage"]["consistently_unhealthy_task"] == {
+        "evaluated": 0,
+        "unobserved": 0,
+        "ignored": 1,
+    }
 
 
 def test_empty_embedded_capture_is_unobserved(tmp_path: Path) -> None:
@@ -528,6 +596,7 @@ def test_duplicate_rollout_identity_counts_once_at_task_scope(tmp_path: Path) ->
     assert result.summary["run"]["artifacts"]["coverage"]["consistently_unhealthy_task"] == {
         "evaluated": 0,
         "unobserved": 1,
+        "ignored": 0,
     }
 
 
@@ -646,3 +715,23 @@ def test_input_validation_and_ambiguous_discovery_errors(tmp_path: Path) -> None
     one.write_text("{}\n")
     with pytest.raises(ValueError, match="workers"):
         run_health_checks(one, workers=0)
+    with pytest.raises(ValueError, match="Unknown rollout health check.*not_a_check"):
+        run_health_checks(one, ignored_checks=["not_a_check"], workers=1)
+
+
+def test_health_check_config_accepts_csv_and_rejects_unknown_ids(tmp_path: Path) -> None:
+    config = RolloutCollectionConfig(
+        input_jsonl_fpath=str(tmp_path / "input.jsonl"),
+        output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+        upload_rollouts=False,
+        health_check_ignored_checks="missed_metrics, zero_token_turns",
+    )
+    assert config.health_check_ignored_checks == ["missed_metrics", "zero_token_turns"]
+
+    with pytest.raises(ValueError, match="Unknown rollout health check.*not_a_check"):
+        RolloutCollectionConfig(
+            input_jsonl_fpath=str(tmp_path / "input.jsonl"),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            upload_rollouts=False,
+            health_check_ignored_checks=["not_a_check"],
+        )

@@ -108,6 +108,32 @@ def _bool_flag(name: str, hydra_key: str, flag_help: str) -> Flag:
     )
 
 
+def _split_comma_separated(value: str) -> list[str]:
+    values = [item.strip() for item in value.split(",")]
+    if not all(values):
+        raise argparse.ArgumentTypeError("check IDs must be a comma-separated list without empty entries")
+    return values
+
+
+def _csv_list_flag(name: str, hydra_key: str, flag_help: str) -> Flag:
+    """A comma-separated CLI value translated to a Hydra list override."""
+    dest = name.replace("-", "_")
+    return Flag(
+        register=lambda p: p.add_argument(
+            f"--{name}",
+            dest=dest,
+            type=_split_comma_separated,
+            metavar="CHECK[,CHECK...]",
+            help=flag_help,
+        ),
+        translate_to_hydra=lambda args: (
+            [f"+{hydra_key}={json.dumps(getattr(args, dest), separators=(',', ':'))}"]
+            if getattr(args, dest) is not None
+            else []
+        ),
+    )
+
+
 # Shared flag: load Gym config files. Reused by every command that reads server/benchmark configs.
 CONFIG = Flag(
     register=lambda p: p.add_argument(
@@ -457,7 +483,10 @@ def _eval_health_check(args: argparse.Namespace, overrides: list[str]) -> None:
         args._parser.error("health-check does not accept Hydra overrides")
     from nemo_gym.cli.eval import health_check_rollouts
 
-    health_check_rollouts(args.run_dir, workers=args.workers)
+    try:
+        health_check_rollouts(args.run_dir, workers=args.workers, ignored_checks=args.ignore_checks or ())
+    except ValueError as exc:
+        args._parser.error(str(exc))
 
 
 def _has_override(overrides: list[str], key: str) -> bool:
@@ -802,6 +831,11 @@ COMMANDS = {
             ),
             _bool_flag("no-health-check", "disable_health_check", "Skip post-run rollout health checks."),
             _value_flag("health-check-workers", "health_check_workers", "Number of rollout-health worker processes."),
+            _csv_list_flag(
+                "health-check-ignore",
+                "health_check_ignored_checks",
+                "Comma-separated rollout-health check IDs to exclude from verdict derivation.",
+            ),
         ),
     ),
     "eval aggregate": Command(
@@ -823,6 +857,11 @@ COMMANDS = {
             ),
             _bool_flag("no-health-check", "disable_health_check", "Skip post-aggregation rollout health checks."),
             _value_flag("health-check-workers", "health_check_workers", "Number of rollout-health worker processes."),
+            _csv_list_flag(
+                "health-check-ignore",
+                "health_check_ignored_checks",
+                "Comma-separated rollout-health check IDs to exclude from verdict derivation.",
+            ),
         ),
     ),
     "eval health-check": Command(
@@ -831,6 +870,15 @@ COMMANDS = {
         flags=(
             Flag(register=lambda p: p.add_argument("run_dir", metavar="RUN_DIR")),
             Flag(register=lambda p: p.add_argument("--workers", type=int, help="Number of worker processes.")),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--ignore-checks",
+                    "--ignore",
+                    type=_split_comma_separated,
+                    metavar="CHECK[,CHECK...]",
+                    help="Comma-separated check IDs to exclude from verdict derivation.",
+                )
+            ),
         ),
     ),
     "eval reverify": Command(

@@ -400,6 +400,12 @@ def _get_max_rollout_attempts() -> int:
         return _DEFAULT_MAX_ROLLOUT_ATTEMPTS
 
 
+def _normalize_health_check_ignored_checks(value) -> List[str]:
+    from nemo_gym.rollout_health import normalize_ignored_checks
+
+    return list(normalize_ignored_checks(value))
+
+
 class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
     num_samples_in_parallel: Optional[int] = Field(
@@ -426,6 +432,16 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
         ge=1,
         description="Number of rollout-health worker processes (defaults to min(cpus, 8)).",
     )
+    health_check_ignored_checks: List[str] = Field(
+        default_factory=list,
+        description="Health-check IDs to exclude from execution and verdict derivation.",
+    )
+
+    @field_validator("health_check_ignored_checks", mode="before")
+    @classmethod
+    def _validate_health_check_ignored_checks(cls, value):
+        return _normalize_health_check_ignored_checks(value)
+
     rollout_collection_driver: Optional[str] = Field(
         default=None,
         description=(
@@ -1071,6 +1087,7 @@ class RolloutCollectionHelper(BaseModel):
                     capture_dirs=capture_dirs,
                     capture_enabled=bool(capture_dirs),
                     workers=config.health_check_workers,
+                    ignored_checks=config.health_check_ignored_checks,
                 )
 
         print(f"""Finished rollout collection! View results at:
@@ -1271,6 +1288,15 @@ class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
         ge=1,
         description="Number of rollout-health worker processes (defaults to min(cpus, 8)).",
     )
+    health_check_ignored_checks: List[str] = Field(
+        default_factory=list,
+        description="Health-check IDs to exclude from execution and verdict derivation.",
+    )
+
+    @field_validator("health_check_ignored_checks", mode="before")
+    @classmethod
+    def _validate_health_check_ignored_checks(cls, value):
+        return _normalize_health_check_ignored_checks(value)
 
 
 def loads_jsonl_line(raw, fpath, line_no: int):
@@ -1343,6 +1369,7 @@ class RolloutAggregationHelper(BaseModel):
                 capture_dirs=capture_dirs,
                 capture_enabled=bool(capture_dirs),
                 workers=config.health_check_workers,
+                ignored_checks=config.health_check_ignored_checks,
             )
 
         print(f"""Finished rollout aggregation! View results at:

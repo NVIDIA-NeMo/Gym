@@ -84,6 +84,19 @@ _ROLLOUT_SPECS = tuple(spec for spec in CHECK_REGISTRY if spec.scope == CheckSco
 _TASK_SPECS = tuple(spec for spec in CHECK_REGISTRY if spec.scope == CheckScope.TASK)
 
 
+def normalize_ignored_checks(checks: Sequence[str] | str | None) -> tuple[str, ...]:
+    """Normalize and validate check IDs supplied by library, CLI, or Hydra config."""
+    if checks is None:
+        return ()
+    raw_checks = checks.split(",") if isinstance(checks, str) else checks
+    normalized = tuple(dict.fromkeys(check.strip() for check in raw_checks if check.strip()))
+    known_checks = {spec.id for spec in CHECK_REGISTRY}
+    unknown_checks = sorted(set(normalized) - known_checks)
+    if unknown_checks:
+        raise ValueError(f"Unknown rollout health check(s): {', '.join(unknown_checks)}")
+    return normalized
+
+
 class RolloutDigest(BaseModel):
     task_index: int | str
     rollout_index: int | str
@@ -126,6 +139,7 @@ class _WorkerInput:
     captures_exist: bool
     capture_enabled: bool | None
     driver_bypass: bool
+    ignored_checks: frozenset[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -710,6 +724,8 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
     unobserved: list[str] = []
 
     for spec in _ROLLOUT_SPECS:
+        if spec.id in payload.ignored_checks:
+            continue
         if parse_error:
             if spec.id == "unreadable_record":
                 findings.append(
@@ -808,47 +824,57 @@ def _unique_task_repeats(digests: list[RolloutDigest]) -> list[_TaskRepeat]:
 
 def _task_findings(
     grouped: dict[int | str, list[_TaskRepeat]],
+    ignored_checks: frozenset[str],
 ) -> tuple[dict[int | str, list[Finding]], dict[str, dict[str, int]]]:
     findings: dict[int | str, list[Finding]] = defaultdict(list)
-    coverage = {spec.id: {"evaluated": 0, "unobserved": 0} for spec in _TASK_SPECS}
+    coverage = {spec.id: {"evaluated": 0, "unobserved": 0, "ignored": 0} for spec in _TASK_SPECS}
     for task_index, repeats in grouped.items():
         subject = _subject(task_index)
 
-        computable = [repeat for repeat in repeats if repeat.verdict != "unobserved"]
-        if len(computable) >= 2:
-            coverage["consistently_unhealthy_task"]["evaluated"] += 1
-            if all(repeat.verdict == "unhealthy" for repeat in computable):
-                findings[task_index].append(
-                    _finding(
-                        "consistently_unhealthy_task",
-                        subject,
-                        computable_repeats=len(computable),
+        if "consistently_unhealthy_task" in ignored_checks:
+            coverage["consistently_unhealthy_task"]["ignored"] += 1
+        else:
+            computable = [repeat for repeat in repeats if repeat.verdict != "unobserved"]
+            if len(computable) >= 2:
+                coverage["consistently_unhealthy_task"]["evaluated"] += 1
+                if all(repeat.verdict == "unhealthy" for repeat in computable):
+                    findings[task_index].append(
+                        _finding(
+                            "consistently_unhealthy_task",
+                            subject,
+                            computable_repeats=len(computable),
+                        )
                     )
-                )
-        else:
-            coverage["consistently_unhealthy_task"]["unobserved"] += 1
+            else:
+                coverage["consistently_unhealthy_task"]["unobserved"] += 1
 
-        if repeats and all(repeat.capture_observed for repeat in repeats):
-            coverage["no_healthy_model_calls_task"]["evaluated"] += 1
-            if not any(repeat.successful_model_calls for repeat in repeats):
-                findings[task_index].append(_finding("no_healthy_model_calls_task", subject, repeats=len(repeats)))
+        if "no_healthy_model_calls_task" in ignored_checks:
+            coverage["no_healthy_model_calls_task"]["ignored"] += 1
         else:
-            coverage["no_healthy_model_calls_task"]["unobserved"] += 1
+            if repeats and all(repeat.capture_observed for repeat in repeats):
+                coverage["no_healthy_model_calls_task"]["evaluated"] += 1
+                if not any(repeat.successful_model_calls for repeat in repeats):
+                    findings[task_index].append(_finding("no_healthy_model_calls_task", subject, repeats=len(repeats)))
+            else:
+                coverage["no_healthy_model_calls_task"]["unobserved"] += 1
     return findings, coverage
 
 
-def _reduce(digests: list[RolloutDigest]) -> dict[str, Any]:
+def _reduce(digests: list[RolloutDigest], ignored_checks: frozenset[str]) -> dict[str, Any]:
     records_by_task: dict[int | str, list[RolloutDigest]] = defaultdict(list)
     for digest in digests:
         records_by_task[digest.task_index].append(digest)
     grouped = {task_index: _unique_task_repeats(records) for task_index, records in records_by_task.items()}
-    task_findings, task_coverage = _task_findings(grouped)
+    task_findings, task_coverage = _task_findings(grouped, ignored_checks)
 
-    coverage = {spec.id: {"evaluated": 0, "unobserved": 0} for spec in CHECK_REGISTRY}
+    coverage = {spec.id: {"evaluated": 0, "unobserved": 0, "ignored": 0} for spec in CHECK_REGISTRY}
     for digest in digests:
         unobserved = set(digest.unobserved)
         for spec in _ROLLOUT_SPECS:
-            coverage[spec.id]["unobserved" if spec.id in unobserved else "evaluated"] += 1
+            if spec.id in ignored_checks:
+                coverage[spec.id]["ignored"] += 1
+            else:
+                coverage[spec.id]["unobserved" if spec.id in unobserved else "evaluated"] += 1
     coverage.update(task_coverage)
 
     issues = Counter(finding.check for digest in digests for finding in digest.findings)
@@ -872,6 +898,7 @@ def _reduce(digests: list[RolloutDigest]) -> dict[str, Any]:
 
     return {
         "run": {
+            "ignored_checks": sorted(ignored_checks),
             "artifacts": {
                 "records": len(digests),
                 "captures": sum(digest.capture_observed for digest in digests),
@@ -943,8 +970,10 @@ def run_health_checks(
     workers: int | None = None,
     capture_enabled: bool | None = None,
     driver_bypass: bool = False,
+    ignored_checks: Sequence[str] = (),
 ) -> HealthCheckResult:
     """Run the RFC's map/group/reduce pipeline and write both reports."""
+    ignored = frozenset(normalize_ignored_checks(ignored_checks))
     paths = [rollout_paths] if isinstance(rollout_paths, Path) else list(rollout_paths)
     if not paths:
         raise ValueError("at least one rollout JSONL path is required")
@@ -962,6 +991,7 @@ def run_health_checks(
             captures_exist=captures_exist,
             capture_enabled=capture_enabled,
             driver_bypass=driver_bypass,
+            ignored_checks=ignored,
         )
         for line in lines
     ]
@@ -993,7 +1023,7 @@ def run_health_checks(
                 )
                 digests = [_worker(item) for item in worker_inputs]
 
-    summary = _reduce(digests)
+    summary = _reduce(digests, ignored)
     report_dir = output_dir or paths[0].parent
     summary_path, verdicts_path = _write_reports(summary, digests, report_dir)
     return HealthCheckResult(
@@ -1032,14 +1062,21 @@ def _discover_capture_dirs(run_dir: Path) -> list[Path]:
 def format_health_report(result: HealthCheckResult) -> str:
     verdicts = result.summary["run"]["verdicts"]
     checked = sum(verdicts.values())
+    ignored = result.summary["run"].get("ignored_checks", [])
+    ignored_note = f" (ignored: {', '.join(ignored)})" if ignored else ""
     return (
         f"Rollout health: {checked} checked, {verdicts['healthy']} healthy, "
-        f"{verdicts['unhealthy']} unhealthy, {verdicts['unobserved']} unobserved\n"
+        f"{verdicts['unhealthy']} unhealthy, {verdicts['unobserved']} unobserved{ignored_note}\n"
         f"Quality summary: {result.summary_path}"
     )
 
 
-def health_check_run_dir(run_dir: str | Path, *, workers: int | None = None) -> HealthCheckResult:
+def health_check_run_dir(
+    run_dir: str | Path,
+    *,
+    workers: int | None = None,
+    ignored_checks: Sequence[str] = (),
+) -> HealthCheckResult:
     path = Path(run_dir)
     rollout_paths = _discover_rollouts(path)
     capture_dirs = _discover_capture_dirs(path)
@@ -1049,6 +1086,7 @@ def health_check_run_dir(run_dir: str | Path, *, workers: int | None = None) -> 
         capture_dirs=capture_dirs,
         workers=workers,
         capture_enabled=True if capture_dirs else None,
+        ignored_checks=ignored_checks,
     )
     print(format_health_report(result))
     return result
