@@ -14,10 +14,10 @@ from copy import deepcopy
 from dataclasses import dataclass
 from math import ceil
 from pathlib import Path
+from shutil import rmtree
 from time import monotonic
 from traceback import format_exc
 from typing import Any
-from urllib.parse import urlparse
 
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -31,6 +31,7 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
@@ -71,8 +72,7 @@ class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
     sandbox_provider: str
     sandbox_config: dict[str, Any]
     enforce_agent_no_network: bool = True
-    sandbox_model_base_url: str | None = None
-    sandbox_model_server_name: str | None = None
+    sandbox_model_server: ModelServerRef | None = None
 
     logs_dir: Path = Path("resources_servers/deepswe/logs")
     clear_verifier_logs: bool = False
@@ -132,6 +132,7 @@ class VerifierResult(BaseModel):
     apply_failed: bool = False
     verifier_exit_code: int | None = None
     verifier_error: str | None = None
+    test_output: str | None = None
     f2p_total: int = 0
     f2p_passed: int = 0
     p2p_total: int = 0
@@ -202,19 +203,14 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
         return options
 
     def _model_egress_target(self) -> str | None:
-        if self.config.sandbox_model_base_url:
-            parsed = urlparse(self.config.sandbox_model_base_url)
-            if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-                raise ValueError(f"Invalid DeepSWE sandbox_model_base_url: {self.config.sandbox_model_base_url!r}")
-            target = parsed.hostname
-        elif self.config.sandbox_model_server_name:
+        if self.config.sandbox_model_server:
             model_config = get_first_server_config_dict(
                 get_global_config_dict(),
-                self.config.sandbox_model_server_name,
+                self.config.sandbox_model_server.name,
             )
             target = str(model_config.get("host") or "")
             if not target:
-                raise ValueError(f"Model server {self.config.sandbox_model_server_name!r} does not have a host")
+                raise ValueError(f"Model server {self.config.sandbox_model_server.name!r} does not have a host")
         else:
             return None
 
@@ -327,9 +323,6 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
 
         log_dir.mkdir(parents=True, exist_ok=True)
         combined_output = (command_result.stdout or "") + (command_result.stderr or "")
-        stdout_path = log_dir / "test-stdout.txt"
-        stdout_path.write_text(combined_output, encoding="utf-8", errors="replace")
-        await sandbox.upload(stdout_path, "/logs/verifier/test-stdout.txt")
 
         artifact_paths = {
             "reward.json": log_dir / "reward.json",
@@ -346,6 +339,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 reward=0.0,
                 verifier_exit_code=command_result.return_code,
                 verifier_error="Verifier did not produce /logs/verifier/reward.json",
+                test_output=combined_output,
             )
         try:
             reward_data = json.loads(artifact_paths["reward.json"].read_text(encoding="utf-8"))
@@ -355,6 +349,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 reward=0.0,
                 verifier_exit_code=command_result.return_code,
                 verifier_error=f"Invalid verifier reward.json: {error}",
+                test_output=combined_output,
             )
 
         reward = float(reward_data.get("reward", 0.0))
@@ -364,6 +359,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 reward=0.0,
                 verifier_exit_code=command_result.return_code,
                 verifier_error=f"Verifier returned non-binary reward: {reward!r}",
+                test_output=combined_output,
             )
         if not present["ctrf.json"]:
             return VerifierResult(
@@ -371,6 +367,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 reward=0.0,
                 verifier_exit_code=command_result.return_code,
                 verifier_error="Verifier did not produce /logs/verifier/ctrf.json",
+                test_output=combined_output,
             )
 
         return VerifierResult(
@@ -378,6 +375,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             reward=reward,
             apply_failed=bool(reward_data.get("apply_failed", False)),
             verifier_exit_code=command_result.return_code,
+            test_output=combined_output,
             f2p_total=int(reward_data.get("f2p_total", 0)),
             f2p_passed=int(reward_data.get("f2p_passed", 0)),
             p2p_total=int(reward_data.get("p2p_total", 0)),
@@ -495,28 +493,16 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 if sandbox is not None:
                     await self._stop_sandbox(sandbox, task_id=current_task_id, phase="verifier")
 
-        if self.config.clear_verifier_logs and result.evaluation_completed:
-            for path in log_dir.glob("*"):
-                path.unlink(missing_ok=True)
-            log_dir.rmdir()
+        if self.config.clear_verifier_logs:
+            rmtree(str(log_dir), ignore_errors=True)
+            log_dir = ""
 
         return DeepSWEVerifyResponse.model_validate(
             body.model_dump()
+            | result.model_dump()
             | {
-                "reward": result.reward,
                 "task_id": current_task_id,
                 "sandbox_handle": sandbox_handle,
-                "evaluation_completed": result.evaluation_completed,
-                "apply_failed": result.apply_failed,
-                "verifier_exit_code": result.verifier_exit_code,
-                "verifier_error": result.verifier_error,
-                "f2p_total": result.f2p_total,
-                "f2p_passed": result.f2p_passed,
-                "p2p_total": result.p2p_total,
-                "p2p_passed": result.p2p_passed,
-                "f2p": result.f2p,
-                "p2p": result.p2p,
-                "partial": result.partial,
                 "model_patch": model_patch.decode("utf-8", errors="replace")
                 if self.config.include_model_patch_in_response
                 else None,
