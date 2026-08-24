@@ -104,18 +104,18 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             )
 
     async def verify(self, request: Request, body: TerminalBench21VerifyRequest) -> TerminalBench21VerifyResponse:
-        # Re-use the original sandbox
-        eval_sandbox = self._session_id_to_sandbox[request.session[SESSION_ID_KEY]]
-
         task_folder = Path(body.task_folder)
 
         if self.config.is_verifying_golden_patch:
+            eval_sandbox = await self._create_sandbox(body)
             self._upload_folder(eval_sandbox, task_folder / "solution", "/solution")
             golden_patch_result = await eval_sandbox.exec(
                 "bash /solution/solve.sh", timeout_s=self.config.evaluation_timeout
             )
             assert golden_patch_result.return_code == 0
         else:
+            # Re-use the original sandbox
+            eval_sandbox = self._session_id_to_sandbox.pop(request.session[SESSION_ID_KEY])
             raise NotImplementedError
 
         start_time = time()
