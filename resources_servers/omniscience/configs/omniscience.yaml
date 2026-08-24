@@ -22,6 +22,10 @@ omniscience:
         top_p: 1.0
       use_chat_completions_for_judge: true
 
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/omniscience/data/example.jsonl
 omniscience_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -32,7 +36,3 @@ omniscience_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/omniscience/data/example.jsonl

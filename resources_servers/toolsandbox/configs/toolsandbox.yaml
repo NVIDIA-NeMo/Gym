@@ -45,12 +45,6 @@ toolsandbox:
       # max_messages: 30      # override per-scenario message cap (default: scenario's own)
       preferred_tool_backend: default
       test_mode: false
-
-toolsandbox_agent:
-  responses_api_agents:
-    toolsandbox_agent:
-      resources_server:
-        name: toolsandbox
       datasets:
       - name: example
         type: example
@@ -65,3 +59,9 @@ toolsandbox_agent:
         jsonl_fpath: resources_servers/toolsandbox/data/test_toolsandbox.jsonl
         # See note above: CC-BY-NC 4.0 upstream, marked TBD pending an enum value.
         license: TBD
+
+toolsandbox_agent:
+  responses_api_agents:
+    toolsandbox_agent:
+      resources_server:
+        name: toolsandbox

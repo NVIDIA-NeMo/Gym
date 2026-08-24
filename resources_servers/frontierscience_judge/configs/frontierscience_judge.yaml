@@ -19,6 +19,12 @@ frontierscience_judge:
       judge_prompt_path: resources_servers/frontierscience_judge/prompts/judge.yaml
       use_chat_completions_for_judge: true
 
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/frontierscience_judge/data/example.jsonl
+        license: Apache 2.0
+
 frontierscience_judge_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -29,12 +35,6 @@ frontierscience_judge_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/frontierscience_judge/data/example.jsonl
-        license: Apache 2.0
-
 judge_base_url: https://integrate.api.nvidia.com/v1
 judge_api_key: ${oc.env:NVIDIA_API_KEY,null}
 judge_model_name: openai/gpt-oss-20b

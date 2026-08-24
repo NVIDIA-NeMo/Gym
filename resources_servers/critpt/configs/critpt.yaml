@@ -12,12 +12,6 @@ critpt_resources_server:
       description: Research-level physics problems scored by the Artificial Analysis API
       value: Evaluate model performance on research-level physics reasoning
       fire_after: null  # smoke-test only; CLI override fires the batch after N real submissions
-
-critpt_agent:
-  responses_api_agents:
-    critpt_agent:
-      resources_server:
-        name: critpt_resources_server
       datasets:
         - name: example
           type: example
@@ -25,3 +19,9 @@ critpt_agent:
           prompt_config: benchmarks/critpt/prompts/turn1.yaml
           num_repeats: 1
           license: Apache 2.0
+
+critpt_agent:
+  responses_api_agents:
+    critpt_agent:
+      resources_server:
+        name: critpt_resources_server

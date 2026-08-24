@@ -6,7 +6,7 @@
 
 # Chain to the existing finance_agent_v2 resources server + finance_agent config.
 config_paths:
-  - resources_servers/finance_agent_v2/configs/finance_agent_v2.yaml
+- resources_servers/finance_agent_v2/configs/finance_agent_v2.yaml
 
 # No endpoints or API keys are set here on purpose. The resource server config gives
 # every judge and tool variable a null-safe `oc.select` default, so none of them
@@ -20,12 +20,8 @@ finance_agent_v2_benchmark_resources_server:
 
 # Benchmark agent — inherits the finance_agent_v2 instance, overrides the dataset
 # to the frozen benchmark split and points at the isolated resources server above.
-finance_agent_v2_benchmark_agent:
-  _inherit_from: finance_agent_v2
-  responses_api_agents:
-    finance_agent:
-      resources_server:
-        name: finance_agent_v2_benchmark_resources_server
+  resources_servers:
+    finance_agent_v2:
       datasets:
       - name: finance_agent_v2
         type: benchmark
@@ -33,7 +29,7 @@ finance_agent_v2_benchmark_agent:
         # prepare.py bakes the upstream v2 system/question prompts into each
         # sample's responses_create_params (from benchmarks/finance_agent_v2/
         # upstream_spec.json), so there is no separate prompt config to apply.
-        prompt_config: null
+        prompt_config:
         prepare_script: benchmarks/finance_agent_v2/prepare.py
         num_repeats: 1
         # Provenance: the public question set + rubrics come from
@@ -41,3 +37,10 @@ finance_agent_v2_benchmark_agent:
         # from. BenchmarkDatasetConfig does not validate this field, but it is
         # the only place the dataset's provenance is recorded.
         license: MIT
+        agent: finance_agent_v2_benchmark_agent
+finance_agent_v2_benchmark_agent:
+  _inherit_from: finance_agent_v2
+  responses_api_agents:
+    finance_agent:
+      resources_server:
+        name: finance_agent_v2_benchmark_resources_server

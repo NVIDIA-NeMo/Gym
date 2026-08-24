@@ -5,24 +5,12 @@ math_with_judge:
       judge_model_server:
         type: responses_api_models
         name: policy_model
-      judge_responses_create_params: {
-        input: []
-      }
+      judge_responses_create_params: {input: []}
       should_use_judge: false
       domain: math
       verified: false
       description: OpenMathReasoning math dataset with math-verify and LLM-as-a-judge
       value: Improve math capabilities including AIME 24 / 25
-math_with_judge_simple_agent:
-  responses_api_agents:
-    simple_agent:
-      entrypoint: app.py
-      resources_server:
-        type: resources_servers
-        name: math_with_judge
-      model_server:
-        type: responses_api_models
-        name: policy_model
       datasets:
       - name: train
         type: train
@@ -41,3 +29,13 @@ math_with_judge_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/math_with_judge/data/example.jsonl
+math_with_judge_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: math_with_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model

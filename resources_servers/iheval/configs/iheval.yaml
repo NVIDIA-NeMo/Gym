@@ -11,16 +11,6 @@ iheval:
       description: IHEval instruction-hierarchy benchmark (8 single-turn tasks — task execution, safety, tool use, rule following) scored with the upstream rule-based checkers.
       value: Improve instruction-hierarchy following across aligned/conflict/reference settings, including native tool-use trajectories.
 
-iheval_simple_agent:
-  responses_api_agents:
-    simple_agent:
-      entrypoint: app.py
-      resources_server:
-        type: resources_servers
-        name: iheval
-      model_server:
-        type: responses_api_models
-        name: policy_model
       datasets:
       - name: example
         type: example
@@ -32,3 +22,13 @@ iheval_simple_agent:
         type: validation
         jsonl_fpath: resources_servers/iheval/data/test.jsonl
         license: Apache 2.0
+iheval_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: iheval
+      model_server:
+        type: responses_api_models
+        name: policy_model

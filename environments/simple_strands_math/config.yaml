@@ -12,6 +12,24 @@ math_with_judge:
       description: Simple Strands Agent harness with math tasks
       value: Improve math capabilities with Simple Strands Agent
 
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: environments/simple_strands_math/data/train.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-math-OpenMathReasoning
+          artifact_fpath: train.jsonl
+        license: Creative Commons Attribution 4.0 International
+      - name: validation
+        type: validation
+        jsonl_fpath: environments/simple_strands_math/data/validation.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-math-OpenMathReasoning
+          artifact_fpath: validation.jsonl
+        license: Creative Commons Attribution 4.0 International
+      - name: example
+        type: example
+        jsonl_fpath: environments/simple_strands_math/data/example.jsonl
 simple_strands_math_agent:
   responses_api_agents:
     simple_strands_agent:
@@ -32,21 +50,3 @@ simple_strands_math_agent:
         This is a standalone math task, not a repository task. Do not edit files. Bash is
         available for calculation and verification when useful. Put only the final answer in
         \boxed{}.
-      datasets:
-      - name: train
-        type: train
-        jsonl_fpath: environments/simple_strands_math/data/train.jsonl
-        huggingface_identifier:
-          repo_id: nvidia/Nemotron-RL-math-OpenMathReasoning
-          artifact_fpath: train.jsonl
-        license: Creative Commons Attribution 4.0 International
-      - name: validation
-        type: validation
-        jsonl_fpath: environments/simple_strands_math/data/validation.jsonl
-        huggingface_identifier:
-          repo_id: nvidia/Nemotron-RL-math-OpenMathReasoning
-          artifact_fpath: validation.jsonl
-        license: Creative Commons Attribution 4.0 International
-      - name: example
-        type: example
-        jsonl_fpath: environments/simple_strands_math/data/example.jsonl

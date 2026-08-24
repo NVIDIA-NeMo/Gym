@@ -4,7 +4,7 @@
 # is null (mutually exclusive with pre-populated responses_create_params.input).
 # Evaluating this benchmark requires a vision-capable policy model.
 config_paths:
-  - resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml
+- resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml
 
 hle_vision_equivalence_llm_judge_resources_server:
   _inherit_from: equivalence_llm_judge
@@ -19,21 +19,22 @@ hle_vision_equivalence_llm_judge_resources_server:
       judge_equal_label: "Judgement: yes"
       judge_not_equal_label: "Judgement: no"
       judge_prompt_template_fpath: ../../benchmarks/hle/prompts/judge.txt
-      response_extract_regex: null
-      question_extract_regex: null
+      response_extract_regex:
+      question_extract_regex:
       check_twice_swap: false
       use_per_record_regex: false
 
+      datasets:
+      - name: hle_vision
+        type: benchmark
+        jsonl_fpath: benchmarks/hle/data/hle_benchmark_vision.jsonl
+        prompt_config:
+        prepare_script: benchmarks/hle/prepare_vision.py
+        num_repeats: 1
+        agent: hle_vision_equivalence_llm_judge_simple_agent
 hle_vision_equivalence_llm_judge_simple_agent:
   _inherit_from: equivalence_llm_judge_simple_agent
   responses_api_agents:
     simple_agent:
       resources_server:
         name: hle_vision_equivalence_llm_judge_resources_server
-      datasets:
-      - name: hle_vision
-        type: benchmark
-        jsonl_fpath: benchmarks/hle/data/hle_benchmark_vision.jsonl
-        prompt_config: null
-        prepare_script: benchmarks/hle/prepare_vision.py
-        num_repeats: 1

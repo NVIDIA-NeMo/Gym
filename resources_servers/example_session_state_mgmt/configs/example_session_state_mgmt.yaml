@@ -5,16 +5,6 @@ example_session_state_mgmt_resources_server:
       domain: agent
       verified: false
       description: Session state management (in-memory)
-example_session_state_mgmt_simple_agent:
-  responses_api_agents:
-    simple_agent:
-      entrypoint: app.py
-      resources_server:
-        type: resources_servers
-        name: example_session_state_mgmt_resources_server
-      model_server:
-        type: responses_api_models
-        name: policy_model
       datasets:
       - name: train
         type: train
@@ -35,3 +25,13 @@ example_session_state_mgmt_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/example_session_state_mgmt/data/example.jsonl
+example_session_state_mgmt_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: example_session_state_mgmt_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model

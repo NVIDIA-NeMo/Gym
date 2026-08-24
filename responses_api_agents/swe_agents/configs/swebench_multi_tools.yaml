@@ -4,24 +4,23 @@
 # SWE-bench wrapper configuration for OpenHands
 swe_agents:
   responses_api_agents:
-    swe_agents: &swe_agents_config
+    swe_agents:
       entrypoint: app.py
-      
+
       # Agent framework configuration
       agent_framework: openhands
       agent_config: responses_api_agents/swe_agents/configs/oh_config.toml
       agent_max_turns: 100
       agent_framework_repo: https://github.com/sdevare-nv/nv-OpenHands.git
       agent_framework_commit: 5f0180054732945df08ad2293903e6873f0492b6  # pragma: allowlist secret
-      
       # Container configuration
       container_formatter: ???
-      container_folder_path: null
+      container_folder_path:
       swebench_agent_timeout: 1800
       swebench_tests_timeout: 900
       apptainer_memory_limit_mb: 32768
       command_exec_timeout: 300
-      
+
       dataset_path: ???
 
       agent_prompt_overrides:
@@ -42,13 +41,13 @@ swe_agents:
         system_prompt_template: responses_api_agents/swe_agents/prompts/terminus/system_prompt.j2
         agent_cls: Terminus2Agent
         diversify_tool_names: false
-      
+
       # CodeAct agent
       - user_prompt_template: responses_api_agents/swe_agents/prompts/openhands/user_prompt.j2
         system_prompt_template: responses_api_agents/swe_agents/prompts/openhands/system_prompt.j2
         agent_cls: CodeActAgent
         diversify_tool_names: false
-      
+
       # Plan and execute agent - CodeActAgent
       - user_prompt_template: responses_api_agents/swe_agents/prompts/plan_and_execute/user_prompt.j2
         system_prompt_template: responses_api_agents/swe_agents/prompts/plan_and_execute/system_prompt.j2
@@ -107,37 +106,33 @@ swe_agents:
         system_prompt_template: responses_api_agents/swe_agents/prompts/minimax/system_prompt.j2
         agent_cls: OpenCodeAgent
         diversify_tool_names: false
-      
+
       # Optional model server reference
       model_server:
         name: policy_model # openai_model
         type: responses_api_models
-        
+
       datasets:
         # Training dataset
-        - name: train
-          type: train
-          jsonl_fpath: responses_api_agents/swe_agents/data/swegym_for_sweagent_and_openhands.jsonl
-          gitlab_identifier:
-            dataset_name: swegym_for_sweagent_and_openhands
-            version: 0.0.2
-            artifact_fpath: swegym-converted.jsonl
-          license: Apache 2.0
+      - name: train
+        type: train
+        jsonl_fpath: responses_api_agents/swe_agents/data/swegym_for_sweagent_and_openhands.jsonl
+        gitlab_identifier:
+          dataset_name: swegym_for_sweagent_and_openhands
+          version: 0.0.2
+          artifact_fpath: swegym-converted.jsonl
+        license: Apache 2.0
         # Validation dataset  
-        - name: validation
-          type: validation
-          jsonl_fpath: responses_api_agents/swe_agents/data/swebench_verified_for_sweagent_and_openhands.jsonl
-          gitlab_identifier:
-            dataset_name: swebench_verified_for_sweagent_and_openhands
-            version: 0.0.1
-            artifact_fpath: swebench_verified_for_sweagent_and_openhands.jsonl
-          license: TBD
+      - name: validation
+        type: validation
+        jsonl_fpath: responses_api_agents/swe_agents/data/swebench_verified_for_sweagent_and_openhands.jsonl
+        gitlab_identifier:
+          dataset_name: swebench_verified_for_sweagent_and_openhands
+          version: 0.0.1
+          artifact_fpath: swebench_verified_for_sweagent_and_openhands.jsonl
+        license: TBD
         # Example dataset for quick testing
-        - name: example
-          type: example
-          jsonl_fpath: responses_api_agents/swe_agents/data/example.jsonl
+      - name: example
+        type: example
+        jsonl_fpath: responses_api_agents/swe_agents/data/example.jsonl
 
-swe_agents_val:
-  responses_api_agents:
-    swe_agents:
-      <<: *swe_agents_config

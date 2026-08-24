@@ -1,18 +1,14 @@
 # Chain to the omniscience resource server + agent config + default judge
 config_paths:
-  - resources_servers/omniscience/configs/omniscience.yaml
-  - benchmarks/omniscience/judge_gptoss20b.yaml
+- resources_servers/omniscience/configs/omniscience.yaml
+- benchmarks/omniscience/judge_gptoss20b.yaml
 
 # Isolated benchmark instances via _inherit_from
 omniscience_omniscience_resources_server:
   _inherit_from: omniscience
 
-omniscience_omniscience_simple_agent:
-  _inherit_from: omniscience_simple_agent
-  responses_api_agents:
-    simple_agent:
-      resources_server:
-        name: omniscience_omniscience_resources_server
+  resources_servers:
+    omniscience:
       datasets:
       - name: omniscience
         type: benchmark
@@ -20,3 +16,10 @@ omniscience_omniscience_simple_agent:
         prompt_config: benchmarks/omniscience/prompts/generation.yaml
         prepare_script: benchmarks/omniscience/prepare.py
         num_repeats: 8
+        agent: omniscience_omniscience_simple_agent
+omniscience_omniscience_simple_agent:
+  _inherit_from: omniscience_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: omniscience_omniscience_resources_server

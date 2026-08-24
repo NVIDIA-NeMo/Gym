@@ -6,6 +6,10 @@ circle_count:
       description: Count circles of a given color in images
       value: Improve visual counting and color recognition
       verified: false
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: environments/circle_count/data/example.jsonl
 circle_count_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -17,7 +21,3 @@ circle_count_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: environments/circle_count/data/example.jsonl

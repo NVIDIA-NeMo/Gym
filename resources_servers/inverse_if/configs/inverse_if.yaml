@@ -102,25 +102,15 @@ inverse_if:
 # ============================================================================
 # Inverse IF Agent Configuration
 # ============================================================================
-inverse_if_simple_agent:
-  responses_api_agents:
-    simple_agent:
-      entrypoint: app.py
-      resources_server:
-        type: resources_servers
-        name: inverse_if
-      model_server:
-        type: responses_api_models
-        name: policy_model
       datasets:
-        - name: inverse_if_example
-          type: example
-          license: "Apache 2.0"
-          jsonl_fpath: resources_servers/inverse_if/data/example.jsonl
-        - name: inverse_if_train
-          type: train
-          license: "TBD"
-          jsonl_fpath: resources_servers/inverse_if/data/inverse_if.jsonl
+      - name: inverse_if_example
+        type: example
+        license: "Apache 2.0"
+        jsonl_fpath: resources_servers/inverse_if/data/example.jsonl
+      - name: inverse_if_train
+        type: train
+        license: "TBD"
+        jsonl_fpath: resources_servers/inverse_if/data/inverse_if.jsonl
 
 # ============================================================================
 # Judge Model Server Configuration
@@ -134,3 +124,13 @@ inverse_if_simple_agent:
 #       model: ${judge_model_name}
 #       return_token_id_information: false
 #       uses_reasoning_parser: true
+inverse_if_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: inverse_if
+      model_server:
+        type: responses_api_models
+        name: policy_model

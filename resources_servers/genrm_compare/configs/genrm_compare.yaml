@@ -19,37 +19,36 @@ genrm_compare_resources_server:
   resources_servers:
     genrm_compare:
       entrypoint: app.py
-      
+
       # GenRM model server: points to the "genrm_model" block above (or another config with that name)
       genrm_model_server:
         type: responses_api_models
         name: genrm_model
-      
+
       # Cohort-based verify (Difference 1): number of rollouts per prompt before running comparison.
       # When > 1, verify() buffers by task/prompt identity and returns relative rewards when a cohort is full.
       # Ensure rollout data has this many rows per prompt (e.g. num_repeats in rollout collection).
       num_rollouts_per_prompt: 16
-      
+
       # Generation params for GenRM calls
       genrm_responses_create_params:
         input: []
         max_output_tokens: 16384
         temperature: 0.6
         top_p: 0.95
-      
+
       # Comparison strategy: "all_pairs" (C(n,2) comparisons) or "circular" (n comparisons)
       comparison_strategy: circular
-      
+
       # Number of judge passes per pair (for majority voting)
       num_judges_per_comparison: 1
-      
+
       # Principle-based comparison
       use_principle: false
       # default_principle: "..." (see code for full default text)
-      
       # Aggregator method (only "simple_tiebreaker" is currently supported)
       aggregator_method: simple_tiebreaker
-      
+
       # Bonus for shortest reasoning trace if in top percentile
       reasoning_bonus: 0.0
       # Bonus for shortest final answer if in top percentile
@@ -63,18 +62,18 @@ genrm_compare_resources_server:
       # Group-relative style penalty coefficient
       # Lower formatting density (headers, lists, bold, emoji) gets bonus
       group_style_penalty_coeff: 0.0
-      
+
       # Default scores when parsing fails
       default_score: 3.0
       default_ranking: 3.5
-      
+
       # Debug logging
       debug_logging: false
-      
+
       # Parse retry configuration
       genrm_parse_retries: 3
       genrm_parse_retry_sleep_s: 0.2
-      
+
       # Server metadata
       domain: rlhf
       verified: false
@@ -83,6 +82,11 @@ genrm_compare_resources_server:
 
 # GenRM model server (local vLLM). Same structure as responses_api_models/genrm_model/configs/genrm_model.yaml.
 # Uses ${genrm_model_name} from env. Load this block when running genrm_compare, or load that file instead.
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/genrm_compare/data/example.jsonl
+
 genrm_model:
   responses_api_models:
     genrm_model:
@@ -91,7 +95,7 @@ genrm_model:
       return_token_id_information: false
       uses_reasoning_parser: false  # GenRM outputs structured JSON, not reasoning
       supports_principle_role: true
-      hf_home: null
+      hf_home:
       vllm_serve_env_vars:
         VLLM_RAY_DP_PACK_STRATEGY: strict
       vllm_serve_kwargs:
@@ -113,11 +117,6 @@ genrm_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/genrm_compare/data/example.jsonl
-
 genrm_simple_agent_reasoning_off:
   responses_api_agents:
     simple_agent:
@@ -128,7 +127,7 @@ genrm_simple_agent_reasoning_off:
       model_server:
         type: responses_api_models
         name: policy_model_reasoning_off
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/genrm_compare/data/example.jsonl
+fan_out:
+  genrm_compare_resources_server:
+  - genrm_simple_agent
+  - genrm_simple_agent_reasoning_off

@@ -7,6 +7,14 @@ reasoning_gym:
       description: Hermes Agent with terminal, file, code_execution, skills, todo toolsets on reasoning_gym tasks
       value: Improve model reasoning capabilities in hermes agent harness
 
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: environments/hermes_reasoning_gym/data/example.jsonl
+      - name: train
+        type: train
+        jsonl_fpath: environments/hermes_reasoning_gym/data/train_knights_knaves.jsonl
+        license: Apache 2.0
 hermes_reasoning_gym_agent:
   responses_api_agents:
     hermes_agent:
@@ -25,11 +33,3 @@ hermes_reasoning_gym_agent:
       system_prompt: |
         You are a precise reasoning assistant. You have access to a terminal tool to run Python for calculations or verification.
         Use it when computation would help. State your final answer clearly.
-      datasets:
-        - name: example
-          type: example
-          jsonl_fpath: environments/hermes_reasoning_gym/data/example.jsonl
-        - name: train
-          type: train
-          jsonl_fpath: environments/hermes_reasoning_gym/data/train_knights_knaves.jsonl
-          license: Apache 2.0

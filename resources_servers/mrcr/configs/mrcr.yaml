@@ -7,6 +7,12 @@ mrcr_resources_server:
       description: Multi-round coreference resolution over multi-turn conversations with prefix-gated SequenceMatcher grading
       value: Improve long-context in-context retrieval and needle-count-aware reasoning
 
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/mrcr/data/example.jsonl
+        num_repeats: 1
+        license: MIT
 mrcr_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -17,9 +23,3 @@ mrcr_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/mrcr/data/example.jsonl
-        num_repeats: 1
-        license: MIT

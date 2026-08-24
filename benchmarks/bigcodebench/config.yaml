@@ -1,5 +1,5 @@
 config_paths:
-  - resources_servers/bigcodebench/configs/bigcodebench.yaml
+- resources_servers/bigcodebench/configs/bigcodebench.yaml
 
 bigcodebench_benchmark_simple_agent:
   responses_api_agents:
@@ -18,3 +18,4 @@ bigcodebench_benchmark_simple_agent:
         prompt_config: benchmarks/prompts/eval/bigcodebench/codegen.yaml
         prepare_script: benchmarks/bigcodebench/prepare.py
         license: Apache 2.0
+        agent: bigcodebench_benchmark_simple_agent

@@ -1,15 +1,11 @@
 config_paths:
-  - resources_servers/frontierscience_judge/configs/frontierscience_judge.yaml
+- resources_servers/frontierscience_judge/configs/frontierscience_judge.yaml
 
 frontierscience_olympiad_frontierscience_judge_resources_server:
   _inherit_from: frontierscience_judge
 
-frontierscience_olympiad_frontierscience_judge_simple_agent:
-  _inherit_from: frontierscience_judge_simple_agent
-  responses_api_agents:
-    simple_agent:
-      resources_server:
-        name: frontierscience_olympiad_frontierscience_judge_resources_server
+  resources_servers:
+    frontierscience_judge:
       datasets:
       - name: frontierscience_olympiad
         type: benchmark
@@ -17,3 +13,10 @@ frontierscience_olympiad_frontierscience_judge_simple_agent:
         prompt_config: benchmarks/prompts/generic/default.yaml
         prepare_script: benchmarks/frontierscience_olympiad/prepare.py
         license: Apache 2.0
+        agent: frontierscience_olympiad_frontierscience_judge_simple_agent
+frontierscience_olympiad_frontierscience_judge_simple_agent:
+  _inherit_from: frontierscience_judge_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: frontierscience_olympiad_frontierscience_judge_resources_server

@@ -7,6 +7,14 @@ reasoning_gym:
       description: Simple Strands Agent harness with reasoning gym tasks
       value: Improve reasoning capabilities with Simple Strands Agent
 
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: environments/simple_strands_reasoning_gym/data/train.jsonl
+        license: Apache 2.0
+      - name: example
+        type: example
+        jsonl_fpath: environments/simple_strands_reasoning_gym/data/example.jsonl
 simple_strands_reasoning_gym_agent:
   responses_api_agents:
     simple_strands_agent:
@@ -27,11 +35,3 @@ simple_strands_reasoning_gym_agent:
       system_prompt: |
         This is a standalone reasoning task, not a repository task. Do not edit files. Use bash
         when helpful. Put only the final answer in \boxed{}.
-      datasets:
-      - name: train
-        type: train
-        jsonl_fpath: environments/simple_strands_reasoning_gym/data/train.jsonl
-        license: Apache 2.0
-      - name: example
-        type: example
-        jsonl_fpath: environments/simple_strands_reasoning_gym/data/example.jsonl

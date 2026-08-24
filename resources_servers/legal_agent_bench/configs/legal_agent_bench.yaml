@@ -14,7 +14,7 @@ legal_agent_bench:
       judge_base_url: ${oc.select:judge_base_url,null}
       judge_api_key: ${oc.select:judge_api_key,null}
       judge_model_name: ${oc.select:judge_model_name,null}
-      judge_temperature: null
+      judge_temperature:
       judge_request_timeout_seconds: 90
       judge_max_retries: 1
       judge_structured_output: true
@@ -22,6 +22,16 @@ legal_agent_bench:
       judge_repair_max_tokens: 4096
       judge_max_tokens: 4096
       judge_parallelism: 6
+
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/legal_agent_bench/data/example.jsonl
+        license: MIT
+      - name: legal_agent_bench
+        type: validation
+        jsonl_fpath: resources_servers/legal_agent_bench/data/generated/all.jsonl
+        license: MIT
 
 responses_create_params:
   temperature: 1.0
@@ -37,7 +47,7 @@ legal_agent_bench_harbor_agent:
         legal_agent_bench:
           local_dataset_path: ${legal_agent_bench.resources_servers.legal_agent_bench.harbor_tasks_dir}
 
-      harbor_agent_name: null
+      harbor_agent_name:
       harbor_agent_import_path: resources_servers.legal_agent_bench.legal_harbor_agent:LegalAgentBenchHarborAgent
       harbor_agent_kwargs:
         agent_id: legal-agent-bench
@@ -50,26 +60,19 @@ legal_agent_bench_harbor_agent:
         agent_model_timeout_seconds: 1800
 
       harbor_environment_type: docker
-      harbor_environment_import_path: null
+      harbor_environment_import_path:
       harbor_environment_kwargs: {}
 
       model_server:
         type: responses_api_models
         name: policy_model
 
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/legal_agent_bench/data/example.jsonl
-        license: MIT
-      - name: legal_agent_bench
-        type: validation
-        jsonl_fpath: resources_servers/legal_agent_bench/data/generated/all.jsonl
-        license: MIT
-
       harbor_agent_override_timeout: 10800
-      harbor_agent_max_timeout: null
+      harbor_agent_max_timeout:
       harbor_verifier_override_timeout: 3600
-      harbor_verifier_max_timeout: null
-      harbor_timeout_multiplier: null
+      harbor_verifier_max_timeout:
+      harbor_timeout_multiplier:
       harbor_jobs_dir: results/legal_agent_bench/harbor_jobs
+      resources_server:
+        type: resources_servers
+        name: legal_agent_bench

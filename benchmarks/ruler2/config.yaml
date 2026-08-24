@@ -1,15 +1,11 @@
 config_paths:
-  - resources_servers/ruler2/configs/ruler2.yaml
+- resources_servers/ruler2/configs/ruler2.yaml
 
 ruler2_benchmark_resources_server:
   _inherit_from: ruler2_resources_server
 
-ruler2_benchmark_simple_agent:
-  _inherit_from: ruler2_simple_agent
-  responses_api_agents:
-    simple_agent:
-      resources_server:
-        name: ruler2_benchmark_resources_server
+  resources_servers:
+    ruler2:
       datasets:
       - name: ruler2
         type: benchmark
@@ -17,3 +13,10 @@ ruler2_benchmark_simple_agent:
         prompt_config: benchmarks/ruler2/prompts/default.yaml
         prepare_script: benchmarks/ruler2/prepare.py
         license: Apache 2.0
+        agent: ruler2_benchmark_simple_agent
+ruler2_benchmark_simple_agent:
+  _inherit_from: ruler2_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: ruler2_benchmark_resources_server

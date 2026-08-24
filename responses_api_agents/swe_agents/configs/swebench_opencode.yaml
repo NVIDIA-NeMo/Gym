@@ -1,7 +1,7 @@
 # SWE-bench wrapper configuration for opencode
 swe_agents:
   responses_api_agents:
-    swe_agents: &swe_agents_config
+    swe_agents:
       entrypoint: app.py
       domain: coding
       description: SWE-bench driven by the opencode agent framework.
@@ -16,7 +16,7 @@ swe_agents:
 
       # Container configuration (same SIFs as the openhands path)
       container_formatter: ???
-      container_folder_path: null
+      container_folder_path:
       swebench_agent_timeout: 1800
       swebench_tests_timeout: 900
       apptainer_memory_limit_mb: 32768
@@ -32,37 +32,28 @@ swe_agents:
 
       datasets:
         # Training dataset
-        - name: train
-          type: train
-          jsonl_fpath: responses_api_agents/swe_agents/data/swegym_for_sweagent_and_openhands.jsonl
-          gitlab_identifier:
-            dataset_name: swegym_for_sweagent_and_openhands
-            version: 0.0.2
-            artifact_fpath: swegym-converted.jsonl
-          license: Apache 2.0
+      - name: train
+        type: train
+        jsonl_fpath: responses_api_agents/swe_agents/data/swegym_for_sweagent_and_openhands.jsonl
+        gitlab_identifier:
+          dataset_name: swegym_for_sweagent_and_openhands
+          version: 0.0.2
+          artifact_fpath: swegym-converted.jsonl
+        license: Apache 2.0
         # Validation dataset
-        - name: validation
-          type: validation
-          jsonl_fpath: responses_api_agents/swe_agents/data/swebench_verified_for_sweagent_and_openhands.jsonl
-          gitlab_identifier:
-            dataset_name: swebench_verified_for_sweagent_and_openhands
-            version: 0.0.1
-            artifact_fpath: swebench_verified_for_sweagent_and_openhands.jsonl
-          license: TBD
+      - name: validation
+        type: validation
+        jsonl_fpath: responses_api_agents/swe_agents/data/swebench_verified_for_sweagent_and_openhands.jsonl
+        gitlab_identifier:
+          dataset_name: swebench_verified_for_sweagent_and_openhands
+          version: 0.0.1
+          artifact_fpath: swebench_verified_for_sweagent_and_openhands.jsonl
+        license: TBD
         # Example dataset for quick testing
-        - name: example
-          type: example
-          jsonl_fpath: responses_api_agents/swe_agents/data/example.jsonl
+      - name: example
+        type: example
+        jsonl_fpath: responses_api_agents/swe_agents/data/example.jsonl
 
 # Alias copies so input rows whose `agent_ref.name` is `swe_agents_val` or
 # `swe_agents_train` (baked in by upstream dataset prep, matching the keys
 # `swebench_multi_tools.yaml` exposes) resolve against this same config.
-swe_agents_val:
-  responses_api_agents:
-    swe_agents:
-      <<: *swe_agents_config
-
-swe_agents_train:
-  responses_api_agents:
-    swe_agents:
-      <<: *swe_agents_config

@@ -13,12 +13,6 @@ scicode:
       num_processes: 20
       timeout_secs: 30.0
       test_data_fpath: null
-
-scicode_agent:
-  responses_api_agents:
-    scicode_agent:
-      resources_server:
-        name: scicode
       datasets:
         - name: example
           type: example
@@ -26,3 +20,9 @@ scicode_agent:
           prompt_config: null
           num_repeats: 1
           license: Apache 2.0
+
+scicode_agent:
+  responses_api_agents:
+    scicode_agent:
+      resources_server:
+        name: scicode

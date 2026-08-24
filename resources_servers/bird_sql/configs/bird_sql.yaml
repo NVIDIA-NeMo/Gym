@@ -16,6 +16,11 @@ bird_sql_resources_server:
       description: Text-to-SQL with execution-based evaluation on BIRD dev (1534 SQLite tasks). Binary reward from unordered result-set equality.
       value: Improve text-to-SQL capabilities on BIRD's realistic dev split using execution-based binary reward without an LLM judge.
 
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/bird_sql/data/example.jsonl
+        license: Creative Commons Attribution-ShareAlike 4.0 International
 bird_sql_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -26,8 +31,3 @@ bird_sql_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-        - name: example
-          type: example
-          jsonl_fpath: resources_servers/bird_sql/data/example.jsonl
-          license: Creative Commons Attribution-ShareAlike 4.0 International

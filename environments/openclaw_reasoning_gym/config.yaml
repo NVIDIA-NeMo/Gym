@@ -7,6 +7,14 @@ reasoning_gym:
       description: OpenClaw agent harness on Reasoning Gym tasks
       value: Evaluate model reasoning capabilities in the OpenClaw agent harness
 
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: environments/openclaw_reasoning_gym/data/example.jsonl
+      - name: train
+        type: train
+        jsonl_fpath: environments/openclaw_reasoning_gym/data/train_knights_knaves.jsonl
+        license: Apache 2.0
 openclaw_reasoning_gym_agent:
   responses_api_agents:
     openclaw_agent:
@@ -35,11 +43,3 @@ openclaw_reasoning_gym_agent:
               - id: nvidia/qwen/qwen3-next-80b-a3b-instruct
                 name: nvidia/qwen/qwen3-next-80b-a3b-instruct
                 api: openai-completions
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: environments/openclaw_reasoning_gym/data/example.jsonl
-      - name: train
-        type: train
-        jsonl_fpath: environments/openclaw_reasoning_gym/data/train_knights_knaves.jsonl
-        license: Apache 2.0

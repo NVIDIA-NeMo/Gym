@@ -3,7 +3,7 @@
 # `context_tokens` with the Nemotron-3-Super HF tokenizer and drops
 # samples whose tokenized context exceeds 1048576 tokens.
 config_paths:
-  - resources_servers/mcqa/configs/mcqa.yaml
+- resources_servers/mcqa/configs/mcqa.yaml
 
 longbench_v2_n3_1m_mcqa_simple_agent:
   _inherit_from: mcqa_simple_agent
@@ -15,3 +15,4 @@ longbench_v2_n3_1m_mcqa_simple_agent:
         jsonl_fpath: benchmarks/longbench_v2/data/longbench_v2_n3_1m_benchmark.jsonl
         prompt_config: benchmarks/longbench_v2/prompts/default.yaml
         prepare_script: benchmarks/longbench_v2/prepare_n3_1m.py
+        agent: longbench_v2_n3_1m_mcqa_simple_agent

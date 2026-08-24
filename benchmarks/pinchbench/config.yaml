@@ -3,7 +3,7 @@
 
 # Chain to existing agent config
 config_paths:
-  - responses_api_agents/pinchbench/configs/pinchbench.yaml
+- responses_api_agents/pinchbench/configs/pinchbench.yaml
 
 # Run-time knobs the agent config interpolates. Declared here so `gym list` and
 # `gym eval prepare` resolve without them; a null reaching the agent fails fast in
@@ -28,7 +28,8 @@ pinchbench_benchmark_agent:
       - name: pinchbench
         type: benchmark
         jsonl_fpath: benchmarks/pinchbench/data/pinchbench_benchmark.jsonl
-        prompt_config: null
+        prompt_config:
         prepare_script: benchmarks/pinchbench/prepare.py
         num_repeats: 10
         license: MIT
+        agent: pinchbench_benchmark_agent

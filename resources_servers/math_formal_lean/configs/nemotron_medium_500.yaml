@@ -10,6 +10,11 @@ math_formal_lean:
       description: Lean4 formal proof verification environment
       value: Improve formal theorem proving capabilities
 
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/math_formal_lean/data/nemotron_medium_500.jsonl
+        license: Apache 2.0
 math_formal_lean_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -20,8 +25,3 @@ math_formal_lean_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: train
-        type: train
-        jsonl_fpath: resources_servers/math_formal_lean/data/nemotron_medium_500.jsonl
-        license: Apache 2.0

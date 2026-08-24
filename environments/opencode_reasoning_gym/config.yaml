@@ -7,6 +7,14 @@ reasoning_gym:
       description: OpenCode agent harness on Reasoning Gym tasks
       value: Evaluate model reasoning capabilities in the OpenCode agent harness
 
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: environments/opencode_reasoning_gym/data/example.jsonl
+      - name: train
+        type: train
+        jsonl_fpath: environments/opencode_reasoning_gym/data/train_knights_knaves.jsonl
+        license: Apache 2.0
 opencode_reasoning_gym_agent:
   responses_api_agents:
     opencode_agent:
@@ -37,11 +45,3 @@ opencode_reasoning_gym_agent:
               apiKey: ${policy_api_key}
             models:
               nvidia/qwen/qwen3-next-80b-a3b-instruct: {}
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: environments/opencode_reasoning_gym/data/example.jsonl
-      - name: train
-        type: train
-        jsonl_fpath: environments/opencode_reasoning_gym/data/train_knights_knaves.jsonl
-        license: Apache 2.0

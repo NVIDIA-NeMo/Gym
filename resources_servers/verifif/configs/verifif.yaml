@@ -22,6 +22,10 @@ verifif:
       judge_top_p: 0.8
       judge_max_tokens: 10000
 
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/verifif/data/example.jsonl
 verifif_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -32,7 +36,3 @@ verifif_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/verifif/data/example.jsonl

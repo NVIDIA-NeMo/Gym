@@ -44,6 +44,10 @@ openair_congestion:
       # cell_capacity_mbps: 60.0
       # Optional reward_weights overrides must match the contract used for any
       # comparison with previously recorded scores.
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/openair_congestion/data/example.jsonl
 openair_congestion_gymnasium_agent:
   responses_api_agents:
     # Inner key 'gymnasium_agent' must match the shared
@@ -62,7 +66,3 @@ openair_congestion_gymnasium_agent:
       # rows and agent_max_steps above, so env, server, and agent terminate
       # in lockstep).
       max_steps: 16
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/openair_congestion/data/example.jsonl
