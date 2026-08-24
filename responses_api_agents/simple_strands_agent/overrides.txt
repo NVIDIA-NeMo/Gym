@@ -1,0 +1,3 @@
+numpy==2.3.2
+openai==2.21.0
+pyarrow==25.0.0

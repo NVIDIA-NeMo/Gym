@@ -1,0 +1,34 @@
+config_paths:
+- benchmarks/nemotron_3.5_super/eval_container_config.yaml
+
+# @bxyu-nvidia: We manually copy over the datasets here
+opencode_sandboxed_agent_swebench_verified:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      datasets:
+        - name: swebench_verified
+          type: benchmark
+          jsonl_fpath: benchmarks/swebench/data/swebench_verified_benchmark.jsonl
+          prepare_script: benchmarks/swebench/verified/prepare.py
+          num_repeats: 3
+
+opencode_sandboxed_agent_swebench_multilingual:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      datasets:
+        - name: swebench_multilingual
+          type: benchmark
+          jsonl_fpath: benchmarks/swebench/data/swebench_multilingual_benchmark.jsonl
+          prepare_script: benchmarks/swebench/multilingual/prepare.py
+          num_repeats: 3
+
+opencode_sandboxed_agent_deepswe:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      datasets:
+        - name: deepswe_v1_1
+          type: benchmark
+          jsonl_fpath: benchmarks/deepswe/data/deepswe_benchmark.jsonl
+          prepare_script: benchmarks/deepswe/prepare.py
+          num_repeats: 5
+

@@ -29,6 +29,18 @@ inputs:
   test-data-path:
     description: Test data path selected by CI pre-flight
     required: true
+  model:
+    description: Optional model name exposed to the test script
+    required: false
+    default: ""
+  model-revision:
+    description: Optional immutable model revision exposed to the test script
+    required: false
+    default: ""
+  results-path:
+    description: Optional host directory mounted for test results
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -38,11 +50,32 @@ runs:
       continue-on-error: true
       shell: bash -e -u -o pipefail {0}
       env:
+        CONTAINER_RESULTS_DIR: /opt/nemo-gym/results/gpu-e2e
         CONTAINER_IMAGE: ${{ inputs.container-image }}
+        MODEL: ${{ inputs.model }}
+        MODEL_REVISION: ${{ inputs.model-revision }}
+        RESULTS_PATH: ${{ inputs.results-path }}
         TEST_DATA_PATH: ${{ inputs.test-data-path }}
         TEST_SCRIPT: ${{ inputs.script }}
         TEST_TYPE: ${{ inputs.test-type }}
       run: |
+        prepare_mount_source() {
+          local label="$1"
+          local source="$2"
+
+          if [[ "$source" != /* ]]; then
+            echo "$label must be an absolute path: $source" >&2
+            return 1
+          fi
+          mkdir -p "$source"
+          source="$(cd "$source" && pwd -P)"
+          if [[ "$source" == "/" ]]; then
+            echo "$label cannot resolve to the filesystem root." >&2
+            return 1
+          fi
+          printf '%s\n' "$source"
+        }
+
         case "$TEST_TYPE" in
           cpu)
             gpu_args=()
@@ -56,6 +89,26 @@ runs:
             ;;
         esac
 
+        TEST_DATA_PATH="$(prepare_mount_source test-data-path "$TEST_DATA_PATH")"
+        container_args=(
+          --env "TEST_DATA_PATH=/home/TestData"
+          --env "HF_HOME=/home/TestData/HF_HOME"
+          --volume "$TEST_DATA_PATH:/home/TestData"
+        )
+        if [[ -n "$RESULTS_PATH" ]]; then
+          RESULTS_PATH="$(prepare_mount_source results-path "$RESULTS_PATH")"
+          container_args+=(
+            --env "RESULTS_DIR=$CONTAINER_RESULTS_DIR"
+            --volume "$RESULTS_PATH:$CONTAINER_RESULTS_DIR"
+          )
+        fi
+        if [[ -n "$MODEL" ]]; then
+          container_args+=(--env "MODEL=$MODEL")
+        fi
+        if [[ -n "$MODEL_REVISION" ]]; then
+          container_args+=(--env "MODEL_REVISION=$MODEL_REVISION")
+        fi
+
         echo -e "\033[1;34m┌─ launching test ─────────────────────────────────────────────────────────┐\033[0m"
         echo -e "\033[1;34m│  script    : $TEST_SCRIPT\033[0m"
         echo -e "\033[1;34m│  type      : $TEST_TYPE\033[0m"
@@ -65,9 +118,8 @@ runs:
         docker pull "$CONTAINER_IMAGE"
         docker run --rm \
           "${gpu_args[@]}" \
+          "${container_args[@]}" \
           --shm-size=64g \
-          --env TEST_DATA_PATH="$TEST_DATA_PATH" \
-          --volume "$TEST_DATA_PATH:$TEST_DATA_PATH" \
           --entrypoint bash \
           "$CONTAINER_IMAGE" \
           -e -u -o pipefail "$TEST_SCRIPT"
@@ -77,6 +129,8 @@ runs:
       shell: bash -e -u -o pipefail {0}
       env:
         CONTAINER_IMAGE: ${{ inputs.container-image }}
+        MODEL: ${{ inputs.model }}
+        RESULTS_PATH: ${{ inputs.results-path }}
         TEST_OUTCOME: ${{ steps.test.outcome }}
         TEST_SCRIPT: ${{ inputs.script }}
         TEST_TYPE: ${{ inputs.test-type }}
@@ -108,6 +162,12 @@ runs:
           echo "|---|---|"
           echo "| Type | \`$TEST_TYPE\` |"
           echo "| Image | \`$CONTAINER_IMAGE\` |"
+          if [[ -n "$MODEL" ]]; then
+            echo "| Model | \`$MODEL\` |"
+          fi
+          if [[ -n "$RESULTS_PATH" ]]; then
+            echo "| Results | \`$RESULTS_PATH\` |"
+          fi
         } >> "$GITHUB_STEP_SUMMARY"
 
         if [[ "$TEST_OUTCOME" == "success" ]]; then
