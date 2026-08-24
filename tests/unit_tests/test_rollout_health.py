@@ -123,7 +123,10 @@ def test_all_eight_v1_checks_fire_on_synthetic_artifacts(tmp_path: Path) -> None
     result = run_health_checks(rollout_path, capture_dirs=[capture_dir], capture_enabled=True, workers=2)
 
     assert set(result.summary["run"]["issues"]) == {spec.id for spec in CHECK_REGISTRY}
-    assert all(result.summary["run"]["issues"][spec.id] > 0 for spec in CHECK_REGISTRY)
+    assert all(
+        result.summary["run"]["issues"][spec.id] > 0 for spec in CHECK_REGISTRY if spec.id != "unreadable_record"
+    )
+    assert result.summary["run"]["issues"]["unreadable_record"] == 0
     assert result.summary["tasks"]["0"]["flags"] == ["consistently_unhealthy_task"]
     assert "no_healthy_model_calls_task" in result.summary["tasks"]["6"]["flags"]
     assert result.summary_path == tmp_path / "quality_summary.json"
@@ -324,7 +327,89 @@ def test_persisted_trajectory_and_invocation_conversation_are_valid_capture_inpu
     ]
     assert health._nonempty(123) is False
     assert health._item_has_tool_call("bad") is False
-    assert health._item_is_agent_message("bad") is False
+    assert health._item_is_agent_content("bad") is False
+
+
+def test_response_output_groups_agent_items_into_turns_and_keeps_reasoning(tmp_path: Path) -> None:
+    record = {
+        "_ng_task_index": 0,
+        "_ng_rollout_index": 0,
+        "response": {
+            "output": [
+                {"type": "reasoning", "summary": [{"type": "summary_text", "text": "thinking"}]},
+                {"type": "message", "role": "assistant", "content": "\n"},
+                {"type": "function_call", "name": "tool", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "call-1", "output": "done"},
+                {"type": "message", "role": "assistant", "content": "finished"},
+                {"type": "message", "role": "user", "content": "ignored boundary"},
+            ]
+        },
+    }
+    rollout_path = tmp_path / "rollouts.jsonl"
+    rollout_path.write_bytes(orjson.dumps(record, option=orjson.OPT_APPEND_NEWLINE))
+
+    result = run_health_checks(rollout_path, capture_enabled=False, workers=1)
+
+    steps = health._agent_steps(record)
+    assert len(steps) == 2
+    assert steps[0].has_message and steps[0].has_tool_calls
+    assert steps[1].has_message and not steps[1].has_tool_calls
+    assert not any(finding.check == "hollow_steps" for finding in result.rollouts[0].findings)
+
+
+def test_missing_all_bindings_is_unobserved_and_embedded_capture_is_used(tmp_path: Path) -> None:
+    record = {
+        "_ng_task_index": 0,
+        "_ng_rollout_index": 0,
+        "response": {
+            "output": [
+                {"type": "message", "role": "assistant", "content": "\n"},
+                {"type": "function_call", "name": "tool", "arguments": "{}"},
+            ]
+        },
+        "ng_model_call_capture": {"calls": [_call()]},
+    }
+    rollout_path = tmp_path / "rollouts.jsonl"
+    rollout_path.write_bytes(orjson.dumps(record, option=orjson.OPT_APPEND_NEWLINE))
+    unrelated_capture_dir = tmp_path / "model_calls"
+    unrelated_capture_dir.mkdir()
+    (unrelated_capture_dir / "another-rollout.capture.jsonl").write_bytes(
+        orjson.dumps(_call(), option=orjson.OPT_APPEND_NEWLINE)
+    )
+
+    result = run_health_checks(
+        rollout_path,
+        capture_dirs=[unrelated_capture_dir],
+        capture_enabled=True,
+        workers=1,
+    )
+
+    [digest] = result.rollouts
+    assert digest.capture_observed
+    assert digest.model_calls == 1
+    assert digest.capture_prompt_tokens == 3
+    assert digest.unobserved == ["missed_metrics"]
+    assert digest.verdict == "unobserved"
+    assert not any(finding.check in {"hollow_steps", "missed_metrics"} for finding in digest.findings)
+
+
+def test_missing_one_binding_is_a_missed_metrics_finding(tmp_path: Path) -> None:
+    record = _record(0, 0)
+    record["ng_trajectory"]["turns"].append(
+        {
+            "turn_no": 2,
+            "answer": "second answer",
+            "model_calls": [],
+        }
+    )
+    rollout_path, capture_dir = _write_fixture(tmp_path, [(record, [_call()])])
+
+    result = run_health_checks(rollout_path, capture_dirs=[capture_dir], capture_enabled=True, workers=1)
+
+    missed = [finding for finding in result.rollouts[0].findings if finding.check == "missed_metrics"]
+    assert len(missed) == 1
+    assert missed[0].locator == {"turn": 2}
+    assert missed[0].detail["reason"] == "transcript step has no call binding"
 
 
 def test_correspondence_handles_raw_damaged_replayed_and_retried_capture_lines(tmp_path: Path) -> None:
@@ -408,8 +493,17 @@ def test_malformed_records_and_check_failures_become_findings(tmp_path: Path, mo
     [digest] = parsed.rollouts
     assert digest.task_index == 0 and digest.rollout_index == 0
     assert digest.verdict == "unhealthy"
-    assert digest.findings[0].detail["reason"] == "no agent turn with model activity"
-    assert any(finding.detail.get("reason") == "rollout record is unreadable" for finding in digest.findings)
+    assert len(digest.findings) == 1
+    assert digest.findings[0].check == "unreadable_record"
+    assert digest.findings[0].detail["reason"] == "rollout record is unreadable"
+    assert set(digest.unobserved) == {
+        "missing_agent_steps",
+        "hollow_steps",
+        "zero_token_turns",
+        "missed_metrics",
+        "transcript_capture_correspondence",
+        "runaway_generations",
+    }
 
     healthy = tmp_path / "healthy.jsonl"
     healthy.write_bytes(orjson.dumps(_record(0, 0), option=orjson.OPT_APPEND_NEWLINE))
@@ -419,8 +513,13 @@ def test_malformed_records_and_check_failures_become_findings(tmp_path: Path, mo
 
     monkeypatch.setitem(health._ROLLOUT_CHECKS, "missing_agent_steps", broken_check)
     checked = run_health_checks(healthy, capture_enabled=False, workers=1)
-    finding = next(item for item in checked.rollouts[0].findings if item.check == "missing_agent_steps")
-    assert finding.detail == {"reason": "check input is unreadable", "error": "TypeError"}
+    finding = next(item for item in checked.rollouts[0].findings if item.check == "unreadable_record")
+    assert finding.detail == {
+        "reason": "check input is unreadable",
+        "failed_check": "missing_agent_steps",
+        "error": "TypeError",
+    }
+    assert "missing_agent_steps" in checked.rollouts[0].unobserved
 
 
 def test_process_pool_success_path_and_run_discovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:

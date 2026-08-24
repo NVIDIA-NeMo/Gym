@@ -69,6 +69,7 @@ class Finding(BaseModel):
 
 
 CHECK_REGISTRY: tuple[CheckSpec, ...] = (
+    CheckSpec(id="unreadable_record", scope=CheckScope.ROLLOUT, reads=CheckReads.RECORD),
     CheckSpec(id="missing_agent_steps", scope=CheckScope.ROLLOUT, reads=CheckReads.RECORD),
     CheckSpec(id="hollow_steps", scope=CheckScope.ROLLOUT, reads=CheckReads.RECORD),
     CheckSpec(id="zero_token_turns", scope=CheckScope.ROLLOUT, reads=CheckReads.CAPTURE),
@@ -166,7 +167,16 @@ def _nonempty(value: Any) -> bool:
     if isinstance(value, dict):
         return any(
             _nonempty(value.get(key))
-            for key in ("text", "content", "output_text", "answer", "reasoning", "reasoning_content")
+            for key in (
+                "text",
+                "content",
+                "output_text",
+                "answer",
+                "encrypted_content",
+                "reasoning",
+                "reasoning_content",
+                "summary",
+            )
         )
     return False
 
@@ -193,14 +203,60 @@ def _item_has_tool_call(item: Any) -> bool:
     return bool(item.get("tool_calls"))
 
 
-def _item_is_agent_message(item: Any) -> bool:
+def _item_is_agent_content(item: Any) -> bool:
     if not isinstance(item, dict):
         return False
     return item.get("role") in {"assistant", "agent"} or item.get("type") in {
         "function_call",
+        "reasoning",
         "tool_call",
         "tool_use",
     }
+
+
+def _item_ends_agent_turn(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return False
+    return item.get("role") == "user" or item.get("type") in {
+        "function_call_output",
+        "tool_call_output",
+        "tool_result",
+    }
+
+
+def _response_output_steps(output: list[Any]) -> list[_AgentStep]:
+    """Group adjacent agent-side Responses items into transcript turns."""
+    steps: list[_AgentStep] = []
+    has_message = False
+    has_tool_calls = False
+    has_agent_content = False
+
+    def flush() -> None:
+        nonlocal has_message, has_tool_calls, has_agent_content
+        if has_agent_content:
+            steps.append(
+                _AgentStep(
+                    locator={"turn": len(steps)},
+                    has_message=has_message,
+                    has_tool_calls=has_tool_calls,
+                    model_call_refs=(),
+                )
+            )
+        has_message = False
+        has_tool_calls = False
+        has_agent_content = False
+
+    for item in output:
+        if _item_ends_agent_turn(item):
+            flush()
+            continue
+        if not _item_is_agent_content(item):
+            continue
+        has_agent_content = True
+        has_tool_calls = has_tool_calls or _item_has_tool_call(item)
+        has_message = has_message or _nonempty(item)
+    flush()
+    return steps
 
 
 def _agent_steps(record: dict[str, Any]) -> list[_AgentStep]:
@@ -235,7 +291,7 @@ def _agent_steps(record: dict[str, Any]) -> list[_AgentStep]:
                     filter(None, (_call_ref_key(ref) for ref in invocation.get("model_calls") or []))
                 )
                 conversation = invocation.get("conversation")
-                agent_items = [item for item in conversation or [] if _item_is_agent_message(item)]
+                agent_items = [item for item in conversation or [] if _item_is_agent_content(item)]
                 if agent_items:
                     normalized.append(
                         _AgentStep(
@@ -252,16 +308,7 @@ def _agent_steps(record: dict[str, Any]) -> list[_AgentStep]:
     output = response.get("output") if isinstance(response, dict) else None
     if not isinstance(output, list):
         return []
-    return [
-        _AgentStep(
-            locator={"turn": position},
-            has_message=_nonempty(item.get("content")) if isinstance(item, dict) else False,
-            has_tool_calls=_item_has_tool_call(item),
-            model_call_refs=(),
-        )
-        for position, item in enumerate(output)
-        if _item_is_agent_message(item)
-    ]
+    return _response_output_steps(output)
 
 
 def _normalized_embedded_calls(record: dict[str, Any]) -> list[dict[str, Any]]:
@@ -301,7 +348,12 @@ def _parse_capture(path: str | None, record: dict[str, Any]) -> tuple[list[dict[
     """Read a sidecar once, or use the persisted projection when no sidecar is available."""
     if path is None:
         embedded = _normalized_embedded_calls(record)
-        return embedded, 0, bool(embedded)
+        trajectory = record.get("ng_trajectory")
+        projected_calls = trajectory.get("model_calls") if isinstance(trajectory, dict) else None
+        attachment = record.get("ng_model_call_capture")
+        attached_calls = attachment.get("calls") if isinstance(attachment, dict) else None
+        embedded_present = isinstance(projected_calls, list) or isinstance(attached_calls, list)
+        return embedded, 0, embedded_present
 
     calls: list[dict[str, Any]] = []
     invalid = 0
@@ -430,6 +482,8 @@ def _hollow_steps(record: dict[str, Any], subject: dict[str, int | str]) -> list
 
 
 def _zero_token_turns(calls: list[dict[str, Any]], subject: dict[str, int | str]) -> list[Finding]:
+    # Until #2122 adds an originating-server role, captures can mix policy calls
+    # with auxiliary user-simulator or judge calls. Evaluate the evidence as stored.
     return [
         _finding(
             "zero_token_turns",
@@ -587,6 +641,7 @@ def _runaway_generations(calls: list[dict[str, Any]], subject: dict[str, int | s
 _ROLLOUT_CHECKS: dict[
     str, Callable[[dict[str, Any], list[dict[str, Any]], int, dict[str, int | str]], list[Finding]]
 ] = {
+    "unreadable_record": lambda record, calls, invalid, subject: [],
     "missing_agent_steps": lambda record, calls, invalid, subject: _missing_agent_steps(record, subject),
     "hollow_steps": lambda record, calls, invalid, subject: _hollow_steps(record, subject),
     "zero_token_turns": lambda record, calls, invalid, subject: _zero_token_turns(calls, subject),
@@ -628,14 +683,17 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
         ),
         None,
     )
-    if payload.driver_bypass:
+    if parse_error:
+        capture_path = None
+        calls, invalid_capture_lines, embedded_capture = [], 0, False
+    elif payload.driver_bypass:
         capture_path = None
         calls, invalid_capture_lines, embedded_capture = [], 0, False
     else:
         calls, invalid_capture_lines, embedded_capture = _parse_capture(capture_path, record)
     if payload.driver_bypass:
         capture_observed = False
-    elif capture_path is not None:
+    elif capture_path is not None or embedded_capture:
         capture_observed = True
     elif payload.capture_enabled is False or payload.captures_exist or payload.capture_enabled is True:
         capture_observed = False
@@ -645,26 +703,34 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
     unobserved: list[str] = []
 
     for spec in _ROLLOUT_SPECS:
+        if parse_error:
+            if spec.id == "unreadable_record":
+                findings.append(
+                    _finding("unreadable_record", subject, reason="rollout record is unreadable", error=parse_error)
+                )
+            else:
+                unobserved.append(spec.id)
+            continue
         needs_capture = spec.reads in {CheckReads.CAPTURE, CheckReads.BOTH}
         if needs_capture and not capture_observed:
+            unobserved.append(spec.id)
+            continue
+        if spec.id == "missed_metrics" and not any(step.model_call_refs for step in _agent_steps(record)):
             unobserved.append(spec.id)
             continue
         try:
             findings.extend(_ROLLOUT_CHECKS[spec.id](record, calls, invalid_capture_lines, subject))
         except Exception as exc:
+            unobserved.append(spec.id)
             findings.append(
                 _finding(
-                    spec.id,
+                    "unreadable_record",
                     subject,
                     reason="check input is unreadable",
+                    failed_check=spec.id,
                     error=type(exc).__name__,
                 )
             )
-
-    if parse_error:
-        findings.append(
-            _finding("missing_agent_steps", subject, reason="rollout record is unreadable", error=parse_error)
-        )
 
     verdict: Verdict = "unhealthy" if findings else "unobserved" if unobserved else "healthy"
     failed = [call for call in calls if _is_failed(call)]
