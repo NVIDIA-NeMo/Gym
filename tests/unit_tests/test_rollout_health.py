@@ -393,6 +393,21 @@ def test_missing_all_bindings_is_unobserved_and_embedded_capture_is_used(tmp_pat
     assert not any(finding.check in {"hollow_steps", "missed_metrics"} for finding in digest.findings)
 
 
+def test_empty_embedded_capture_is_unobserved(tmp_path: Path) -> None:
+    record = _record(0, 0)
+    record["ng_model_call_capture"] = {"calls": []}
+    rollout_path = tmp_path / "rollouts.jsonl"
+    rollout_path.write_bytes(orjson.dumps(record, option=orjson.OPT_APPEND_NEWLINE))
+
+    result = run_health_checks(rollout_path, capture_enabled=True, workers=1)
+
+    [digest] = result.rollouts
+    assert not digest.capture_observed
+    assert digest.model_calls == 0
+    assert set(digest.unobserved) == CAPTURE_CHECKS
+    assert digest.verdict == "unobserved"
+
+
 def test_missing_one_binding_is_a_missed_metrics_finding(tmp_path: Path) -> None:
     record = _record(0, 0)
     record["ng_trajectory"]["turns"].append(
@@ -413,7 +428,12 @@ def test_missing_one_binding_is_a_missed_metrics_finding(tmp_path: Path) -> None
 
 
 def test_correspondence_handles_raw_damaged_replayed_and_retried_capture_lines(tmp_path: Path) -> None:
-    record = _record(0, 0, usage={"input_tokens": 99, "output_tokens": 99})
+    record = _record(
+        0,
+        0,
+        refs=[{"model_call_id": "missing"}, {"model_call_id": "c1"}],
+        usage={"input_tokens": 99, "output_tokens": 99},
+    )
     rollout_path = tmp_path / "rollouts.jsonl"
     rollout_path.write_bytes(orjson.dumps(record, option=orjson.OPT_APPEND_NEWLINE))
     capture_dir = tmp_path / "captures"
@@ -456,6 +476,35 @@ def test_correspondence_handles_raw_damaged_replayed_and_retried_capture_lines(t
     assert result.summary["run"]["stats"]["duplicated_calls"] == {"replayed": 1, "rollouts": 1}
     assert health._call_identity({"response_id": "loose"}) == "response::loose"
     assert health._call_identity({}) is None
+
+
+def test_correspondence_uses_bound_calls_and_gym_ids_for_replay(tmp_path: Path) -> None:
+    record = _record(0, 0, usage={"input_tokens": 3, "output_tokens": 2})
+    rollout_path, capture_dir = _write_fixture(
+        tmp_path,
+        [
+            (
+                record,
+                [
+                    _call(model_call_id="c1", response_id="placeholder"),
+                    _call(
+                        model_call_id="auxiliary",
+                        response_id="placeholder",
+                        tokens_in=100,
+                        tokens_out=50,
+                    ),
+                ],
+            )
+        ],
+    )
+
+    result = run_health_checks(rollout_path, capture_dirs=[capture_dir], capture_enabled=True, workers=1)
+
+    correspondence = [
+        finding for finding in result.rollouts[0].findings if finding.check == "transcript_capture_correspondence"
+    ]
+    assert not correspondence
+    assert result.summary["run"]["stats"]["duplicated_calls"] == {"replayed": 0, "rollouts": 0}
 
 
 def test_explicit_deterministic_dispatch_and_nonempty_length_response_are_exempt(tmp_path: Path) -> None:

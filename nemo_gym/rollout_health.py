@@ -348,12 +348,7 @@ def _parse_capture(path: str | None, record: dict[str, Any]) -> tuple[list[dict[
     """Read a sidecar once, or use the persisted projection when no sidecar is available."""
     if path is None:
         embedded = _normalized_embedded_calls(record)
-        trajectory = record.get("ng_trajectory")
-        projected_calls = trajectory.get("model_calls") if isinstance(trajectory, dict) else None
-        attachment = record.get("ng_model_call_capture")
-        attached_calls = attachment.get("calls") if isinstance(attachment, dict) else None
-        embedded_present = isinstance(projected_calls, list) or isinstance(attached_calls, list)
-        return embedded, 0, embedded_present
+        return embedded, 0, bool(embedded)
 
     calls: list[dict[str, Any]] = []
     invalid = 0
@@ -404,12 +399,8 @@ def _call_identity(call: dict[str, Any]) -> str | None:
 
 
 def _replay_identity(call: dict[str, Any]) -> str | None:
-    model_ref = call.get("model_ref")
-    response_id = call.get("response_id")
-    if isinstance(model_ref, dict) and response_id:
-        return f"response:{model_ref.get('type')}:{model_ref.get('name')}:{response_id}"
-    if response_id:
-        return f"response::{response_id}"
+    # Gym assigns model_call_id per invocation. Provider response IDs are only a
+    # fallback: some backends reuse a placeholder response ID for distinct calls.
     return _call_identity(call)
 
 
@@ -537,15 +528,18 @@ def _correspondence(
         )
 
     refs = [ref for step in _agent_steps(record) for ref in step.model_call_refs]
+    calls_by_id = {identity: call for call in calls if (identity := _call_identity(call)) is not None}
     call_ids = [identity for call in calls if (identity := _replay_identity(call)) is not None]
-    if refs and len(refs) != len(calls):
+    missing_refs = [ref for ref in refs if ref not in calls_by_id]
+    if missing_refs:
         findings.append(
             _finding(
                 "transcript_capture_correspondence",
                 subject,
                 kind="call_count_delta",
                 transcript=len(refs),
-                capture=len(calls),
+                bound=len(refs) - len(missing_refs),
+                missing=len(missing_refs),
             )
         )
 
@@ -601,10 +595,15 @@ def _correspondence(
         )
 
     transcript_prompt, transcript_completion, transcript_usage_present = _transcript_tokens(record)
-    capture_prompt = sum(_token_count(call, "tokens_in") for call in calls)
-    capture_completion = sum(_token_count(call, "tokens_out") for call in calls)
-    capture_usage_present = any(
-        type(call.get("tokens_in")) is int or type(call.get("tokens_out")) is int for call in calls
+    # Top-level transcript usage describes policy work, while capture sidecars
+    # can also contain auxiliary user-simulator and judge calls. Until captures
+    # carry the #2122 originating-role stamp, only explicit transcript bindings
+    # prove which calls belong in token reconciliation.
+    bound_calls = [calls_by_id[ref] for ref in refs if ref in calls_by_id]
+    capture_prompt = sum(_token_count(call, "tokens_in") for call in bound_calls)
+    capture_completion = sum(_token_count(call, "tokens_out") for call in bound_calls)
+    capture_usage_present = bool(bound_calls) and any(
+        type(call.get("tokens_in")) is int or type(call.get("tokens_out")) is int for call in bound_calls
     )
     if (
         transcript_usage_present
