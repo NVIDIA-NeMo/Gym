@@ -102,8 +102,8 @@ the case that motivated sharing.
 
 ### Tracing is off unless configured
 
-`IdeGYMClient` defaults its OTLP endpoint to a JetBrains-hosted collector, so constructing it with no
-`otel_config` sends traces to a third party. The session always passes an explicit `OTELConfig`, and
+`IdeGYMClient` ships a default OTLP endpoint, so constructing it with no `otel_config` sends traces
+off-box to a third party. The session always passes an explicit `OTELConfig`, and
 `connection.tracing_endpoint` is `null` by default. Opting in is a config change.
 
 ### The SDK's httpx transport is replaced
@@ -217,12 +217,22 @@ timeout patterns are anchored to the surrounding message. Searching the whole st
 output like `curl failed: status=404` mark a healthy sandbox as gone, or `pytest ... timed out after
 30s` read as a command timeout.
 
-### Retries re-name the server
+### Server names are not made unique
 
-A start-server retry takes a fresh uniqueness suffix, because an attempt whose response was lost may
-have landed anyway; reusing the name would make IdeGYM offer that half-created server back as a reuse
-candidate. The orphan is reaped by IdeGYM's watcher once the client stops heartbeating. A pinned
-`provider_options.server_name` is kept across retries, since pinning is an explicit opt-in to reuse.
+The provider sends `<prefix>-<metadata hints>` and stops there. IdeGYM appends its own autoincrement
+id to derive `generated_name`, and that is the name Kubernetes sees and the only one the database
+keeps unique (`server_name` is an unconstrained column). Adding a random suffix on top would buy no
+uniqueness, cost 9 characters of the 63-character budget that instance ids need, and make pod names
+harder to read.
+
+It would also mislead: a suffix looks like it prevents unintended reuse, but reuse is skipped
+entirely unless `reuse_strategy` is `RESTART`/`RESET`, and even then only servers left `FINISHED`
+qualify — while this provider always *stops* the servers it creates, which marks them `STOPPED`.
+
+The same reasoning applies to retries, which keep the name rather than re-rolling it: an attempt whose
+response was lost may have landed anyway, but that orphan gets its own `generated_name` and is reaped
+by the watcher once the client stops heartbeating. Renaming would only break the name matching that a
+pinned `provider_options.server_name` exists to drive.
 
 ### Metadata cannot become labels
 

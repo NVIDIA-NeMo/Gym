@@ -423,8 +423,8 @@ def test_build_client_constructs_a_real_sdk_client(monkeypatch: pytest.MonkeyPat
     """Construct the real ``IdeGYMClient`` (no I/O) and check what it was handed.
 
     This is the one place the provider's constructor arguments meet the SDK's, and
-    it is also where tracing is pinned off: the SDK's own default endpoint is a
-    JetBrains-hosted collector.
+    it is also where tracing is pinned off: the SDK ships a default OTLP endpoint
+    that traces off-box.
     """
     from idegym.client import IdeGYMClient
 
@@ -666,7 +666,7 @@ def test_aiohttp_backend_falls_back_when_the_bridge_is_missing(
 
 
 def test_tracing_stays_off_unless_an_endpoint_is_configured() -> None:
-    """The SDK defaults to a JetBrains-hosted collector; the provider must not."""
+    """The SDK traces to its default off-box collector; the provider must not."""
     from idegym.api.config import OTELConfig, TracingConfig
 
     assert OTELConfig(tracing=TracingConfig(endpoint=None)).tracing.enabled is False

@@ -116,12 +116,7 @@ def _httpx() -> ModuleType | None:
 
 
 def is_command_timeout(exc: BaseException) -> bool:
-    """Whether a failure means the command ran out of time.
-
-    Covers the sandbox killing the process group and answering with a 500, and the
-    client giving up waiting. ``httpx.ConnectTimeout`` is excluded: failing to reach
-    the orchestrator at all is a connectivity problem, not a slow command.
-    """
+    """Whether a failure means the command ran out of time."""
     if isinstance(exc, TimeoutError):
         return True
     httpx = _httpx()
@@ -131,13 +126,7 @@ def is_command_timeout(exc: BaseException) -> bool:
 
 
 def is_retryable(exc: BaseException) -> bool:
-    """Whether a control-plane failure is transient enough to retry.
-
-    Covers transport failures — the SDK lets httpx's through unwrapped, and
-    ``httpx.TransportError`` is not a builtin ``ConnectionError`` — plus the
-    orchestrator's back-pressure and availability statuses. Anything else is more
-    likely a bad request or a bug than a blip, so it is not retried.
-    """
+    """Whether a control-plane failure is transient enough to retry."""
     if isinstance(exc, (ConnectionError, TimeoutError)):
         return True
     httpx = _httpx()

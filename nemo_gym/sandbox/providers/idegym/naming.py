@@ -16,29 +16,26 @@
 
 Names carry more weight in IdeGYM than in most backends, which is why they get their
 own module. A *client* name is what resource-quota rules match by regex and what groups
-a job in the dashboard. A *server* name becomes the Kubernetes resource name, is what
-IdeGYM matches when looking for a server to reuse, and must satisfy RFC-1035 syntax
-with room left for the ``-<server_id>`` suffix the orchestrator appends.
+a job in the dashboard. A *server* name is one of the filters IdeGYM matches on when a
+``RESTART``/``RESET`` reuse strategy sends it looking for a server to reuse, and it
+prefixes the Kubernetes resource name, so it must satisfy RFC-1035 syntax with room
+left for the ``-<server_id>`` suffix the orchestrator appends. It need not be unique:
+that suffix is what makes the Kubernetes name unique.
 """
 
 import re
-import uuid
 
-from nemo_gym.sandbox.providers.idegym.config import (
-    MAX_SERVER_NAME_LENGTH,
-    SERVER_ID_SUFFIX_RESERVE,
-    SERVER_NAME_UNIQUE_SUFFIX_LENGTH,
-)
+from nemo_gym.sandbox.providers.idegym.config import MAX_SERVER_NAME_LENGTH, SERVER_ID_SUFFIX_RESERVE
 
 
-# Names end up in Kubernetes objects, log lines, and operator-written regexes, so
-# they are reduced to a conservative DNS-ish alphabet: an attribution value or task
-# id picked up from the environment must not be able to produce something invalid.
+# Names end up in Kubernetes objects, log lines, and operator-written regexes, so an
+# attribution value or task id picked up from the environment is reduced to a
+# conservative DNS-ish alphabet rather than trusted to be valid.
 _UNSAFE_NAME_CHARS = re.compile(r"[^a-z0-9-]+")
 
 MAX_CLIENT_NAME_LENGTH = 63
-# RFC-1035 label names must start with a letter, so a stem that survives
-# sanitization but starts with a digit needs a fallback.
+# RFC-1035 labels must start with a letter, so a stem that survives sanitization but
+# starts with a digit needs a fallback.
 FALLBACK_SERVER_NAME_STEM = "idegym"
 
 
@@ -52,32 +49,23 @@ def clamp_client_name(value: str) -> str:
     return value[:MAX_CLIENT_NAME_LENGTH].rstrip("-")
 
 
-def refresh_unique_suffix(name: str) -> str:
-    """Return ``name`` with a fresh uniqueness suffix.
+def generate_server_name(prefix: str, hints: list[str]) -> str:
+    """Build an RFC-1035 server name from ``prefix`` and ``hints``.
 
-    Used when a start-server call is retried: the previous attempt may have landed
-    even though its response was lost, and reusing the name would make IdeGYM treat
-    that half-created server as a reuse candidate.
+    ``hints`` are best-effort context (a benchmark instance id) and are truncated away
+    first when the budget runs out. The name deliberately carries no uniqueness suffix:
+    IdeGYM appends its own autoincrement id to derive ``<server_name>-<server_id>``,
+    and that is the name Kubernetes sees and the column the database keeps unique.
     """
-    stem, _, _ = name.rpartition("-")
-    return f"{stem or name}-{uuid.uuid4().hex[:SERVER_NAME_UNIQUE_SUFFIX_LENGTH]}"
-
-
-def generate_server_name(prefix: str, hints: list[str], *, unique_suffix: str | None = None) -> str:
-    """Build a unique RFC-1035 server name from ``prefix`` and ``hints``.
-
-    ``hints`` are best-effort context (a benchmark instance id, say) and are
-    truncated away first when the budget runs out; the uniqueness suffix is never
-    dropped, because two concurrent sandboxes sharing a name would make IdeGYM
-    treat one as a candidate for reusing the other.
-    """
-    suffix = unique_suffix or uuid.uuid4().hex[:SERVER_NAME_UNIQUE_SUFFIX_LENGTH]
-    budget = MAX_SERVER_NAME_LENGTH - SERVER_ID_SUFFIX_RESERVE - len(suffix) - 1
+    budget = MAX_SERVER_NAME_LENGTH - SERVER_ID_SUFFIX_RESERVE
     if budget < 1:
-        raise ValueError(f"Server name suffix {suffix!r} leaves no room for a name stem")
-    stem = sanitize_name("-".join([prefix, *hints]))[:budget].rstrip("-")
-    if not stem or not stem[0].isalpha():
-        stem = sanitize_name(prefix)[:budget].rstrip("-")
-    if not stem or not stem[0].isalpha():
-        stem = FALLBACK_SERVER_NAME_STEM[:budget]
-    return f"{stem}-{suffix}"
+        raise ValueError(
+            f"MAX_SERVER_NAME_LENGTH={MAX_SERVER_NAME_LENGTH} leaves no room for a name after "
+            f"reserving {SERVER_ID_SUFFIX_RESERVE} for the server id IdeGYM appends"
+        )
+    name = sanitize_name("-".join([prefix, *hints]))[:budget].rstrip("-")
+    if not name or not name[0].isalpha():
+        name = sanitize_name(prefix)[:budget].rstrip("-")
+    if not name or not name[0].isalpha():
+        name = FALLBACK_SERVER_NAME_STEM[:budget]
+    return name

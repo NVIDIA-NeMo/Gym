@@ -107,7 +107,7 @@ Per-sandbox IdeGYM options with no neutral equivalent, validated before a pod is
 | `service_account_name` | ServiceAccount for the pod. |
 | `pod_overrides` | Partial `V1PodSpec` deep-merged into the generated pod spec (tolerations, affinity, ...). |
 | `reuse_strategy`, `server_kind`, `snapshot`, `max_restarts` | Passed through to IdeGYM. |
-| `server_name` | Pins the server name, opting into IdeGYM's server reuse. Otherwise a unique name is generated per sandbox. |
+| `server_name` | Pins the server name IdeGYM's reuse lookup matches on. Otherwise it is derived from the name prefix and metadata hints. |
 | `service_port`, `container_port` | Override the configured ports. |
 
 ### `SandboxSpec` mapping

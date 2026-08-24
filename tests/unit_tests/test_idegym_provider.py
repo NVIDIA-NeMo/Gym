@@ -41,6 +41,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxSpec,
     SandboxStatus,
 )
+from nemo_gym.sandbox.providers.idegym import naming as idegym_naming
 from nemo_gym.sandbox.providers.idegym import provider as idegym_provider
 from nemo_gym.sandbox.providers.idegym import session as idegym_session
 from nemo_gym.sandbox.providers.idegym.config import (
@@ -62,7 +63,6 @@ from nemo_gym.sandbox.providers.idegym.errors import (
 from nemo_gym.sandbox.providers.idegym.naming import (
     MAX_CLIENT_NAME_LENGTH,
     generate_server_name,
-    refresh_unique_suffix,
     sanitize_name,
 )
 from nemo_gym.sandbox.providers.idegym.provider import (
@@ -452,12 +452,13 @@ def test_sanitize_and_clamp_names() -> None:
     assert len(long_name) == MAX_CLIENT_NAME_LENGTH
 
 
-def test_generated_server_names_fit_kubernetes_and_stay_unique() -> None:
+def test_generated_server_names_leave_room_for_the_appended_server_id() -> None:
     name = generate_server_name("nemo-gym", ["django__django-11099"])
-    assert name.startswith("nemo-gym-django-django-11099-")
+    assert name == "nemo-gym-django-django-11099"
     # Room must be left for the `-<server_id>` suffix the orchestrator appends.
     assert len(name) + len("-9999999") <= MAX_SERVER_NAME_LENGTH
-    assert generate_server_name("nemo-gym", []) != generate_server_name("nemo-gym", [])
+    # A hint too long for that budget is truncated rather than overflowing it.
+    assert len(generate_server_name("nemo-gym", ["x" * 200])) + len("-9999999") <= MAX_SERVER_NAME_LENGTH
 
 
 def test_generated_server_names_satisfy_rfc1035() -> None:
@@ -473,16 +474,15 @@ def test_generated_server_names_satisfy_rfc1035() -> None:
         assert pattern.match(generate_server_name(prefix, hints)), (prefix, hints)
 
 
-def test_server_name_suffix_must_leave_room_for_a_stem() -> None:
-    with pytest.raises(ValueError, match="no room for a name stem"):
-        generate_server_name("nemo-gym", [], unique_suffix="s" * MAX_SERVER_NAME_LENGTH)
+def test_server_id_reserve_must_leave_room_for_a_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Raising the reserve to the 63-character cap must fail loudly.
 
-
-def test_refresh_unique_suffix_keeps_the_stem() -> None:
-    original = generate_server_name("nemo-gym", ["task-1"])
-    refreshed = refresh_unique_suffix(original)
-    assert refreshed != original
-    assert refreshed.rpartition("-")[0] == original.rpartition("-")[0]
+    The budget is fixed by the length constants, so the alternative to raising is an
+    empty name that Kubernetes then rejects.
+    """
+    monkeypatch.setattr(idegym_naming, "SERVER_ID_SUFFIX_RESERVE", MAX_SERVER_NAME_LENGTH)
+    with pytest.raises(ValueError, match="leaves no room for a name"):
+        generate_server_name("nemo-gym", [])
 
 
 # --- spec translation ------------------------------------------------------
@@ -498,7 +498,7 @@ def test_translate_maps_resources_to_limits_and_requests() -> None:
         "requests": {"cpu": "500m", "memory": "2048Mi"},
         "limits": {"cpu": "2", "memory": "8192Mi", "ephemeral-storage": "30Gi"},
     }
-    assert request["server_name"].startswith("nemo-gym-task-9-")
+    assert request["server_name"] == "nemo-gym-task-9"
     assert request["reuse_strategy"] == "NONE"
 
 
@@ -654,7 +654,10 @@ async def test_create_can_skip_the_probe_entirely(make_provider, fake_session: F
     assert fake_session.bash_calls == []
 
 
-async def test_create_retries_transient_failures_with_a_fresh_name(make_provider, fake_session: FakeSession) -> None:
+async def test_create_retries_transient_failures_keeping_the_generated_name(
+    make_provider, fake_session: FakeSession
+) -> None:
+    """Renaming would defeat a RESTART/RESET reuse strategy, which matches on the name."""
     fake_session.start_results = [
         orchestrator_error(429),
         IdeGymServerRef(server_id=9, server_name="nemo-gym-second", namespace="idegym"),
@@ -663,8 +666,7 @@ async def test_create_retries_transient_failures_with_a_fresh_name(make_provider
     handle = await provider.create(spec())
     assert handle.sandbox_id == "9"
     first, second = (call["request"]["server_name"] for call in fake_session.start_calls)
-    assert first != second
-    assert first.rpartition("-")[0] == second.rpartition("-")[0]
+    assert first == second
 
 
 async def test_create_keeps_a_pinned_name_across_retries(make_provider, fake_session: FakeSession) -> None:
@@ -817,13 +819,26 @@ async def test_exec_user_request_warns_once(
 
 @pytest.mark.parametrize(
     ("mode", "expected"),
-    [("runuser", "exec runuser -u tester -- bash -c"), ("su", "exec su tester -c")],
+    [("runuser", "exec runuser -u tester -- bash -c"), ("su", "exec su -s /bin/bash -c")],
 )
 def test_user_switch_modes_wrap_the_script(mode: str, expected: str) -> None:
+    """Both modes pin bash: a service account's login shell may be /sbin/nologin."""
     builder = BashScriptBuilder(IdeGymExecConfig(user_mode=mode))
     script = builder.build("true", cwd="/w", user="tester")
     assert expected in script
+    assert "tester" in script
     assert "cd -- /w" in script
+
+
+@requires_bash
+@pytest.mark.parametrize("mode", ["runuser", "su"])
+def test_a_user_switched_script_is_valid_bash(mode: str) -> None:
+    """The wrap nests two levels of quoting, which a substring assertion cannot check."""
+    script = BashScriptBuilder(IdeGymExecConfig(user_mode=mode)).build(
+        "echo hi && ls 'a b'", cwd="/testbed", env={"FOO": "a b"}, user="tester"
+    )
+    completed = subprocess.run(["bash", "-n", "-c", script], capture_output=True, text=True, check=False)
+    assert completed.returncode == 0, completed.stderr
 
 
 @pytest.mark.parametrize("mode", ["runuser", "su"])

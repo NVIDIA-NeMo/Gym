@@ -302,9 +302,9 @@ class IdeGymSession:
         auth = None
         if connection.username is not None or connection.password is not None:
             auth = BasicAuth(username=connection.username, password=connection.password)
-        # Always pass an explicit OTEL config: left to its own devices the SDK
-        # defaults to a JetBrains-hosted trace collector, and NeMo Gym does not
-        # ship telemetry to a third party unless it was configured to.
+        # Always pass an explicit OTEL config: left to its own devices the SDK traces
+        # to its default off-box collector, and NeMo Gym does not ship telemetry to a
+        # third party unless it was configured to.
         otel_config = OTELConfig(
             service_name=f"nemo-gym-{self._client_name}",
             tracing=TracingConfig(

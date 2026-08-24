@@ -58,7 +58,6 @@ from nemo_gym.sandbox.providers.idegym.errors import (
     is_retryable,
     is_sandbox_gone,
 )
-from nemo_gym.sandbox.providers.idegym.naming import refresh_unique_suffix
 from nemo_gym.sandbox.providers.idegym.session import (
     IdeGymServerRef,
     IdeGymSession,
@@ -177,7 +176,7 @@ class IdeGymProvider:
         session = await self.session()
         ready_timeout_s = float(spec.ready_timeout_s or self._create.ready_timeout_s)
 
-        ref = await self._start_server(session, request, ready_timeout_s, rename_on_retry=options.server_name is None)
+        ref = await self._start_server(session, request, ready_timeout_s)
         sandbox = _IdeGymSandbox(
             server_id=ref.server_id,
             server_name=ref.server_name,
@@ -201,17 +200,14 @@ class IdeGymProvider:
         session: IdeGymSession,
         request: dict[str, Any],
         ready_timeout_s: float,
-        *,
-        rename_on_retry: bool,
     ) -> IdeGymServerRef:
         """Issue start-server, retrying failures that look transient.
 
         ``ready_timeout_s`` is a deadline for the whole call, not per attempt: each
         retry gets only the remaining budget, so a late failure cannot multiply the
-        wait the caller configured. Unless the name was pinned to opt into IdeGYM's
-        server reuse, a retry also takes a fresh one — an attempt whose response was
-        lost may have landed anyway, and reusing the name would make IdeGYM offer that
-        half-created server back as a reuse candidate.
+        wait the caller configured. Retries keep the same server name: IdeGYM derives
+        the Kubernetes name from its own server id, so a lost response that landed
+        anyway leaves an orphan the watcher reaps, not a name collision.
         """
         create = self._create
         loop = asyncio.get_running_loop()
@@ -243,8 +239,6 @@ class IdeGymProvider:
                 )
                 await asyncio.sleep(backoff)
                 delay = min(delay * 2, create.retry_max_delay_s) if delay > 0 else create.retry_delay_s
-                if rename_on_retry:
-                    request = {**request, "server_name": refresh_unique_suffix(str(request["server_name"]))}
 
     async def _verify(self, handle: SandboxHandle) -> None:
         """Check that the new sandbox can actually run commands.

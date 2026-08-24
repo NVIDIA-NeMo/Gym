@@ -77,7 +77,7 @@ gym env start \
 | `attribution` | How the registered IdeGYM client name is derived when it is not pinned. |
 
 <Note>
-Tracing is off unless `connection.tracing_endpoint` is set. The IdeGYM SDK otherwise defaults to a JetBrains-hosted collector, and NeMo Gym does not send telemetry to a third party implicitly.
+Tracing is off unless `connection.tracing_endpoint` is set. The IdeGYM SDK otherwise traces to its own default off-box collector, and NeMo Gym does not send telemetry to a third party implicitly. Point `tracing_endpoint` at your own OTLP HTTP collector to opt in.
 </Note>
 
 ## Provider Options
@@ -95,7 +95,7 @@ Tracing is off unless `connection.tracing_endpoint` is set. The IdeGYM SDK other
 | `service_account_name` | ServiceAccount for the pod. |
 | `pod_overrides` | Partial `V1PodSpec` deep-merged into the generated pod spec (tolerations, affinity, ...). |
 | `reuse_strategy`, `server_kind`, `snapshot`, `max_restarts` | Passed through to IdeGYM. |
-| `server_name` | Pins the server name, opting into IdeGYM's server reuse. Otherwise a unique name is generated per sandbox. |
+| `server_name` | Pins the server name IdeGYM's reuse lookup matches on. Otherwise it is derived from the name prefix and metadata hints. |
 | `service_port`, `container_port` | Override the configured ports. |
 
 ```yaml

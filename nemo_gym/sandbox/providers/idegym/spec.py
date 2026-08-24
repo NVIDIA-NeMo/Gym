@@ -14,9 +14,6 @@
 
 """Translating a ``SandboxSpec`` into IdeGYM's start-server request.
 
-The neutral spec and IdeGYM's pod-shaped request overlap only partly; the mismatches
-are what this module exists for:
-
 ``image``
     Passed through minus a ``docker://`` scheme. It has to be an IdeGYM *server*
     image; map benchmark images onto one with ``sandbox_spec.image_rewrites``.
@@ -49,8 +46,9 @@ from nemo_gym.sandbox.providers.idegym.naming import generate_server_name
 LOGGER = logging.getLogger(__name__)
 
 IMAGE_SCHEME_PREFIX = "docker://"
-# `idegym.api.type.OCIImageName`. Validated here so a bad image fails with an
-# explanation rather than as a pydantic error deep inside the SDK.
+# Mirrors `idegym.api.type.OCIImageName` (1-383 characters, lowercase only). Checked
+# here so a bad image fails with an explanation rather than as a pydantic error deep
+# inside the SDK.
 _OCI_IMAGE = re.compile(r"[a-z0-9._/:@-]{1,383}")
 
 
@@ -72,7 +70,7 @@ def normalize_image(image: str | None) -> str:
 
 
 def format_cpu(cores: float) -> str:
-    """Format a CPU count the way Kubernetes expects it."""
+    """Format a CPU count as a Kubernetes quantity: ``2``, or ``500m`` below whole cores."""
     millicores = round(cores * 1000)
     if millicores <= 0:
         raise IdeGymCreateError(f"CPU request must be greater than zero, got {cores!r}")
@@ -80,12 +78,14 @@ def format_cpu(cores: float) -> str:
 
 
 def format_mib(mib: int) -> str:
+    """Format a memory size as a Kubernetes quantity: ``8192Mi``."""
     if mib <= 0:
         raise IdeGymCreateError(f"Memory request must be greater than zero, got {mib!r}")
     return f"{int(mib)}Mi"
 
 
 def format_gib(gib: int) -> str:
+    """Format a disk size as a Kubernetes quantity: ``30Gi``."""
     if gib <= 0:
         raise IdeGymCreateError(f"Disk request must be greater than zero, got {gib!r}")
     return f"{int(gib)}Gi"
@@ -127,8 +127,6 @@ class IdeGymProviderOptions:
     server_kind: str | None = None
     snapshot: Mapping[str, Any] | None = None
     max_restarts: int | None = None
-    # Pin the server name to opt into IdeGYM's server reuse; the provider
-    # otherwise generates a unique name per sandbox.
     server_name: str | None = None
     service_port: int | None = None
     container_port: int | None = None
@@ -176,7 +174,7 @@ def _mapping(value: Any, name: str) -> dict[str, Any] | None:
 def _mapping_tuple(value: Any, name: str) -> tuple[Mapping[str, Any], ...]:
     if not value:
         return ()
-    if isinstance(value, Mapping) or not isinstance(value, (list, tuple)):
+    if not isinstance(value, (list, tuple)):
         raise TypeError(f"provider_options[{name!r}] must be a list of mappings, got {type(value).__name__}")
     entries: list[Mapping[str, Any]] = []
     for index, entry in enumerate(value):
@@ -184,6 +182,11 @@ def _mapping_tuple(value: Any, name: str) -> tuple[Mapping[str, Any], ...]:
             raise TypeError(f"provider_options[{name!r}][{index}] must be a mapping, got {type(entry).__name__}")
         entries.append(dict(entry))
     return tuple(entries)
+
+
+def _or_default(option: Any, default: Any) -> Any:
+    """Return ``option``, falling back to ``default`` only when it was left unset."""
+    return default if option is None else option
 
 
 class ServerRequestTranslator:
@@ -203,15 +206,14 @@ class ServerRequestTranslator:
     def server_name(self, spec: SandboxSpec) -> str:
         """Generate the RFC-1035 server name for one sandbox.
 
-        Names are unique per sandbox so concurrent sandboxes cannot collide on
-        IdeGYM's name-based server matching, and they carry the configured metadata
-        hints so a pod is traceable back to its task. Pin
-        ``provider_options.server_name`` instead to opt into IdeGYM's server reuse.
+        The name carries the configured metadata hints so a pod is traceable back to
+        its task. It is not made unique: IdeGYM appends its own server id, which is
+        what Kubernetes sees and what the database keeps unique.
         """
         hints = [
-            str(spec.metadata[key])
+            str(value)
             for key in self._create.server_name_metadata_keys
-            if spec.metadata.get(key) not in (None, "")
+            if (value := spec.metadata.get(key)) not in (None, "")
         ]
         return generate_server_name(self._create.server_name_prefix, hints)
 
@@ -226,11 +228,12 @@ class ServerRequestTranslator:
         request: dict[str, Any] = {
             "image_tag": normalize_image(spec.image),
             "server_name": options.server_name or self.server_name(spec),
-            "run_as_root": create.run_as_root if options.run_as_root is None else options.run_as_root,
-            "service_port": create.service_port if options.service_port is None else options.service_port,
-            "container_port": create.container_port if options.container_port is None else options.container_port,
+            "run_as_root": _or_default(options.run_as_root, create.run_as_root),
+            "service_port": _or_default(options.service_port, create.service_port),
+            "container_port": _or_default(options.container_port, create.container_port),
             "reuse_strategy": options.reuse_strategy or create.reuse_strategy,
-            "max_restarts": create.max_restarts if options.max_restarts is None else options.max_restarts,
+            "max_restarts": _or_default(options.max_restarts, create.max_restarts),
+            # How long the SDK waits before retrying its own 429; it takes whole seconds.
             "retry_delay_in_seconds": max(1, round(create.busy_retry_delay_s)),
         }
         if resources := self._resources(spec, options):
@@ -261,8 +264,8 @@ class ServerRequestTranslator:
             resources["limits"] = limits
         return resources
 
-    def _warn_about_gpu(self, *requests: SandboxResources | None) -> None:
-        if any(resources is not None and (resources.gpu or resources.gpu_type) for resources in requests):
+    def _warn_about_gpu(self, *blocks: SandboxResources | None) -> None:
+        if any(block is not None and (block.gpu or block.gpu_type) for block in blocks):
             self._warn_once(
                 "gpu",
                 "The idegym provider cannot map GPU resource requests: IdeGYM's resource model covers "
@@ -286,6 +289,6 @@ class ServerRequestTranslator:
             self._warn_once(
                 "ports",
                 f"spec.ports {list(spec.ports)!r} is ignored by the idegym provider: an IdeGYM server pod "
-                f"exposes only its own API port, and the orchestrator forwards requests rather than routing "
-                f"raw TCP. sandbox.endpoint() is unavailable on this provider.",
+                "exposes only its own API port, and the orchestrator forwards requests rather than routing "
+                "raw TCP. sandbox.endpoint() is unavailable on this provider.",
             )

@@ -14,12 +14,15 @@
 
 """Configuration objects for the IdeGYM sandbox provider.
 
-The provider constructor takes one section per concern — ``connection``,
-``create``, ``exec``, ``probe``, ``files``, ``operations``, ``attribution`` —
-mirroring the shipped ``configs/idegym.yaml`` block. Every section validates in
-``__post_init__`` so a bad Hydra value fails at server start rather than in the
-middle of a rollout, and every section is frozen and hashable so the shared
-orchestrator session can be keyed on its connection config.
+The provider constructor takes one section per concern — ``connection``, ``create``,
+``exec``, ``probe``, ``files``, ``operations``, ``attribution`` — mirroring the shipped
+``configs/idegym.yaml`` block. Every section validates in ``__post_init__`` so a bad
+Hydra value fails at server start rather than mid-rollout, and every section is frozen
+and hashable so the shared orchestrator session can be keyed on its connection config.
+
+Comments here cover only what a reader of the code needs: sentinel values, cross-field
+constraints, and the reason behind a default. Knob-by-knob operator guidance lives once,
+in ``configs/idegym.yaml``.
 """
 
 from collections.abc import Mapping
@@ -40,25 +43,24 @@ MAX_COMMAND_BYTES = 100 * 1024
 # limit leaves real headroom rather than filling the budget with payload alone.
 MAX_UPLOAD_CHUNK_BYTES = 64 * 1024
 
+# The probe asserts stdout equality, so these two only make sense as a pair.
 DEFAULT_PROBE_COMMAND = "printf idegym-sandbox-ready"
 DEFAULT_PROBE_EXPECTED = "idegym-sandbox-ready"
 
-# RFC-1035 caps Kubernetes resource names at 63 characters, and the orchestrator
-# derives the pod name as `<server_name>-<server_id>`, so the name the provider sends
-# leaves room for that suffix as well as for its own uniqueness suffix.
+# RFC-1035 caps Kubernetes resource names at 63 characters, and the orchestrator derives
+# the pod name as `<server_name>-<server_id>`, so the name the provider sends leaves room
+# for that suffix.
 MAX_SERVER_NAME_LENGTH = 63
 SERVER_ID_SUFFIX_RESERVE = 8
-SERVER_NAME_UNIQUE_SUFFIX_LENGTH = 8
 
 
 class UserMode(StrEnum):
     """How ``exec(user=...)`` is honored.
 
-    The IdeGYM bash tool has no user field: commands run as whatever user the
-    server container runs as (``provider_options.run_as_root`` decides that at
-    pod level). ``IGNORE`` therefore drops the request with one warning, while
-    the two switch modes wrap the script in a privilege-dropping command for
-    images that ship one.
+    The IdeGYM bash tool has no user field: commands run as whatever user the server
+    container runs as, which ``provider_options.run_as_root`` decides at pod level.
+    ``IGNORE`` therefore drops the request with one warning, while the two switch modes
+    wrap the script in a privilege-dropping command for images that ship one.
     """
 
     IGNORE = "ignore"
@@ -91,34 +93,31 @@ def _require_non_negative(value: float | int, name: str) -> None:
 class IdeGymConnectionConfig:
     """How to reach the IdeGYM orchestrator and how to identify this process to it.
 
-    One registered IdeGYM client is shared by every sandbox created from an
-    identical connection config (see :mod:`nemo_gym.sandbox.providers.idegym.session`),
-    so this section doubles as that session's cache key and must stay hashable.
+    One registered IdeGYM client is shared by every sandbox created from an identical
+    connection config (see :mod:`nemo_gym.sandbox.providers.idegym.session`), so this
+    section doubles as that session's cache key and must stay hashable.
     """
 
     orchestrator_url: str = "idegym.test"
     namespace: str = "idegym"
-    # Quotas are enforced per client *name*, so all sandboxes of one job should
-    # share it. Left unset, the session derives a name from job attribution.
+    # Quotas match the client *name*, so every sandbox of one job shares it. Left unset,
+    # the session derives it from job attribution.
     client_name: str | None = None
     username: str | None = None
     password: str | None = None
-    # Dedicated Kubernetes nodes requested at registration. 0 uses the shared pool.
+    # 0 uses the shared node pool.
     nodes_count: int = 0
     heartbeat_interval_s: int = 60
     request_timeout_s: int = 60
     transport_backend: str = TransportBackend.AIOHTTP
-    # Bounds in-flight HTTP to the orchestrator across every sandbox sharing this
-    # connection. Bounding requests rather than whole operations matters: a create
-    # holds its connection only while polling, so provisioning cannot block the
-    # exec calls of sandboxes that are already running. null means no cap.
+    # Caps in-flight requests rather than whole operations: a create holds a connection
+    # only while polling, so provisioning cannot block execs on running sandboxes.
     max_connections: int | None = 64
     max_keepalive_connections: int = 20
     keepalive_expiry_s: float | None = 5.0
     connect_retries: int = 2
-    # The IdeGYM client SDK traces to a JetBrains-hosted collector unless told
-    # otherwise. NeMo Gym does not send telemetry to third parties implicitly, so
-    # tracing stays off until an endpoint is configured here.
+    # The SDK ships a default OTLP endpoint, so tracing stays off until one is set here:
+    # NeMo Gym does not send telemetry to third parties implicitly.
     tracing_endpoint: str | None = None
     tracing_timeout_s: float = 10.0
     tracing_username: str | None = None
@@ -131,14 +130,14 @@ class IdeGymConnectionConfig:
             raise ValueError("connection.namespace must be a non-empty Kubernetes namespace")
         if self.client_name is not None and not self.client_name.strip():
             raise ValueError("connection.client_name must be non-empty when set")
-        _require_non_negative(self.nodes_count, "connection.nodes_count")
-        _require_positive(self.heartbeat_interval_s, "connection.heartbeat_interval_s")
-        _require_positive(self.request_timeout_s, "connection.request_timeout_s")
-        if self.transport_backend not in tuple(TransportBackend):
+        if self.transport_backend not in TransportBackend:
             raise ValueError(
                 f"connection.transport_backend must be one of {[m.value for m in TransportBackend]}, "
                 f"got {self.transport_backend!r}"
             )
+        _require_non_negative(self.nodes_count, "connection.nodes_count")
+        _require_positive(self.heartbeat_interval_s, "connection.heartbeat_interval_s")
+        _require_positive(self.request_timeout_s, "connection.request_timeout_s")
         _require_positive(self.max_connections, "connection.max_connections", allow_none=True)
         _require_non_negative(self.max_keepalive_connections, "connection.max_keepalive_connections")
         _require_positive(self.keepalive_expiry_s, "connection.keepalive_expiry_s", allow_none=True)
@@ -160,16 +159,16 @@ class IdeGymPollingConfig:
     """
 
     initial_delay_s: float = 0.25
-    # Fixed interval; 0 selects the exponential schedule below instead.
+    # Fixed interval; 0 selects the exponential schedule below.
     interval_s: float = 0.0
     backoff_factor: float = 1.5
     max_delay_s: float = 30.0
 
     def __post_init__(self) -> None:
-        _require_positive(self.initial_delay_s, "polling.initial_delay_s")
-        _require_non_negative(self.interval_s, "polling.interval_s")
         if self.backoff_factor < 1:
             raise ValueError("polling.backoff_factor must be >= 1")
+        _require_positive(self.initial_delay_s, "polling.initial_delay_s")
+        _require_non_negative(self.interval_s, "polling.interval_s")
         _require_positive(self.max_delay_s, "polling.max_delay_s")
 
 
@@ -177,46 +176,41 @@ class IdeGymPollingConfig:
 class IdeGymCreateConfig:
     """Server provisioning: readiness budget, retries, and pod shape defaults."""
 
-    # Bounds the whole start_server call, including the orchestrator's own wait
-    # for the pod to become ready and its internal 429 back-pressure retries.
+    # Bounds the whole start_server call: pod scheduling, image pull, and the
+    # orchestrator's own 429 back-pressure retries.
     ready_timeout_s: float = 900.0
     retries: int = 3
     retry_delay_s: float = 5.0
     retry_max_delay_s: float = 60.0
-    # Handed to the SDK, which retries the orchestrator's 429 back-pressure
-    # itself — inside one start-server call — until `ready_timeout_s` runs out.
+    # The SDK's own in-call retry delay for a 429, bounded by `ready_timeout_s`.
     busy_retry_delay_s: float = 15.0
-    # RFC-1035 prefix for the generated Kubernetes resource name.
     server_name_prefix: str = "nemo-gym"
-    # Metadata keys folded into the generated server name, in order, so a pod can
-    # be traced back to its task from `kubectl get pods` and the IdeGYM dashboard.
+    # Folded into the generated server name, in order, so a pod traces back to its task.
     server_name_metadata_keys: tuple[str, ...] = ("instance_id",)
-    # NONE recreates from scratch. The provider generates a unique name per
-    # sandbox, so there is nothing to reuse unless a caller pins the name through
-    # `provider_options.server_name`.
+    # The only strategy that can apply here: the reuse lookup considers servers left
+    # FINISHED, and this provider always stops the ones it creates.
     reuse_strategy: str = "NONE"
     run_as_root: bool = False
     service_port: int = 80
     container_port: int = 8000
-    # Pod restarts tolerated before IdeGYM tears the server down. 0 surfaces the
-    # first crash instead of looping restarts.
+    # 0 surfaces the first crash instead of looping restarts.
     max_restarts: int = 0
     polling: IdeGymPollingConfig | Mapping[str, Any] = field(default_factory=IdeGymPollingConfig)
 
     def __post_init__(self) -> None:
+        # Frozen dataclass, so normalizing a field goes through object.__setattr__.
         object.__setattr__(self, "polling", coerce_config(self.polling, IdeGymPollingConfig))
+        object.__setattr__(self, "server_name_metadata_keys", tuple(self.server_name_metadata_keys or ()))
+        if not self.server_name_prefix:
+            raise ValueError("create.server_name_prefix must be non-empty")
+        for name, port in (("service_port", self.service_port), ("container_port", self.container_port)):
+            if not 0 <= port <= 65535:
+                raise ValueError(f"create.{name} must be between 0 and 65535, got {port}")
         _require_positive(self.ready_timeout_s, "create.ready_timeout_s")
         _require_non_negative(self.retries, "create.retries")
         _require_non_negative(self.retry_delay_s, "create.retry_delay_s")
         _require_non_negative(self.retry_max_delay_s, "create.retry_max_delay_s")
         _require_non_negative(self.busy_retry_delay_s, "create.busy_retry_delay_s")
-        if not self.server_name_prefix:
-            raise ValueError("create.server_name_prefix must be non-empty")
-        object.__setattr__(self, "server_name_metadata_keys", tuple(self.server_name_metadata_keys or ()))
-        if not 0 <= self.service_port <= 65535:
-            raise ValueError(f"create.service_port must be between 0 and 65535, got {self.service_port}")
-        if not 0 <= self.container_port <= 65535:
-            raise ValueError(f"create.container_port must be between 0 and 65535, got {self.container_port}")
         _require_non_negative(self.max_restarts, "create.max_restarts")
 
 
@@ -225,29 +219,28 @@ class IdeGymExecConfig:
     """Command execution through the IdeGYM bash tool."""
 
     default_timeout_s: float | None = 180.0
-    # Passed to the sandbox: how long a timed-out process group gets to exit on
-    # SIGTERM before it is SIGKILLed.
+    # Grace period a timed-out process group gets on SIGTERM before it is SIGKILLed.
     graceful_termination_timeout_s: float = 2.0
-    # Client-side budget on top of the command timeout, covering the orchestrator
-    # round trip. Keeping it non-zero means the sandbox's own timeout fires first, so
-    # the caller gets the partial output instead of a bare transport error.
+    # Client-side budget on top of the command timeout, covering the orchestrator round
+    # trip. Keeping it non-zero means the sandbox's own timeout fires first, so the
+    # caller gets the partial output instead of a bare transport error.
     request_overhead_s: float = 60.0
     user_mode: str = UserMode.IGNORE
 
     def __post_init__(self) -> None:
+        if self.user_mode not in UserMode:
+            raise ValueError(f"exec.user_mode must be one of {[m.value for m in UserMode]}, got {self.user_mode!r}")
         _require_positive(self.default_timeout_s, "exec.default_timeout_s", allow_none=True)
         _require_non_negative(self.graceful_termination_timeout_s, "exec.graceful_termination_timeout_s")
         _require_non_negative(self.request_overhead_s, "exec.request_overhead_s")
-        if self.user_mode not in tuple(UserMode):
-            raise ValueError(f"exec.user_mode must be one of {[m.value for m in UserMode]}, got {self.user_mode!r}")
 
 
 @dataclass(frozen=True)
 class IdeGymProbeConfig:
     """Readiness verification run after the orchestrator reports a started server.
 
-    A started pod is not the same as a sandbox that can run commands, so
-    ``create()`` only returns once this probe has passed ``stable_count`` times.
+    A started pod is not the same as a sandbox that can run commands, so ``create()``
+    only returns once this probe has passed ``stable_count`` times.
     """
 
     command: str | None = DEFAULT_PROBE_COMMAND
@@ -255,20 +248,20 @@ class IdeGymProbeConfig:
     timeout_s: float = 30.0
     deadline_s: float | None = 180.0
     stable_count: int = 1
-    # Non-zero: the probe polls a remote orchestrator, so back-to-back retries
-    # would hammer it for the whole deadline while a pod is still warming up.
+    # Non-zero: the probe polls a remote orchestrator, so back-to-back retries would
+    # hammer it for the whole deadline while a pod is still warming up.
     stable_delay_s: float = 2.0
-    # Fail create when `spec.workdir` is missing in the image. Without the check,
-    # every later exec fails on `cd` instead, long after the cause is visible.
+    # Fail create on a missing `spec.workdir` instead of letting every later exec fail
+    # on `cd`, long after the cause is visible.
     verify_workdir: bool = True
 
     def __post_init__(self) -> None:
+        if self.stable_count < 1:
+            raise ValueError("probe.stable_count must be >= 1")
         # Always validated: the workdir check uses this timeout even when the probe
         # command is disabled.
         _require_positive(self.timeout_s, "probe.timeout_s")
         _require_positive(self.deadline_s, "probe.deadline_s", allow_none=True)
-        if self.stable_count < 1:
-            raise ValueError("probe.stable_count must be >= 1")
         _require_non_negative(self.stable_delay_s, "probe.stable_delay_s")
 
 
@@ -276,11 +269,11 @@ class IdeGymProbeConfig:
 class IdeGymFilesConfig:
     """File transfer, which rides base64 over the bash tool.
 
-    IdeGYM has no binary transfer endpoint reachable through the orchestrator's
-    JSON request forwarding, so bytes are chunked and shell-encoded. Upload chunks
-    share the command budget with the caller's ``env`` exports, so a large ``env``
-    can still push a legal chunk over it; download chunks are bounded by how much
-    text the orchestrator is willing to store per operation.
+    IdeGYM exposes no binary transfer endpoint through the orchestrator's JSON request
+    forwarding, so bytes are chunked and shell-encoded. Upload chunks share the command
+    budget with the caller's ``env`` exports, so a large ``env`` can still push a legal
+    chunk over it; download chunks are bounded by how much text the orchestrator is
+    willing to store per operation.
     """
 
     upload_chunk_bytes: int = 48 * 1024
@@ -325,20 +318,21 @@ class IdeGymOperationsConfig:
 
 @dataclass(frozen=True)
 class IdeGymAttributionConfig:
-    """Job attribution for the registered IdeGYM client name and sandbox metadata.
+    """Job attribution, which names the registered IdeGYM client.
 
-    IdeGYM has no per-server label API, so attribution cannot become Kubernetes
-    labels the way it does on OpenSandbox. What it can do is name the registered
-    client — which is what the IdeGYM dashboard and its per-name resource quota key
-    on — so a team's sandboxes are attributable and quota-bounded together.
+    IdeGYM has no per-server label API, so attribution cannot become Kubernetes labels
+    the way it does on OpenSandbox. Naming the client instead is what the dashboard
+    groups by and what per-name resource quotas key on, so a team's sandboxes stay
+    attributable and quota-bounded together as ``<prefix>-<team>-<user>-<workload>``.
     """
 
     enabled: bool = True
     team: str | None = None
     user: str | None = None
     workload: str | None = None
+    # Resolved and logged, but deliberately kept out of the client name, which has to
+    # stay stable across launches for quota matching to work.
     run: str | None = None
-    # Prefix of the derived client name; the resolved attribution fields follow.
     client_name_prefix: str = "nemo-gym"
 
     def __post_init__(self) -> None:

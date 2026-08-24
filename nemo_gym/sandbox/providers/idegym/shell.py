@@ -20,8 +20,8 @@ everything ``exec(command, cwd=, env=, user=)`` promises is expressed inside the
 script. Two sandbox-side details shape it: the executor runs
 ``source <bash-integration> && <script>`` where ``&&`` binds only to the first
 statement, so the script is emitted as one ``{ ... }`` group; and it travels as a single
-``execve()`` argument capped at 128 KiB, so an oversized script is rejected here rather
-than failing with a confusing ``E2BIG``.
+``execve()`` argument, which Linux caps at 128 KiB, so an oversized script is rejected
+here against ``MAX_COMMAND_BYTES`` rather than failing with a confusing ``E2BIG``.
 """
 
 import logging
@@ -94,8 +94,8 @@ class BashScriptBuilder:
             # and silently running in the image's project directory instead would
             # make the command look like it merely failed.
             lines.append(f"cd -- {quote(cwd)} || exit 1")
-        for name, value in (env or {}).items():
-            name = str(name)
+        for key, value in (env or {}).items():
+            name = str(key)
             if not _ENV_NAME.fullmatch(name):
                 raise ValueError(
                     f"Environment variable name {name!r} is not a valid shell identifier, so the idegym "
@@ -120,15 +120,19 @@ class BashScriptBuilder:
                     f"image ships one of those tools."
                 )
             return script
+        # Both tools resolve the user through getpwnam, so a bare uid is not something
+        # they can be handed.
         if isinstance(user, int) or str(user).isdigit():
             raise ValueError(
                 f"exec.user_mode={mode.value!r} needs a user name, but got the numeric id {user!r}. Pass a "
                 f"name, or use exec.user_mode='ignore' to run as the container's own user."
             )
         name = quote(str(user))
+        # Both pin the shell to bash rather than inherit the target user's login shell,
+        # which is `/sbin/nologin` on a service account and would refuse the command.
         if mode is UserMode.RUNUSER:
             return f"exec runuser -u {name} -- bash -c {quote(script)}"
-        return f"exec su {name} -c {quote(script)}"
+        return f"exec su -s /bin/bash -c {quote(script)} {name}"
 
     def _check_size(self, script: str, command: str) -> None:
         size = len(script.encode())
