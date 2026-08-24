@@ -18,6 +18,9 @@ FULL_TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "full-test-suite.yml"
 GPU_E2E_CONFIG = REPO_ROOT / "tests" / "e2e" / "gpu_e2e.yaml"
 GPU_E2E_DATASET = REPO_ROOT / "tests" / "e2e" / "gpu_smoke.jsonl"
 GPU_E2E_VERIFIER = REPO_ROOT / "tests" / "e2e" / "verify_gpu_rollout.py"
+GPU_E2E_SCRIPT = REPO_ROOT / "tests" / "e2e" / "gpu_e2e_test.sh"
+INFERENCE_PROVIDER_E2E_SCRIPT = REPO_ROOT / "tests" / "e2e" / "run_inference_provider_e2e.sh"
+INFERENCE_PROVIDER_ROLLOUT_VERIFIER = REPO_ROOT / "tests" / "e2e" / "verify_inference_provider_rollout.py"
 GITLAB_PIPELINE = REPO_ROOT / ".gitlab-ci.yml"
 IS_RETRYABLE_FULL_SUITE_FAILURE = REPO_ROOT / "scripts" / "ci" / "is_retryable_full_suite_failure.sh"
 RECLAIM_RUNNER_DISK = REPO_ROOT / "scripts" / "ci" / "reclaim_runner_disk.sh"
@@ -207,7 +210,7 @@ def test_cicd_main_wires_preflight_cpu_and_gpu_workflows() -> None:
     assert "base-ref: ${{ needs.pre-flight.outputs.base_ref }}" in workflow
     assert "needs: [pre-flight, classify_changes, unit_tests]" in workflow
     assert "needs: [pre-flight, classify_changes, unit_tests, container_build]" in workflow
-    assert workflow.count("if: needs.classify_changes.outputs.docs_only != 'true'") == 3
+    assert workflow.count("if: needs.classify_changes.outputs.docs_only != 'true'") == 4
     assert "needs.pre-flight.outputs.docs_only" not in workflow
     assert "runs-on: ${{ needs.pre-flight.outputs.runner_prefix }}" in workflow
     assert "matrix:" in workflow
@@ -241,13 +244,20 @@ def test_cicd_container_build_pushes_sha_image_after_unit_tests() -> None:
 def test_cicd_summary_accepts_only_expected_docs_only_skips() -> None:
     workflow = CICD_MAIN_WORKFLOW.read_text()
 
-    assert "needs: [pre-flight, classify_changes, unit_tests, container_build, gpu_e2e_tests]" in workflow
+    assert (
+        "needs: [pre-flight, classify_changes, unit_tests, container_build, gpu_e2e_tests, provider_e2e_tests]"
+        in workflow
+    )
     assert "if: always() && !cancelled()" in workflow
     assert '"$PREFLIGHT_RESULT" != "success"' in workflow
     assert '"$CLASSIFY_RESULT" != "success"' in workflow
     assert '"$DOCS_ONLY" == "true"' in workflow
     assert '"$CONTAINER_BUILD_RESULT" == "skipped"' in workflow
     assert '"$CONTAINER_BUILD_RESULT" == "success"' in workflow
+    assert "PROVIDER_E2E_TEST_RESULT: ${{ needs.provider_e2e_tests.result }}" in workflow
+    assert 'echo "Provider E2E tests: $PROVIDER_E2E_TEST_RESULT"' in workflow
+    assert '"$PROVIDER_E2E_TEST_RESULT" == "skipped"' not in workflow
+    assert '"$PROVIDER_E2E_TEST_RESULT" == "success"' not in workflow
 
 
 def test_shared_change_classifier_matches_gym_docs_and_server_paths() -> None:
@@ -380,6 +390,130 @@ def test_gpu_e2e_verifier_rejects_vacuous_rollout(tmp_path: Path, failure: str) 
     result = _run_gpu_rollout_verifier(tmp_path, rollout)
 
     assert result.returncode != 0
+
+
+def test_provider_e2e_matrix_selects_config_model_and_secret_by_name() -> None:
+    workflow = CICD_MAIN_WORKFLOW.read_text()
+
+    assert "provider_e2e_tests:" in workflow
+    assert "name: ${{ matrix.provider }}-e2e" in workflow
+    assert "timeout-minutes: 20" in workflow
+    assert "provider: fireworks" in workflow
+    assert "config: responses_api_models/inference_provider/configs/fireworks.yaml" in workflow
+    assert "model: accounts/fireworks/models/gpt-oss-20b" in workflow
+    assert "model_api_key_secret_name: FIREWORKS" in workflow
+    assert "MODEL_API_KEY: ${{ secrets[matrix.model_api_key_secret_name] }}" in workflow
+    assert workflow.count("secrets[matrix.model_api_key_secret_name]") == 1
+    assert "model-api-key:" not in workflow
+    assert "needs: [classify_changes, unit_tests]" in workflow
+    assert "runs-on: ubuntu-latest" in workflow
+    assert "UV_VERSION=\"$(sed -n 's/^ARG UV_VERSION=//p' docker/Dockerfile)\"" in workflow
+    assert 'curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh' in workflow
+    assert "https://astral.sh/uv/0.11.29/install.sh" not in workflow
+    assert "E2E_MODEL: ${{ matrix.model }}" in workflow
+    assert "E2E_PROVIDER_CONFIG: ${{ matrix.config }}" in workflow
+    assert "run: bash tests/e2e/run_inference_provider_e2e.sh" in workflow
+
+    script = INFERENCE_PROVIDER_E2E_SCRIPT.read_text()
+    assert "E2E_PROVIDER_CONFIG" in script
+    assert "E2E_MODEL" in script
+    assert "MODEL_API_KEY" in script
+    assert "--model-api-key" not in script
+    assert "resources_servers/example_single_tool_call/data/example.jsonl" in script
+    assert "--max-output-tokens 4096" in script
+
+    env_config = (REPO_ROOT / "tests" / "e2e" / "inference_provider_env.yaml").read_text()
+    assert "max_steps: 2" in env_config
+
+
+def _valid_inference_provider_rollout() -> dict:
+    return {
+        "reward": 1.0,
+        "response": {
+            "status": "completed",
+            "error": None,
+            "incomplete_details": None,
+            "usage": {"input_tokens": 30, "output_tokens": 12, "total_tokens": 42},
+            "output": [
+                {
+                    "type": "function_call",
+                    "name": "get_weather",
+                    "arguments": '{"city": "San Francisco"}',
+                    "call_id": "weather-call",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "weather-call",
+                    "output": (
+                        '{"city": "San Francisco", "weather_description": "The weather in San Francisco is cold."}'
+                    ),
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "It is cold in San Francisco."}],
+                },
+            ],
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda rollout: rollout["response"].update(status="incomplete"),
+        lambda rollout: rollout["response"]["usage"].update(input_tokens=0),
+        lambda rollout: rollout["response"]["usage"].update(output_tokens=0),
+        lambda rollout: rollout["response"]["output"].__setitem__(slice(0, 1), []),
+        lambda rollout: rollout["response"]["output"][1].update(call_id="wrong-call"),
+        lambda rollout: rollout["response"]["output"][-1].update(content=[]),
+    ],
+)
+def test_inference_provider_rollout_verifier_rejects_invalid_tool_loop(tmp_path: Path, mutate) -> None:
+    rollout = _valid_inference_provider_rollout()
+    mutate(rollout)
+    rollouts_path = tmp_path / "rollouts.jsonl"
+    rollouts_path.write_text(f"{json.dumps(rollout)}\n")
+
+    result = subprocess.run(
+        [sys.executable, str(INFERENCE_PROVIDER_ROLLOUT_VERIFIER), "--rollouts", str(rollouts_path)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+
+
+def test_inference_provider_rollout_verifier_accepts_completed_tool_loop(tmp_path: Path) -> None:
+    rollouts_path = tmp_path / "rollouts.jsonl"
+    rollouts_path.write_text(f"{json.dumps(_valid_inference_provider_rollout())}\n")
+
+    result = subprocess.run(
+        [sys.executable, str(INFERENCE_PROVIDER_ROLLOUT_VERIFIER), "--rollouts", str(rollouts_path)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_inference_provider_rollout_verifier_reports_incomplete_reason(tmp_path: Path) -> None:
+    rollout = _valid_inference_provider_rollout()
+    rollout["response"].update(
+        status="incomplete",
+        incomplete_details={"reason": "max_output_tokens"},
+    )
+    rollouts_path = tmp_path / "rollouts.jsonl"
+    rollouts_path.write_text(f"{json.dumps(rollout)}\n")
+
+    result = subprocess.run(
+        [sys.executable, str(INFERENCE_PROVIDER_ROLLOUT_VERIFIER), "--rollouts", str(rollouts_path)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "max_output_tokens" in result.stderr
 
 
 def test_runner_disk_reclamation_fails_fast_when_space_is_still_low(tmp_path: Path) -> None:
