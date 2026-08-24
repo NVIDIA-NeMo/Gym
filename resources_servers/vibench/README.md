@@ -77,10 +77,17 @@ provider config binds, so without it startup fails with *"Sandbox provider refer
 'sandbox' is not defined in the merged config"*. Swap that one path to move to another
 provider (OpenSandbox, Fargate, Enroot) without editing this config.
 
+Use `vibench_agent`'s docker config rather than the stock one. The harness inside the
+sandbox reaches the policy model at `http://127.0.0.1:<port>` (`get_server_url`), which in a
+bridged container points at the container itself — the harness then makes **zero** LLM calls
+and exports an empty app with `"tokens": {"input": 0, "output": 0}`, with no error anywhere.
+The host network makes that address mean the same thing in both places. Read the trade-off
+note at the top of that file before using it on anything but a disposable box.
+
 ```bash
 gym env start \
     --config resources_servers/vibench/configs/vibench.yaml \
-    --config nemo_gym/sandbox/providers/docker/configs/docker.yaml \
+    --config responses_api_agents/vibench_agent/configs/docker_host_network.yaml \
     --model-type openai_model
 
 gym eval run --no-serve \
