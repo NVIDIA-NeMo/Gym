@@ -1,6 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from glob import glob
+from pathlib import Path
+from time import time
 from typing import Any, ClassVar, Dict, Optional
 
 from fastapi import Request
@@ -37,14 +40,24 @@ class TerminalBench21ResourcesServerConfig(BaseResourcesServerConfig):
             self.clear_terminal_bench_debug_logs = False
 
 
+class TerminalBench21SeedSessionResponse(BaseSeedSessionResponse):
+    sandbox_handle: str  # @bxyu-nvidia: Just a plain string URI for now for OpenSandbox backend.
+
+
 class TerminalBench21VerifyRequest(BaseVerifyRequest):
     task_name: str
     docker_image: str
     task_folder: str
 
 
-class TerminalBench21SeedSessionResponse(BaseSeedSessionResponse):
-    sandbox_handle: str  # @bxyu-nvidia: Just a plain string URI for now for OpenSandbox backend.
+class TerminalBench21VerifyResponse(BaseVerifyResponse):
+    evaluation_completed: bool
+
+    # Misc metrics
+    verification_time_taken: float
+
+    task_name: str
+    test_output: str
 
 
 class TerminalBench21ResourcesServer(SimpleResourcesServer):
@@ -90,9 +103,52 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
 
         return TerminalBench21SeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)
 
-    async def verify(self, body: TerminalBench21VerifyRequest) -> BaseVerifyResponse:
-        reward = float(body.response.output_text.strip() == body.expected_answer.strip())
-        return BaseVerifyResponse(**body.model_dump(), reward=reward)
+    async def _upload_folder(self, sandbox: AsyncSandbox, local_dirpath: Path, target_dirpath: str) -> None:
+        for file in glob(str(local_dirpath / "**"), recursive=True):
+            await sandbox.upload(
+                local_path=local_dirpath / file,
+                remote_path=f"{target_dirpath}/{file}",
+            )
+
+    async def verify(self, request: Request, body: TerminalBench21VerifyRequest) -> TerminalBench21VerifyResponse:
+        # Re-use the original sandbox
+        eval_sandbox = self._session_id_to_sandbox[request.session[SESSION_ID_KEY]]
+
+        task_folder = Path(body.task_folder)
+
+        if self.config.is_verifying_golden_patch:
+            self._upload_folder(eval_sandbox, task_folder / "solution", "/solution")
+            golden_patch_result = await eval_sandbox.exec(
+                "bash /solution/solve.sh", timeout_s=self.config.evaluation_timeout
+            )
+            assert golden_patch_result.return_code == 0
+        else:
+            raise NotImplementedError
+
+        start_time = time()
+        self._upload_folder(eval_sandbox, task_folder / "tests", "/tests")
+        eval_result = await eval_sandbox.exec(
+            'bash /tests/test.sh | echo "Reward: $(cat /logs/verifier/reward.txt)"',
+            timeout_s=self.config.evaluation_timeout,
+        )
+        verification_time_taken = time() - start_time
+
+        test_output = (eval_result.stderr or "") + (eval_result.stdout or "")
+        split = test_output.rsplit("Reward: ", maxsplit=1)
+        if len(split) == 1:
+            evaluation_completed = False
+            reward = 0.0
+        else:
+            evaluation_completed = True
+            reward = float(split[-1].strip())
+
+        return TerminalBench21VerifyResponse(
+            **body.model_dump(),
+            evaluation_completed=evaluation_completed,
+            reward=reward,
+            verification_time_taken=verification_time_taken,
+            test_output=test_output,
+        )
 
 
 if __name__ == "__main__":
