@@ -6,6 +6,14 @@ ether0:
       verified: false
       description: ether0 chemistry benchmark verifiers
       value: Evaluate chemistry knowledge and reasoning with ether0 benchmark
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: environments/ether0/data/example.jsonl
+      - name: val
+        type: validation
+        jsonl_fpath: environments/ether0/data/val.jsonl
+        license: Creative Commons Attribution 4.0 International
 ether0_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -16,11 +24,3 @@ ether0_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: environments/ether0/data/example.jsonl
-      - name: val
-        type: validation
-        jsonl_fpath: environments/ether0/data/val.jsonl
-        license: Creative Commons Attribution 4.0 International

@@ -9,6 +9,10 @@ openenv_echo_resources_server:
       action_class: "openenv.core.env_server.mcp_types.CallToolAction"
       is_mcp: true
 
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/openenv/data/echo/example.jsonl
 openenv_echo_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -19,7 +23,3 @@ openenv_echo_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/openenv/data/echo/example.jsonl

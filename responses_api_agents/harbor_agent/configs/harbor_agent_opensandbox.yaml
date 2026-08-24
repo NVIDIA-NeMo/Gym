@@ -33,13 +33,14 @@ harbor_agent:
 
       # One row per task; consumed by `gym eval run --split benchmark`.
       datasets:
-        - name: terminal_bench_2_1
-          type: benchmark
-          jsonl_fpath: responses_api_agents/harbor_agent/example/terminal_bench_2_1_input.jsonl
-          prepare_script: responses_api_agents/harbor_agent/prepare_terminal_bench_2_1.py
-          prompt_config: null
+      - name: terminal_bench_2_1
+        type: benchmark
+        jsonl_fpath: responses_api_agents/harbor_agent/example/terminal_bench_2_1_input.jsonl
+        prepare_script: responses_api_agents/harbor_agent/prepare_terminal_bench_2_1.py
+        prompt_config:
 
-      harbor_agent_name: null
+        agent: harbor_agent
+      harbor_agent_name:
       harbor_agent_import_path: "responses_api_agents.harbor_agent.custom_agents.terminus_2_nemo_gym:Terminus2NemoGym"
       harbor_agent_kwargs:
         collect_rollout_details: false
@@ -54,7 +55,7 @@ harbor_agent:
           input_cost_per_token: 0.0
           output_cost_per_token: 0.0
 
-      harbor_environment_type: null
+      harbor_environment_type:
       harbor_environment_import_path: "responses_api_agents.harbor_agent.custom_envs.nemo_gym_sandbox.environment:NemoGymSandboxEnvironment"
       harbor_environment_kwargs:
         # The `sandbox` block from the included provider config.
@@ -86,8 +87,8 @@ harbor_agent:
 
       # Match the Qwen3.6 model-card harness setup: 3h agent timeout.
       harbor_agent_override_timeout: 10800
-      harbor_agent_max_timeout: null
-      harbor_verifier_override_timeout: null
-      harbor_verifier_max_timeout: null
-      harbor_timeout_multiplier: null
+      harbor_agent_max_timeout:
+      harbor_verifier_override_timeout:
+      harbor_verifier_max_timeout:
+      harbor_timeout_multiplier:
       harbor_jobs_dir: "responses_api_agents/harbor_agent/jobs"

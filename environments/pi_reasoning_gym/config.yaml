@@ -7,6 +7,14 @@ reasoning_gym:
       description: Pi agent harness on Reasoning Gym tasks
       value: Evaluate model reasoning capabilities in the Pi agent harness
 
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: environments/pi_reasoning_gym/data/example.jsonl
+      - name: train
+        type: train
+        jsonl_fpath: environments/pi_reasoning_gym/data/train_knights_knaves.jsonl
+        license: Apache 2.0
 pi_reasoning_gym_agent:
   responses_api_agents:
     pi_agent:
@@ -34,11 +42,3 @@ pi_reasoning_gym_agent:
             models:
             - id: nvidia/qwen/qwen3-next-80b-a3b-instruct
               reasoning: false
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: environments/pi_reasoning_gym/data/example.jsonl
-      - name: train
-        type: train
-        jsonl_fpath: environments/pi_reasoning_gym/data/train_knights_knaves.jsonl
-        license: Apache 2.0

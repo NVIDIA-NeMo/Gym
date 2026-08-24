@@ -55,6 +55,18 @@ litmus_agent:
           harness: litmus_agent
           sandbox-api: apptainer
 
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/litmus_agent/data/train.jsonl
+        source:
+          type: huggingface
+          repo_id: nvidia/Nemotron-RL-litmus-bench-v0.1
+          artifact_fpath: train.jsonl
+        license: Creative Commons Attribution 4.0 International
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/litmus_agent/data/example.jsonl
 litmus_agent_agent:
   responses_api_agents:
     simple_agent:
@@ -66,15 +78,3 @@ litmus_agent_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-        - name: train
-          type: train
-          jsonl_fpath: resources_servers/litmus_agent/data/train.jsonl
-          source:
-            type: huggingface
-            repo_id: nvidia/Nemotron-RL-litmus-bench-v0.1
-            artifact_fpath: train.jsonl
-          license: Creative Commons Attribution 4.0 International
-        - name: example
-          type: example
-          jsonl_fpath: resources_servers/litmus_agent/data/example.jsonl

@@ -6,16 +6,6 @@ vlm_eval_kit_resources_server:
       verified: false
       description: Run all supported VLMEvalKit benchmarks.
       value: Measure VLM capabilities
-vlm_eval_kit_simple_agent:
-  responses_api_agents:
-    simple_agent:
-      entrypoint: app.py
-      resources_server:
-        type: resources_servers
-        name: vlm_eval_kit_resources_server
-      model_server:
-        type: responses_api_models
-        name: policy_model
       datasets:
       - name: MMBench_DEV_EN_V11
         type: validation
@@ -39,3 +29,13 @@ vlm_eval_kit_simple_agent:
         type: example
         jsonl_fpath: resources_servers/vlm_eval_kit/data/example.jsonl
         num_repeats: 1
+vlm_eval_kit_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: vlm_eval_kit_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model

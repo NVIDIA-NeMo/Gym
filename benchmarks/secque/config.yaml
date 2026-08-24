@@ -1,6 +1,6 @@
 # SECQUE open-book financial Q&A using LLM-as-judge scoring.
 config_paths:
-  - resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml
+- resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml
 
 # Grading model. Falls back to the policy model, so a single-model setup needs
 # no extra configuration. Set judge_model_name (and judge_base_url /
@@ -28,21 +28,22 @@ secque_judge_resources_server:
       judge_equal_label: "[[2]]"
       judge_not_equal_label: "[[0]]"
       # Grade the full generation rather than a regex-extracted span.
-      response_extract_regex: null
+      response_extract_regex:
       use_per_record_regex: false
       check_twice_swap: false
 
+      datasets:
+      - name: secque
+        type: benchmark
+        jsonl_fpath: benchmarks/secque/data/secque_benchmark.jsonl
+        prompt_config: benchmarks/secque/prompts/default.yaml
+        prepare_script: benchmarks/secque/prepare.py
+        num_repeats: 1
+        license: MIT
+        agent: secque_simple_agent
 secque_simple_agent:
   _inherit_from: equivalence_llm_judge_simple_agent
   responses_api_agents:
     simple_agent:
       resources_server:
         name: secque_judge_resources_server
-      datasets:
-        - name: secque
-          type: benchmark
-          jsonl_fpath: benchmarks/secque/data/secque_benchmark.jsonl
-          prompt_config: benchmarks/secque/prompts/default.yaml
-          prepare_script: benchmarks/secque/prepare.py
-          num_repeats: 1
-          license: MIT

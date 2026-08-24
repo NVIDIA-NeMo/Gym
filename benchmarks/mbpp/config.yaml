@@ -1,5 +1,5 @@
 config_paths:
-  - resources_servers/evalplus/configs/evalplus.yaml
+- resources_servers/evalplus/configs/evalplus.yaml
 
 mbpp_evalplus_resources_server:
   _inherit_from: evalplus
@@ -7,12 +7,6 @@ mbpp_evalplus_resources_server:
     evalplus:
       dataset: mbpp
 
-mbpp_evalplus_simple_agent:
-  _inherit_from: evalplus_simple_agent
-  responses_api_agents:
-    simple_agent:
-      resources_server:
-        name: mbpp_evalplus_resources_server
       datasets:
       - name: mbpp
         type: benchmark
@@ -20,3 +14,10 @@ mbpp_evalplus_simple_agent:
         prompt_config: benchmarks/mbpp/prompts/default.yaml
         prepare_script: benchmarks/mbpp/prepare.py
         license: MIT
+        agent: mbpp_evalplus_simple_agent
+mbpp_evalplus_simple_agent:
+  _inherit_from: evalplus_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: mbpp_evalplus_resources_server

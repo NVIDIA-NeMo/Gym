@@ -1,15 +1,11 @@
 config_paths:
-  - resources_servers/asr_with_pc/configs/asr_with_pc.yaml
+- resources_servers/asr_with_pc/configs/asr_with_pc.yaml
 
 librispeech_pc_asr_with_pc_resources_server:
   _inherit_from: asr_with_pc
 
-librispeech_pc_asr_with_pc_simple_agent:
-  _inherit_from: asr_with_pc_simple_agent
-  responses_api_agents:
-    simple_agent:
-      resources_server:
-        name: librispeech_pc_asr_with_pc_resources_server
+  resources_servers:
+    asr_with_pc:
       datasets:
       - name: librispeech_pc
         type: benchmark
@@ -17,3 +13,10 @@ librispeech_pc_asr_with_pc_simple_agent:
         prepare_script: benchmarks/librispeech_pc/prepare.py
         prompt_config: benchmarks/librispeech_pc/prompts/default.yaml
         license: Creative Commons Attribution 4.0 International
+        agent: librispeech_pc_asr_with_pc_simple_agent
+librispeech_pc_asr_with_pc_simple_agent:
+  _inherit_from: asr_with_pc_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: librispeech_pc_asr_with_pc_resources_server

@@ -7,6 +7,15 @@ reasoning_gym:
       value: Iterative test time scaling for improved performance in reasoning tasks
       verified: false
 
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/reasoning_gym/data/train_knights_knaves.jsonl
+        gitlab_identifier:
+          dataset_name: knights_knaves_reasoning_gym
+          version: 1.0.0
+          artifact_fpath: train_knights_knaves.jsonl
+        license: Apache 2.0
 reasoning_gym_parallel_thinking_agent:
   responses_api_agents:
     langgraph_agent:
@@ -17,12 +26,3 @@ reasoning_gym_parallel_thinking_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: train
-        type: train
-        jsonl_fpath: resources_servers/reasoning_gym/data/train_knights_knaves.jsonl
-        gitlab_identifier:
-          dataset_name: knights_knaves_reasoning_gym
-          version: 1.0.0
-          artifact_fpath: train_knights_knaves.jsonl
-        license: Apache 2.0

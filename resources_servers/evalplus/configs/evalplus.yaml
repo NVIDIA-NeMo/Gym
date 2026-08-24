@@ -12,6 +12,11 @@ evalplus:
       gt_time_limit_factor: 4.0
       evalplus_version: default
 
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/evalplus/data/example.jsonl
+        license: MIT
 evalplus_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -22,8 +27,3 @@ evalplus_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/evalplus/data/example.jsonl
-        license: MIT

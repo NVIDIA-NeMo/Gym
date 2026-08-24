@@ -22,6 +22,10 @@ reasoning_gym:
       description: Claude Code agent harness for reasoning gym tasks, via a Gym model server's /v1/messages
       value: Showcase Claude Code running against any Gym model backend
 
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/reasoning_gym/data/example.jsonl
 reasoning_gym_claude_code_agent_model_server:
   responses_api_agents:
     claude_code_agent:
@@ -35,14 +39,10 @@ reasoning_gym_claude_code_agent_model_server:
       concurrency: 32
       model: ${policy_model_name}
       anthropic_api_key: EMPTY  # pragma: allowlist secret
-      anthropic_base_url: null
+      anthropic_base_url:
       max_turns: 30
       timeout: 300
       thinking: disabled
       system_prompt: |
         You are a precise reasoning assistant. You have access to Bash to run Python for calculations.
         For every problem: think step by step, use code to verify when helpful, and state your final answer clearly.
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/reasoning_gym/data/example.jsonl

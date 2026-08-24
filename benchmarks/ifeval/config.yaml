@@ -1,5 +1,5 @@
 config_paths:
-  - resources_servers/instruction_following/configs/instruction_following.yaml
+- resources_servers/instruction_following/configs/instruction_following.yaml
 
 ifeval_instruction_following_simple_agent:
   _inherit_from: instruction_following_simple_agent
@@ -11,3 +11,4 @@ ifeval_instruction_following_simple_agent:
         jsonl_fpath: benchmarks/ifeval/data/ifeval_benchmark.jsonl
         prepare_script: benchmarks/ifeval/prepare.py
         license: Apache 2.0
+        agent: ifeval_instruction_following_simple_agent

@@ -5,6 +5,10 @@ example_single_tool_call:
       domain: agent
       verified: false
       description: Basic single-step tool calling
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/example_single_tool_call/data/example.jsonl
 example_single_tool_call_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -15,7 +19,3 @@ example_single_tool_call_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/example_single_tool_call/data/example.jsonl

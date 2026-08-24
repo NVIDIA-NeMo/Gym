@@ -11,6 +11,12 @@ speed_bench_resources_server:
       server_type_for_metrics: vllm
       snapshot_at_init: false
 
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/speed_bench/data/example.jsonl
+        num_repeats: 1
+        license: NVIDIA Evaluation Dataset License Agreement
 speed_bench_simple_agent:
   responses_api_agents:
     speed_bench_agent:
@@ -21,9 +27,3 @@ speed_bench_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/speed_bench/data/example.jsonl
-        num_repeats: 1
-        license: NVIDIA Evaluation Dataset License Agreement

@@ -24,18 +24,6 @@ image_tools_pivot:
       # count as the same Level 0 decision. Set false to require the exact name.
       unify_region_inspect_tools: true
 
-image_tools_pivot_agent:
-  responses_api_agents:
-    tool_simulation_agent:
-      entrypoint: app.py
-      # A pivot is a single decision: one model call, no tool execution.
-      max_steps: 1
-      resources_server:
-        type: resources_servers
-        name: image_tools_pivot
-      model_server:
-        type: responses_api_models
-        name: policy_model
       datasets:
       # `license` is REQUIRED on train/validation datasets: DatasetConfig asserts
       # it, and without it pydantic falls through to BenchmarkDatasetConfig and
@@ -50,3 +38,15 @@ image_tools_pivot_agent:
         jsonl_fpath: resources_servers/image_tools/data/validation.jsonl
         num_repeats: 1
         license: NVIDIA Internal Use Only, Do Not Distribute
+image_tools_pivot_agent:
+  responses_api_agents:
+    tool_simulation_agent:
+      entrypoint: app.py
+      # A pivot is a single decision: one model call, no tool execution.
+      max_steps: 1
+      resources_server:
+        type: resources_servers
+        name: image_tools_pivot
+      model_server:
+        type: responses_api_models
+        name: policy_model

@@ -47,6 +47,11 @@ arena_judge:
       # produce surrogate halves / NULs that need scrubbing before judging.
       sanitize_generations: false
 
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/arena_judge/data/example.jsonl
+        license: Apache 2.0
 arena_judge_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -57,8 +62,3 @@ arena_judge_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-        - name: example
-          type: example
-          jsonl_fpath: resources_servers/arena_judge/data/example.jsonl
-          license: Apache 2.0

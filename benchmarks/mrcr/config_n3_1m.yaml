@@ -3,22 +3,18 @@
 # tokens with the Nemotron-3-Super HF tokenizer and drops samples whose
 # tokenized conversation exceeds 1048576 tokens.
 config_paths:
-  - resources_servers/mrcr/configs/mrcr.yaml
+- resources_servers/mrcr/configs/mrcr.yaml
 
 mrcr_n3_1m_benchmark_resources_server:
   _inherit_from: mrcr_resources_server
 
-mrcr_n3_1m_benchmark_simple_agent:
-  _inherit_from: mrcr_simple_agent
-  responses_api_agents:
-    simple_agent:
-      resources_server:
-        name: mrcr_n3_1m_benchmark_resources_server
+  resources_servers:
+    mrcr:
       datasets:
       - name: mrcr_n3_1m
         type: benchmark
         jsonl_fpath: benchmarks/mrcr/data/mrcr_n3_1m_benchmark.jsonl
-        prompt_config: null
+        prompt_config:
         prepare_script: benchmarks/mrcr/prepare_n3_1m.py
         # Rollouts per task for pass@k variance.
         # NOTE: for `type: benchmark` datasets, `num_repeats` here is a
@@ -26,3 +22,10 @@ mrcr_n3_1m_benchmark_simple_agent:
         # `type: train`/`validation`. To actually get N rollouts per task,
         # pass `--num-repeats N` on the `gym eval run --no-serve` CLI.
         num_repeats: 1
+        agent: mrcr_n3_1m_benchmark_simple_agent
+mrcr_n3_1m_benchmark_simple_agent:
+  _inherit_from: mrcr_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: mrcr_n3_1m_benchmark_resources_server

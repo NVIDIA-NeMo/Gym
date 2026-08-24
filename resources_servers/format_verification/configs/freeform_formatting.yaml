@@ -6,16 +6,6 @@ freeform_formatting:
       verified: false
       description: Verify freeform text formatting (bullets, headings, tables, etc.) via regex patterns
       value: Improve instruction following for text formatting constraints
-freeform_formatting_simple_agent:
-  responses_api_agents:
-    simple_agent:
-      entrypoint: app.py
-      resources_server:
-        type: resources_servers
-        name: freeform_formatting
-      model_server:
-        type: responses_api_models
-        name: policy_model
       datasets:
       - name: train
         type: train
@@ -28,3 +18,13 @@ freeform_formatting_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/format_verification/data/ds2_freeform_formatting_example.jsonl
+freeform_formatting_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: freeform_formatting
+      model_server:
+        type: responses_api_models
+        name: policy_model

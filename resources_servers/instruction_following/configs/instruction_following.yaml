@@ -6,16 +6,6 @@ instruction_following:
       verified: false
       description: Instruction following datasets targeting IFEval and IFBench style instruction following capabilities
       value: Improve IFEval and IFBench
-instruction_following_simple_agent:
-  responses_api_agents:
-    simple_agent:
-      entrypoint: app.py
-      resources_server:
-        type: resources_servers
-        name: instruction_following
-      model_server:
-        type: responses_api_models
-        name: policy_model
       datasets:
       - name: train
         type: train
@@ -31,3 +21,13 @@ instruction_following_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/instruction_following/data/example.jsonl
+instruction_following_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: instruction_following
+      model_server:
+        type: responses_api_models
+        name: policy_model

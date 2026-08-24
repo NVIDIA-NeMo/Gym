@@ -8,6 +8,10 @@ citation_if:
       # Maintainer-granted flag; new contributions default to false.
       verified: false
 
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/citation_if/data/example.jsonl
 citation_if_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -19,7 +23,3 @@ citation_if_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/citation_if/data/example.jsonl

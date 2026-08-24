@@ -7,6 +7,12 @@ graphwalks_resources_server:
       description: Long-context graph-walks (BFS / parents) with F1-over-node-sets grading from openai/graphwalks
       value: Improve long-context multi-step graph reasoning and adjacency-list traversal
 
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/graphwalks/data/example.jsonl
+        num_repeats: 1
+        license: MIT
 graphwalks_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -17,9 +23,3 @@ graphwalks_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/graphwalks/data/example.jsonl
-        num_repeats: 1
-        license: MIT

@@ -1,5 +1,5 @@
 config_paths:
-  - resources_servers/iheval/configs/iheval.yaml
+- resources_servers/iheval/configs/iheval.yaml
 
 # Gym-native IHEval benchmark. Inherits the resources server + model wiring from
 # iheval_simple_agent (see resources_servers/iheval/configs/iheval.yaml) and
@@ -18,5 +18,6 @@ iheval_benchmark_simple_agent:
         # prompt template is applied. The key is required by BenchmarkDatasetConfig
         # (Optional[Path] = value may be null, but the key must be present); null
         # keeps the pre-built input untouched (see train_data_utils collate path).
-        prompt_config: null
+        prompt_config:
         license: Apache 2.0
+        agent: iheval_benchmark_simple_agent

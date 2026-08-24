@@ -12,23 +12,6 @@ math_with_judge:
       description: Prime Agent harness with math tasks
       value: Improve math capabilities with Prime Agent
 
-prime_agent_math_agent:
-  responses_api_agents:
-    prime_agent:
-      entrypoint: app.py
-      resources_server:
-        type: resources_servers
-        name: math_with_judge
-      model_server:
-        type: responses_api_models
-        name: policy_model
-      concurrency: 8
-      command: prime-agent
-      model: ${policy_model_name}
-      prime_agent_version: 0.7.0
-      timeout: 600
-      system_prompt: |
-        Use IPython to compute or verify results when helpful. Put the final answer in \boxed{}.
       datasets:
       - name: train
         type: train
@@ -47,3 +30,20 @@ prime_agent_math_agent:
       - name: example
         type: example
         jsonl_fpath: environments/prime_agent_math/data/example.jsonl
+prime_agent_math_agent:
+  responses_api_agents:
+    prime_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: math_with_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      concurrency: 8
+      command: prime-agent
+      model: ${policy_model_name}
+      prime_agent_version: 0.7.0
+      timeout: 600
+      system_prompt: |
+        Use IPython to compute or verify results when helpful. Put the final answer in \boxed{}.

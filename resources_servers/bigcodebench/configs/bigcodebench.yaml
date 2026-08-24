@@ -15,6 +15,11 @@ bigcodebench:
       min_time_limit: 1.0
       gt_time_limit: 20.0
       subprocess_timeout: 240.0
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/bigcodebench/data/example.jsonl
+        license: Apache 2.0
 bigcodebench_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -25,8 +30,3 @@ bigcodebench_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/bigcodebench/data/example.jsonl
-        license: Apache 2.0

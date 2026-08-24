@@ -1,5 +1,5 @@
 config_paths:
-  - resources_servers/mcqa/configs/mcqa.yaml
+- resources_servers/mcqa/configs/mcqa.yaml
 
 longcodebench_mcqa_simple_agent:
   _inherit_from: mcqa_simple_agent
@@ -12,3 +12,4 @@ longcodebench_mcqa_simple_agent:
         prompt_config: benchmarks/prompts/generic/default.yaml
         prepare_script: benchmarks/longcodebench/prepare.py
         license: Creative Commons Attribution 4.0 International
+        agent: longcodebench_mcqa_simple_agent

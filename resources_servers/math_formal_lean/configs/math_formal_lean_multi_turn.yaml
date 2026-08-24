@@ -11,6 +11,14 @@ math_formal_lean:
       value: Improve formal theorem proving capabilities
 
 # Proof refinement agent with multi-turn self-correction
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/math_formal_lean/data/minif2f_test.jsonl
+        license: MIT
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/math_formal_lean/data/minif2f_test.jsonl
 math_formal_lean_refinement_agent:
   responses_api_agents:
     proof_refinement_agent:
@@ -25,11 +33,3 @@ math_formal_lean_refinement_agent:
       max_correction_turns: 2
       # Include all attempts in output (for training data)
       include_all_attempts: true
-      datasets:
-      - name: train
-        type: train
-        jsonl_fpath: resources_servers/math_formal_lean/data/minif2f_test.jsonl
-        license: MIT
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/math_formal_lean/data/minif2f_test.jsonl

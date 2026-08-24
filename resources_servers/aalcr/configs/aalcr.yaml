@@ -8,6 +8,11 @@ aalcr_resources_server:
         type: responses_api_models
         name: Qwen3-235B-A22B-Instruct-2507-FP8
       judge_responses_create_params_overrides: {}
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/aalcr/data/example.jsonl
+        num_repeats: 1
 aalcr_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -18,8 +23,3 @@ aalcr_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/aalcr/data/example.jsonl
-        num_repeats: 1

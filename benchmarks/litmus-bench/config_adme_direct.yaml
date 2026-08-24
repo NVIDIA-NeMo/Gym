@@ -1,6 +1,6 @@
 # ADME Tier-5 sub10, direct subset.
 config_paths:
-  - benchmarks/litmus-bench/config_adme_base.yaml
+- benchmarks/litmus-bench/config_adme_base.yaml
 
 prepare_script_args:
   subset: direct
@@ -12,9 +12,10 @@ adme_tier5_direct_agent:
       resources_server:
         name: adme_tier5_resources_server
       datasets:
-        - name: adme-tier5-direct
-          type: benchmark
-          jsonl_fpath: benchmarks/litmus-bench/data/adme-tier5-direct_benchmark.jsonl
-          prompt_config: null
-          prepare_script: benchmarks/litmus-bench/prepare_adme_tier5.py
-          num_repeats: 5
+      - name: adme-tier5-direct
+        type: benchmark
+        jsonl_fpath: benchmarks/litmus-bench/data/adme-tier5-direct_benchmark.jsonl
+        prompt_config:
+        prepare_script: benchmarks/litmus-bench/prepare_adme_tier5.py
+        num_repeats: 5
+        agent: adme_tier5_direct_agent

@@ -6,6 +6,10 @@ bunsenbench_chemistry_mcq:
       verified: false
       description: Public BunsenBench chemistry multiple-choice benchmark verifier
       value: Measure chemistry MCQ reasoning with source and taxonomy breakdowns
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/bunsenbench_chemistry_mcq/data/example.jsonl
 bunsenbench_chemistry_mcq_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -16,7 +20,3 @@ bunsenbench_chemistry_mcq_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/bunsenbench_chemistry_mcq/data/example.jsonl

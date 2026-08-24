@@ -20,6 +20,22 @@ imo_proofbench_judge:
         top_p: 1.0
       use_chat_completions_for_judge: true
 
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/imo_proofbench_judge/data/example.jsonl
+        license: Apache 2.0
+
+# Default-null judge config keys so OmegaConf can resolve the
+# `${judge_base_url}` / `${judge_api_key}` / `${judge_model_name}`
+# interpolations on the `judge_model` server even when the consumer
+# doesn't supply them. `gym eval prepare` reads the merged config
+# but doesn't instantiate the judge — without these defaults, prepare
+# crashes with `InterpolationKeyError` before prepare.py runs. CLI
+# overrides (`+judge_base_url=…`) supersede the null at server launch.
+# Kept at the END of the file so `update_env_list.py`'s YAML visitor
+# (which recurses only into the FIRST top-level key) still finds the
+# `imo_proofbench_judge` resources_servers block above.
 judge_model:
   responses_api_models:
     openai_model:
@@ -38,22 +54,6 @@ imo_proofbench_judge_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/imo_proofbench_judge/data/example.jsonl
-        license: Apache 2.0
-
-# Default-null judge config keys so OmegaConf can resolve the
-# `${judge_base_url}` / `${judge_api_key}` / `${judge_model_name}`
-# interpolations on the `judge_model` server even when the consumer
-# doesn't supply them. `gym eval prepare` reads the merged config
-# but doesn't instantiate the judge — without these defaults, prepare
-# crashes with `InterpolationKeyError` before prepare.py runs. CLI
-# overrides (`+judge_base_url=…`) supersede the null at server launch.
-# Kept at the END of the file so `update_env_list.py`'s YAML visitor
-# (which recurses only into the FIRST top-level key) still finds the
-# `imo_proofbench_judge` resources_servers block above.
-judge_base_url: null
-judge_api_key: null
-judge_model_name: null
+judge_base_url:
+judge_api_key:
+judge_model_name:

@@ -11,16 +11,6 @@ ragtruth:
       # different tag, e.g. think_tag: reasoning for <reasoning>…</reasoning>.
       # think_tag: think
 
-ragtruth_simple_agent:
-  responses_api_agents:
-    simple_agent:
-      entrypoint: app.py
-      resources_server:
-        type: resources_servers
-        name: ragtruth
-      model_server:
-        type: responses_api_models
-        name: policy_model
       datasets:
       - name: example
         type: example
@@ -39,3 +29,13 @@ ragtruth_simple_agent:
         type: validation
         jsonl_fpath: resources_servers/ragtruth/data/test_data2txt.jsonl
         license: MIT
+ragtruth_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: ragtruth
+      model_server:
+        type: responses_api_models
+        name: policy_model

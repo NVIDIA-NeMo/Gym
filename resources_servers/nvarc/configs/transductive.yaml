@@ -8,6 +8,18 @@ nvarc_transductive_resources_server:
       value: Improve ARC-AGI puzzle-solving by directly predicting transformed grids
       agent_mode: transductive
 
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/nvarc/data/example.jsonl
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/nvarc/data/transductive/train.jsonl
+        license: Apache 2.0
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/nvarc/data/transductive/validation.jsonl
+        license: Apache 2.0
 nvarc_transductive_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -18,15 +30,3 @@ nvarc_transductive_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-        - name: example
-          type: example
-          jsonl_fpath: resources_servers/nvarc/data/example.jsonl
-        - name: train
-          type: train
-          jsonl_fpath: resources_servers/nvarc/data/transductive/train.jsonl
-          license: Apache 2.0
-        - name: validation
-          type: validation
-          jsonl_fpath: resources_servers/nvarc/data/transductive/validation.jsonl
-          license: Apache 2.0

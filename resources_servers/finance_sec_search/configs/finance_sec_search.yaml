@@ -49,6 +49,10 @@ finance_sec_search_resources_server:
       # Retrieval model parameters (adjust when swapping between thinking/instruct models)
       retrieval_max_output_tokens: 8192
       retrieval_model_context_length: 131072
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/finance_sec_search/data/example.jsonl
 
 # Judge model server (OpenAI or local — configured via env.yaml)
 search_judge_model:
@@ -66,7 +70,3 @@ finance_agent:
     finance_agent:
       resources_server:
         name: finance_sec_search_resources_server
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/finance_sec_search/data/example.jsonl

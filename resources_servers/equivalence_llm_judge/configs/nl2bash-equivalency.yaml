@@ -67,7 +67,7 @@ equivalence_llm_judge:
         CANDIDATE:
         {generated_answer}
       judge_endpoint_max_concurrency: 256
-      judge_system_message: null
+      judge_system_message:
       judge_equal_label: "[[A=B]]"
       judge_not_equal_label: "[[A!=B]]"
 
@@ -75,7 +75,7 @@ equivalence_llm_judge:
       # match is used. If capture groups exist, the first non-empty group is
       # returned; otherwise, the entire last match is used.
       # Example: "^Question:\\s*(.*)$"
-      question_extract_regex: null
+      question_extract_regex:
 
       # Optional regex to extract the generated response from the last assistant message.
       # The LAST match is used. If capture groups exist, the first non-empty
@@ -118,16 +118,6 @@ equivalence_llm_judge:
       verified: true
       description: Short bash command generation questions with LLM-as-a-judge
       value: Improve foundational bash and IF capabilities
-equivalence_llm_judge_simple_agent:
-  responses_api_agents:
-    simple_agent:
-      entrypoint: app.py
-      resources_server:
-        type: resources_servers
-        name: equivalence_llm_judge
-      model_server:
-        type: responses_api_models
-        name: policy_model
       datasets:
       - name: example
         type: example
@@ -149,3 +139,13 @@ equivalence_llm_judge_simple_agent:
           version: 0.0.1
           artifact_fpath: nl2bash-super-validation-0901.jsonl
         license: GNU General Public License v3.0
+equivalence_llm_judge_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: equivalence_llm_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model

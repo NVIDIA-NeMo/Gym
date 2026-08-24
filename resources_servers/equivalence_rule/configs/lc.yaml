@@ -8,7 +8,11 @@ lc_equivalence_rule:
       verified: false
       description: Question - Answering with rule-based reward
       value: Improve retrieval and counting capabilities
-      
+
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/equivalence_rule/data/example.jsonl
 lc_equivalence_rule_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -19,7 +23,3 @@ lc_equivalence_rule_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/equivalence_rule/data/example.jsonl

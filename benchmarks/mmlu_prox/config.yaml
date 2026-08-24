@@ -1,6 +1,6 @@
 # Chain to existing resource server + agent config
 config_paths:
-  - resources_servers/mcqa/configs/mcqa.yaml
+- resources_servers/mcqa/configs/mcqa.yaml
 
 # We use `_inherit_from` directives to inherit from and not use the generic config above to ensure this benchmark config is isolated.
 mmlu_prox_mcqa_resources_server:
@@ -11,12 +11,6 @@ mmlu_prox_mcqa_resources_server:
       # the existing strict-boxed behavior preserved as the final fallback.
       grading_mode: lenient_answer_colon_md
 
-mmlu_prox_mcqa_simple_agent:
-  _inherit_from: mcqa_simple_agent
-  responses_api_agents:
-    simple_agent:
-      resources_server:
-        name: mmlu_prox_mcqa_resources_server
       datasets:
       - name: mmlu_prox
         type: benchmark
@@ -24,3 +18,10 @@ mmlu_prox_mcqa_simple_agent:
         prompt_config: benchmarks/prompts/generic/default.yaml
         prepare_script: benchmarks/mmlu_prox/prepare.py
         num_repeats: 1
+        agent: mmlu_prox_mcqa_simple_agent
+mmlu_prox_mcqa_simple_agent:
+  _inherit_from: mcqa_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: mmlu_prox_mcqa_resources_server

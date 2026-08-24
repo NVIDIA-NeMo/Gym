@@ -7,6 +7,10 @@ gymnasium:
       verified: false
       description: Base class for Gymnasium-style servers. Not a standalone server.
       value: Reusable base class for step/reset style environments
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/gymnasium/data/example.jsonl
 gymnasium_agent:
   responses_api_agents:
     gymnasium_agent:
@@ -18,7 +22,3 @@ gymnasium_agent:
         type: responses_api_models
         name: policy_model
       max_steps: 1
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/gymnasium/data/example.jsonl

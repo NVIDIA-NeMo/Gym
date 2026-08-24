@@ -7,16 +7,6 @@ gpqa_diamond:
       description: GPQA Diamond multiple-choice question answering problems
       value: Evaluate graduate-level scientific reasoning via MCQ verification
 
-gpqa_diamond_simple_agent:
-  responses_api_agents:
-    simple_agent:
-      entrypoint: app.py
-      resources_server:
-        type: resources_servers
-        name: gpqa_diamond
-      model_server:
-        type: responses_api_models
-        name: policy_model
       datasets:
       - name: train
         type: train
@@ -29,3 +19,13 @@ gpqa_diamond_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/gpqa_diamond/data/example.jsonl
+gpqa_diamond_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: gpqa_diamond
+      model_server:
+        type: responses_api_models
+        name: policy_model

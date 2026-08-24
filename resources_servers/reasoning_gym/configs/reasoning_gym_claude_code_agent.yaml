@@ -7,6 +7,17 @@ reasoning_gym:
       description: Claude Code agent harness for reasoning gym tasks
       value: Evaluate model capabilities in the Claude Code agent harness
 
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/reasoning_gym/data/example.jsonl
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/reasoning_gym/data/Nemotron-RL-ReasoningGym-v1_train.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-ReasoningGym-v1
+          artifact_fpath: data/train.jsonl
+        license: Creative Commons Attribution 4.0 International
 reasoning_gym_claude_code_agent:
   responses_api_agents:
     claude_code_agent:
@@ -24,14 +35,3 @@ reasoning_gym_claude_code_agent:
       system_prompt: |
         You are a precise reasoning assistant. You have access to Bash to run Python for calculations.
         For every problem: think step by step, use code to verify when helpful, and state your final answer clearly.
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/reasoning_gym/data/example.jsonl
-      - name: train
-        type: train
-        jsonl_fpath: resources_servers/reasoning_gym/data/Nemotron-RL-ReasoningGym-v1_train.jsonl
-        huggingface_identifier:
-          repo_id: nvidia/Nemotron-RL-ReasoningGym-v1
-          artifact_fpath: data/train.jsonl
-        license: Creative Commons Attribution 4.0 International

@@ -1,6 +1,6 @@
 # Chain to the arena_judge resource server + agent config.
 config_paths:
-  - resources_servers/arena_judge/configs/arena_judge.yaml
+- resources_servers/arena_judge/configs/arena_judge.yaml
 
 # Isolate this benchmark's agent wiring from other arena_judge consumers
 # via ``_inherit_from`` so overrides here don't leak.
@@ -12,12 +12,6 @@ m_arena_hard_arena_judge_resources_server:
       # that break the judge's JSON serialization; scrub them before judging.
       sanitize_generations: true
 
-m_arena_hard_arena_judge_simple_agent:
-  _inherit_from: arena_judge_simple_agent
-  responses_api_agents:
-    simple_agent:
-      resources_server:
-        name: m_arena_hard_arena_judge_resources_server
       datasets:
       - name: m_arena_hard
         type: benchmark
@@ -28,3 +22,10 @@ m_arena_hard_arena_judge_simple_agent:
         # it on the CLI as `+num_repeats=N` — see run_m_arena_hard_gym.py
         # in the migration recipe directory.
         license: Apache 2.0
+        agent: m_arena_hard_arena_judge_simple_agent
+m_arena_hard_arena_judge_simple_agent:
+  _inherit_from: arena_judge_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: m_arena_hard_arena_judge_resources_server

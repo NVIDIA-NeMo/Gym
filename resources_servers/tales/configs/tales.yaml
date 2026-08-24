@@ -14,6 +14,12 @@ tales:
       seed: 0
       split: train
       max_episode_steps: 25
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/tales/data/example.jsonl
+        num_repeats: 1
+        license: Apache 2.0
 tales_gymnasium_agent:
   responses_api_agents:
     gymnasium_agent:
@@ -25,9 +31,3 @@ tales_gymnasium_agent:
         type: responses_api_models
         name: policy_model
       max_steps: 25
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/tales/data/example.jsonl
-        num_repeats: 1
-        license: Apache 2.0

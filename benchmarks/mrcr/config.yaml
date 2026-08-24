@@ -1,6 +1,6 @@
 # Chain to the generic mrcr resource server + agent config.
 config_paths:
-  - resources_servers/mrcr/configs/mrcr.yaml
+- resources_servers/mrcr/configs/mrcr.yaml
 
 # Benchmark-specific overrides via `_inherit_from` so the base mrcr config
 # stays isolated from benchmark use.
@@ -8,17 +8,13 @@ config_paths:
 mrcr_benchmark_resources_server:
   _inherit_from: mrcr_resources_server
 
-mrcr_benchmark_simple_agent:
-  _inherit_from: mrcr_simple_agent
-  responses_api_agents:
-    simple_agent:
-      resources_server:
-        name: mrcr_benchmark_resources_server
+  resources_servers:
+    mrcr:
       datasets:
       - name: mrcr
         type: benchmark
         jsonl_fpath: benchmarks/mrcr/data/mrcr_benchmark.jsonl
-        prompt_config: null
+        prompt_config:
         prepare_script: benchmarks/mrcr/prepare.py
         # Rollouts per task for pass@k variance.
         # NOTE: for `type: benchmark` datasets, `num_repeats` here is a
@@ -26,3 +22,10 @@ mrcr_benchmark_simple_agent:
         # `type: train`/`validation`. To actually get N rollouts per task,
         # pass `--num-repeats N` on the `gym eval run --no-serve` CLI.
         num_repeats: 4
+        agent: mrcr_benchmark_simple_agent
+mrcr_benchmark_simple_agent:
+  _inherit_from: mrcr_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: mrcr_benchmark_resources_server
