@@ -5,7 +5,7 @@ position: 2
 ---
 
 <Info>
-Python 3.12 is required. Refer to [Prerequisites](/get-started/prerequisites) for full system requirements.
+Python 3.13.14 or higher is required. Refer to [Prerequisites](/get-started/prerequisites) for full system requirements.
 </Info>
 
 Install from PyPI for the quickest setup. Clone from git if you need the latest features and environments, or use a NeMo RL container if you intend to train with NeMo Gym and NeMo RL.
@@ -14,17 +14,17 @@ Install from PyPI for the quickest setup. Clone from git if you need the latest 
 <Tab title="PyPI">
 
 ```bash
-python3.12 -m pip install nemo-gym
+python3.13 -m pip install nemo-gym
 ```
 
 Or with [uv](https://docs.astral.sh/uv/):
 
 ```bash
-uv venv --python 3.12 && source .venv/bin/activate
+uv venv --python 3.13.14 && source .venv/bin/activate
 uv pip install nemo-gym
 ```
 
-The package includes built-in environments and CLI commands. Config and data paths resolve against the package install location automatically. To pin a release: `python3.12 -m pip install nemo-gym==0.4.0`.
+The package includes built-in environments and CLI commands. Config and data paths resolve against the package install location automatically. To pin a release: `python3.13 -m pip install nemo-gym==0.4.0`.
 
 </Tab>
 <Tab title="Git">
@@ -32,7 +32,7 @@ The package includes built-in environments and CLI commands. Config and data pat
 ```bash
 git clone git@github.com:NVIDIA-NeMo/Gym.git
 cd Gym
-uv venv --python 3.12 && source .venv/bin/activate
+uv venv --python 3.13.14 && source .venv/bin/activate
 uv sync
 ```
 
@@ -80,7 +80,7 @@ You should see output like:
 
 ```text
 NeMo Gym v0.4.0
-Python 3.12.x
+Python 3.13.14
 Installation: /path/to/Gym
 ```
 
