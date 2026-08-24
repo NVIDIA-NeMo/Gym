@@ -269,6 +269,19 @@ class VibenchResourcesServer(SimpleResourcesServer):
         except Exception:
             print("Failed to derive grader env from env_creator", format_exc(), file=sys.stderr)
 
+        # ViBench's in-container agent validates AGENT_LLM_*, AGENT_SEEDING_LLM_* and
+        # AGENT_EVALUATION_LLM_* together and refuses to start if any is unset
+        # (_harness/runner/agent/environment.py: "LLM API KEYS is not set"). AGENT_LLM_* is
+        # the *builder's* slot, which here is Gym's policy model rather than anything
+        # env_creator knows about, so it comes back empty and seeding dies before it runs --
+        # despite the seeding agent never using that key. Fill the unused slot from the
+        # seeding values to satisfy the check without inventing credentials.
+        for suffix in ("API_KEY", "MODEL", "ENDPOINT"):
+            if not env.get(f"AGENT_LLM_{suffix}"):
+                seeded = env.get(f"AGENT_SEEDING_LLM_{suffix}")
+                if seeded:
+                    env[f"AGENT_LLM_{suffix}"] = seeded
+
         return env
 
     async def _run_vibench_script(self, cmd: List[str]) -> tuple[int, str]:
