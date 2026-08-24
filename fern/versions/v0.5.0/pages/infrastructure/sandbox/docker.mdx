@@ -10,7 +10,7 @@ The `docker` provider runs each sandbox as one long-lived container on the local
 
 Install Docker and make sure the `docker` binary is on `PATH` with a running daemon. The provider does not install or start Docker; constructing it raises `RuntimeError` if the binary is missing, and `create()` fails if the daemon is unreachable.
 
-Images can be any reference the daemon can run, such as `ubuntu:22.04`, `python:3.12-slim`, or a registry reference. An Apptainer-style `docker://` prefix is tolerated and stripped. GPU passthrough needs the NVIDIA Container Toolkit; CPU and memory limits need cgroups.
+Images can be any reference the daemon can run, such as `ubuntu:22.04`, `python:3.13.14-slim`, or a registry reference. An Apptainer-style `docker://` prefix is tolerated and stripped. GPU passthrough needs the NVIDIA Container Toolkit; CPU and memory limits need cgroups.
 
 ## Provider Config
 
