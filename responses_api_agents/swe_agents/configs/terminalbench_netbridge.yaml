@@ -4,8 +4,8 @@
 # (private netns: services bind privileged ports, parallel workers isolated) AND reach the
 # host policy model over a bind-mounted unix-domain socket bridged with socat on both ends
 # (the bridge is active only when env TB_NET_BRIDGE_PKG points at the portable socat/ip
-# bundle). allow_internet=true tasks keep the shared host netns (unchanged). REQUIRES
-# tb_single_exec=true (the outer socat hop is started in the single-exec runner path).
+# bundle). allow_internet=true tasks keep the shared host netns (unchanged). Agent and
+# evaluator use separate execs; only the agent receives the model bridge.
 # See logbook P260611 H3 run 2026-06-14-netns-model-bridge.
 swe_agents:
   responses_api_agents:
@@ -27,11 +27,6 @@ swe_agents:
         - /lustre/fsw/portfolios/llmservice/users/charlwang/cluster/tb/data/tb_sifs_arm64/{instance_id}_arm64.sif
         - /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/kbhardwaj/datasets/nvidia-ots-1000-batch-2/sifs_arm64/{instance_id}_arm64.sif
       container_folder_path: null
-
-      # Single-exec: run agent + eval in ONE apptainer exec so the inner socat bridge +
-      # boot daemons the agent starts persist into the eval phase. REQUIRED for the bridge.
-      tb_single_exec: true
-      tb_service_settle_sec: 20
 
       # Portable socat/ip bundle carrying the model into the private netns (arm64/HSG).
       tb_net_bridge_pkg: /lustre/fsw/portfolios/llmservice/users/charlwang/cluster/tb/data/tb_net_bridge/socat_portable

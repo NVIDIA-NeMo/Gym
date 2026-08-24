@@ -1,11 +1,10 @@
 # ============================================================================
 # CANONICAL Terminal-Bench rollout config (opencode, Path-2 live-state scoring).
-# THE single production setting — use this for all Terminal-Bench rollouts/evals.
+# Agent and evaluator run in separate Apptainer execs over one shared overlay.
 # Supersedes terminalbench_{opencode,multiset,tb21,netbridge,all}.yaml.
 #
-# One mode: tb_single_exec=true (agent + eval in ONE apptainer exec). Validated
-# equivalent to the old two-exec on afterquery (A/B 2026-06-15: pass@2 0.833 == 0.833,
-# pass@1 within noise) AND required for service tasks (daemon persistence).
+# Authoritative tests, verifier outputs, and the full dataset row are mounted only in
+# the evaluator exec; the agent sees a redacted row and never receives those mounts.
 # Networking is automatic per task (gym, no flag): allow_internet=false => private
 # netns (--net --network=none) + model carried in over the unix-socket socat bridge
 # (default-on, staged bundle); allow_internet=true/absent => shared host netns.
@@ -19,8 +18,8 @@ swe_agents:
     swe_agents: &swe_agents_config
       entrypoint: app.py
       domain: coding
-      description: Canonical Terminal-Bench rollouts via opencode (Path-2, single-exec, auto netns bridge).
-      value: One production config for all Terminal-Bench task sets; service tasks get private-netns + model bridge automatically.
+      description: Canonical answer-isolated Terminal-Bench rollouts via opencode (Path-2, two-exec, auto netns bridge).
+      value: Agent and evaluator share live filesystem state while authoritative tests remain evaluator-only.
 
       agent_framework: opencode
       agent_max_turns: 300
@@ -35,10 +34,6 @@ swe_agents:
         - /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/kbhardwaj/datasets/nvidia-ots-1000-batch-2/sifs_arm64/{instance_id}_arm64.sif
         - /lustre/fsw/portfolios/llmservice/users/charlwang/cluster/tb/data/tb_sifs_arm64/tb21/{instance_id}_arm64.sif
       container_folder_path: null
-
-      # Single production mode: agent + eval in one apptainer exec.
-      tb_single_exec: true
-      tb_service_settle_sec: 20
 
       # Portable socat/ip bundle used to carry the model server into the private netns of
       # offline (allow_internet=false) tasks. Architecture-specific: this one is arm64 (HSG).

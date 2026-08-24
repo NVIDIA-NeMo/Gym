@@ -30,6 +30,7 @@ import time
 import uuid
 from asyncio import Semaphore
 from asyncio.subprocess import Process
+from collections.abc import Mapping
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -37,13 +38,13 @@ from shutil import rmtree
 from subprocess import Popen
 from subprocess import run as subprocess_run
 from traceback import format_exc
-from typing import Any, Dict, List, Literal, NamedTuple, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, NamedTuple, Optional, Tuple
 
 import ray
 import tomlkit
 from gprof2dot import main as gprof2dot_main
 from openai.types.responses.function_tool import FunctionTool
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydot import graph_from_dot_file
 
 from nemo_gym import PARENT_DIR
@@ -294,6 +295,19 @@ class AgentPromptOverride(BaseModel):
 class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
 
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_removed_terminal_bench_execution_options(cls, values: Any) -> Any:
+        """Fail closed when a stale config requests the removed merged execution path."""
+        if isinstance(values, Mapping):
+            removed = sorted({"tb_single_exec", "tb_service_settle_sec"}.intersection(values))
+            if removed:
+                raise ValueError(
+                    f"removed Terminal-Bench options {removed}: agent and evaluator always run in "
+                    "separate Apptainer execs so authoritative tests are never mounted for the agent"
+                )
+        return values
+
     # Agent framework configuration
     agent_framework: Literal["openhands", "opencode"] = Field(
         default="openhands",
@@ -322,20 +336,8 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
 
     swebench_agent_timeout: int = Field(default=45 * 60, description="Timeout for running the agent (seconds)")
 
-    # Terminal-Bench configuration
-    tb_single_exec: bool = Field(
-        default=False,
-        description=(
-            "Terminal-Bench: run the agent and the eval in ONE apptainer exec so background "
-            "services the agent starts (grpc/nginx/pypi/...) stay alive for the test phase via "
-            "the shared PID namespace. Required for service tasks; the two-exec default kills "
-            "them between execs. Cannot provide strict hidden-test mount isolation, because the "
-            "single exec needs the eval test mount for its whole duration."
-        ),
-    )
-    tb_service_settle_sec: int = Field(
-        default=20, description="Terminal-Bench single-exec: seconds to let agent services settle before eval."
-    )
+    # Terminal-Bench configuration. Agent and evaluator always use separate
+    # Apptainer execs so evaluator-only mounts are never visible to the agent.
     tb_net_bridge_pkg: Optional[str] = Field(
         default=None,
         description=(
@@ -444,9 +446,7 @@ class SWEBenchWrapperServerConfig(BaseModel):
 class ExecuteContainerCommandArgs(BaseModel):
     command: str
     expected_file_pattern: str
-    # "agent_eval" is the Terminal-Bench single-exec mode: one apptainer exec that runs
-    # the agent and then the verifier, so agent-started services survive into the eval.
-    mode: Union[Literal["agent"], Literal["eval"], Literal["agent_eval"]]
+    mode: Literal["agent", "eval"]
     timeout: int
 
 
@@ -490,10 +490,6 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
     agent_command: Optional[ExecuteContainerCommandArgs] = None
     agent_apptainer_command_str: Optional[str] = None
     agent_script: Optional[str] = None
-    # tb_single_exec (terminal-bench): merged agent+eval command, built in _setup_params
-    # where _build_apptainer_command is available (it lives on the wrapper, not the runner).
-    merged_command: Optional[ExecuteContainerCommandArgs] = None
-    merged_apptainer_command_str: Optional[str] = None
     # Model-in-netns bridge: real model-server "host:port" + portable socat bundle path, set
     # in _setup_params when the bridge is active, so the Ray worker can start the outer socat
     # hop WITHOUT depending on the env var propagating into the worker process.
@@ -1746,14 +1742,6 @@ fi
             }
         }
         report_path.write_text(json.dumps(report, indent=2))
-
-
-# Exit status of the agent phase inside a tb_single_exec merged command. `timeout`
-# exits 124 when the agent window is exhausted; the runner reads this to set
-# `agent_timed_out`, which the merged command's own success would otherwise hide.
-TB_AGENT_RC_FILENAME = "tb_agent_rc.txt"
-TB_AGENT_RC_MOUNTED_PATH = f"/trajectories_mount/{TB_AGENT_RC_FILENAME}"
-TB_TIMEOUT_EXIT_CODE = 124
 
 
 # Size of the per-instance ext3 overlay shared between the Terminal-Bench agent
@@ -3133,20 +3121,6 @@ class RunOpenHandsAgent(BaseModel):
         except Exception:
             pass
 
-    def _tb_agent_phase_timed_out(self) -> Optional[bool]:
-        """Did the agent phase of a tb_single_exec run exhaust its window?
-
-        Reads the exit status the merged command recorded before `|| true` would have
-        swallowed it. `timeout` exits 124 on expiry. Returns None when the marker is
-        absent or unreadable, so a missing file is "unknown" rather than "did not time
-        out" — `update_and_read_metrics` strips None, leaving the field unset.
-        """
-        rc_path = self.config.persistent_dir / TB_AGENT_RC_FILENAME
-        try:
-            return int(rc_path.read_text().strip()) == TB_TIMEOUT_EXIT_CODE
-        except Exception:
-            return None
-
     async def _process_single_datapoint_terminal_bench(self) -> Optional[Path]:
         """Shared-overlay orchestration for Terminal-Bench tasks.
 
@@ -3169,66 +3143,6 @@ class RunOpenHandsAgent(BaseModel):
             metrics.patch_exists = False
             update_and_read_metrics(self.config.metrics_fpath, metrics.model_dump())
             return None
-
-        # 1b) SINGLE-EXEC path (tb_single_exec): run the agent AND the eval in ONE
-        # apptainer exec so background services the agent starts (grpc/nginx/pypi/...)
-        # stay alive for the test phase (shared PID namespace). The two-exec default
-        # kills them between execs. Apptainer `instance` would be cleaner but user
-        # namespaces are blocked on the nodes. This path cannot provide strict mount
-        # isolation, because agent_eval needs the eval test mount for the whole exec.
-        if self.config.tb_single_exec and self.config.merged_command is not None:
-            # The merged agent+eval command was built in _setup_params (the wrapper has
-            # _build_apptainer_command; this runner does not). Just use it here.
-            agent_cmd = self.config.agent_command
-            merged_cmd = self.config.merged_command
-            merged_apptainer = self.config.merged_apptainer_command_str
-            metrics.openhands_run_time = -time.time()
-            metrics.generation_apptainer_spinup_time = metrics.openhands_run_time
-            # Model-in-netns bridge: start the OUTER socat hop before the exec; the in-SIF
-            # inner hop connects to the bind-mounted socket. No-op unless the bridge is
-            # active for this task. Always torn down in finally.
-            _outer = await self._tb_start_outer_bridge()
-            try:
-                active = await self._start_container_command(merged_cmd, merged_apptainer)
-                try:
-                    report_file = await self._finish_container_command(active, merged_cmd)
-                except Exception as e:
-                    print(f"[terminal-bench single-exec] merged command failed for {instance_id}: {e}", flush=True)
-                    metrics.openhands_run_time += time.time()
-                    metrics.patch_exists = False
-                    metrics.agent_timed_out = (
-                        metrics.openhands_run_time is not None
-                        and metrics.openhands_run_time >= _effective_agent_timeout_sec(self.config)
-                    )
-                    update_and_read_metrics(self.config.metrics_fpath, metrics.model_dump())
-                    return None
-                metrics.openhands_run_time += time.time()
-                metrics.patch_exists = True
-                # The merged command succeeds even when the AGENT phase was killed by its
-                # `timeout` wrapper, because the script goes on to run the verifier. Recover
-                # the agent's real exit status so an exhausted agent window is recorded as a
-                # timeout instead of a genuine reward-0 attempt (it usually has an empty
-                # trajectory, which must be maskable downstream).
-                metrics.agent_timed_out = self._tb_agent_phase_timed_out()
-                # best-effort agent metrics (patch / error) from the agent's output file
-                try:
-                    agent_out = glob.glob(agent_cmd.expected_file_pattern, recursive=True)
-                    if agent_out:
-                        out_file = self._openhands_dir_copy_from_host(output_file_path=agent_out[0])
-                        with open(out_file, "r") as f:
-                            out_dict = json.loads(f.read().strip())
-                        metrics.agent_error_kind = _classify_agent_error(out_dict.get("error"))
-                        patch = (out_dict.get("test_result") or {}).get("git_patch") or None
-                        metrics.model_patch = (patch + "\n") if patch and not patch.endswith("\n") else patch
-                except Exception as e:
-                    print(
-                        f"[terminal-bench single-exec] agent-metrics read failed for {instance_id}: {e}",
-                        flush=True,
-                    )
-                update_and_read_metrics(self.config.metrics_fpath, metrics.model_dump())
-                return report_file
-            finally:
-                await self._tb_stop_outer_bridge(_outer)
 
         # 2) Run the opencode agent (sequential; writes land in the overlay).
         metrics.openhands_run_time = -time.time()
@@ -3807,7 +3721,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         # Private-netns config for offline Terminal-Bench tasks. `tb_bridge` is the
         # model-carrying socat hop, which only the agent-side exec needs.
         tb_net = _tb_net_bridge_cfg(params)
-        tb_bridge = tb_net if command.mode in ("agent", "agent_eval") else None
+        tb_bridge = tb_net if command.mode == "agent" else None
 
         # Fix localhost URLs not working sometimes
         container_commands = []
@@ -3902,9 +3816,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         if params.agent_framework == "opencode" and command.mode == "eval":
             mount_args.append(f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl")
-        elif params.agent_framework == "opencode" and command.mode in ("agent", "agent_eval"):
-            # "agent_eval" is the terminal-bench single-exec mode: the one exec runs the agent
-            # first, so it needs the full opencode harness mounted exactly like a plain agent exec.
+        elif params.agent_framework == "opencode" and command.mode == "agent":
             assert params.opencode_setup_dir is not None, "opencode_setup_dir not set"
             opencode_dir = f"{params.opencode_setup_dir}/opencode"
             bun_dir = f"{params.opencode_setup_dir}/bun"
@@ -4072,7 +3984,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 mount_args.append(f"--mount type=bind,src={denovoswe_eval_script},dst=/root/_denovoswe_eval.py,ro")
                 mount_args.append(f"--mount type=bind,src={params.model_patch_path},dst=/root/patch.diff")
 
-        if command.mode in ("eval", "agent_eval") and data_point.get("dataset_name") == "terminal-bench":
+        if command.mode == "eval" and data_point.get("dataset_name") == "terminal-bench":
             # The authoritative test bundle, staged by TerminalBenchDatasetProcessor under
             # eval_private_dir. Mounted read-only here and never in a pure agent exec.
             tb_tests_host_dir = _tb_tests_host_dir(params.eval_private_dir)
@@ -4082,7 +3994,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             tb_verifier_host_dir.mkdir(parents=True, exist_ok=True)
             mount_args.append(f"--mount type=bind,src={tb_verifier_host_dir},dst=/logs/verifier")
 
-        if command.mode in ("agent", "agent_eval") and data_point.get("dataset_name") == "terminal-bench":
+        if command.mode == "agent" and data_point.get("dataset_name") == "terminal-bench":
             # Defense-in-depth: if the task SIF baked the hidden tests in, delete
             # them so the agent cannot read them. (Harbor builds the agent image
             # from environment/ only, so normally there are none.) The canonical
@@ -4402,39 +4314,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             params.agent_command = OpenHandsHarnessProcessor(config=params).get_run_command()
         params.agent_apptainer_command_str = self._build_apptainer_command(params, params.agent_command)
         params.agent_script = params.agent_script_path.read_text()
-
-        # tb_single_exec (terminal-bench): build the merged agent+eval command HERE, where
-        # _build_apptainer_command is available (it lives on the wrapper, not the runner).
-        # `set +e` + `|| true` so a failing agent phase still reaches the verifier — an
-        # unresolved task is a valid outcome, not a container error.
-        if params.tb_single_exec and params.problem_info.get("dataset_name") == "terminal-bench":
-            settle = int(params.tb_service_settle_sec)
-            # Record the agent phase's real exit status before `|| true` swallows it. The
-            # agent runs under `timeout --signal=TERM`, which exits 124 when the window is
-            # exhausted; without this the merged command still succeeds (it goes on to the
-            # eval phase), `_finish_container_command` raises nothing, and the rollout is
-            # recorded as a genuine reward-0 attempt rather than a timeout. Empty-trajectory
-            # timeouts must stay distinguishable so they can be masked in training.
-            merged_inner = (
-                "set +e\n( "
-                + params.agent_command.command
-                + f"\n)\necho $? > {TB_AGENT_RC_MOUNTED_PATH} 2>/dev/null || true\n"
-                + f'echo "[tb_single_exec] agent phase done; settling services {settle}s"\n'
-                + f"sleep {settle}\n"
-                + params.eval_command.command
-            )
-            params.merged_command = ExecuteContainerCommandArgs(
-                command=merged_inner,
-                expected_file_pattern=params.eval_command.expected_file_pattern,
-                mode="agent_eval",
-                timeout=(
-                    _effective_agent_timeout_sec(params)
-                    + int(params.eval_command.timeout or params.swebench_tests_timeout)
-                    + settle
-                    + 120
-                ),
-            )
-            params.merged_apptainer_command_str = self._build_apptainer_command(params, params.merged_command)
 
         # Record the real model endpoint + bundle path for the model-in-netns bridge, so the
         # Ray worker can start the outer socat hop without depending on env propagation.

@@ -36,16 +36,15 @@ import pytest
 # (requirements.txt) absent from the core lock — skip rather than break a
 # clean-env `pytest tests/unit_tests/` run.
 pytest.importorskip("tomlkit")
+pydantic = pytest.importorskip("pydantic")
+ValidationError = pydantic.ValidationError
 
 from responses_api_agents.swe_agents.app import (  # noqa: E402
     _TB_TERMINAL_TOOL_OUTPUT,
     AGENT_VISIBLE_INSTANCE_FIELDS,
-    TB_AGENT_RC_FILENAME,
-    TB_AGENT_RC_MOUNTED_PATH,
-    TB_TIMEOUT_EXIT_CODE,
     ExecuteContainerCommandArgs,
-    RunOpenHandsAgent,
     SWEBenchWrapper,
+    SWEBenchWrapperConfig,
     TerminalBenchDatasetProcessor,
     _append_terminal_tool_outputs,
     _effective_agent_timeout_sec,
@@ -229,7 +228,7 @@ class TerminalBenchIsolationTests(unittest.TestCase):
         # Non-destructive: the host-side authoritative row is still intact.
         self.assertIn("test_files", source)
 
-    def test_two_exec_commands_keep_tests_out_of_agent(self):
+    def test_terminal_bench_commands_keep_tests_out_of_agent(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             persistent = root / "results" / "task_run"
@@ -314,6 +313,22 @@ class TerminalBenchIsolationTests(unittest.TestCase):
             self.assertNotIn("TCP-LISTEN:18900", eval_script)
             self.assertIn("/.singularity.d/runscript", agent_script)
             self.assertIn("/.singularity.d/runscript", eval_script)
+
+    def test_removed_merged_execution_options_fail_closed(self):
+        self.assertNotIn("tb_single_exec", SWEBenchWrapperConfig.model_fields)
+        self.assertNotIn("tb_service_settle_sec", SWEBenchWrapperConfig.model_fields)
+
+        for key, value in (("tb_single_exec", True), ("tb_service_settle_sec", 20)):
+            with self.subTest(key=key), self.assertRaisesRegex(ValidationError, "removed Terminal-Bench options"):
+                SWEBenchWrapperConfig.model_validate({key: value})
+
+        with self.assertRaises(ValidationError):
+            ExecuteContainerCommandArgs(
+                command="echo merged",
+                expected_file_pattern="eval.json",
+                mode="agent_eval",
+                timeout=60,
+            )
 
     def test_terminal_bench_uses_a_shared_persistent_overlay_not_tmpfs(self):
         """Agent and eval must share one overlay image, or live-state grading breaks."""
@@ -477,108 +492,6 @@ class TerminalBenchIsolationTests(unittest.TestCase):
             params.problem_info["instance_dict"] = json.dumps({"workspace_path": "/app", "test_files": {}})
             with self.assertRaisesRegex(ValueError, "is missing"):
                 processor.get_run_command()
-
-    def test_single_exec_mounts_the_opencode_harness_and_exposes_hidden_tests(self):
-        """`agent_eval` (tb_single_exec) needs the agent harness AND the verifier mounts.
-
-        It runs both phases in one exec, so it must mount the opencode harness like an
-        agent exec and the test bundle like an eval exec. The second half of that is a
-        deliberate, documented trade: because Apptainer fixes mounts at exec start, the
-        hidden tests are readable by the agent for the whole run. Two-exec does not have
-        this property (see test_two_exec_commands_keep_tests_out_of_agent); single-exec
-        buys daemon persistence for service tasks at the cost of test isolation.
-        """
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            persistent = root / "results" / "task_run"
-            persistent.mkdir(parents=True)
-            eval_private = persistent / "eval_private"
-            (eval_private / ".empty").mkdir(parents=True)
-            _tb_tests_host_dir(eval_private).mkdir(parents=True)
-            dataset = eval_private / "instance.jsonl"
-            dataset.write_text("{}\n")
-            setup = root / "opencode_setup"
-            (setup / "opencode" / "evaluation" / "oh").mkdir(parents=True)
-            (setup / "opencode" / "packages" / "opencode" / "migration").mkdir(parents=True)
-            (setup / "bun").mkdir(parents=True)
-
-            params = SimpleNamespace(
-                problem_info={
-                    "dataset_name": "terminal-bench",
-                    "instance_dict": json.dumps({"workspace_path": "/app", "tests_dir": "/tests"}),
-                },
-                instance_dataset_path=dataset,
-                agent_instance_dataset_path=dataset,
-                eval_private_dir=eval_private,
-                agent_framework="opencode",
-                opencode_setup_dir=setup,
-                # Deliberately None: an opencode run has no OpenHands setup dir, so if the
-                # harness dispatch ever stops recognising "agent_eval" this assertion fires.
-                openhands_setup_dir=None,
-                persistent_dir=persistent,
-                agent_run_id="example-run",
-                resolved_system_prompt_template=None,
-                resolved_user_prompt_template=None,
-                swebench_setup_dir=root / "swebench",
-                swebench_multilingual_setup_dir=root / "multilingual",
-                swe_rebench_setup_dir=root / "rebench",
-                model_patch_path=persistent / "patch.diff",
-                container="/images/example.sif",
-            )
-            merged = SWEBenchWrapper._build_apptainer_command(
-                None,
-                params,
-                ExecuteContainerCommandArgs(
-                    command="echo merged",
-                    expected_file_pattern=str(persistent / "eval.json"),
-                    mode="agent_eval",
-                    timeout=60,
-                ),
-            )
-
-            # Agent side: the opencode harness must be present or the agent phase cannot run.
-            self.assertIn("dst=/opencode_setup/opencode,ro", merged)
-            self.assertIn("dst=/root/dataset/data.jsonl", merged)
-            # Eval side: verifier mounts must be present or the grading phase cannot run.
-            self.assertIn(f"src={_tb_tests_host_dir(eval_private)},dst=/root/tb_tests,ro", merged)
-            self.assertIn("dst=/logs/verifier", merged)
-            # Same shared overlay as every other terminal-bench exec.
-            self.assertIn(f"--overlay {persistent / 'agent_overlay.img'}", merged)
-
-    def test_single_exec_records_the_agent_phase_exit_status(self):
-        """An exhausted agent window must stay distinguishable from a real failure.
-
-        In tb_single_exec the merged command runs the verifier after the agent, so it
-        exits 0 even when `timeout` killed the agent. Without capturing the agent's own
-        exit status the rollout looks like a genuine reward-0 attempt, and empty-trajectory
-        timeouts silently become training signal.
-        """
-        # Contract between the two halves: the in-container script writes the mounted
-        # path, the host-side runner reads persistent_dir/<filename>. persistent_dir is
-        # bind-mounted at /trajectories_mount, so these must name the same file.
-        self.assertEqual(TB_AGENT_RC_MOUNTED_PATH, f"/trajectories_mount/{TB_AGENT_RC_FILENAME}")
-        self.assertEqual(TB_TIMEOUT_EXIT_CODE, 124)  # GNU coreutils `timeout` expiry
-
-        runner = SimpleNamespace()
-        with tempfile.TemporaryDirectory() as tmp:
-            persistent = Path(tmp)
-            runner.config = SimpleNamespace(persistent_dir=persistent)
-            probe = RunOpenHandsAgent._tb_agent_phase_timed_out
-
-            # No marker (e.g. two-exec, or the echo never ran) -> unknown, not False.
-            self.assertIsNone(probe(runner))
-
-            rc_file = persistent / "tb_agent_rc.txt"
-            rc_file.write_text("124\n")  # `timeout` expiry
-            self.assertIs(probe(runner), True)
-
-            for rc in ("0", "1", "137"):
-                with self.subTest(rc=rc):
-                    rc_file.write_text(rc + "\n")
-                    self.assertIs(probe(runner), False)
-
-            rc_file.write_text("not-a-number")
-            self.assertIsNone(probe(runner))
 
     def test_per_instance_agent_timeout_overrides_the_config_default(self):
         """TB rows declare their own agent budget; it must beat the config-wide value."""
