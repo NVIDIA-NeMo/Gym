@@ -228,6 +228,8 @@ class ExecuteContainerCommandArgs(BaseModel):
 
 class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapperConfig):
     rollout_id: Optional[str] = Field(default=None, exclude_if=lambda value: value is None)
+    model_call_capture_enabled: bool = False
+    token_id_capture_enabled: bool = False
     metrics_fpath: Path
     problem_info: Dict[str, Any]
     body: NeMoGymResponseCreateParamsNonStreaming
@@ -2103,7 +2105,9 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
         try:
             model_server_cfg = get_first_server_config_dict(get_global_config_dict(), self.config.model_server_name)
             model_server_base_url = apply_rollout_prefix(
-                f"http://{model_server_cfg.host}:{model_server_cfg.port}", self.config.rollout_id
+                f"http://{model_server_cfg.host}:{model_server_cfg.port}",
+                self.config.rollout_id,
+                token_capture=self.config.token_id_capture_enabled,
             )
             default_model_name = (
                 getattr(model_server_cfg, "openai_model", None) or getattr(model_server_cfg, "model", None) or ""
@@ -2512,7 +2516,7 @@ class RunOpenHandsAgent(BaseModel):
             recursive=True,
         )
         retained = latest_completion_paths(Path(path) for path in completion_candidates)
-        if self.config.rollout_id is not None:
+        if self.config.model_call_capture_enabled and self.config.rollout_id is not None:
             try:
                 observations = build_swe_observations(
                     (Path(path) for path in completion_candidates),
@@ -3513,7 +3517,12 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         return json.dumps(chat_messages)
 
     def _setup_params(
-        self, body: NeMoGymResponseCreateParamsNonStreaming, rollout_id: Optional[str] = None
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        rollout_id: Optional[str] = None,
+        *,
+        model_call_capture_enabled: bool = False,
+        token_id_capture_enabled: bool = False,
     ) -> Tuple[SWEBenchWrapperInstanceConfig, BaseDatasetHarnessProcessor]:
         problem_info = body.metadata | {"container_formatter": self.config.container_formatter}
         instance_id = problem_info.get("instance_id", "unknown")
@@ -3588,6 +3597,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             **self.config.model_dump(),
             **self._swe_bench_wrapper_server_config.model_dump(),
             rollout_id=rollout_id,
+            model_call_capture_enabled=model_call_capture_enabled,
+            token_id_capture_enabled=token_id_capture_enabled,
             problem_info=problem_info,
             body=body,
             persistent_dir=persistent_dir,
@@ -3665,9 +3676,19 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         return await self._responses(body)
 
     async def _responses(
-        self, body: NeMoGymResponseCreateParamsNonStreaming, rollout_id: Optional[str] = None
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        rollout_id: Optional[str] = None,
+        *,
+        model_call_capture_enabled: bool = False,
+        token_id_capture_enabled: bool = False,
     ) -> NeMoGymResponse:
-        params, dataset_processor = self._setup_params(body, rollout_id)
+        params, dataset_processor = self._setup_params(
+            body,
+            rollout_id,
+            model_call_capture_enabled=model_call_capture_enabled,
+            token_id_capture_enabled=token_id_capture_enabled,
+        )
 
         with (params.eval_private_dir / "params.json").open("w") as f:
             f.write(params.model_dump_json(indent=4))
@@ -3786,7 +3807,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         updated_metrics = update_and_read_metrics(params.metrics_fpath, metrics_to_update)
 
         observations: Optional[AgentObservationBundle] = None
-        if params.rollout_id is not None:
+        if params.model_call_capture_enabled and params.rollout_id is not None:
             observations_path = params.persistent_dir / OBSERVATIONS_FILENAME
             try:
                 observations = AgentObservationBundle.model_validate_json(observations_path.read_text())
@@ -3867,7 +3888,15 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             body.responses_create_params.parallel_tool_calls = True
             body.responses_create_params.tool_choice = "auto"
 
-            response = await self._responses(body.responses_create_params, self.rollout_id_from_run(body))
+            rollout_id = self.rollout_id_from_run(body)
+            model_call_capture_enabled = self._model_call_capture_enabled()
+            token_id_capture_enabled = self._token_id_capture_enabled()
+            response = await self._responses(
+                body.responses_create_params,
+                rollout_id,
+                model_call_capture_enabled=model_call_capture_enabled,
+                token_id_capture_enabled=token_id_capture_enabled,
+            )
 
             metadata, response.metadata = response.metadata, None
             responses_create_params = body.responses_create_params.model_dump() | {
@@ -3879,7 +3908,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             if "subagent_trajectories" in metadata:
                 subagent_trajectories = json.loads(metadata["subagent_trajectories"])
             observations = None
-            if "agent_observations" in metadata:
+            if model_call_capture_enabled and rollout_id is not None and "agent_observations" in metadata:
                 observations = AgentObservationBundle.model_validate_json(metadata["agent_observations"])
 
             return SWEBenchVerifyResponse(

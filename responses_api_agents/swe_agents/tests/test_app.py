@@ -346,7 +346,14 @@ class TestSWEBenchWrapperInstanceConfig:
             assert config.resolved_agent_cls == "CodeActAgent"
             assert config.resolved_diversify_tool_names is False
             assert config.resolved_camel_case_tool_names is False
-            assert "rollout_id" not in config.model_dump()
+            serialized = config.model_dump()
+            assert "rollout_id" not in serialized
+            assert serialized["model_call_capture_enabled"] is False
+            assert serialized["token_id_capture_enabled"] is False
+
+            restored = SWEBenchWrapperInstanceConfig.model_validate(serialized)
+            assert restored.model_call_capture_enabled is False
+            assert restored.token_id_capture_enabled is False
 
 
 class TestSWEBenchMetrics:
@@ -400,6 +407,11 @@ class TestSWEBenchVerifyResponse:
         assert "patch_exists" in fields
         assert "instance_config" in fields
         assert "subagent_trajectories" in fields
+
+    def test_optional_observations_are_excluded_when_disabled(self) -> None:
+        response = SWEBenchVerifyResponse.model_construct(ng_agent_observations=None)
+
+        assert "ng_agent_observations" not in response.model_dump()
 
 
 ########################################
@@ -1251,13 +1263,35 @@ class TestOpenCodeHarnessProcessor:
             assert "--max-turns" not in script  # max_turns is positional
             assert str(config.agent_max_turns) in script
 
-    def test_get_run_command_prefixes_observed_rollout(self, _stub_model_server_lookup) -> None:
+    @pytest.mark.parametrize(
+        ("model_call_capture_enabled", "token_id_capture_enabled", "expected_base_url"),
+        [
+            (False, False, "http://test-host:12345"),
+            (True, False, "http://test-host:12345/ng-rollout/7-2"),
+            (False, True, "http://test-host:12345/ng-rollout/7-2/training-token-capture"),
+            (True, True, "http://test-host:12345/ng-rollout/7-2/training-token-capture"),
+        ],
+        ids=("disabled", "observability-only", "token-capture-only", "both"),
+    )
+    def test_get_run_command_routes_each_capture_state(
+        self,
+        _stub_model_server_lookup,
+        model_call_capture_enabled: bool,
+        token_id_capture_enabled: bool,
+        expected_base_url: str,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            config = self._opencode_config(tmpdir, rollout_id="7-2")
+            rollout_id = "7-2" if model_call_capture_enabled or token_id_capture_enabled else None
+            config = self._opencode_config(
+                tmpdir,
+                rollout_id=rollout_id,
+                model_call_capture_enabled=model_call_capture_enabled,
+                token_id_capture_enabled=token_id_capture_enabled,
+            )
             OpenCodeHarnessProcessor(config=config).get_run_command()
 
             script = self._read_agent_script(config)
-            assert "NEMO_GYM_MODEL_SERVER_BASE_URL=http://test-host:12345/ng-rollout/7-2" in script
+            assert f"NEMO_GYM_MODEL_SERVER_BASE_URL={expected_base_url}" in script
 
     def test_get_run_command_subagents_disabled_by_default(self, _stub_model_server_lookup) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1505,7 +1539,7 @@ class TestOpencodeMultiSessionCopy:
 
     def test_observation_failure_does_not_break_existing_copy_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            agent = self._agent(tmpdir, rollout_id="7-2")
+            agent = self._agent(tmpdir, rollout_id="7-2", model_call_capture_enabled=True)
             eval_dir = self._eval_dir(agent)
             inst = agent.config.instance_id
             comp_root = eval_dir / inst / "bench_run" / "llm_completions" / inst
@@ -1530,7 +1564,7 @@ class TestOpencodeMultiSessionCopy:
 
     def test_persists_all_response_ids_before_source_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            agent = self._agent(tmpdir, rollout_id="7-2")
+            agent = self._agent(tmpdir, rollout_id="7-2", model_call_capture_enabled=True)
             eval_dir = self._eval_dir(agent)
             inst = agent.config.instance_id
             comp_root = eval_dir / inst / "bench_run" / "llm_completions" / inst
@@ -1557,6 +1591,28 @@ class TestOpencodeMultiSessionCopy:
             )
             [invocation] = [record for record in bundle.records if isinstance(record, AgentInvocation)]
             assert [ref.response_id for ref in invocation.model_calls] == ["resp-0", "resp-1"]
+
+    def test_token_capture_only_does_not_build_observation_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            agent = self._agent(tmpdir, rollout_id="7-2", token_id_capture_enabled=True)
+            eval_dir = self._eval_dir(agent)
+            inst = agent.config.instance_id
+            comp_root = eval_dir / inst / "bench_run" / "llm_completions" / inst
+            artifact = comp_root / "turn.json"
+            _write_completion(
+                artifact,
+                session_id="main",
+                parent_session_id=None,
+                turn=0,
+                response_id="resp-0",
+            )
+
+            with patch.object(swe_app, "build_swe_observations") as build_observations:
+                agent._openhands_dir_copy_from_host(output_file_path=None)
+
+            assert (agent.config.trajectories_root / "llm_completions" / inst / artifact.name).is_file()
+            build_observations.assert_not_called()
+            assert not (agent.config.persistent_dir / "agent_observations.json").exists()
 
 
 class TestGetOpenhandsTrajectoryFromCompletions:
@@ -2628,10 +2684,32 @@ class TestSWEBenchWrapperResponses:
 
 
 class TestSWEBenchWrapperRun:
+    @pytest.mark.parametrize(
+        ("model_call_capture_enabled", "token_id_capture_enabled", "expected_rollout_id"),
+        [
+            (False, False, None),
+            (True, False, "7-2-a1"),
+            (False, True, "7-2-a1"),
+            (True, True, "7-2-a1"),
+        ],
+        ids=("disabled", "observability-only", "token-capture-only", "both"),
+    )
     @pytest.mark.asyncio
-    async def test_run_resolved(self, monkeypatch) -> None:
+    async def test_run_resolved_routes_each_capture_state(
+        self,
+        monkeypatch,
+        model_call_capture_enabled: bool,
+        token_id_capture_enabled: bool,
+        expected_rollout_id: str | None,
+    ) -> None:
         wrapper = _create_wrapper(monkeypatch)
-        wrapper.server_client.global_config_dict = {"observability_enabled": True}
+        wrapper.server_client.global_config_dict = {
+            "observability_enabled": model_call_capture_enabled,
+            "token_id_capture": {
+                "enabled": token_id_capture_enabled,
+                "all_agents": token_id_capture_enabled,
+            },
+        }
         observations = AgentObservationBundle(
             source="swe_opencode",
             records=[AgentInvocation(invocation_id="main")],
@@ -2672,13 +2750,18 @@ class TestSWEBenchWrapperRun:
                 ),
                 _ng_task_index=7,
                 _ng_rollout_index=2,
+                _ng_attempt_index=1,
             )
 
             result = await wrapper.run(body)
             assert isinstance(result, SWEBenchVerifyResponse)
             assert result.reward == 1.0
-            assert result.ng_agent_observations == observations
-            assert responses_mock.await_args.args[1] == "7-2"
+            assert result.ng_agent_observations == (observations if model_call_capture_enabled else None)
+            assert responses_mock.await_args.args[1] == expected_rollout_id
+            assert responses_mock.await_args.kwargs == {
+                "model_call_capture_enabled": model_call_capture_enabled,
+                "token_id_capture_enabled": token_id_capture_enabled,
+            }
 
     @pytest.mark.asyncio
     async def test_run_not_resolved(self, monkeypatch) -> None:
