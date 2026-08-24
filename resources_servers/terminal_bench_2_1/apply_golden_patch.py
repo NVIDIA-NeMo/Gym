@@ -39,7 +39,7 @@ async def main(examples: list) -> None:
         result = await future
         data = await result.json()
 
-        num_resolved += data["resolved"]
+        num_resolved += int(data["reward"])
         num_total += 1
 
         resolved_pct = 100 * num_resolved / num_total
