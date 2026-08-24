@@ -163,7 +163,7 @@ class ResponsesConverter(BaseModel):
         self,
         responses_create_params: NeMoGymResponseCreateParamsNonStreaming,
     ) -> NeMoGymChatCompletionCreateParamsNonStreaming:
-        responses_create_params = responses_create_params.model_dump(exclude_unset=True)
+        responses_create_params = responses_create_params.model_dump(exclude_none=True, exclude_unset=True)
 
         unsupported_fields = sorted(
             {

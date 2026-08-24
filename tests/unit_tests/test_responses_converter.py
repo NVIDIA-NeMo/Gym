@@ -1536,6 +1536,24 @@ def test_downconverting_present_responses_only_fields_fails_explicitly(
         converter.responses_to_chat_completion_create_params(params)
 
 
+def test_downconverting_null_responses_only_fields_treats_them_as_absent(converter: ResponsesConverter):
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input="hi",
+        background=None,
+        context_management=None,
+        conversation=None,
+        include=None,
+        max_tool_calls=None,
+        previous_response_id=None,
+        prompt=None,
+        truncation=None,
+    )
+
+    converted = converter.responses_to_chat_completion_create_params(params)
+
+    assert converted.messages == [{"content": [{"text": "hi", "type": "text"}], "role": "user"}]
+
+
 def test_downconverting_text_format_fails_explicitly(converter: ResponsesConverter):
     params = NeMoGymResponseCreateParamsNonStreaming(input="hi", text={"format": {"type": "json_object"}})
 
