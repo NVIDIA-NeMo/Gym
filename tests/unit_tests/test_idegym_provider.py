@@ -988,6 +988,37 @@ async def test_upload_failure_reports_the_failing_chunk(
         await provider.upload_file(handle, source, "/tmp/x.bin")
 
 
+async def test_upload_failure_names_a_later_chunk(make_provider, fake_session: FakeSession, tmp_path: Path) -> None:
+    """The reported index counts chunks, and a later chunk must still be attempted."""
+    provider = make_provider(probe={"command": None}, files={"upload_chunk_bytes": 4})
+    handle = await provider.create(spec())
+    source = tmp_path / "src.bin"
+    source.write_bytes(b"abcdefghij")
+    fake_session.bash_results = [
+        IdeGymBashResult(stdout="", stderr="", exit_code=0),
+        IdeGymBashResult(stdout="", stderr="disk full", exit_code=1),
+    ]
+    with pytest.raises(idegym_provider.IdeGymOperationError, match="failed on chunk 2/3"):
+        await provider.upload_file(handle, source, "/tmp/x.bin")
+
+
+@requires_bash
+async def test_download_without_a_cap_is_uncapped(make_provider, tmp_path: Path) -> None:
+    """`max_download_bytes: null` disables the check rather than comparing against None."""
+    provider = make_provider(
+        LocalBashSession(),
+        probe={"command": None, "verify_workdir": False},
+        files={"max_download_bytes": None, "download_chunk_bytes": 16},
+    )
+    handle = await provider.create(spec())
+    payload = bytes(range(64))
+    source = tmp_path / "blob.bin"
+    source.write_bytes(payload)
+    out = tmp_path / "back.bin"
+    await provider.download_file(handle, str(source), out)
+    assert out.read_bytes() == payload
+
+
 async def test_download_rejects_unparsable_size_and_bad_base64(
     make_provider, fake_session: FakeSession, tmp_path: Path
 ) -> None:

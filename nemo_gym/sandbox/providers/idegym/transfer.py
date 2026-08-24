@@ -14,15 +14,14 @@
 
 """File transfer in and out of an IdeGYM sandbox, over its bash tool.
 
-IdeGYM's filesystem API is unusable here: its read endpoint streams raw bytes while
-the orchestrator forwards requests as JSON text, and its typed file endpoints only
-write UTF-8. So bytes travel base64-encoded through the bash tool, chunked in both
-directions — uploads to stay inside
-:data:`~nemo_gym.sandbox.providers.idegym.config.MAX_COMMAND_BYTES`, downloads because
-each chunk's stdout is persisted as an async-operation result.
+IdeGYM's filesystem API is unusable here: its read endpoint streams raw bytes while the
+orchestrator forwards requests as JSON text, and its typed file endpoints only write
+UTF-8. So bytes travel base64-encoded through the bash tool, chunked both ways — uploads
+to stay inside :data:`~nemo_gym.sandbox.providers.idegym.config.MAX_COMMAND_BYTES`,
+downloads because each chunk's stdout is persisted as an async-operation result.
 
-Good enough for the config files, patches, and logs a benchmark moves around, but not a
-bulk channel — have the sandbox fetch large inputs itself.
+Fine for the config files, patches, and logs a benchmark moves around, but not a bulk
+channel — have the sandbox fetch large inputs itself.
 """
 
 import asyncio
@@ -41,15 +40,13 @@ from nemo_gym.sandbox.providers.idegym.shell import quote
 
 LOGGER = logging.getLogger(__name__)
 
-# Runs a command in the sandbox. Bound to one sandbox by the provider, so the
-# transfer layer never needs to know about handles or sessions.
+# Runs one command in the sandbox; the provider binds it to a handle.
 ExecRunner = Callable[..., Awaitable[SandboxExecResult]]
 
 
 def _describe(result: SandboxExecResult) -> str:
     detail = (result.stderr or result.stdout or "").strip()
-    suffix = f": {detail}" if detail else ""
-    return f"exit code {result.return_code}{suffix}"
+    return f"exit code {result.return_code}" + (f": {detail}" if detail else "")
 
 
 class Base64BashFileTransfer:
@@ -63,11 +60,10 @@ class Base64BashFileTransfer:
         """Upload one local file, creating its parent directory in the sandbox."""
         data = await asyncio.to_thread(Path(source_path).read_bytes)
         chunk_size = self._config.upload_chunk_bytes
-        # An empty file still needs one (empty) chunk, so the file is created.
+        # An empty file still needs one (empty) chunk, so that it gets created.
         chunks = [data[offset : offset + chunk_size] for offset in range(0, len(data), chunk_size)] or [b""]
         for index, chunk in enumerate(chunks):
-            script = self._write_chunk_script(target_path, chunk, first=index == 0)
-            result = await self._run(script, timeout_s=self._config.timeout_s)
+            result = await self._exec(self._write_chunk_script(target_path, chunk, first=index == 0))
             if result.return_code != 0:
                 raise IdeGymTransferError(
                     f"Uploading {source_path} to {target_path!r} failed on chunk "
@@ -77,59 +73,57 @@ class Base64BashFileTransfer:
     async def download(self, source_path: str, target_path: Path) -> None:
         """Download one sandbox file to ``target_path``."""
         size = await self._remote_size(source_path)
-        max_bytes = self._config.max_download_bytes
-        if max_bytes is not None and size > max_bytes:
+        cap = self._config.max_download_bytes
+        if cap is not None and size > cap:
             raise IdeGymTransferError(
                 f"Refusing to download {source_path!r}: {size} bytes exceeds files.max_download_bytes "
-                f"({max_bytes}). Archive and split it in the sandbox, or raise the limit."
+                f"({cap}). Archive and split it in the sandbox, or raise the limit."
             )
         chunk_size = self._config.download_chunk_bytes
         data = bytearray()
-        # Every chunk asserts its own decoded length, so the concatenation is
-        # complete by construction; a file that shrinks mid-read fails on the chunk
-        # that came back short.
-        for offset in range(0, size, chunk_size) if size else ():
-            length = min(chunk_size, size - offset)
-            data.extend(await self._read_chunk(source_path, offset, length))
-        target_path = Path(target_path)
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        await asyncio.to_thread(target_path.write_bytes, bytes(data))
+        # Each chunk asserts its own decoded length, so the concatenation needs no
+        # separate check and a file that shrinks mid-read fails on the short chunk.
+        for offset in range(0, size, chunk_size):
+            data.extend(await self._read_chunk(source_path, offset, min(chunk_size, size - offset)))
+        target = Path(target_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(target.write_bytes, bytes(data))
+
+    async def _exec(self, script: str) -> SandboxExecResult:
+        return await self._run(script, timeout_s=self._config.timeout_s)
 
     # --- script construction ----------------------------------------------
 
     def _write_chunk_script(self, target_path: str, chunk: bytes, *, first: bool) -> str:
-        """Decode one base64 chunk into ``target_path``.
+        """Decode one base64 chunk into ``target_path``, appending unless ``first``.
 
-        Each chunk is encoded independently, so appending decoded chunks
-        reconstructs the file byte for byte regardless of chunk alignment.
+        Chunks are encoded independently, so appending the decoded bytes rebuilds the
+        file exactly, whatever the chunk alignment.
         """
-        encoded = base64.b64encode(chunk).decode("ascii")
-        redirect = ">" if first else ">>"
-        lines: list[str] = []
+        lines = []
         if first and (parent := posixpath.dirname(target_path)):
             lines.append(f"mkdir -p {quote(parent)}")
-        # The pipeline's exit code is `base64 -d`'s, which is the failure that
-        # matters: a decode error or a write error both surface through it.
-        lines.append(f"printf '%s' {quote(encoded)} | base64 -d {redirect} {quote(target_path)}")
+        # The pipeline's exit code is `base64 -d`'s, so a decode or write error surfaces.
+        encoded = quote(base64.b64encode(chunk).decode("ascii"))
+        lines.append(f"printf '%s' {encoded} | base64 -d {'>' if first else '>>'} {quote(target_path)}")
         return "\n".join(lines)
 
     def _size_script(self, source_path: str) -> str:
         path = quote(source_path)
-        # `wc -c` over a redirect rather than an argument: a path that starts with a
-        # dash would otherwise be read as an option.
+        # `-f` rejects directories and devices, whose read would never end; the redirect
+        # keeps a leading-dash path from being taken as a `wc` option.
         return f"[ -f {path} ] || {{ printf 'not a regular file\\n' >&2; exit 1; }}\nwc -c < {path}"
 
     def _read_chunk_script(self, source_path: str, offset: int, length: int) -> str:
-        path = quote(source_path)
-        # No `pipefail` on purpose: `head -c` closes the pipe once it has its bytes, so
-        # `tail` normally dies of SIGPIPE and would make a good chunk look failed. The
-        # decoded length check below is the real guard against a short read.
-        return f"tail -c +{offset + 1} < {path} | head -c {length} | base64"
+        # No `pipefail`: `head -c` closes the pipe once it has its bytes, so `tail` dies
+        # of SIGPIPE and would make a good chunk look failed. `_read_chunk` checks the
+        # decoded length instead.
+        return f"tail -c +{offset + 1} < {quote(source_path)} | head -c {length} | base64"
 
     # --- sandbox round trips ----------------------------------------------
 
     async def _remote_size(self, source_path: str) -> int:
-        result = await self._run(self._size_script(source_path), timeout_s=self._config.timeout_s)
+        result = await self._exec(self._size_script(source_path))
         if result.return_code != 0:
             raise IdeGymTransferError(f"Cannot read {source_path!r} from the sandbox ({_describe(result)})")
         text = (result.stdout or "").strip()
@@ -138,19 +132,14 @@ class Base64BashFileTransfer:
         return int(text)
 
     async def _read_chunk(self, source_path: str, offset: int, length: int) -> bytes:
-        result = await self._run(
-            self._read_chunk_script(source_path, offset, length), timeout_s=self._config.timeout_s
-        )
+        what = f"{length} bytes at offset {offset} of {source_path!r}"
+        result = await self._exec(self._read_chunk_script(source_path, offset, length))
         if result.return_code != 0:
-            raise IdeGymTransferError(
-                f"Reading {length} bytes at offset {offset} of {source_path!r} failed ({_describe(result)})"
-            )
+            raise IdeGymTransferError(f"Reading {what} failed ({_describe(result)})")
         try:
             chunk = base64.b64decode("".join((result.stdout or "").split()), validate=True)
         except (binascii.Error, ValueError) as e:
             raise IdeGymTransferError(f"The sandbox returned invalid base64 for {source_path!r}: {e}") from e
         if len(chunk) != length:
-            raise IdeGymTransferError(
-                f"Expected {length} bytes at offset {offset} of {source_path!r} but got {len(chunk)}"
-            )
+            raise IdeGymTransferError(f"Expected {what} but got {len(chunk)}")
         return chunk
