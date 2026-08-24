@@ -32,13 +32,6 @@ class TerminalBench21ResourcesServerConfig(BaseResourcesServerConfig):
     sandbox_provider: str
     sandbox_config: Dict[str, Any]
 
-    clear_terminal_bench_debug_logs: bool = True
-
-    def model_post_init(self, context: Any, /) -> None:
-        if self.is_verifying_golden_patch and self.clear_terminal_bench_debug_logs:
-            print("Turning off logs clear since `is_verifying_golden_patch=true`")
-            self.clear_terminal_bench_debug_logs = False
-
 
 class TerminalBench21SeedSessionResponse(BaseSeedSessionResponse):
     sandbox_handle: str  # @bxyu-nvidia: Just a plain string URI for now for OpenSandbox backend.
