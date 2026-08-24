@@ -2575,3 +2575,42 @@ class TestTaskSourcePreprocess:
         )
         rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
         assert len(rows) == 3
+
+    async def test_run_from_config_resolves_task_source_before_materialized_write(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """task_source-only rows must be resolved to an agent BEFORE the materialized-inputs
+        file is written: custom drivers (e.g. gdpval's orchestrator) read agent_ref from it."""
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", lambda: {})
+
+        source_row = {"responses_create_params": {"input": []}, "task_source": "math_rs"}
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes(orjson.dumps(source_row) + b"\n")
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            disable_aggregation=True,
+        )
+
+        mock_client = MagicMock()
+        mock_client.global_config_dict = OmegaConf.create(
+            {
+                "math_rs": {"resources_servers": {"impl": {}}},
+                "math_agent": {"responses_api_agents": {"impl": {"resources_server": {"name": "math_rs"}}}},
+            }
+        )
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return mock_client
+
+            def run_examples(self, examples, *args, **kwargs):
+                future = Future()
+                future.set_result((examples[0], {"response": {}}))
+                return [future]
+
+        await Helper().run_from_config(config)
+
+        [materialized] = [orjson.loads(line) for line in config.materialized_jsonl_fpath.read_bytes().splitlines()]
+        assert materialized["agent_ref"] == {"name": "math_agent"}
+        assert materialized["task_source"] == "math_rs"
