@@ -69,6 +69,8 @@ _CUSTODY_FIELDS = (
     "logical_request_id",
     "admitted_at",
     "staging_chain",
+    "chain_hash",
+    "cumulative_hash",
 )
 
 
@@ -85,6 +87,8 @@ def _custody_columns(
     logical_request_id: str | None,
     admitted_at: float | None,
     staging_chain: list[str] | None = None,
+    chain_hash: str | None = None,
+    cumulative_hash: str | None = None,
 ) -> dict:
     """Return the ledger custody columns, or an empty dict for a lineage-only row."""
     if staging_key is None:
@@ -102,6 +106,8 @@ def _custody_columns(
         "logical_request_id": logical_request_id,
         "admitted_at": admitted_at,
         "staging_chain": list(staging_chain) if staging_chain else [],
+        "chain_hash": chain_hash,
+        "cumulative_hash": cumulative_hash,
     }
 
 
@@ -142,6 +148,8 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
                     extras_digest=str(row["extras_digest"]),
                     staging_key=str(row["staging_key"]),
                     mode=str(row["mode"]),
+                    chain_hash=row.get("chain_hash"),
+                    cumulative_hash=row.get("cumulative_hash"),
                     logical_request_id=row.get("logical_request_id"),
                     admitted_at=row.get("admitted_at"),
                 )
@@ -312,6 +320,7 @@ class LineageNode:
     context_digest: str = ""
     staging_key: str = ""
     staging_chain: list[str] = field(default_factory=list)
+    chain_hash: str = ""
 
 
 @dataclass
@@ -366,16 +375,20 @@ class RolloutLineage:
         *,
         staging_key: str = "",
         parent_staging_chain: list[str] | None = None,
+        cum_len: int | None = None,
+        chain_hash: str = "",
     ) -> None:
         """Index a completed call by its continuation fingerprint.
 
         ``context_len`` counts the request items before the model response.
         The default assumes one synthesized response item.
+        ``cum_len`` must be passed explicitly for token-free custody rows,
+        where ``cum_tokens`` is empty; a child's ``prev_len`` reads it.
         """
         node = LineageNode(
             call_id=call_id,
             cum_tokens=list(cum_tokens),
-            cum_len=len(cum_tokens),
+            cum_len=cum_len if cum_len is not None else len(cum_tokens),
             digest=digest,
             context_len=context_len if context_len is not None else max(len(messages or []) - 1, 0),
             context_digest=conversation_digest(
@@ -383,6 +396,7 @@ class RolloutLineage:
             ),
             staging_key=staging_key,
             staging_chain=list(parent_staging_chain) if parent_staging_chain else [],
+            chain_hash=chain_hash,
         )
         previous = self.by_call_id.get(call_id)
         if previous is not None:
@@ -472,6 +486,7 @@ class InMemoryLineageStore:
             digest=node.digest,
             staging_chain=tuple(node.staging_chain),
             prev_len=node.cum_len,
+            chain_hash=node.chain_hash,
         )
 
     async def record(
@@ -495,15 +510,22 @@ class InMemoryLineageStore:
         logical_request_id: str | None = None,
         admitted_at: float | None = None,
         staging_chain: list[str] | None = None,
+        chain_hash: str | None = None,
+        cumulative_hash: str | None = None,
     ) -> None:
+        # Custody rows are token-free (mirrors FileLineageStore): the chain
+        # hash covers continuity, so the index keeps tokens only for
+        # lineage-only local-capture rows that inject prompt prefixes.
         self.index.for_rollout(rollout_id).record(
             model_call_id,
             list(request_items) + list(response_items),
-            cumulative_token_ids,
+            [] if staging_key else cumulative_token_ids,
             digest,
             context_len=len(request_items),
             staging_key=staging_key or "",
             parent_staging_chain=staging_chain,
+            cum_len=cum_len,
+            chain_hash=chain_hash or "",
         )
         custody = _custody_columns(
             parent_call_id,
@@ -518,6 +540,8 @@ class InMemoryLineageStore:
             logical_request_id,
             admitted_at,
             staging_chain,
+            chain_hash,
+            cumulative_hash,
         )
         if custody:
             rows = self._ledgers.setdefault(rollout_id, [])
@@ -646,10 +670,12 @@ class FileLineageStore:
             return None
         return LineageMatch(
             model_call_id=str(record["model_call_id"]),
-            cumulative_token_ids=tuple(int(token) for token in record["cumulative_token_ids"]),
+            # Token-free custody rows omit the column; legacy rows keep it.
+            cumulative_token_ids=tuple(int(token) for token in record.get("cumulative_token_ids") or ()),
             digest=str(record["digest"]),
             staging_chain=tuple(record.get("staging_chain") or []),
             prev_len=int(record.get("cum_len") or 0),
+            chain_hash=str(record.get("chain_hash") or ""),
         )
 
     async def record(
@@ -673,6 +699,8 @@ class FileLineageStore:
         logical_request_id: str | None = None,
         admitted_at: float | None = None,
         staging_chain: list[str] | None = None,
+        chain_hash: str | None = None,
+        cumulative_hash: str | None = None,
     ) -> None:
         custody = _custody_columns(
             parent_call_id,
@@ -687,6 +715,8 @@ class FileLineageStore:
             logical_request_id,
             admitted_at,
             staging_chain,
+            chain_hash,
+            cumulative_hash,
         )
         await asyncio.to_thread(
             self._record,
@@ -714,10 +744,14 @@ class FileLineageStore:
             "fingerprint": assistant_fingerprint(list(request_items) + list(response_items)),
             "context_len": len(request_items),
             "context_digest": conversation_digest(request_items),
-            "cumulative_token_ids": list(cumulative_token_ids),
             "digest": digest,
             **(custody or {}),
         }
+        if not custody:
+            # Custody rows are token-free: the chained ``chain_hash`` covers
+            # continuity, so only lineage-only (local capture) rows store the
+            # cumulative sequence for prompt-prefix injection.
+            record["cumulative_token_ids"] = list(cumulative_token_ids)
         with self._locked(rollout_id):
             records = self._read(rollout_id)
             matches = [existing for existing in records if existing["model_call_id"] == model_call_id]

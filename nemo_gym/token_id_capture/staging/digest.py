@@ -42,6 +42,7 @@ EXTRAS_DIGEST_VERSION = 1
 _CALL_DIGEST_DOMAIN = b"nemo-gym-staging-call-v2"
 _EXTRAS_DIGEST_DOMAIN = b"nemo-gym-staging-extras-v1"
 _TOKEN_DIGEST_DOMAIN = b"nemo-gym-staging-prefix-v2"
+_CHAIN_DIGEST_DOMAIN = b"nemo-gym-staging-chain-v1"
 _HEX_DIGEST_LENGTH = 64
 
 
@@ -92,6 +93,31 @@ def encode_token_ids(token_ids: Sequence[int]) -> bytes:
 def hash_token_ids(token_ids: Sequence[int]) -> str:
     """Hash one exact cumulative token prefix."""
     return hashlib.sha256(_TOKEN_DIGEST_DOMAIN + encode_token_ids(token_ids)).hexdigest()
+
+
+def compute_chain_hash(parent_chain_hash: str | None, token_ids_delta: Sequence[int]) -> str:
+    """Chain one staged delta onto its parent's chain hash.
+
+    ``chain_hash_N = H(chain_hash_{N-1} || token_ids_delta_N)`` lets every
+    consumer verify parent-child token continuity without materializing the
+    cumulative sequence. A root delta chains from ``None``. The marker byte
+    keeps a root encoding from colliding with a child encoding.
+
+    Args:
+        parent_chain_hash: The parent call's chain hash, or ``None`` for a root.
+        token_ids_delta: This call's exact staged token delta.
+
+    Returns:
+        The lowercase SHA-256 hex chain hash for this call.
+    """
+    payload = bytearray()
+    if parent_chain_hash is None:
+        payload += b"\x00"
+    else:
+        _validate_digest(parent_chain_hash, field="parent_chain_hash")
+        payload += b"\x01" + bytes.fromhex(parent_chain_hash)
+    payload += encode_token_ids(token_ids_delta)
+    return hashlib.sha256(_CHAIN_DIGEST_DOMAIN + bytes(payload)).hexdigest()
 
 
 def _encode_float32_values(values: Sequence[float], *, field: str) -> bytes:
