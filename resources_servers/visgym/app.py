@@ -44,6 +44,16 @@ from resources_servers.visgym.schemas import (
 
 logger = logging.getLogger(__name__)
 
+# distance_delta reward shaping expresses progress as a fraction of the
+# episode's own starting distance (see _training_step_reward), so one shared
+# weight works across environments whose raw distance is in unrelated units
+# (maze cells, degrees, pixel-space color distance, ...). 0.5 is the ceiling:
+# above it an unsolved episode that fully closes the distance without ever
+# emitting the stop action could outscore a solved one, which would let the
+# policy learn to farm progress instead of finishing tasks.
+DEFAULT_SHAPING_WEIGHT = 0.3
+MAX_SHAPING_WEIGHT = 0.5
+
 
 def _ensure_headless_defaults() -> None:
     os.environ["MPLBACKEND"] = "Agg"
@@ -788,8 +798,32 @@ class VisGymResourcesServer(SimpleResourcesServer):
         if not isinstance(shaping, dict) or shaping.get("type") != "distance_delta":
             return {}
         info_key = str(shaping.get("info_key", "distance"))
-        distance = self._distance_value(info, info_key)
-        return {"previous_distance": distance} if distance is not None else {}
+        initial_distance = self._distance_value(info, info_key)
+        if initial_distance is None or initial_distance <= 0:
+            # Nothing to normalize progress against: either the environment
+            # hasn't reported the key yet, or the task spawned already at the
+            # goal (dividing by zero). Either way shaping stays off for the
+            # whole episode and only the terminal reward is paid.
+            return {}
+        return {"initial_distance": initial_distance, "previous_progress": 0.0}
+
+    @staticmethod
+    def _clamped_shaping_weight(raw_weight: Any, reward_state: dict[str, float]) -> float:
+        try:
+            weight = float(raw_weight)
+        except (TypeError, ValueError):
+            weight = DEFAULT_SHAPING_WEIGHT
+        clamped = min(MAX_SHAPING_WEIGHT, max(0.0, weight))
+        if clamped != weight and not reward_state.get("warned_weight_out_of_range"):
+            reward_state["warned_weight_out_of_range"] = True
+            logger.warning(
+                "VisGym reward_shaping weight=%r is outside (0, %.1f]; clamped to %.3f so a "
+                "solved episode always scores higher than an unsolved one.",
+                weight,
+                MAX_SHAPING_WEIGHT,
+                clamped,
+            )
+        return clamped
 
     def _training_step_reward(
         self,
@@ -805,13 +839,15 @@ class VisGymResourcesServer(SimpleResourcesServer):
         info_key = str(shaping.get("info_key", "distance"))
         current_distance = self._distance_value(info, info_key)
         reward_state = self.env_id_to_reward_state.setdefault(env_id, {})
-        previous_distance = reward_state.get("previous_distance")
-        if current_distance is None:
-            # A shaping block naming a key the environment never reports is
-            # indistinguishable from no shaping at all: every step silently
-            # falls through to the terminal-only reward, and the run just
-            # learns slowly for no visible reason. Say it once per session.
-            if not reward_state.get("warned_missing_info_key"):
+        initial_distance = reward_state.get("initial_distance")
+        if current_distance is None or initial_distance is None:
+            # A shaping block naming a key the environment never reports, or
+            # one whose initial distance was non-positive (see
+            # _initial_reward_state), is indistinguishable from no shaping at
+            # all: every step silently falls through to the terminal-only
+            # reward, and the run just learns slowly for no visible reason.
+            # Say it once per session.
+            if current_distance is None and not reward_state.get("warned_missing_info_key"):
                 reward_state["warned_missing_info_key"] = True
                 logger.warning(
                     "VisGym reward_shaping is configured with info_key=%r, but the "
@@ -826,12 +862,26 @@ class VisGymResourcesServer(SimpleResourcesServer):
                     else "<non-mapping info>",
                 )
             return raw_reward
-        reward_state["previous_distance"] = current_distance
-        if previous_distance is None:
-            return raw_reward
 
-        scale = float(shaping.get("scale", 1.0))
-        return raw_reward + scale * (previous_distance - current_distance)
+        # Progress is a potential function normalized to the episode's own
+        # starting distance: Phi(s) = clip((initial - current) / initial, 0,
+        # 1). The per-step shaped term Phi(s') - Phi(s) telescopes across the
+        # episode to exactly Phi(final) in [0, 1], regardless of the raw
+        # distance's units.
+        progress = min(1.0, max(0.0, (initial_distance - current_distance) / initial_distance))
+        previous_progress = reward_state.get("previous_progress", 0.0)
+        reward_state["previous_progress"] = progress
+
+        weight = self._clamped_shaping_weight(shaping.get("weight", DEFAULT_SHAPING_WEIGHT), reward_state)
+        shaped_delta = weight * (progress - previous_progress)
+        # raw_reward is 0.0 on every non-terminal step and one of {0.0, 1.0}
+        # -- every VisGym environment's _compute_reward returns exactly one
+        # of those two values -- on the step that ends the episode. Mixing it
+        # with the bounded shaped_delta as a convex combination means the
+        # reward returned here, and therefore its sum across the whole
+        # episode (which telescopes to (1 - weight) * terminal + weight *
+        # Phi(final)), is always in [0, 1].
+        return (1.0 - weight) * raw_reward + shaped_delta
 
     def _feedback_text(self, info: Any) -> str | None:
         if not self.config.include_env_feedback:

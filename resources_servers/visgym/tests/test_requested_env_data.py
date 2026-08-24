@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import importlib.util
 import json
 import re
+import sys
 import zipfile
 from collections import Counter
 from pathlib import Path
@@ -12,12 +14,26 @@ import pytest
 from omegaconf import OmegaConf
 from PIL import Image
 
+from resources_servers.visgym import app as visgym_app
 from resources_servers.visgym.schemas import VisGymTaskRow
 
 
 VISGYM_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_ROOT = VISGYM_ROOT / "data" / "requested_env_manifests"
 ASSET_ROOT = VISGYM_ROOT / "data" / "requested_env_assets"
+
+# scripts/ has no __init__.py (it is a collection of standalone CLI entry
+# points, not an importable package), so the generator is loaded by path
+# instead of a normal import.
+_generator_spec = importlib.util.spec_from_file_location(
+    "create_fourteen_env_data", VISGYM_ROOT / "scripts" / "create_fourteen_env_data.py"
+)
+create_fourteen_env_data = importlib.util.module_from_spec(_generator_spec)
+# The module's frozen dataclasses look themselves up in sys.modules while
+# their class bodies are being evaluated, so it must be registered before
+# exec_module runs, not just assigned to this local name.
+sys.modules[_generator_spec.name] = create_fourteen_env_data
+_generator_spec.loader.exec_module(create_fourteen_env_data)
 SLUGS = (
     "matchstick_equation",
     "maze_3d",
@@ -54,8 +70,8 @@ VALID_ACTIONS = {
 
 GENERATE_HINT = (
     "Generate them first:\n"
-    "  resources_servers/visgym/scripts/create_requested_env_data.py\n"
-    "  resources_servers/visgym/scripts/create_requested_env_data.py "
+    "  resources_servers/visgym/scripts/create_fourteen_env_data.py\n"
+    "  resources_servers/visgym/scripts/create_fourteen_env_data.py "
     "--horizon-cap 20 --skip-assets"
 )
 
@@ -96,7 +112,7 @@ def test_requested_training_and_smoke_manifests() -> None:
     assert matchstick_rows[0]["task_metadata"]["reward_shaping"] == {
         "type": "distance_delta",
         "info_key": "matchstick_distance",
-        "scale": 0.25,
+        "weight": create_fourteen_env_data.DEFAULT_SHAPING_WEIGHT,
     }
     assert maze_row["env_kwargs"]["maze_width"] == 5
     assert maze_row["env_kwargs"]["maze_height"] == 5
@@ -105,7 +121,7 @@ def test_requested_training_and_smoke_manifests() -> None:
     assert maze_row["task_metadata"]["reward_shaping"] == {
         "type": "distance_delta",
         "info_key": "distance",
-        "scale": 0.1,
+        "weight": create_fourteen_env_data.DEFAULT_SHAPING_WEIGHT,
     }
     sliding_row = load_rows(MANIFEST_ROOT / "sliding_block_easy_train_1280_t1024.jsonl")[0]
     assert sliding_row["env_kwargs"]["num_shuffle_moves"] == 4
@@ -165,6 +181,32 @@ def test_requested_uniform_horizon_20_manifests() -> None:
         assert len(train_rows) == 20 * 64
         assert smoke_rows == train_rows[:16]
         assert all(row["horizon_cap"] == 20 for row in train_rows)
+
+
+def test_default_shaping_weight_matches_resources_server() -> None:
+    """The generator duplicates this constant instead of importing app.py.
+
+    (create_fourteen_env_data.py stays free of the resources server's
+    FastAPI/aiohttp dependencies so it can run standalone.) A drift here
+    means every generated manifest silently reward-shapes with a weight the
+    server wasn't reviewed against.
+    """
+    assert create_fourteen_env_data.DEFAULT_SHAPING_WEIGHT == visgym_app.DEFAULT_SHAPING_WEIGHT
+
+
+def test_every_reward_shaping_weight_is_within_the_resources_server_ceiling() -> None:
+    """weight > MAX_SHAPING_WEIGHT is silently clamped at runtime (see
+    VisGymResourcesServer._clamped_shaping_weight), which would make every
+    manifest row generated with an out-of-range weight quietly train at a
+    different value than the one committed to the row. Catch it at
+    generation time instead.
+    """
+    for spec in create_fourteen_env_data.ENV_SPECS.values():
+        if spec.reward_shaping is None:
+            continue
+        weight = spec.reward_shaping.get("weight")
+        assert weight is not None
+        assert 0.0 < weight <= visgym_app.MAX_SHAPING_WEIGHT
 
 
 def test_requested_asset_fixtures_exist() -> None:

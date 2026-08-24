@@ -87,6 +87,56 @@ class DistanceStubVisGymEnv(StubVisGymEnv):
         )
 
 
+class ClosingDistanceStubVisGymEnv(StubVisGymEnv):
+    """Distance closes from 8 to 0 over four moves, then a stop action solves it."""
+
+    def reset(self, *, seed: int | None = None, init_state: dict[str, Any] | None = None):
+        observation, info = super().reset(seed=seed, init_state=init_state)
+        self._distance = 8.0
+        info["distance"] = self._distance
+        return observation, info
+
+    def step(self, action: str):
+        self.actions.append(action)
+        self.step_count += 1
+        if action == "('stop', 'stop')":
+            return (
+                np.full((4, 4, 3), 255, dtype=np.uint8),
+                1.0,
+                True,
+                False,
+                {"distance": self._distance, "env_feedback": "Solved."},
+            )
+        self._distance = max(0.0, self._distance - 2.0)
+        return (
+            np.full((4, 4, 3), 128, dtype=np.uint8),
+            0.0,
+            False,
+            False,
+            {"distance": self._distance, "env_feedback": "Moved closer."},
+        )
+
+
+class RetreatingStubVisGymEnv(StubVisGymEnv):
+    """Distance starts at 4 and grows to 10 on the first step -- the agent moved away."""
+
+    def reset(self, *, seed: int | None = None, init_state: dict[str, Any] | None = None):
+        observation, info = super().reset(seed=seed, init_state=init_state)
+        info["distance"] = 4.0
+        return observation, info
+
+    def step(self, action: str):
+        self.actions.append(action)
+        self.step_count += 1
+        return (
+            np.full((4, 4, 3), 128, dtype=np.uint8),
+            0.0,
+            False,
+            False,
+            {"distance": 10.0, "env_feedback": "Moved away."},
+        )
+
+
 class StubGym:
     def __init__(self, env: StubVisGymEnv) -> None:
         self.env = env
@@ -280,10 +330,18 @@ async def test_step_accumulates_reward_and_verify_drains(monkeypatch: pytest.Mon
 
 
 @pytest.mark.asyncio
-async def test_distance_delta_reward_shaping_preserves_raw_reward(
+async def test_distance_delta_reward_shaping_normalizes_progress(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Shaping is a fraction of the episode's own starting distance.
+
+    initial=3.0, current=2.0 -> progress = (3-2)/3 = 1/3. With weight=0.3 the
+    shaped delta is 0.3 * 1/3 = 0.1 -- the same number the old raw-units
+    "scale" design produced here by coincidence, but this design also caps
+    the episode total at 1.0 regardless of the environment's distance units
+    (see test_distance_delta_full_episode_reward_stays_within_unit_interval).
+    """
     env = DistanceStubVisGymEnv()
     stub_gym = StubGym(env)
     monkeypatch.setattr(visgym_app, "gym", stub_gym)
@@ -293,7 +351,7 @@ async def test_distance_delta_reward_shaping_preserves_raw_reward(
             "reward_shaping": {
                 "type": "distance_delta",
                 "info_key": "distance",
-                "scale": 0.1,
+                "weight": 0.3,
             }
         }
     )
@@ -310,6 +368,126 @@ async def test_distance_delta_reward_shaping_preserves_raw_reward(
     assert stepped.obs[0].env_info["raw_env_reward"] == 0.0
     assert stepped.obs[0].env_info["training_step_reward"] == pytest.approx(0.1)
     assert verified.reward == pytest.approx(0.1)
+
+
+@pytest.mark.asyncio
+async def test_distance_delta_full_episode_reward_stays_within_unit_interval(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A solved episode's total must be exactly 1.0, never the old design's 1.8.
+
+    The old "raw_reward + scale * (previous - current)" design added shaping
+    on top of the terminal reward with no shared ceiling, so an environment
+    like maze_2d (scale=0.1, typical initial distance 8) could total 1.8. This
+    normalizes progress to the episode's own starting distance and mixes it
+    with the terminal reward as a convex combination, so a fully-closed,
+    successfully-stopped episode telescopes to exactly
+    (1 - weight) * 1.0 + weight * 1.0 == 1.0.
+    """
+    env = ClosingDistanceStubVisGymEnv()
+    stub_gym = StubGym(env)
+    monkeypatch.setattr(visgym_app, "gym", stub_gym)
+    monkeypatch.setattr(visgym_app, "_ensure_visgym_importable", lambda: stub_gym)
+    row = _row(
+        task_metadata={
+            "reward_shaping": {
+                "type": "distance_delta",
+                "info_key": "distance",
+                "weight": 0.3,
+            }
+        }
+    )
+    server = _server(tmp_path, [row])
+    seeded = await server.seed_session(_request(), VisGymSeedSessionRequest(task_idx=0))
+
+    rewards = []
+    for action in ("('move', 0)", "('move', 0)", "('move', 0)", "('move', 0)", "('stop', 'stop')"):
+        stepped = await server.step(_request(), VisGymStepRequest(env_id=seeded.env_id, action_string=action))
+        rewards.append(stepped.reward)
+
+    assert stepped.done is True
+    assert sum(rewards) == pytest.approx(1.0)
+    assert max(rewards) < 1.0, "no single step should pay the full terminal reward plus shaping on top"
+
+
+@pytest.mark.asyncio
+async def test_distance_delta_moving_away_from_goal_does_not_go_negative(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An unsolved episode that ends farther from the goal than it started must floor at 0.
+
+    The old design summed scale * (initial - final) with no floor, so ending
+    farther away than the start (final > initial) produced a negative
+    episode total. Progress is clipped to [0, 1] at every step here, so it
+    cannot happen.
+    """
+    env = RetreatingStubVisGymEnv()
+    stub_gym = StubGym(env)
+    monkeypatch.setattr(visgym_app, "gym", stub_gym)
+    monkeypatch.setattr(visgym_app, "_ensure_visgym_importable", lambda: stub_gym)
+    row = _row(
+        horizon_cap=1,
+        task_metadata={
+            "reward_shaping": {
+                "type": "distance_delta",
+                "info_key": "distance",
+                "weight": 0.3,
+            }
+        },
+    )
+    server = _server(tmp_path, [row])
+    seeded = await server.seed_session(_request(), VisGymSeedSessionRequest(task_idx=0))
+
+    stepped = await server.step(
+        _request(),
+        VisGymStepRequest(env_id=seeded.env_id, action_string="('move', 0)"),
+    )
+
+    assert stepped.reward == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
+async def test_shaping_weight_above_ceiling_is_clamped_and_warns_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    env = DistanceStubVisGymEnv()
+    stub_gym = StubGym(env)
+    monkeypatch.setattr(visgym_app, "gym", stub_gym)
+    monkeypatch.setattr(visgym_app, "_ensure_visgym_importable", lambda: stub_gym)
+    row = _row(
+        task_metadata={
+            "reward_shaping": {
+                "type": "distance_delta",
+                "info_key": "distance",
+                "weight": 0.9,
+            }
+        }
+    )
+    server = _server(tmp_path, [row])
+    seeded = await server.seed_session(_request(), VisGymSeedSessionRequest(task_idx=0))
+
+    with caplog.at_level(logging.WARNING):
+        first = await server.step(
+            _request(),
+            VisGymStepRequest(env_id=seeded.env_id, action_string="('move', 0)"),
+        )
+        second = await server.step(
+            _request(),
+            VisGymStepRequest(env_id=seeded.env_id, action_string="('move', 0)"),
+        )
+
+    # initial=3.0, current=2.0 (the stub env's distance is fixed, not
+    # cumulative) -> progress=1/3 on every step; weight clamped from 0.9 to
+    # the 0.5 ceiling, so shaped_delta = 0.5 * 1/3 on the first step and 0.0
+    # once progress stops changing.
+    assert first.reward == pytest.approx(0.5 / 3)
+    assert second.reward == pytest.approx(0.0)
+    warned = [r for r in caplog.records if "clamped" in r.getMessage()]
+    assert len(warned) == 1, "expected exactly one clamp warning across repeated steps"
 
 
 def test_matchstick_info_exposes_binary_solution_distance() -> None:
@@ -427,7 +605,7 @@ async def test_shaping_with_unknown_info_key_warns_once(
                     "reward_shaping": {
                         "type": "distance_delta",
                         "info_key": "not_a_real_key",
-                        "scale": 0.5,
+                        "weight": 0.5,
                     }
                 }
             )

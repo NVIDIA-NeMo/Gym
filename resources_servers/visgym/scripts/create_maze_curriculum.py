@@ -18,6 +18,11 @@ from typing import Any
 
 ACTION_GRAMMAR = r"^\('(?:move|stop)',\s*(?:[0-3]|'stop')\)$"
 DEFAULT_MODEL = "policy_model"
+# Must match VisGymResourcesServer.MAX_SHAPING_WEIGHT in ../app.py -- see that
+# file for why weight is bounded rather than an arbitrary raw-distance-units
+# coefficient. Duplicated rather than imported for the same reason
+# create_fourteen_env_data.py duplicates DEFAULT_SHAPING_WEIGHT.
+MAX_SHAPING_WEIGHT = 0.5
 HORIZON_CAP_BY_SIZE = {
     5: 8,
     7: 12,
@@ -54,7 +59,7 @@ def make_row(
     model: str,
     temperature: float,
     max_output_tokens: int,
-    reward_shaping_scale: float = 0.0,
+    reward_shaping_weight: float = 0.0,
 ) -> dict[str, Any]:
     horizon_cap = horizon_cap_for_size(size)
     return {
@@ -72,17 +77,20 @@ def make_row(
             # Terminal reward alone is too sparse to learn from: the maze pays
             # 1.0 only for ('stop', 'stop') on the target and 0.0 for every
             # move, so a GRPO group of rollouts ties at zero and the advantage
-            # is degenerate. distance_delta pays the per-step change in
-            # info["distance"], which the server adds on top of the raw reward.
+            # is degenerate. distance_delta normalizes progress to the
+            # episode's own starting distance and mixes it with the terminal
+            # reward as a convex combination (see
+            # VisGymResourcesServer._training_step_reward), so the episode
+            # total stays in [0, 1] regardless of the weight chosen here.
             **(
                 {
                     "reward_shaping": {
                         "type": "distance_delta",
                         "info_key": "distance",
-                        "scale": reward_shaping_scale,
+                        "weight": reward_shaping_weight,
                     }
                 }
-                if reward_shaping_scale
+                if reward_shaping_weight
                 else {}
             ),
             "suite": "visgym",
@@ -129,15 +137,17 @@ def main() -> int:
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument(
-        "--reward-shaping-scale",
+        "--reward-shaping-weight",
         type=float,
         default=0.0,
         help=(
-            "Per-step distance_delta shaping coefficient. 0 (default) keeps the "
-            "environment's terminal-only reward. A positive value pays "
-            "scale * (previous_distance - current_distance) on every step, which is "
-            "what keeps GRPO advantages from collapsing to zero on a task that only "
-            "scores a correct stop on the target."
+            "distance_delta shaping weight in (0, %.1f]. 0 (default) keeps the "
+            "environment's terminal-only reward. A positive value mixes in "
+            "progress toward the goal, normalized to the episode's own starting "
+            "distance, as a convex combination with the terminal reward -- which "
+            "is what keeps GRPO advantages from collapsing to zero on a task that "
+            "only scores a correct stop on the target, while keeping the episode "
+            "total in [0, 1]." % MAX_SHAPING_WEIGHT
         ),
     )
     args = parser.parse_args()
@@ -146,18 +156,20 @@ def main() -> int:
         parser.error("--samples-per-stage must be positive")
     if args.seed_stride < args.samples_per_stage:
         parser.error("--seed-stride must be at least --samples-per-stage to keep stage seed ranges disjoint")
-    if args.reward_shaping_scale < 0:
-        parser.error("--reward-shaping-scale must be >= 0")
+    if args.reward_shaping_weight < 0:
+        parser.error("--reward-shaping-weight must be >= 0")
+    if args.reward_shaping_weight > MAX_SHAPING_WEIGHT:
+        parser.error(f"--reward-shaping-weight must be <= {MAX_SHAPING_WEIGHT} (the resources server's ceiling)")
     if args.max_output_tokens < 1:
         parser.error("--max-output-tokens must be positive")
 
     sizes: list[int] = args.sizes
     size_slug = "_".join(f"{size}x{size}" for size in sizes)
     curriculum_name = "maze_size_" + "_".join(str(size) for size in sizes)
-    # Suffix carries the shaping coefficient for the same reason the token
-    # budget is in the name: two manifests that differ only in reward would
+    # Suffix carries the shaping weight for the same reason the token budget
+    # is in the name: two manifests that differ only in reward would
     # otherwise be indistinguishable on disk.
-    shaping_suffix = f"_s{args.reward_shaping_scale:g}".replace(".", "p") if args.reward_shaping_scale else ""
+    shaping_suffix = f"_w{args.reward_shaping_weight:g}".replace(".", "p") if args.reward_shaping_weight else ""
     prefix = f"maze_2d_easy_curriculum_{size_slug}"
     stage_files: list[dict[str, Any]] = []
     combined_rows: list[dict[str, Any]] = []
@@ -177,7 +189,7 @@ def main() -> int:
                 model=args.model,
                 temperature=args.temperature,
                 max_output_tokens=args.max_output_tokens,
-                reward_shaping_scale=args.reward_shaping_scale,
+                reward_shaping_weight=args.reward_shaping_weight,
             )
             for stage_index in range(args.samples_per_stage)
         ]

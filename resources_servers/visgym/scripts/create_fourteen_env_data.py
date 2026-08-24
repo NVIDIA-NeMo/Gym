@@ -16,6 +16,12 @@ from typing import Any
 from PIL import Image, ImageDraw, ImageFont
 
 
+# Must match VisGymResourcesServer.DEFAULT_SHAPING_WEIGHT in ../app.py --
+# duplicated rather than imported so this script stays free of the resources
+# server's FastAPI/aiohttp dependencies. test_requested_env_data.py asserts
+# the two stay equal.
+DEFAULT_SHAPING_WEIGHT = 0.3
+
 VISGYM_ROOT = Path(__file__).resolve().parents[1]
 DATA_ROOT = VISGYM_ROOT / "data"
 ASSET_ROOT = DATA_ROOT / "requested_env_assets"
@@ -111,7 +117,7 @@ ENV_SPECS = {
         grammar=r"^(?:\('move',\s*\[[0-9]+,\s*[0-9]+,\s*[0-9]+,\s*[0-9]+\]\)|\('undo',\s*'undo'\)|\('stop',\s*'stop'\))$",
         horizon_cap=4,
         env_kwargs={"break_moves": 1, "enforce_min_distance": True},
-        reward_shaping={"type": "distance_delta", "info_key": "matchstick_distance", "scale": 0.25},
+        reward_shaping={"type": "distance_delta", "info_key": "matchstick_distance", "weight": DEFAULT_SHAPING_WEIGHT},
         seed_cycle=MATCHSTICK_EASY_SEEDS,
     ),
     "maze_3d": EnvironmentSpec(
@@ -119,7 +125,7 @@ ENV_SPECS = {
         grammar=r"^(?:\('move',\s*0\)|\('turn',\s*[1-3]\)|\('stop',\s*'stop'\))$",
         horizon_cap=8,
         env_kwargs={"maze_width": 5, "maze_height": 5, "render_size": [128, 128]},
-        reward_shaping={"type": "distance_delta", "info_key": "distance", "scale": 0.1},
+        reward_shaping={"type": "distance_delta", "info_key": "distance", "weight": DEFAULT_SHAPING_WEIGHT},
     ),
     "jigsaw": EnvironmentSpec(
         env_id="jigsaw/easy",
@@ -136,7 +142,7 @@ ENV_SPECS = {
         grammar=r"^(?:\('move',\s*\([0-9]+,\s*[0-3]\)\)|\('stop',\s*'stop'\))$",
         horizon_cap=4,
         env_kwargs={"num_shuffle_moves": 4},
-        reward_shaping={"type": "distance_delta", "info_key": "sliding_distance", "scale": 0.05},
+        reward_shaping={"type": "distance_delta", "info_key": "sliding_distance", "weight": DEFAULT_SHAPING_WEIGHT},
     ),
     "colorization": EnvironmentSpec(
         env_id="colorization/easy",
@@ -152,7 +158,7 @@ ENV_SPECS = {
             "min_brightness": 25,
             "max_brightness": 230,
         },
-        reward_shaping={"type": "distance_delta", "info_key": "color_distance", "scale": 0.002},
+        reward_shaping={"type": "distance_delta", "info_key": "color_distance", "weight": DEFAULT_SHAPING_WEIGHT},
     ),
     "counting": EnvironmentSpec(
         env_id="counting/easy",
@@ -180,7 +186,7 @@ ENV_SPECS = {
             "camera_default_distance": 1.75,
         },
         seed_key=None,
-        reward_shaping={"type": "distance_delta", "info_key": "fetch_pick_distance", "scale": 1.0},
+        reward_shaping={"type": "distance_delta", "info_key": "fetch_pick_distance", "weight": DEFAULT_SHAPING_WEIGHT},
     ),
     "fetch_reach": EnvironmentSpec(
         env_id="fetch_reach/easy",
@@ -196,7 +202,7 @@ ENV_SPECS = {
             "camera_default_distance": 1.75,
         },
         seed_key=None,
-        reward_shaping={"type": "distance_delta", "info_key": "distance_to_goal", "scale": 1.0},
+        reward_shaping={"type": "distance_delta", "info_key": "distance_to_goal", "weight": DEFAULT_SHAPING_WEIGHT},
     ),
     "mental_rotation_2d": EnvironmentSpec(
         env_id="mental_rotation_2d/easy",
@@ -207,14 +213,11 @@ ENV_SPECS = {
             "image_size": 128,
             "tolerance": 10.0,
         },
-        # The environment reports rotation_error on every step, so the same
-        # progress signal the 3D variant uses is available here too -- but in
-        # DEGREES (0-180, tolerance 10), where the 3D variant's error is
-        # already normalized. Reusing the 3D coefficient of 0.25 pays tens of
-        # reward per step and drowns the terminal 1.0. Scale so that fully
-        # correcting a worst-case 180-degree error is worth ~0.4, the same
-        # fraction of the terminal reward the maze shaping uses.
-        reward_shaping={"type": "distance_delta", "info_key": "rotation_error", "scale": 0.002},
+        # rotation_error is in degrees here vs. an already-normalized value in
+        # the 3D variant, but reward_shaping normalizes progress to each
+        # episode's own starting distance (see VisGymResourcesServer.
+        # _training_step_reward), so the same weight is correct regardless.
+        reward_shaping={"type": "distance_delta", "info_key": "rotation_error", "weight": DEFAULT_SHAPING_WEIGHT},
     ),
     "zoom_in_puzzle": EnvironmentSpec(
         env_id="zoom_in_puzzle/easy",
@@ -234,14 +237,14 @@ ENV_SPECS = {
         grammar=r"^(?:\('move',\s*[0-3]\)|\('stop',\s*'stop'\))$",
         horizon_cap=20,
         env_kwargs={"maze_width": 7, "maze_height": 7},
-        reward_shaping={"type": "distance_delta", "info_key": "distance", "scale": 0.1},
+        reward_shaping={"type": "distance_delta", "info_key": "distance", "weight": DEFAULT_SHAPING_WEIGHT},
     ),
     "maze_3d_7x7": EnvironmentSpec(
         env_id="maze_3d/easy",
         grammar=r"^(?:\('move',\s*0\)|\('turn',\s*[1-3]\)|\('stop',\s*'stop'\))$",
         horizon_cap=20,
         env_kwargs={"maze_width": 7, "maze_height": 7, "render_size": [128, 128]},
-        reward_shaping={"type": "distance_delta", "info_key": "distance", "scale": 0.1},
+        reward_shaping={"type": "distance_delta", "info_key": "distance", "weight": DEFAULT_SHAPING_WEIGHT},
     ),
     "refcoco_plus": EnvironmentSpec(
         env_id="referring_dot_pointing/easy",
@@ -263,7 +266,7 @@ ENV_SPECS = {
             "angle_tol": math.radians(10.0),
             "action_frame": "object",
         },
-        reward_shaping={"type": "distance_delta", "info_key": "rotation_error", "scale": 0.25},
+        reward_shaping={"type": "distance_delta", "info_key": "rotation_error", "weight": DEFAULT_SHAPING_WEIGHT},
     ),
 }
 
