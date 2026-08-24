@@ -142,6 +142,7 @@ class MCPServerMetadata(BaseModel):
     url_path: str = "/mcp"
     transport: str = "http"
     headers: dict[str, str]
+    tool_names: list[str]
 
 
 class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleServer):

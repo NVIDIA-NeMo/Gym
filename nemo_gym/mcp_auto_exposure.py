@@ -703,7 +703,13 @@ def _wrap_verify(app: FastAPI, server: Any) -> None:
 # ==================================================================================================
 
 
-def _mint_session_metadata(server: Any, serializer: URLSafeSerializer, request: Request, seed_body: dict) -> dict:
+def _mint_session_metadata(
+    server: Any,
+    serializer: URLSafeSerializer,
+    exposed_tool_names: tuple[str, ...],
+    request: Request,
+    seed_body: dict,
+) -> dict:
     """Mint the session token embedded in a /seed_session response (see ``_wrap_seed_session``).
 
     Assigns the rollout its session id, asks the server for any per-session tool narrowing, and
@@ -716,11 +722,13 @@ def _mint_session_metadata(server: Any, serializer: URLSafeSerializer, request: 
     # A raising hook propagates and fails the seed request — no token is minted past a broken hook.
     session_allowed = server.mcp_allowed_tools_for_session(seed_body)
     payload = {"sid": session_id, "tools": session_allowed}
+    allowed = None if session_allowed is None else frozenset(session_allowed)
     return MCPServerMetadata(
         server_name=server.config.name or type(server).__name__,
         url_path=MCP_URL_PATH,
         transport="http",
         headers={NEMO_GYM_MCP_SESSION_TOKEN_HEADER: serializer.dumps(payload)},
+        tool_names=[name for name in exposed_tool_names if allowed is None or name in allowed],
     ).model_dump()
 
 
@@ -788,7 +796,7 @@ def install_auto_exposure(server: Any, app: FastAPI) -> dict[str, MCPTool]:
     serializer = URLSafeSerializer(secret, salt=_MCP_TOKEN_SALT)
     tools = harvest_tools(app, server)
 
-    mint_metadata = functools.partial(_mint_session_metadata, server, serializer)
+    mint_metadata = functools.partial(_mint_session_metadata, server, serializer, tuple(tools))
     _wrap_seed_session(app, mint_metadata)
     _wrap_verify(app, server)
 

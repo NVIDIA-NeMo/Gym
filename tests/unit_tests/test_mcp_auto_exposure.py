@@ -486,13 +486,24 @@ def test_session_hook_returning_none_mints_unrestricted_token():
         assert payload == {"echo": {"k": 1}}
 
 
+def test_seed_metadata_lists_exposed_tool_names():
+    server = _server(SessionScoped)
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    with TestClient(app) as client:
+        metadata = client.post("/seed_session", json={}).json()["mcp"]
+        assert set(metadata["tool_names"]) == {"append", "raw_step", "lookup"}
+
+
 def test_session_hook_restricts_that_sessions_token():
     server = _server(SessionScoped)
     app = server.setup_webserver()
     maybe_auto_expose(server, app)
     with TestClient(app) as client:
         resp = client.post("/seed_session", json={"allowed_tools": ["append"]})
-        token = resp.json()["mcp"]["headers"][TOKEN_HEADER]
+        metadata = resp.json()["mcp"]
+        token = metadata["headers"][TOKEN_HEADER]
+        assert metadata["tool_names"] == ["append"]
         _handshake(client)
         assert {t["name"] for t in _list(client, token)} == {"append"}
         blocked = _call(client, "raw_step", {}, token=token)

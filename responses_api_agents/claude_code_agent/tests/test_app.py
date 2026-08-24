@@ -42,6 +42,7 @@ from responses_api_agents.claude_code_agent.app import (
     ResourcesServerRef,
     _extract_instruction,
     _invocation_outcome,
+    claude_mcp_tool_aliases,
     parse_stream_json,
 )
 from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations
@@ -616,6 +617,29 @@ class TestRunClaudeCode:
 
 
 class TestRolloutMCPConfig:
+    def test_builds_exact_alias_map_from_seed_metadata(self) -> None:
+        aliases = claude_mcp_tool_aliases(
+            {
+                "mcp": {
+                    "server_name": "example_mcp_weather",
+                    "tool_names": ["get_weather", "forecast__daily"],
+                }
+            }
+        )
+        assert aliases == {
+            "mcp__example_mcp_weather__get_weather": {
+                "server_name": "example_mcp_weather",
+                "tool_name": "get_weather",
+            },
+            "mcp__example_mcp_weather__forecast__daily": {
+                "server_name": "example_mcp_weather",
+                "tool_name": "forecast__daily",
+            },
+        }
+
+    def test_missing_seed_tool_names_cannot_build_authoritative_alias_map(self) -> None:
+        assert claude_mcp_tool_aliases({"mcp": {"server_name": "example_mcp_weather"}}) is None
+
     def test_no_metadata_preserves_static_config(self, tmp_path: Path) -> None:
         agent = _make_agent(mcp_config="/path/to/static.json")
         assert agent._write_rollout_mcp_config({}, tmp_path) is None
@@ -708,30 +732,69 @@ class TestRolloutMCPConfig:
                             "server_name": "example_mcp_weather",
                             "url_path": "/mcp",
                             "headers": {"X-NeMo-Gym-Session-Token": "tok"},
+                            "tool_names": ["get_weather"],
                         }
                     },
                     cookies={"session": "abc"},
                 )
             if url_path == "/verify":
+                captured["verify_json"] = json
                 return FakeAioHTTPResponse(json | {"reward": 1.0})
             raise AssertionError(f"unexpected post: {server_name} {url_path}")
 
         captured: dict = {}
 
-        async def fake_run_claude_code(instruction, system_prompt=None, mcp_config=None, **kwargs):
+        async def fake_run_claude_code(
+            instruction,
+            system_prompt=None,
+            mcp_config=None,
+            mcp_tool_aliases=None,
+            **kwargs,
+        ):
             captured["instruction"] = instruction
             captured["mcp_config"] = mcp_config
+            captured["mcp_tool_aliases"] = mcp_tool_aliases
             captured["config_exists_during_run"] = Path(mcp_config).is_file()
             captured["config"] = json.loads(Path(mcp_config).read_text())
-            return (
-                _output(
+            stdout = "\n".join(
+                [
+                    _event(
+                        "assistant",
+                        message={
+                            "content": [
+                                {
+                                    "type": "tool_use",
+                                    "id": "call-weather",
+                                    "name": "mcp__example_mcp_weather__get_weather",
+                                    "input": {"city": "Paris"},
+                                }
+                            ]
+                        },
+                    ),
+                    _event(
+                        "user",
+                        message={
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": "call-weather",
+                                    "content": "sunny and 72 F",
+                                }
+                            ]
+                        },
+                    ),
                     _event(
                         "assistant",
                         message={"content": [{"type": "text", "text": "The weather in Paris is sunny and 72 F."}]},
-                    )
-                ),
+                    ),
+                ]
+            )
+            output_items, metadata = parse_stream_json(stdout, mcp_tool_aliases=mcp_tool_aliases)
+            metadata["status"] = "completed"
+            return (
+                output_items,
                 "claude-sonnet-4-6",
-                {"status": "completed"},
+                metadata,
             )
 
         agent.server_client.post.side_effect = fake_post
@@ -748,9 +811,21 @@ class TestRolloutMCPConfig:
         assert result.reward == 1.0
         assert captured["instruction"] == "use the weather tool"
         assert captured["config_exists_during_run"] is True
+        assert captured["mcp_tool_aliases"] == {
+            "mcp__example_mcp_weather__get_weather": {
+                "server_name": "example_mcp_weather",
+                "tool_name": "get_weather",
+            }
+        }
         server = captured["config"]["mcpServers"]["example_mcp_weather"]
         assert server["url"] == "http://127.0.0.1:8123/mcp"
         assert server["headers"]["X-NeMo-Gym-Session-Token"] == "tok"
+        assert captured["verify_json"]["mcp_tool_call_provenance"] == {
+            "call-weather": {
+                "server_name": "example_mcp_weather",
+                "tool_name": "get_weather",
+            }
+        }
         assert not Path(captured["mcp_config"]).exists()
 
     def test_run_threads_session_cookie_seed_to_verify(self, tmp_path: Path) -> None:
