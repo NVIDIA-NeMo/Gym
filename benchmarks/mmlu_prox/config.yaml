@@ -7,9 +7,9 @@ mmlu_prox_mcqa_resources_server:
   _inherit_from: mcqa
   resources_servers:
     mcqa:
-      # No server-level grading_mode — each row supplies its own language-specific
-      # extraction regex via template_metadata.output_regex
-      grading_mode: null
+      # Try each row's language regex, then MMLU-Pro payload parsing, with
+      # the existing strict-boxed behavior preserved as the final fallback.
+      grading_mode: lenient_answer_colon_md
 
 mmlu_prox_mcqa_simple_agent:
   _inherit_from: mcqa_simple_agent

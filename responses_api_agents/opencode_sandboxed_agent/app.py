@@ -142,7 +142,14 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         return sandbox
 
-    def _create_opencode_config(self) -> Dict[str, Any]:
+    async def _create_opencode_config(self, request: Request) -> Dict[str, Any]:
+        base_url = (
+            self.base_url_for_run(
+                base_url=get_server_url(self.config.model_server.name),
+                body=await request.json(),
+            )
+            + "/v1"
+        )
         return {
             "model": "nemo_gym/dummy_model",
             "$schema": "https://opencode.ai/config.json",
@@ -151,7 +158,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     # TODO @bxyu-nvidia: We should use @ai-sdk/openai here but there is some /v1/responses streaming error.
                     "npm": "@ai-sdk/openai-compatible",
                     "options": {
-                        "baseURL": f"{get_server_url(self.config.model_server.name)}/v1",
+                        "baseURL": base_url,
                         "apiKey": "dummy_key",  # pragma: allowlist secret
                         "timeout": False,
                         "chunkTimeout": 600000,  # in milliseconds, 10 min
@@ -303,7 +310,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && echo "OpenCode run finished"
         """
 
-        opencode_config_content = json.dumps(self._create_opencode_config())
+        opencode_config_content = json.dumps(await self._create_opencode_config(request))
 
         if self.config.debug:
             print(f"Running command:\n```bash\n{command}\n```\n", file=sys.stderr)

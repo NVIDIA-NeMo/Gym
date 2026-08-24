@@ -9,12 +9,12 @@ MODEL=$MODEL
 CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
 VLLM_CONFIG=$VLLM_CONFIG
+SLURM_COMMENT="${SLURM_COMMENT:-}"
 
 should_run_eval=$(( $# > 0 ))
 if (( should_run_eval )); then
     EXPERIMENT_NAME=$EXPERIMENT_NAME
 
-    # 
     EXPORT_TO_CSV=${EXPORT_TO_CSV:-0}
     EXPORT_CSV_TO_MODEL_DIR=${EXPORT_CSV_TO_MODEL_DIR:-0}
 else
@@ -31,7 +31,7 @@ DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT=5700
 ROUTER_SERVER_PORT=8000
 WORKER_SERVER_PORT=8001
 
-EVAL_COMMAND=$(cat <<EOF
+eval_command=$(cat <<EOF
 set -euo pipefail
 
 # Activate environment in container and cd into Gym. The Gym path here may be mounted.
@@ -41,6 +41,10 @@ cd /opt/Gym
 gym eval prepare $@ +use_cached_prepared_benchmarks=true
 
 experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%d_%H%M%S)
+# export_to_csv.py derives <base>_aggregate_metrics.json from this, so the
+# default timestamped name makes the aggregate unfindable to anything that
+# did not watch the job run. Override it when results/ is already per-run.
+rollouts_fpath=\${ROLLOUTS_FPATH:-results/\$experiment_name.jsonl}
 # +uv_venv_dir=/opt/uv_venvs is from the container.
 # +skip_venv_if_present=true will reuse the venvs baked into the container if possible.
 # ++use_absolute_ip=true: Necessary for communication between harness in sandbox and Gym model servers
@@ -54,7 +58,7 @@ gym eval run \
     +uv_venv_dir=/opt/uv_venvs \
     +nemo_gym_log_dir=results/\$experiment_name/logs \
     +skip_venv_if_present=true \
-    ++output_jsonl_fpath=results/\$experiment_name.jsonl \
+    ++output_jsonl_fpath=\$rollouts_fpath \
     ++overwrite_metrics_conflicts=true \
     ++split=benchmark \
     ++use_absolute_ip=true \
@@ -71,17 +75,17 @@ gym eval run \
 if (( $EXPORT_TO_CSV )); then
     python benchmarks/nemotron_3.5_super/export_to_csv.py \
         --model-path $MODEL \
-        --jsonl-fpath-base \$(realpath results/\$experiment_name)
+        --jsonl-fpath-base \$(realpath "\${rollouts_fpath%.jsonl}")
 
     if (( $EXPORT_CSV_TO_MODEL_DIR )); then
-        cp results/\$experiment_name_export.csv $MODEL/export.csv
+        cp "\${rollouts_fpath%.jsonl}_export.csv" $MODEL/export.csv
     fi
 fi
 
 EOF
 )
 
-command=$(cat <<EOF
+pd_command=$(cat <<EOF
 #!/bin/bash
 
 set -euo pipefail
@@ -103,6 +107,11 @@ export UCX_RNDV_SCHEME=get_zcopy
 export UCX_RNDV_THRESH=0
 
 source "$VLLM_CONFIG"
+
+# Increase the number of file descriptors to 65k
+if [[ \$(ulimit -Hn) == "unlimited" ]] || [[ 65535 -lt \$(ulimit -Hn) ]]; then
+  ulimit -Sn 65535
+fi
 
 this_node_hostname=\$(hostname)
 if (( SLURM_PROCID == 0 )); then
@@ -172,7 +181,7 @@ srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 \
         set -euo pipefail
         cd "\$SLURM_SUBMIT_DIR"
         exec "\$@"
-    ' bash bash -lc "\$VLLM_PD_WORKLOAD" &
+    ' bash bash -lc "\$vllm_command" &
 server_step=\$!
 
 cleanup_server() {
@@ -203,7 +212,7 @@ if (( $should_run_eval )); then
         bash -lc '
             set -euo pipefail
             cd "\$SLURM_SUBMIT_DIR"
-            exec bash -lc "\$EVAL_COMMAND"
+            exec bash -lc "\$eval_command"
         ' &
     eval_step=\$!
 
@@ -232,15 +241,16 @@ EOF
 )
 
 # --segment > 0 otherwise the engine will hang on the second or third engine step.
-VLLM_PD_WORKLOAD="$command" \
-EVAL_COMMAND="$EVAL_COMMAND" \
-VLLM_PD_BATCH_COMMAND="$batch_command" \
+vllm_command="$pd_command" \
+eval_command="$eval_command" \
+batch_command="$batch_command" \
 sbatch \
     --nodes=$NUM_NODES \
     --time=04:00:00 \
     --job-name=gym-$EXPERIMENT_NAME-$USER \
     --output=slurm-logs/%j-%x.log \
     --ntasks-per-node=1 \
+    --comment="$SLURM_COMMENT" \
     --exclusive \
     --segment=$NUM_NODES \
-    --wrap 'exec bash -lc "$VLLM_PD_BATCH_COMMAND"'
+    --wrap 'exec bash -lc "$batch_command"'

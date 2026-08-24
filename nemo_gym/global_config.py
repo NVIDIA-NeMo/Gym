@@ -95,6 +95,9 @@ JSON_OUTPUT_KEY_NAME = "json"
 QUERY_KEY_NAME = "query"
 OBSERVABILITY_ENABLED_KEY_NAME = "observability_enabled"
 MODEL_CALL_CAPTURE_DIR_KEY_NAME = "model_call_capture_dir"
+# Run-wide training-token capture settings.
+# See ``nemo_gym/token_id_capture/config.py``.
+TOKEN_ID_CAPTURE_BLOCK = "token_id_capture"
 COMPONENT_NAME_KEY_NAME = "component_name"
 SKIP_VERIFICATION_KEY_NAME = "skip_verification"
 SKIP_VERIFICATION_REWARD_KEY_NAME = "skip_verification_reward"
@@ -129,6 +132,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     QUERY_KEY_NAME,
     OBSERVABILITY_ENABLED_KEY_NAME,
     MODEL_CALL_CAPTURE_DIR_KEY_NAME,
+    TOKEN_ID_CAPTURE_BLOCK,
     COMPONENT_NAME_KEY_NAME,
     SKIP_VERIFICATION_KEY_NAME,
     SKIP_VERIFICATION_REWARD_KEY_NAME,
@@ -140,6 +144,10 @@ ROLLOUT_INDEX_KEY_NAME = "_ng_rollout_index"
 # Resume re-dispatch attempt counter (0 on the first attempt); distinguishes retries of the same
 # (task, rollout) so their captured model calls stay separable.
 ATTEMPT_INDEX_KEY_NAME = "_ng_attempt_index"
+# An explicit capture id replaces the task and rollout derivation.
+# Set it when dispatches reuse task and rollout indices.
+# Otherwise two dispatches would share one capture key.
+ROLLOUT_ID_KEY_NAME = "_ng_rollout_id"
 RESPONSES_CREATE_PARAMS_KEY_NAME = "responses_create_params"
 RESPONSE_KEY_NAME = "response"
 AGENT_REF_KEY_NAME = "agent_ref"

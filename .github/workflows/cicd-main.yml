@@ -1,0 +1,260 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+name: CICD NeMo Gym
+
+on:
+  push:
+    branches:
+      - main
+      - "pull-request/[0-9]+"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  pre-flight:
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_cicd_preflight.yml@cf5acebace78c7c339bc1f804357a991336f1c4d # v1.8.10
+    with:
+      default_runner_prefix: ${{ vars.DEFAULT_RUNNER_PREFIX }}
+      non_nvidia_runner_prefix: ${{ vars.NON_NVIDIA_RUNNER_PREFIX }}
+      default_test_data_path: ${{ vars.DEFAULT_TEST_DATA_PATH }}
+      non_nvidia_test_data_path: ${{ vars.NON_NVIDIA_TEST_DATA_PATH }}
+      default_registry: ${{ vars.DEFAULT_CONTAINER_REGISTRY }}
+      non_nvidia_registry: ${{ vars.NON_NVIDIA_CONTAINER_REGISTRY }}
+      sso_users_filename: ${{ vars.SSO_USERS_FILENAME }}
+    secrets:
+      NVIDIA_MANAGEMENT_ORG_PAT: ${{ secrets.NVIDIA_MANAGEMENT_ORG_PAT }}
+
+  classify_changes:
+    name: Classify changes
+    needs: [pre-flight]
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.changes.outputs.docs_only }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Classify changes
+        id: changes
+        uses: ./.github/actions/classify-changes
+        with:
+          base-ref: ${{ needs.pre-flight.outputs.base_ref }}
+
+  unit_tests:
+    name: Unit tests
+    needs: [pre-flight, classify_changes]
+    if: needs.classify_changes.outputs.docs_only != 'true'
+    uses: ./.github/workflows/unit-tests.yml
+    with:
+      base-ref: ${{ needs.pre-flight.outputs.base_ref }}
+
+  container_build:
+    name: Build Gym container
+    needs: [pre-flight, classify_changes, unit_tests]
+    if: needs.classify_changes.outputs.docs_only != 'true'
+    runs-on: ${{ needs.pre-flight.outputs.runner_prefix }}
+    environment: ${{ contains(needs.pre-flight.outputs.registry, 'azure') && 'nemo-ci' || '' }}
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Compute image and cache keys
+        id: image
+        shell: bash -e -u -o pipefail {0}
+        env:
+          REGISTRY: ${{ needs.pre-flight.outputs.registry }}
+        run: |
+          branch_key=$(echo "${GITHUB_REF_NAME}" | tr '/' '-' | tr -cd '[:alnum:]._-')
+          if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+            cache_key="main"
+          else
+            cache_key="$branch_key"
+          fi
+
+          if [[ "$cache_key" != "main" ]] && \
+             docker buildx imagetools inspect "$REGISTRY/gym:${cache_key}-buildcache" >/dev/null 2>&1; then
+            cache_seed="$cache_key"
+          else
+            cache_seed="main"
+          fi
+
+          echo "cache-key=$cache_key" >> "$GITHUB_OUTPUT"
+          echo "cache-seed=$cache_seed" >> "$GITHUB_OUTPUT"
+          echo "image=$REGISTRY/gym:$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
+        with:
+          context: .
+          file: docker/Dockerfile
+          build-contexts: nemo-gym=.
+          target: release
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            NEMO_GYM_COMMIT=${{ github.sha }}
+            NVIDIA_BUILD_ID=${{ github.run_id }}
+            NVIDIA_BUILD_REF=${{ github.ref }}
+            NEMO_GYM_PREFETCH_CONFIGS=tests/e2e/gpu_e2e.yaml
+          cache-from: type=registry,ref=${{ needs.pre-flight.outputs.registry }}/gym:${{ steps.image.outputs.cache-seed }}-buildcache
+          cache-to: type=registry,ref=${{ needs.pre-flight.outputs.registry }}/gym:${{ steps.image.outputs.cache-key }}-buildcache,mode=max
+          tags: |
+            ${{ needs.pre-flight.outputs.registry }}/gym:${{ steps.image.outputs.cache-key }}
+            ${{ steps.image.outputs.image }}
+
+  gpu_e2e_tests:
+    name: ${{ matrix.name }}
+    needs: [pre-flight, classify_changes, unit_tests, container_build]
+    if: needs.classify_changes.outputs.docs_only != 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: GPU E2E - Qwen vLLM rollout
+            script: ./tests/e2e/gpu_e2e_test.sh
+            test_type: gpu
+            model: Qwen/Qwen2.5-0.5B-Instruct
+            model_revision: 7ae557604adf67be50417f59c2c2f167def9a775 # pragma: allowlist secret
+            artifact_name: gpu-e2e-qwen-vllm
+    runs-on: ${{ needs.pre-flight.outputs.runner_prefix }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Run ${{ matrix.name }}
+        uses: ./.github/actions/test-template
+        with:
+          script: ${{ matrix.script }}
+          test-type: ${{ matrix.test_type }}
+          container-image: ${{ needs.container_build.outputs.image }}
+          test-data-path: ${{ needs.pre-flight.outputs.test_data_path }}
+          model: ${{ matrix.model }}
+          model-revision: ${{ matrix.model_revision }}
+          results-path: ${{ runner.temp }}/nemo-gym-gpu-e2e/${{ github.run_id }}-${{ github.run_attempt }}/${{ matrix.artifact_name }}
+
+      - name: Upload GPU E2E artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ matrix.artifact_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nemo-gym-gpu-e2e/${{ github.run_id }}-${{ github.run_attempt }}/${{ matrix.artifact_name }}
+          if-no-files-found: warn
+          retention-days: 7
+
+  provider_e2e_tests:
+    name: ${{ matrix.provider }}-e2e
+    needs: [classify_changes, unit_tests]
+    if: needs.classify_changes.outputs.docs_only != 'true'
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - provider: fireworks
+            config: responses_api_models/inference_provider/configs/fireworks.yaml
+            model: accounts/fireworks/models/gpt-oss-20b
+            model_api_key_secret_name: FIREWORKS
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Install uv
+        run: |
+          UV_VERSION="$(sed -n 's/^ARG UV_VERSION=//p' docker/Dockerfile)"
+          if [[ ! "$UV_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Could not read a valid UV_VERSION from docker/Dockerfile: $UV_VERSION" >&2
+            exit 1
+          fi
+          curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Run provider E2E - ${{ matrix.provider }}
+        env:
+          E2E_DIR: ${{ runner.temp }}/nemo-gym-${{ matrix.provider }}-e2e
+          E2E_MODEL: ${{ matrix.model }}
+          E2E_PROVIDER_CONFIG: ${{ matrix.config }}
+          MODEL_API_KEY: ${{ secrets[matrix.model_api_key_secret_name] }}
+        run: bash tests/e2e/run_inference_provider_e2e.sh
+
+  Nemo_CICD_Test:
+    needs: [pre-flight, classify_changes, unit_tests, container_build, gpu_e2e_tests, provider_e2e_tests]
+    if: always() && !cancelled()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check test results
+        shell: bash -e -u -o pipefail {0}
+        env:
+          CLASSIFY_RESULT: ${{ needs.classify_changes.result }}
+          DOCS_ONLY: ${{ needs.classify_changes.outputs.docs_only }}
+          PREFLIGHT_RESULT: ${{ needs.pre-flight.result }}
+          UNIT_TEST_RESULT: ${{ needs.unit_tests.result }}
+          CONTAINER_BUILD_RESULT: ${{ needs.container_build.result }}
+          GPU_E2E_TEST_RESULT: ${{ needs.gpu_e2e_tests.result }}
+          PROVIDER_E2E_TEST_RESULT: ${{ needs.provider_e2e_tests.result }}
+        run: |
+          echo "Pre-flight: $PREFLIGHT_RESULT"
+          echo "Classify changes: $CLASSIFY_RESULT"
+          echo "Docs only: $DOCS_ONLY"
+          echo "Unit tests: $UNIT_TEST_RESULT"
+          echo "Container build: $CONTAINER_BUILD_RESULT"
+          echo "GPU E2E tests: $GPU_E2E_TEST_RESULT"
+          echo "Provider E2E tests: $PROVIDER_E2E_TEST_RESULT"
+
+          if [[ "$PREFLIGHT_RESULT" != "success" ]]; then
+            echo "Pre-flight did not succeed."
+            exit 1
+          fi
+
+          if [[ "$CLASSIFY_RESULT" != "success" ]]; then
+            echo "Change classification did not succeed."
+            exit 1
+          fi
+
+          if [[ "$DOCS_ONLY" == "true" ]]; then
+            if [[ "$UNIT_TEST_RESULT" == "skipped" && \
+                  "$CONTAINER_BUILD_RESULT" == "skipped" && \
+                  "$GPU_E2E_TEST_RESULT" == "skipped" ]]; then
+              echo "Docs-only change: tests and container build were skipped as expected."
+              exit 0
+            fi
+
+            echo "Docs-only change had an unexpected test result."
+            exit 1
+          fi
+
+          if [[ "$UNIT_TEST_RESULT" == "success" && \
+                "$CONTAINER_BUILD_RESULT" == "success" && \
+                "$GPU_E2E_TEST_RESULT" == "success" ]]; then
+            echo "All required test jobs completed successfully."
+            exit 0
+          fi
+
+          echo "One or more required test jobs did not succeed."
+          exit 1

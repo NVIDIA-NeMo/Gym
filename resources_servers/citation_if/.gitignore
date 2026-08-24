@@ -1,0 +1,15 @@
+# Generated / downloaded training data — never commit (multi-GB).
+# The shared resources_servers/.gitignore only matches data/*train.jsonl and misses
+# the train_augmented/ shards, so ignore the whole data dir here.
+# NOTE: `data/*` not `data/` — git does not descend into an excluded DIRECTORY, so a
+# negation for a file inside it can never re-include that file.
+data/*
+
+# ...except the three small example artifacts every server ships, all required by
+# CONTRIBUTING.md's new-environment checks:
+#   example.jsonl          the 5 example rows the config points at
+#   example_metrics.json   `gym dataset collate ... +mode=example_validation`
+#   example_rollouts.jsonl the 5 rows run through the agent
+!data/example.jsonl
+!data/example_metrics.json
+!data/example_rollouts.jsonl
