@@ -110,7 +110,9 @@ class CaptureLedger(LineageStore, Protocol):
     keyword arguments: ``parent_call_id``, ``staging_key``, ``weight_version``,
     ``prev_len``/``delta_len``/``cum_len``, ``staging_digest``,
     ``extras_digest``, ``mode``, ``logical_request_id``, ``admitted_at``,
-    ``staging_chain``, ``chain_hash``, ``cumulative_hash``),
+    ``staging_chain``, ``chain_hash``, ``cumulative_hash``, ``response_id``,
+    ``output_fingerprint``, ``continuation_fingerprint``,
+    ``fingerprint_version``),
     poison rows are
     appended with ``record_failure``, and the framework reads the rollout back
     token-free through ``manifest``.

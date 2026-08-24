@@ -55,6 +55,7 @@ def _custody(model_call_id: str, *, parent_call_id: str | None = None, prev_len:
         extras_digest=EMPTY_EXTRAS_DIGEST,
         mode="text" if parent_call_id is None else "token_in",
         logical_request_id=f"lr-{model_call_id}",
+        response_id=f"chatcmpl-{model_call_id}",
         admitted_at=1_755_600_000.25,
         chain_hash=CHAIN_HASH_1,
         cumulative_hash=CUMULATIVE_HASH_1,
@@ -311,7 +312,11 @@ async def test_legacy_token_carrying_row_resolves_but_cannot_anchor_a_chain(tmp_
         "context_digest": conversation_digest([USER_1]),
         "cumulative_token_ids": TOKENS_1,
         "digest": compute_digest(TOKENS_1),
-        **{key: value for key, value in _custody("c1").items() if key not in ("chain_hash", "cumulative_hash")},
+        **{
+            key: value
+            for key, value in _custody("c1").items()
+            if key not in ("chain_hash", "cumulative_hash", "response_id")
+        },
         "staging_chain": ["r1/c1"],
     }
     path = tmp_path / "r1.lineage.jsonl"
@@ -325,4 +330,8 @@ async def test_legacy_token_carrying_row_resolves_but_cannot_anchor_a_chain(tmp_
     context = await _admit(store, [USER_1, ASSISTANT_1, USER_2])
     assert context.capture_admission is None
     manifest = RolloutManifest.model_validate(await store.manifest("r1"))
-    assert [failure.reason for failure in manifest.failures] == [UNRESOLVED_PARENT_REASON]
+    # The pre-response-id custody row is no longer manifest-expressible: it
+    # poisons the rollout (fail-closed) instead of being tolerated.
+    assert sorted(failure.reason for failure in manifest.failures) == sorted(
+        ["ledger_row_missing_response_id", UNRESOLVED_PARENT_REASON]
+    )

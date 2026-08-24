@@ -396,5 +396,6 @@ def linearize(
         rollout_id=rollout_id,
         terminal_model_call_id=terminal_hint,
         manifest=manifest,
+        terminal_selection="declared",
     )
     return verify_and_linearize(receipt, snapshots)
