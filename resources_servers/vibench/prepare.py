@@ -30,21 +30,62 @@ need a reference-implementation starting tree that the public ViBench repo does 
 
 import argparse
 import json
+import subprocess
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
 
-TASK_INSTRUCTIONS = """\
-You are building a web application from scratch inside this container.
+# ViBench's own build brief. It is a contract, not flavour text: it requires the app to ship
+# setup-environment.sh and start-server.sh, and describes the environment (POSTGRES_DATABASE_URL,
+# APPLICATION_PORT) the grader provides. The grading stack invokes setup-environment.sh from the
+# generated seed.sh, so an app built without it fails evaluation with exit code 127 no matter how
+# good the app is. Writing our own brief would also change what the benchmark measures.
+CODING_PROMPT = "coding_prompt.j2"
 
-The product requirements document is at {prd_path}. Read it first.
+RENDER_SNIPPET = """
+import sys, json
+from jinja2 import Environment, FileSystemLoader, StrictUndefined
+prompts_dir, prd_path, max_iterations = sys.argv[1], sys.argv[2], int(sys.argv[3])
+env = Environment(loader=FileSystemLoader(prompts_dir), undefined=StrictUndefined, keep_trailing_newline=True)
+tpl = env.get_template("coding_prompt.j2")
+sys.stdout.write(tpl.render(
+    goal="zero-to-one",
+    prd=open(prd_path).read(),
+    max_iterations=max_iterations,
+    additional_instructions="",
+))
+"""
 
-Build the complete application in {workdir}. The app must actually run: it will be started \
-by an automated harness that seeds it with data through its own UI and then exercises every \
-requirement in the PRD through a real browser. Anything the PRD asks for that a user cannot \
-reach through the running app scores zero, no matter what the source code contains.
 
-Do not stop until the app builds and starts cleanly."""
+def vibench_python(root: Path) -> str:
+    """ViBench's own interpreter, which has jinja2; fall back to this one."""
+    candidate = root / ".venv" / "bin" / "python"
+    return str(candidate) if candidate.exists() else sys.executable
+
+
+def render_task_prompt(root: Path, prd_text: str, max_iterations: int) -> Optional[str]:
+    """Render ViBench's coding prompt, or None if the checkout cannot render it."""
+    prompts_dir = root / "_harness" / "runner" / "agent" / "prompts"
+    if not (prompts_dir / CODING_PROMPT).exists():
+        return None
+
+    tmp = root / ".vibench_prd_tmp.txt"
+    try:
+        tmp.write_text(prd_text)
+        result = subprocess.run(
+            [vibench_python(root), "-c", RENDER_SNIPPET, str(prompts_dir), str(tmp), str(max_iterations)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    finally:
+        tmp.unlink(missing_ok=True)
+
+    if result.returncode != 0:
+        print(f"WARNING: could not render {CODING_PROMPT}: {result.stderr.strip()[-300:]}", file=sys.stderr)
+        return None
+    return result.stdout
 
 
 def artifact_test_dir(app_dir: Path, artifact: str) -> Path:
@@ -79,6 +120,7 @@ def build_row(
     artifact: str,
     workdir: str,
     system_prompt: Optional[str],
+    max_iterations: int,
 ) -> Optional[Dict]:
     app_dir = root / "prds" / app
 
@@ -100,7 +142,10 @@ def build_row(
     test_assets = app_dir / "test_assets"
     test_assets_dir = str(test_assets.relative_to(root)) if test_assets.is_dir() else None
 
-    prompt = TASK_INSTRUCTIONS.format(prd_path=f"{workdir}/prd.txt", workdir=workdir)
+    prd_text = "\n\n".join(pth.read_text() for pth in prds)
+    prompt = render_task_prompt(root, prd_text, max_iterations)
+    if prompt is None:
+        return None
     messages = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
@@ -125,6 +170,7 @@ def main() -> None:
     parser.add_argument("--artifacts", nargs="*", default=["mvp"], help="Artifacts per app (default: mvp)")
     parser.add_argument("--workdir", default="/app", help="Build directory inside the sandbox")
     parser.add_argument("--system-prompt", default=None)
+    parser.add_argument("--max-iterations", type=int, default=300, help="Value passed to ViBench's prompt")
     parser.add_argument("--limit", type=int, default=None)
     args = parser.parse_args()
 
@@ -141,7 +187,7 @@ def main() -> None:
         for artifact in args.artifacts:
             if artifact.split("-on_")[0] not in available:
                 continue
-            row = build_row(root, app, artifact, args.workdir, args.system_prompt)
+            row = build_row(root, app, artifact, args.workdir, args.system_prompt, args.max_iterations)
             if row is not None:
                 rows.append(row)
 

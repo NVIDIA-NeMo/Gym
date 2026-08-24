@@ -62,6 +62,13 @@ policy model under test — do not point them at the same endpoint when profilin
 
 ## Generate task rows
 
+`prepare.py` renders ViBench's own `coding_prompt.j2` as each task's brief rather than
+paraphrasing it. That prompt is a contract: it requires the app to ship
+`setup-environment.sh` and `start-server.sh`, which the grading stack invokes. An app built
+without them fails evaluation regardless of quality, and a reworded brief would change what
+the benchmark measures. Rendering needs `jinja2` — from ViBench's own venv if present,
+otherwise the interpreter running `prepare.py`.
+
 ```bash
 python resources_servers/vibench/prepare.py \
     --vibench-root "$VIBENCH_REPO_ROOT" \
