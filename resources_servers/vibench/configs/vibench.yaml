@@ -27,7 +27,10 @@ vibench_resources_server:
       # Each test plan stands up postgres + the app + playwright. Two at a time per rollout
       # is already heavy; raise only on a big host.
       max_concurrent_test_plans: 2
-      keep_evaluation_artifacts: false
+      # Set VIBENCH_KEEP_ARTIFACTS=true to retain per-test-plan traces, screenshots,
+      # DB dumps and container logs -- the only way to diagnose a grading failure
+      # after the fact, since the work dir is otherwise removed.
+      keep_evaluation_artifacts: ${oc.env:VIBENCH_KEEP_ARTIFACTS,false}
 
 # Agent: owns the build sandbox, runs OpenCode in it, harvests the app.
 vibench_opencode_agent:
