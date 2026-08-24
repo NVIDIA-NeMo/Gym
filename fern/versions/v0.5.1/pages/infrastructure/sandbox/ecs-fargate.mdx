@@ -1,0 +1,128 @@
+---
+title: "ECS Fargate"
+description: "Run sandboxes as AWS ECS Fargate tasks reached over an SSH sidecar."
+position: 3
+---
+
+The `ecs_fargate` provider runs each sandbox as an AWS ECS Fargate task reached over an SSH sidecar. It implements the provider-neutral `SandboxProvider` contract, so any sandbox-backed agent or resources server can use it by selecting `ecs_fargate` in its sandbox config.
+
+## Setup
+
+ECS Fargate needs the AWS SDK and a provisioned account/region:
+
+```bash
+uv pip install boto3
+```
+
+- **Infrastructure.** The reference Terraform stack publishes its outputs to SSM at `/<ssm_project>/ecs-sandbox/config` (`ssm_project` defaults to `harbor`): cluster, subnets, security groups, task/execution roles, ECR mirror, EFS, and the SSH-sidecar key ARNs. A missing parameter raises an actionable error.
+- **Credentials.** `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (or an instance role) plus `AWS_REGION`.
+- **Network.** The host must reach each task's SSH sidecar port (`52222`). Run inside the sandbox VPC/peered network, or allow the host IP on the sidecar security group. Exec, file transfer, and model reverse-tunnels all ride this SSH connection.
+
+## Provider Configuration
+
+NeMo Gym ships this provider config at `nemo_gym/sandbox/providers/ecs_fargate/configs/ecs_fargate.yaml`. It defines a top-level `sandbox` block that an agent selects with `sandbox_provider: sandbox`. Region-only is enough; everything else auto-discovers from SSM (explicit YAML always wins), and task cpu/memory/disk come from the agent's `sandbox_spec.resources`:
+
+```yaml
+sandbox:
+  default_metadata:
+    sandbox-api: ecs-fargate
+  ecs_fargate:
+    region: ${oc.env:AWS_REGION}
+```
+
+| Field | Default | Purpose |
+| --- | --- | --- |
+| `region` | — | AWS region; enables SSM auto-discovery when `cluster` is omitted |
+| `cpu` / `memory` | `"4096"` / `"8192"` | Fargate task size (CPU units / MiB) when set directly |
+| `ephemeral_storage_gib` | 20 (implicit) | Task scratch disk; explicit values must be 21–200 |
+| `auto_mirror` | `true` | Mirror a missing public image into the ECR mirror on demand |
+| `ssm_project` | `harbor` | SSM namespace for auto-discovery |
+| `environment_dir` | — | Build the task image from a Dockerfile directory via CodeBuild instead of using a prebuilt image |
+
+Cluster, subnets, security groups, roles, ECR mirror, EFS defaults, and the SSH-sidecar key ARNs are filled in from SSM when omitted.
+
+## Provider Options
+
+Per-sandbox options go in `SandboxSpec.provider_options`:
+
+| Key | Purpose |
+| --- | --- |
+| `volumes` | EFS mounts: a list of `{"container_path": "/mnt/efs", "efs": true}` entries. Each inherits the provider's `efs_filesystem_id` / `efs_access_point_id` unless it names its own. |
+| `outside_endpoints` | Host URLs exposed inside the sandbox via an SSH reverse tunnel, as `{"url": ..., "env_var": ...}` (e.g. a model server). |
+| `environment_dir` | Dockerfile directory to build the task image from via CodeBuild. |
+
+Common `SandboxSpec` fields map onto the task as follows: `ttl_s` → sidecar watchdog that stops the task, `ready_timeout_s` → task-startup timeout, `env` / `files` / `workdir` → container environment, seed files, and working directory.
+
+## Resource Mapping and Isolation
+
+`SandboxResources` maps onto the Fargate task definition:
+
+| `SandboxResources` | Fargate |
+| --- | --- |
+| `cpu` (vCPU) | task CPU units (`cpu * 1024`), validated against Fargate's CPU/memory pairs |
+| `memory_mib` | task memory (MiB) |
+| `disk_gib` | task ephemeral storage (21–200 GiB) |
+| `gpu` | unsupported — raises `SandboxCreateError` |
+
+Each sandbox is a dedicated Fargate task with its own kernel, network namespace, and microVM boundary — there is no host sharing between sandboxes. The orchestrator holds a per-task SSH connection for exec and file transfer, and TTL is enforced by a sidecar watchdog that stops the task.
+
+## Images and On-Demand Mirroring
+
+ECS pulls task images from the account ECR mirror rather than their origin registry. A bare/public image (e.g. `docker.io/swebench/sweb.eval.x86_64.<id>:latest`) resolves to the mirror tag `<ecr_repository>:<sanitized-name>`. Resolution order:
+
+1. `environment_dir` set → build the image via CodeBuild and use it.
+2. Image is already an ECR reference → use verbatim (never re-mirrored).
+3. Bare/public name + `auto_mirror=true` → mirror into ECR on demand (CodeBuild pull → retag → push) during `create`, then launch.
+
+The first task for a new image waits on a one-time build (~1–3 min for typical SWE-bench images); later tasks hit the ECR cache, and concurrent tasks for the same image de-duplicate onto a single build. Set `auto_mirror: false` to require a pre-populated mirror and fail fast on a miss.
+
+## First-Run Example
+
+Drive a sandbox directly through the provider-neutral API:
+
+```python
+import asyncio
+
+from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
+
+
+provider_config = {"ecs_fargate": {"region": "us-east-1"}}
+spec = SandboxSpec(
+    image="python:3.12-slim",
+    ttl_s=1800,
+    ready_timeout_s=300,
+    resources=SandboxResources(cpu=2, memory_mib=8192),
+)
+
+
+async def main() -> None:
+    async with AsyncSandbox(provider_config, spec) as sandbox:
+        await sandbox.start()
+        result = await sandbox.exec("python3 --version", timeout_s=60)
+        print(result.stdout or result.stderr)
+
+
+asyncio.run(main())
+```
+
+For an end-to-end agent run, add this provider config to `mini_swe_agent_2`'s config paths — the agent config is unchanged:
+
+```bash
+ng_run "+config_paths=[responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml, nemo_gym/sandbox/providers/ecs_fargate/configs/ecs_fargate.yaml, <MODEL_CONFIG>]"
+```
+
+## Troubleshooting
+
+| Symptom | Cause / fix |
+| --- | --- |
+| `SSM parameter '/…/ecs-sandbox/config' not found` | Infrastructure is not provisioned in that region. Run the Terraform stack, or set the ECS fields explicitly in YAML. |
+| Exec/SSH times out after the task reaches RUNNING | The host cannot reach the sidecar port `52222`. Run inside the sandbox VPC or allow the host IP on the sidecar security group. |
+| `Fargate memory for cpu=… must be …` | The CPU/memory pair is not a supported Fargate combination. Pick a valid pair. |
+| `ephemeral storage must be between 21 and 200 GiB` | `disk_gib` is out of range. Omit it for the implicit 20 GiB default. |
+| First task is slow or the image pull fails | The first task mirrors the image via CodeBuild (~1–3 min); later tasks hit the ECR cache. Set `auto_mirror: false` to require a pre-staged mirror. |
+| S3 staging objects accumulate | The orchestrator role lacks `s3:DeleteObject`. Grant it, or set a bucket lifecycle policy to reap `*/ecs-sandbox/*` staging artifacts. |
+| `ECS Fargate does not support GPU sandboxes` | Fargate has no GPU; use a GPU-capable provider instead. |
+
+<Warning>
+The reference sidecar security group allows `0.0.0.0/0` on `52222` for convenience. Restrict it to the orchestrator's egress IP (or move to a private/peered path) before non-smoke use.
+</Warning>

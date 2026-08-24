@@ -16,7 +16,7 @@ def read(path: str) -> str:
 
 class TestFernDocsLinks(unittest.TestCase):
     def test_model_call_capture_leads_with_a_copy_paste_consumer_workflow(self):
-        for version in ("latest", "v0.5.0"):
+        for version in ("latest", "v0.5.0", "v0.5.1"):
             with self.subTest(version=version):
                 guide = read(f"fern/versions/{version}/pages/model-server/model-call-capture.mdx")
 
@@ -30,7 +30,7 @@ class TestFernDocsLinks(unittest.TestCase):
                 self.assertIn("results/mcqa_rollouts.jsonl", guide)
 
     def test_model_call_capture_shows_the_rollout_attachment_shape(self):
-        for version in ("latest", "v0.5.0"):
+        for version in ("latest", "v0.5.0", "v0.5.1"):
             guide = read(f"fern/versions/{version}/pages/model-server/model-call-capture.mdx")
 
             with self.subTest(version=version):
@@ -48,14 +48,14 @@ class TestFernDocsLinks(unittest.TestCase):
                 self.assertIn("<rollout_id>.capture.jsonl", guide)
 
     def test_model_call_capture_labels_the_raw_record_as_synthetic(self):
-        for version in ("latest", "v0.5.0"):
+        for version in ("latest", "v0.5.0", "v0.5.1"):
             with self.subTest(version=version):
                 guide = read(f"fern/versions/{version}/pages/model-server/model-call-capture.mdx")
 
                 self.assertIn("The following synthetic record shows the exact persisted field shape.", guide)
 
     def test_model_call_capture_scopes_agent_observations_to_claude_code(self):
-        for version in ("latest", "v0.5.0"):
+        for version in ("latest", "v0.5.0", "v0.5.1"):
             with self.subTest(version=version):
                 guide = read(f"fern/versions/{version}/pages/model-server/model-call-capture.mdx")
 
@@ -63,7 +63,7 @@ class TestFernDocsLinks(unittest.TestCase):
                 self.assertIn("### Advanced: correlation, compaction, and sandbox evidence", guide)
 
     def test_model_server_index_links_model_call_capture(self):
-        for version in ("latest", "v0.5.0"):
+        for version in ("latest", "v0.5.0", "v0.5.1"):
             with self.subTest(version=version):
                 index = read(f"fern/versions/{version}/pages/model-server/index.mdx")
 
