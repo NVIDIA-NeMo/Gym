@@ -431,7 +431,7 @@ def run_health_checks(
 
     lines = _index_jsonl(paths)
     capture_dir_strings = tuple(str(path) for path in capture_dirs)
-    captures_exist = any(directory.rglob("*.capture.jsonl") for directory in capture_dirs if directory.exists())
+    captures_exist = any(any(directory.glob("*.capture.jsonl")) for directory in capture_dirs if directory.exists())
     worker_inputs = [
         _WorkerInput(
             line=line,
@@ -503,10 +503,17 @@ def _discover_rollouts(run_dir: Path) -> list[Path]:
     return candidates
 
 
-def _discover_capture_dirs(run_dir: Path) -> list[Path]:
-    root = run_dir if run_dir.is_dir() else run_dir.parent
-    captures = list(root.rglob("*.capture.jsonl"))
-    return sorted({path.parent for path in captures})
+def _standalone_capture_dirs(run_dir: Path, capture_dirs: Sequence[str | Path] | None) -> list[Path]:
+    if capture_dirs is None:
+        root = run_dir if run_dir.is_dir() else run_dir.parent
+        return [root / "model_calls"]
+
+    resolved = [Path(directory) for directory in capture_dirs]
+    missing = [directory for directory in resolved if not directory.is_dir()]
+    if missing:
+        formatted = ", ".join(str(directory) for directory in missing)
+        raise ValueError(f"Capture directory not found: {formatted}")
+    return resolved
 
 
 def format_health_report(result: HealthCheckResult) -> str:
@@ -526,16 +533,17 @@ def health_check_run_dir(
     *,
     workers: int | None = None,
     ignored_checks: Sequence[str] = (),
+    capture_dirs: Sequence[str | Path] | None = None,
 ) -> HealthCheckResult:
     path = Path(run_dir)
     rollout_paths = _discover_rollouts(path)
-    capture_dirs = _discover_capture_dirs(path)
+    selected_capture_dirs = _standalone_capture_dirs(path, capture_dirs)
     result = run_health_checks(
         rollout_paths,
         output_dir=path if path.is_dir() else path.parent,
-        capture_dirs=capture_dirs,
+        capture_dirs=selected_capture_dirs,
         workers=workers,
-        capture_enabled=True if capture_dirs else None,
+        capture_enabled=True if any(directory.is_dir() for directory in selected_capture_dirs) else None,
         ignored_checks=ignored_checks,
     )
     print(format_health_report(result))

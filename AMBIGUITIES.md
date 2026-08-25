@@ -171,11 +171,11 @@ This makes `healthy` a strong claim that every enabled rollout check ran and pas
 
 ### 12. Finding capture files from the standalone command
 
-**RFC gap.** `gym eval health-check <run-dir>` accepts only the run directory. Capture output can be configured at an absolute path, and the RFC defines no manifest that records that path.
+**RFC gap.** The RFC does not define where the standalone command should find capture files. Core Gym has no implicit capture-directory default: when observability is enabled, `ModelCallCaptureConfig` requires an explicit absolute `model_call_capture_dir`.
 
-**Chosen behavior.** The standalone command recursively searches the supplied run directory for `*.capture.jsonl`. Automatic execution after `run` or `aggregate` receives the configured capture directory directly and does not need discovery.
+**Chosen behavior.** With no CLI override, the standalone command uses only `<run-dir>/model_calls`, the conventional capture location beside the rollout file. It never recursively searches the run directory. One or more explicit directories may replace that convention by repeating `--capture-dir PATH`; an explicitly supplied directory must exist. Automatic execution after `run` or `aggregate` receives `model_call_capture_dir` from the run configuration directly and does not use this fallback.
 
-**Alternatives considered.** Add another standalone CLI argument not defined by the RFC, or make every capture-dependent check unobserved in standalone mode.
+**Alternatives considered.** Recursively discover every `*.capture.jsonl`, support historical directory layouts implicitly, or make every capture-dependent check unobserved in standalone mode. Recursive discovery can ingest stale or unrelated artifacts, so nonstandard layouts must be named explicitly.
 
 ### 13. Using model-call evidence embedded in a rollout
 

@@ -455,11 +455,17 @@ def health_check_rollouts(
     *,
     workers: int | None = None,
     ignored_checks: Sequence[str] = (),
+    capture_dirs: Sequence[str | Path] | None = None,
 ):
     """Run rollout quality verification for an existing run directory."""
     from nemo_gym.rollout_health import health_check_run_dir
 
-    return health_check_run_dir(run_dir, workers=workers, ignored_checks=ignored_checks)
+    return health_check_run_dir(
+        run_dir,
+        workers=workers,
+        ignored_checks=ignored_checks,
+        capture_dirs=capture_dirs,
+    )
 
 
 @exit_cleanly_on_config_error

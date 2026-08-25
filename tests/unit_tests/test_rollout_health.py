@@ -277,13 +277,20 @@ async def test_health_on_and_off_leave_collection_and_metrics_byte_identical(
     assert artifacts[False] == artifacts[True]
 
 
-def test_health_check_cli_accepts_run_dir_workers_and_ignored_checks(
+def test_health_check_cli_accepts_run_dir_capture_dirs_workers_and_ignored_checks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     received = {}
+    first_capture_dir = tmp_path / "first-captures"
+    second_capture_dir = tmp_path / "second-captures"
 
-    def fake_health_check(run_dir, *, workers=None, ignored_checks=()):
-        received.update(run_dir=run_dir, workers=workers, ignored_checks=ignored_checks)
+    def fake_health_check(run_dir, *, workers=None, ignored_checks=(), capture_dirs=None):
+        received.update(
+            run_dir=run_dir,
+            workers=workers,
+            ignored_checks=ignored_checks,
+            capture_dirs=capture_dirs,
+        )
 
     monkeypatch.setattr(cli_eval, "health_check_rollouts", fake_health_check)
     monkeypatch.setattr(
@@ -296,6 +303,10 @@ def test_health_check_cli_accepts_run_dir_workers_and_ignored_checks(
             str(tmp_path),
             "--workers",
             "3",
+            "--capture-dir",
+            str(first_capture_dir),
+            "--capture-dir",
+            str(second_capture_dir),
             "--ignore-checks",
             "model_call_missing_token_counts,model_call_zero_completion_tokens",
         ],
@@ -307,7 +318,26 @@ def test_health_check_cli_accepts_run_dir_workers_and_ignored_checks(
         "run_dir": str(tmp_path),
         "workers": 3,
         "ignored_checks": ["model_call_missing_token_counts", "model_call_zero_completion_tokens"],
+        "capture_dirs": [first_capture_dir, second_capture_dir],
     }
+
+
+def test_standalone_capture_dirs_use_only_default_or_explicit_paths(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    nested_capture_dir = run_dir / "old" / "model_calls_cache"
+    nested_capture_dir.mkdir(parents=True)
+    explicit_capture_dir = tmp_path / "explicit"
+    explicit_capture_dir.mkdir()
+
+    assert health._standalone_capture_dirs(run_dir, None) == [run_dir / "model_calls"]
+    assert health._standalone_capture_dirs(run_dir, [explicit_capture_dir]) == [explicit_capture_dir]
+    assert nested_capture_dir not in health._standalone_capture_dirs(run_dir, None)
+
+
+def test_standalone_capture_dirs_reject_missing_explicit_path(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="Capture directory not found"):
+        health._standalone_capture_dirs(tmp_path, [tmp_path / "missing"])
 
 
 def test_invocation_fallback_warns_and_remains_a_capture_input(tmp_path: Path) -> None:
