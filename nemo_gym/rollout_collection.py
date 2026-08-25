@@ -445,6 +445,21 @@ class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
     split: Union[Literal["train"], Literal["validation"], Literal["benchmark"]]
     reuse_existing_data_preparation: bool = False
 
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_input_jsonl_fpath(cls, data):
+        # This config has no input_jsonl_fpath field, so pydantic would silently drop it and
+        # e2e collection would overwrite it with the prepared split path — the user's file
+        # would be ignored without any indication.
+        if isinstance(data, dict) and "input_jsonl_fpath" in data:
+            raise ConfigError(
+                "`input_jsonl_fpath` (-i/--input) is not supported when serving end-to-end: the input is "
+                "always the prepared dataset for the requested split. Either add --no-serve to collect "
+                "rollouts from your own input file against already-running servers, or drop -i/--input "
+                "to use the prepared data."
+            )
+        return data
+
 
 class RolloutCollectionConfig(SharedRolloutCollectionConfig):
     """
@@ -753,6 +768,7 @@ class RolloutCollectionHelper(BaseModel):
 
     async def run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
+        failures_fpath = failures_path_for(output_fpath)
 
         # Create the output directory up front: every artifact this run writes (materialized inputs,
         # rollouts, failures sidecar, aggregate metrics) is derived from output_fpath and keeps its
@@ -794,13 +810,12 @@ class RolloutCollectionHelper(BaseModel):
                     f.write(orjson.dumps(row) + b"\n")
 
             output_fpath.unlink(missing_ok=True)
+            failures_fpath.unlink(missing_ok=True)
 
         semaphore = nullcontext()
         if config.num_samples_in_parallel:
             print(f"Querying with {config.num_samples_in_parallel} concurrent requests")
             semaphore = Semaphore(config.num_samples_in_parallel)
-
-        failures_fpath = failures_path_for(output_fpath)
 
         # Resolve capture dirs once so each rollout's captured model calls can be folded
         # into its record below (uniform across agents; no-op when capture is off / dirs absent).

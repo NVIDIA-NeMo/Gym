@@ -38,6 +38,9 @@ set -euo pipefail
 source /opt/Gym_venv/bin/activate
 cd /opt/Gym
 
+export NEMO_GYM_RUN_ID="\$SLURM_JOB_ID"
+export NEMO_GYM_USER="\${NEMO_GYM_USER:-\$SLURM_JOB_USER}"
+
 gym eval prepare $@ +use_cached_prepared_benchmarks=true
 
 experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%d_%H%M%S)
@@ -184,11 +187,28 @@ srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 \
     ' bash bash -lc "\$vllm_command" &
 server_step=\$!
 
-cleanup_server() {
+cleanup_job() {
+    job_status=\$?
+    trap - EXIT INT TERM
+    set +e
+    if (( $should_run_eval )); then
+        echo "Starting OpenSandbox cleanup"
+        python3 "\$SLURM_SUBMIT_DIR/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py" \
+            --connection-config "\$SLURM_SUBMIT_DIR/env.yaml" \
+            --run-id "\$SLURM_JOB_ID" \
+            --user "\${NEMO_GYM_USER:-\$SLURM_JOB_USER}" \
+            --reap
+        cleanup_status=\$?
+        if (( cleanup_status != 0 )); then
+            echo "OpenSandbox cleanup failed with status \$cleanup_status" >&2
+        fi
+    fi
     kill "\$server_step" 2>/dev/null || true
-    wait "\$server_step" 2>/dev/null || true
+    exit "\$job_status"
 }
-trap cleanup_server EXIT INT TERM
+trap cleanup_job EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 if (( $should_run_eval )); then
     # No need to wait for endpoint since Gym will wait for model endpoints to spin up before proceeding.
@@ -227,12 +247,9 @@ if (( $should_run_eval )); then
         echo "vLLM server step exited unexpectedly with status \$completed_status" >&2
         kill "\$eval_step" 2>/dev/null || true
         wait "\$eval_step" 2>/dev/null || true
-        trap - EXIT INT TERM
         exit "\$completed_status"
     fi
 
-    cleanup_server
-    trap - EXIT INT TERM
     exit "\$completed_status"
 fi
 
