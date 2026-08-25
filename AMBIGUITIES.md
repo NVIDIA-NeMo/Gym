@@ -206,19 +206,21 @@ This preserves the difference between “the evidence is absent” and “the av
 
 **Alternative considered.** Infer a rollout file when exactly one plausible JSONL is present. Even unique-looking files can be prepared inputs or unrelated outputs, so inference could silently check the wrong artifact.
 
-### 17. Running after aggregation without shard merging
+### 17. Health checking explicitly selected rollout shards
 
-**RFC gap.** `gym eval aggregate` can run with `merge_shards=false`, while the RFC requires automatic health checks after aggregation but does not say whether health checking requires a merged rollout file.
+**RFC gap.** `gym eval aggregate` can run with `merge_shards=false`. In that mode, aggregation does not create the merged rollout file named by `output_jsonl_fpath`, but the RFC still requires an automatic health check.
 
-**Chosen behavior.** The runner reads each selected shard directly and writes one combined health report beside the requested aggregate output. It does not create a merged rollout artifact.
+**Chosen behavior.** The aggregate command passes the rollout shard paths explicitly selected by `input_glob` to the health runner. The runner checks those files as one logical run and writes one combined health report in the directory containing `output_jsonl_fpath`. It does not search for additional JSONL files and does not create a merged rollout file.
 
-**Alternatives considered.** Create an unrequested merged JSONL, or skip the required health check when shard merging is disabled.
+This does not affect the standalone command: `gym eval health-check` still requires `<run-dir>/rollouts.jsonl` or an explicit `--rollouts-file` argument.
+
+**Alternatives considered.** Create a merged rollout file despite `merge_shards=false`, or omit the automatic health check.
 
 ### 18. Reporting an unreadable rollout record
 
 **RFC gap.** The RFC says parsing must be tolerant and an unparseable record is a finding. It defines neither an issue ID for that finding nor a fallback identity for the report row.
 
-**Chosen behavior.** The implementation adds the separate `record_unreadable` check ID. For an unreadable JSONL entry, its zero-based position among all non-empty input lines becomes `_ng_task_index` and `_ng_rollout_index` becomes `0`. Checks that need the parsed record are marked unobserved, preventing meaningless follow-on findings.
+**Chosen behavior.** The implementation adds the separate `record_unreadable` check ID. Because an unreadable entry cannot supply its real rollout identity, the report uses a clearly synthetic `_ng_task_index` containing the input-file position and physical line number, such as `__unreadable_record__:input-0:line-42`; `_ng_rollout_index` is `0`. The finding locator records the selected source-file path and line number. Checks that need the parsed record are marked unobserved, preventing meaningless follow-on findings. The synthetic namespace prevents an unreadable entry from being grouped with an ordinary numeric task index.
 
 **Alternatives considered.** Report the parse failure under an unrelated semantic check, or omit the line from reports. The first corrupts another check's issue count; the second violates the requirement to classify every rollout record.
 

@@ -94,7 +94,8 @@ def _read_record(line: _LineSlice) -> tuple[dict[str, Any], str | None]:
 
 def _worker(payload: _WorkerInput) -> RolloutDigest:
     record, parse_error = _read_record(payload.line)
-    task_index = record.get(TASK_INDEX_KEY, payload.line.ordinal)
+    unreadable_identity = f"__unreadable_record__:input-{payload.line.source_index}:line-{payload.line.line_number}"
+    task_index = record.get(TASK_INDEX_KEY, unreadable_identity if parse_error else payload.line.ordinal)
     rollout_index = record.get(ROLLOUT_INDEX_KEY, 0)
     trajectory = record.get("ng_trajectory")
     trajectory_rollout_id = trajectory.get("rollout_id") if isinstance(trajectory, dict) else None
@@ -118,7 +119,13 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
         if parse_error:
             if spec.id == "record_unreadable":
                 findings.append(
-                    _finding("record_unreadable", subject, reason="rollout record is unreadable", error=parse_error)
+                    _finding(
+                        "record_unreadable",
+                        subject,
+                        locator={"source_file": payload.line.path, "line": payload.line.line_number},
+                        reason="rollout record is unreadable",
+                        error=parse_error,
+                    )
                 )
             else:
                 unobserved.append(spec.id)
@@ -207,16 +214,27 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
 def _index_jsonl(paths: Sequence[Path]) -> list[_LineSlice]:
     slices: list[_LineSlice] = []
     ordinal = 0
-    for path in paths:
+    for source_index, path in enumerate(paths):
         with path.open("rb") as handle:
+            line_number = 0
             while True:
                 offset = handle.tell()
                 line = handle.readline()
                 if not line:
                     break
+                line_number += 1
                 if not line.strip():
                     continue
-                slices.append(_LineSlice(str(path), offset, len(line), ordinal))
+                slices.append(
+                    _LineSlice(
+                        path=str(path),
+                        offset=offset,
+                        length=len(line),
+                        ordinal=ordinal,
+                        source_index=source_index,
+                        line_number=line_number,
+                    )
+                )
                 ordinal += 1
     return slices
 

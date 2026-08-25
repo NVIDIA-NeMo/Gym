@@ -762,13 +762,15 @@ def test_zero_token_call_is_flagged_and_nonempty_length_response_is_exempt(tmp_p
 
 def test_malformed_records_and_check_failures_become_findings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     malformed = tmp_path / "malformed.jsonl"
-    malformed.write_bytes(b"[]\n")
+    malformed.write_bytes(b"\n[]\n")
     parsed = run_health_checks(malformed, workers=1)
     [digest] = parsed.rollouts
-    assert digest.task_index == 0 and digest.rollout_index == 0
+    assert digest.task_index == "__unreadable_record__:input-0:line-2"
+    assert digest.rollout_index == 0
     assert digest.verdict == "unhealthy"
     assert len(digest.findings) == 1
     assert digest.findings[0].check == "record_unreadable"
+    assert digest.findings[0].locator == {"source_file": str(malformed), "line": 2}
     assert digest.findings[0].detail["reason"] == "rollout record is unreadable"
     assert set(digest.unobserved) == {
         "rollout_missing_agent_turns",
@@ -780,6 +782,17 @@ def test_malformed_records_and_check_failures_become_findings(tmp_path: Path, mo
         "rollout_token_count_mismatch",
         "model_call_runaway_generation",
     }
+
+    # A malformed line must not be grouped with a valid rollout whose numeric
+    # task index happens to equal the malformed line's global ordinal.
+    collision = tmp_path / "collision.jsonl"
+    collision.write_bytes(orjson.dumps(_record(1, 0), option=orjson.OPT_APPEND_NEWLINE) + b"[]\n")
+    collision_result = run_health_checks(collision, workers=1)
+    assert {digest.task_index for digest in collision_result.rollouts} == {
+        1,
+        "__unreadable_record__:input-0:line-2",
+    }
+    assert set(collision_result.summary["tasks"]) == {"1", "__unreadable_record__:input-0:line-2"}
 
     healthy = tmp_path / "healthy.jsonl"
     healthy.write_bytes(orjson.dumps(_record(0, 0), option=orjson.OPT_APPEND_NEWLINE))

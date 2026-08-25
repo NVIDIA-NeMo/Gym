@@ -108,6 +108,8 @@ class _LineSlice:
     offset: int
     length: int
     ordinal: int
+    source_index: int
+    line_number: int
 
 
 @dataclass(frozen=True, slots=True)
