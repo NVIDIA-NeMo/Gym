@@ -203,6 +203,15 @@ jobs:
           MODEL_API_KEY: ${{ secrets[matrix.model_api_key_secret_name] }}
         run: bash tests/e2e/run_inference_provider_e2e.sh
 
+      - name: Upload provider E2E artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ matrix.provider }}-e2e-results-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nemo-gym-${{ matrix.provider }}-e2e/results
+          if-no-files-found: warn
+          retention-days: 7
+
   Nemo_CICD_Test:
     needs: [pre-flight, classify_changes, unit_tests, container_build, gpu_e2e_tests, provider_e2e_tests]
     if: always() && !cancelled()

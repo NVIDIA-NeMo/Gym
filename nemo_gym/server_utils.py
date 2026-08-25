@@ -206,7 +206,11 @@ DISCONNECTED_CLIENT_OS_HELP_TEXT = """We've run into this issue in two different
 
 
 async def request(
-    method: str, url: str, _internal: bool = False, **kwargs: Unpack[_RequestOptions]
+    method: str,
+    url: str,
+    _internal: bool = False,
+    _max_connection_retries: Optional[int] = None,
+    **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     # Faster JSON dumps than the default aiohttp json
     if kwargs.get("json"):
@@ -232,6 +236,10 @@ async def request(
                     flush=True,
                 )
 
+            # Retrying forever is wrong if the endpoint is expected to sometimes die and move.
+            if _max_connection_retries is not None and retries >= _max_connection_retries:
+                raise
+
             await asyncio.sleep(0.5)
         except ClientOSError:
             global _NUM_CLIENT_OS_ERROR
@@ -243,6 +251,9 @@ async def request(
                     f"Hit {_NUM_CLIENT_OS_ERROR} global `ClientOSError` while querying {url}.\n{DISCONNECTED_CLIENT_OS_HELP_TEXT}",
                     flush=True,
                 )
+
+            if _max_connection_retries is not None and retries >= _max_connection_retries:
+                raise
 
             await asyncio.sleep(0.5)
         except Exception as e:
