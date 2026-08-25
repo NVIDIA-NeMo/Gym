@@ -1,0 +1,26 @@
+nooa_agent:
+  responses_api_agents:
+    nooa_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: example_single_tool_call
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      nooa:
+        agent_class: responses_api_agents.nooa_agent.example_agent:WeatherAgent
+        entrypoint: answer
+        init_kwargs: {}
+        arguments:
+          question:
+            source: responses_create_params.input
+            transform: latest_user_text
+      max_steps: 10
+      concurrency: 8
+      run_timeout_secs: 600
+      datasets:
+        - name: example
+          type: validation
+          jsonl_fpath: responses_api_agents/nooa_agent/data/example.jsonl
+          license: Apache 2.0
