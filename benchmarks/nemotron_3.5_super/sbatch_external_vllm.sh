@@ -111,6 +111,11 @@ export UCX_RNDV_THRESH=0
 
 source "$VLLM_CONFIG"
 
+# Increase the number of file descriptors to 65k
+if [[ \$(ulimit -Hn) == "unlimited" ]] || [[ 65535 -lt \$(ulimit -Hn) ]]; then
+  ulimit -Sn 65535
+fi
+
 this_node_hostname=\$(hostname)
 if (( SLURM_PROCID == 0 )); then
     read -r -a nodes <<< "\$ALL_NODES"
