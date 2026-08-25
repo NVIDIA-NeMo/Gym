@@ -96,9 +96,8 @@ class BaseVerifyRequest(BaseRunRequest):
 class BaseVerifyResponse(BaseVerifyRequest):
     reward: float
 
-    # Elaborates on why `reward` may not be fully genuine, allowing the upstream
-    # training loop to decide on how to treat the response.
-    # For example, timeouts may result in reward=0, and we should be honest about the reason.
+    # Human-readable diagnosis of why `reward` may not reflect policy quality.
+    # Machine-readable handling belongs to `mask_sample`/`failure_kind`.
     failure_reason: Optional[str] = None
 
 

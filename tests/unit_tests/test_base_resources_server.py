@@ -46,8 +46,8 @@ class TestBaseVerifyResponse:
         assert response.failure_reason is None
         assert response.model_dump()["failure_reason"] is None
 
-        rescued = response.model_copy(update={"failure_reason": "cohort_timeout"})
-        assert rescued.model_dump()["failure_reason"] == "cohort_timeout"
+        rescued = response.model_copy(update={"failure_reason": "judge response unparseable after 3 attempts"})
+        assert rescued.model_dump()["failure_reason"] == "judge response unparseable after 3 attempts"
         assert rescued.reward == 0.0
 
 
