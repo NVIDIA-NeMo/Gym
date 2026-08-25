@@ -1,51 +1,60 @@
 # IdeGYM Sandbox Provider — Design Decisions
 
-A record of the questions this integration raised, what was chosen, and why. It exists so a reviewer
-can see which choices were deliberate and which are open, and so the next person to touch this
-provider does not have to re-derive the constraints from the IdeGYM and NeMo Gym sources.
+Why this provider is built the way it is: the choices with real alternatives, and the constraints
+that forced them. It exists so the next person to touch the code does not have to re-derive them
+from the IdeGYM and NeMo Gym sources.
 
-Written against **NeMo Gym** at `2251ef7` and **idegym 0.11.1** (`idegym-client` 0.11.1 on PyPI).
+## The shape of the integration
 
-## Questions put to the maintainer
+```mermaid
+flowchart LR
+    P["IdeGymProvider<br/>one per sandbox"] --> S["IdeGymSession<br/>shared, refcounted"]
+    S --> C["Registered client<br/>heartbeat · quota · owns N servers"]
+    C --> O["Orchestrator"]
+    O --> K["Kubernetes"]
+    K --> Pod["Server pod"]
+    O -.->|"HTTP forwarded<br/>as JSON text"| Pod
+```
 
-Three decisions were genuinely the maintainer's to make, because different answers would have meant
-materially different work. They were asked before implementation.
+Two properties of that chain drive most of what follows: the *client* is the unit of ownership and
+quota, and the orchestrator relays requests as JSON text rather than proxying a socket.
 
-### 1. How should `SandboxSpec.image` be resolved?
+## Choices with real alternatives
 
-The constraint: an IdeGYM sandbox is a pod running the **IdeGYM server**, and that server is what
-exposes the API the orchestrator forwards commands to. A plain benchmark image does not boot one, so
-the image cannot simply be a SWE-bench tag.
+### How `SandboxSpec.image` is resolved
+
+An IdeGYM sandbox is a pod running the **IdeGYM server**, and that server exposes the API the
+orchestrator forwards commands to. A plain benchmark image does not boot one, so the image cannot
+simply be a SWE-bench tag.
 
 | Option | Decision |
 | --- | --- |
-| **Pass pre-built IdeGYM images through; document `image_rewrites` for mapping upstream benchmark images onto them** | **Chosen** |
-| Integrate IdeGYM's image builder so the provider can build and push a wrapped image on demand | Rejected for a first milestone: needs a registry, cluster build permissions, and a build-cache story |
+| **Pass pre-built IdeGYM images through; document `image_rewrites` for mapping benchmark images onto them** | **Chosen** |
+| Integrate IdeGYM's image builder so the provider builds and pushes a wrapped image on demand | Rejected for a first milestone: needs a registry, cluster build permissions, and a build-cache story |
 | Validate the image against an allow-prefix and refuse anything else | Rejected as too rigid — registry layouts vary |
 
-Consequence: `spec.image` is normalized (`docker://` stripped) and validated against IdeGYM's OCI
+`spec.image` is therefore normalized (`docker://` stripped) and validated against IdeGYM's OCI
 reference pattern, and nothing more. A non-IdeGYM image fails inside the orchestrator instead: its
 container never answers the health endpoint the pod's readiness probe polls, so `start_server` times
 out rather than handing back a server that cannot run commands.
 
-### 2. What should `close()` do?
+### What `close()` does
 
-IdeGYM distinguishes `stop_server` (delete the pod and its Kubernetes resources) from
-`finish_server` (mark the server free, keep the pod warm for reuse).
+IdeGYM distinguishes `stop_server` (delete the pod and its Kubernetes resources) from `finish_server`
+(mark the server free, keep the pod warm for reuse).
 
 | Option | Decision |
 | --- | --- |
 | `stop_server` only | **Chosen** |
-| `stop` by default with `finish` + reuse available behind a config knob | Not implemented in this milestone |
+| `stop` by default, with `finish` + reuse behind a config knob | Not implemented in this milestone |
 | `finish` by default | Rejected: keeps pods warm but leaks them whenever a run dies |
 
-Consequence: `close()` always deletes. Reuse is still reachable — pinning
-`provider_options.server_name` and setting `reuse_strategy` opts into IdeGYM's own server matching —
-but the provider does not manage a warm pool, and `operations` has no `close_action` knob to get
-wrong. Pod startup cost is therefore paid per task; if that becomes the bottleneck on long
-benchmarks, a `finish`-based warm pool is the follow-up.
+So `close()` always deletes. Reuse stays reachable — pin `provider_options.server_name` and set
+`reuse_strategy` to opt into IdeGYM's own matching — but the provider manages no warm pool, and
+`operations` has no `close_action` knob to get wrong. Pod startup cost is paid per task; if that
+becomes the bottleneck on long benchmarks, a `finish`-based warm pool is the follow-up.
 
-### 3. Where does the SDK dependency live?
+### Where the SDK dependency lives
 
 | Option | Decision |
 | --- | --- |
@@ -55,51 +64,46 @@ benchmarks, a `finish`-based warm pool is the follow-up.
 This follows the `nemo-gym[openshell]` precedent. CI installs the extra alongside the other sandbox
 extras so the SDK-gated tests run rather than skip.
 
-**One consequence worth a maintainer's attention.** `uv.lock` resolves all extras together, so adding
-this one raises two locked versions for every install, not just for IdeGYM users:
+One consequence worth knowing: `uv.lock` resolves all extras together, so adding this one raises two
+locked versions for every install, not just for IdeGYM users — `hydra-core` 1.3.2 → 1.3.5 (required
+by `idegym-common-utils`) and `pyyaml` 6.0.2 → 6.0.3 pulled in behind it. Both are patch bumps inside
+the range `pyproject.toml` already allows. Declaring the extra conflicting in `[tool.uv]` would keep
+the resolution untouched, at the cost of a second resolution to maintain.
 
-| Package | Before | After | Cause |
-| --- | --- | --- | --- |
-| `hydra-core` | 1.3.2 | 1.3.5 | `idegym-common-utils` requires `hydra-core>=1.3.4` |
-| `pyyaml` | 6.0.2 | 6.0.3 | pulled in by that resolution |
+## Implementation decisions
 
-Both are patch bumps inside the line `pyproject.toml` already allows (`hydra-core` is unpinned), and
-the full core unit-test suite passes on them. If keeping the resolution untouched matters more, the
-alternative is declaring the extra conflicting in `[tool.uv]` so it resolves separately — at the cost
-of a second resolution to maintain.
+These follow from reading the two codebases. Each is recorded because a reviewer might reasonably
+expect the alternative.
 
-## Decisions taken without asking
+### One registered client per process, not per sandbox
 
-These follow from reading the two codebases; they are recorded because each has a plausible
-alternative that a reviewer might expect instead.
+A *client* is a registered, heartbeating entity that owns N server pods, carries the resource quota
+(matched by regex against its **name**), and terminates all of its servers when it stops.
 
-### One registered IdeGYM client per process, not per sandbox
+Registering one per sandbox looked simpler but does not survive a benchmark fan-out: the orchestrator
+takes `LOCK TABLE clients IN EXCLUSIVE MODE` per registration, heartbeats multiply by the concurrency,
+and one job's pods scatter across many owners in the dashboard. A session is therefore shared by every
+sandbox with an identical `connection` config, and reference-counted across providers.
 
-IdeGYM's unit of ownership is a **client**: a registered, heartbeating entity that owns N server
-pods, carries the resource quota (matched by regex against its *name*), and terminates all of its
-servers when it stops.
-
-Registering one per sandbox looked simpler but does not scale to a benchmark fan-out: the
-orchestrator takes `LOCK TABLE clients IN EXCLUSIVE MODE` per registration, heartbeats multiply by
-the concurrency, and one job's pods end up scattered across many owners in the dashboard. So a
-session is shared by every sandbox with an identical `connection` config and reference-counted across
-providers.
-
-The refcount matters for correctness, not just efficiency: the SDK unregisters a client by stopping
-it, which **terminates all of its servers**. Releasing early would kill live sandboxes belonging to
-other providers.
+The refcount is correctness, not efficiency: unregistering a client **terminates all of its servers**,
+so releasing early would kill live sandboxes belonging to other providers.
 
 ### The shared client runs on a private event loop
 
-The SDK's client owns an httpx session and a heartbeat task, so it belongs to the loop that created
-it. NeMo Gym drives sandboxes from two directions: `AsyncSandbox` on the caller's loop, and the sync
+The SDK client owns an httpx session and a heartbeat task, so it belongs to the loop that created it.
+NeMo Gym drives sandboxes from two directions: `AsyncSandbox` on the caller's loop, and the sync
 `Sandbox` facade — which gives *every sandbox its own* loop in its own thread, and is what
-`mini_swe_agent_2` uses. Binding the shared client to whichever loop happened to create it first
-would tie one registration's lifetime to one sandbox's.
+`mini_swe_agent_2` uses. Binding the shared client to whichever loop created it first would tie one
+registration's lifetime to one sandbox's.
 
-Alternative considered: key sessions on `(connection, running loop)`. That is simpler, and correct
-for the async case, but degenerates to one registration per sandbox under the sync facade — exactly
-the case that motivated sharing.
+For the same reason the provider's own session guard is a `threading.Lock`, never an `asyncio.Lock`:
+one provider can be reached from two loops, and an `asyncio.Lock` cannot span them without
+deadlocking. Nothing is awaited while it is held, so a racing acquirer simply returns its spare
+reference.
+
+Alternative considered: key sessions on `(connection, running loop)`. Simpler, and correct for the
+async case, but it degenerates to one registration per sandbox under the sync facade — exactly the
+case that motivated sharing.
 
 ### Tracing is off unless configured
 
@@ -113,66 +117,64 @@ off-box to a third party. The session always passes an explicit `OTELConfig`, an
 concurrency — and says to swap the transport when wrapping a library that uses httpx internally. The
 IdeGYM client builds its own `httpx.AsyncClient` and exposes no hook, so the swap reaches into
 `client._http_client._transport`. That private access is isolated in one function, degrades to a
-warning plus the SDK's own transport if the shape changes, and is guarded by a test. Pool limits and
-`connection.max_connections` bounds orchestrator load either way.
+warning plus the SDK's own transport if the shape changes, and is guarded by a test.
 
 ### Files move as base64 over the bash tool
 
-IdeGYM's server does have a filesystem API, but not one reachable here: its read endpoint streams raw
-bytes while the orchestrator forwards requests by storing and replaying them as JSON *text*, so
-binary content does not survive; and its typed file endpoints only write UTF-8. base64 over the bash
-tool is binary-safe in both directions and needs nothing but coreutils.
+IdeGYM's server has a filesystem API, but not one reachable here: its read endpoint streams raw bytes
+while the orchestrator forwards requests by storing and replaying them as JSON *text*, so binary
+content does not survive; and its typed file endpoints only write UTF-8. base64 over the bash tool is
+binary-safe both ways and needs nothing but coreutils.
 
 Both directions are chunked, for different reasons, and the numbers are not arbitrary:
 
-- **Uploads** embed the payload in the script, and the IdeGYM executor passes the script as a single
-  `execve()` argument. Linux caps that at `MAX_ARG_STRLEN` (128 KiB) and fails with `E2BIG`, so a raw
-  chunk has to stay under ~96 KiB once base64 inflates it by 4/3. The default is 48 KiB, and the
-  config rejects anything that could not fit.
-- **Downloads** come back as a command's stdout, which the orchestrator persists as the text result
-  of an async operation, so a whole-file read would put an inflated copy of the file through its
-  database.
+- **Uploads** embed the payload in the script, which the executor passes as a single `execve()`
+  argument. Linux caps that at `MAX_ARG_STRLEN` (128 KiB) and fails with `E2BIG`, so a raw chunk must
+  stay under ~96 KiB once base64 inflates it by 4/3. The default is 48 KiB, and the config rejects
+  anything that could not fit.
+- **Downloads** come back as a command's stdout, which the orchestrator persists as the text result of
+  an async operation, so a whole-file read would put an inflated copy of the file through its database.
 
-The download chunk script deliberately does *not* set `pipefail`: `head -c` closes the pipe as soon
-as it has its bytes, so `tail` normally dies of SIGPIPE and would make a perfectly good chunk look
-like a failure. The decoded-length check is the real guard.
+The download chunk script deliberately does *not* set `pipefail`: `head -c` closes the pipe as soon as
+it has its bytes, so `tail` normally dies of SIGPIPE and would make a perfectly good chunk look like a
+failure. The decoded-length check is the real guard.
 
 ### Command context is expressed in the script
 
-IdeGYM's bash tool takes a command, a timeout and a graceful-termination timeout — no
-working-directory, environment or user arguments. So `cwd` becomes `cd -- ... || exit 1`, `env`
-becomes `export`, and the whole thing is wrapped in one `{ ... }` group because the executor runs
-`source <bash-integration> && <script>` and `&&` binds only to the first statement of a
-multi-statement script.
+IdeGYM's bash tool takes a command, a timeout and a graceful-termination timeout — no working
+directory, environment or user. So `cwd` becomes `cd -- ... || exit 1`, `env` becomes `export`, and
+the whole thing is wrapped in one `{ ... }` group because the executor runs
+`source <bash-integration> && <script>` and `&&` binds only to the first statement.
 
-`user` has no equivalent at all. Rather than silently dropping it, `exec.user_mode` makes the
-behavior explicit: `ignore` (default) warns once per provider, while `runuser` and `su` wrap the
-script for images that ship those tools. `create.run_as_root` defaults to `true` in the shipped
-config, which makes `exec(user="root")` — what `mini_swe_agent_2` passes — a no-op rather than a lie.
+`user` has no equivalent at all. Rather than dropping it silently, `exec.user_mode` makes the behavior
+explicit: `ignore` (default) warns once per provider, while `runuser` and `su` wrap the script for
+images that ship those tools — both pinning `/bin/bash` rather than inheriting a login shell that may
+be `/sbin/nologin`. `create.run_as_root` defaults to `true` in the shipped config, which makes
+`exec(user="root")` — what `mini_swe_agent_2` passes — a no-op rather than a lie.
 
 ### `create()` checks only the workdir
 
 IdeGYM does not report a server until `wait_for_pods_ready` sees its pod `Running` with every
-container ready, and the container's readiness probe is an HTTP GET against the IdeGYM server's own
-health endpoint on the port the bash tool is served from. A provider-side readiness probe would only
-re-ask that question, so `create()` adds one check the orchestrator cannot make: that `spec.workdir`
-exists, because otherwise every later command fails on `cd` and reads like a broken agent rather
-than a mis-set path.
+container ready, and that readiness probe is an HTTP GET against the IdeGYM server's own health
+endpoint on the port the bash tool is served from. A provider-side readiness probe would only re-ask
+the question, so `create()` adds the one check the orchestrator cannot make: that `spec.workdir`
+exists, because otherwise every later command fails on `cd` and reads like a broken agent rather than
+a mis-set path.
 
 ### Capabilities stands in for a status endpoint
 
 IdeGYM has no per-server status endpoint. `list_capabilities` is the cheapest call that validates the
 server's database record *and* reaches the pod, which is exactly the liveness question `status()`
-asks. Its answers map cleanly: 404 (unknown client/server) and 410 (terminal state) mean the sandbox
-is gone; anything else that fails leaves the status `unknown`.
+asks. Its answers map cleanly: 404 (unknown client/server) and 410 (terminal state) mean gone;
+anything else that fails leaves the status `unknown`.
 
 ### HTTP status is recovered by parsing exception text
 
 The SDK collapses every HTTP failure into a plain `RuntimeError` whose message embeds the status and
 body. Telling "the sandbox is gone" from "the control plane is busy" from "the command timed out"
-requires that status, so the parsing lives in `errors.py` — one module, both message shapes, covered
-by tests — rather than being spread across the provider. If the SDK ever raises typed errors, that is
-the only place to change.
+needs that status, so the parsing lives in `errors.py` — one module, both message shapes, covered by
+tests — rather than spread across the provider. If the SDK ever raises typed errors, that is the only
+place to change.
 
 ### Transport failures are classified by httpx's hierarchy, not Python's
 
@@ -188,17 +190,17 @@ problem, not a slow command.
 `_start_server` tracks a deadline across retries and hands each attempt only the remaining budget,
 because the config documents `ready_timeout_s` as bounding the whole call. Per-attempt budgets would
 let a *late* retryable failure — a 503 after 1100s of a 1200s wait — start a fresh full-length
-attempt, up to 80 minutes on the shipped default. A bare `TimeoutError` is additionally never
-retried: the SDK raises it only after spending the budget it was given.
+attempt, up to 80 minutes on the shipped default. A bare `TimeoutError` is additionally never retried:
+the SDK raises it only after spending the budget it was given.
 
 ### Concurrency is bounded by the HTTP pool, not by serializing operations
 
 An earlier draft held a semaphore for the duration of each session operation. That bounds *operations*
 rather than requests, and an IdeGYM create polls for as long as the readiness timeout — so with the
-shipped 32-slot pool and `mini_swe_agent_2`'s concurrency of 64, provisioning would have blocked the
-exec calls of sandboxes that were already running, and teardown behind provisioning. The limit now
-lives where it belongs, on `connection.max_connections`, which both transports honor (the aiohttp
-bridge maps it onto the connector's `limit`).
+shipped pool and `mini_swe_agent_2`'s concurrency, provisioning would have blocked the exec calls of
+sandboxes already running, and teardown behind provisioning. The limit lives where it belongs, on
+`connection.max_connections`, which both transports honor (the aiohttp bridge maps it onto the
+connector's `limit`).
 
 ### Failure paths get the same fidelity as success paths
 
@@ -207,10 +209,13 @@ test:
 
 - `stop_server` reports a failed delete by *returning* an `ErrorResponse` rather than raising, so the
   return value is checked; an unchecked one records a live pod as stopped.
-- A server is dropped from the session's bookkeeping only once it is really stopped. Dropping it on
-  failure would make the caller's own retry look like "already stopped" and leave the pod running.
+- A server leaves the session's bookkeeping only once it is really stopped. Dropping it on failure
+  would make the caller's own retry look like "already stopped" and leave the pod running.
 - The generated script opens with `:` so the brace group is never empty: a blank or comment-only
   command would otherwise fail with a bash syntax error attributed to the caller.
+
+An `exec` failure the classifier does not recognize is logged with its traceback before being turned
+into a return value, because that return value is the only other place it would ever appear.
 
 ### Failures are classified on structure, not on substring
 
@@ -223,13 +228,12 @@ output like `curl failed: status=404` mark a healthy sandbox as gone, or `pytest
 
 The provider sends `<prefix>-<metadata hints>` and stops there. IdeGYM appends its own autoincrement
 id to derive `generated_name`, and that is the name Kubernetes sees and the only one the database
-keeps unique (`server_name` is an unconstrained column). Adding a random suffix on top would buy no
-uniqueness, cost 9 characters of the 63-character budget that instance ids need, and make pod names
-harder to read.
+keeps unique (`server_name` is an unconstrained column). A random suffix on top would buy no
+uniqueness, cost 9 of the 63 name characters that instance ids need, and make pod names harder to read.
 
-It would also mislead: a suffix looks like it prevents unintended reuse, but reuse is skipped
-entirely unless `reuse_strategy` is `RESTART`/`RESET`, and even then only servers left `FINISHED`
-qualify — while this provider always *stops* the servers it creates, which marks them `STOPPED`.
+It would also mislead: a suffix looks like it prevents unintended reuse, but reuse is skipped entirely
+unless `reuse_strategy` is `RESTART`/`RESET`, and even then only servers left `FINISHED` qualify —
+while this provider always *stops* the ones it creates, which marks them `STOPPED`.
 
 The same reasoning applies to retries, which keep the name rather than re-rolling it: an attempt whose
 response was lost may have landed anyway, but that orphan gets its own `generated_name` and is reaped
@@ -251,29 +255,4 @@ launch, and a name that changes per launch defeats both quota matching and dashb
 | --- | --- |
 | `SupportsSandboxEndpoint` (`endpoint()`) | The orchestrator forwards API requests through an async-operation indirection; it does not route raw TCP to arbitrary container ports, so there is no honest URL to hand back. |
 | `SupportsSandboxPty` | IdeGYM has no terminal API. |
-| `ConnectableProvider` (`serialize()` / `connect()`) | A server is only reachable through the registered client that owns it. Attaching from another process would mean a client with no registration and no heartbeat, and tearing one down cleanly is not expressible through the SDK's public surface without also stopping the client — which would kill the original process's sandboxes. Sharing a sandbox across processes is possible by fronting this provider with a sandbox server. |
-
-## Verified and not verified
-
-Verified locally:
-
-- The generated bash scripts — quoting, `cd`, `export`, base64 chunking at unaligned boundaries,
-  empty files, filenames with dashes and quotes — by executing them with real `bash`.
-- Every session call shape binds against the published `idegym-client` 0.11.1 signatures, and the
-  plain-dict start-server request validates into the SDK's own pydantic models.
-- The documented launch command resolves end-to-end:
-  `gym env resolve --config <mini_swe_agent_2> --config <idegym> --config <vllm_model>`.
-- The full `-m sandbox` suite and the core unit tests, with no new failures.
-  (`test_enroot_provider.py::test_create_start_timeout_cleans_up` fails on a clean checkout too.)
-
-**Not** verified: nothing has been run against a real IdeGYM orchestrator or Kubernetes cluster. The
-end-to-end acceptance criterion — `mini_swe_agent_2` completing a small evaluation on IdeGYM — needs a
-reachable orchestrator and IdeGYM-wrapped benchmark images, and is the next step rather than a
-finished claim.
-
-## One fix outside the provider
-
-`mini_swe_agent_2.yaml` declared `datasets: []` twice, which the strict YAML loader rejects, so
-`gym env resolve` and `gym env start` failed for *every* sandbox provider — the launch command
-documented across all the provider configs. The duplicate is removed here because the provider's own
-quick-start depends on it.
+| `ConnectableProvider` (`serialize()` / `connect()`) | A server is reachable only through the registered client that owns it. Attaching from another process would mean a client with no registration and no heartbeat, and tearing one down cleanly is not expressible through the SDK's public surface without also stopping the client — which would kill the original process's sandboxes. Sharing a sandbox across processes is possible by fronting this provider with a sandbox server. |
