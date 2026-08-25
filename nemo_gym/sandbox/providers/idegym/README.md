@@ -12,9 +12,9 @@ example `mini_swe_agent_2`) can use it by pointing at this provider's config.
 
 - A reachable IdeGYM orchestrator, and Basic auth credentials for it.
 - The client SDK: `uv pip install 'nemo-gym[idegym]'`.
-- **An IdeGYM server image.** The easy one to miss: the pod runs the IdeGYM server, and that server
-  is what exposes the API the orchestrator forwards commands to. A plain benchmark image such as
-  `swebench/sweb.eval.x86_64.*` does not boot one and never passes readiness. See [Images](#images).
+- **An IdeGYM server image.** The pod runs the IdeGYM server, and that server exposes the API this
+  provider talks to. A plain benchmark image such as `swebench/sweb.eval.x86_64.*` has none, so it
+  never becomes ready. See [Images](#images).
 - `base64`, `wc`, `tail` and `head` in the image. File transfer uses them; coreutils covers it.
 
 ## Quick start
@@ -102,28 +102,23 @@ rest — validated before a pod is allocated. The
 | `env` | Exported per command. IdeGYM can only put ConfigMap/Secret env on the pod, via `provider_options.env_from`. |
 | `resources` | Kubernetes **limits**; `provider_options.resource_requests` supplies the requests. Quota accounting reads the limits, so `spec.resources` is what counts against your rule. |
 | `metadata` | Not labels — IdeGYM has no per-server label API. `create.server_name_metadata_keys` folds selected keys into the pod name; the rest is diagnostics. |
-| `ttl_s`, `ports`, `resources.gpu` | Unsupported; each warns once. `entrypoint` is rejected outright, since the entrypoint starts the IdeGYM server. |
+| `ttl_s`, `ports`, `resources.gpu` | Unsupported; each warns once. `entrypoint` fails `create()`, since the entrypoint starts the IdeGYM server. |
 
 ## How it works
 
 ```mermaid
-flowchart TB
-    API["AsyncSandbox / Sandbox"] --> P["IdeGymProvider"]
-    P --> S["IdeGymSession<br/>the only module importing the SDK"]
-    S --> O["IdeGYM orchestrator"]
-    O -->|forwards| Pod["Server pod<br/>IdeGYM server + your project"]
+flowchart LR
+    API["AsyncSandbox<br/>Sandbox"] --> P["IdeGymProvider"]
+    P --> S["IdeGymSession<br/>registered client · private event loop<br/>the only SDK import"]
+    S -->|HTTP| O["Orchestrator"]
+    O -->|"forwards as JSON text"| Pod["Server pod<br/>IdeGYM server + your project"]
+
+    P -.-> SP["spec.py — spec → start-server request"]
+    P -.-> NA["naming.py — RFC-1035 server and client names"]
+    P -.-> SH["shell.py — cwd/env/user → one bash script"]
+    P -.-> TR["transfer.py — files → base64 chunks"]
+    P -.-> ER["errors.py — SDK error → gone / busy / timed out"]
 ```
-
-`IdeGymProvider` is the composition point; the pieces around it each turn one neutral concept into
-IdeGYM's shape:
-
-| Module | Turns |
-| --- | --- |
-| `spec.py` | a `SandboxSpec` into a start-server request |
-| `naming.py` | a prefix, metadata and attribution into RFC-1035 server and client names |
-| `shell.py` | `cwd` / `env` / `user` into one bash script |
-| `transfer.py` | files into base64 over the bash tool |
-| `errors.py` | an SDK exception into "gone" / "busy" / "timed out" |
 
 **One registered client per process.** IdeGYM's unit of ownership is a *client*: a heartbeating
 entity that owns N server pods, carries the resource quota keyed on its name, and terminates all of

@@ -1,9 +1,5 @@
 # IdeGYM Sandbox Provider — Design Decisions
 
-Why this provider is built the way it is: the choices with real alternatives, and the constraints
-that forced them. It exists so the next person to touch the code does not have to re-derive them
-from the IdeGYM and NeMo Gym sources.
-
 ## The shape of the integration
 
 ```mermaid
@@ -16,8 +12,20 @@ flowchart LR
     O -.->|"HTTP forwarded<br/>as JSON text"| Pod
 ```
 
-Two properties of that chain drive most of what follows: the *client* is the unit of ownership and
-quota, and the orchestrator relays requests as JSON text rather than proxying a socket.
+A NeMo Gym sandbox is one *server pod*, but nothing addresses that pod directly. Everything goes
+through the orchestrator, and the orchestrator will only talk to a pod on behalf of a registered
+*client*.
+
+Two properties of that chain shape most of what follows.
+
+The **client is the unit of ownership**: it holds the heartbeat, it carries the resource quota, and
+it owns every server it started — so its lifetime, not any single sandbox's, decides when pods go
+away. That is why the session is shared and counted rather than created per sandbox.
+
+The **orchestrator relays rather than proxies**: a request is stored and replayed as JSON text, not
+carried over a socket held open to the pod. That rules out streaming binary, raw TCP to a container
+port, and anything resembling an interactive terminal — hence base64 file transfer and the
+capabilities gaps at the end of this document.
 
 ## Choices with real alternatives
 
@@ -29,14 +37,14 @@ simply be a SWE-bench tag.
 
 | Option | Decision |
 | --- | --- |
-| **Pass pre-built IdeGYM images through; document `image_rewrites` for mapping benchmark images onto them** | **Chosen** |
-| Integrate IdeGYM's image builder so the provider builds and pushes a wrapped image on demand | Rejected for a first milestone: needs a registry, cluster build permissions, and a build-cache story |
-| Validate the image against an allow-prefix and refuse anything else | Rejected as too rigid — registry layouts vary |
+| **Pass pre-built IdeGYM images through, and document `image_rewrites` for mapping benchmark images onto them** | **Chosen** |
+| Build and push a wrapped image on demand, using IdeGYM's image builder | Deferred: needs a registry, cluster build permissions, and a build-cache story |
+| Accept any image that serves the same health endpoint, without an IdeGYM server behind it | Not yet workable. The image change is the small part: a server counts as alive only while requests to it keep completing, so an idle sandbox would be reaped mid-run unless the deployment's inactivity timeout is raised to roughly an hour. It would also lose the bash tool the whole provider is built on |
 
-`spec.image` is therefore normalized (`docker://` stripped) and validated against IdeGYM's OCI
-reference pattern, and nothing more. A non-IdeGYM image fails inside the orchestrator instead: its
-container never answers the health endpoint the pod's readiness probe polls, so `start_server` times
-out rather than handing back a server that cannot run commands.
+`spec.image` is therefore normalized (`docker://` stripped) and checked against IdeGYM's OCI
+reference pattern, and nothing more. The provider does not try to detect a wrong image: one without
+an IdeGYM server never reports ready, so `start_server` fails instead of handing back a sandbox that
+cannot run commands.
 
 ### What `close()` does
 
@@ -47,7 +55,7 @@ IdeGYM distinguishes `stop_server` (delete the pod and its Kubernetes resources)
 | --- | --- |
 | `stop_server` only | **Chosen** |
 | `stop` by default, with `finish` + reuse behind a config knob | Not implemented in this milestone |
-| `finish` by default | Rejected: keeps pods warm but leaks them whenever a run dies |
+| `finish` by default | Not chosen: keeps pods warm, but leaks them whenever a run dies |
 
 So `close()` always deletes. Reuse stays reachable — pin `provider_options.server_name` and set
 `reuse_strategy` to opt into IdeGYM's own matching — but the provider manages no warm pool, and
@@ -59,7 +67,7 @@ becomes the bottleneck on long benchmarks, a `finish`-based warm pool is the fol
 | Option | Decision |
 | --- | --- |
 | Opt-in extra `nemo-gym[idegym]`, imported lazily, with an actionable `ModuleNotFoundError` | **Chosen** |
-| Core dependency alongside `opensandbox` / `daytona` / `boto3` | Rejected: IdeGYM is a third-party control plane, and its SDK should not be in installs that will never talk to one |
+| Core dependency alongside `opensandbox` / `daytona` / `boto3` | Not chosen: IdeGYM is a third-party control plane, and its SDK should not sit in installs that will never talk to one |
 
 This follows the `nemo-gym[openshell]` precedent. CI installs the extra alongside the other sandbox
 extras so the SDK-gated tests run rather than skip.
@@ -72,18 +80,15 @@ the resolution untouched, at the cost of a second resolution to maintain.
 
 ## Implementation decisions
 
-These follow from reading the two codebases. Each is recorded because a reviewer might reasonably
-expect the alternative.
-
 ### One registered client per process, not per sandbox
 
 A *client* is a registered, heartbeating entity that owns N server pods, carries the resource quota
 (matched by regex against its **name**), and terminates all of its servers when it stops.
 
-Registering one per sandbox looked simpler but does not survive a benchmark fan-out: the orchestrator
-takes `LOCK TABLE clients IN EXCLUSIVE MODE` per registration, heartbeats multiply by the concurrency,
-and one job's pods scatter across many owners in the dashboard. A session is therefore shared by every
-sandbox with an identical `connection` config, and reference-counted across providers.
+Registering one per sandbox looked simpler but does not survive a benchmark fan-out: registrations
+are serialized on the orchestrator, heartbeats multiply by the concurrency, and one job's pods scatter
+across many owners in the dashboard. A session is therefore shared by every sandbox with an identical
+`connection` config, and reference-counted across providers.
 
 The refcount is correctness, not efficiency: unregistering a client **terminates all of its servers**,
 so releasing early would kill live sandboxes belonging to other providers.
@@ -195,12 +200,12 @@ the SDK raises it only after spending the budget it was given.
 
 ### Concurrency is bounded by the HTTP pool, not by serializing operations
 
-An earlier draft held a semaphore for the duration of each session operation. That bounds *operations*
-rather than requests, and an IdeGYM create polls for as long as the readiness timeout — so with the
-shipped pool and `mini_swe_agent_2`'s concurrency, provisioning would have blocked the exec calls of
-sandboxes already running, and teardown behind provisioning. The limit lives where it belongs, on
-`connection.max_connections`, which both transports honor (the aiohttp bridge maps it onto the
-connector's `limit`).
+The obvious way to bound load is a semaphore around each session operation, and it is the wrong one
+here. A create polls for as long as the readiness timeout, so holding a slot for the whole operation
+would let provisioning block the exec calls of sandboxes already running, and queue teardown behind
+provisioning. What actually needs bounding is in-flight *requests*, which is what
+`connection.max_connections` does — both transports honor it, and the aiohttp bridge maps it onto the
+connector's `limit`.
 
 ### Failure paths get the same fidelity as success paths
 

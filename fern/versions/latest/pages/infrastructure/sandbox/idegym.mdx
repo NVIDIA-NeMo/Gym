@@ -26,7 +26,7 @@ export IDEGYM_AUTH_PASSWORD=...
 ```
 
 <Warning>
-`spec.image` must be an **IdeGYM server image**. The pod runs the IdeGYM server, and that server is what exposes the API the orchestrator forwards commands to, so a plain benchmark image such as `swebench/sweb.eval.x86_64.*` never boots one and never passes readiness. Build IdeGYM images with IdeGYM's image builder and map upstream tags onto them with `image_rewrites` — see [Images](#images).
+`spec.image` must be an **IdeGYM server image**. The pod runs the IdeGYM server, and that server exposes the API this provider talks to. A plain benchmark image such as `swebench/sweb.eval.x86_64.*` has none, so it never becomes ready and `create()` fails. See [Images](#images).
 </Warning>
 
 ```python
@@ -152,7 +152,7 @@ mini_swe_agent_2:
 | `metadata` | Not Kubernetes labels — IdeGYM has no per-server label API. `create.server_name_metadata_keys` folds selected keys (default `instance_id`) into the pod name. |
 | `ttl_s` | Not enforced; warns. IdeGYM servers live until stopped, and its watcher reaps servers whose client stops heartbeating. |
 | `ports` | Ignored; warns. An IdeGYM pod exposes only its own API port. |
-| `entrypoint` | Rejected. The container entrypoint starts the IdeGYM server. |
+| `entrypoint` | Fails `create()`. The container entrypoint starts the IdeGYM server. |
 
 ## Resource Mapping
 
@@ -205,7 +205,7 @@ This is fine for the config files, patches, and logs a benchmark moves around, b
 
 ## Images
 
-Build IdeGYM server images with IdeGYM's image builder, publish them where your cluster can pull them, then map upstream benchmark tags onto them:
+Every sandbox image needs an IdeGYM server inside it — that server provides the bash tool this provider runs commands through, and the health endpoint the pod's readiness check polls. Build such images with IdeGYM's image builder, publish them where your cluster can pull them, then map upstream benchmark tags onto them:
 
 ```yaml
 sandbox_spec:
