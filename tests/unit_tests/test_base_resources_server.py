@@ -18,6 +18,7 @@ from unittest.mock import MagicMock
 from nemo_gym.base_resources_server import (
     BaseMultiRewardVerifyResponse,
     BaseResourcesServerConfig,
+    BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
 )
@@ -33,6 +34,20 @@ def _resources_server() -> SimpleResourcesServer:
             pass
 
     return TestSimpleResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+class TestBaseVerifyResponse:
+    def test_failure_kind_is_optional_and_accepts_namespaced_extensions(self) -> None:
+        response = BaseVerifyResponse(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="hi"),
+            response=NeMoGymResponse.model_construct(id="resp-1", output=[]),
+            reward=0.0,
+        )
+        assert response.failure_kind is None
+        assert response.model_dump()["failure_kind"] is None
+
+        namespaced = response.model_copy(update={"failure_kind": "my_server:quota_exhausted"})
+        assert namespaced.failure_kind == "my_server:quota_exhausted"
 
 
 class TestBaseMultiRewardVerifyResponse:
