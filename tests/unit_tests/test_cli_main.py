@@ -26,6 +26,7 @@ from pytest import MonkeyPatch
 import nemo_gym.cli.main as cli_main
 import nemo_gym.global_config as gc
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, WORKING_DIR
+from nemo_gym.cli.eval import _progress_artifact_display
 from nemo_gym.cli.main import main
 from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
 
@@ -60,6 +61,16 @@ def _split_overrides(overrides: list[str]) -> tuple[set[str], set[str]]:
     paths = set(config_tokens[0][len(prefix) : -1].split(",")) if config_tokens else set()
     others = {o for o in overrides if o not in config_tokens}
     return paths, others
+
+
+def test_progress_artifact_display_assigns_custom_driver_ownership(tmp_path: Path) -> None:
+    progress_fpath = tmp_path / "rollouts_progress"
+
+    assert _progress_artifact_display(progress_fpath, None) == str(progress_fpath)
+    assert (
+        _progress_artifact_display(progress_fpath, "package.driver:run")
+        == "managed by the custom rollout collection driver"
+    )
 
 
 # `gym <command>` -> the legacy ng_<command> function it dispatches to, for the config-accepting commands.

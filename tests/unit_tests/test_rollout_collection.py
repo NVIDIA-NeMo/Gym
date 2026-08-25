@@ -2140,6 +2140,41 @@ class TestRolloutCollection:
         assert progress_values[-1] == 2
         assert int((tmp_path / "rollouts_progress").read_text()) == 2
 
+    async def test_progress_forces_latest_count_when_collection_raises(
+        self, tmp_path: Path, empty_global_config: MagicMock
+    ) -> None:
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_text(
+            "\n".join(
+                json.dumps(
+                    {
+                        "responses_create_params": {"input": []},
+                        AGENT_REF_KEY_NAME: {"name": "agent"},
+                    }
+                )
+                for _ in range(2)
+            )
+            + "\n"
+        )
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
+            disable_aggregation=True,
+        )
+
+        class Helper(RolloutCollectionHelper):
+            def run_examples(self, examples, *args, **kwargs):
+                completed = Future()
+                completed.set_result((examples[0], {"response": {"usage": {}}}))
+                failed = Future()
+                failed.set_exception(RuntimeError("collection failed"))
+                return [completed, failed]
+
+        with pytest.raises(RuntimeError, match="collection failed"):
+            await Helper().run_from_config(config)
+
+        assert int((tmp_path / "rollouts_progress").read_text()) == 1
+
     async def test_progress_write_failure_does_not_fail_collection(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture, empty_global_config: MagicMock
     ) -> None:

@@ -908,7 +908,7 @@ COMMANDS = {
             _value_flag(
                 "progress-file",
                 "progress_file_fpath",
-                "Machine-readable rollout progress file (default: <output stem>_progress).",
+                "Machine-readable completed-attempt counter (default: <output stem>_progress).",
             ),
             _value_flag("limit", "limit", "Maximum number of tasks to run."),
             _value_flag("num-repeats", "num_repeats", "Number of rollouts per task."),
