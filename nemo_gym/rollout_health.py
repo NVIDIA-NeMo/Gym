@@ -268,15 +268,17 @@ def _task_findings(
             else:
                 coverage["task_consistently_unhealthy"]["unobserved"] += 1
 
-        if "task_no_healthy_model_calls" in ignored_checks:
-            coverage["task_no_healthy_model_calls"]["ignored"] += 1
+        if "task_no_successful_model_calls" in ignored_checks:
+            coverage["task_no_successful_model_calls"]["ignored"] += 1
         else:
             if repeats and all(repeat.policy_calls_observed for repeat in repeats):
-                coverage["task_no_healthy_model_calls"]["evaluated"] += 1
+                coverage["task_no_successful_model_calls"]["evaluated"] += 1
                 if not any(repeat.successful_model_calls for repeat in repeats):
-                    findings[task_index].append(_finding("task_no_healthy_model_calls", subject, repeats=len(repeats)))
+                    findings[task_index].append(
+                        _finding("task_no_successful_model_calls", subject, repeats=len(repeats))
+                    )
             else:
-                coverage["task_no_healthy_model_calls"]["unobserved"] += 1
+                coverage["task_no_successful_model_calls"]["unobserved"] += 1
     return findings, coverage
 
 

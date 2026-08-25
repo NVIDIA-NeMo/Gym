@@ -88,7 +88,7 @@ CHECK_REGISTRY: tuple[CheckSpec, ...] = (
         reads=frozenset({CheckInput.REPEAT_VERDICTS}),
     ),
     CheckSpec(
-        id="task_no_healthy_model_calls",
+        id="task_no_successful_model_calls",
         evaluation_scope=CheckScope.TASK,
         subject=CheckSubject.TASK,
         reads=frozenset({CheckInput.REPEAT_DIGESTS}),

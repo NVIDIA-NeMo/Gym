@@ -143,7 +143,7 @@ This makes `healthy` a strong claim that every enabled rollout check ran and pas
 
 **Alternative considered.** Require every repeat for the task to be observed before evaluating the task check.
 
-### 9. Inputs to `task_no_healthy_model_calls`
+### 9. Inputs to `task_no_successful_model_calls`
 
 **RFC gap.** The RFC does not say whether this task-level check may draw a conclusion from only the repeats that have capture evidence.
 
@@ -183,7 +183,7 @@ This makes `healthy` a strong claim that every enabled rollout check ran and pas
 
 **Chosen behavior.** A sidecar whose filename matches the rollout is preferred. If none matches, a non-empty embedded model-call projection counts as observed capture. An embedded but empty call list does not prove that the rollout used Gym's capture path, so capture-dependent checks remain unobserved.
 
-**Alternatives considered.** Ignore embedded evidence, or treat an empty embedded list as proof of a successfully captured rollout with zero calls. The latter produced false `task_no_healthy_model_calls` findings for collection drivers that bypass Gym's model server.
+**Alternatives considered.** Ignore embedded evidence, or treat an empty embedded list as proof of a successfully captured rollout with zero calls. The latter produced false `task_no_successful_model_calls` findings for collection drivers that bypass Gym's model server.
 
 ### 14. Recording why a check is unobserved
 

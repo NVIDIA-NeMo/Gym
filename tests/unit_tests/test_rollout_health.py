@@ -153,7 +153,7 @@ def test_all_registered_semantic_checks_fire_on_synthetic_artifacts(tmp_path: Pa
     )
     assert result.summary["run"]["issues"]["record_unreadable"] == 0
     assert result.summary["tasks"]["0"]["flags"] == ["task_consistently_unhealthy"]
-    assert "task_no_healthy_model_calls" in result.summary["tasks"]["8"]["flags"]
+    assert "task_no_successful_model_calls" in result.summary["tasks"]["8"]["flags"]
     assert result.summary_path == tmp_path / "quality_summary.json"
     assert result.verdicts_path == tmp_path / "rollout_verdicts.jsonl"
 
