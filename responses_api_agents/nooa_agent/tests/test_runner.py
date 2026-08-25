@@ -22,7 +22,11 @@ import pytest
 from nooa import Agent
 from pydantic import BaseModel, ConfigDict
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.openai_utils import (
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseFunctionToolCallForTraining,
+)
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig
 from responses_api_agents.nooa_agent.runner import EmbeddedNOOARunner, NOOARunRequest
 
@@ -68,9 +72,13 @@ class FakeContent:
 
 
 class FakeResponse:
+    ok = True
     status = 200
     content = FakeContent()
     cookies = SimpleCookie()
+
+    async def read(self) -> bytes:
+        return await self.content.read()
 
 
 def make_runner() -> tuple[EmbeddedNOOARunner, MagicMock]:
@@ -170,3 +178,106 @@ async def test_constructs_a_fresh_agent_for_every_rollout() -> None:
     assert FakeAgent.instances == 2
     assert first.agent is not second.agent
     assert first.resource_cookies is not second.resource_cookies
+
+
+@pytest.mark.asyncio
+async def test_real_nooa_codeact_rollout_calls_generated_gym_tool() -> None:
+    execute_output = NeMoGymResponseFunctionToolCallForTraining(
+        id="fc-1",
+        call_id="code-1",
+        name="execute_python",
+        arguments=json.dumps(
+            {"code": 'weather = await self.gym_tools.get_weather(city="Paris")\nprint(weather["weather"])'}
+        ),
+        prompt_token_ids=[1, 2],
+        generation_token_ids=[3, 4],
+        generation_log_probs=[-0.1, -0.2],
+    )
+    return_output = NeMoGymResponseFunctionToolCallForTraining(
+        id="fc-2",
+        call_id="return-1",
+        name="return_result",
+        arguments=json.dumps({"result": "cold"}),
+        prompt_token_ids=[1, 2, 3, 4],
+        generation_token_ids=[5],
+        generation_log_probs=[-0.05],
+    )
+    first_response = NeMoGymResponse(
+        id="resp-1",
+        created_at=0,
+        model="policy",
+        object="response",
+        output=[execute_output],
+        parallel_tool_calls=False,
+        tool_choice="auto",
+        tools=[],
+    )
+    second_response = NeMoGymResponse(
+        id="resp-2",
+        created_at=0,
+        model="policy",
+        object="response",
+        output=[return_output],
+        parallel_tool_calls=False,
+        tool_choice="auto",
+        tools=[],
+    )
+
+    class RoutedClient:
+        def __init__(self) -> None:
+            self.model_requests: list[Any] = []
+
+        async def post(self, *, server_name: str, **kwargs: Any) -> Any:
+            if server_name == "policy":
+                self.model_requests.append(kwargs["json"])
+                selected = first_response if len(self.model_requests) == 1 else second_response
+                payload = selected.model_dump(mode="json")
+
+                class ModelContent:
+                    async def read(self) -> bytes:
+                        return json.dumps(payload).encode()
+
+                model_http = FakeResponse()
+                model_http.content = ModelContent()
+                return model_http
+            return FakeResponse()
+
+    invocation = NOOAInvocationConfig.model_validate(
+        {
+            "agent_class": "responses_api_agents.nooa_agent.example_agent:WeatherAgent",
+            "entrypoint": "answer",
+            "arguments": {
+                "question": {
+                    "source": "responses_create_params.input",
+                    "transform": "latest_user_text",
+                }
+            },
+        }
+    )
+    client = RoutedClient()
+    runner = EmbeddedNOOARunner(
+        invocation=invocation,
+        server_client=client,
+        model_server_name="policy",
+        resources_server_name="weather",
+        max_steps=2,
+    )
+
+    result = await runner.run(
+        NOOARunRequest(
+            row=row("Paris"),
+            rollout_id="real-rollout",
+            task_id="real-task",
+            model_url_path="/ng-rollout/real-rollout/v1/responses",
+        )
+    )
+
+    assert result.return_value == "cold"
+    assert [response.id for response in result.model_responses] == ["resp-1", "resp-2"]
+    assert result.model_responses[0].output[0].generation_token_ids == [3, 4]
+    prior_call = next(
+        item for item in client.model_requests[1].input if item.type == "function_call" and item.call_id == "code-1"
+    )
+    assert prior_call.generation_token_ids == [3, 4]
+    assert result.tool_executions[0].name == "get_weather"
+    assert [event.kind for event in result.timeline] == ["model", "tool", "model"]

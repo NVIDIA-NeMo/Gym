@@ -16,6 +16,7 @@
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
+from nemo_gym.base_responses_api_model import ModelCallRecord
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
@@ -23,7 +24,12 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.rollout_observability import AgentInvocation, ToolCallObservation
+from nemo_gym.responses_converter import ResponsesConverter
+from nemo_gym.rollout_observability import (
+    AgentInvocation,
+    ToolCallObservation,
+    join_model_call_observations,
+)
 from responses_api_agents.nooa_agent.gym_tools import GymToolExecution
 from responses_api_agents.nooa_agent.observability import TraceEvent, project_nooa_result
 
@@ -129,6 +135,26 @@ def test_projects_model_and_semantic_resource_evidence_in_execution_order() -> N
     assert tool.duration_ms == 100
     assert bundle.gaps == []
 
+    joined = join_model_call_observations(
+        bundle,
+        [
+            ModelCallRecord(
+                call_index=index,
+                model_call_id=f"captured-{index}",
+                response_id=response_id,
+                model_ref=ModelServerRef(type="responses_api_models", name="policy_model"),
+            )
+            for index, response_id in enumerate(("resp-1", "resp-2"))
+        ],
+    )
+    joined_root = next(
+        record
+        for record in joined.records
+        if isinstance(record, AgentInvocation) and record.invocation_id == "root-call"
+    )
+    assert [reference.model_call_id for reference in joined_root.model_calls] == ["captured-0", "captured-1"]
+    assert joined.gaps == []
+
 
 def test_marks_return_value_fallback_as_non_trainable() -> None:
     params = NeMoGymResponseCreateParamsNonStreaming(input="Hello")
@@ -145,3 +171,27 @@ def test_marks_return_value_fallback_as_non_trainable() -> None:
 
     assert projected.output[0].content[0].text == '{"answer": "fallback"}'
     assert [gap.code for gap in bundle.gaps] == ["non_trainable_fallback_output"]
+
+
+def test_projected_model_output_is_consumable_by_training_converter() -> None:
+    authored = response("resp-training", "train me")
+    params = NeMoGymResponseCreateParamsNonStreaming(input="Question")
+    projected, _ = project_nooa_result(
+        responses_create_params=params,
+        return_value="ignored",
+        model_responses=[authored],
+        tool_executions=[],
+        timeline=[TraceEvent(kind="model", value=authored, invocation_id="root")],
+        nooa_events=[],
+        model_ref=ModelServerRef(type="responses_api_models", name="policy_model"),
+    )
+
+    converted = ResponsesConverter(return_token_id_information=True).responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming.model_validate(
+            {"input": [item.model_dump(mode="json") for item in projected.output]}
+        )
+    )
+
+    assert converted.messages[0]["prompt_token_ids"] == [1, 2]
+    assert converted.messages[0]["generation_token_ids"] == [3]
+    assert converted.messages[0]["generation_log_probs"] == [-0.1]

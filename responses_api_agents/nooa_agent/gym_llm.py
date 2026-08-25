@@ -128,6 +128,7 @@ class GymResponsesLLM(UnifiedLLM):
         self._cookies = cookies
         self._timeline = timeline
         self._invocation_id = invocation_id or (lambda: "root")
+        self._prior_outputs: list[dict[str, Any]] = []
         self._calls = 0
 
     @property
@@ -155,6 +156,7 @@ class GymResponsesLLM(UnifiedLLM):
         self._calls += 1
 
         input_items, instructions = _responses_input(messages)
+        self._restore_prior_output_metadata(input_items)
         request: dict[str, Any] = {
             "input": input_items,
             "instructions": instructions,
@@ -195,6 +197,7 @@ class GymResponsesLLM(UnifiedLLM):
             self._timeline.append(TraceEvent(kind="model", value=response, invocation_id=self._invocation_id()))
 
         dumped_output = [item.model_dump(mode="json", exclude_none=True) for item in response.output]
+        self._prior_outputs.extend(dumped_output)
         function_calls = [item for item in response.output if isinstance(item, NeMoGymResponseFunctionToolCall)]
         usage = response.usage.model_dump(mode="json") if response.usage is not None else None
         if function_calls:
@@ -228,3 +231,36 @@ class GymResponsesLLM(UnifiedLLM):
             reasoning=json.dumps(reasoning) if reasoning else None,
             usage=usage,
         )
+
+    def _restore_prior_output_metadata(self, input_items: list[dict[str, Any]]) -> None:
+        """Replace NOOA's normalized history items with the exact prior Gym outputs."""
+
+        for raw in self._prior_outputs:
+            item_type = raw.get("type")
+            identity = raw.get("call_id") or raw.get("id")
+            replacement_index = next(
+                (
+                    index
+                    for index, item in enumerate(input_items)
+                    if item.get("type") == item_type
+                    and identity is not None
+                    and (item.get("call_id") or item.get("id")) == identity
+                ),
+                None,
+            )
+            if replacement_index is None and item_type == "message":
+                raw_text = "\n".join(
+                    part.get("text", "")
+                    for part in raw.get("content", [])
+                    if isinstance(part, dict) and part.get("type") == "output_text"
+                )
+                replacement_index = next(
+                    (
+                        index
+                        for index, item in enumerate(input_items)
+                        if item.get("role") == "assistant" and item.get("content") == raw_text
+                    ),
+                    None,
+                )
+            if replacement_index is not None:
+                input_items[replacement_index] = raw
