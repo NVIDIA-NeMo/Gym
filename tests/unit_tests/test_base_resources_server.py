@@ -18,6 +18,7 @@ from unittest.mock import MagicMock
 from nemo_gym.base_resources_server import (
     BaseMultiRewardVerifyResponse,
     BaseResourcesServerConfig,
+    BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
 )
@@ -33,6 +34,21 @@ def _resources_server() -> SimpleResourcesServer:
             pass
 
     return TestSimpleResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+class TestBaseVerifyResponse:
+    def test_failure_reason_defaults_none_and_round_trips(self) -> None:
+        response = BaseVerifyResponse(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="hi"),
+            response=NeMoGymResponse.model_construct(id="resp-1", output=[]),
+            reward=0.0,
+        )
+        assert response.failure_reason is None
+        assert response.model_dump()["failure_reason"] is None
+
+        rescued = response.model_copy(update={"failure_reason": "judge response unparseable after 3 attempts"})
+        assert rescued.model_dump()["failure_reason"] == "judge response unparseable after 3 attempts"
+        assert rescued.reward == 0.0
 
 
 class TestBaseMultiRewardVerifyResponse:
