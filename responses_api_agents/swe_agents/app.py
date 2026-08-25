@@ -41,6 +41,7 @@ from typing import Any, Dict, List, Literal, NamedTuple, Optional, Tuple, Union
 
 import ray
 import tomlkit
+
 from gprof2dot import main as gprof2dot_main
 from openai.types.responses.function_tool import FunctionTool
 from pydantic import BaseModel, ConfigDict, Field
@@ -70,6 +71,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.profiling import Profiler
 from nemo_gym.server_utils import get_first_server_config_dict
+from responses_api_agents.cline_agent.parser import parse_cline_events
 from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
 
 
@@ -81,7 +83,10 @@ from responses_api_models.vllm_model.app import VLLMConverter, split_responses_i
 class AgentPromptOverride(BaseModel):
     user_prompt_template: Optional[str] = Field(
         default=None,
+
+
         description="Path to the user prompt template file",
+
     )
     system_prompt_template: Optional[str] = Field(
         default=None,
@@ -105,13 +110,11 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
 
     # Agent framework configuration
-    agent_framework: Literal["openhands", "opencode"] = Field(
-        default="openhands",
-        description="Which agent harness drives the SWE-bench rollout. 'openhands' uses the nv-OpenHands "
-        "fork at swe_openhands_setup/. 'opencode' uses the opencode fork at swe_opencode_setup/ via "
-        "its bench/ entry point.",
-    )
     agent_config: Optional[str] = Field(default=None, description="Path to agent configuration file")
+    agent_framework: Literal["openhands", "opencode", "cline"] = Field(
+        default="openhands",
+        description="Which agent harness drives the SWE-bench rollout. Cline runs the headless Cline CLI in the task image.",
+    )
     agent_tools_file: Optional[str] = Field(
         default=None, description="Path to JSON file containing tool definitions in OpenAI format (for SWE-agent)"
     )
@@ -211,6 +214,7 @@ class SWEBenchWrapperServerConfig(BaseModel):
     opencode_setup_dir: Optional[Path] = None
 
 
+    cline_setup_dir: Optional[Path] = None
 class ExecuteContainerCommandArgs(BaseModel):
     command: str
     expected_file_pattern: str
@@ -2259,6 +2263,79 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
 
 ########################################
 # START Ray worker logic
+
+
+def _resolve_agent_workspace_path(problem_info: Dict[str, Any]) -> str:
+    """Return the dataset image workspace path, shared by agent harnesses."""
+    return _resolve_opencode_workspace_path(problem_info)
+
+
+class ClineHarnessProcessor(BaseDatasetHarnessProcessor):
+    """Run the headless Cline CLI in the benchmark image.
+
+    The dependency-light parser is used on the host to materialize Cline's JSONL
+    events into the Responses trajectory after the container exits.
+    """
+
+    def setup(self) -> Path:
+        setup_dir = self.parent_dir / "swe_cline_setup"
+        deps_dir = setup_dir / "deps"
+        marker = deps_dir / "bin" / "cline"
+        with file_lock(setup_dir, "Cline"):
+            if marker.exists():
+                return setup_dir
+            setup_dir.mkdir(parents=True, exist_ok=True)
+            script = self.parent_dir.parent / "anyswe_agent" / "setup_scripts" / "cline_agent_deps.sh"
+            command = f"DEPS_DIR={deps_dir} NEMO_GYM_ROOT={Path(__file__).resolve().parents[2]} bash {script}"
+            self._run_setup_command(command)
+        return setup_dir
+
+    def get_run_command(self) -> ExecuteContainerCommandArgs:
+        assert isinstance(self.config, SWEBenchWrapperInstanceConfig)
+        data_point = self.config.problem_info
+        try:
+            server = get_first_server_config_dict(get_global_config_dict(), self.config.model_server.name)
+            base_url = f"http://{server.host}:{server.port}"
+            model = self.config.body.model or getattr(server, "openai_model", None) or getattr(server, "model", None) or ""
+        except Exception as exc:
+            raise RuntimeError(f"Could not resolve model server for Cline: {exc}") from exc
+        if not model:
+            raise RuntimeError("Cline harness requires a model name from the request or model server")
+
+        workspace_path = _resolve_agent_workspace_path(data_point)
+        workspace_q = shlex.quote(workspace_path)
+
+        prompt_path = self.config.persistent_dir / "cline_prompt.txt"
+        prompt = str(data_point.get("problem_statement") or "Fix the issue in the repository.")
+        prompt_path.write_text(prompt)
+        script_path = self.config.persistent_dir / f"cline_script_{self.config.agent_run_id}.sh"
+        event_path = "/trajectories_mount/cline_events.jsonl"
+        patch_path = "/trajectories_mount/patch.diff"
+        script = f"""#!/bin/bash
+set -u
+export PATH=/cline_setup/deps/bin:$PATH
+export HOME=/tmp/cline-home
+export CLINE_SESSION_BACKEND_MODE=local
+mkdir -p "$HOME"
+cline auth openai-compatible --apikey EMPTY --modelid {shlex.quote(model)} --baseurl {shlex.quote(base_url)} --data-dir "$HOME/.cline" >/dev/null 2>&1 || true
+cd {workspace_q}
+prompt=$(cat /cline_prompt.txt)
+cline --json --auto-approve true --timeout {self.config.swebench_agent_timeout} --cwd {workspace_q} -- "$prompt" > {event_path} 2>/tmp/cline.stderr || true
+git diff --binary > {patch_path}
+mkdir -p /trajectories_mount/trajectories/{self.config.instance_id}
+printf '{{"model_name_or_path": %s, "instance_id": %s, "model_patch": %s}}\\n' {shlex.quote(json.dumps(model))} {shlex.quote(json.dumps(self.config.instance_id))} "$(python3 -c 'import json; print(json.dumps(open("{patch_path}").read()))')" > /trajectories_mount/trajectories/{self.config.instance_id}/output_for_eval.jsonl
+"""
+        script_path.write_text(script)
+        script_path.chmod(0o755)
+        return ExecuteContainerCommandArgs(
+            command=f"timeout --signal=TERM --kill-after=30 {self.config.swebench_agent_timeout + 60} bash /trajectories_mount/{script_path.name}",
+            expected_file_pattern=str(self.config.persistent_dir / "trajectories" / self.config.instance_id / "output_for_eval.jsonl"),
+            mode="agent",
+            timeout=self.config.swebench_agent_timeout + 60,
+        )
+
+
+
 ########################################
 
 
@@ -2461,9 +2538,8 @@ class RunOpenHandsAgent(BaseModel):
         if self.config.agent_framework == "opencode":
             assert self.config.opencode_setup_dir is not None
             eval_dir_on_host = Path(self.config.opencode_setup_dir) / "opencode" / eval_dir_in_openhands
-        else:
-            assert self.config.openhands_setup_dir is not None
-            eval_dir_on_host = Path(self.config.openhands_setup_dir) / "OpenHands" / eval_dir_in_openhands
+        elif self.config.agent_framework == "cline":
+            eval_dir_on_host = Path(self.config.persistent_dir)
         trajectories_root = self.config.trajectories_root
         llm_completions_dir = trajectories_root / "llm_completions" / data_point["instance_id"]
         trajectories_root.mkdir(parents=True, exist_ok=True)
@@ -2907,9 +2983,11 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         print(f"SWE agents results root for this run: {base_results_dir}", flush=True)
         # Only set up the agent harness that's actually selected. Both share the
         # same dataset/eval setup paths.
-        openhands_setup_dir, opencode_setup_dir = None, None
+        openhands_setup_dir, opencode_setup_dir, cline_setup_dir = None, None, None
         if self.config.agent_framework == "opencode":
             opencode_setup_dir = OpenCodeHarnessProcessor(config=self.config).setup()
+        elif self.config.agent_framework == "cline":
+            cline_setup_dir = ClineHarnessProcessor(config=self.config).setup()
         else:
             openhands_setup_dir = OpenHandsHarnessProcessor(config=self.config).setup()
 
@@ -2920,6 +2998,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             model_server_name=self.config.model_server.name,
             openhands_setup_dir=openhands_setup_dir,
             opencode_setup_dir=opencode_setup_dir,
+            cline_setup_dir=cline_setup_dir,
             swebench_setup_dir=SweBenchDatasetProcessor(config=self.config).setup(),
             swebench_multilingual_setup_dir=SweBenchMultilingualDatasetProcessor(config=self.config).setup(),
             r2e_gym_setup_dir=R2EGymDatasetProcessor(config=self.config).setup(),
@@ -3247,6 +3326,13 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         if params.agent_framework == "opencode" and command.mode == "eval":
             mount_args.append(f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl")
+        elif params.agent_framework == "cline" and command.mode == "agent":
+            assert params.cline_setup_dir is not None, "cline_setup_dir not set"
+            mount_args.extend([
+                f"--mount type=bind,src={params.cline_setup_dir / 'deps'},dst=/cline_setup/deps,ro",
+                f"--mount type=bind,src={params.persistent_dir / 'cline_prompt.txt'},dst=/cline_prompt.txt,ro",
+                f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl,ro",
+            ])
         elif params.agent_framework == "opencode" and command.mode == "agent":
             assert params.opencode_setup_dir is not None, "opencode_setup_dir not set"
             opencode_dir = f"{params.opencode_setup_dir}/opencode"
@@ -3655,7 +3741,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         params.eval_command = dataset_processor.get_run_command()
         params.eval_apptainer_command_str = self._build_apptainer_command(params, params.eval_command)
 
-        if self.config.agent_framework == "opencode":
+        if self.config.agent_framework == "cline":
+            params.agent_command = ClineHarnessProcessor(config=params).get_run_command()
+        elif self.config.agent_framework == "opencode":
             params.agent_command = OpenCodeHarnessProcessor(config=params).get_run_command()
         else:
             params.agent_command = OpenHandsHarnessProcessor(config=params).get_run_command()
@@ -3721,6 +3809,31 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             or eval_oom_killed
         ):
             params.mask_sample = True
+
+        if self.config.agent_framework == "cline":
+            events_path = params.persistent_dir / "cline_events.jsonl"
+            if events_path.exists():
+                cline_items, cline_metadata = parse_cline_events(events_path.read_text())
+                output_items = cline_items
+                input_items = list(params.body.input) if isinstance(params.body.input, list) else []
+                updated_metrics = update_and_read_metrics(params.metrics_fpath, metrics_to_update)
+                metadata = {
+                    "input": json.dumps([item.model_dump() for item in input_items]),
+                    "metrics": json.dumps(updated_metrics),
+                    "instance_config": params.model_dump_json(),
+                    "cline_metadata": json.dumps(cline_metadata),
+                }
+                return NeMoGymResponse(
+                    id=f"swebench-{params.instance_id}",
+                    created_at=int(time.time()),
+                    model=params.body.model or self.config.model_server.name,
+                    object="response",
+                    output=output_items,
+                    parallel_tool_calls=params.body.parallel_tool_calls,
+                    tool_choice=params.body.tool_choice,
+                    tools=[],
+                    metadata=metadata,
+                )
 
         trajectories_dir = params.persistent_dir / "trajectories"
         chat_completions_trajectory, chat_completions_tools, prefix_msg_count = (
