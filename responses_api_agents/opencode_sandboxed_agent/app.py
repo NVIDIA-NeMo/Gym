@@ -374,6 +374,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             print("OpenCode install and run stderr:\n", result.stderr, file=sys.stderr)
 
         export_fname = "export.json"
+        # Kept outside the sandbox workdir on purpose: SWE-bench-style environments set the workdir
+        # to the git repo, and resources servers extract the model patch with `git add -N . && git
+        # diff`, which would sweep this transcript into the patch.
+        export_remote_fpath = f"/tmp/opencode_{export_fname}"
         try:
             session_list_result = await sandbox.exec(
                 command="export PATH=$HOME/.opencode/bin:$PATH && opencode session list --format json"
@@ -387,7 +391,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             export_result = await sandbox.exec(
                 command=(
                     "export PATH=$HOME/.opencode/bin:$PATH "
-                    f"&& opencode export {quote(session_id)} > {quote(export_fname)}"
+                    f"&& opencode export {quote(session_id)} > {quote(export_remote_fpath)}"
                 )
             )
         except Exception:
@@ -397,26 +401,18 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             print("Export stdout:\n", export_result.stdout, file=sys.stderr)
             print("Export stderr:\n", export_result.stderr, file=sys.stderr)
 
-        try:
-            pwd_result = await sandbox.exec(command="pwd")
-            results_remote_fpath = Path(pwd_result.stdout.strip()) / export_fname
-        except:
-            print("Failed to get current working directory", format_exc(), file=sys.stderr)
-            results_remote_fpath = None
-
         results_dir: Path = Path(__file__).parent / "results" / request.session[SESSION_ID_KEY]
         results_dir.mkdir(parents=True, exist_ok=True)
         results_local_fpath = results_dir / export_fname
-        if results_remote_fpath:
-            if self.config.debug:
-                print(f"Downloading results from {results_remote_fpath} to {results_local_fpath}", file=sys.stderr)
-            try:
-                await sandbox.download(str(results_remote_fpath), results_local_fpath)
-            except:
-                print(f"Failed to download export results to {results_local_fpath}", format_exc(), file=sys.stderr)
-                if export_result:
-                    print("Export stdout:\n", export_result.stdout, file=sys.stderr)
-                    print("Export stderr:\n", export_result.stderr, file=sys.stderr)
+        if self.config.debug:
+            print(f"Downloading results from {export_remote_fpath} to {results_local_fpath}", file=sys.stderr)
+        try:
+            await sandbox.download(export_remote_fpath, results_local_fpath)
+        except:
+            print(f"Failed to download export results to {results_local_fpath}", format_exc(), file=sys.stderr)
+            if export_result:
+                print("Export stdout:\n", export_result.stdout, file=sys.stderr)
+                print("Export stderr:\n", export_result.stderr, file=sys.stderr)
 
         opencode_export = dict()
         if results_local_fpath.exists():

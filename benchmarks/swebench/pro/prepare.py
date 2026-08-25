@@ -38,20 +38,16 @@ BENCHMARK_DIR = Path(__file__).parent.parent
 DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "swebench_pro_benchmark.jsonl"
 UPSTREAM_CACHE_DIR = DATA_DIR / "swebench_pro_upstream"
-PROMPT_TEMPLATE = (BENCHMARK_DIR / "minimax_prompt.txt").read_text(encoding="utf-8")
-
+PROMPT_TEMPLATE = (BENCHMARK_DIR / "swebenchpro_prompt.txt").read_text(encoding="utf-8")
 
 def render_prompt(row: Mapping[str, Any]) -> str:
     """Render the same Minimax coding prompt used by SWE-bench Verified."""
-    repo_language = str(row.get("repo_language") or "")
-    return (
-        PROMPT_TEMPLATE.replace("{{ workspace_path }}", "/app")
-        .replace("{{ instance.problem_statement }}", str(row["problem_statement"]))
-        .replace(
-            "{{ instance.repo_language ~ ' ' if instance.repo_language else '' }}",
-            f"{repo_language} " if repo_language else "",
-        )
+    materialized_prompt = PROMPT_TEMPLATE.format(
+        problem_statement=str(row["problem_statement"]),
+        requirements=str(row["requirements"]),
+        interface=str(row["interface"]),
     )
+    return materialized_prompt
 
 
 def fetch_upstream_assets(cache_dir: Path = UPSTREAM_CACHE_DIR) -> Path:
