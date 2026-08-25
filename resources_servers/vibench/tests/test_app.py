@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import json
+import signal
 import tarfile
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -311,7 +312,7 @@ class TestRunVibenchScript:
         monkeypatch.setattr(server, "_grader_env", _const_env({}))
         _patch_env_creator(monkeypatch, _FakeProc(0, "hello"))
 
-        code, log = await server._run_vibench_script(["/bin/true"])
+        code, log = await server._run_vibench_script(["/bin/true"], timeout_s=30)
 
         assert (code, log) == (0, "hello")
 
@@ -322,7 +323,7 @@ class TestRunVibenchScript:
         monkeypatch.setattr(server, "_grader_env", _const_env({"AGENT_SEEDING_LLM_API_KEY": "leaky-secret-key"}))
         _patch_env_creator(monkeypatch, _FakeProc(0, "using leaky-secret-key here"))
 
-        _, log = await server._run_vibench_script(["/bin/true"])
+        _, log = await server._run_vibench_script(["/bin/true"], timeout_s=30)
 
         assert "leaky-secret-key" not in log
 
@@ -336,40 +337,108 @@ class TestRunVibenchScript:
 
         monkeypatch.setattr("resources_servers.vibench.app.asyncio.create_subprocess_exec", boom)
 
-        code, log = await server._run_vibench_script(["/bin/true"])
+        code, log = await server._run_vibench_script(["/bin/true"], timeout_s=30)
 
         assert code == 1
         assert "cannot spawn" in log
 
     @pytest.mark.asyncio
-    async def test_timeout_kills_the_process_and_fails_the_plan(self, tmp_path, monkeypatch):
-        """One wedged compose stack must not take the whole rollout down."""
-        server = make_server(tmp_path, evaluation_timeout_s=1)
+    async def test_timeout_terminates_the_group_so_compose_cleanup_runs(self, tmp_path, monkeypatch):
+        """SIGKILL would skip ViBench's finally-block `docker-compose down`, leaking the
+        very stack this timeout exists to reap."""
+        server = make_server(tmp_path, evaluation_timeout_s=1, cleanup_grace_s=0.05)
         monkeypatch.setattr(server, "_grader_env", _const_env({}))
-        killed = []
+        signals: list[int] = []
 
         class _Hanging:
             returncode = None
+            pid = 4242
 
             async def communicate(self):
                 raise asyncio.TimeoutError()
 
-            def kill(self):
-                killed.append(True)
+            async def wait(self):
+                # Never exits on SIGTERM, so the escalation path is exercised too.
+                await asyncio.sleep(10)
+
+        async def fake_exec(*a, **k):
+            assert k.get("start_new_session") is True, "no process group means no group signal"
+            return _Hanging()
+
+        monkeypatch.setattr("resources_servers.vibench.app.asyncio.create_subprocess_exec", fake_exec)
+        monkeypatch.setattr("resources_servers.vibench.app.os.getpgid", lambda pid: pid)
+        monkeypatch.setattr("resources_servers.vibench.app.os.killpg", lambda pid, sig: signals.append(sig))
+
+        code, log = await server._run_vibench_script(["/bin/sleep", "99"], timeout_s=0.05)
+
+        assert code == 1
+        assert "timed out" in log
+        # SIGTERM first so cleanup can run, SIGKILL only for what ignores it.
+        assert signals == [signal.SIGTERM, signal.SIGKILL]
+
+    @pytest.mark.asyncio
+    async def test_a_process_that_exits_on_sigterm_is_not_killed(self, tmp_path, monkeypatch):
+        server = make_server(tmp_path, cleanup_grace_s=5)
+        monkeypatch.setattr(server, "_grader_env", _const_env({}))
+        signals: list[int] = []
+
+        class _Polite:
+            returncode = None
+            pid = 99
+
+            async def communicate(self):
+                raise asyncio.TimeoutError()
 
             async def wait(self):
                 return None
 
         async def fake_exec(*a, **k):
-            return _Hanging()
+            return _Polite()
 
         monkeypatch.setattr("resources_servers.vibench.app.asyncio.create_subprocess_exec", fake_exec)
+        monkeypatch.setattr("resources_servers.vibench.app.os.getpgid", lambda pid: pid)
+        monkeypatch.setattr("resources_servers.vibench.app.os.killpg", lambda pid, sig: signals.append(sig))
 
-        code, log = await server._run_vibench_script(["/bin/sleep", "99"])
+        await server._run_vibench_script(["/bin/sleep", "99"], timeout_s=0.05)
 
-        assert code == 1
-        assert killed == [True]
-        assert "timed out" in log
+        assert signals == [signal.SIGTERM]
+
+
+class TestBuildContract:
+    """The grading stack invokes ViBench's two scripts; package.json is not the contract."""
+
+    def test_an_app_with_both_scripts_is_buildable(self, tmp_path):
+        app = tmp_path / "app"
+        app.mkdir()
+        (app / "setup-environment.sh").write_text("#!/bin/bash\n")
+        (app / "start-server.sh").write_text("#!/bin/bash\n")
+
+        assert make_server(tmp_path)._looks_buildable(app) is True
+
+    def test_a_python_app_is_not_penalised_for_having_no_package_json(self, tmp_path):
+        app = tmp_path / "app"
+        app.mkdir()
+        (app / "setup-environment.sh").write_text("#!/bin/bash\n")
+        (app / "start-server.sh").write_text("#!/bin/bash\n")
+        (app / "main.py").write_text("print('hi')")
+
+        assert make_server(tmp_path)._looks_buildable(app) is True
+
+    def test_missing_start_script_is_a_build_failure(self, tmp_path):
+        app = tmp_path / "app"
+        app.mkdir()
+        (app / "setup-environment.sh").write_text("#!/bin/bash\n")
+
+        assert make_server(tmp_path)._looks_buildable(app) is False
+
+    def test_empty_tree_is_a_build_failure(self, tmp_path):
+        app = tmp_path / "app"
+        app.mkdir()
+
+        assert make_server(tmp_path)._looks_buildable(app) is False
+
+    def test_absent_dir_is_a_build_failure(self, tmp_path):
+        assert make_server(tmp_path)._looks_buildable(tmp_path / "nope") is False
 
 
 class TestGradeOneTestPlan:
@@ -384,7 +453,7 @@ class TestGradeOneTestPlan:
         server = make_server(tmp_path)
         rel = self._plan(tmp_path)
 
-        async def fake_run(cmd):
+        async def fake_run(cmd, timeout_s=None):
             return 1, "seeding blew up"
 
         monkeypatch.setattr(server, "_run_vibench_script", fake_run)
@@ -401,7 +470,7 @@ class TestGradeOneTestPlan:
         rel = self._plan(tmp_path)
         work = tmp_path / "work"
 
-        async def fake_run(cmd):
+        async def fake_run(cmd, timeout_s=None):
             # Seeding succeeds (creates its output dir); evaluation writes no report.
             if "run-seed.py" in " ".join(cmd):
                 (work / "test1" / "seed" / "seeding").mkdir(parents=True, exist_ok=True)
@@ -420,7 +489,7 @@ class TestGradeOneTestPlan:
         rel = self._plan(tmp_path)
         work = tmp_path / "work"
 
-        async def fake_run(cmd):
+        async def fake_run(cmd, timeout_s=None):
             out = work / "test1"
             if "run-seed.py" in " ".join(cmd):
                 (out / "seed" / "seeding").mkdir(parents=True, exist_ok=True)
@@ -450,7 +519,7 @@ class TestGradeOneTestPlan:
         assets.mkdir(parents=True)
         seen = []
 
-        async def fake_run(cmd):
+        async def fake_run(cmd, timeout_s=None):
             seen.append(" ".join(cmd))
             if "run-seed.py" in " ".join(cmd):
                 (work / "test1" / "seed" / "seeding").mkdir(parents=True, exist_ok=True)
@@ -469,7 +538,7 @@ class TestGradeOneTestPlan:
         rel = self._plan(tmp_path)
         work = tmp_path / "work"
 
-        async def fake_run(cmd):
+        async def fake_run(cmd, timeout_s=None):
             out = work / "test1"
             if "run-seed.py" in " ".join(cmd):
                 (out / "seed" / "seeding").mkdir(parents=True, exist_ok=True)
@@ -568,7 +637,8 @@ def _stub_extraction(server: VibenchResourcesServer, monkeypatch) -> None:
 
     def fake_unpack(artifact: Path, dest: Path):
         dest.mkdir(parents=True, exist_ok=True)
-        (dest / "package.json").write_text(json.dumps({"name": "app"}))
+        (dest / "setup-environment.sh").write_text("#!/bin/bash\n")
+        (dest / "start-server.sh").write_text("#!/bin/bash\n")
 
     monkeypatch.setattr(server, "_unpack_artifact", fake_unpack)
     monkeypatch.setattr(server, "_resolve_artifact", lambda p: Path(p))

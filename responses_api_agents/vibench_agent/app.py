@@ -33,10 +33,12 @@ everything about installing and driving OpenCode is inherited.
 """
 
 import sys
+from contextlib import suppress
 from pathlib import Path
 from shlex import quote
 from traceback import format_exc
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse, urlunparse
 from uuid import uuid4
 
 from fastapi import Request
@@ -44,7 +46,13 @@ from fastapi import Request
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
+from nemo_gym.server_utils import (
+    SESSION_ID_KEY,
+    get_response_json,
+    get_server_url,
+    is_nemo_gym_fastapi_entrypoint,
+    raise_for_status,
+)
 from responses_api_agents.opencode_sandboxed_agent.app import (
     OpenCodeSandboxedAgent,
     OpenCodeSandboxedAgentConfig,
@@ -58,6 +66,34 @@ from responses_api_agents.opencode_sandboxed_agent.app import (
 # are handed the same PRD text separately at grade time.
 PRD_FILENAME = "prd.txt"
 
+# Bind addresses that are valid on the Gym host but mean "this container" inside a
+# bridged Docker sandbox. host.docker.internal is added via --add-host=host-gateway.
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "0.0.0.0", "::1", "[::1]"})
+DOCKER_HOST_GATEWAY = "host.docker.internal"
+
+
+def _origin(url: str) -> str:
+    """Strip a trailing slash or ``/v1`` so callers can always append ``/v1``."""
+    url = url.rstrip("/")
+    return url[:-3].rstrip("/") if url.endswith("/v1") else url
+
+
+def rewrite_loopback_url_for_docker(url: str, gateway_host: str = DOCKER_HOST_GATEWAY) -> str:
+    """Rewrite a host-loopback model URL so a bridged container can reach it.
+
+    ``get_server_url`` is computed on the host (``http://127.0.0.1:<port>``). Inside a
+    bridged container that address is the container itself, so OpenCode makes zero LLM
+    calls. ``host.docker.internal`` (via Docker's ``host-gateway``) is the host from the
+    box without sharing the host network namespace.
+    """
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if host not in _LOOPBACK_HOSTS:
+        return _origin(url)
+    port = parsed.port
+    netloc = f"{gateway_host}:{port}" if port is not None else gateway_host
+    return _origin(urlunparse(parsed._replace(netloc=netloc)))
+
 
 class VibenchAgentConfig(OpenCodeSandboxedAgentConfig):
     # ViBench's base image. Its WORKDIR is /app, which is where the harness lands.
@@ -70,9 +106,40 @@ class VibenchAgentConfig(OpenCodeSandboxedAgentConfig):
     # Ceiling on taring and downloading the finished app.
     harvest_timeout_s: int = 900
 
+    # Model URL as seen from inside the sandbox. When unset, a Docker sandbox rewrites
+    # loopback ``get_server_url`` hosts to ``host.docker.internal``. Set this for
+    # OpenSandbox (or any provider whose boxes have their own address).
+    sandbox_model_base_url: Optional[str] = None
+
 
 class VibenchAgent(OpenCodeSandboxedAgent):
     config: VibenchAgentConfig
+
+    def _uses_docker_provider(self) -> bool:
+        try:
+            provider_cfg = resolve_provider_config(self.config.sandbox_provider, get_global_config_dict())
+        except Exception:
+            return False
+        return "docker" in provider_cfg
+
+    def _sandbox_reachable_model_url(self) -> str:
+        override = (self.config.sandbox_model_base_url or "").strip()
+        if override:
+            return _origin(override)
+        url = get_server_url(self.config.model_server.name)
+        if self._uses_docker_provider():
+            return rewrite_loopback_url_for_docker(url)
+        return _origin(url)
+
+    def _create_opencode_config(self) -> Dict[str, Any]:
+        # Parent bakes the *host* model URL into OpenCode's in-container config. Rewrite it
+        # to an address the sandbox can actually route to, otherwise the harness talks to
+        # itself and exports an empty app with no error.
+        config = super()._create_opencode_config()
+        options = ((config.get("provider") or {}).get("nemo_gym") or {}).get("options")
+        if isinstance(options, dict):
+            options["baseURL"] = f"{self._sandbox_reachable_model_url()}/v1"
+        return config
 
     async def _create_build_sandbox(self, prd_text: str, asset_paths: list[str]) -> AsyncSandbox:
         """Start a fresh build box with the PRD already staged.
@@ -101,14 +168,21 @@ class VibenchAgent(OpenCodeSandboxedAgent):
         sandbox = AsyncSandbox(provider, spec)
         await sandbox.start()
 
-        for asset_dir in asset_paths:
-            src = Path(asset_dir)
-            if not src.is_dir():
-                continue
-            for item in sorted(src.rglob("*")):
-                if item.is_file():
-                    remote = f"{self.config.app_workdir}/assets/{item.relative_to(src).as_posix()}"
-                    await sandbox.upload(item, remote)
+        # Past start(), a container exists. Anything that raises here would otherwise leave
+        # it running until its TTL, since the caller only registers cleanup once this returns.
+        try:
+            for asset_dir in asset_paths:
+                src = Path(asset_dir)
+                if not src.is_dir():
+                    continue
+                for item in sorted(src.rglob("*")):
+                    if item.is_file():
+                        remote = f"{self.config.app_workdir}/assets/{item.relative_to(src).as_posix()}"
+                        await sandbox.upload(item, remote)
+        except Exception:
+            with suppress(Exception):
+                await sandbox.stop()
+            raise
 
         return sandbox
 

@@ -82,10 +82,8 @@ P0 covers `mvp` artifacts only. `prepare.py` already resolves the PRD chain and 
 for feature artifacts, but `seed_session` only ever hands the agent a PRD — there is no path
 yet to stage an existing codebase into the build sandbox, which a feature task starts from.
 
-ViBench ships reference implementations (`results/<app>/RI_MVP/app/`, 21 of its 24 apps),
-including the `setup-environment.sh` and `start-server.sh` the grader requires, so
 `feature-ri` — building a feature on top of the reference implementation — is a follow-up
-rather than a blocked one. `feature-mvp` (`featureN-on_mvp`) is harder: it starts from the
+ `feature-mvp` (`featureN-on_mvp`) is harder: it starts from the
 model's own MVP output and so depends on a prior rollout's artifact.
 
 ## Run
@@ -95,17 +93,19 @@ provider config binds, so without it startup fails with *"Sandbox provider refer
 'sandbox' is not defined in the merged config"*. Swap that one path to move to another
 provider (OpenSandbox, Fargate, Enroot) without editing this config.
 
-Use `vibench_agent`'s docker config rather than the stock one. The harness inside the
-sandbox reaches the policy model at `http://127.0.0.1:<port>` (`get_server_url`), which in a
-bridged container points at the container itself — the harness then makes **zero** LLM calls
-and exports an empty app with `"tokens": {"input": 0, "output": 0}`, with no error anywhere.
-The host network makes that address mean the same thing in both places. Read the trade-off
-note at the top of that file before using it on anything but a disposable box.
+Use `vibench_agent`'s docker config rather than the stock one. Stock Docker uses a 180s
+exec timeout, which kills long installs, and OpenCode is told the policy model is at
+`http://127.0.0.1:<port>` (`get_server_url`) — inside a bridged container that is the
+container itself, so the harness makes **zero** LLM calls and exports an empty app. That
+config keeps the default bridge, adds `host.docker.internal` via Docker's host-gateway,
+and the agent rewrites loopback model URLs to it. Do not use `network: host`: that puts
+model-written code on the host network namespace. OpenSandbox does not need this file;
+set `sandbox_model_base_url` on the agent instead.
 
 ```bash
 gym env start \
     --config resources_servers/vibench/configs/vibench.yaml \
-    --config responses_api_agents/vibench_agent/configs/docker_host_network.yaml \
+    --config responses_api_agents/vibench_agent/configs/docker.yaml \
     --model-type openai_model
 
 gym eval run --no-serve \

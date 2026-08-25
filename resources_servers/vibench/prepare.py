@@ -32,6 +32,7 @@ import argparse
 import json
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -70,9 +71,12 @@ def render_task_prompt(root: Path, prd_text: str, max_iterations: int) -> Option
     if not (prompts_dir / CODING_PROMPT).exists():
         return None
 
-    tmp = root / ".vibench_prd_tmp.txt"
+    # A fixed name inside the checkout would race between concurrent prepares and fail on a
+    # read-only checkout.
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as fh:
+        fh.write(prd_text)
+        tmp = Path(fh.name)
     try:
-        tmp.write_text(prd_text)
         result = subprocess.run(
             [vibench_python(root), "-c", RENDER_SNIPPET, str(prompts_dir), str(tmp), str(max_iterations)],
             capture_output=True,

@@ -23,10 +23,11 @@ such as Docker cannot support it at all.
     sandbox and hands out no handle. The agent never sees the test plans.
   * ``responses_api_agents/vibench_agent`` owns the build sandbox, runs a coding harness in
     it, tars the finished app, and writes it to ``artifact_dir``.
-  * ``verify`` unpacks that tarball and grades it by shelling out to ViBench's existing
-    ``run-seed-then-evaluate.py`` once per test plan. Each run stands up the app + postgres
-    + code-browse in a *fresh* compose project, seeds it with the seeding agent, then scores
-    it with the evaluation agent.
+  * ``verify`` unpacks that tarball and grades it with ViBench's ``run-seed.py`` then
+    ``run-evaluate-post-seeding.py``, once per test plan. Each run stands up the app +
+    postgres + code-browse in a *fresh* compose project, seeds it with the seeding agent,
+    then scores it with the evaluation agent. (The single-call run-seed-then-evaluate.py is
+    not used; see the comment above SEED_SCRIPT.)
 
 ``artifact_dir`` is a plain filesystem path shared by the agent and this server. That is not
 a new constraint: grading already shells into a local Docker daemon, so both processes are
@@ -42,6 +43,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import sys
 import tarfile
 import tempfile
@@ -49,7 +51,7 @@ import time
 from contextlib import suppress
 from pathlib import Path
 from traceback import format_exc
-from typing import Any, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 
 from fastapi import Request
 from pydantic import BaseModel
@@ -93,8 +95,11 @@ class VibenchResourcesServerConfig(BaseResourcesServerConfig):
     # Directory the agent drops built-app tarballs into, shared with this server.
     artifact_dir: str
 
-    # Wall-clock ceiling for a single test plan's seed+evaluate run.
+    # Wall-clock ceiling for one test plan, shared across its seed and evaluate phases --
+    # not per phase, or a slow-but-successful seed would still hand evaluate a full window.
     evaluation_timeout_s: int = 5400
+    # Grace period for a timed-out grading script to tear its compose project down.
+    cleanup_grace_s: float = 60.0
     # ViBench grading is compose-heavy (postgres + app + playwright per test plan). Cap how
     # many run at once *within one rollout*; Gym's own concurrency multiplies on top of this.
     max_concurrent_test_plans: int = 2
@@ -112,7 +117,7 @@ class VibenchResourcesServerConfig(BaseResourcesServerConfig):
     # Delete the agent's tarball once it has been unpacked.
     remove_artifact_after_grading: bool = True
 
-    REVERIFY_MODE = ReverifyMode.UNSUPPORTED
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.UNSUPPORTED
 
 
 class VibenchTaskRequest(BaseModel):
@@ -297,6 +302,17 @@ class VibenchResourcesServer(SimpleResourcesServer):
         self._cached_grader_env = dict(env)
         return env
 
+    @staticmethod
+    def _looks_buildable(app_dir: Path) -> bool:
+        """Whether the agent produced something the grading stack could even start.
+
+        ViBench's prompt requires setup-environment.sh and start-server.sh, and the seeding
+        script invokes them; without either, grading cannot begin whatever the language.
+        """
+        if not app_dir.is_dir() or not any(app_dir.iterdir()):
+            return False
+        return (app_dir / "setup-environment.sh").exists() and (app_dir / "start-server.sh").exists()
+
     def _redact(self, text: str, env: Dict[str, str]) -> str:
         """Strip grader credentials out of captured output.
 
@@ -312,11 +328,16 @@ class VibenchResourcesServer(SimpleResourcesServer):
                 text = text.replace(value, f"<redacted:{key}>")
         return text
 
-    async def _run_vibench_script(self, cmd: List[str]) -> tuple[int, str]:
+    async def _run_vibench_script(self, cmd: List[str], timeout_s: float) -> tuple[int, str]:
         """Run one ViBench grading script, returning (return_code, merged output).
 
         A timeout is a failed grade, not an exception: one wedged compose stack should score
         zero rather than take the whole rollout down.
+
+        On timeout the process *group* gets SIGTERM before SIGKILL. ViBench tears its compose
+        project down in a ``finally`` block, which SIGKILL skips -- and the wedged-stack case
+        this timeout exists for is exactly when postgres, the app, Playwright, the image tag
+        and a port in the 50000-60000 range would otherwise leak.
         """
         env = await self._grader_env()
         try:
@@ -326,19 +347,31 @@ class VibenchResourcesServer(SimpleResourcesServer):
                 env=env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                start_new_session=True,
             )
         except Exception:
             return 1, format_exc()
 
         try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=self.config.evaluation_timeout_s)
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
         except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            return 1, f"timed out after {self.config.evaluation_timeout_s}s: {' '.join(cmd)}"
+            await self._terminate_group(proc)
+            return 1, f"timed out after {timeout_s:g}s: {' '.join(cmd)}"
 
         code = proc.returncode if proc.returncode is not None else 1
         return code, self._redact((stdout or b"").decode(errors="replace"), env)
+
+    async def _terminate_group(self, proc: Any) -> None:
+        """SIGTERM the process group, then SIGKILL what is left."""
+        with suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        with suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(proc.wait(), timeout=self.config.cleanup_grace_s)
+            return
+        with suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        with suppress(Exception):
+            await proc.wait()
 
     async def _grade_one_test_plan(
         self,
@@ -347,14 +380,15 @@ class VibenchResourcesServer(SimpleResourcesServer):
         work_dir: Path,
         test_assets_dir: Optional[str],
     ) -> PlanResult:
-        """Seed, then evaluate, a single test plan and parse its score."""
+        """Seed, then evaluate, a single test plan and parse its score.
+
+        Every failure here becomes a zeroed plan rather than an exception: one unreadable
+        plan file or one truncated evaluation-finished.json would otherwise 500 /verify and
+        lose the whole rollout, including the plans that graded fine.
+        """
         started = time.time()
         name = Path(test_plan_rel).stem
         out_dir = work_dir / name
-        out_dir.mkdir(parents=True, exist_ok=True)
-
-        plan_path = out_dir / "test-plan.txt"
-        plan_path.write_text(add_evaluation_tags(self._resolve(test_plan_rel).read_text()))
 
         def fail(seeding_failed: bool, error: str) -> PlanResult:
             return PlanResult(
@@ -369,6 +403,15 @@ class VibenchResourcesServer(SimpleResourcesServer):
                 duration_s=time.time() - started,
             )
 
+        deadline = started + self.config.evaluation_timeout_s
+
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            plan_path = out_dir / "test-plan.txt"
+            plan_path.write_text(add_evaluation_tags(self._resolve(test_plan_rel).read_text()))
+        except Exception:
+            return fail(seeding_failed=False, error=format_exc())
+
         seed_dir = out_dir / "seed"
         seed_dir.mkdir(parents=True, exist_ok=True)
         code, log = await self._run_vibench_script(
@@ -381,7 +424,8 @@ class VibenchResourcesServer(SimpleResourcesServer):
                 str(plan_path),
                 "--output-dir",
                 str(seed_dir),
-            ]
+            ],
+            timeout_s=max(1.0, deadline - time.time()),
         )
         # ViBench refuses to evaluate an app it could not seed; that is a real zero, tracked
         # separately from a bad build so aggregate metrics can tell them apart.
@@ -405,7 +449,7 @@ class VibenchResourcesServer(SimpleResourcesServer):
             # staged into the build sandbox.
             evaluate_cmd += ["--test-assets", str(self._resolve(test_assets_dir))]
 
-        code, log = await self._run_vibench_script(evaluate_cmd)
+        code, log = await self._run_vibench_script(evaluate_cmd, timeout_s=max(1.0, deadline - time.time()))
 
         report_path = out_dir / "evaluation-finished.json"
         if not report_path.exists():
@@ -414,10 +458,14 @@ class VibenchResourcesServer(SimpleResourcesServer):
             # which is exactly what it did the first time this fired.
             return fail(seeding_failed=False, error=log[-4000:])
 
-        data = json.loads(report_path.read_text())
-        score = float(data.get("score", 0) or 0)
-        full_points = float(data.get("full_points", 0) or 0)
-        steps = data.get("steps", []) or []
+        try:
+            data = json.loads(report_path.read_text())
+            score = float(data.get("score", 0) or 0)
+            full_points = float(data.get("full_points", 0) or 0)
+            steps = data.get("steps", []) or []
+        except Exception:
+            # A truncated or malformed scorecard is a failed grade, not a crashed rollout.
+            return fail(seeding_failed=False, error=format_exc())
 
         if not self.config.keep_evaluation_artifacts:
             shutil.rmtree(out_dir, ignore_errors=True)
@@ -473,7 +521,9 @@ class VibenchResourcesServer(SimpleResourcesServer):
                         artifact.unlink(missing_ok=True)
 
         # An agent that produced nothing runnable is a build failure, not a 0-scoring app.
-        if not build_failed and not (app_dir / "package.json").exists():
+        # The contract is the two scripts ViBench's prompt requires and its grading stack
+        # invokes -- not package.json, which would misjudge any app that is not Node.
+        if not build_failed and not self._looks_buildable(app_dir):
             build_failed = True
         artifact_extraction_time_s = time.time() - started
 
@@ -486,7 +536,23 @@ class VibenchResourcesServer(SimpleResourcesServer):
                 async with semaphore:
                     return await self._grade_one_test_plan(app_dir, plan, work_dir, body.test_assets_dir)
 
-            results = list(await asyncio.gather(*(run(p) for p in body.test_plans)))
+            gathered = await asyncio.gather(*(run(p) for p in body.test_plans), return_exceptions=True)
+            results = [
+                r
+                if isinstance(r, PlanResult)
+                else PlanResult(
+                    test_plan=Path(plan).stem,
+                    score=0.0,
+                    full_points=0.0,
+                    normalized_score=0.0,
+                    steps_total=0,
+                    steps_passed=0,
+                    seeding_failed=False,
+                    error=f"{type(r).__name__}: {r}",
+                    duration_s=0.0,
+                )
+                for plan, r in zip(body.test_plans, gathered)
+            ]
         grading_time_s = time.time() - grading_started
 
         if not self.config.keep_evaluation_artifacts:

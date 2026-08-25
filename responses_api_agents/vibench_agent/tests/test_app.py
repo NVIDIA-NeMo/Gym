@@ -18,7 +18,12 @@ from unittest.mock import MagicMock
 import pytest
 
 from nemo_gym.server_utils import ServerClient
-from responses_api_agents.vibench_agent.app import PRD_FILENAME, VibenchAgent, VibenchAgentConfig
+from responses_api_agents.vibench_agent.app import (
+    PRD_FILENAME,
+    VibenchAgent,
+    VibenchAgentConfig,
+    rewrite_loopback_url_for_docker,
+)
 
 
 def make_agent(tmp_path: Path, **overrides) -> VibenchAgent:
@@ -187,3 +192,51 @@ class TestBuildSandbox:
         await agent._create_build_sandbox("PRD", [str(tmp_path / "missing")])
 
         assert sandbox.uploads == []
+
+
+class TestSandboxModelUrl:
+    def test_rewrites_loopback_to_the_docker_host_gateway(self):
+        assert rewrite_loopback_url_for_docker("http://127.0.0.1:9000") == "http://host.docker.internal:9000"
+        assert rewrite_loopback_url_for_docker("http://localhost:9000/v1") == "http://host.docker.internal:9000"
+        assert rewrite_loopback_url_for_docker("http://0.0.0.0:9000") == "http://host.docker.internal:9000"
+
+    def test_leaves_a_routable_host_alone(self):
+        assert rewrite_loopback_url_for_docker("http://10.0.0.8:9000") == "http://10.0.0.8:9000"
+
+    def test_override_wins_over_host_loopback(self, tmp_path, monkeypatch):
+        agent = make_agent(tmp_path, sandbox_model_base_url="http://opensandbox.internal:8080/v1")
+        monkeypatch.setattr(
+            "responses_api_agents.vibench_agent.app.get_server_url", lambda name: "http://127.0.0.1:9000"
+        )
+
+        assert agent._sandbox_reachable_model_url() == "http://opensandbox.internal:8080"
+
+    def test_docker_provider_rewrites_get_server_url(self, tmp_path, monkeypatch):
+        agent = make_agent(tmp_path)
+        monkeypatch.setattr(
+            "responses_api_agents.vibench_agent.app.get_server_url", lambda name: "http://127.0.0.1:9000"
+        )
+        monkeypatch.setattr(agent, "_uses_docker_provider", lambda: True)
+
+        assert agent._sandbox_reachable_model_url() == "http://host.docker.internal:9000"
+
+    def test_non_docker_provider_keeps_get_server_url(self, tmp_path, monkeypatch):
+        agent = make_agent(tmp_path)
+        monkeypatch.setattr(
+            "responses_api_agents.vibench_agent.app.get_server_url", lambda name: "http://127.0.0.1:9000"
+        )
+        monkeypatch.setattr(agent, "_uses_docker_provider", lambda: False)
+
+        assert agent._sandbox_reachable_model_url() == "http://127.0.0.1:9000"
+
+    def test_opencode_config_uses_the_sandbox_reachable_url(self, tmp_path, monkeypatch):
+        agent = make_agent(tmp_path)
+        monkeypatch.setattr(agent, "_sandbox_reachable_model_url", lambda: "http://host.docker.internal:9000")
+        monkeypatch.setattr(
+            "responses_api_agents.opencode_sandboxed_agent.app.get_server_url",
+            lambda name: "http://127.0.0.1:9000",
+        )
+
+        config = agent._create_opencode_config()
+
+        assert config["provider"]["nemo_gym"]["options"]["baseURL"] == "http://host.docker.internal:9000/v1"
