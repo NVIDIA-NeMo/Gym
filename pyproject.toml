@@ -290,6 +290,17 @@ openshell = [
 
 # Telemetry is opt-in: without this extra (or with `telemetry.enabled: false`) every
 # instrumentation site in nemo_gym is a ~0-cost no-op and Gym behaves identically.
+#
+# NOTE: uv resolves one unified lockfile across all optional-dependency groups, so this
+# extra's floor on opentelemetry-api (via nemo-lens[sdk] and the instrumentation packages
+# below) raises the version uv.lock records for *every* install, not just one that
+# requests `telemetry` — opentelemetry-api was already a transitive dependency (via
+# mlflow-tracing, a core dependency) and moved from 1.38.0 to 1.44.0 when this extra was
+# added. Accepted: OpenTelemetry's Python API keeps strict backward compatibility within
+# 1.x, and the full test suite passes unchanged at 1.44.0. There's no clean uv mechanism
+# to isolate one extra's transitive floor from the shared lockfile while still letting it
+# be installed alongside other extras (`[tool.uv] conflicts` forces extras to be mutually
+# exclusive, which `telemetry` is not — it needs to coexist with `dev`/`sandbox` in CI).
 telemetry = [
     # nemo-lens: OpenTelemetry instrumentation shared across the NeMo ecosystem. Provides the
     # tracer/meter lifecycle, span-group gating, W3C context propagation, and the FastAPI /

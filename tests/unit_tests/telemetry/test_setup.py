@@ -208,6 +208,47 @@ def test_init_is_idempotent_even_when_disabled(clean_otel_env, monkeypatch):
     assert init_telemetry(server_name="x") is None, "the first call already settled this process"
 
 
+def test_concurrent_init_calls_produce_exactly_one_setup(enabled_console_env, monkeypatch):
+    """Prove `_INIT_LOCK` actually guards something.
+
+    Without it, two threads can both observe `_INITIALISED is False` before either sets
+    it and both call `setup_telemetry`, which nemo-lens raises on for a second call in
+    the same process. Wrap `setup_telemetry` to count calls and race many threads through
+    `init_telemetry` at once.
+    """
+    import threading
+
+    from nemo.lens import setup_telemetry as real_setup_telemetry
+
+    call_count = 0
+    count_lock = threading.Lock()
+
+    def counting_setup_telemetry(*args, **kwargs):
+        nonlocal call_count
+        with count_lock:
+            call_count += 1
+        return real_setup_telemetry(*args, **kwargs)
+
+    monkeypatch.setattr("nemo.lens.setup_telemetry", counting_setup_telemetry)
+
+    barrier = threading.Barrier(16)
+    results = [None] * 16
+
+    def worker(index):
+        barrier.wait()
+        results[index] = init_telemetry(server_name="weather")
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert call_count == 1, f"setup_telemetry must run exactly once under concurrent init, ran {call_count} times"
+    assert all(r is not None for r in results)
+    assert len({id(r) for r in results}) == 1, "every thread must observe the same handle"
+
+
 def test_non_exporting_rank_gets_a_silent_handle(clean_otel_env):
     """Rank 1..N under `single_rank`: no-op providers and no enabled span groups."""
     from nemo_gym.telemetry._fallbacks import is_span_group_enabled
