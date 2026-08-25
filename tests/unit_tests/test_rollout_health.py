@@ -600,7 +600,7 @@ def test_duplicate_rollout_identity_counts_once_at_task_scope(tmp_path: Path) ->
     }
 
 
-def test_explicit_deterministic_dispatch_and_nonempty_length_response_are_exempt(tmp_path: Path) -> None:
+def test_zero_token_call_is_flagged_and_nonempty_length_response_is_exempt(tmp_path: Path) -> None:
     rollout_path, capture_dir = _write_fixture(
         tmp_path,
         [
@@ -610,7 +610,6 @@ def test_explicit_deterministic_dispatch_and_nonempty_length_response_are_exempt
                     _call(
                         tokens_out=0,
                         finish_reason="length",
-                        request={"metadata": {"deterministic_dispatch": True}},
                         response={"choices": [{"message": {"content": "kept"}}]},
                     )
                 ],
@@ -621,9 +620,8 @@ def test_explicit_deterministic_dispatch_and_nonempty_length_response_are_exempt
     result = run_health_checks(rollout_path, capture_dirs=[capture_dir], capture_enabled=True, workers=1)
 
     checks = {finding.check for finding in result.rollouts[0].findings}
-    assert "zero_token_turns" not in checks
+    assert "zero_token_turns" in checks
     assert "runaway_generations" not in checks
-    assert health._is_deterministic_dispatch({"request": "malformed"}) is False
     assert health._response_has_content("malformed") is False
     assert health._response_has_content({"content": "visible"}) is True
 

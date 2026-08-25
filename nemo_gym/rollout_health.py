@@ -430,17 +430,6 @@ def _call_locator(call: dict[str, Any], fallback: int) -> dict[str, int | str]:
     return {"call_id": str(call.get("model_call_id") or call.get("response_id") or fallback)}
 
 
-def _is_deterministic_dispatch(call: dict[str, Any]) -> bool:
-    request = call.get("request")
-    if not isinstance(request, dict):
-        return False
-    metadata = request.get("metadata")
-    return bool(
-        request.get("deterministic_dispatch") is True
-        or (isinstance(metadata, dict) and metadata.get("deterministic_dispatch") is True)
-    )
-
-
 def _response_has_content(response: Any) -> bool:
     if not isinstance(response, dict):
         return False
@@ -505,7 +494,7 @@ def _zero_token_turns(calls: list[dict[str, Any]], subject: dict[str, int | str]
             completion_tokens=0,
         )
         for position, call in enumerate(calls)
-        if call.get("tokens_out") == 0 and not _is_deterministic_dispatch(call)
+        if call.get("tokens_out") == 0
     ]
 
 
