@@ -29,7 +29,7 @@ def _value(metrics: Any, name: str) -> Any:
     return metrics.get(name) if isinstance(metrics, dict) else getattr(metrics, name, None)
 
 
-def sandbox_observations_from_metrics(metrics: Any, sandbox_id: str | None = None) -> list[SandboxObservation]:
+def sandbox_observations_from_metrics(metrics: Any) -> list[SandboxObservation]:
     """Map only resource and outcome facts reported by the SWE runner."""
     observations: list[SandboxObservation] = []
     phases = (
@@ -56,7 +56,6 @@ def sandbox_observations_from_metrics(metrics: Any, sandbox_id: str | None = Non
             SandboxObservation(
                 role=role,
                 provider="apptainer",
-                sandbox_id=sandbox_id,
                 outcome=outcome,
                 wall_time_s=wall_time_s,
                 peak_memory_mib=peak_memory_mib,
@@ -102,25 +101,6 @@ def _artifact_order(path: Path, data: dict[str, Any]) -> tuple[int, float, str]:
     except OSError:
         mtime = 0.0
     return (0, mtime, path.name)
-
-
-def latest_completion_paths(completion_paths: Iterable[Path]) -> tuple[Path, ...]:
-    """Select the cumulative artifact retained by the existing SWE path."""
-    latest: dict[str, tuple[Path, float]] = {}
-    for path in map(Path, completion_paths):
-        data: dict[str, Any] = {}
-        try:
-            parsed = json.loads(path.read_text())
-            if isinstance(parsed, dict):
-                data = parsed
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            pass
-        session_id = data.get("session_id")
-        key = session_id if isinstance(session_id, str) and session_id else "main"
-        modified_at = path.stat().st_mtime
-        if key not in latest or modified_at > latest[key][1]:
-            latest[key] = (path, modified_at)
-    return tuple(path for path, _ in latest.values())
 
 
 def _gap(code: str, *, invocation_id: str | None = None, detail: str | None = None) -> ObservationGap:

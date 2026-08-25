@@ -120,9 +120,7 @@ class DockerContainer(BaseModel):
 
     _inner_container: AsyncSandbox
     _eval_return_code: Optional[int] = None
-    _eval_error_type: Optional[str] = None
-    _eval_timed_out: bool = False
-    _cleanup_error_type: Optional[str] = None
+    _sandbox_error_type: Optional[str] = None
 
     async def exec_run(
         self,
@@ -137,10 +135,10 @@ class DockerContainer(BaseModel):
                 user=user,
             )
         except Exception as exc:
-            self._eval_error_type = self._eval_error_type or type(exc).__name__
+            self._sandbox_error_type = self._sandbox_error_type or type(exc).__name__
             raise
         if res.error_type is not None:
-            self._eval_error_type = self._eval_error_type or res.error_type
+            self._sandbox_error_type = self._sandbox_error_type or res.error_type
 
         return ExecResult(
             exit_code=res.return_code,
@@ -160,7 +158,7 @@ class DockerContainer(BaseModel):
             )
             self._eval_return_code = res.return_code if res.error_type is None else None
             if res.error_type is not None:
-                self._eval_error_type = self._eval_error_type or res.error_type
+                self._sandbox_error_type = res.error_type
             timed_out = False
 
             stdout = res.stdout or ""
@@ -168,14 +166,13 @@ class DockerContainer(BaseModel):
 
             maybe_test_output = patch_swebench_multilingual_log_parsing(stdout, stderr, self.instance_id)
             test_output = maybe_test_output or (stdout + stderr)
-        except TimeoutError as exc:
+        except TimeoutError:
             # Gym Sandbox API will throw a timeout error on actual timeout.
             timed_out = True
-            self._eval_timed_out = True
-            self._eval_error_type = self._eval_error_type or type(exc).__name__
+            self._sandbox_error_type = "TimeoutError"
             test_output = ""
         except Exception as exc:
-            self._eval_error_type = self._eval_error_type or type(exc).__name__
+            self._sandbox_error_type = type(exc).__name__
             raise
 
         return (test_output, timed_out, time() - start_time)
@@ -188,22 +185,22 @@ class DockerContainer(BaseModel):
         try:
             await self._inner_container.upload(local_path=src, remote_path=str(dest))
         except Exception as exc:
-            self._eval_error_type = self._eval_error_type or type(exc).__name__
+            self._sandbox_error_type = self._sandbox_error_type or type(exc).__name__
             raise
 
     async def cleanup(self) -> None:
         try:
             await self._inner_container.stop()
         except Exception as exc:
-            self._cleanup_error_type = type(exc).__name__
+            self._sandbox_error_type = self._sandbox_error_type or type(exc).__name__
             print("Failed to stop verification sandbox", format_exc(), file=sys.stderr)
 
     def observation(self, *, wall_time_s: float, evaluation_completed: bool) -> SandboxObservation:
         handle = self._inner_container._handle
-        normalized_error = self._eval_error_type.lower() if isinstance(self._eval_error_type, str) else ""
-        if self._eval_timed_out or "timeout" in normalized_error:
+        normalized_error = self._sandbox_error_type.lower() if isinstance(self._sandbox_error_type, str) else ""
+        if "timeout" in normalized_error:
             outcome = "timeout"
-        elif self._cleanup_error_type is not None or self._eval_error_type is not None:
+        elif self._sandbox_error_type is not None:
             outcome = "sandbox_error"
         elif evaluation_completed:
             outcome = "completed"
@@ -217,7 +214,7 @@ class DockerContainer(BaseModel):
             outcome=outcome,
             exit_code=self._eval_return_code,
             wall_time_s=wall_time_s,
-            error_type=self._eval_error_type or self._cleanup_error_type,
+            error_type=self._sandbox_error_type,
         )
 
 

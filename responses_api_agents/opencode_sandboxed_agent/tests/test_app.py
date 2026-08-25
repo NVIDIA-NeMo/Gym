@@ -274,8 +274,9 @@ class TestOpenCodeSandboxedAgent:
 
         observation = server._agent_sandbox_observation(
             sandbox=sandbox,
-            sandbox_id="sandbox-1",
-            execution={"return_code": 125, "error_type": "TimeoutError", "finished": False},
+            return_code=125,
+            error_type="TimeoutError",
+            finished=False,
         )
 
         assert observation.outcome == "timeout"
@@ -285,8 +286,9 @@ class TestOpenCodeSandboxedAgent:
 
         observation = server._agent_sandbox_observation(
             sandbox=sandbox,
-            sandbox_id="sandbox-1",
-            execution={"return_code": 137, "error_type": "OutOfMemoryError", "finished": False},
+            return_code=137,
+            error_type="OutOfMemoryError",
+            finished=False,
         )
         assert observation.outcome == "sandbox_error"
         assert observation.exit_code is None
@@ -370,15 +372,7 @@ class TestOpenCodeSandboxedAgent:
         connection.execute("insert into session values ('root', null, 0)")
         connection.execute(
             "insert into message values (?, ?, ?, ?)",
-            ("m0", "root", json.dumps({"role": "user", "time": {"created": 0}}), 0),
-        )
-        connection.execute(
-            "insert into message values (?, ?, ?, ?)",
             ("m1", "root", json.dumps({"role": "assistant", "time": {"created": 1, "completed": 3}}), 1),
-        )
-        connection.execute(
-            "insert into part values (?, ?, ?, ?, ?)",
-            ("p0", "m0", "root", json.dumps({"type": "text", "text": "solve"}), 0),
         )
         connection.execute(
             "insert into part values (?, ?, ?, ?, ?)",

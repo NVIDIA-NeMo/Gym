@@ -15,7 +15,6 @@
 
 import json
 import sys
-from collections.abc import Mapping
 from pathlib import Path
 from shlex import quote
 from time import time
@@ -159,20 +158,19 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         self,
         *,
         sandbox: AsyncSandbox,
-        sandbox_id: Optional[str],
-        execution: Mapping[str, Any],
+        return_code: Any,
+        error_type: Any,
+        finished: bool,
     ) -> SandboxObservation:
         handle = getattr(sandbox, "_handle", None)
         handle_provider = getattr(handle, "provider_name", None)
         handle_sandbox_id = getattr(handle, "sandbox_id", None)
-        return_code = execution.get("return_code")
-        error_type = execution.get("error_type")
         normalized_error = error_type.lower() if isinstance(error_type, str) else ""
         if "timeout" in normalized_error:
             outcome = "timeout"
         elif normalized_error:
             outcome = "sandbox_error"
-        elif return_code == 0 and execution.get("finished") is True:
+        elif return_code == 0 and finished:
             outcome = "completed"
         elif isinstance(return_code, int):
             outcome = "failed" if return_code != 0 else "unknown"
@@ -181,7 +179,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         return SandboxObservation(
             role="agent",
             provider=handle_provider if isinstance(handle_provider, str) else None,
-            sandbox_id=handle_sandbox_id if isinstance(handle_sandbox_id, str) else sandbox_id,
+            sandbox_id=handle_sandbox_id if isinstance(handle_sandbox_id, str) else None,
             outcome=outcome,
             exit_code=return_code if not normalized_error and isinstance(return_code, int) else None,
             error_type=error_type if isinstance(error_type, str) else None,
@@ -356,7 +354,6 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         """
 
         opencode_config_content = json.dumps(await self._create_opencode_config(request))
-        sandbox_key = request.cookies["sandbox_id"]
         observation_invocation_id = getattr(request.state, "_ng_observation_invocation_id", None)
         observation_invocation_id = observation_invocation_id if isinstance(observation_invocation_id, str) else None
         collect_observations = observation_invocation_id is not None
@@ -480,6 +477,29 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         result_stderr = (result.stderr if result else "") or ""
         opencode_finished = "OpenCode run finished" in result_stdout
 
+        if collect_observations and observations is not None:
+            agent_sandbox_observation = self._agent_sandbox_observation(
+                sandbox=sandbox,
+                return_code=getattr(result, "return_code", None),
+                error_type=getattr(result, "error_type", None) or run_error_type,
+                finished=opencode_finished,
+            )
+            for record in observations.records:
+                if isinstance(record, ToolCallObservation):
+                    record.sandbox_id = agent_sandbox_observation.sandbox_id
+                elif isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
+                    status = {
+                        "completed": "completed",
+                        "failed": "failed",
+                        "sandbox_error": "failed",
+                        "timeout": "incomplete",
+                        "cancelled": "incomplete",
+                    }.get(agent_sandbox_observation.outcome)
+                    if status is not None:
+                        record.status = status
+            observations.records.append(agent_sandbox_observation)
+            observations.gaps.append(ObservationGap(code="sandbox_lifecycle_timing_unavailable"))
+
         run_result = {
             "opencode_results_fpath": str(results_local_fpath) if opencode_export_found else "",
             "opencode_run_stdout": result_stdout,
@@ -488,13 +508,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             "opencode_finished": opencode_finished,
         }
         if collect_observations:
-            run_result["_ng_agent_execution"] = {
-                "return_code": getattr(result, "return_code", None),
-                "error_type": getattr(result, "error_type", None) or run_error_type,
-                "finished": opencode_finished,
-            }
             run_result["_ng_agent_observations"] = observations
-        self._sandbox_id_to_run_result[sandbox_key] = run_result
+        self._sandbox_id_to_run_result[request.cookies["sandbox_id"]] = run_result
 
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
@@ -537,14 +552,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         request._cookies = cookies
         request.state._ng_observation_invocation_id = rollout_id
-        execution: Mapping[str, Any] = {}
         observations = None
         try:
             response = await self.responses(request, body.responses_create_params)
         finally:
             del request.state._ng_observation_invocation_id
             run_result = self._sandbox_id_to_run_result.get(session_key, {})
-            execution = run_result.pop("_ng_agent_execution", {})
             observations = run_result.pop("_ng_agent_observations", None)
 
         verify_request = OpenCodeSandboxedAgentVerifyRequest.model_validate(body.model_dump() | {"response": response})
@@ -582,26 +595,6 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     records=[AgentInvocation(invocation_id=rollout_id)],
                     gaps=[ObservationGap(code="observation_capture_failed")],
                 )
-            agent_sandbox_observation = self._agent_sandbox_observation(
-                sandbox=sandbox,
-                sandbox_id=provider_sandbox_id,
-                execution=execution,
-            )
-            for record in observations.records:
-                if isinstance(record, ToolCallObservation):
-                    record.sandbox_id = agent_sandbox_observation.sandbox_id
-                elif isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
-                    status = {
-                        "completed": "completed",
-                        "failed": "failed",
-                        "sandbox_error": "failed",
-                        "timeout": "incomplete",
-                        "cancelled": "incomplete",
-                    }.get(agent_sandbox_observation.outcome)
-                    if status is not None:
-                        record.status = status
-            observations.records.append(agent_sandbox_observation)
-            observations.gaps.append(ObservationGap(code="sandbox_lifecycle_timing_unavailable"))
             if raw_verifier_sandbox_observation is not None:
                 try:
                     verifier_observation = SandboxObservation.model_validate(raw_verifier_sandbox_observation)

@@ -30,7 +30,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ModelCallRef
+from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ModelCallRef, SandboxObservation
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.swe_agents.app import (
     ActiveContainerCommand,
@@ -348,11 +348,9 @@ class TestSWEBenchWrapperInstanceConfig:
             assert config.resolved_camel_case_tool_names is False
             serialized = config.model_dump()
             assert "rollout_id" not in serialized
-            assert serialized["model_call_capture_enabled"] is False
             assert serialized["token_id_capture_enabled"] is False
 
             restored = SWEBenchWrapperInstanceConfig.model_validate(serialized)
-            assert restored.model_call_capture_enabled is False
             assert restored.token_id_capture_enabled is False
 
 
@@ -377,8 +375,7 @@ class TestSWEBenchMetrics:
                 agent_peak_rss_mb=2048,
                 final_eval_time=3.0,
                 eval_timed_out=True,
-            ),
-            "test_run_123",
+            )
         )
 
         assert [(item.role, item.outcome) for item in observations] == [
@@ -387,7 +384,7 @@ class TestSWEBenchMetrics:
         ]
         assert observations[0].wall_time_s == 12.5
         assert observations[0].peak_memory_mib == 2048
-        assert observations[0].sandbox_id == "test_run_123"
+        assert observations[0].sandbox_id is None
         assert observations[0].cpu_time_s is None
         assert observations[0].resource_usage_source == "proc_tree_watchdog"
         assert observations[1].wall_time_s == 3.0
@@ -1264,28 +1261,25 @@ class TestOpenCodeHarnessProcessor:
             assert str(config.agent_max_turns) in script
 
     @pytest.mark.parametrize(
-        ("model_call_capture_enabled", "token_id_capture_enabled", "expected_base_url"),
+        ("rollout_id", "token_id_capture_enabled", "expected_base_url"),
         [
-            (False, False, "http://test-host:12345"),
-            (True, False, "http://test-host:12345/ng-rollout/7-2"),
-            (False, True, "http://test-host:12345/ng-rollout/7-2/training-token-capture"),
-            (True, True, "http://test-host:12345/ng-rollout/7-2/training-token-capture"),
+            (None, False, "http://test-host:12345"),
+            ("7-2", False, "http://test-host:12345/ng-rollout/7-2"),
+            ("7-2", True, "http://test-host:12345/ng-rollout/7-2/training-token-capture"),
         ],
-        ids=("disabled", "observability-only", "token-capture-only", "both"),
+        ids=("disabled", "observability", "token-capture"),
     )
     def test_get_run_command_routes_each_capture_state(
         self,
         _stub_model_server_lookup,
-        model_call_capture_enabled: bool,
+        rollout_id: str | None,
         token_id_capture_enabled: bool,
         expected_base_url: str,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            rollout_id = "7-2" if model_call_capture_enabled or token_id_capture_enabled else None
             config = self._opencode_config(
                 tmpdir,
                 rollout_id=rollout_id,
-                model_call_capture_enabled=model_call_capture_enabled,
                 token_id_capture_enabled=token_id_capture_enabled,
             )
             OpenCodeHarnessProcessor(config=config).get_run_command()
@@ -1476,8 +1470,7 @@ class TestOpencodeMultiSessionCopy:
 
             inst = agent.config.problem_info["instance_id"]
             comp_root = eval_dir / inst / "bench_run" / "llm_completions" / inst
-            # The existing copy path selects by mtime, even when artifact turn
-            # metadata orders the same files differently.
+            # main session: two turns (turn 0 older, turn 1 newer)
             _write_completion(comp_root / "m-0.json", session_id="ses_main", parent_session_id=None, turn=0)
             _write_completion(comp_root / "m-1.json", session_id="ses_main", parent_session_id=None, turn=1)
             # subagent A: one turn
@@ -1486,11 +1479,11 @@ class TestOpencodeMultiSessionCopy:
             _write_completion(comp_root / "b-0.json", session_id="ses_b", parent_session_id="ses_main", turn=0)
             _write_completion(comp_root / "b-1.json", session_id="ses_b", parent_session_id="ses_main", turn=1)
 
-            # Latest by mtime = m-0, a-0, b-1.
+            # Bump mtimes: latest = m-1, a-0, b-1.
             now = time.time()
             for name, off in [
-                ("m-0.json", 10),
-                ("m-1.json", 100),
+                ("m-0.json", 100),
+                ("m-1.json", 10),
                 ("a-0.json", 50),
                 ("b-0.json", 80),
                 ("b-1.json", 5),
@@ -1506,7 +1499,7 @@ class TestOpencodeMultiSessionCopy:
             copied = sorted((traj_root / "llm_completions" / inst).glob("*.json"))
             # 3 unique sessions → 3 files copied (latest from each).
             names = {p.name for p in copied}
-            assert names == {"m-0.json", "a-0.json", "b-1.json"}
+            assert names == {"m-1.json", "a-0.json", "b-1.json"}
 
     def test_falls_back_to_single_latest_when_files_untagged(self) -> None:
         """Openhands-style files (no session_id) bucket under "main" → one copy."""
@@ -1539,7 +1532,7 @@ class TestOpencodeMultiSessionCopy:
 
     def test_observation_failure_does_not_break_existing_copy_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            agent = self._agent(tmpdir, rollout_id="7-2", model_call_capture_enabled=True)
+            agent = self._agent(tmpdir, rollout_id="7-2")
             eval_dir = self._eval_dir(agent)
             inst = agent.config.instance_id
             comp_root = eval_dir / inst / "bench_run" / "llm_completions" / inst
@@ -1564,7 +1557,7 @@ class TestOpencodeMultiSessionCopy:
 
     def test_persists_all_response_ids_before_source_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            agent = self._agent(tmpdir, rollout_id="7-2", model_call_capture_enabled=True)
+            agent = self._agent(tmpdir, rollout_id="7-2")
             eval_dir = self._eval_dir(agent)
             inst = agent.config.instance_id
             comp_root = eval_dir / inst / "bench_run" / "llm_completions" / inst
@@ -2711,7 +2704,7 @@ class TestSWEBenchWrapperResponses:
                 rollout_id=rollout_id,
                 token_id_capture_enabled=token_id_capture_enabled,
             )
-            params.metrics_fpath.write_text("{}")
+            params.metrics_fpath.write_text(json.dumps({"openhands_run_time": 1.0}))
             observations = AgentObservationBundle(
                 source="swe_openhands",
                 records=[
@@ -2742,6 +2735,10 @@ class TestSWEBenchWrapperResponses:
                 [invocation] = [record for record in bundle.records if isinstance(record, AgentInvocation)]
                 assert [ref.response_id for ref in invocation.model_calls] == ["resp-openhands-0"]
                 assert "model_call_capture_correlation_unavailable" in {gap.code for gap in bundle.gaps}
+                [sandbox] = [record for record in bundle.records if isinstance(record, SandboxObservation)]
+                assert sandbox.role == "agent"
+                assert sandbox.sandbox_id is None
+                assert ("sandbox_identity_unavailable", "agent") in {(gap.code, gap.detail) for gap in bundle.gaps}
 
 
 class TestSWEBenchWrapperRun:
@@ -2820,7 +2817,6 @@ class TestSWEBenchWrapperRun:
             assert result.ng_agent_observations == (observations if expected_rollout_id is not None else None)
             assert responses_mock.await_args.args[1] == expected_rollout_id
             assert responses_mock.await_args.kwargs == {
-                "model_call_capture_enabled": model_call_capture_enabled,
                 "token_id_capture_enabled": token_id_capture_enabled,
             }
 

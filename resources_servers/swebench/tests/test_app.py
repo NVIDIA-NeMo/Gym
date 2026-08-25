@@ -135,14 +135,21 @@ class TestApp:
         assert observation.outcome == "completed"
         assert observation.exit_code == 7
         assert observation.wall_time_s == 3.5
-        assert observation.cpu_time_s is None
-        assert observation.peak_memory_mib is None
 
     async def test_timeout_is_observed_without_changing_harness_timeout_behavior(self) -> None:
-        sandbox = make_sandbox(exec_error=TimeoutError("timed out"))
+        sandbox = make_sandbox(
+            exec_result=SandboxExecResult(
+                stdout=None,
+                stderr="backend failed",
+                return_code=125,
+                error_type="sandbox",
+            )
+        )
         container = DockerContainer(id="run-id", instance_id="instance-id")
         container._inner_container = sandbox
 
+        await container.exec_run("git apply patch.diff")
+        sandbox.exec.side_effect = TimeoutError("timed out")
         test_output, timed_out, _ = await container.exec_run_with_timeout("/bin/bash /eval.sh", timeout=60)
         observation = container.observation(wall_time_s=60.0, evaluation_completed=False)
 

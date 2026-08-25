@@ -74,7 +74,6 @@ from nemo_gym.server_utils import apply_rollout_prefix, get_first_server_config_
 from responses_api_agents.swe_agents.observability import (
     OBSERVATIONS_FILENAME,
     build_swe_observations,
-    latest_completion_paths,
     materialize_completion,
     sandbox_observations_from_metrics,
 )
@@ -228,7 +227,6 @@ class ExecuteContainerCommandArgs(BaseModel):
 
 class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapperConfig):
     rollout_id: Optional[str] = Field(default=None, exclude_if=lambda value: value is None)
-    model_call_capture_enabled: bool = False
     token_id_capture_enabled: bool = False
     metrics_fpath: Path
     problem_info: Dict[str, Any]
@@ -2515,7 +2513,6 @@ class RunOpenHandsAgent(BaseModel):
             str(eval_dir_on_host / "**" / "llm_completions" / "*" / "*.json"),
             recursive=True,
         )
-        retained = latest_completion_paths(Path(path) for path in completion_candidates)
         if self.config.rollout_id is not None:
             try:
                 observations = build_swe_observations(
@@ -2537,9 +2534,28 @@ class RunOpenHandsAgent(BaseModel):
             except OSError:
                 pass
 
-        # Keep only the cumulative artifact selected for each invocation.
-        for path in retained:
-            shutil.copy2(path, llm_completions_dir / path.name)
+        # When subagents are enabled (opencode) we get multiple sessions, each
+        # writing its own per-turn JSONs. Group by session_id (from the file
+        # payload) and copy each session's most recent turn — that file's
+        # `messages` field carries the full cumulative history for the session.
+        if completion_candidates:
+            latest_per_session: dict[str, str] = {}
+            session_mtime: dict[str, float] = {}
+            for path_str in completion_candidates:
+                sess_id = "main"
+                try:
+                    with open(path_str, "r") as f:
+                        payload = json.load(f)
+                    if isinstance(payload, dict) and payload.get("session_id"):
+                        sess_id = str(payload["session_id"])
+                except (OSError, UnicodeError, json.JSONDecodeError):
+                    pass
+                mtime = os.path.getmtime(path_str)
+                if mtime > session_mtime.get(sess_id, -1):
+                    session_mtime[sess_id] = mtime
+                    latest_per_session[sess_id] = path_str
+            for path_str in latest_per_session.values():
+                shutil.copy2(path_str, llm_completions_dir / Path(path_str).name)
 
         shutil.rmtree(eval_dir_on_host, ignore_errors=True)
         try:
@@ -3521,7 +3537,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         body: NeMoGymResponseCreateParamsNonStreaming,
         rollout_id: Optional[str] = None,
         *,
-        model_call_capture_enabled: bool = False,
         token_id_capture_enabled: bool = False,
     ) -> Tuple[SWEBenchWrapperInstanceConfig, BaseDatasetHarnessProcessor]:
         problem_info = body.metadata | {"container_formatter": self.config.container_formatter}
@@ -3597,7 +3612,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             **self.config.model_dump(),
             **self._swe_bench_wrapper_server_config.model_dump(),
             rollout_id=rollout_id,
-            model_call_capture_enabled=model_call_capture_enabled,
             token_id_capture_enabled=token_id_capture_enabled,
             problem_info=problem_info,
             body=body,
@@ -3680,13 +3694,11 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         body: NeMoGymResponseCreateParamsNonStreaming,
         rollout_id: Optional[str] = None,
         *,
-        model_call_capture_enabled: bool = False,
         token_id_capture_enabled: bool = False,
     ) -> NeMoGymResponse:
         params, dataset_processor = self._setup_params(
             body,
             rollout_id,
-            model_call_capture_enabled=model_call_capture_enabled,
             token_id_capture_enabled=token_id_capture_enabled,
         )
 
@@ -3827,10 +3839,14 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                     )
                 )
             sandbox_observations = sandbox_observations_from_metrics(updated_metrics)
-            for sandbox in sandbox_observations:
-                sandbox.sandbox_id = f"{params.agent_run_id}:{sandbox.role}"
             observations.records.extend(sandbox_observations)
             for sandbox in sandbox_observations:
+                observations.gaps.append(
+                    ObservationGap(
+                        code="sandbox_identity_unavailable",
+                        detail=sandbox.role,
+                    )
+                )
                 if sandbox.cpu_time_s is None:
                     observations.gaps.append(
                         ObservationGap(
@@ -3889,12 +3905,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             body.responses_create_params.tool_choice = "auto"
 
             rollout_id = self.rollout_id_from_run(body)
-            model_call_capture_enabled = self._model_call_capture_enabled()
             token_id_capture_enabled = self._token_id_capture_enabled()
             response = await self._responses(
                 body.responses_create_params,
                 rollout_id,
-                model_call_capture_enabled=model_call_capture_enabled,
                 token_id_capture_enabled=token_id_capture_enabled,
             )
 
