@@ -96,6 +96,10 @@ class BaseVerifyRequest(BaseRunRequest):
 class BaseVerifyResponse(BaseVerifyRequest):
     reward: float
 
+    # Human-readable diagnosis of why `reward` may not reflect policy quality.
+    # Machine-readable handling belongs to `mask_sample`/`failure_kind`.
+    failure_reason: Optional[str] = None
+
 
 class BaseMultiRewardVerifyResponse(BaseVerifyResponse):
     """Base verify response for environments with multiple reward objectives.
