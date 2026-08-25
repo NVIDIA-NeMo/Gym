@@ -37,12 +37,16 @@ from nemo_gym.rollout_collection import (
     _DEFAULT_MAX_ROLLOUT_ATTEMPTS,
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
+    NG_PERF_KEY,
+    NG_TRAJECTORY_KEY,
     E2ERolloutCollectionConfig,
     RolloutAggregationConfig,
     RolloutAggregationHelper,
     RolloutCollectionConfig,
     RolloutCollectionHelper,
+    _attach_ng_perf,
     _attach_trajectory_record,
+    _build_ng_perf,
     _build_trajectory_record,
     _expand_input_glob,
     _failures_path_for,
@@ -340,6 +344,168 @@ class TestRolloutCollection:
             sanitized = _rollout_for_export(malformed_result)
             assert b"secret" not in orjson.dumps(sanitized)
 
+    def test_build_ng_perf_absent_without_trajectory(self) -> None:
+        assert _build_ng_perf({}, rollout_latency_ms=12.0) is None
+        assert _build_ng_perf({NG_TRAJECTORY_KEY: "not-a-dict"}, rollout_latency_ms=12.0) is None
+
+    def test_build_ng_perf_absent_when_trajectory_invalid(self) -> None:
+        result = {NG_TRAJECTORY_KEY: {"invocations": [{"invocation_id": "root"}, {"invocation_id": "root"}]}}
+        assert _build_ng_perf(result, rollout_latency_ms=12.0) is None
+
+    def test_build_ng_perf_absent_without_invocations(self) -> None:
+        result = {NG_TRAJECTORY_KEY: {"task_id": "t", "rollout_id": "t-0", "invocations": []}}
+        assert _build_ng_perf(result, rollout_latency_ms=12.0) is None
+
+    def test_build_ng_perf_sums_owned_calls_and_matched_tool_calls(self) -> None:
+        result = {
+            NG_TRAJECTORY_KEY: {
+                "task_id": "t",
+                "rollout_id": "t-0",
+                "invocations": [
+                    {
+                        "invocation_id": "root",
+                        "model_calls": [{"model_call_id": "call-1"}],
+                    },
+                    {
+                        "invocation_id": "sub",
+                        "model_calls": [{"model_call_id": "call-2"}, {"model_call_id": "unresolved-response"}],
+                    },
+                ],
+                "tool_calls": [
+                    {"invocation_id": "root", "tool_call_id": "t1"},
+                    {"invocation_id": "sub", "tool_call_id": "t2"},
+                    {"invocation_id": "sub", "tool_call_id": "t3"},
+                    # Orphaned: no invocation in this trajectory owns "ghost".
+                    {"invocation_id": "ghost", "tool_call_id": "t4"},
+                ],
+                "model_calls": [
+                    {
+                        "model_call_id": "call-1",
+                        "token_stats": {
+                            "prompt_tokens": 100,
+                            "completion_tokens": 20,
+                            "cached_tokens": 10,
+                        },
+                    },
+                    {
+                        "model_call_id": "call-2",
+                        "token_stats": {
+                            "prompt_tokens": 50,
+                            "completion_tokens": 5,
+                            "reasoning_tokens": 3,
+                        },
+                    },
+                    # Present in raw capture but never referenced by any invocation's
+                    # model_calls (e.g. compaction-owned, or unjoined) -- must not be summed.
+                    {
+                        "model_call_id": "unowned",
+                        "token_stats": {"prompt_tokens": 999, "completion_tokens": 999},
+                    },
+                ],
+            }
+        }
+
+        ng_perf = _build_ng_perf(result, rollout_latency_ms=1234.5)
+
+        assert ng_perf == {
+            "num_turns": 2,
+            "num_tool_calls": 3,
+            "prompt_tokens": 150,
+            "cached_prompt_tokens": 10,
+            "completion_tokens": 25,
+            "reasoning_tokens": 3,
+            "total_latency_ms": 1234.5,
+        }
+
+    def test_build_ng_perf_omits_absent_token_fields_and_latency(self) -> None:
+        # No model_calls/tool_calls at all on the trajectory, and no independent latency
+        # measurement, so every optional ng_perf field must be *absent*, not present-as-None.
+        result = {
+            NG_TRAJECTORY_KEY: {
+                "task_id": "t",
+                "rollout_id": "t-0",
+                "invocations": [{"invocation_id": "root"}],
+            }
+        }
+
+        ng_perf = _build_ng_perf(result, rollout_latency_ms=None)
+
+        for absent_key in (
+            "prompt_tokens",
+            "cached_prompt_tokens",
+            "completion_tokens",
+            "reasoning_tokens",
+            "total_latency_ms",
+        ):
+            assert absent_key not in ng_perf
+        assert ng_perf == {"num_turns": 1, "num_tool_calls": 0}
+
+    def test_build_ng_perf_dedupes_model_call_claimed_by_two_invocations(self) -> None:
+        # Simulates a join_model_call_observations conflict: the losing invocation keeps an
+        # unresolved ref pointing at a model_call_id another invocation already claimed. Tokens
+        # for that call must be counted once, not twice.
+        result = {
+            NG_TRAJECTORY_KEY: {
+                "task_id": "t",
+                "rollout_id": "t-0",
+                "invocations": [
+                    {"invocation_id": "root", "model_calls": [{"model_call_id": "shared"}]},
+                    {"invocation_id": "sub", "model_calls": [{"model_call_id": "shared"}]},
+                ],
+                "model_calls": [
+                    {"model_call_id": "shared", "token_stats": {"prompt_tokens": 100, "completion_tokens": 10}},
+                ],
+            }
+        }
+
+        ng_perf = _build_ng_perf(result, rollout_latency_ms=None)
+
+        # Both invocations are still real, distinct turns -- the dedup applies only to token
+        # attribution, not to num_turns, which must still count both.
+        assert ng_perf["num_turns"] == 2
+        assert ng_perf["prompt_tokens"] == 100
+        assert ng_perf["completion_tokens"] == 10
+
+    def test_attach_ng_perf_absent_when_observability_disabled(self) -> None:
+        result = {
+            "_ng_rollout_latency_ms": 42.0,
+            NG_TRAJECTORY_KEY: {
+                "task_id": "t",
+                "rollout_id": "t-0",
+                "invocations": [{"invocation_id": "root"}],
+            },
+        }
+
+        _attach_ng_perf(result, observability_enabled=False)
+
+        assert NG_PERF_KEY not in result
+        assert "_ng_rollout_latency_ms" not in result
+
+    def test_attach_ng_perf_sets_ng_perf_when_enabled(self) -> None:
+        result = {
+            "_ng_rollout_latency_ms": 42.0,
+            NG_TRAJECTORY_KEY: {
+                "task_id": "t",
+                "rollout_id": "t-0",
+                "invocations": [{"invocation_id": "root"}],
+            },
+        }
+
+        _attach_ng_perf(result, observability_enabled=True)
+
+        assert result[NG_PERF_KEY] == {"num_turns": 1, "num_tool_calls": 0, "total_latency_ms": 42.0}
+        assert "_ng_rollout_latency_ms" not in result
+
+    def test_attach_ng_perf_swallows_build_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # An unexpected assembly failure must never take down rollout collection over an observability side-channel.
+        result = {"_ng_rollout_latency_ms": 42.0, NG_TRAJECTORY_KEY: {}}
+        monkeypatch.setattr(nemo_gym.rollout_collection, "_build_ng_perf", MagicMock(side_effect=ValueError))
+
+        _attach_ng_perf(result, observability_enabled=True)
+
+        assert NG_PERF_KEY not in result
+        assert "_ng_rollout_latency_ms" not in result
+
     @pytest.mark.parametrize("request_debug_enabled", [True, False])
     async def test_run_examples_logs_failed_run_when_request_debug_enabled(
         self,
@@ -390,6 +556,24 @@ class TestRolloutCollection:
             assert "do not log this" not in captured.out
         else:
             assert "[rollout_collection] /run failed" not in captured.out
+
+    async def test_run_examples_stamps_independent_rollout_latency(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        row = {AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+        response = MagicMock()
+        response.status = 200
+
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(return_value=response)
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
+        )
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"response": {}}))
+
+        _, result = await next(RolloutCollectionHelper().run_examples([row]))
+
+        assert isinstance(result["_ng_rollout_latency_ms"], float)
+        assert result["_ng_rollout_latency_ms"] >= 0
 
     def test_preprocess_rows_with_prompt_config(self, tmp_path: Path) -> None:
         """prompt_config builds responses_create_params.input from template."""

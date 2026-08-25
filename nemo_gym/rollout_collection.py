@@ -39,6 +39,7 @@ from nemo_gym.base_responses_api_model import (
     clear_model_call_captures_for_rollouts,
     merge_model_call_capture_into_record,
     model_call_capture_dirs_from_config,
+    observability_enabled_from_config,
 )
 from nemo_gym.config_types import (
     BaseNeMoGymCLIConfig,
@@ -135,6 +136,8 @@ NG_FAILURE_CLASS_KEY = "_ng_failure_class"
 NG_NO_PERSIST_KEY = "_ng_no_persist"
 NG_TERMINAL_KEY = "_ng_failure_terminal"
 NG_TRAJECTORY_KEY = "ng_trajectory"
+NG_PERF_KEY = "ng_perf"
+_NG_ROLLOUT_LATENCY_MS_KEY = "_ng_rollout_latency_ms"
 _MODEL_CALL_PAYLOAD_KEYS = ("request", "response", "request_raw", "response_raw")
 
 _DEFAULT_MAX_ROLLOUT_ATTEMPTS = 3
@@ -381,6 +384,85 @@ def _attach_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> No
         # Raw capture payloads remain as a fallback on failure. After success,
         # ng_trajectory owns them, so remove only the duplicate copies.
         _strip_capture_payloads(result)
+
+
+def _build_ng_perf(result: dict[str, Any], *, rollout_latency_ms: Optional[float]) -> Optional[dict[str, Any]]:
+    """Assemble the per-rollout ``ng_perf`` summary from ``ng_trajectory``.
+
+    Returns ``None`` (``ng_perf`` stays absent) unless at least one reasoning turn was
+    observed: per-turn evidence is needed rather than just raw model-call capture,
+    so a rollout collected with observability disabled produces no ``ng_perf`` at all.
+
+    Token fields are summed only over model calls owned by a reasoning-turn ``AgentInvocation``,
+    excluding compaction calls -- mixing in compaction overhead would skew the token efficiency signal.
+    """
+    raw_trajectory = result.get(NG_TRAJECTORY_KEY)
+    if not isinstance(raw_trajectory, dict):
+        return None
+    try:
+        trajectory = TrajectoryRecord.model_validate(raw_trajectory)
+    except Exception:
+        return None
+    if not trajectory.invocations:
+        return None
+
+    calls_by_id = {call.model_call_id: call for call in trajectory.model_calls if call.model_call_id}
+    # De-duplicate by model_call_id rather than trusting each invocation's claim in isolation:
+    # join_model_call_observations leaves a conflicted ref attached to its losing invocation
+    # (unremoved, just gap-flagged), so if a ref ever carries a real model_call_id pre-join, two
+    # invocations could otherwise claim -- and double-count -- the same physical call.
+    seen_call_ids: set[str] = set()
+    owned_calls = []
+    for invocation in trajectory.invocations:
+        for ref in invocation.model_calls:
+            if ref.model_call_id not in calls_by_id or ref.model_call_id in seen_call_ids:
+                continue
+            seen_call_ids.add(ref.model_call_id)
+            owned_calls.append(calls_by_id[ref.model_call_id])
+    tool_calls_by_invocation = Counter(tool.invocation_id for tool in trajectory.tool_calls)
+    num_tool_calls = sum(
+        tool_calls_by_invocation.get(invocation.invocation_id, 0) for invocation in trajectory.invocations
+    )
+
+    def _sum_tokens(attr: str) -> Optional[int]:
+        values = [
+            getattr(call.token_stats, attr) for call in owned_calls if getattr(call.token_stats, attr) is not None
+        ]
+        return sum(values) if values else None
+
+    ng_perf: dict[str, Any] = {
+        "num_turns": len(trajectory.invocations),
+        "num_tool_calls": num_tool_calls,
+    }
+    for ng_perf_key, token_stats_attr in (
+        ("prompt_tokens", "prompt_tokens"),
+        ("cached_prompt_tokens", "cached_tokens"),
+        ("completion_tokens", "completion_tokens"),
+        ("reasoning_tokens", "reasoning_tokens"),
+    ):
+        value = _sum_tokens(token_stats_attr)
+        if value is not None:
+            ng_perf[ng_perf_key] = value
+
+    if isinstance(rollout_latency_ms, (int, float)):
+        ng_perf["total_latency_ms"] = rollout_latency_ms
+
+    return ng_perf
+
+
+def _attach_ng_perf(result: dict[str, Any], *, observability_enabled: bool) -> None:
+    rollout_latency_ms = result.pop(_NG_ROLLOUT_LATENCY_MS_KEY, None)
+    if not observability_enabled:
+        # ng_perf stays absent entirely when observability is off (OQ4): a caller who
+        # disabled it only wants the final score, not partial/best-effort perf evidence.
+        return
+    try:
+        ng_perf = _build_ng_perf(result, rollout_latency_ms=rollout_latency_ms)
+    except Exception:
+        logger.warning("Could not assemble ng_perf for a rollout.", exc_info=True)
+        return
+    if ng_perf is not None:
+        result[NG_PERF_KEY] = ng_perf
 
 
 def _get_max_rollout_attempts() -> int:
@@ -1003,6 +1085,7 @@ class RolloutCollectionHelper(BaseModel):
         # into its record below (uniform across agents; no-op when capture is off / dirs absent).
         global_config = get_global_config_dict()
         capture_dirs = model_call_capture_dirs_from_config(global_config)
+        observability_enabled = observability_enabled_from_config(global_config)
         # Resolve the training-token store directory once.
         # Training capture is independent of evaluation capture.
         # An empty result disables training-token capture.
@@ -1086,6 +1169,11 @@ class RolloutCollectionHelper(BaseModel):
 
             if "ng_model_call_capture" in result or "ng_agent_observations" in result or NG_TRAJECTORY_KEY in result:
                 _attach_trajectory_record(row, result)
+
+            # Assembles ng_perf from ng_trajectory when observability is enabled;
+            # additionally drops the internal wall-clock timer key so it never
+            # leaks into a persisted rollout.
+            _attach_ng_perf(result, observability_enabled=observability_enabled)
 
             # Freeze and rebuild tokens only for participating agents.
             # This step does not retire the frozen snapshot.
@@ -1487,6 +1575,7 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
 
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:
+                started_at = time()
                 res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
                 try:
                     await raise_for_status(res)
@@ -1499,7 +1588,11 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
                             flush=True,
                         )
                     raise
-                return row, await get_response_json(res)
+                result = await get_response_json(res)
+                # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
+                # from summed model-call/tool latencies to account for additional overhead.
+                result[_NG_ROLLOUT_LATENCY_MS_KEY] = (time() - started_at) * 1000
+                return row, result
 
         return tqdm.as_completed(
             map(_post_subroutine, examples),

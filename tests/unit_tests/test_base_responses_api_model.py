@@ -613,6 +613,18 @@ def test_model_call_capture_config_requires_absolute_dir_when_enabled(tmp_path, 
     assert model_call_capture_dirs_from_config(nested_config) == []
 
 
+def test_observability_enabled_from_config(tmp_path):
+    from nemo_gym.base_responses_api_model import observability_enabled_from_config
+
+    assert observability_enabled_from_config({}) is False
+
+    global_config = OmegaConf.create({"observability_enabled": True, "model_call_capture_dir": str(tmp_path)})
+    assert observability_enabled_from_config(global_config) is True
+
+    with pytest.raises(ValueError, match="required"):
+        observability_enabled_from_config({"observability_enabled": True})
+
+
 def test_make_capture_store_init_failure_returns_none(monkeypatch):
     import nemo_gym.base_responses_api_model as obs
 
