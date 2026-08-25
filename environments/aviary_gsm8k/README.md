@@ -1,6 +1,6 @@
 # GSM8K (Aviary)
 
-This environment exposes [GSM8K](https://arxiv.org/abs/2110.14168) through the [Aviary](https://github.com/Future-House/aviary) calculator environment.
+This environment runs [GSM8K](https://arxiv.org/abs/2110.14168) through [Aviary](https://github.com/Future-House/aviary). It is a math question-answering environment with a calculator tool.
 
 The commands below assume that a model endpoint is configured with `policy_base_url`, `policy_model_name`, and `policy_api_key` in `env.yaml`. See the [local configuration documentation](https://docs.nvidia.com/nemo/gym/reference/configuration#local-configuration-envyaml).
 
