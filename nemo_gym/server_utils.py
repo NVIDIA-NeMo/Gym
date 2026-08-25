@@ -327,8 +327,8 @@ class ServerClient(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    # Cached server_name -> base_url lookup populated lazily by request()
-    _server_base_urls: dict = PrivateAttr(default_factory=dict)
+    # Resolved base URLs, cached by server name.
+    _server_base_urls: dict[str, str] = PrivateAttr(default_factory=dict)
 
     @classmethod
     def load_head_server_config(cls) -> BaseServerConfig:
@@ -339,15 +339,15 @@ class ServerClient(BaseModel):
 
     @classmethod
     def load_from_global_config(cls, head_server_config: Optional[BaseServerConfig] = None) -> "ServerClient":
-        """Build a `ServerClient` from the merged global config dict.
+        """Build a client from the fully resolved global config.
 
-        Uses the in-process global config dict when available.
-        Otherwise falls back to fetching the YAML from the head server over HTTP.
+        Gym-launched server processes reuse the config injected by their parent.
+        Other processes fetch the config from the head server.
         """
         if head_server_config is None:
             head_server_config = cls.load_head_server_config()
 
-        if _has_local_global_config():
+        if _has_injected_global_config_env():
             return cls(
                 head_server_config=head_server_config,
                 global_config_dict=get_global_config_dict(),
@@ -473,7 +473,7 @@ class ServerClient(BaseModel):
         return f"http://{server_config_dict.host}:{server_config_dict.port}"
 
 
-def _has_local_global_config() -> bool:
+def _has_injected_global_config_env() -> bool:
     return getenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME) is not None
 
 
@@ -826,7 +826,7 @@ Full body: {json.dumps(exc.body, indent=4)}
 class HeadServer(BaseServer):
     config: BaseServerConfig
     _server_instances: List[dict] = []
-    # Cached YAML serialization of the global config dict, which is immutable post-startup
+    # Serialized global config returned to clients.
     _cached_yaml: Optional[str] = None
 
     def setup_webserver(self) -> FastAPI:
@@ -845,7 +845,7 @@ class HeadServer(BaseServer):
         self._server_instances = instances
 
     def invalidate_global_config_dict_yaml_cache(self) -> None:
-        """Forget the cached YAML; the next call to `global_config_dict_yaml will re-serialize."""
+        """Clear the serialized global config cache."""
         self._cached_yaml = None
 
     @classmethod
