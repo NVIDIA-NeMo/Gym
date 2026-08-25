@@ -115,32 +115,33 @@ per test plan; wall-clock is tens of minutes and the box needs headroom for
 
 ## Validation
 
-Run end to end on a Docker host. All five example tasks graded, and the reward tracks model
-capability rather than merely completing:
+Run end to end on a Docker host against the code in this branch. All five example tasks
+graded, 16/16 test plans, no build or seeding failures:
 
 | app | reward | plans graded |
 | --- | --- | --- |
 | barber | 1.00 | 3/3 |
 | quiz | 1.00 | 3/3 |
+| notes | 1.00 | 3/3 |
 | market_place | 0.97 | 3/3 |
-| wedding | 0.51 | 4/4 |
-| notes | 0.00 | 0/3 |
+| wedding | 0.20 | 4/4 |
 
-Mean 0.696. The spread matters more than the mean: `wedding` at roughly half marks shows the
-scale is not saturated, and `market_place` at 0.97 shows partial credit works. `notes` scored
-zero because that build crashed on startup (`Cannot read properties of undefined` in its DB
-init), which the grader attributed correctly rather than reporting as a harness error.
+Mean 0.834. The spread is the point: `wedding` well below the rest shows the scale is not
+saturated, and `market_place` at 0.97 shows partial credit works. `data/example_rollouts.jsonl`
+holds this run.
 
-An earlier run of the same task with a weaker policy model scored 0.0 with 0/19 steps, so the
-environment discriminates between models. `data/example_rollouts.jsonl` holds the five-task run.
+The reward tracks model capability. An earlier run of `notes` with a weaker policy model
+scored 0.0 with 0/19 steps, its app unreachable because the build produced no output, while
+the stronger model scores 1.0 on the same task with the same graders.
 
-Reward varies across repeats because the model does not build the same app twice — `notes`
-scored 1.00 in one run and 0.00 in another. That is a property to measure during reward
-profiling, not a defect; profiling with repeats is what separates model variance from any
-variance in the LLM-driven verifier.
+Reward also varies across repeats of the *same* model, because the model does not build the
+same app twice: `notes` has scored both 0.00 and 1.00, and `wedding` both 0.20 and 0.51. That
+is a property to quantify during reward profiling rather than a defect. Profiling with repeats
+is also what would separate this build-to-build variance from any variance contributed by the
+LLM-driven verifier, which is not yet measured.
 
 `verified: false` still stands: that flag means baselined and reviewed, which needs a
-profiling sweep across many tasks, not five.
+profiling sweep across many tasks and repeats, not five single rollouts.
 
 ## P0 limitations
 
