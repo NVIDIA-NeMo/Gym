@@ -295,12 +295,12 @@ idegym = [
     # server start/exec/stop against an IdeGYM orchestrator. Pulls in idegym-api and
     # idegym-common-utils (its request/response models and logging helpers).
     # Lower bound 0.11.1: the first release whose start-server API carries the pod_spec
-    # overrides and max_restarts fields the provider passes through. Upper bound <0.12:
-    # the SDK is pre-1.0, and the provider depends on the shape of its client and server
-    # operation classes; the SDK-conformance unit test guards raising this ceiling.
-    # Updated: Wed Aug 19, 2026 with idegym-client>=0.11.1,<0.12
+    # overrides and max_restarts fields the provider passes through. No upper bound, so
+    # new IdeGYM releases are picked up as they ship; the SDK-conformance unit test is
+    # what catches a change to the client and server operation shapes the provider uses.
+    # Updated: Wed Aug 19, 2026 with idegym-client>=0.11.1
     # License: Apache 2.0 https://github.com/JetBrains-Research/idegym/blob/main/LICENSE
-    "idegym-client>=0.11.1,<0.12",
+    "idegym-client>=0.11.1",
 
     # httpx-aiohttp: the IdeGYM provider swaps the SDK's httpx transport for this
     # aiohttp-backed one. Without it the provider falls back to raw httpx, whose

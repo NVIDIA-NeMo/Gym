@@ -352,8 +352,8 @@ def test_attribution_can_be_disabled() -> None:
 async def test_session_calls_bind_against_the_installed_sdk() -> None:
     """Bind the session's exact SDK call shapes against the installed signatures.
 
-    The provider talks to IdeGYM only through these calls, so this is what catches
-    a pre-1.0 SDK changing its argument names underneath the pinned range.
+    The provider talks to IdeGYM only through these calls, and the dependency carries no
+    upper bound, so this is the guard against a pre-1.0 SDK renaming an argument.
     """
     import inspect
 
