@@ -73,10 +73,10 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
     # and a read-only bash_command tool is exposed for the model to grep/read them.
     workspace: str = "none"
     workspace_root: Optional[str] = None  # default: $BROWSECOMP_WS_ROOT or /tmp/browsecomp_ws
-    bash_timeout_s: float = 60.0  # match bc_frankie's _BASH_MAX_DURATION_S
+    bash_timeout_s: float = 60.0  # match the reference harness's _BASH_MAX_DURATION_S
     bash_max_concurrency: int = 64
     max_page_bytes: int = 2_000_000  # cap per-page bytes written to disk
-    # Results returned per search query (both providers). The bc_frankie Exa
+    # Results returned per search query (both providers). The reference Exa
     # reference uses 10; its Tavily path (and this harness historically) uses 5.
     max_results: int = 5
 
@@ -191,7 +191,7 @@ class TavilySearchSingleAsyncTavilyMetrics(BaseModel):
     start_time: float
     end_time: float
     time_taken: Optional[float] = None
-    # Retry counts for THIS provider request: true 429s exactly (bc_frankie
+    # Retry counts for THIS provider request: true 429s exactly (the reference harness
     # parity: status == 429), everything else retryable (500/502/503/504/520)
     # separately — never conflated.
     num_429_retries: int = 0
@@ -400,7 +400,7 @@ class ExaAIOHTTPClient(BaseModel):
 
 # ---------------------------------------------------------------------------
 # Terminal/disk mode: per-session page workspace (pages/ + manifest.tsv) and a
-# read-only bash tool. Ported from the bc_frankie harness.
+# read-only bash tool. Ported from the reference harness.
 # ---------------------------------------------------------------------------
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _URL_RE = re.compile(r"https?://([^/]+)(/.*)?")
@@ -729,7 +729,7 @@ def _last_assistant_text(response) -> str:
     """Text of the LAST assistant message item in response.output (the model's final answer).
     Replaces Response.output_text, which CONCATENATES every assistant message item — wrong when
     the model emits text alongside tool calls mid-trajectory (~49% of BrowseComp samples). Also
-    aligns with bc_frankie, which grades only the final message."""
+    aligns with the reference harness, which grades only the final message."""
     text = ""
     for item in response.output:
         if getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant":
@@ -763,7 +763,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         if isinstance(tavily_api_keys, str):
             tavily_api_keys = [tavily_api_keys]
 
-        # Optional Tavily client-source identity header (matches bc_frankie's
+        # Optional Tavily client-source identity header (matches the reference harness's
         # x-client-source). Value comes ONLY from the env (TAVILY_CLIENT_SOURCE);
         # not hardcoded. Empty/unset => header not sent.
         client_source = os.environ.get("TAVILY_CLIENT_SOURCE", "")
@@ -948,7 +948,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
     async def _exa_search_one(self, query: str, max_length: int, metrics: "TavilySearchMetrics") -> str:
         """Exa search: highlight snippets returned INLINE (never written to pages/, even in
-        terminal mode). Mirrors the bc_frankie Exa harness formatting exactly."""
+        terminal mode). Mirrors the reference Exa harness formatting exactly."""
         if len(query) > 400:
             return "Query is too long"
 
@@ -1017,7 +1017,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         self, query: str, page_writer: "_PageWriter", max_per_query: int, metrics: "TavilySearchMetrics"
     ) -> str:
         """Terminal mode: run one search, write each result's raw content to disk, return
-        title/url/snippet/[Saved to] metadata. Mirrors the bc_frankie harness tavily_search
+        title/url/snippet/[Saved to] metadata. Mirrors the reference harness tavily_search
         (disk mode) formatting exactly."""
         client = self._select_tavily_client()
         call_start = time()
@@ -1148,7 +1148,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         page_writer = self._get_page_writer(request.session[SESSION_ID_KEY])
         if page_writer is not None:
             # terminal mode: write each page to disk, return metadata + preview.
-            # Mirrors the bc_frankie harness tavily_extract (disk mode) formatting exactly.
+            # Mirrors the reference harness tavily_extract (disk mode) formatting exactly.
             blocks = []
             for result in result_list:
                 url = result.get("url", "") or ""
