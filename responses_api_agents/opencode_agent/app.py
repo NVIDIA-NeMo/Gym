@@ -83,7 +83,7 @@ def _milliseconds(value: Any) -> Optional[float]:
     return float(value) / 1000
 
 
-def parse_opencode_observations(db_path: Path, fallback_invocation_id: str) -> AgentObservationBundle:
+def _parse_opencode_session(db_path: Path, fallback_invocation_id: str) -> AgentObservationBundle:
     """Read OpenCode's persisted session tree before its workspace is removed."""
     if not db_path.is_file():
         return AgentObservationBundle(
@@ -653,7 +653,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             observations = AgentObservationBundle(source="opencode")
             if collect_observations:
                 try:
-                    observations = parse_opencode_observations(db_path, invocation_id)
+                    observations = _parse_opencode_session(db_path, invocation_id)
                 except Exception:
                     LOG.exception("failed to read OpenCode session artifact")
                     observations = AgentObservationBundle(

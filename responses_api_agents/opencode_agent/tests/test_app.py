@@ -40,7 +40,7 @@ from responses_api_agents.opencode_agent.app import (
     OpenCodeAgentConfig,
     OpenCodeAgentRunRequest,
     _extract_instruction,
-    parse_opencode_observations,
+    _parse_opencode_session,
     parse_opencode_session,
 )
 
@@ -264,7 +264,7 @@ class TestParseOpencodeSession:
             sessions=[("root", None), ("child", "root")],
         )
 
-        bundle = parse_opencode_observations(db, "fallback")
+        bundle = _parse_opencode_session(db, "fallback")
 
         root, child = _invocations(bundle)
         assert child.parent_invocation_id == root.invocation_id
@@ -301,7 +301,7 @@ class TestParseOpencodeSession:
             ],
         )
 
-        bundle = parse_opencode_observations(db, "fallback")
+        bundle = _parse_opencode_session(db, "fallback")
 
         assert _compactions(bundle)[0].first_kept_item_id is None
         assert any(gap.code == "compaction_first_kept_item_unavailable" and gap.detail == "m0" for gap in bundle.gaps)
@@ -315,7 +315,7 @@ class TestParseOpencodeSession:
         con.commit()
         con.close()
 
-        bundle = parse_opencode_observations(db, "fallback")
+        bundle = _parse_opencode_session(db, "fallback")
 
         root = _invocations(bundle)[0]
         assert root.status == "unknown"
@@ -347,7 +347,7 @@ class TestParseOpencodeSession:
             sessions=[("root", None), ("child", "missing-parent")],
         )
 
-        bundle = parse_opencode_observations(db, "fallback")
+        bundle = _parse_opencode_session(db, "fallback")
 
         assert all(tool.started_at is None and tool.completed_at is None for tool in _tool_calls(bundle))
         assert {gap.code for gap in bundle.gaps} >= {
@@ -412,7 +412,7 @@ class TestRolloutObservability:
 
     def test_padding_is_not_reported_as_artifact_evidence(self, tmp_path: Path) -> None:
         _, usage = parse_opencode_session(tmp_path / "missing.db")
-        observations = parse_opencode_observations(tmp_path / "missing.db", "1-2")
+        observations = _parse_opencode_session(tmp_path / "missing.db", "1-2")
         agent = _make_agent(system_prompt="configured system")
         agent._run_opencode = AsyncMock(return_value=([], usage, "model", observations))
         body = NeMoGymResponseCreateParamsNonStreaming(
@@ -436,7 +436,7 @@ class TestRolloutObservability:
     def test_run_attaches_artifact_observations_when_enabled(self, tmp_path: Path) -> None:
         db = _session_db(tmp_path, [("assistant", [{"type": "text", "text": "done"}])])
         items, usage = parse_opencode_session(db)
-        observations = parse_opencode_observations(db, "1-2")
+        observations = _parse_opencode_session(db, "1-2")
         agent = _make_agent()
         agent.server_client.global_config_dict = {"observability_enabled": True}
         agent._run_opencode = AsyncMock(return_value=(items, usage, "model", observations))
@@ -504,7 +504,7 @@ class TestRepoDir:
                 return_value=(scored, {"input_tokens": 1, "output_tokens": 2}),
             ),
             patch(
-                "responses_api_agents.opencode_agent.app.parse_opencode_observations",
+                "responses_api_agents.opencode_agent.app._parse_opencode_session",
                 side_effect=ValueError("invalid observation artifact"),
             ),
         ):

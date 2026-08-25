@@ -14,6 +14,8 @@
 # limitations under the License.
 import json
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict
@@ -51,6 +53,14 @@ from responses_api_agents.opencode_sandboxed_agent.app import (
 
 
 class TestOpenCodeSandboxedAgent:
+    def test_import_does_not_load_standalone_opencode_agent(self) -> None:
+        code = (
+            "import sys; import responses_api_agents.opencode_sandboxed_agent.app; "
+            "assert not any(name == 'responses_api_agents.opencode_agent' "
+            "or name.startswith('responses_api_agents.opencode_agent.') for name in sys.modules)"
+        )
+        subprocess.run([sys.executable, "-c", code], check=True, timeout=30)
+
     def _create_config(self) -> OpenCodeSandboxedAgentConfig:
         return OpenCodeSandboxedAgentConfig(
             host="0.0.0.0",
