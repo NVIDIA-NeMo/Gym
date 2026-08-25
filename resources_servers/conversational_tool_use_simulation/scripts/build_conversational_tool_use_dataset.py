@@ -438,10 +438,6 @@ def build_row(
             "parallel_tool_calls": parallel_tool_calls,
             "tools": responses_api_tools(tools),
         },
-        "agent_ref": {
-            "type": "responses_api_agents",
-            "name": agent_name,
-        },
         "source_artifacts": {
             "source_name": source_name,
             "source_index": source_index,

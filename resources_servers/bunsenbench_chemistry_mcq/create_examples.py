@@ -32,9 +32,7 @@ ROLLOUTS_FPATH = DATA_DIR / "example_rollouts.jsonl"
 PROMPT_CONFIG_FPATH = (
     SERVER_DIR.parent.parent / "benchmarks" / "bunsenbench_chemistry_mcq" / "prompts" / "default.yaml"
 )
-AGENT_REF = {"type": "responses_api_agents", "name": "bunsenbench_chemistry_mcq_simple_agent"}
-
-COMMITTED_FIELDS = ("responses_create_params", "options", "expected_answer", "uuid", "metadata", "agent_ref")
+COMMITTED_FIELDS = ("responses_create_params", "options", "expected_answer", "uuid", "metadata")
 
 SYNTHETIC_CONFIG_METADATA = {
     **UPSTREAM_CONFIG_METADATA,
@@ -146,7 +144,6 @@ def build_example_rows() -> list[dict]:
         materialized = materialize_row(reconstituted)
         prompted = apply_prompt_to_row(materialized, prompt_cfg)
         row = {key: prompted[key] for key in COMMITTED_FIELDS if key in prompted}
-        row["agent_ref"] = AGENT_REF
         rows.append(row)
     return rows
 

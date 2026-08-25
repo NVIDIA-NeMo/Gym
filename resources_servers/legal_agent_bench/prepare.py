@@ -479,10 +479,6 @@ def _render_task_index(source_ids: Iterable[str]) -> str:
     rows = []
     for source_id in sorted(source_ids):
         row = {
-            "agent_ref": {
-                "name": "legal_agent_bench_harbor_agent",
-                "type": "responses_api_agents",
-            },
             "instance_id": f"legal_agent_bench::{flatten_task_id(source_id)}",
             "responses_create_params": {
                 "input": [],

@@ -186,10 +186,7 @@ def test_build_sample_dataset_converts_raw_seed_row(tmp_path: Path) -> None:
     assert row["source_artifacts"]["scenario_index"] == 0
     assert row["source_artifacts"]["source_name"] == "source_0"
     assert row["source_artifacts"]["scenario_file"] == ("scenarios/Qwen3-235B-A22B-Thinking-2507/scenarios_0000.jsonl")
-    assert row["agent_ref"] == {
-        "type": "responses_api_agents",
-        "name": "conversational_tool_use_agent",
-    }
+    assert "agent_ref" not in row  # routing is a run-time lookup (dataset-decoupling)
     ConversationalToolUseSeedSessionRequest.model_validate(row)
     NeMoGymResponseCreateParamsNonStreaming.model_validate(row["responses_create_params"])
 

@@ -90,7 +90,7 @@ def test_generated_task_cache_is_deterministic_and_credential_free(monkeypatch, 
         "legal_agent_bench::area__task-group__scenario-01",
         "legal_agent_bench::area__task-one",
     ]
-    assert all(row["agent_ref"]["name"] == "legal_agent_bench_harbor_agent" for row in rows)
+    assert all("agent_ref" not in row for row in rows)  # routing is a run-time lookup (dataset-decoupling)
     for toml in first.glob("*/task.toml"):
         text = toml.read_text(encoding="utf-8")
         assert "[verifier.env]" not in text
