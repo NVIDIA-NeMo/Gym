@@ -68,7 +68,7 @@ from nemo_gym.global_config import (
     pairing_override_enabled,
     resolve_dataset_agent,
 )
-from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for
+from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for, progress_path_for
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
@@ -696,8 +696,7 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
     def resolved_progress_file_fpath(self) -> Path:
         if self.progress_file_fpath is not None:
             return Path(self.progress_file_fpath)
-        output_fpath = Path(self.output_jsonl_fpath)
-        return output_fpath.with_name(f"{output_fpath.stem}_progress")
+        return progress_path_for(Path(self.output_jsonl_fpath))
 
 
 class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):

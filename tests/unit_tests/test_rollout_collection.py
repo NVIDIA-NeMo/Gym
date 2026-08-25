@@ -43,6 +43,7 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
 )
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.path_utils import progress_path_for
 from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.rollout_collection import (
     _DEFAULT_MAX_ROLLOUT_ATTEMPTS,
@@ -1737,6 +1738,8 @@ class TestRolloutCollection:
         assert len(rows) == 2
 
     def test_progress_file_default_is_derived_from_output(self, tmp_path: Path) -> None:
+        assert progress_path_for(tmp_path / "rollouts.jsonl") == tmp_path / "rollouts_progress"
+
         shard_0_config = RolloutCollectionConfig(
             input_jsonl_fpath=str(tmp_path / "input.jsonl"),
             output_jsonl_fpath=str(tmp_path / "rollouts-chunk0.jsonl"),
