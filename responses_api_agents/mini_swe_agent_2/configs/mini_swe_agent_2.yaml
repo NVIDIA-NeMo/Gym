@@ -56,4 +56,3 @@ mini_swe_agent_2:
       eval_timeout: 1800
       skip_if_exists: false
       step_limit: 250
-      datasets: []
