@@ -2,14 +2,12 @@
 
 # Aviary resources server
 
-This component adapts [Aviary environments](https://github.com/Future-House/aviary) to the NeMo Gym resources-server interface. It provides the state and tools used by the Aviary agent; runnable compositions live under `environments/`:
+This resources server adapts [Aviary environments](https://github.com/Future-House/aviary) to the NeMo Gym. It provides the state, tools, and env integration used with `aviary_agent`. Environment configs are in `environments/`:
 
 - [GSM8K](../../environments/aviary_gsm8k/README.md)
 - [HotPotQA](../../environments/aviary_hotpotqa/README.md)
 - [BixBench](../../environments/aviary_bixbench/README.md)
 - [BixBench-Hypothesis](../../environments/aviary_bbh/README.md)
-
-`configs/aviary.yaml` is the minimal GSM8K composition used by the component test suite. Use the environment configs above for evaluation and training.
 
 ## Licensing
 
