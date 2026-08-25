@@ -474,10 +474,6 @@ class ServerClient(BaseModel):
 
 
 def _has_local_global_config() -> bool:
-    from nemo_gym import global_config as _gc
-
-    if _gc._GLOBAL_CONFIG_DICT is not None:
-        return True
     return getenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME) is not None
 
 

@@ -166,8 +166,8 @@ class TestServerUtils:
         actual_client = ServerClient.load_from_global_config()
         assert {"a": 2} == actual_client.global_config_dict
 
-    def test_ServerClient_load_from_global_config_prefers_local_cache(self, monkeypatch: MonkeyPatch) -> None:
-        """When `_GLOBAL_CONFIG_DICT` is populated locally, no HTTP fetch happens."""
+    def test_ServerClient_load_from_global_config_ignores_unscoped_local_cache(self, monkeypatch: MonkeyPatch) -> None:
+        """A local singleton without the worker env var may contain only CLI config."""
         global_config_dict = DictConfig(
             {
                 "head_server": {"host": "", "port": 0},
@@ -177,22 +177,21 @@ class TestServerUtils:
         get_global_config_dict_mock = MagicMock(return_value=global_config_dict)
         monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
 
-        # Simulate a worker process: the global config dict is cached locally.
+        # `gym eval run --no-serve` initializes a partial local config.
+        # It must still fetch the full config from the running head server.
         monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", global_config_dict)
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
 
-        # If the fast path is taken, requests.get is never called. Make it loud
-        # if it does get called so the test fails clearly.
-        def boom(*args, **kwargs):
-            raise AssertionError("requests.get should not be called on the fast path")
-
-        monkeypatch.setattr(nemo_gym.server_utils.requests, "get", boom)
+        response = MagicMock(content=b'"remote_server: {host: remote, port: 1234}"')
+        get_mock = MagicMock(return_value=response)
+        monkeypatch.setattr(nemo_gym.server_utils.requests, "get", get_mock)
 
         client = ServerClient.load_from_global_config()
-        assert client.global_config_dict is global_config_dict
+        assert client.global_config_dict == {"remote_server": {"host": "remote", "port": 1234}}
+        get_mock.assert_called_once()
 
     def test_ServerClient_load_from_global_config_fast_path_via_env(self, monkeypatch: MonkeyPatch) -> None:
-        """`NEMO_GYM_CONFIG_DICT` env var alone is enough to trigger the fast path
-        (covers the first call inside a fresh worker before the singleton is hit)."""
+        """The worker config env var triggers the fast path before the singleton is populated."""
         global_config_dict = DictConfig({"head_server": {"host": "", "port": 0}})
         get_global_config_dict_mock = MagicMock(return_value=global_config_dict)
         monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
