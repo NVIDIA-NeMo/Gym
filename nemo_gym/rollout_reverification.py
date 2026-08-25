@@ -23,7 +23,7 @@ from typing import Any, Callable, Dict, Iterator, List, Literal, Optional, Tuple
 
 import orjson
 from omegaconf import DictConfig
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError, model_validator
 from tqdm.asyncio import tqdm
 
 from nemo_gym import _resolve_under_cwd_or_install
@@ -62,6 +62,7 @@ from nemo_gym.server_utils import (
 # Todo after merging branch `edobrowolska/judge_failures_v2`: replace this by importing from judge.py
 JUDGE_FAILED_FAILURE_CLASS = "judge_failed"
 ATIF_PROVENANCE_KEY = "_ng_atif_provenance"
+_CONFIG_BOOL_ADAPTER = TypeAdapter(bool)
 
 # Printed at the start of a `--judge-failed-only` run.
 _RECOVERY_TWO_SOURCES_WARNING = (
@@ -247,6 +248,73 @@ def _build_agent_to_resources_server_mapping(
     if mapping:
         return mapping
     return _agent_to_rs_mapping_from_resources_only_config(global_config_dict)
+
+
+def _resources_server_exposes_tools_over_mcp(
+    global_config_dict: Union[Dict[str, Any], "DictConfig"],
+    resources_server_name: str,
+) -> bool:
+    """Read the selected resources server's MCP exposure flag from Gym config."""
+
+    block = global_config_dict.get(resources_server_name)
+    if not isinstance(block, (dict, DictConfig)):
+        raise ConfigError(f"reverify: resources server {resources_server_name!r} is missing from the config.")
+    implementations = block.get("resources_servers")
+    if not isinstance(implementations, (dict, DictConfig)) or len(implementations) != 1:
+        raise ConfigError(
+            f"reverify: resources server {resources_server_name!r} must contain exactly one resources_servers entry."
+        )
+    implementation = next(iter(implementations.values()))
+    if not isinstance(implementation, (dict, DictConfig)):
+        raise ConfigError(f"reverify: resources server {resources_server_name!r} has an invalid config entry.")
+    exposes_tools = implementation.get("expose_tools_over_mcp", False)
+    try:
+        return _CONFIG_BOOL_ADAPTER.validate_python(exposes_tools)
+    except ValidationError as exc:
+        raise ConfigError(
+            f"reverify: resources server {resources_server_name!r} has an invalid expose_tools_over_mcp value."
+        ) from exc
+
+
+def _response_has_function_calls(row: Dict[str, Any]) -> bool:
+    response = row.get("response")
+    output = response.get("output") if isinstance(response, dict) else None
+    return isinstance(output, list) and any(
+        isinstance(item, dict) and item.get("type") == "function_call" for item in output
+    )
+
+
+def _guard_atif_tool_identity(payloads: List[Dict[str, Any]]) -> None:
+    """Reject tool-bearing ATIF when the verifier requires Gym MCP identity.
+
+    Relay ATIF can prove call/result correlation, but it does not currently carry
+    Gym's canonical ``(server_name, tool_name)`` provenance.  An MCP-exposed
+    resources server may otherwise treat a colliding harness-facing name as one
+    of its own tools during verification.
+    """
+
+    tool_payloads = [row for row in payloads if _response_has_function_calls(row)]
+    if not tool_payloads:
+        return
+
+    server_client = setup_server_client()
+    agent_to_rs = _build_agent_to_resources_server_mapping(server_client.global_config_dict)
+    for row in tool_payloads:
+        agent_ref = row.get(AGENT_REF_KEY_NAME)
+        agent_name = agent_ref.get("name") if isinstance(agent_ref, dict) else None
+        if not isinstance(agent_name, str) or not agent_name:
+            raise ConfigError("ATIF reverification requires every materialized input to identify an agent.")
+        try:
+            resources_server_name = agent_to_rs[agent_name]
+        except KeyError as exc:
+            raise ConfigError(f"reverify: agent {agent_name!r} has no resources server mapping.") from exc
+        if _resources_server_exposes_tools_over_mcp(server_client.global_config_dict, resources_server_name):
+            raise AtifProjectionError(
+                "Relay ATIF tool calls cannot be reverified against MCP-exposed resources server "
+                f"{resources_server_name!r}: ATIF proves call/result correlation but does not carry Gym's "
+                "canonical (server_name, tool_name) provenance. Use a non-MCP stateless verifier or a "
+                "text-only trajectory."
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -471,8 +539,6 @@ def _prepare_payloads(
 def _prepare_atif_payloads(
     materialized_inputs_jsonl_fpath: Path,
     atif_manifest_jsonl_fpath: Path,
-    output_fpaths: OutputPaths,
-    resume_from_cache: bool,
     limit: Optional[int] = None,
 ) -> List[Dict]:
     """Build verifier payloads from an explicit ATIF-to-materialized-task manifest."""
@@ -508,7 +574,7 @@ def _prepare_atif_payloads(
         index_materialized_inputs(materialized_rows),
         manifest_directory=atif_manifest_jsonl_fpath.parent,
     )
-    all_payloads = [
+    return [
         item.payload
         | {
             ATIF_PROVENANCE_KEY: {
@@ -521,7 +587,6 @@ def _prepare_atif_payloads(
         }
         for item in projected
     ]
-    return _apply_reverify_cache(all_payloads, output_fpaths, resume_from_cache)
 
 
 def _apply_reverify_cache(
@@ -785,9 +850,6 @@ class RolloutReverificationHelper(BaseModel):
         else:
             output_name_prefix = ""
 
-        output_fpaths = _prepare_output_fpaths(
-            output_name_prefix, config.output_jsonl_fpath, config.resume_from_cache, config.overwrite, config.append
-        )
         materialized_inputs_jsonl_fpath = _resolve_under_cwd_or_install(config.materialized_inputs_jsonl_fpath)
         if config.input_format == "atif":
             assert config.atif_manifest_jsonl_fpath is not None
@@ -795,11 +857,24 @@ class RolloutReverificationHelper(BaseModel):
             payloads_to_reverify = _prepare_atif_payloads(
                 materialized_inputs_jsonl_fpath,
                 atif_manifest_jsonl_fpath,
-                output_fpaths,
-                config.resume_from_cache,
                 config.limit,
             )
+            _guard_atif_tool_identity(payloads_to_reverify)
+            output_fpaths = _prepare_output_fpaths(
+                output_name_prefix,
+                config.output_jsonl_fpath,
+                config.resume_from_cache,
+                config.overwrite,
+                config.append,
+            )
         else:
+            output_fpaths = _prepare_output_fpaths(
+                output_name_prefix,
+                config.output_jsonl_fpath,
+                config.resume_from_cache,
+                config.overwrite,
+                config.append,
+            )
             assert config.rollouts_jsonl_fpath is not None
             rollouts_jsonl_fpath = _resolve_under_cwd_or_install(config.rollouts_jsonl_fpath)
             reverify_source_fpath = rollouts_jsonl_fpath

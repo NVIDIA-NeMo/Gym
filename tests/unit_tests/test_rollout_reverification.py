@@ -46,6 +46,7 @@ from nemo_gym.rollout_reverification import (
     _check_reverify_mode,
     _drop_cache_from_payloads,
     _get_rs_names,
+    _guard_atif_tool_identity,
     _guard_reverify_mode,
     _is_judge_failure,
     _load_cache_keys_by_status,
@@ -55,6 +56,7 @@ from nemo_gym.rollout_reverification import (
     _prepare_output_fpaths,
     _prepare_payloads,
     _recovery_rollout_predicate,
+    _resources_server_exposes_tools_over_mcp,
     _rollout_verify_debug_summary,
     _run_verification_payloads,
     _seed_output_with_successes,
@@ -279,6 +281,143 @@ class TestBuildAgentToResourcesServerMapping:
         }
         result = _build_agent_to_resources_server_mapping(config)
         assert result["any_agent_name"] == "verifier_block"
+
+
+class TestAtifToolIdentityGuard:
+    @staticmethod
+    def _tool_payload(agent_name: str = "fixture-agent") -> dict:
+        return {
+            AGENT_REF_KEY_NAME: {"name": agent_name},
+            "response": {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call-1",
+                        "name": "lookup",
+                        "arguments": "{}",
+                    },
+                    {"type": "function_call_output", "call_id": "call-1", "output": "ok"},
+                ]
+            },
+        }
+
+    @staticmethod
+    def _config(*, exposes_tools_over_mcp: bool) -> dict:
+        return {
+            "fixture-agent": {
+                "responses_api_agents": {
+                    "fixture": {"resources_server": {"name": "fixture-rs"}},
+                }
+            },
+            "fixture-rs": {
+                "resources_servers": {
+                    "fixture": {"expose_tools_over_mcp": exposes_tools_over_mcp},
+                }
+            },
+        }
+
+    def _patch_client(self, monkeypatch: pytest.MonkeyPatch, config: dict) -> None:
+        client = MagicMock()
+        client.global_config_dict = config
+        monkeypatch.setattr("nemo_gym.rollout_reverification.setup_server_client", lambda: client)
+
+    @pytest.mark.parametrize("enabled", [False, True])
+    def test_reads_boolean_mcp_exposure_flag(self, enabled: bool) -> None:
+        config = self._config(exposes_tools_over_mcp=enabled)
+
+        assert _resources_server_exposes_tools_over_mcp(config, "fixture-rs") is enabled
+
+    def test_missing_mcp_exposure_flag_defaults_to_false(self) -> None:
+        config = self._config(exposes_tools_over_mcp=False)
+        del config["fixture-rs"]["resources_servers"]["fixture"]["expose_tools_over_mcp"]
+
+        assert _resources_server_exposes_tools_over_mcp(config, "fixture-rs") is False
+
+    @pytest.mark.parametrize(("configured", "expected"), [("false", False), ("true", True), (0, False), (1, True)])
+    def test_mcp_exposure_uses_resources_server_bool_parsing(self, configured: object, expected: bool) -> None:
+        config = self._config(exposes_tools_over_mcp=False)
+        config["fixture-rs"]["resources_servers"]["fixture"]["expose_tools_over_mcp"] = configured
+
+        assert _resources_server_exposes_tools_over_mcp(config, "fixture-rs") is expected
+
+    def test_invalid_mcp_exposure_flag_fails_closed(self) -> None:
+        config = self._config(exposes_tools_over_mcp=False)
+        config["fixture-rs"]["resources_servers"]["fixture"]["expose_tools_over_mcp"] = "not-a-bool"
+
+        with pytest.raises(ConfigError, match="invalid expose_tools_over_mcp"):
+            _resources_server_exposes_tools_over_mcp(config, "fixture-rs")
+
+    def test_rejects_tool_calls_for_mcp_exposed_verifier(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._patch_client(monkeypatch, self._config(exposes_tools_over_mcp=True))
+
+        with pytest.raises(AtifProjectionError, match="does not carry Gym's canonical"):
+            _guard_atif_tool_identity([self._tool_payload()])
+
+    def test_allows_tool_calls_for_non_mcp_verifier(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._patch_client(monkeypatch, self._config(exposes_tools_over_mcp=False))
+
+        _guard_atif_tool_identity([self._tool_payload()])
+
+    def test_only_the_selected_resources_server_controls_the_guard(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        config = self._config(exposes_tools_over_mcp=False)
+        config["unrelated-mcp-rs"] = {
+            "resources_servers": {"unrelated": {"expose_tools_over_mcp": True}},
+        }
+        self._patch_client(monkeypatch, config)
+
+        _guard_atif_tool_identity([self._tool_payload()])
+
+    def test_resources_only_config_uses_its_single_mcp_server(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        config = {
+            "fixture-rs": {
+                "resources_servers": {
+                    "fixture": {"expose_tools_over_mcp": True},
+                }
+            }
+        }
+        self._patch_client(monkeypatch, config)
+
+        with pytest.raises(AtifProjectionError, match="MCP-exposed resources server 'fixture-rs'"):
+            _guard_atif_tool_identity([self._tool_payload("external-agent")])
+
+    def test_text_only_atif_does_not_require_mcp_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification.setup_server_client",
+            lambda: pytest.fail("text-only ATIF should not inspect MCP configuration"),
+        )
+        payload = {
+            AGENT_REF_KEY_NAME: {"name": "fixture-agent"},
+            "response": {"output": [{"type": "message", "content": []}]},
+        }
+
+        _guard_atif_tool_identity([payload])
+
+    async def test_run_rejects_before_preparing_output_paths(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._patch_client(monkeypatch, self._config(exposes_tools_over_mcp=True))
+        monkeypatch.setattr("nemo_gym.rollout_reverification._guard_reverify_mode", AsyncMock(return_value=None))
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification._resolve_under_cwd_or_install",
+            lambda value: Path(value),
+        )
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification._prepare_atif_payloads",
+            lambda *_args, **_kwargs: [self._tool_payload()],
+        )
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification._prepare_output_fpaths",
+            lambda *_args, **_kwargs: pytest.fail("output paths must not be touched before the ATIF guard"),
+        )
+        config = RolloutReverificationConfig(
+            input_format="atif",
+            materialized_inputs_jsonl_fpath="inputs.jsonl",
+            rollouts_jsonl_fpath=None,
+            atif_manifest_jsonl_fpath="manifest.jsonl",
+            output_jsonl_fpath="existing-output.jsonl",
+            overwrite=True,
+        )
+
+        with pytest.raises(AtifProjectionError, match="does not carry Gym's canonical"):
+            await RolloutReverificationHelper().run_from_config(config)
 
 
 class TestGetRsNames:
@@ -922,8 +1061,6 @@ class TestPrepareAtifPayloads:
         payloads = _prepare_atif_payloads(
             materialized,
             manifest,
-            self._paths(tmp_path),
-            resume_from_cache=False,
         )
 
         assert len(payloads) == 1
@@ -952,8 +1089,6 @@ class TestPrepareAtifPayloads:
             _prepare_atif_payloads(
                 materialized,
                 manifest,
-                self._paths(tmp_path),
-                resume_from_cache=False,
             )
 
 

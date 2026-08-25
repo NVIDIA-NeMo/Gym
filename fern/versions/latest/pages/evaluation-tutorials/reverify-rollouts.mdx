@@ -101,7 +101,7 @@ Every selected resources server must report `stateless`. ATIF mode does not perm
 This is a deliberately bounded Relay-produced ATIF profile, not general ATIF ingestion. Gym rejects trajectories when projection could change what the verifier sees, including multimodal content, continuations or subagents, incomplete provider output, uncorrelated or incomplete tool call/result pairs, aggregated LLM calls, unsupported provider actions, or output ordering that ATIF does not prove.
 
 <Warning>
-This initial path preserves harness-facing function names and call/result correlation, but ATIF does not by itself prove Gym MCP `(server, tool)` identity. Do not use it with a verifier whose reward depends on canonical MCP tool identity unless that identity is supplied by a supported provenance contract.
+This initial path preserves harness-facing function names and call/result correlation, but ATIF does not by itself prove Gym MCP `(server, tool)` identity. Gym therefore rejects a tool-bearing ATIF trajectory when its selected resources server sets `expose_tools_over_mcp: true`. Text-only trajectories and generic tool trajectories sent to non-MCP stateless verifiers remain supported.
 </Warning>
 
 ### Reverifying against a benchmark config
