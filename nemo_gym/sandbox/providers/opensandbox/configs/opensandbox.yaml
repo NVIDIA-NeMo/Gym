@@ -34,8 +34,9 @@ sandbox:
       # null for no cap.
       max_connections: null
       connect_retries: 2
-      # "aiohttp" routes through the optional httpx-aiohttp bridge, falling
-      # back to httpx with a warning when it is not installed.
+      # "aiohttp" uses the in-house aiohttp transport (incremental SSE
+      # streaming with clearer mid-stream error mapping); "httpx" uses the
+      # httpx default.
       transport_backend: aiohttp
     create:
       request_timeout_s: 1200

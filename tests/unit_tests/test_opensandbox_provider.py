@@ -16,7 +16,6 @@
 import asyncio
 import builtins
 import logging
-import sys
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -535,7 +534,7 @@ def test_connection_config_and_image_policy(fake_opensandbox_sdk: None) -> None:
     assert "headers" not in direct._connection_config().kwargs
 
 
-def test_connection_transport_backends(fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_connection_transport_backends(fake_opensandbox_sdk: None) -> None:
     # Default backend is httpx, with the configured keepalive expiry on the pool.
     provider = opensandbox_provider.OpenSandboxProvider()
     transport = provider._build_transport()
@@ -555,13 +554,6 @@ def test_connection_transport_backends(fake_opensandbox_sdk: None, monkeypatch: 
     assert isinstance(transport, httpx.AsyncHTTPTransport)
     # connect_retries reaches the pool rather than silently falling back.
     assert transport._pool._retries == 1
-
-    # aiohttp requested but httpx-aiohttp unavailable: falls back to httpx.
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setitem(sys.modules, "httpx_aiohttp", None)
-        provider = opensandbox_provider.OpenSandboxProvider(connection={"transport_backend": "aiohttp"})
-        transport = provider._build_transport()
-        assert isinstance(transport, httpx.AsyncHTTPTransport)
 
     # keepalive_expiry_s=null disables transport injection entirely.
     provider = opensandbox_provider.OpenSandboxProvider(connection={"keepalive_expiry_s": None})
@@ -600,17 +592,36 @@ async def test_connection_transport_is_shared_and_closed_by_provider(fake_opensa
     assert provider._transport is None
 
 
-def test_connection_transport_backend_aiohttp_opt_in(fake_opensandbox_sdk: None) -> None:
-    # Opt-in aiohttp backend via the httpx-aiohttp bridge; the package is not a
-    # declared dependency, so this coverage only runs where it is installed.
-    httpx_aiohttp = pytest.importorskip("httpx_aiohttp", reason="optional httpx-aiohttp is not installed")
-    provider = opensandbox_provider.OpenSandboxProvider(connection={"transport_backend": "aiohttp"})
+def test_connection_transport_backend_aiohttp(fake_opensandbox_sdk: None) -> None:
+    # The "aiohttp" backend selects the in-house transport, carrying pool
+    # limits and connect retries through.
+    from nemo_gym.sandbox.providers.opensandbox.aiohttp_transport import AiohttpTransport
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={
+            "transport_backend": "aiohttp",
+            "keepalive_expiry_s": 2.5,
+            "max_connections": 7,
+            "max_keepalive_connections": 3,
+            "connect_retries": 1,
+        }
+    )
     transport = provider._build_transport()
-    assert isinstance(transport, httpx_aiohttp.AiohttpTransport)
-    assert transport.limits.keepalive_expiry == 3.0
-    # Both backends honor connect_retries; the bridge default is 0, so this
-    # would catch the option being dropped on the aiohttp path.
-    assert transport.retries == 2
+    assert isinstance(transport, AiohttpTransport)
+    assert transport._limits.max_connections == 7
+    assert transport._limits.max_keepalive_connections == 3
+    assert transport._limits.keepalive_expiry == 2.5
+    assert transport._retries == 1
+    assert transport._force_close is False
+
+    # disable_connection_pooling works via force-close on this backend (the
+    # httpx backend's zeroed keepalive count means nothing to aiohttp).
+    no_pooling_provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"transport_backend": "aiohttp", "disable_connection_pooling": True}
+    )
+    no_pooling_transport = no_pooling_provider._build_transport()
+    assert isinstance(no_pooling_transport, AiohttpTransport)
+    assert no_pooling_transport._force_close is True
 
     extensions = provider._resolve_extensions({"imagePullPolicy": "Never"})
     assert extensions["imagePullPolicy"] == "Never"
