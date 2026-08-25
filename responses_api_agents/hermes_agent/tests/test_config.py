@@ -46,7 +46,7 @@ def test_hermes_runtime_uses_named_upstream_release():
     assert "hermes-agent" not in requirements
     assert 'HERMES_RELEASE = "v2026.8.19"' in setup
     assert 'HERMES_VERSION = "0.20.5"' in setup
-    assert 'HERMES_COMMIT = "fcbd1076a93841fa88855acce810e342a5b78101"' in setup
+    assert 'HERMES_COMMIT = "fcbd1076a93841fa88855acce810e342a5b78101"' in setup  # pragma: allowlist secret
     assert "HERMES_INSTALLER_SHA256" in setup
     assert '"--frozen"' in setup
     assert "cmunley1/hermes-agent" not in requirements

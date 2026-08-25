@@ -75,7 +75,7 @@ class TestSanity:
     def test_upstream_release_api_matches_adapter(self) -> None:
         assert HERMES_RELEASE == "v2026.8.19"
         assert HERMES_VERSION == "0.20.5"
-        assert HERMES_COMMIT == "fcbd1076a93841fa88855acce810e342a5b78101"
+        assert HERMES_COMMIT == "fcbd1076a93841fa88855acce810e342a5b78101"  # pragma: allowlist secret
 
     def test_concurrency_semaphore_initialized(self) -> None:
         agent = HermesAgent(config=_config(concurrency=4), server_client=MagicMock(spec=ServerClient))

@@ -27,8 +27,11 @@ LOG = logging.getLogger(__name__)
 
 HERMES_RELEASE = "v2026.8.19"
 HERMES_VERSION = "0.20.5"
-HERMES_COMMIT = "fcbd1076a93841fa88855acce810e342a5b78101"
-HERMES_INSTALLER_SHA256 = "0582d9b1562efcb6e0ac62f4451021667830b830a72ce7d91eaea9fee8b6c09b"
+HERMES_COMMIT = "fcbd1076a93841fa88855acce810e342a5b78101"  # pragma: allowlist secret
+HERMES_INSTALLER_SHA256 = (
+    "0582d9b1562efcb6e0ac62f445102166"  # pragma: allowlist secret
+    "7830b830a72ce7d91eaea9fee8b6c09b"  # pragma: allowlist secret
+)
 
 _INSTALL_ROOT = Path(
     os.environ.get(
