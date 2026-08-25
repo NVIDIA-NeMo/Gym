@@ -178,9 +178,9 @@ It provides:
 
 Some agents may come with predefined tools, and you can use the Resources Server to supplement them with additional external tools. When building a new environment, prefer defining tools in the Resources Server rather than the Agent Server. This separation lets multiple agents share the same tool logic without duplicating it.
 
-The generated `app.py` already defines a stateless verifier, a verifier mixin, and a `VERIFIER_FIXTURE` used by the scaffolded tests. Keep that structure while adding the weather tool and changing the verifier to reward `get_weather` calls.
+The scaffold has already done some useful setup for you: the generated `app.py` includes a stateless verifier, a verifier mixin, and a `VERIFIER_FIXTURE` used by the generated tests. Rather than starting over, you can build on that foundation by adding the weather tool and changing the verifier to reward `get_weather` calls.
 
-Update `resources_servers/my_weather_tool/app.py` so it contains:
+Open `resources_servers/my_weather_tool/app.py`, keep the generated SPDX license header at the top, and update the rest of the file to match the following implementation:
 
 ```python
 from pathlib import Path
@@ -200,24 +200,33 @@ from nemo_gym.verifier_fixture import VerifierFixture
 
 
 class MyWeatherToolResourcesServerConfig(BaseResourcesServerConfig):
+    # Verification only uses the request and this server configuration,
+    # so saved rollouts can be safely verified again later.
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
 
 
 class GetWeatherRequest(BaseModel):
+    """Input accepted by the get_weather tool."""
+
     city: str
 
 
 class GetWeatherResponse(BaseModel):
+    """Weather information returned to the agent."""
+
     city: str
     weather_description: str
 
 
 class MyWeatherToolVerifyRequest(BaseVerifyRequest):
+    """The standard verification request is sufficient for this environment."""
+
     pass
 
 
 class MyWeatherToolVerifier:
     async def verify(self, body: MyWeatherToolVerifyRequest) -> BaseVerifyResponse:
+        # Reward the rollout when the model called the weather tool.
         used_tool = any(
             output.type == "function_call" and output.name == "get_weather" for output in body.response.output
         )
@@ -228,14 +237,20 @@ class MyWeatherToolResourcesServer(MyWeatherToolVerifier, SimpleResourcesServer)
     config: MyWeatherToolResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:
+        """Add the weather tool route to the standard resources server routes."""
+
         app = super().setup_webserver()
         app.post("/get_weather")(self.get_weather)
         return app
 
     async def get_weather(self, body: GetWeatherRequest) -> GetWeatherResponse:
+        """Return example weather data for the requested city."""
+
+        # A production environment could call a weather service here.
         return GetWeatherResponse(city=body.city, weather_description=f"The weather in {body.city} is cold.")
 
 
+# Keep verification testable without starting the web server.
 VERIFIER_FIXTURE = VerifierFixture(
     server_factory=MyWeatherToolVerifier,
     request_model=MyWeatherToolVerifyRequest,
@@ -247,7 +262,7 @@ if __name__ == "__main__":
     MyWeatherToolResourcesServer.run_webserver()
 ```
 
-`REVERIFY_MODE = ReverifyMode.STATELESS` declares that verification depends only on the request and server configuration. The `MyWeatherToolVerifier` mixin keeps scoring independent of the web server, and `VERIFIER_FIXTURE` connects that scorer to the generated test cases.
+Most of this should look familiar from the generated file. The important pieces to keep are `REVERIFY_MODE`, the separate `MyWeatherToolVerifier` mixin, and `VERIFIER_FIXTURE`. Together, they keep scoring independent of the web server and connect it to the generated test cases.
 
 #### Key Components
 
@@ -258,6 +273,8 @@ if __name__ == "__main__":
 | **`setup_webserver()`** | Registers FastAPI routes for your tools |
 | **Tool Methods** | Async functions implementing tool logic |
 | **`verify()`** | **Required** — evaluates task performance and returns a reward |
+| **`REVERIFY_MODE`** | Declares whether saved rollouts can be verified again safely |
+| **`VERIFIER_FIXTURE`** | Connects the verifier to reusable test cases |
 
 ### 3.3 Verification Logic
 
@@ -266,13 +283,16 @@ The `verify()` function is the heart of your RL environment — it computes the 
 ```python
 class MyWeatherToolVerifier:
     async def verify(self, body: MyWeatherToolVerifyRequest) -> BaseVerifyResponse:
+        # Look through the model's output for a call to get_weather.
         used_tool = any(
             output.type == "function_call" and output.name == "get_weather" for output in body.response.output
         )
+
+        # A matching tool call earns 1.0; every other response earns 0.0.
         return BaseVerifyResponse(**body.model_dump(), reward=float(used_tool))
 ```
 
-This example checks tool *usage*, not argument correctness. Jump to [Advanced: Verification Patterns](#advanced-verification-patterns) at the end of this tutorial for more examples.
+This first verifier intentionally checks only tool *usage*, not whether the city argument is correct. Starting with a small, predictable reward function makes it easier to confirm that the complete environment works before adding more sophisticated scoring. Jump to [Advanced: Verification Patterns](#advanced-verification-patterns) at the end of this tutorial for more examples.
 
 #### Configure - Wiring the pieces together
 
@@ -331,7 +351,7 @@ If your server needs external packages, add them to `requirements.txt`:
 
 ## 5. Write Tests
 
-The scaffolded `tests/test_app.py` imports `VERIFIER_FIXTURE` from `app.py` and runs each case in `tests/verifier_cases.jsonl`. Keep that generated test and replace `resources_servers/my_weather_tool/tests/verifier_cases.jsonl` with these three cases:
+You will test both parts of the resources server: the reward behavior and the weather tool itself. The scaffold has already connected `tests/test_app.py` to `VERIFIER_FIXTURE`, so begin by replacing `resources_servers/my_weather_tool/tests/verifier_cases.jsonl` with three cases tailored to the new verifier:
 
 ```json
 {"name":"used weather tool","kind":"full_reward","request":{"responses_create_params":{"input":"What's the weather in San Francisco?"},"response":{"id":"fixture_response","created_at":0,"model":"fixture","object":"response","output":[{"id":"fixture_call","type":"function_call","call_id":"fixture_call","name":"get_weather","arguments":"{\"city\":\"San Francisco\"}","status":"completed"}],"parallel_tool_calls":false,"tool_choice":"auto","tools":[]}},"expected_reward":1.0}
@@ -339,7 +359,59 @@ The scaffolded `tests/test_app.py` imports `VERIFIER_FIXTURE` from `app.py` and 
 {"name":"missing response","kind":"malformed","request":{"responses_create_params":{"input":"What's the weather in San Francisco?"}},"expected_error":"response"}
 ```
 
-The full-reward case contains a `get_weather` function call, the zero-reward case contains only an assistant message, and the malformed case confirms that requests without a response are rejected. The fixture validates the request schema, reward endpoints, and malformed-input behavior without starting the Gym services.
+The full-reward case contains a `get_weather` function call, the zero-reward case contains only an assistant message, and the malformed case confirms that requests without a response are rejected. These cases let the fixture validate the request schema and reward behavior without starting the Gym services.
+
+Next, update `resources_servers/my_weather_tool/tests/test_app.py`. Keep the generated SPDX license header and fixture test, then add a focused test for the weather tool:
+
+```python
+import asyncio
+from unittest.mock import MagicMock
+
+from nemo_gym.server_utils import ServerClient
+from nemo_gym.verifier_fixture import exercise_verifier_fixture
+
+from ..app import (
+    VERIFIER_FIXTURE,
+    GetWeatherRequest,
+    MyWeatherToolResourcesServer,
+    MyWeatherToolResourcesServerConfig,
+)
+
+
+def test_verifier_fixture() -> None:
+    """Run the full-reward, zero-reward, and malformed verifier cases."""
+
+    asyncio.run(
+        exercise_verifier_fixture(
+            VERIFIER_FIXTURE,
+            reward_range=(0.0, 1.0),
+            higher_is_better=True,
+            determinism="unknown",
+        )
+    )
+
+
+def test_get_weather() -> None:
+    """Return weather information for the requested city."""
+
+    config = MyWeatherToolResourcesServerConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="my_weather_tool",
+    )
+    server = MyWeatherToolResourcesServer(
+        config=config,
+        server_client=MagicMock(spec=ServerClient),
+    )
+
+    response = asyncio.run(server.get_weather(GetWeatherRequest(city="San Francisco")))
+
+    assert response.city == "San Francisco"
+    assert response.weather_description == "The weather in San Francisco is cold."
+```
+
+The fixture test protects the reward contract, while `test_get_weather` checks the tool response directly. Keeping those responsibilities separate makes failures easier to understand as the environment grows.
 
 Run the tests:
 
