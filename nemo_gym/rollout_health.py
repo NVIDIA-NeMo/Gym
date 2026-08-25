@@ -3,8 +3,9 @@
 
 """Deterministic post-run rollout quality verification workflow.
 
-Checks operate only on persisted rollout and model-call capture artifacts.
-They return evidence; this module derives verdicts and writes reports.
+Checks operate only on persisted rollout records and their canonical
+``ng_trajectory`` evidence. They return evidence; this module derives verdicts
+and writes reports.
 """
 
 from __future__ import annotations
@@ -21,20 +22,23 @@ from typing import Any
 import orjson
 
 from nemo_gym.health.checks import (
-    _FALLBACK_TRANSCRIPT_CHECK_IDS,
+    _INCOMPLETE_MODEL_CALL_GAPS,
     _ROLLOUT_CHECKS,
     _ROLLOUT_SPECS,
     _TASK_SPECS,
     CHECK_REGISTRY,
-    _agent_steps_with_source,
     _bind_policy_calls,
+    _canonical_trajectory,
     _finding,
     _is_failed,
     _is_successful,
-    _parse_capture,
+    _normalized_trajectory_calls,
     _replay_identity,
     _subject,
     _token_count,
+    _trajectory_has_any_gap,
+    _trajectory_has_gap,
+    _trajectory_reference_contradictions,
     _transcript_tokens,
     normalize_ignored_checks,
 )
@@ -52,11 +56,9 @@ from nemo_gym.health.types import (
     HealthCheckResult,
     RolloutDigest,
     Verdict,
-    _AgentStepSource,
     _LineSlice,
     _TaskRepeat,
     _WorkerInput,
-    _WorkerResult,
 )
 
 
@@ -90,9 +92,8 @@ def _read_record(line: _LineSlice) -> tuple[dict[str, Any], str | None]:
         return {}, type(exc).__name__
 
 
-def _worker(payload: _WorkerInput) -> _WorkerResult:
+def _worker(payload: _WorkerInput) -> RolloutDigest:
     record, parse_error = _read_record(payload.line)
-    agent_step_source: _AgentStepSource = "none" if parse_error else _agent_steps_with_source(record)[1]
     task_index = record.get(TASK_INDEX_KEY, payload.line.ordinal)
     rollout_index = record.get(ROLLOUT_INDEX_KEY, 0)
     trajectory = record.get("ng_trajectory")
@@ -100,31 +101,14 @@ def _worker(payload: _WorkerInput) -> _WorkerResult:
     rollout_id = str(record.get(ROLLOUT_ID_KEY) or trajectory_rollout_id or f"{task_index}-{rollout_index}")
     subject = _subject(task_index, rollout_index)
 
-    capture_path = next(
-        (
-            str(candidate)
-            for directory in payload.capture_dirs
-            if (candidate := Path(directory) / f"{rollout_id}.capture.jsonl").is_file()
-        ),
-        None,
+    trajectory, trajectory_error = (None, None) if parse_error else _canonical_trajectory(record)
+    trajectory_observed = trajectory is not None and not _trajectory_has_gap(
+        trajectory, "trajectory_projection_failed"
     )
-    if parse_error:
-        capture_path = None
-        calls, invalid_capture_lines, embedded_capture = [], 0, False
-    elif payload.driver_bypass:
-        capture_path = None
-        calls, invalid_capture_lines, embedded_capture = [], 0, False
-    else:
-        calls, invalid_capture_lines, embedded_capture = _parse_capture(capture_path, record)
-    if payload.driver_bypass:
-        capture_observed = False
-    elif capture_path is not None or embedded_capture:
-        capture_observed = True
-    elif payload.capture_enabled is False or payload.captures_exist or payload.capture_enabled is True:
-        capture_observed = False
-    else:
-        capture_observed = embedded_capture
-    bindings = _bind_policy_calls(record, calls)
+    turns_observed = trajectory_observed and not _trajectory_has_gap(trajectory, "turns_unavailable")
+    model_calls_observed = trajectory_observed and not _trajectory_has_any_gap(trajectory, _INCOMPLETE_MODEL_CALL_GAPS)
+    calls = _normalized_trajectory_calls(trajectory) if trajectory_observed else []
+    bindings = _bind_policy_calls(trajectory, calls) if trajectory_observed else _bind_policy_calls({}, [])
     findings: list[Finding] = []
     unobserved: list[str] = []
 
@@ -139,16 +123,34 @@ def _worker(payload: _WorkerInput) -> _WorkerResult:
             else:
                 unobserved.append(spec.id)
             continue
-        needs_capture = CheckInput.CAPTURE in spec.reads
-        if needs_capture and not capture_observed:
+        if trajectory_error and spec.id == "record_unreadable":
+            findings.append(
+                _finding(
+                    "record_unreadable",
+                    subject,
+                    reason="canonical trajectory is unreadable",
+                    error=trajectory_error,
+                )
+            )
+            continue
+        if CheckInput.TRAJECTORY in spec.reads and not trajectory_observed:
             unobserved.append(spec.id)
             continue
-        if CheckInput.BOUND_CALLS in spec.reads and not bindings.matched_calls:
+        if CheckInput.AGENT_TURNS in spec.reads and not turns_observed:
             unobserved.append(spec.id)
             continue
-        if spec.id == "trajectory_capture_mismatch" and not bindings.observed and not invalid_capture_lines:
-            unobserved.append(spec.id)
-            continue
+        if CheckInput.BOUND_CALLS in spec.reads:
+            if not model_calls_observed:
+                unobserved.append(spec.id)
+                continue
+            has_required_bindings = (
+                bindings.observed or bool(_trajectory_reference_contradictions(trajectory))
+                if spec.id == "trajectory_capture_mismatch"
+                else bindings.matched_calls
+            )
+            if not has_required_bindings:
+                unobserved.append(spec.id)
+                continue
         if spec.id == "rollout_token_count_mismatch" and (
             not bindings.complete
             or not bindings.matched_calls
@@ -158,7 +160,7 @@ def _worker(payload: _WorkerInput) -> _WorkerResult:
             unobserved.append(spec.id)
             continue
         try:
-            findings.extend(_ROLLOUT_CHECKS[spec.id](record, calls, bindings, invalid_capture_lines, subject))
+            findings.extend(_ROLLOUT_CHECKS[spec.id](record, trajectory, bindings, subject))
         except Exception as exc:
             unobserved.append(spec.id)
             findings.append(
@@ -180,28 +182,25 @@ def _worker(payload: _WorkerInput) -> _WorkerResult:
     duplicated = sum(count - 1 for count in Counter(identities).values() if count > 1)
     transcript_prompt, transcript_completion, _ = _transcript_tokens(record)
 
-    return _WorkerResult(
-        digest=RolloutDigest(
-            task_index=task_index,
-            rollout_index=rollout_index,
-            rollout_id=rollout_id,
-            verdict=verdict,
-            findings=findings,
-            unobserved=unobserved,
-            capture_observed=capture_observed,
-            policy_calls_observed=bindings.complete and not invalid_capture_lines,
-            model_calls=len(calls),
-            successful_model_calls=sum(_is_successful(call) for call in bindings.matched_calls),
-            model_call_errors=len(failed),
-            errors_by_status=dict(errors_by_status),
-            ended_on_error=bool(calls and _is_failed(calls[-1])),
-            duplicated_calls=duplicated,
-            transcript_prompt_tokens=transcript_prompt,
-            transcript_completion_tokens=transcript_completion,
-            capture_prompt_tokens=sum(_token_count(call, "tokens_in") for call in calls),
-            capture_completion_tokens=sum(_token_count(call, "tokens_out") for call in calls),
-        ),
-        agent_step_source=agent_step_source,
+    return RolloutDigest(
+        task_index=task_index,
+        rollout_index=rollout_index,
+        rollout_id=rollout_id,
+        verdict=verdict,
+        findings=findings,
+        unobserved=unobserved,
+        capture_observed=bool(calls),
+        policy_calls_observed=bindings.complete,
+        model_calls=len(calls),
+        successful_model_calls=sum(_is_successful(call) for call in bindings.matched_calls),
+        model_call_errors=len(failed),
+        errors_by_status=dict(errors_by_status),
+        ended_on_error=bool(calls and _is_failed(calls[-1])),
+        duplicated_calls=duplicated,
+        transcript_prompt_tokens=transcript_prompt,
+        transcript_completion_tokens=transcript_completion,
+        capture_prompt_tokens=sum(_token_count(call, "tokens_in") for call in calls),
+        capture_completion_tokens=sum(_token_count(call, "tokens_out") for call in calls),
     )
 
 
@@ -384,40 +383,11 @@ def _write_reports(summary: dict[str, Any], digests: list[RolloutDigest], output
     return summary_path, verdicts_path
 
 
-def _warn_noncanonical_agent_steps(worker_results: Sequence[_WorkerResult], ignored_checks: frozenset[str]) -> None:
-    enabled_transcript_checks = _FALLBACK_TRANSCRIPT_CHECK_IDS - ignored_checks
-    if not enabled_transcript_checks:
-        return
-    counts = Counter(
-        result.agent_step_source
-        for result in worker_results
-        if result.agent_step_source in {"trajectory_invocations", "response_output"}
-        and any(check_id not in result.digest.unobserved for check_id in enabled_transcript_checks)
-    )
-    if not counts:
-        return
-    details = []
-    if counts["trajectory_invocations"]:
-        details.append(f"{counts['trajectory_invocations']} used coarse ng_trajectory.invocations evidence")
-    if counts["response_output"]:
-        details.append(f"{counts['response_output']} used heuristic response.output grouping")
-    warnings.warn(
-        f"ng_trajectory.turns was unavailable for {sum(counts.values())} rollout record(s); "
-        f"{'; '.join(details)}. Turn-based health results for these records are best-effort. "
-        "Current producers should emit TrajectoryRecord.turns.",
-        RuntimeWarning,
-        stacklevel=3,
-    )
-
-
 def run_health_checks(
     rollout_paths: Path | Sequence[Path],
     *,
     output_dir: Path | None = None,
-    capture_dirs: Sequence[Path] = (),
     workers: int | None = None,
-    capture_enabled: bool | None = None,
-    driver_bypass: bool = False,
     ignored_checks: Sequence[str] = (),
 ) -> HealthCheckResult:
     """Run the RFC's map/group/reduce pipeline and write both reports."""
@@ -430,15 +400,9 @@ def run_health_checks(
             raise FileNotFoundError(f"Rollout JSONL not found: {path}")
 
     lines = _index_jsonl(paths)
-    capture_dir_strings = tuple(str(path) for path in capture_dirs)
-    captures_exist = any(any(directory.glob("*.capture.jsonl")) for directory in capture_dirs if directory.exists())
     worker_inputs = [
         _WorkerInput(
             line=line,
-            capture_dirs=capture_dir_strings,
-            captures_exist=captures_exist,
-            capture_enabled=capture_enabled,
-            driver_bypass=driver_bypass,
             ignored_checks=ignored,
         )
         for line in lines
@@ -471,8 +435,7 @@ def run_health_checks(
                 )
                 worker_results = [_worker(item) for item in worker_inputs]
 
-    _warn_noncanonical_agent_steps(worker_results, ignored)
-    digests = [result.digest for result in worker_results]
+    digests = worker_results
     summary = _reduce(digests, ignored)
     report_dir = output_dir or paths[0].parent
     summary_path, verdicts_path = _write_reports(summary, digests, report_dir)
@@ -503,19 +466,6 @@ def _discover_rollouts(run_dir: Path) -> list[Path]:
     return candidates
 
 
-def _standalone_capture_dirs(run_dir: Path, capture_dirs: Sequence[str | Path] | None) -> list[Path]:
-    if capture_dirs is None:
-        root = run_dir if run_dir.is_dir() else run_dir.parent
-        return [root / "model_calls"]
-
-    resolved = [Path(directory) for directory in capture_dirs]
-    missing = [directory for directory in resolved if not directory.is_dir()]
-    if missing:
-        formatted = ", ".join(str(directory) for directory in missing)
-        raise ValueError(f"Capture directory not found: {formatted}")
-    return resolved
-
-
 def format_health_report(result: HealthCheckResult) -> str:
     verdicts = result.summary["run"]["verdicts"]
     checked = sum(verdicts.values())
@@ -533,17 +483,13 @@ def health_check_run_dir(
     *,
     workers: int | None = None,
     ignored_checks: Sequence[str] = (),
-    capture_dirs: Sequence[str | Path] | None = None,
 ) -> HealthCheckResult:
     path = Path(run_dir)
     rollout_paths = _discover_rollouts(path)
-    selected_capture_dirs = _standalone_capture_dirs(path, capture_dirs)
     result = run_health_checks(
         rollout_paths,
         output_dir=path if path.is_dir() else path.parent,
-        capture_dirs=selected_capture_dirs,
         workers=workers,
-        capture_enabled=True if any(directory.is_dir() for directory in selected_capture_dirs) else None,
         ignored_checks=ignored_checks,
     )
     print(format_health_report(result))

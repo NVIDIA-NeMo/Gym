@@ -20,7 +20,6 @@ QUALITY_SUMMARY_FILENAME = "quality_summary.json"
 ROLLOUT_VERDICTS_FILENAME = "rollout_verdicts.jsonl"
 
 Verdict = Literal["healthy", "unhealthy", "unobserved"]
-_AgentStepSource = Literal["trajectory_turns", "trajectory_invocations", "response_output", "none"]
 
 
 class CheckScope(str, Enum):
@@ -43,9 +42,11 @@ class CheckInput(str, Enum):
 
     # One parsed object from a rollout JSONL file.
     RECORD = "record"
-    # Model-call evidence from a capture sidecar or an embedded rollout projection.
-    CAPTURE = "capture"
-    # Captured calls matched in memory to explicit TrajectoryTurn model-call references.
+    # The canonical TrajectoryRecord persisted under the rollout's ng_trajectory key.
+    TRAJECTORY = "trajectory"
+    # Canonical TrajectoryTurn objects from TrajectoryRecord.turns.
+    AGENT_TURNS = "agent_turns"
+    # Canonical model calls joined in memory to explicit TrajectoryTurn references.
     BOUND_CALLS = "bound_calls"
     # Runner-derived rollout verdicts grouped by task for task-level reduction.
     REPEAT_VERDICTS = "repeat_verdicts"
@@ -112,17 +113,7 @@ class _LineSlice:
 @dataclass(frozen=True, slots=True)
 class _WorkerInput:
     line: _LineSlice
-    capture_dirs: tuple[str, ...]
-    captures_exist: bool
-    capture_enabled: bool | None
-    driver_bypass: bool
     ignored_checks: frozenset[str]
-
-
-@dataclass(frozen=True, slots=True)
-class _WorkerResult:
-    digest: RolloutDigest
-    agent_step_source: _AgentStepSource
 
 
 @dataclass(frozen=True, slots=True)

@@ -1084,8 +1084,6 @@ class RolloutCollectionHelper(BaseModel):
 
                 health_result = run_health_checks(
                     output_fpath,
-                    capture_dirs=capture_dirs,
-                    capture_enabled=bool(capture_dirs),
                     workers=config.health_check_workers,
                     ignored_checks=config.health_check_ignored_checks,
                 )
@@ -1323,9 +1321,7 @@ def _expand_input_glob(input_glob: str) -> List[str]:
 
 
 class RolloutAggregationHelper(BaseModel):
-    async def run_from_config(
-        self, config: RolloutAggregationConfig, *, capture_dirs: tuple[Path, ...] = ()
-    ) -> Optional[Path]:
+    async def run_from_config(self, config: RolloutAggregationConfig) -> Optional[Path]:
         input_paths = _expand_input_glob(config.input_glob)
         if not input_paths:
             raise ConfigPathNotFoundError(f"No shards matched input_glob={config.input_glob!r}")
@@ -1366,8 +1362,6 @@ class RolloutAggregationHelper(BaseModel):
             health_result = run_health_checks(
                 output_fpath if config.merge_shards else [Path(path) for path in input_paths],
                 output_dir=output_fpath.parent,
-                capture_dirs=capture_dirs,
-                capture_enabled=bool(capture_dirs),
                 workers=config.health_check_workers,
                 ignored_checks=config.health_check_ignored_checks,
             )

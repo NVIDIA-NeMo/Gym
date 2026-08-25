@@ -9,9 +9,6 @@ from collections import defaultdict
 from collections.abc import Callable, Sequence
 from typing import Any
 
-import orjson
-
-from nemo_gym.base_responses_api_model import build_model_call_record
 from nemo_gym.health.types import (
     ROLLOUT_INDEX_KEY,
     TASK_INDEX_KEY,
@@ -21,9 +18,9 @@ from nemo_gym.health.types import (
     CheckSubject,
     Finding,
     _AgentStep,
-    _AgentStepSource,
     _CallBindings,
 )
+from nemo_gym.rollout_observability import TrajectoryRecord
 
 
 CHECK_REGISTRY: tuple[CheckSpec, ...] = (
@@ -37,49 +34,49 @@ CHECK_REGISTRY: tuple[CheckSpec, ...] = (
         id="rollout_missing_agent_turns",
         evaluation_scope=CheckScope.ROLLOUT,
         subject=CheckSubject.ROLLOUT,
-        reads=frozenset({CheckInput.RECORD}),
+        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.AGENT_TURNS}),
     ),
     CheckSpec(
         id="agent_turn_hollow",
         evaluation_scope=CheckScope.ROLLOUT,
         subject=CheckSubject.AGENT_TURN,
-        reads=frozenset({CheckInput.RECORD}),
+        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.AGENT_TURNS}),
     ),
     CheckSpec(
         id="model_call_zero_completion_tokens",
         evaluation_scope=CheckScope.ROLLOUT,
         subject=CheckSubject.MODEL_CALL,
-        reads=frozenset({CheckInput.RECORD, CheckInput.CAPTURE, CheckInput.BOUND_CALLS}),
+        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.BOUND_CALLS}),
     ),
     CheckSpec(
         id="model_call_missing_token_counts",
         evaluation_scope=CheckScope.ROLLOUT,
         subject=CheckSubject.MODEL_CALL,
-        reads=frozenset({CheckInput.RECORD, CheckInput.CAPTURE, CheckInput.BOUND_CALLS}),
+        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.BOUND_CALLS}),
     ),
     CheckSpec(
         id="trajectory_capture_mismatch",
         evaluation_scope=CheckScope.ROLLOUT,
         subject=CheckSubject.TRAJECTORY_CAPTURE,
-        reads=frozenset({CheckInput.RECORD, CheckInput.CAPTURE}),
+        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.BOUND_CALLS}),
     ),
     CheckSpec(
         id="model_call_failed",
         evaluation_scope=CheckScope.ROLLOUT,
         subject=CheckSubject.MODEL_CALL,
-        reads=frozenset({CheckInput.RECORD, CheckInput.CAPTURE, CheckInput.BOUND_CALLS}),
+        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.BOUND_CALLS}),
     ),
     CheckSpec(
         id="rollout_token_count_mismatch",
         evaluation_scope=CheckScope.ROLLOUT,
         subject=CheckSubject.ROLLOUT,
-        reads=frozenset({CheckInput.RECORD, CheckInput.CAPTURE, CheckInput.BOUND_CALLS}),
+        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.BOUND_CALLS}),
     ),
     CheckSpec(
         id="model_call_runaway_generation",
         evaluation_scope=CheckScope.ROLLOUT,
         subject=CheckSubject.MODEL_CALL,
-        reads=frozenset({CheckInput.RECORD, CheckInput.CAPTURE, CheckInput.BOUND_CALLS}),
+        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.BOUND_CALLS}),
     ),
     CheckSpec(
         id="task_consistently_unhealthy",
@@ -97,7 +94,6 @@ CHECK_REGISTRY: tuple[CheckSpec, ...] = (
 
 _ROLLOUT_SPECS = tuple(spec for spec in CHECK_REGISTRY if spec.evaluation_scope == CheckScope.ROLLOUT)
 _TASK_SPECS = tuple(spec for spec in CHECK_REGISTRY if spec.evaluation_scope == CheckScope.TASK)
-_FALLBACK_TRANSCRIPT_CHECK_IDS = frozenset({"rollout_missing_agent_turns", "agent_turn_hollow"})
 
 
 def normalize_ignored_checks(checks: Sequence[str] | str | None) -> tuple[str, ...]:
@@ -184,17 +180,21 @@ _AGENT_TOOL_CALL_TYPES = frozenset(
         "custom_tool_call",
     }
 )
-_AGENT_TURN_BOUNDARY_TYPES = frozenset(
+
+_INCOMPLETE_MODEL_CALL_GAPS = frozenset(
     {
-        "function_call_output",
-        "tool_call_output",
-        "tool_result",
-        "computer_call_output",
-        "custom_tool_call_output",
-        "local_shell_call_output",
-        "mcp_approval_response",
+        "model_calls_unavailable",
+        "model_call_capture_incomplete",
+        "model_call_capture_records_unreadable",
+        "model_call_capture_unreadable",
     }
 )
+
+_REFERENCE_CONTRADICTION_GAPS = {
+    "model_call_reference_unmatched": "missing_captured_call",
+    "model_call_reference_ambiguous": "duplicated_captured_call",
+    "model_call_reference_conflict": "conflicting_call_ownership",
+}
 
 
 def _item_has_tool_call(item: Any) -> bool:
@@ -207,169 +207,70 @@ def _item_has_tool_call(item: Any) -> bool:
     return bool(item.get("tool_calls"))
 
 
-def _item_is_agent_content(item: Any) -> bool:
-    if not isinstance(item, dict):
-        return False
-    return item.get("role") in {"assistant", "agent"} or item.get("type") == "reasoning" or _item_has_tool_call(item)
+def _canonical_trajectory(record: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+    raw = record.get("ng_trajectory")
+    if raw is None:
+        return None, None
+    try:
+        return TrajectoryRecord.model_validate(raw).model_dump(mode="json"), None
+    except Exception as exc:
+        return None, type(exc).__name__
 
 
-def _item_ends_agent_turn(item: Any) -> bool:
-    if not isinstance(item, dict):
-        return False
-    return item.get("role") == "user" or item.get("type") in _AGENT_TURN_BOUNDARY_TYPES
+def _trajectory_has_gap(trajectory: dict[str, Any], code: str) -> bool:
+    return any(isinstance(gap, dict) and gap.get("code") == code for gap in trajectory.get("gaps") or [])
 
 
-def _response_output_steps(output: list[Any]) -> list[_AgentStep]:
-    """Group adjacent agent-side Responses items into transcript turns."""
-    steps: list[_AgentStep] = []
-    has_message = False
-    has_tool_calls = False
-    has_agent_content = False
+def _trajectory_has_any_gap(trajectory: dict[str, Any], codes: frozenset[str]) -> bool:
+    return any(isinstance(gap, dict) and gap.get("code") in codes for gap in trajectory.get("gaps") or [])
 
-    def flush() -> None:
-        nonlocal has_message, has_tool_calls, has_agent_content
-        if has_agent_content:
-            steps.append(
-                _AgentStep(
-                    locator={"turn": len(steps)},
-                    has_message=has_message,
-                    has_tool_calls=has_tool_calls,
-                    model_call_refs=(),
-                )
+
+def _trajectory_reference_contradictions(trajectory: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        gap
+        for gap in trajectory.get("gaps") or []
+        if isinstance(gap, dict) and gap.get("code") in _REFERENCE_CONTRADICTION_GAPS
+    ]
+
+
+def _agent_steps(trajectory: dict[str, Any]) -> list[_AgentStep]:
+    """Normalize canonical TrajectoryTurn records for structural checks."""
+    steps = []
+    for position, turn in enumerate(trajectory.get("turns") or []):
+        refs = tuple(filter(None, (_call_ref_key(ref) for ref in turn.get("model_calls") or [])))
+        steps.append(
+            _AgentStep(
+                locator={"turn": turn.get("turn_no", position)},
+                has_message=_nonempty(turn.get("answer")) or _nonempty(turn.get("reasoning_content")),
+                has_tool_calls=_item_has_tool_call(turn.get("answer")) or _item_has_tool_call(turn.get("tool_calls")),
+                model_call_refs=refs,
             )
-        has_message = False
-        has_tool_calls = False
-        has_agent_content = False
-
-    for item in output:
-        if _item_ends_agent_turn(item):
-            flush()
-            continue
-        if not _item_is_agent_content(item):
-            continue
-        has_agent_content = True
-        has_tool_calls = has_tool_calls or _item_has_tool_call(item)
-        has_message = has_message or _nonempty(item)
-    flush()
+        )
     return steps
 
 
-def _agent_steps_with_source(record: dict[str, Any]) -> tuple[list[_AgentStep], _AgentStepSource]:
-    """Return agent-step evidence and the persisted source used to derive it."""
-    trajectory = record.get("ng_trajectory")
-    if isinstance(trajectory, dict):
-        turns = trajectory.get("turns")
-        if isinstance(turns, list) and turns:
-            normalized = []
-            for position, turn in enumerate(turns):
-                if not isinstance(turn, dict):
-                    continue
-                refs = tuple(filter(None, (_call_ref_key(ref) for ref in turn.get("model_calls") or [])))
-                normalized.append(
-                    _AgentStep(
-                        locator={"turn": turn.get("turn_no", position)},
-                        has_message=_nonempty(turn.get("answer")) or _nonempty(turn.get("reasoning_content")),
-                        has_tool_calls=_item_has_tool_call(turn.get("answer"))
-                        or _item_has_tool_call(turn.get("tool_calls")),
-                        model_call_refs=refs,
-                    )
-                )
-            if normalized:
-                return normalized, "trajectory_turns"
-
-        invocations = trajectory.get("invocations")
-        if isinstance(invocations, list):
-            normalized = []
-            for invocation_position, invocation in enumerate(invocations):
-                if not isinstance(invocation, dict):
-                    continue
-                invocation_refs = tuple(
-                    filter(None, (_call_ref_key(ref) for ref in invocation.get("model_calls") or []))
-                )
-                conversation = invocation.get("conversation")
-                agent_items = [item for item in conversation or [] if _item_is_agent_content(item)]
-                if agent_items:
-                    normalized.append(
-                        _AgentStep(
-                            locator={"invocation": str(invocation.get("invocation_id", invocation_position))},
-                            has_message=any(_nonempty(item) for item in agent_items),
-                            has_tool_calls=any(_item_has_tool_call(item) for item in agent_items),
-                            model_call_refs=invocation_refs,
-                        )
-                    )
-            if normalized:
-                return normalized, "trajectory_invocations"
-
-    response = record.get("response")
-    output = response.get("output") if isinstance(response, dict) else None
-    if not isinstance(output, list):
-        return [], "none"
-    return _response_output_steps(output), "response_output"
-
-
-def _agent_steps(record: dict[str, Any]) -> list[_AgentStep]:
-    """Return the best available agent-step evidence for health checks."""
-    return _agent_steps_with_source(record)[0]
-
-
-def _normalized_embedded_calls(record: dict[str, Any]) -> list[dict[str, Any]]:
-    trajectory = record.get("ng_trajectory")
-    raw_calls = trajectory.get("model_calls") if isinstance(trajectory, dict) else None
-    if isinstance(raw_calls, list) and raw_calls:
-        calls: list[dict[str, Any]] = []
-        for position, raw in enumerate(raw_calls):
-            if not isinstance(raw, dict):
-                continue
-            metadata = raw.get("response_metadata") if isinstance(raw.get("response_metadata"), dict) else {}
-            tokens = raw.get("token_stats") if isinstance(raw.get("token_stats"), dict) else {}
-            calls.append(
-                {
-                    "call_index": position,
-                    "model_call_id": raw.get("model_call_id"),
-                    "response_id": metadata.get("response_id"),
-                    "model_ref": metadata.get("model_ref"),
-                    "status_code": metadata.get("status_code"),
-                    "response_status": metadata.get("response_status"),
-                    "finish_reason": metadata.get("finish_reason"),
-                    "error_category": metadata.get("error_category"),
-                    "tokens_in": tokens.get("prompt_tokens"),
-                    "tokens_out": tokens.get("completion_tokens"),
-                    "request": raw.get("request"),
-                    "response": raw.get("response"),
-                }
-            )
-        return calls
-
-    capture = record.get("ng_model_call_capture")
-    raw_calls = capture.get("calls") if isinstance(capture, dict) else None
-    return [dict(call) for call in raw_calls or [] if isinstance(call, dict)]
-
-
-def _parse_capture(path: str | None, record: dict[str, Any]) -> tuple[list[dict[str, Any]], int, bool]:
-    """Read a sidecar once, or use the persisted projection when no sidecar is available."""
-    if path is None:
-        embedded = _normalized_embedded_calls(record)
-        return embedded, 0, bool(embedded)
-
+def _normalized_trajectory_calls(trajectory: dict[str, Any]) -> list[dict[str, Any]]:
     calls: list[dict[str, Any]] = []
-    invalid = 0
-    with open(path, "rb") as handle:
-        for position, line in enumerate(handle):
-            if not line.strip():
-                continue
-            try:
-                raw = orjson.loads(line)
-                if not isinstance(raw, dict):
-                    raise ValueError("capture line is not an object")
-                if "call_index" in raw or "tokens_in" in raw or "token_stats" in raw:
-                    normalized = dict(raw)
-                    normalized.setdefault("call_index", position)
-                else:
-                    normalized = build_model_call_record(raw, call_index=position).model_dump(mode="json")
-                calls.append(normalized)
-            except Exception:
-                invalid += 1
-    return calls, invalid, True
+    for position, raw in enumerate(trajectory.get("model_calls") or []):
+        metadata = raw.get("response_metadata") or {}
+        tokens = raw.get("token_stats") or {}
+        calls.append(
+            {
+                "call_index": position,
+                "model_call_id": raw.get("model_call_id"),
+                "response_id": metadata.get("response_id"),
+                "model_ref": metadata.get("model_ref"),
+                "status_code": metadata.get("status_code"),
+                "response_status": metadata.get("response_status"),
+                "finish_reason": metadata.get("finish_reason"),
+                "error_category": metadata.get("error_category"),
+                "tokens_in": tokens.get("prompt_tokens"),
+                "tokens_out": tokens.get("completion_tokens"),
+                "request": raw.get("request"),
+                "response": raw.get("response"),
+            }
+        )
+    return calls
 
 
 def _is_failed(call: dict[str, Any]) -> bool:
@@ -399,23 +300,18 @@ def _call_identity(call: dict[str, Any]) -> str | None:
     return None
 
 
-def _canonical_model_call_references(record: dict[str, Any]) -> tuple[str, ...]:
+def _canonical_model_call_references(trajectory: dict[str, Any]) -> tuple[str, ...]:
     """Return explicit model-call references from canonical TrajectoryTurn records only."""
-    trajectory = record.get("ng_trajectory")
-    turns = trajectory.get("turns") if isinstance(trajectory, dict) else None
-    if not isinstance(turns, list) or not turns:
-        return ()
     return tuple(
         reference
-        for turn in turns
-        if isinstance(turn, dict)
+        for turn in trajectory.get("turns") or []
         for raw_reference in turn.get("model_calls") or []
         if (reference := _call_ref_key(raw_reference)) is not None
     )
 
 
-def _bind_policy_calls(record: dict[str, Any], calls: list[dict[str, Any]]) -> _CallBindings:
-    references = _canonical_model_call_references(record)
+def _bind_policy_calls(trajectory: dict[str, Any], calls: list[dict[str, Any]]) -> _CallBindings:
+    references = _canonical_model_call_references(trajectory)
     calls_by_identity: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for call in calls:
         if identity := _call_identity(call):
@@ -488,17 +384,17 @@ def _transcript_tokens(record: dict[str, Any]) -> tuple[int, int, bool]:
     return prompt or 0, completion or 0, prompt is not None and completion is not None
 
 
-def _rollout_missing_agent_turns(record: dict[str, Any], subject: dict[str, int | str]) -> list[Finding]:
-    steps = _agent_steps(record)
+def _rollout_missing_agent_turns(trajectory: dict[str, Any], subject: dict[str, int | str]) -> list[Finding]:
+    steps = _agent_steps(trajectory)
     if any(step.has_model_activity for step in steps):
         return []
     return [_finding("rollout_missing_agent_turns", subject, reason="no agent turn with model activity")]
 
 
-def _agent_turn_hollow(record: dict[str, Any], subject: dict[str, int | str]) -> list[Finding]:
+def _agent_turn_hollow(trajectory: dict[str, Any], subject: dict[str, int | str]) -> list[Finding]:
     return [
         _finding("agent_turn_hollow", subject, locator=step.locator, reason="agent turn has no message or tool calls")
-        for step in _agent_steps(record)
+        for step in _agent_steps(trajectory)
         if not step.has_message and not step.has_tool_calls
     ]
 
@@ -534,37 +430,49 @@ def _model_call_missing_token_counts(bindings: _CallBindings, subject: dict[str,
 
 
 def _trajectory_capture_mismatch(
+    trajectory: dict[str, Any],
     bindings: _CallBindings,
-    invalid_capture_lines: int,
     subject: dict[str, int | str],
 ) -> list[Finding]:
     findings: list[Finding] = []
-    if invalid_capture_lines:
-        findings.append(
-            _finding(
-                "trajectory_capture_mismatch",
-                subject,
-                kind="unreadable_capture_records",
-                count=invalid_capture_lines,
-            )
-        )
+    seen: set[tuple[str, str]] = set()
     for reference in bindings.missing_references:
+        locator = reference.split(":")[-1]
+        seen.add(("missing_captured_call", locator))
         findings.append(
             _finding(
                 "trajectory_capture_mismatch",
                 subject,
-                locator={"call_id": reference.split(":")[-1]},
+                locator={"call_id": locator},
                 kind="missing_captured_call",
             )
         )
     for reference, count in bindings.duplicated_references:
+        locator = reference.split(":")[-1]
+        seen.add(("duplicated_captured_call", locator))
         findings.append(
             _finding(
                 "trajectory_capture_mismatch",
                 subject,
-                locator={"call_id": reference.split(":")[-1]},
+                locator={"call_id": locator},
                 kind="duplicated_captured_call",
                 count=count,
+            )
+        )
+    for gap in _trajectory_reference_contradictions(trajectory):
+        kind = _REFERENCE_CONTRADICTION_GAPS[gap["code"]]
+        detail = gap.get("detail") or "unknown"
+        locator = str(detail).split(":")[-1]
+        if (kind, locator) in seen:
+            continue
+        findings.append(
+            _finding(
+                "trajectory_capture_mismatch",
+                subject,
+                locator={"call_id": locator},
+                kind=kind,
+                observation_gap=gap["code"],
+                invocation_id=gap.get("invocation_id"),
             )
         )
     return findings
@@ -623,29 +531,29 @@ def _model_call_runaway_generation(bindings: _CallBindings, subject: dict[str, i
 _ROLLOUT_CHECKS: dict[
     str,
     Callable[
-        [dict[str, Any], list[dict[str, Any]], _CallBindings, int, dict[str, int | str]],
+        [dict[str, Any], dict[str, Any], _CallBindings, dict[str, int | str]],
         list[Finding],
     ],
 ] = {
-    "record_unreadable": lambda record, calls, bindings, invalid, subject: [],
-    "rollout_missing_agent_turns": lambda record, calls, bindings, invalid, subject: _rollout_missing_agent_turns(
-        record, subject
+    "record_unreadable": lambda record, trajectory, bindings, subject: [],
+    "rollout_missing_agent_turns": lambda record, trajectory, bindings, subject: _rollout_missing_agent_turns(
+        trajectory, subject
     ),
-    "agent_turn_hollow": lambda record, calls, bindings, invalid, subject: _agent_turn_hollow(record, subject),
-    "model_call_zero_completion_tokens": lambda record, calls, bindings, invalid, subject: (
+    "agent_turn_hollow": lambda record, trajectory, bindings, subject: _agent_turn_hollow(trajectory, subject),
+    "model_call_zero_completion_tokens": lambda record, trajectory, bindings, subject: (
         _model_call_zero_completion_tokens(bindings, subject)
     ),
-    "model_call_missing_token_counts": lambda record, calls, bindings, invalid, subject: (
+    "model_call_missing_token_counts": lambda record, trajectory, bindings, subject: (
         _model_call_missing_token_counts(bindings, subject)
     ),
-    "trajectory_capture_mismatch": lambda record, calls, bindings, invalid, subject: (
-        _trajectory_capture_mismatch(bindings, invalid, subject)
+    "trajectory_capture_mismatch": lambda record, trajectory, bindings, subject: (
+        _trajectory_capture_mismatch(trajectory, bindings, subject)
     ),
-    "model_call_failed": lambda record, calls, bindings, invalid, subject: _model_call_failed(bindings, subject),
-    "rollout_token_count_mismatch": lambda record, calls, bindings, invalid, subject: (
+    "model_call_failed": lambda record, trajectory, bindings, subject: _model_call_failed(bindings, subject),
+    "rollout_token_count_mismatch": lambda record, trajectory, bindings, subject: (
         _rollout_token_count_mismatch(record, bindings, subject)
     ),
-    "model_call_runaway_generation": lambda record, calls, bindings, invalid, subject: (
+    "model_call_runaway_generation": lambda record, trajectory, bindings, subject: (
         _model_call_runaway_generation(bindings, subject)
     ),
 }

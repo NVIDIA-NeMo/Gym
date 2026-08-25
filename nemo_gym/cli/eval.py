@@ -412,16 +412,11 @@ def e2e_rollout_collection():  # pragma: no cover
         rh.shutdown()
 
     if health_check_enabled and collection_completed:
-        from nemo_gym.base_responses_api_model import model_call_capture_dirs_from_config
         from nemo_gym.rollout_health import format_health_report, run_health_checks
 
-        capture_dirs = model_call_capture_dirs_from_config(global_config_dict)
         health_result = run_health_checks(
             output_fpath,
-            capture_dirs=capture_dirs,
-            capture_enabled=bool(capture_dirs),
             workers=rollout_collection_config.health_check_workers,
-            driver_bypass=bool(driver_path),
             ignored_checks=rollout_collection_config.health_check_ignored_checks,
         )
         print(format_health_report(health_result))
@@ -439,15 +434,13 @@ def collect_rollouts():  # pragma: no cover
 
 @exit_cleanly_on_config_error
 def aggregate_rollouts():  # pragma: no cover
-    from nemo_gym.base_responses_api_model import model_call_capture_dirs_from_config
     from nemo_gym.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
 
     global_config = get_global_config_dict()
     config = RolloutAggregationConfig.model_validate(global_config)
     rah = RolloutAggregationHelper()
-    capture_dirs = tuple(model_call_capture_dirs_from_config(global_config))
 
-    asyncio.run(rah.run_from_config(config, capture_dirs=capture_dirs))
+    asyncio.run(rah.run_from_config(config))
 
 
 def health_check_rollouts(
@@ -455,7 +448,6 @@ def health_check_rollouts(
     *,
     workers: int | None = None,
     ignored_checks: Sequence[str] = (),
-    capture_dirs: Sequence[str | Path] | None = None,
 ):
     """Run rollout quality verification for an existing run directory."""
     from nemo_gym.rollout_health import health_check_run_dir
@@ -464,7 +456,6 @@ def health_check_rollouts(
         run_dir,
         workers=workers,
         ignored_checks=ignored_checks,
-        capture_dirs=capture_dirs,
     )
 
 

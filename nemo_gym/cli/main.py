@@ -488,7 +488,6 @@ def _eval_health_check(args: argparse.Namespace, overrides: list[str]) -> None:
             args.run_dir,
             workers=args.workers,
             ignored_checks=args.ignore_checks or (),
-            capture_dirs=args.capture_dirs,
         )
     except ValueError as exc:
         args._parser.error(str(exc))
@@ -875,16 +874,6 @@ COMMANDS = {
         flags=(
             Flag(register=lambda p: p.add_argument("run_dir", metavar="RUN_DIR")),
             Flag(register=lambda p: p.add_argument("--workers", type=int, help="Number of worker processes.")),
-            Flag(
-                register=lambda p: p.add_argument(
-                    "--capture-dir",
-                    dest="capture_dirs",
-                    action="append",
-                    type=Path,
-                    metavar="PATH",
-                    help="Capture directory to use instead of RUN_DIR/model_calls; repeat for multiple directories.",
-                )
-            ),
             Flag(
                 register=lambda p: p.add_argument(
                     "--ignore-checks",

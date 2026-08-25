@@ -16,55 +16,42 @@ The rollout-health RFC is the product specification for this branch. This docume
 
 - **Task:** One benchmark problem. A task may be attempted more than once.
 - **Rollout or repeat:** One agent attempt at a task. `_ng_task_index` identifies the task and `_ng_rollout_index` identifies the repeat.
-- **Artifact:** A file saved by an evaluation run, such as rollout records, aggregate metrics, model-call captures, or health reports.
+- **Artifact:** A file saved by an evaluation run, such as rollout records, aggregate metrics, or health reports.
 - **JSONL:** A text file containing one complete JSON value per line. Gym stores one rollout record per non-empty line.
 - **Rollout record:** One JSON object in the rollout JSONL file. It contains the task and repeat identity, the agent result, verifier output, and any observability data attached during collection.
-- **Observability data:** Evidence recorded so a completed run can be inspected, such as conversations, model calls, token counts, status codes, and timing. It does not change the rollout or its score.
-- **Transcript:** Saved conversation evidence for the user, agent, and tools. New Gym records standardize this evidence in `ng_trajectory`.
+- **Observability data:** Evidence recorded so a completed run can be inspected, such as conversations, model calls, token counts, status codes, and timing. Gym writes the final standard form under the rollout record's `ng_trajectory` key. It does not change the rollout or its score.
+- **Canonical trajectory:** The one `TrajectoryRecord` stored under `ng_trajectory`. This is the only observability representation read by health checks.
+- **Observation gap:** An `ObservationGap` in `ng_trajectory.gaps`. The observability code writes a gap when it could not collect, normalize, or join some evidence exactly. A gap is a fact about evidence quality, not a health verdict by itself.
+- **Transcript:** Saved conversation evidence for the user, agent, and tools. Health checks read its agent turns only from `ng_trajectory.turns`.
 - **Agent turn:** One unit of agent activity. It may include reasoning, an assistant message, and one or more function calls. A user message or function-call output starts the next interaction.
 - **Agent invocation:** One execution of a root agent or subagent. An invocation can contain several conversation items, turns, tool calls, and model calls. The code type is `AgentInvocation`.
 - **Model call:** One request sent to a language model and its response.
-- **Model-call capture:** Saved request, response, token, status, and timing evidence for model calls.
-- **Sidecar:** A separate file associated with a rollout. Raw model-call capture usually lives in a `*.capture.jsonl` sidecar.
-- **Embedded projection:** A normalized copy of capture data stored inside the rollout record, in `ng_trajectory.model_calls` or `ng_model_call_capture`.
-- **Model-call reference:** An identifier that connects transcript evidence to a captured model call. `ModelCallRef` accepts either `model_call_id` or the pair `model_ref` and `response_id`.
-- **Binding:** A successful match between a transcript model-call reference and a captured model call.
-- **Correlation:** The information needed to make bindings between transcript activity and captured model calls.
+- **Model-call evidence:** The request, response, token, status, and timing data stored in `ng_trajectory.model_calls`.
+- **Model-call reference:** An identifier that connects one canonical trajectory turn to one canonical model call. `ModelCallRef` accepts either `model_call_id` or the pair `model_ref` and `response_id`.
+- **Binding:** A successful match between a reference in `TrajectoryTurn.model_calls` and exactly one entry in `TrajectoryRecord.model_calls`.
+- **Correlation:** The information needed to bind trajectory turns to canonical model calls.
 - **Policy model:** The model being evaluated.
-- **Auxiliary model:** A model used to support the evaluation, such as a user simulator or judge. Its calls may appear in the same capture as policy-model calls.
+- **Auxiliary model:** A model used to support the evaluation, such as a user simulator or judge. Its calls may appear in the same canonical model-call list as policy-model calls.
 - **Check:** One registered health rule. `CheckSpec` gives it a stable ID, an evaluation scope, a finding subject, and required inputs. Evaluation scope says how much data the rule reduces: one rollout, one task across repeats, or the run as a whole. Finding subject says what the evidence identifies, such as an agent turn or model call.
 - **Finding:** Evidence that a check failed for a rollout or task. A check emits `Finding`; it never emits a verdict.
 - **Healthy:** Every enabled rollout check had enough input to run, and none produced a finding.
 - **Unhealthy:** At least one enabled rollout check produced a finding.
 - **Unobserved:** No enabled rollout check produced a finding, but at least one could not run because required evidence was missing.
-- **Driver bypass:** A custom collection path that does not use Gym's normal model-server capture and correlation path.
 - **Shard:** One part of a larger rollout file. Separate workers may write shards that are later aggregated.
 
 ## Transcript and check behavior
 
 ### 1. Missing canonical agent turns
 
-**RFC gap.** Current Gym stores agent turns in `TrajectoryRecord.turns`. Some records do not contain those turns, and the RFC does not say whether turn-based checks should reject them, become unobserved, or use weaker evidence.
+**RFC gap.** Current Gym stores agent turns in `TrajectoryRecord.turns`. The RFC does not say how a check should behave when the canonical trajectory or its turns are unavailable.
 
-**Chosen behavior.** `ng_trajectory.turns` is the canonical input. The runner retains two compatibility fallbacks, but labels their turn-based results as best-effort with one aggregated warning per run. The warning reports how many records used each fallback. Sources are tried in this order and never combined:
+**Chosen behavior.** Health checks read agent turns only from `ng_trajectory.turns`. They do not reconstruct turns from `ng_trajectory.invocations`, `response.output`, or any agent-specific record shape.
 
-1. `ng_trajectory.turns`: each `TrajectoryTurn` is one agent turn.
-2. `ng_trajectory.invocations`: this is current Gym data, but it is coarser than turns. Each `AgentInvocation` with conversation evidence is treated as one unit. An invocation may contain several messages and model calls. Its `model_calls` list is stored on the `AgentInvocation`, not on individual conversation items, so the runner cannot safely determine which call produced each message.
-3. `response.output`: this legacy fallback reconstructs turns by grouping adjacent reasoning, assistant-message, and function-call items. A user message or function-call output ends the group.
+- No valid `ng_trajectory`, a `trajectory_projection_failed` gap, or a `turns_unavailable` gap makes `rollout_missing_agent_turns` and `agent_turn_hollow` unobserved.
+- A valid canonical trajectory whose turns are available but contain no agent activity produces `rollout_missing_agent_turns`.
+- Each canonical turn is reduced to whether it contains non-empty answer or reasoning content, a tool call, or an explicit model-call reference.
 
-For example, this `response.output` sequence contains two agent turns:
-
-```text
-reasoning
-assistant message
-function call
-function-call output  # ends the first agent turn
-assistant message     # second agent turn
-```
-
-For structural health checks, each selected turn or invocation is reduced to three facts: whether it contains non-empty text or reasoning, whether it contains a tool call, and which model-call references it contains. The record has agent activity when at least one selected unit contains any of those facts. Model-call checks do not use these compatibility fallbacks: they require explicit references from canonical `TrajectoryTurn.model_calls` and otherwise become unobserved.
-
-**Alternatives considered.** Mark turn-based checks unobserved whenever `TrajectoryRecord.turns` is missing, reject such records, or treat every `response.output` item as a separate turn. Treating each item separately produced false `agent_turn_hollow` findings when an empty assistant message and its real function call were sibling items in the same model response.
+**Alternatives considered.** Reconstruct historical turns from invocation conversations or `response.output`, or reject the whole rollout. Reconstruction makes the result depend on guessed agent-specific formats; rejection would prevent the other checks from running.
 
 ### 2. Whether reasoning counts as message content
 
@@ -78,22 +65,23 @@ For structural health checks, each selected turn or invocation is reduced to thr
 
 **RFC gap.** The RFC exempts deterministic-dispatch steps from `model_call_zero_completion_tokens` without explaining the term.
 
-**Chosen behavior.** A deterministic dispatch is agent logic that produces a step without calling the model. Because `model_call_zero_completion_tokens` examines explicitly bound policy-model calls, such a step has no bound call and is automatically outside this check. Every bound call reporting zero completion tokens produces a finding. Unowned capture entries are not evaluated because they may belong to a user simulator or judge. The runner does not infer an exemption from request parameters or metadata.
+**Chosen behavior.** A deterministic dispatch is agent logic that produces a step without calling the model. Because `model_call_zero_completion_tokens` examines explicitly bound policy-model calls, such a step has no bound call and is automatically outside this check. Every bound call reporting zero completion tokens produces a finding. Unreferenced canonical model-call entries are not evaluated because they may belong to a user simulator or judge. The runner does not infer an exemption from request parameters or metadata.
 
-**Alternative considered.** Add or infer a special marker on captured calls. No such marker exists in the specified artifacts, so doing this would invent a new contract.
+**Alternative considered.** Add or infer a special marker on model calls. No such marker exists in the specified artifacts, so doing this would invent a new contract.
 
-### 4. Binding trajectory turns to captured model calls
+### 4. Binding trajectory turns to model calls
 
-**RFC gap.** The model-call checks need to know which captured calls belong to the policy trajectory, but the RFC does not define how to make that connection or distinguish absent evidence from contradictory evidence.
+**RFC gap.** The model-call checks need to know which calls belong to the policy trajectory, but the RFC does not define how to make that connection or distinguish absent evidence from contradictory evidence.
 
-**Chosen behavior.** The runner creates one shared binding result from canonical `TrajectoryTurn.model_calls`. It accepts only an explicit `ModelCallRef`: either `model_call_id`, or both `model_ref` and `response_id`. It never matches by position, payload similarity, or model name. All policy-model-call checks consume the same bound calls.
+**Chosen behavior.** Both sides of the match come from the same canonical `TrajectoryRecord`: references come from `TrajectoryTurn.model_calls`, and call evidence comes from `TrajectoryRecord.model_calls`. The runner accepts only an explicit `ModelCallRef`: either `model_call_id`, or both `model_ref` and `response_id`. It never matches by position, payload similarity, or model name. All policy-model-call checks consume the same binding result.
 
 - A turn without a reference does not produce a finding. It may be deterministic agent logic rather than a model call.
-- If the trajectory contains no usable references, binding-dependent checks are unobserved.
-- An explicit reference that resolves to no captured call or more than one captured call produces `trajectory_capture_mismatch` findings because the two artifacts contradict each other.
+- If the canonical trajectory lacks usable references or complete model-call evidence, binding-dependent checks are unobserved.
+- An explicit reference that resolves to no model call or more than one model call produces a `trajectory_capture_mismatch` finding only when the canonical trajectory does not say that model-call evidence is incomplete.
+- The observability gap codes `model_call_reference_unmatched`, `model_call_reference_ambiguous`, and `model_call_reference_conflict` are also explicit contradictions and produce `trajectory_capture_mismatch` findings.
 - Only calls that resolve exactly once become bound policy-model calls.
 
-**Alternatives considered.** Match by list position, treat every capture entry as a policy-model call, or fail every turn without a reference. These choices can connect auxiliary calls to policy turns or turn missing observability into false rollout failures.
+**Alternatives considered.** Read raw capture files again, match by list position, treat every model-call entry as a policy-model call, or fail every turn without a reference. These choices duplicate observability work, can assign auxiliary calls to policy turns, or turn missing evidence into false rollout failures.
 
 ### 5. Separating correspondence, token, and model-call failures
 
@@ -101,13 +89,13 @@ For structural health checks, each selected turn or invocation is reduced to thr
 
 **Chosen behavior.** The implementation separates them into checks whose IDs begin with their finding subject:
 
-- `trajectory_capture_mismatch` reports explicit references that resolve to zero or multiple captured calls. An unreadable capture line is also an affirmative artifact defect under this check. Extra unreferenced capture entries do not fail because they may be auxiliary calls.
+- `trajectory_capture_mismatch` reports explicit reference contradictions recorded in or derived from the canonical trajectory. Extra unreferenced model-call entries do not fail because they may be auxiliary calls.
 - `model_call_missing_token_counts` reports a bound call missing prompt-token or completion-token counts. With no bound calls, it is unobserved. Zero is a present count and belongs to `model_call_zero_completion_tokens`.
 - `rollout_token_count_mismatch` compares complete top-level rollout totals with the sum of a complete set of bound calls. Missing totals, missing per-call counts, or incomplete bindings make it unobserved.
-- `model_call_failed` reports one finding per bound call with HTTP status 400 through 599, a recorded error category, or response status `failed`, `error`, or `cancelled`. Its detail records whether that call was the final bound call. Unreferenced failed capture entries are not attributed to the policy model.
+- `model_call_failed` reports one finding per bound call with HTTP status 400 through 599, a recorded error category, or response status `failed`, `error`, or `cancelled`. Its detail records whether that call was the final bound call. Unreferenced failed model-call entries are not attributed to the policy model.
 - `model_call_zero_completion_tokens` and `model_call_runaway_generation` also evaluate only bound policy-model calls.
 
-Raw run statistics remain unchanged: they count all stored capture calls because they describe the artifact rather than assigning policy ownership.
+Run statistics count all `TrajectoryRecord.model_calls` because they describe the canonical artifact rather than assigning policy ownership. The report field names containing `capture` are retained because the RFC fixes those schema names; health does not read capture sidecars.
 
 **Alternatives considered.** Keep one overloaded check, sum all capture calls, or treat every unreferenced failure as a dropped policy retry. Separate checks make each ID independently understandable and ignorable, while bound-call evaluation avoids attributing judge or user-simulator failures to the policy.
 
@@ -145,9 +133,9 @@ This makes `healthy` a strong claim that every enabled rollout check ran and pas
 
 ### 9. Inputs to `task_no_successful_model_calls`
 
-**RFC gap.** The RFC does not say whether this task-level check may draw a conclusion from only the repeats that have capture evidence.
+**RFC gap.** The RFC does not say whether this task-level check may draw a conclusion from only the repeats that have model-call evidence.
 
-**Chosen behavior.** Every repeat must have a complete set of explicit policy-call bindings. Raw capture alone is insufficient because it may contain auxiliary calls. If any repeat lacks complete bindings, this task check is unobserved. When every repeat is observed, the check produces a finding only if none contains a successful bound call.
+**Chosen behavior.** Every repeat must have a complete set of explicit policy-call bindings in its canonical trajectory. A list of model calls without turn references is insufficient because it may contain auxiliary calls. If any repeat lacks complete bindings, this task check is unobserved. When every repeat is observed, the check produces a finding only if none contains a successful bound call.
 
 **Alternative considered.** Evaluate only the observed repeats. That could report failure even though an unobserved repeat contained a successful call.
 
@@ -169,37 +157,46 @@ This makes `healthy` a strong claim that every enabled rollout check ran and pas
 
 ## Artifact discovery and failure handling
 
-### 12. Finding capture files from the standalone command
+### 12. Finding the canonical observability input
 
-**RFC gap.** The RFC does not define where the standalone command should find capture files. Core Gym has no implicit capture-directory default: when observability is enabled, `ModelCallCaptureConfig` requires an explicit absolute `model_call_capture_dir`.
+**RFC gap.** The RFC describes rollout records and separate capture artifacts, but current Gym already combines its observability evidence into a final `TrajectoryRecord` before persisting each rollout.
 
-**Chosen behavior.** With no CLI override, the standalone command uses only `<run-dir>/model_calls`, the conventional capture location beside the rollout file. It never recursively searches the run directory. One or more explicit directories may replace that convention by repeating `--capture-dir PATH`; an explicitly supplied directory must exist. Automatic execution after `run` or `aggregate` receives `model_call_capture_dir` from the run configuration directly and does not use this fallback.
+**Chosen behavior.** Standalone, post-run, and post-aggregate health checks all read exactly one observability source: `ng_trajectory` inside each rollout record. The CLI has no capture-directory option, and the health runner never discovers or opens model-call sidecars. The collection observability code may still use sidecars internally before it creates the final trajectory; that is outside the health workflow.
 
-**Alternatives considered.** Recursively discover every `*.capture.jsonl`, support historical directory layouts implicitly, or make every capture-dependent check unobserved in standalone mode. Recursive discovery can ingest stale or unrelated artifacts, so nonstandard layouts must be named explicitly.
+**Alternatives considered.** Let health rediscover sidecars, read `ng_model_call_capture`, or choose among several representations. Multiple sources require precedence rules, can disagree after files move, and duplicate normalization and correlation already owned by the observability stack.
 
-### 13. Using model-call evidence embedded in a rollout
+### 13. Translating observation gaps into health behavior
 
-**RFC gap.** A rollout may retain model-call evidence inside `ng_trajectory` or `ng_model_call_capture` after raw sidecars have moved, or when sidecar filenames do not match the rollout identity. The RFC does not state which source wins.
+**RFC gap.** `TrajectoryRecord.gaps` records evidence that observability could not collect or join exactly, but the RFC does not say which gaps mean missing input and which describe an affirmative contradiction.
 
-**Chosen behavior.** A sidecar whose filename matches the rollout is preferred. If none matches, a non-empty embedded model-call projection counts as observed capture. An embedded but empty call list does not prove that the rollout used Gym's capture path, so capture-dependent checks remain unobserved.
+**Chosen behavior.** The observability stack records facts; the health runner alone derives findings and verdicts from them.
 
-**Alternatives considered.** Ignore embedded evidence, or treat an empty embedded list as proof of a successfully captured rollout with zero calls. The latter produced false `task_no_successful_model_calls` findings for collection drivers that bypass Gym's model server.
+- `trajectory_projection_failed` makes every trajectory-dependent check unobserved.
+- `turns_unavailable` makes turn-dependent checks unobserved.
+- `model_calls_unavailable`, `model_call_capture_incomplete`, `model_call_capture_records_unreadable`, and `model_call_capture_unreadable` make binding-dependent checks unobserved.
+- `model_call_reference_unmatched`, `model_call_reference_ambiguous`, and `model_call_reference_conflict` are explicit contradictions and produce `trajectory_capture_mismatch` findings.
+- `model_call_ownership_unavailable` does not fail a check by itself. An unreferenced call may belong to a judge, user simulator, or other auxiliary model.
+- Other gap codes are not silently turned into rollout-health failures. A check uses them only when it has an explicit rule.
+
+This preserves the difference between “the evidence is absent” and “the available evidence disagrees.”
+
+**Alternatives considered.** Treat every gap as unhealthy, ignore all gaps, or add a health check for every observability code. Those choices respectively create false failures, hide missing-input states, or make the health registry an accidental mirror of observability internals.
 
 ### 14. Recording why a check is unobserved
 
-**RFC gap.** The RFC distinguishes capture disabled, an agent that cannot correlate calls, and driver bypass. Its `rollout_verdicts.jsonl` schema allows only a list of unobserved check IDs, not a reason for each ID.
+**RFC gap.** The canonical trajectory can explain why evidence is missing through `ObservationGap`, while `rollout_verdicts.jsonl` allows only a list of unobserved check IDs, not a reason for each ID.
 
-**Chosen behavior.** The runner distinguishes these causes while deciding whether input exists, then writes only the check IDs allowed by the schema.
+**Chosen behavior.** The runner reads the relevant gap codes while deciding whether each check has input, then writes only the check IDs allowed by the RFC schema. The original reasons remain inspectable in the rollout's `ng_trajectory.gaps`.
 
-**Alternative considered.** Add an unobserved-reasons object to each verdict row. That would change the specified report schema.
+**Alternative considered.** Copy gap reasons into every verdict row. That would duplicate evidence and change the specified report schema.
 
-### 15. Treating custom collection drivers as capture bypass
+### 15. Custom collection drivers
 
-**RFC gap.** None. The RFC's state table says a custom collection driver bypasses the standard correlation path. The remaining choice is whether to trust capture-looking files found beside such a run.
+**RFC gap.** A custom collection driver may or may not participate in Gym observability, and the RFC does not define a separate persisted driver-health contract.
 
-**Chosen behavior.** Automatic execution marks all capture-dependent checks unobserved when a custom collection driver is configured, even if files named like captures are present.
+**Chosen behavior.** Health has no driver-specific branch. If a driver produces a valid final `ng_trajectory`, its available checks run. If it does not, the dependent checks are unobserved. Files adjacent to the rollout are never used to infer observability.
 
-**Alternative considered.** Evaluate those files opportunistically. Their presence does not prove they follow Gym's standard rollout-correlation contract.
+**Alternative considered.** Mark every custom driver unobserved by configuration alone. That would ignore valid canonical trajectories produced by conforming drivers.
 
 ### 16. Finding the rollout JSONL from a run directory
 
