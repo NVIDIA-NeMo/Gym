@@ -164,6 +164,7 @@ def test_all_registered_semantic_checks_fire_on_synthetic_artifacts(tmp_path: Pa
         (_record(8, 0, usage={"input_tokens": 3, "output_tokens": 2}), [_call(status_code=500)]),
         (_record(8, 1, usage={"input_tokens": 3, "output_tokens": 2}), [_call(status_code=408)]),
     ]
+    rows.append(deepcopy(rows[0]))
     rollout_path = _write_fixture(tmp_path, rows)
 
     result = run_health_checks(rollout_path, workers=2)
@@ -222,11 +223,7 @@ def test_missing_canonical_trajectory_makes_trajectory_checks_unobserved(tmp_pat
     [digest] = run_health_checks(rollout_path, workers=1).rollouts
 
     assert digest.verdict == "unobserved"
-    assert set(digest.unobserved) == {
-        spec.id
-        for spec in CHECK_REGISTRY
-        if spec.evaluation_scope == health.CheckScope.ROLLOUT and spec.id not in RUNNER_CHECKS
-    }
+    assert set(digest.unobserved) == {spec.id for spec in CHECK_REGISTRY if health.CheckInput.TRAJECTORY in spec.reads}
     assert not digest.capture_observed
     assert digest.model_calls == 0
     assert not digest.findings
@@ -360,11 +357,7 @@ def test_invalid_canonical_trajectory_is_unreadable_without_fallback(tmp_path: P
     assert digest.model_calls == 0
     assert [finding.check for finding in digest.findings] == ["record_unreadable"]
     assert digest.findings[0].detail["reason"] == "canonical trajectory is unreadable"
-    assert set(digest.unobserved) == {
-        spec.id
-        for spec in CHECK_REGISTRY
-        if spec.evaluation_scope == health.CheckScope.ROLLOUT and spec.id not in RUNNER_CHECKS
-    }
+    assert set(digest.unobserved) == {spec.id for spec in CHECK_REGISTRY if health.CheckInput.TRAJECTORY in spec.reads}
     assert health_checks._nonempty(123) is False
     assert health_checks._call_ref_key({"response_id": "unqualified-response"}) is None
     assert health_checks._item_has_tool_call("bad") is False
@@ -439,11 +432,7 @@ def test_trajectory_projection_failure_makes_trajectory_checks_unobserved(tmp_pa
     [digest] = run_health_checks(rollout_path, workers=1).rollouts
 
     assert digest.verdict == "unobserved"
-    assert set(digest.unobserved) == {
-        spec.id
-        for spec in CHECK_REGISTRY
-        if spec.evaluation_scope == health.CheckScope.ROLLOUT and spec.id not in RUNNER_CHECKS
-    }
+    assert set(digest.unobserved) == {spec.id for spec in CHECK_REGISTRY if health.CheckInput.TRAJECTORY in spec.reads}
     assert not digest.findings
 
 
@@ -709,16 +698,24 @@ def test_call_failures_and_token_mismatches_have_separate_check_ids(tmp_path: Pa
 
 
 def test_duplicate_rollout_identity_counts_once_at_task_scope(tmp_path: Path) -> None:
-    duplicate = _record(7, 0, answer=None)
-    rollout_path = tmp_path / "rollouts.jsonl"
-    rollout_path.write_bytes(
-        orjson.dumps(duplicate, option=orjson.OPT_APPEND_NEWLINE)
-        + orjson.dumps(duplicate, option=orjson.OPT_APPEND_NEWLINE)
+    duplicate = _record(7, 0, usage={"input_tokens": 3, "output_tokens": 2})
+    rollout_path = _write_fixture(
+        tmp_path,
+        [
+            (duplicate, [_call()]),
+            (deepcopy(duplicate), [_call()]),
+        ],
     )
 
     result = run_health_checks(rollout_path, workers=1)
 
     assert result.summary["run"]["verdicts"] == {"healthy": 0, "unhealthy": 2, "unobserved": 0}
+    assert result.summary["run"]["issues"]["rollout_duplicate_identity"] == 2
+    assert all(
+        [finding.check for finding in digest.findings] == ["rollout_duplicate_identity"]
+        and digest.findings[0].detail == {"duplicate_count": 2}
+        for digest in result.rollouts
+    )
     assert result.summary["tasks"]["7"] == {
         "repeats": 1,
         "healthy": 0,
@@ -731,6 +728,11 @@ def test_duplicate_rollout_identity_counts_once_at_task_scope(tmp_path: Path) ->
         "unobserved": 1,
         "ignored": 0,
     }
+
+    ignored = run_health_checks(rollout_path, workers=1, ignored_checks=["rollout_duplicate_identity"])
+    assert ignored.summary["run"]["verdicts"] == {"healthy": 2, "unhealthy": 0, "unobserved": 0}
+    assert ignored.summary["run"]["issues"]["rollout_duplicate_identity"] == 0
+    assert ignored.summary["tasks"]["7"]["repeats"] == 1
 
 
 def test_zero_token_call_is_flagged_and_nonempty_length_response_is_exempt(tmp_path: Path) -> None:
@@ -773,6 +775,7 @@ def test_malformed_records_and_check_failures_become_findings(tmp_path: Path, mo
     assert digest.findings[0].detail["reason"] == "rollout record is unreadable"
     assert set(digest.unobserved) == {
         "check_execution_error",
+        "rollout_duplicate_identity",
         "rollout_missing_agent_turns",
         "agent_turn_hollow",
         "model_call_zero_completion_tokens",

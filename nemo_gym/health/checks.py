@@ -37,6 +37,12 @@ CHECK_REGISTRY: tuple[CheckSpec, ...] = (
         reads=frozenset({CheckInput.RECORD}),
     ),
     CheckSpec(
+        id="rollout_duplicate_identity",
+        evaluation_scope=CheckScope.ROLLOUT,
+        subject=CheckSubject.ROLLOUT,
+        reads=frozenset({CheckInput.RECORD}),
+    ),
+    CheckSpec(
         id="rollout_missing_agent_turns",
         evaluation_scope=CheckScope.ROLLOUT,
         subject=CheckSubject.ROLLOUT,
@@ -543,6 +549,7 @@ _ROLLOUT_CHECKS: dict[
 ] = {
     "check_execution_error": lambda record, trajectory, bindings, subject: [],
     "record_unreadable": lambda record, trajectory, bindings, subject: [],
+    "rollout_duplicate_identity": lambda record, trajectory, bindings, subject: [],
     "rollout_missing_agent_turns": lambda record, trajectory, bindings, subject: _rollout_missing_agent_turns(
         trajectory, subject
     ),

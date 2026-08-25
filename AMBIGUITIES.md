@@ -240,16 +240,15 @@ This does not affect the standalone command: `gym eval health-check` still requi
 
 **Alternatives considered.** Report the exception as `record_unreadable`, which incorrectly blames a successfully parsed record, or abort verification before the other checks can run.
 
-### 21. Duplicate task and rollout identities
+### 21. Duplicate rollout identities
 
-**RFC gap.** Reports are keyed by `_ng_task_index` and `_ng_rollout_index`, but the RFC does not say what to do when the input JSONL contains the same pair more than once.
+**RFC gap.** Reports identify a rollout using `_ng_task_index` and `_ng_rollout_index`, but the RFC does not define what happens when multiple input records contain the same pair.
 
-**Chosen behavior.** Every non-empty input line still receives a rollout verdict and contributes to run-level counts. Before task-level checks and repeat counts, records with the same identity are collapsed into one repeat:
+**Chosen behavior.** The runner emits a `rollout_duplicate_identity` finding on every record sharing a duplicated identity. Every physical record remains present in `rollout_verdicts.jsonl` and contributes to run-level artifact and verdict counts.
 
-- Copies with the same verdict produce that verdict once.
-- Copies with conflicting verdicts make that repeat unobserved for task-level evaluation.
+For task-level repeat counts and checks, records with the same identity are treated as one repeat. This prevents duplicated records from being mistaken for independent attempts and producing a false `task_consistently_unhealthy` finding.
 
-**Alternatives considered.** Reject the run, keep only the first or last copy everywhere, or classify identity collisions as `record_unreadable`. Validation found that counting duplicate lines as separate repeats could create a false `task_consistently_unhealthy` finding.
+**Alternatives considered.** Silently keep only the first or last record, reject the entire run, count every copy as an independent repeat, or convert conflicting copies to unobserved. Those choices respectively discard evidence, prevent tolerant reporting, inflate repeat counts, or hide an affirmative artifact defect.
 
 ### 22. Running only a selected subset of checks
 

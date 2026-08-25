@@ -260,6 +260,29 @@ def _unique_task_repeats(digests: list[RolloutDigest]) -> list[_TaskRepeat]:
     return repeats
 
 
+def _mark_duplicate_identities(digests: list[RolloutDigest], ignored_checks: frozenset[str]) -> None:
+    """Flag physical records that claim the same logical rollout identity."""
+    if "rollout_duplicate_identity" in ignored_checks:
+        return
+
+    grouped: dict[tuple[int | str, int | str], list[RolloutDigest]] = defaultdict(list)
+    for digest in digests:
+        grouped[(digest.task_index, digest.rollout_index)].append(digest)
+
+    for copies in grouped.values():
+        if len(copies) < 2:
+            continue
+        for digest in copies:
+            digest.findings.append(
+                _finding(
+                    "rollout_duplicate_identity",
+                    _subject(digest.task_index, digest.rollout_index),
+                    duplicate_count=len(copies),
+                )
+            )
+            digest.verdict = "unhealthy"
+
+
 def _task_findings(
     grouped: dict[int | str, list[_TaskRepeat]],
     ignored_checks: frozenset[str],
@@ -455,6 +478,7 @@ def run_health_checks(
                 worker_results = [_worker(item) for item in worker_inputs]
 
     digests = worker_results
+    _mark_duplicate_identities(digests, ignored)
     summary = _reduce(digests, ignored)
     report_dir = output_dir or paths[0].parent
     summary_path, verdicts_path = _write_reports(summary, digests, report_dir)
