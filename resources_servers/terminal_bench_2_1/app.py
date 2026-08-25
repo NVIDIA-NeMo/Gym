@@ -128,12 +128,13 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             if self.config.debug:
                 print(f"Creating eval sandbox for {body.task_name}", file=stderr)
             eval_sandbox, pty_session = await self._create_sandbox(body)
-            await self._upload_folder(eval_sandbox, task_folder / "solution", "/solution")
+            cwd = (await eval_sandbox.exec("pwd")).stdout.strip()
+            await self._upload_folder(eval_sandbox, task_folder / "solution", cwd)
 
             if self.config.debug:
                 print(f"Running golden patch for {body.task_name}", file=stderr)
             golden_patch_result = await eval_sandbox.pty.exec(
-                "bash /solution/solve.sh", session=pty_session, timeout_s=self.config.evaluation_timeout
+                f"bash {cwd}/solve.sh", session=pty_session, timeout_s=self.config.evaluation_timeout
             )
             assert golden_patch_result.return_code == 0, (
                 f"Failed to apply golden patch for {body.task_name}: {golden_patch_result}"
