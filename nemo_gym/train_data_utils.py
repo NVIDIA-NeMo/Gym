@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import warnings
 from abc import abstractmethod
 from collections import Counter, defaultdict
 from math import sqrt
@@ -29,7 +30,6 @@ from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import BaseRunRequest
 from nemo_gym.config_types import (
     AGENT_REF_KEY,
-    AgentServerRef,
     BaseNeMoGymCLIConfig,
     DatasetConfig,
     DatasetType,
@@ -42,7 +42,6 @@ from nemo_gym.global_config import (
     HF_TOKEN_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
     GlobalConfigDictParser,
-    agents_by_resources_server,
     get_global_config_dict,
 )
 from nemo_gym.hf_utils import (
@@ -342,12 +341,7 @@ class TrainDataProcessor(BaseModel):
         )
 
         self._print_title("Collate samples and aggregate metrics")
-        self.collate_samples(
-            config,
-            server_instance_configs,
-            dataset_type_to_aggregate_metrics,
-            agents_by_rs=agents_by_resources_server(global_config_dict),
-        )
+        self.collate_samples(config, server_instance_configs, dataset_type_to_aggregate_metrics)
 
         self._print_title("Finished!")
 
@@ -734,7 +728,6 @@ This could be due to a change in how metrics are calculated, leading to outdated
         self,
         type: DatasetType,
         server_instance_configs: List[ServerInstanceConfig],
-        agents_by_rs: Optional[Dict[str, List[str]]] = None,
     ) -> List[Path]:
         paths_to_collate = []
         used_prepare_paths: set[Path] = set()
@@ -760,19 +753,12 @@ This could be due to a change in how metrics are calculated, leading to outdated
                 prepare_path.parent.mkdir(parents=True, exist_ok=True)
 
                 # The routing stamp: task_source names the declaring instance; the agent is
-                # resolved from it at dispatch time. The legacy agent_ref is dual-stamped for one
-                # deprecation cycle so pre-task_source consumers keep working: the declaring
-                # instance itself when it is an agent, else the unique agent referencing the
-                # declaring resources server (ambiguity leaves task_source-only rows — the
-                # resolver's +agent_map error covers them at run time).
-                legacy_agent_name: Optional[str] = None
-                if c.SERVER_TYPE == "responses_api_agents":
-                    legacy_agent_name = c.name
-                elif agents_by_rs is not None:
-                    candidates = agents_by_rs.get(c.name, [])
-                    if len(candidates) == 1:
-                        legacy_agent_name = candidates[0]
-
+                # resolved from it at dispatch time. Collated output carries NO agent_ref — the
+                # agent is a run-time choice, never part of the data. Incoming rows that still
+                # carry a legacy agent_ref get it stripped (with one warning per file): routing
+                # for this dataset comes from the declaration, and passing the stale field
+                # through would leak the old coupling into the clean format.
+                legacy_agent_ref_rows = 0
                 with open(prepare_path, "w") as target:
                     for line in self._iter_dataset_lines(d):
                         row = json.loads(line)
@@ -781,13 +767,18 @@ This could be due to a change in how metrics are calculated, leading to outdated
                             validate_prompt_compatibility([row], prompt_cfg)
                             row = apply_prompt_to_row(row, prompt_cfg)
 
+                        if row.pop(AGENT_REF_KEY, None) is not None:
+                            legacy_agent_ref_rows += 1
                         row[TASK_SOURCE_KEY_NAME] = c.name
-                        if legacy_agent_name is not None:
-                            row[AGENT_REF_KEY] = AgentServerRef(
-                                type="responses_api_agents", name=legacy_agent_name
-                            ).model_dump()
                         target.write(f"{json.dumps(row)}\n")
 
+                if legacy_agent_ref_rows:
+                    warnings.warn(
+                        f"{d.jsonl_fpath}: stripped legacy agent_ref from {legacy_agent_ref_rows} rows "
+                        "(deprecated in source datasets; routing comes from the config declaration).",
+                        DeprecationWarning,
+                        stacklevel=2,
+                    )
                 paths_to_collate.append(prepare_path)
 
         return paths_to_collate
@@ -797,7 +788,6 @@ This could be due to a change in how metrics are calculated, leading to outdated
         config: TrainDataProcessorConfig,
         server_instance_configs: List[ServerInstanceConfig],
         dataset_type_to_aggregate_metrics: Dict[str, DatasetMetrics],
-        agents_by_rs: Optional[Dict[str, List[str]]] = None,
     ) -> None:
         final_fpaths: Dict[DatasetType, Path] = dict()
         conflicting_fpaths: List[str] = []
@@ -837,7 +827,6 @@ This could be due to a change in how metrics are calculated, leading to outdated
             paths_to_collate = self._collate_samples_single_type(
                 type=type,
                 server_instance_configs=server_instance_configs,
-                agents_by_rs=agents_by_rs,
             )
             collated_fpath = parent / f"{type}.jsonl"
             with open(collated_fpath, "wb") as outfile:

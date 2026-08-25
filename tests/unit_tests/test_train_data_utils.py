@@ -1320,59 +1320,79 @@ def _dataset(tmp_path: Path, name: str, rows: list) -> dict:
 
 
 class TestCollateTaskSourceStamping:
-    """Pins the collate stamping contract (dataset-decoupling RFC): task_source = declaring
-    instance; legacy agent_ref dual-stamped for one deprecation cycle."""
+    """Pins the collate stamping contract (dataset-decoupling RFC): rows are stamped with
+    task_source (the declaring instance) and carry NO agent_ref — the agent is a run-time
+    choice, never part of the data. This is also the processed-format contract external
+    training frameworks consume."""
 
     ROWS = [{"responses_create_params": {"input": []}, "question": "q1"}]
 
-    def _collate(self, tmp_path, monkeypatch, configs, agents_by_rs):
+    def _collate(self, tmp_path, monkeypatch, configs):
         monkeypatch.chdir(tmp_path)
-        return TrainDataProcessor()._collate_samples_single_type(
-            type="example", server_instance_configs=configs, agents_by_rs=agents_by_rs
-        )
+        return TrainDataProcessor()._collate_samples_single_type(type="example", server_instance_configs=configs)
 
     def _read(self, path: Path) -> list:
         return [json.loads(line) for line in open(path)]
 
-    def test_rs_declared_dataset_stamps_task_source_and_dual_agent_ref(self, tmp_path, monkeypatch) -> None:
+    def test_rs_declared_dataset_stamps_task_source_only(self, tmp_path, monkeypatch) -> None:
         rs = _instance(
             "math_rs",
             "resources_servers",
             {"entrypoint": "app.py", "domain": "math", "datasets": [_dataset(tmp_path, "d1", self.ROWS)]},
         )
-        paths = self._collate(tmp_path, monkeypatch, [rs], {"math_rs": ["math_agent"]})
+        paths = self._collate(tmp_path, monkeypatch, [rs])
         rows = self._read(paths[0])
         assert rows[0]["task_source"] == "math_rs"
-        assert rows[0]["agent_ref"] == {"type": "responses_api_agents", "name": "math_agent"}
-
-    def test_ambiguous_rs_stamps_task_source_only(self, tmp_path, monkeypatch) -> None:
-        rs = _instance(
-            "shared_rs",
-            "resources_servers",
-            {"entrypoint": "app.py", "domain": "math", "datasets": [_dataset(tmp_path, "d2", self.ROWS)]},
-        )
-        paths = self._collate(tmp_path, monkeypatch, [rs], {"shared_rs": ["agent_a", "agent_b"]})
-        rows = self._read(paths[0])
-        assert rows[0]["task_source"] == "shared_rs"
         assert "agent_ref" not in rows[0]
 
-    def test_agent_declared_dataset_keeps_legacy_stamp_plus_task_source(self, tmp_path, monkeypatch) -> None:
+    def test_agent_declared_dataset_also_stamps_task_source_only(self, tmp_path, monkeypatch) -> None:
         agent = _instance(
             "tau2_agent",
             "responses_api_agents",
             {"entrypoint": "app.py", "datasets": [_dataset(tmp_path, "d3", self.ROWS)]},
         )
-        paths = self._collate(tmp_path, monkeypatch, [agent], {})
+        paths = self._collate(tmp_path, monkeypatch, [agent])
         rows = self._read(paths[0])
         assert rows[0]["task_source"] == "tau2_agent"
-        assert rows[0]["agent_ref"] == {"type": "responses_api_agents", "name": "tau2_agent"}
+        assert "agent_ref" not in rows[0]
+
+    def test_incoming_legacy_agent_ref_is_stripped_with_warning(self, tmp_path, monkeypatch) -> None:
+        legacy_rows = [
+            {"responses_create_params": {"input": []}, "agent_ref": {"type": "responses_api_agents", "name": "old"}}
+        ]
+        rs = _instance(
+            "math_rs",
+            "resources_servers",
+            {"entrypoint": "app.py", "domain": "math", "datasets": [_dataset(tmp_path, "d4", legacy_rows)]},
+        )
+        import pytest
+
+        with pytest.warns(DeprecationWarning, match="stripped legacy agent_ref from 1 rows"):
+            paths = self._collate(tmp_path, monkeypatch, [rs])
+        rows = self._read(paths[0])
+        assert "agent_ref" not in rows[0]
+        assert rows[0]["task_source"] == "math_rs"
+
+    def test_processed_format_contract(self, tmp_path, monkeypatch) -> None:
+        """The contract external consumers rely on: every collated row has task_source and
+        responses_create_params; agent_ref is never emitted. Guard against silent format drift."""
+        rs = _instance(
+            "math_rs",
+            "resources_servers",
+            {"entrypoint": "app.py", "domain": "math", "datasets": [_dataset(tmp_path, "d5", self.ROWS)]},
+        )
+        paths = self._collate(tmp_path, monkeypatch, [rs])
+        for row in self._read(paths[0]):
+            assert "responses_create_params" in row
+            assert isinstance(row["task_source"], str) and row["task_source"]
+            assert "agent_ref" not in row
 
     def test_same_fpath_two_declarations_get_distinct_prepare_files(self, tmp_path, monkeypatch) -> None:
         """Previously the second declaration silently truncated the first's prepared file."""
         shared = _dataset(tmp_path, "shared", self.ROWS)
         a = _instance("agent_a", "responses_api_agents", {"entrypoint": "app.py", "datasets": [dict(shared)]})
         b = _instance("agent_b", "responses_api_agents", {"entrypoint": "app.py", "datasets": [dict(shared)]})
-        paths = self._collate(tmp_path, monkeypatch, [a, b], {})
+        paths = self._collate(tmp_path, monkeypatch, [a, b])
         assert len(paths) == len(set(paths)) == 2
         stamps = [self._read(p)[0]["task_source"] for p in paths]
         assert sorted(stamps) == ["agent_a", "agent_b"]
