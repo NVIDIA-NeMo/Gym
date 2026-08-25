@@ -46,6 +46,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
+from nemo_gym.responses_converter import ResponsesConverter
 from nemo_gym.rollout_observability import (
     AgentEpisode,
     AgentObservationBundle,
@@ -67,6 +68,7 @@ def _trajectory_to_output_items(messages, n_input):
         if role == "assistant":
             reasoning_text = item.get("reasoning") or ""
             if reasoning_text:
+                content = ResponsesConverter._parse_think_tags(content)[1]
                 output_items.append(
                     NeMoGymResponseReasoningItem(
                         id=f"rsn-{len(output_items)}",

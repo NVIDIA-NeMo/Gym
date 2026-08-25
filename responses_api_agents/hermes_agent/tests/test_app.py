@@ -24,6 +24,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessageForTraining,
+    NeMoGymResponseReasoningItem,
 )
 from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
 from nemo_gym.server_utils import ServerClient
@@ -247,6 +248,21 @@ class TestTrajectoryToOutputItems:
         assert out[0].generation_token_ids == [3, 4]
         assert out[0].prompt_token_ids == [1, 2]
         assert out[0].routed_experts == routed_experts
+
+    def test_assistant_reasoning_strips_inline_think_from_message(self) -> None:
+        msgs = [
+            {
+                "role": "assistant",
+                "reasoning": "structured thoughts",
+                "content": "<think>structured thoughts</think>final answer",
+            }
+        ]
+        out = _trajectory_to_output_items(msgs, 0)
+        assert len(out) == 2
+        assert isinstance(out[0], NeMoGymResponseReasoningItem)
+        assert out[0].summary[0].text == "structured thoughts"
+        assert isinstance(out[1], NeMoGymResponseOutputMessageForTraining)
+        assert out[1].content[0].text == "final answer"
 
     def test_assistant_with_tool_call_and_tool_result(self) -> None:
         msgs = [
