@@ -31,13 +31,17 @@ from nemo_gym.sandbox import (
     SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
+    SandboxImagePrepareRequest,
+    SandboxImagePrepareResult,
     SandboxResources,
     SandboxSpec,
     SandboxStatus,
     SupportsSandboxEndpoint,
+    SupportsSandboxImagePrepare,
     create_provider,
     get_provider_class,
     list_providers,
+    prepare_provider_image,
     register_provider,
     resolve_provider_config,
     resolve_provider_metadata,
@@ -151,6 +155,41 @@ class FakeSandboxProvider:
 
     async def aclose(self) -> None:
         self.aclosed = True
+
+
+def test_prepare_provider_image_noops_for_unsupported_provider(tmp_path: Path) -> None:
+    provider = FakeSandboxProvider()
+    request = SandboxImagePrepareRequest(image="ubuntu:22.04", target_path=tmp_path / "image.sif")
+
+    result = prepare_provider_image(provider, request)
+
+    assert result == SandboxImagePrepareResult(
+        image="ubuntu:22.04",
+        ok=True,
+        prepared=False,
+        detail="provider does not prepare images",
+    )
+
+
+def test_prepare_provider_image_dispatches_to_optional_capability(tmp_path: Path) -> None:
+    class ImagePreparingProvider:
+        def prepare_image(self, request: SandboxImagePrepareRequest) -> SandboxImagePrepareResult:
+            return SandboxImagePrepareResult(image=str(request.target_path), ok=True, prepared=True, detail="prepared")
+
+    provider = ImagePreparingProvider()
+
+    assert isinstance(provider, SupportsSandboxImagePrepare)
+    result = prepare_provider_image(
+        provider,
+        SandboxImagePrepareRequest(image="ubuntu:22.04", target_path=tmp_path / "image.sif"),
+    )
+
+    assert result == SandboxImagePrepareResult(
+        image=str(tmp_path / "image.sif"),
+        ok=True,
+        prepared=True,
+        detail="prepared",
+    )
 
 
 class PlainSandboxProvider:
