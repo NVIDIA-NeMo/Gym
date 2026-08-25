@@ -49,6 +49,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputItem,
     NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputRefusal,
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseReasoningItem,
@@ -492,11 +493,44 @@ class ResponsesConverter(BaseModel):
     def postprocess_assistant_message_dict(self, message_dict: Dict[str, Any]) -> List[NeMoGymResponseOutputItem]:
         response_output = []
 
-        content = _message_content_to_text(message_dict.get("content"))
-        if self.uses_reasoning_parser:
-            reasoning_matches, content = self._extract_reasoning_from_content(content)
-        else:
-            reasoning_matches = []
+        raw_content = message_dict.get("content")
+        content_parts = raw_content if isinstance(raw_content, list) else [{"type": "text", "text": raw_content or ""}]
+        reasoning_matches = []
+        response_content = []
+        text_buffer = []
+
+        def flush_text_buffer() -> None:
+            content = "".join(text_buffer)
+            text_buffer.clear()
+            if self.uses_reasoning_parser:
+                matches, content = self._extract_reasoning_from_content(content)
+                reasoning_matches.extend(matches)
+            if content:
+                response_content.append(NeMoGymResponseOutputText(type="output_text", text=content, annotations=[]))
+
+        for part in content_parts:
+            if not isinstance(part, dict):
+                raise TypeError(f"Assistant content parts must be mappings, got {type(part).__name__}")
+            part_type = part.get("type")
+            if part_type == "text":
+                text = part.get("text")
+                if not isinstance(text, str):
+                    raise TypeError("Assistant text content must contain a string 'text' field")
+                text_buffer.append(text)
+            elif part_type == "refusal":
+                flush_text_buffer()
+                refusal = part.get("refusal")
+                if not isinstance(refusal, str):
+                    raise TypeError("Assistant refusal content must contain a string 'refusal' field")
+                response_content.append(NeMoGymResponseOutputRefusal(refusal=refusal))
+            else:
+                raise ValueError(f"Unsupported assistant content part type: {part_type!r}")
+        flush_text_buffer()
+
+        top_level_refusal = message_dict.get("refusal")
+        if isinstance(top_level_refusal, str) and top_level_refusal:
+            response_content.append(NeMoGymResponseOutputRefusal(refusal=top_level_refusal))
+
         if reasoning_matches:
             reasoning_item = NeMoGymResponseReasoningItem(
                 id=f"rs_{uuid4().hex}",
@@ -509,20 +543,17 @@ class ResponsesConverter(BaseModel):
             response_output.append(reasoning_item)
 
         tool_calls_raw = message_dict.get("tool_calls", []) or []
-        has_empty_output = not (response_output or tool_calls_raw)
+        has_empty_output = not (response_output or response_content or tool_calls_raw)
 
-        if content or has_empty_output:
+        if has_empty_output:
+            response_content.append(NeMoGymResponseOutputText(type="output_text", text="", annotations=[]))
+
+        if response_content:
             response_output.append(
                 NeMoGymResponseOutputMessage(
                     id=f"msg_{uuid4().hex}",
                     role=message_dict.get("role"),
-                    content=[
-                        NeMoGymResponseOutputText(
-                            type="output_text",
-                            text=content,
-                            annotations=[],
-                        )
-                    ],
+                    content=response_content,
                     status="completed",
                     type="message",
                 )
