@@ -98,6 +98,7 @@ GYM_PID=$!
   --input "$ROOT_DIR/resources_servers/example_single_tool_call/data/example.jsonl" \
   --output "$RESULTS_DIR/rollouts.jsonl" \
   --limit 1 \
+  --temperature 0 \
   --max-output-tokens 4096
 
 "$VENV_DIR/bin/python" "$ROOT_DIR/tests/e2e/verify_inference_provider_rollout.py" \
