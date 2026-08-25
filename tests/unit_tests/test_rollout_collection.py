@@ -35,6 +35,7 @@ from nemo_gym.rollout_collection import (
     _DEFAULT_MAX_ROLLOUT_ATTEMPTS,
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
+    E2ERolloutCollectionConfig,
     RolloutAggregationConfig,
     RolloutAggregationHelper,
     RolloutCollectionConfig,
@@ -2140,3 +2141,25 @@ class TestRolloutCarriesTokenIds:
     )
     def test_false_without_them(self, response) -> None:
         assert rollout_carries_token_ids({"response": response}) is False
+
+
+class TestE2EInputJsonlFpathRejected:
+    def test_e2e_config_rejects_input_jsonl_fpath(self) -> None:
+        with pytest.raises(ConfigError, match=r"not supported when serving end-to-end"):
+            E2ERolloutCollectionConfig.model_validate(
+                {
+                    "output_jsonl_fpath": "out.jsonl",
+                    "split": "train",
+                    "input_jsonl_fpath": "my_data.jsonl",
+                }
+            )
+
+    def test_e2e_config_accepts_without_input_jsonl_fpath(self) -> None:
+        config = E2ERolloutCollectionConfig.model_validate({"output_jsonl_fpath": "out.jsonl", "split": "train"})
+        assert config.split == "train"
+
+    def test_no_serve_config_still_accepts_input_jsonl_fpath(self) -> None:
+        config = RolloutCollectionConfig.model_validate(
+            {"output_jsonl_fpath": "out.jsonl", "input_jsonl_fpath": "my_data.jsonl"}
+        )
+        assert config.input_jsonl_fpath == "my_data.jsonl"
