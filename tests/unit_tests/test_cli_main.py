@@ -165,8 +165,8 @@ class TestEvalRunFlags:
             (["--no-health-check"], "+disable_health_check=true"),
             (["--health-check-workers", "4"], "+health_check_workers=4"),
             (
-                ["--health-check-ignore", "missed_metrics,zero_token_turns"],
-                '+health_check_ignored_checks=["missed_metrics","zero_token_turns"]',
+                ["--health-check-ignore", "model_call_missing_token_counts,model_call_zero_completion_tokens"],
+                '+health_check_ignored_checks=["model_call_missing_token_counts","model_call_zero_completion_tokens"]',
             ),
         ],
     )
@@ -487,7 +487,7 @@ class TestEvalAggregateFlags:
                 "--health-check-workers",
                 "3",
                 "--health-check-ignore",
-                "missed_metrics,zero_token_turns",
+                "model_call_missing_token_counts,model_call_zero_completion_tokens",
             ],
         )
         assert target == "nemo_gym.cli.eval:aggregate_rollouts"
@@ -496,7 +496,7 @@ class TestEvalAggregateFlags:
             "+output_jsonl_fpath=out.jsonl",
             "+disable_health_check=true",
             "+health_check_workers=3",
-            '+health_check_ignored_checks=["missed_metrics","zero_token_turns"]',
+            '+health_check_ignored_checks=["model_call_missing_token_counts","model_call_zero_completion_tokens"]',
         }
 
 

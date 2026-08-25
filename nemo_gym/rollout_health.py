@@ -42,10 +42,20 @@ class CheckScope(str, Enum):
     RUN = "run"
 
 
+class CheckSubject(str, Enum):
+    RECORD = "record"
+    ROLLOUT = "rollout"
+    AGENT_TURN = "agent_turn"
+    MODEL_CALL = "model_call"
+    TRAJECTORY_CAPTURE = "trajectory_capture"
+    TASK = "task"
+
+
 class CheckReads(str, Enum):
     RECORD = "record"
     CAPTURE = "capture"
     BOTH = "both"
+    BOUND_CALLS = "bound_calls"
     REPEAT_VERDICTS = "repeat_verdicts"
     REPEAT_DIGESTS = "repeat_digests"
 
@@ -56,7 +66,8 @@ class CheckSpec(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     id: str
-    scope: CheckScope
+    evaluation_scope: CheckScope
+    subject: CheckSubject
     reads: CheckReads
 
 
@@ -70,22 +81,77 @@ class Finding(BaseModel):
 
 
 CHECK_REGISTRY: tuple[CheckSpec, ...] = (
-    CheckSpec(id="unreadable_record", scope=CheckScope.ROLLOUT, reads=CheckReads.RECORD),
-    CheckSpec(id="missing_agent_steps", scope=CheckScope.ROLLOUT, reads=CheckReads.RECORD),
-    CheckSpec(id="hollow_steps", scope=CheckScope.ROLLOUT, reads=CheckReads.RECORD),
-    CheckSpec(id="zero_token_turns", scope=CheckScope.ROLLOUT, reads=CheckReads.CAPTURE),
-    CheckSpec(id="missed_metrics", scope=CheckScope.ROLLOUT, reads=CheckReads.CAPTURE),
-    CheckSpec(id="transcript_capture_correspondence", scope=CheckScope.ROLLOUT, reads=CheckReads.BOTH),
-    CheckSpec(id="consistently_unhealthy_task", scope=CheckScope.TASK, reads=CheckReads.REPEAT_VERDICTS),
-    CheckSpec(id="runaway_generations", scope=CheckScope.ROLLOUT, reads=CheckReads.CAPTURE),
-    CheckSpec(id="no_healthy_model_calls_task", scope=CheckScope.TASK, reads=CheckReads.REPEAT_DIGESTS),
+    CheckSpec(
+        id="record_unreadable",
+        evaluation_scope=CheckScope.ROLLOUT,
+        subject=CheckSubject.RECORD,
+        reads=CheckReads.RECORD,
+    ),
+    CheckSpec(
+        id="rollout_missing_agent_turns",
+        evaluation_scope=CheckScope.ROLLOUT,
+        subject=CheckSubject.ROLLOUT,
+        reads=CheckReads.RECORD,
+    ),
+    CheckSpec(
+        id="agent_turn_hollow",
+        evaluation_scope=CheckScope.ROLLOUT,
+        subject=CheckSubject.AGENT_TURN,
+        reads=CheckReads.RECORD,
+    ),
+    CheckSpec(
+        id="model_call_zero_completion_tokens",
+        evaluation_scope=CheckScope.ROLLOUT,
+        subject=CheckSubject.MODEL_CALL,
+        reads=CheckReads.BOUND_CALLS,
+    ),
+    CheckSpec(
+        id="model_call_missing_token_counts",
+        evaluation_scope=CheckScope.ROLLOUT,
+        subject=CheckSubject.MODEL_CALL,
+        reads=CheckReads.BOUND_CALLS,
+    ),
+    CheckSpec(
+        id="trajectory_capture_mismatch",
+        evaluation_scope=CheckScope.ROLLOUT,
+        subject=CheckSubject.TRAJECTORY_CAPTURE,
+        reads=CheckReads.BOTH,
+    ),
+    CheckSpec(
+        id="model_call_failed",
+        evaluation_scope=CheckScope.ROLLOUT,
+        subject=CheckSubject.MODEL_CALL,
+        reads=CheckReads.BOUND_CALLS,
+    ),
+    CheckSpec(
+        id="rollout_token_count_mismatch",
+        evaluation_scope=CheckScope.ROLLOUT,
+        subject=CheckSubject.ROLLOUT,
+        reads=CheckReads.BOTH,
+    ),
+    CheckSpec(
+        id="model_call_runaway_generation",
+        evaluation_scope=CheckScope.ROLLOUT,
+        subject=CheckSubject.MODEL_CALL,
+        reads=CheckReads.BOUND_CALLS,
+    ),
+    CheckSpec(
+        id="task_consistently_unhealthy",
+        evaluation_scope=CheckScope.TASK,
+        subject=CheckSubject.TASK,
+        reads=CheckReads.REPEAT_VERDICTS,
+    ),
+    CheckSpec(
+        id="task_no_healthy_model_calls",
+        evaluation_scope=CheckScope.TASK,
+        subject=CheckSubject.TASK,
+        reads=CheckReads.REPEAT_DIGESTS,
+    ),
 )
 
-_ROLLOUT_SPECS = tuple(spec for spec in CHECK_REGISTRY if spec.scope == CheckScope.ROLLOUT)
-_TASK_SPECS = tuple(spec for spec in CHECK_REGISTRY if spec.scope == CheckScope.TASK)
-_TRANSCRIPT_CHECK_IDS = frozenset(
-    {"missing_agent_steps", "hollow_steps", "missed_metrics", "transcript_capture_correspondence"}
-)
+_ROLLOUT_SPECS = tuple(spec for spec in CHECK_REGISTRY if spec.evaluation_scope == CheckScope.ROLLOUT)
+_TASK_SPECS = tuple(spec for spec in CHECK_REGISTRY if spec.evaluation_scope == CheckScope.TASK)
+_FALLBACK_TRANSCRIPT_CHECK_IDS = frozenset({"rollout_missing_agent_turns", "agent_turn_hollow"})
 
 
 def normalize_ignored_checks(checks: Sequence[str] | str | None) -> tuple[str, ...]:
@@ -109,6 +175,7 @@ class RolloutDigest(BaseModel):
     findings: list[Finding]
     unobserved: list[str]
     capture_observed: bool
+    policy_calls_observed: bool = False
     model_calls: int = 0
     successful_model_calls: int = 0
     model_call_errors: int = 0
@@ -165,10 +232,26 @@ class _AgentStep:
 
 
 @dataclass(frozen=True, slots=True)
+class _CallBindings:
+    references: tuple[str, ...]
+    matched_calls: tuple[dict[str, Any], ...]
+    missing_references: tuple[str, ...]
+    duplicated_references: tuple[tuple[str, int], ...]
+
+    @property
+    def observed(self) -> bool:
+        return bool(self.references)
+
+    @property
+    def complete(self) -> bool:
+        return self.observed and not self.missing_references and not self.duplicated_references
+
+
+@dataclass(frozen=True, slots=True)
 class _TaskRepeat:
     rollout_index: int | str
     verdict: Verdict
-    capture_observed: bool
+    policy_calls_observed: bool
     successful_model_calls: int
 
 
@@ -458,6 +541,47 @@ def _call_identity(call: dict[str, Any]) -> str | None:
     return None
 
 
+def _canonical_model_call_references(record: dict[str, Any]) -> tuple[str, ...]:
+    """Return explicit model-call references from canonical TrajectoryTurn records only."""
+    trajectory = record.get("ng_trajectory")
+    turns = trajectory.get("turns") if isinstance(trajectory, dict) else None
+    if not isinstance(turns, list) or not turns:
+        return ()
+    return tuple(
+        reference
+        for turn in turns
+        if isinstance(turn, dict)
+        for raw_reference in turn.get("model_calls") or []
+        if (reference := _call_ref_key(raw_reference)) is not None
+    )
+
+
+def _bind_policy_calls(record: dict[str, Any], calls: list[dict[str, Any]]) -> _CallBindings:
+    references = _canonical_model_call_references(record)
+    calls_by_identity: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for call in calls:
+        if identity := _call_identity(call):
+            calls_by_identity[identity].append(call)
+
+    matched_calls: list[dict[str, Any]] = []
+    missing_references: list[str] = []
+    duplicated_references: list[tuple[str, int]] = []
+    for reference in dict.fromkeys(references):
+        matches = calls_by_identity.get(reference, [])
+        if not matches:
+            missing_references.append(reference)
+        elif len(matches) > 1:
+            duplicated_references.append((reference, len(matches)))
+        else:
+            matched_calls.append(matches[0])
+    return _CallBindings(
+        references=references,
+        matched_calls=tuple(matched_calls),
+        missing_references=tuple(missing_references),
+        duplicated_references=tuple(duplicated_references),
+    )
+
+
 def _replay_identity(call: dict[str, Any]) -> str | None:
     # Gym assigns model_call_id per invocation. Provider response IDs are only a
     # fallback: some backends reuse a placeholder response ID for distinct calls.
@@ -503,65 +627,56 @@ def _transcript_tokens(record: dict[str, Any]) -> tuple[int, int, bool]:
     response = record.get("response")
     usage = response.get("usage") if isinstance(response, dict) else None
     prompt, completion = _usage_tokens(usage)
-    return prompt or 0, completion or 0, prompt is not None or completion is not None
+    return prompt or 0, completion or 0, prompt is not None and completion is not None
 
 
-def _missing_agent_steps(record: dict[str, Any], subject: dict[str, int | str]) -> list[Finding]:
+def _rollout_missing_agent_turns(record: dict[str, Any], subject: dict[str, int | str]) -> list[Finding]:
     steps = _agent_steps(record)
     if any(step.has_model_activity for step in steps):
         return []
-    return [_finding("missing_agent_steps", subject, reason="no agent turn with model activity")]
+    return [_finding("rollout_missing_agent_turns", subject, reason="no agent turn with model activity")]
 
 
-def _hollow_steps(record: dict[str, Any], subject: dict[str, int | str]) -> list[Finding]:
+def _agent_turn_hollow(record: dict[str, Any], subject: dict[str, int | str]) -> list[Finding]:
     return [
-        _finding("hollow_steps", subject, locator=step.locator, reason="agent turn has no message or tool calls")
+        _finding("agent_turn_hollow", subject, locator=step.locator, reason="agent turn has no message or tool calls")
         for step in _agent_steps(record)
         if not step.has_message and not step.has_tool_calls
     ]
 
 
-def _zero_token_turns(calls: list[dict[str, Any]], subject: dict[str, int | str]) -> list[Finding]:
-    # Until #2122 adds an originating-server role, captures can mix policy calls
-    # with auxiliary user-simulator or judge calls. Evaluate the evidence as stored.
+def _model_call_zero_completion_tokens(bindings: _CallBindings, subject: dict[str, int | str]) -> list[Finding]:
     return [
         _finding(
-            "zero_token_turns",
+            "model_call_zero_completion_tokens",
             subject,
             locator=_call_locator(call, position),
             completion_tokens=0,
         )
-        for position, call in enumerate(calls)
+        for position, call in enumerate(bindings.matched_calls)
         if call.get("tokens_out") == 0
     ]
 
 
-def _missed_metrics(
-    record: dict[str, Any], calls: list[dict[str, Any]], subject: dict[str, int | str]
-) -> list[Finding]:
-    calls_by_id = {identity: call for call in calls if (identity := _call_identity(call)) is not None}
-    findings: list[Finding] = []
-    for step in _agent_steps(record):
-        if not step.model_call_refs:
-            findings.append(
-                _finding("missed_metrics", subject, locator=step.locator, reason="transcript step has no call binding")
-            )
-            continue
-        bound = [calls_by_id[ref] for ref in step.model_call_refs if ref in calls_by_id]
-        if not bound:
-            findings.append(
-                _finding("missed_metrics", subject, locator=step.locator, reason="transcript call binding is absent")
-            )
-        elif any(call.get("tokens_in") is None or call.get("tokens_out") is None for call in bound):
-            findings.append(
-                _finding("missed_metrics", subject, locator=step.locator, reason="captured call has no token usage")
-            )
-    return findings
+def _model_call_missing_token_counts(bindings: _CallBindings, subject: dict[str, int | str]) -> list[Finding]:
+    return [
+        _finding(
+            "model_call_missing_token_counts",
+            subject,
+            locator=_call_locator(call, position),
+            missing=[
+                field
+                for field, key in (("prompt_tokens", "tokens_in"), ("completion_tokens", "tokens_out"))
+                if call.get(key) is None
+            ],
+        )
+        for position, call in enumerate(bindings.matched_calls)
+        if call.get("tokens_in") is None or call.get("tokens_out") is None
+    ]
 
 
-def _correspondence(
-    record: dict[str, Any],
-    calls: list[dict[str, Any]],
+def _trajectory_capture_mismatch(
+    bindings: _CallBindings,
     invalid_capture_lines: int,
     subject: dict[str, int | str],
 ) -> list[Finding]:
@@ -569,135 +684,112 @@ def _correspondence(
     if invalid_capture_lines:
         findings.append(
             _finding(
-                "transcript_capture_correspondence",
+                "trajectory_capture_mismatch",
                 subject,
                 kind="unreadable_capture_records",
                 count=invalid_capture_lines,
             )
         )
-
-    refs = [ref for step in _agent_steps(record) for ref in step.model_call_refs]
-    calls_by_id = {identity: call for call in calls if (identity := _call_identity(call)) is not None}
-    call_ids = [identity for call in calls if (identity := _replay_identity(call)) is not None]
-    missing_refs = [ref for ref in refs if ref not in calls_by_id]
-    if missing_refs:
+    for reference in bindings.missing_references:
         findings.append(
             _finding(
-                "transcript_capture_correspondence",
+                "trajectory_capture_mismatch",
                 subject,
-                kind="call_count_delta",
-                transcript=len(refs),
-                bound=len(refs) - len(missing_refs),
-                missing=len(missing_refs),
+                locator={"call_id": reference.split(":")[-1]},
+                kind="missing_captured_call",
             )
         )
-
-    duplicate_ids = {identity: count for identity, count in Counter(call_ids).items() if count > 1}
-    for identity, count in duplicate_ids.items():
+    for reference, count in bindings.duplicated_references:
         findings.append(
             _finding(
-                "transcript_capture_correspondence",
+                "trajectory_capture_mismatch",
                 subject,
-                locator={"call_id": identity.split(":")[-1]},
-                kind="duplicated_call",
-                replayed=count - 1,
-            )
-        )
-
-    ref_set = set(refs)
-    for position, call in enumerate(calls):
-        if not _is_failed(call):
-            continue
-        identity = _call_identity(call)
-        status = call.get("status_code")
-        findings.append(
-            _finding(
-                "transcript_capture_correspondence",
-                subject,
-                locator=_call_locator(call, position),
-                kind="failed_call",
-                status=status,
-                error_category=call.get("error_category"),
-            )
-        )
-        if (
-            identity is not None
-            and identity not in ref_set
-            and any(_is_successful(later) for later in calls[position + 1 :])
-        ):
-            findings.append(
-                _finding(
-                    "transcript_capture_correspondence",
-                    subject,
-                    locator=_call_locator(call, position),
-                    kind="retry_dropped_call",
-                )
-            )
-    if calls and _is_failed(calls[-1]):
-        findings.append(
-            _finding(
-                "transcript_capture_correspondence",
-                subject,
-                locator=_call_locator(calls[-1], len(calls) - 1),
-                kind="trial_ended_on_failed_call",
-            )
-        )
-
-    transcript_prompt, transcript_completion, transcript_usage_present = _transcript_tokens(record)
-    # Top-level transcript usage describes policy work, while capture sidecars
-    # can also contain auxiliary user-simulator and judge calls. Until captures
-    # carry the #2122 originating-role stamp, only explicit transcript bindings
-    # prove which calls belong in token reconciliation.
-    bound_calls = [calls_by_id[ref] for ref in refs if ref in calls_by_id]
-    capture_prompt = sum(_token_count(call, "tokens_in") for call in bound_calls)
-    capture_completion = sum(_token_count(call, "tokens_out") for call in bound_calls)
-    capture_usage_present = bool(bound_calls) and any(
-        type(call.get("tokens_in")) is int or type(call.get("tokens_out")) is int for call in bound_calls
-    )
-    if (
-        transcript_usage_present
-        and capture_usage_present
-        and (transcript_prompt != capture_prompt or transcript_completion != capture_completion)
-    ):
-        findings.append(
-            _finding(
-                "transcript_capture_correspondence",
-                subject,
-                kind="token_sum_mismatch",
-                transcript_prompt=transcript_prompt,
-                transcript_completion=transcript_completion,
-                capture_prompt=capture_prompt,
-                capture_completion=capture_completion,
+                locator={"call_id": reference.split(":")[-1]},
+                kind="duplicated_captured_call",
+                count=count,
             )
         )
     return findings
 
 
-def _runaway_generations(calls: list[dict[str, Any]], subject: dict[str, int | str]) -> list[Finding]:
+def _model_call_failed(bindings: _CallBindings, subject: dict[str, int | str]) -> list[Finding]:
     return [
         _finding(
-            "runaway_generations",
+            "model_call_failed",
+            subject,
+            locator=_call_locator(call, position),
+            status=call.get("status_code"),
+            error_category=call.get("error_category"),
+            terminal=bindings.complete and position == len(bindings.matched_calls) - 1,
+        )
+        for position, call in enumerate(bindings.matched_calls)
+        if _is_failed(call)
+    ]
+
+
+def _rollout_token_count_mismatch(
+    record: dict[str, Any], bindings: _CallBindings, subject: dict[str, int | str]
+) -> list[Finding]:
+    transcript_prompt, transcript_completion, transcript_usage_present = _transcript_tokens(record)
+    capture_prompt = sum(_token_count(call, "tokens_in") for call in bindings.matched_calls)
+    capture_completion = sum(_token_count(call, "tokens_out") for call in bindings.matched_calls)
+    if transcript_usage_present and (
+        transcript_prompt != capture_prompt or transcript_completion != capture_completion
+    ):
+        return [
+            _finding(
+                "rollout_token_count_mismatch",
+                subject,
+                transcript_prompt=transcript_prompt,
+                transcript_completion=transcript_completion,
+                capture_prompt=capture_prompt,
+                capture_completion=capture_completion,
+            )
+        ]
+    return []
+
+
+def _model_call_runaway_generation(bindings: _CallBindings, subject: dict[str, int | str]) -> list[Finding]:
+    return [
+        _finding(
+            "model_call_runaway_generation",
             subject,
             locator=_call_locator(call, position),
             finish_reason="length",
         )
-        for position, call in enumerate(calls)
+        for position, call in enumerate(bindings.matched_calls)
         if call.get("finish_reason") == "length" and not _response_has_content(call.get("response"))
     ]
 
 
 _ROLLOUT_CHECKS: dict[
-    str, Callable[[dict[str, Any], list[dict[str, Any]], int, dict[str, int | str]], list[Finding]]
+    str,
+    Callable[
+        [dict[str, Any], list[dict[str, Any]], _CallBindings, int, dict[str, int | str]],
+        list[Finding],
+    ],
 ] = {
-    "unreadable_record": lambda record, calls, invalid, subject: [],
-    "missing_agent_steps": lambda record, calls, invalid, subject: _missing_agent_steps(record, subject),
-    "hollow_steps": lambda record, calls, invalid, subject: _hollow_steps(record, subject),
-    "zero_token_turns": lambda record, calls, invalid, subject: _zero_token_turns(calls, subject),
-    "missed_metrics": lambda record, calls, invalid, subject: _missed_metrics(record, calls, subject),
-    "transcript_capture_correspondence": lambda record, calls, invalid, subject: _correspondence(
-        record, calls, invalid, subject
+    "record_unreadable": lambda record, calls, bindings, invalid, subject: [],
+    "rollout_missing_agent_turns": lambda record, calls, bindings, invalid, subject: _rollout_missing_agent_turns(
+        record, subject
     ),
-    "runaway_generations": lambda record, calls, invalid, subject: _runaway_generations(calls, subject),
+    "agent_turn_hollow": lambda record, calls, bindings, invalid, subject: _agent_turn_hollow(record, subject),
+    "model_call_zero_completion_tokens": lambda record, calls, bindings, invalid, subject: (
+        _model_call_zero_completion_tokens(bindings, subject)
+    ),
+    "model_call_missing_token_counts": lambda record, calls, bindings, invalid, subject: (
+        _model_call_missing_token_counts(bindings, subject)
+    ),
+    "trajectory_capture_mismatch": lambda record, calls, bindings, invalid, subject: (
+        _trajectory_capture_mismatch(bindings, invalid, subject)
+    ),
+    "model_call_failed": lambda record, calls, bindings, invalid, subject: _model_call_failed(bindings, subject),
+    "rollout_token_count_mismatch": lambda record, calls, bindings, invalid, subject: (
+        _rollout_token_count_mismatch(record, bindings, subject)
+    ),
+    "model_call_runaway_generation": lambda record, calls, bindings, invalid, subject: (
+        _model_call_runaway_generation(bindings, subject)
+    ),
 }
 
 
@@ -748,6 +840,7 @@ def _worker(payload: _WorkerInput) -> _WorkerResult:
         capture_observed = False
     else:
         capture_observed = embedded_capture
+    bindings = _bind_policy_calls(record, calls)
     findings: list[Finding] = []
     unobserved: list[str] = []
 
@@ -755,27 +848,38 @@ def _worker(payload: _WorkerInput) -> _WorkerResult:
         if spec.id in payload.ignored_checks:
             continue
         if parse_error:
-            if spec.id == "unreadable_record":
+            if spec.id == "record_unreadable":
                 findings.append(
-                    _finding("unreadable_record", subject, reason="rollout record is unreadable", error=parse_error)
+                    _finding("record_unreadable", subject, reason="rollout record is unreadable", error=parse_error)
                 )
             else:
                 unobserved.append(spec.id)
             continue
-        needs_capture = spec.reads in {CheckReads.CAPTURE, CheckReads.BOTH}
+        needs_capture = spec.reads in {CheckReads.CAPTURE, CheckReads.BOTH, CheckReads.BOUND_CALLS}
         if needs_capture and not capture_observed:
             unobserved.append(spec.id)
             continue
-        if spec.id == "missed_metrics" and not any(step.model_call_refs for step in _agent_steps(record)):
+        if spec.reads == CheckReads.BOUND_CALLS and not bindings.matched_calls:
+            unobserved.append(spec.id)
+            continue
+        if spec.id == "trajectory_capture_mismatch" and not bindings.observed and not invalid_capture_lines:
+            unobserved.append(spec.id)
+            continue
+        if spec.id == "rollout_token_count_mismatch" and (
+            not bindings.complete
+            or not bindings.matched_calls
+            or not _transcript_tokens(record)[2]
+            or any(call.get("tokens_in") is None or call.get("tokens_out") is None for call in bindings.matched_calls)
+        ):
             unobserved.append(spec.id)
             continue
         try:
-            findings.extend(_ROLLOUT_CHECKS[spec.id](record, calls, invalid_capture_lines, subject))
+            findings.extend(_ROLLOUT_CHECKS[spec.id](record, calls, bindings, invalid_capture_lines, subject))
         except Exception as exc:
             unobserved.append(spec.id)
             findings.append(
                 _finding(
-                    "unreadable_record",
+                    "record_unreadable",
                     subject,
                     reason="check input is unreadable",
                     failed_check=spec.id,
@@ -801,8 +905,9 @@ def _worker(payload: _WorkerInput) -> _WorkerResult:
             findings=findings,
             unobserved=unobserved,
             capture_observed=capture_observed,
+            policy_calls_observed=bindings.complete and not invalid_capture_lines,
             model_calls=len(calls),
-            successful_model_calls=sum(_is_successful(call) for call in calls),
+            successful_model_calls=sum(_is_successful(call) for call in bindings.matched_calls),
             model_call_errors=len(failed),
             errors_by_status=dict(errors_by_status),
             ended_on_error=bool(calls and _is_failed(calls[-1])),
@@ -846,7 +951,7 @@ def _unique_task_repeats(digests: list[RolloutDigest]) -> list[_TaskRepeat]:
             _TaskRepeat(
                 rollout_index=rollout_index,
                 verdict=verdicts.pop() if len(verdicts) == 1 else "unobserved",
-                capture_observed=all(copy.capture_observed for copy in copies),
+                policy_calls_observed=all(copy.policy_calls_observed for copy in copies),
                 successful_model_calls=max(copy.successful_model_calls for copy in copies),
             )
         )
@@ -862,32 +967,32 @@ def _task_findings(
     for task_index, repeats in grouped.items():
         subject = _subject(task_index)
 
-        if "consistently_unhealthy_task" in ignored_checks:
-            coverage["consistently_unhealthy_task"]["ignored"] += 1
+        if "task_consistently_unhealthy" in ignored_checks:
+            coverage["task_consistently_unhealthy"]["ignored"] += 1
         else:
             computable = [repeat for repeat in repeats if repeat.verdict != "unobserved"]
             if len(computable) >= 2:
-                coverage["consistently_unhealthy_task"]["evaluated"] += 1
+                coverage["task_consistently_unhealthy"]["evaluated"] += 1
                 if all(repeat.verdict == "unhealthy" for repeat in computable):
                     findings[task_index].append(
                         _finding(
-                            "consistently_unhealthy_task",
+                            "task_consistently_unhealthy",
                             subject,
                             computable_repeats=len(computable),
                         )
                     )
             else:
-                coverage["consistently_unhealthy_task"]["unobserved"] += 1
+                coverage["task_consistently_unhealthy"]["unobserved"] += 1
 
-        if "no_healthy_model_calls_task" in ignored_checks:
-            coverage["no_healthy_model_calls_task"]["ignored"] += 1
+        if "task_no_healthy_model_calls" in ignored_checks:
+            coverage["task_no_healthy_model_calls"]["ignored"] += 1
         else:
-            if repeats and all(repeat.capture_observed for repeat in repeats):
-                coverage["no_healthy_model_calls_task"]["evaluated"] += 1
+            if repeats and all(repeat.policy_calls_observed for repeat in repeats):
+                coverage["task_no_healthy_model_calls"]["evaluated"] += 1
                 if not any(repeat.successful_model_calls for repeat in repeats):
-                    findings[task_index].append(_finding("no_healthy_model_calls_task", subject, repeats=len(repeats)))
+                    findings[task_index].append(_finding("task_no_healthy_model_calls", subject, repeats=len(repeats)))
             else:
-                coverage["no_healthy_model_calls_task"]["unobserved"] += 1
+                coverage["task_no_healthy_model_calls"]["unobserved"] += 1
     return findings, coverage
 
 
@@ -994,7 +1099,7 @@ def _write_reports(summary: dict[str, Any], digests: list[RolloutDigest], output
 
 
 def _warn_noncanonical_agent_steps(worker_results: Sequence[_WorkerResult], ignored_checks: frozenset[str]) -> None:
-    enabled_transcript_checks = _TRANSCRIPT_CHECK_IDS - ignored_checks
+    enabled_transcript_checks = _FALLBACK_TRANSCRIPT_CHECK_IDS - ignored_checks
     if not enabled_transcript_checks:
         return
     counts = Counter(

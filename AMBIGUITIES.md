@@ -30,7 +30,7 @@ The rollout-health RFC is the product specification for this branch. This docume
 - **Correlation:** The information needed to make bindings between transcript activity and captured model calls.
 - **Policy model:** The model being evaluated.
 - **Auxiliary model:** A model used to support the evaluation, such as a user simulator or judge. Its calls may appear in the same capture as policy-model calls.
-- **Check:** One registered health rule. `CheckSpec` gives it a stable ID, a scope, and required inputs. Scope says whether the rule evaluates one rollout, one task across repeats, or the run as a whole.
+- **Check:** One registered health rule. `CheckSpec` gives it a stable ID, an evaluation scope, a finding subject, and required inputs. Evaluation scope says how much data the rule reduces: one rollout, one task across repeats, or the run as a whole. Finding subject says what the evidence identifies, such as an agent turn or model call.
 - **Finding:** Evidence that a check failed for a rollout or task. A check emits `Finding`; it never emits a verdict.
 - **Healthy:** Every enabled rollout check had enough input to run, and none produced a finding.
 - **Unhealthy:** At least one enabled rollout check produced a finding.
@@ -60,13 +60,13 @@ function-call output  # ends the first agent turn
 assistant message     # second agent turn
 ```
 
-For health checks, each selected turn or invocation is reduced to three facts: whether it contains non-empty text or reasoning, whether it contains a tool call, and which model-call references it contains. The record has agent activity when at least one selected unit contains any of those facts.
+For structural health checks, each selected turn or invocation is reduced to three facts: whether it contains non-empty text or reasoning, whether it contains a tool call, and which model-call references it contains. The record has agent activity when at least one selected unit contains any of those facts. Model-call checks do not use these compatibility fallbacks: they require explicit references from canonical `TrajectoryTurn.model_calls` and otherwise become unobserved.
 
-**Alternatives considered.** Mark turn-based checks unobserved whenever `TrajectoryRecord.turns` is missing, reject such records, or treat every `response.output` item as a separate turn. Treating each item separately produced false `hollow_steps` findings when an empty assistant message and its real function call were sibling items in the same model response.
+**Alternatives considered.** Mark turn-based checks unobserved whenever `TrajectoryRecord.turns` is missing, reject such records, or treat every `response.output` item as a separate turn. Treating each item separately produced false `agent_turn_hollow` findings when an empty assistant message and its real function call were sibling items in the same model response.
 
 ### 2. Whether reasoning counts as message content
 
-**RFC gap.** `hollow_steps` means “no message and no tool calls,” but the RFC does not say whether a reasoning-only turn has a message.
+**RFC gap.** `agent_turn_hollow` means “no message and no tool calls,” but the RFC does not say whether a reasoning-only turn has a message.
 
 **Chosen behavior.** Any non-empty answer, content, text, output text, reasoning content, reasoning summary, or encrypted reasoning content means the turn is not hollow. A tool call also means the turn is not hollow.
 
@@ -74,44 +74,44 @@ For health checks, each selected turn or invocation is reduced to three facts: w
 
 ### 3. Deterministic dispatch and zero-token calls
 
-**RFC gap.** The RFC exempts deterministic-dispatch steps from `zero_token_turns` without explaining the term.
+**RFC gap.** The RFC exempts deterministic-dispatch steps from `model_call_zero_completion_tokens` without explaining the term.
 
-**Chosen behavior.** A deterministic dispatch is agent logic that produces a step without calling the model. Because `zero_token_turns` examines captured model calls, such a step has no captured call and is automatically outside this check. Every captured model call reporting zero completion tokens produces a finding. The runner does not infer an exemption from request parameters or metadata.
+**Chosen behavior.** A deterministic dispatch is agent logic that produces a step without calling the model. Because `model_call_zero_completion_tokens` examines explicitly bound policy-model calls, such a step has no bound call and is automatically outside this check. Every bound call reporting zero completion tokens produces a finding. Unowned capture entries are not evaluated because they may belong to a user simulator or judge. The runner does not infer an exemption from request parameters or metadata.
 
 **Alternative considered.** Add or infer a special marker on captured calls. No such marker exists in the specified artifacts, so doing this would invent a new contract.
 
-### 4. Connecting transcript steps to model-call metrics
+### 4. Binding trajectory turns to captured model calls
 
-**RFC gap.** `missed_metrics` needs to know which captured model call belongs to each transcript step, but the RFC does not define how to make that connection.
+**RFC gap.** The model-call checks need to know which captured calls belong to the policy trajectory, but the RFC does not define how to make that connection or distinguish absent evidence from contradictory evidence.
 
-**Chosen behavior.** The runner accepts only an explicit `ModelCallRef`: either `model_call_id`, or both `model_ref` and `response_id`. A bound call must contain both prompt-token and completion-token counts.
+**Chosen behavior.** The runner creates one shared binding result from canonical `TrajectoryTurn.model_calls`. It accepts only an explicit `ModelCallRef`: either `model_call_id`, or both `model_ref` and `response_id`. It never matches by position, payload similarity, or model name. All policy-model-call checks consume the same bound calls.
 
-- If no selected transcript unit contains any model-call reference, the check is unobserved. The artifact lacks the input needed to evaluate this check.
-- If the transcript contains references, a unit produces a finding when its reference is absent, cannot be matched to capture, or matches a call missing either required token count.
+- A turn without a reference does not produce a finding. It may be deterministic agent logic rather than a model call.
+- If the trajectory contains no usable references, binding-dependent checks are unobserved.
+- An explicit reference that resolves to no captured call or more than one captured call produces `trajectory_capture_mismatch` findings because the two artifacts contradict each other.
+- Only calls that resolve exactly once become bound policy-model calls.
 
-**Alternatives considered.** Match transcript steps and calls by list position, emit one finding per step when the entire record format lacks references, or accept partial token usage. These choices can connect the wrong call, flood historical corpora with false failures, or hide missing metrics.
+**Alternatives considered.** Match by list position, treat every capture entry as a policy-model call, or fail every turn without a reference. These choices can connect auxiliary calls to policy turns or turn missing observability into false rollout failures.
 
-### 5. Comparing the transcript with captured model calls
+### 5. Separating correspondence, token, and model-call failures
 
-**RFC gap.** `transcript_capture_correspondence` includes missing calls, replayed calls, dropped retries, token-sum mismatches, and failed calls. The RFC names these cases but does not define their algorithms.
+**RFC gap.** The RFC's correspondence family combines cross-artifact mismatches, missing token fields, token-total mismatches, failed calls, and retries under one check. These findings have different subjects and different missing-input behavior.
 
-**Chosen behavior.** The check uses these rules:
+**Chosen behavior.** The implementation separates them into checks whose IDs begin with their finding subject:
 
-- A transcript reference with no matching capture produces a call-count-delta finding.
-- An unreferenced captured call does not by itself produce a call-count-delta finding. Capture may include user-simulator, judge, or other auxiliary calls that are not part of the policy transcript.
-- Repeated `model_call_id` values mean a replayed call. The provider's `response_id` is used only when Gym's `model_call_id` is absent because some providers reuse placeholder response IDs across distinct calls.
-- A failed captured call not referenced by the transcript is called a dropped retry only when a later captured call succeeds.
-- A failed call means an HTTP status from 400 through 599, a recorded error category, or response status `failed`, `error`, or `cancelled`.
-- A call with no failure signal and no HTTP status is treated as successful because status is optional in Gym's capture model.
-- Transcript token totals are compared only with explicitly bound calls, and only when both sides contain token usage. Summing every captured call would mix policy tokens with auxiliary-model tokens.
-- An unreadable capture line produces an `unreadable_capture_records` correspondence finding.
-- A failed final captured call produces a `trial_ended_on_failed_call` correspondence finding.
+- `trajectory_capture_mismatch` reports explicit references that resolve to zero or multiple captured calls. An unreadable capture line is also an affirmative artifact defect under this check. Extra unreferenced capture entries do not fail because they may be auxiliary calls.
+- `model_call_missing_token_counts` reports a bound call missing prompt-token or completion-token counts. With no bound calls, it is unobserved. Zero is a present count and belongs to `model_call_zero_completion_tokens`.
+- `rollout_token_count_mismatch` compares complete top-level rollout totals with the sum of a complete set of bound calls. Missing totals, missing per-call counts, or incomplete bindings make it unobserved.
+- `model_call_failed` reports one finding per bound call with HTTP status 400 through 599, a recorded error category, or response status `failed`, `error`, or `cancelled`. Its detail records whether that call was the final bound call. Unreferenced failed capture entries are not attributed to the policy model.
+- `model_call_zero_completion_tokens` and `model_call_runaway_generation` also evaluate only bound policy-model calls.
 
-**Alternatives considered.** Sum all captured calls, prefer provider response IDs over Gym call IDs, identify calls by request-payload hashes or list position, require an explicit HTTP 2xx status for success, or treat every unreferenced call as a dropped retry. Validation showed false token mismatches from captured judge calls and false replay findings from reused provider response IDs.
+Raw run statistics remain unchanged: they count all stored capture calls because they describe the artifact rather than assigning policy ownership.
+
+**Alternatives considered.** Keep one overloaded check, sum all capture calls, or treat every unreferenced failure as a dropped policy retry. Separate checks make each ID independently understandable and ignorable, while bound-call evaluation avoids attributing judge or user-simulator failures to the policy.
 
 ### 6. Deciding whether a length-limited response is empty
 
-**RFC gap.** `runaway_generations` applies when a call ends because of the length limit and has empty content, but model providers serialize response content differently.
+**RFC gap.** `model_call_runaway_generation` applies when a call ends because of the length limit and has empty content, but model providers serialize response content differently.
 
 **Chosen behavior.** The runner looks for non-empty text, content, output text, answer, encrypted content, reasoning, or reasoning summary in OpenAI Responses output, Chat Completions choices, and Messages-style content. Any of those fields means the response is not empty.
 
@@ -133,7 +133,7 @@ This makes `healthy` a strong claim that every enabled rollout check ran and pas
 
 **Alternatives considered.** Call a rollout healthy when every computable check passes, even if other checks lack evidence, or omit the overall verdict whenever coverage is partial.
 
-### 8. Inputs to `consistently_unhealthy_task`
+### 8. Inputs to `task_consistently_unhealthy`
 
 **RFC gap.** The RFC says this task-level check uses “computable repeat verdicts” but does not define that phrase.
 
@@ -141,11 +141,11 @@ This makes `healthy` a strong claim that every enabled rollout check ran and pas
 
 **Alternative considered.** Require every repeat for the task to be observed before evaluating the task check.
 
-### 9. Inputs to `no_healthy_model_calls_task`
+### 9. Inputs to `task_no_healthy_model_calls`
 
 **RFC gap.** The RFC does not say whether this task-level check may draw a conclusion from only the repeats that have capture evidence.
 
-**Chosen behavior.** Every repeat must have capture evidence. If any repeat lacks capture, this task check is unobserved. When every repeat is observed, the check produces a finding only if none contains a successful model call.
+**Chosen behavior.** Every repeat must have a complete set of explicit policy-call bindings. Raw capture alone is insufficient because it may contain auxiliary calls. If any repeat lacks complete bindings, this task check is unobserved. When every repeat is observed, the check produces a finding only if none contains a successful bound call.
 
 **Alternative considered.** Evaluate only the observed repeats. That could report failure even though an unobserved repeat contained a successful call.
 
@@ -181,7 +181,7 @@ This makes `healthy` a strong claim that every enabled rollout check ran and pas
 
 **Chosen behavior.** A sidecar whose filename matches the rollout is preferred. If none matches, a non-empty embedded model-call projection counts as observed capture. An embedded but empty call list does not prove that the rollout used Gym's capture path, so capture-dependent checks remain unobserved.
 
-**Alternatives considered.** Ignore embedded evidence, or treat an empty embedded list as proof of a successfully captured rollout with zero calls. The latter produced false `no_healthy_model_calls_task` findings for collection drivers that bypass Gym's model server.
+**Alternatives considered.** Ignore embedded evidence, or treat an empty embedded list as proof of a successfully captured rollout with zero calls. The latter produced false `task_no_healthy_model_calls` findings for collection drivers that bypass Gym's model server.
 
 ### 14. Recording why a check is unobserved
 
@@ -219,7 +219,7 @@ This makes `healthy` a strong claim that every enabled rollout check ran and pas
 
 **RFC gap.** The RFC says parsing must be tolerant and an unparseable record is a finding. It defines neither an issue ID for that finding nor a fallback identity for the report row.
 
-**Chosen behavior.** The implementation adds `unreadable_record` as a ninth registered check ID. For an unreadable JSONL entry, its zero-based position among all non-empty input lines becomes `_ng_task_index` and `_ng_rollout_index` becomes `0`. Checks that need the parsed record are marked unobserved, preventing meaningless follow-on findings.
+**Chosen behavior.** The implementation adds the separate `record_unreadable` check ID. For an unreadable JSONL entry, its zero-based position among all non-empty input lines becomes `_ng_task_index` and `_ng_rollout_index` becomes `0`. Checks that need the parsed record are marked unobserved, preventing meaningless follow-on findings.
 
 **Alternatives considered.** Report the parse failure under an unrelated semantic check, or omit the line from reports. The first corrupts another check's issue count; the second violates the requirement to classify every rollout record.
 
@@ -235,7 +235,7 @@ This makes `healthy` a strong claim that every enabled rollout check ran and pas
 
 **RFC gap.** The RFC requires tolerant parsing but does not say how to distinguish a health finding from a check implementation failing on malformed input.
 
-**Chosen behavior.** The runner catches the check failure, emits an `unreadable_record` finding whose detail names the affected check, and marks that check unobserved. Other checks continue.
+**Chosen behavior.** The runner catches the check failure, emits a `record_unreadable` finding whose detail names the affected check, and marks that check unobserved. Other checks continue.
 
 **Alternatives considered.** File the exception under the affected semantic check, which would pollute that check's issue histogram, or abort all verification.
 
@@ -248,7 +248,7 @@ This makes `healthy` a strong claim that every enabled rollout check ran and pas
 - Copies with the same verdict produce that verdict once.
 - Copies with conflicting verdicts make that repeat unobserved for task-level evaluation.
 
-**Alternatives considered.** Reject the run, keep only the first or last copy everywhere, or classify identity collisions as `unreadable_record`. Validation found that counting duplicate lines as separate repeats could create a false `consistently_unhealthy_task` finding.
+**Alternatives considered.** Reject the run, keep only the first or last copy everywhere, or classify identity collisions as `record_unreadable`. Validation found that counting duplicate lines as separate repeats could create a false `task_consistently_unhealthy` finding.
 
 ### 22. Running only a selected subset of checks
 
