@@ -49,6 +49,7 @@ from nemo_gym.global_config import (
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     GlobalConfigDictParserConfig,
+    agents_by_resources_server,
     get_first_server_config_dict,
     get_global_config_dict,
 )
@@ -214,11 +215,19 @@ def prepare_benchmark() -> None:
     )
     prepare_benchmark_config = PrepareBenchmarkConfig.model_validate(global_config_dict)
 
+    # A benchmark dataset may be declared by an agent block (legacy) or a resources server
+    # block (decoupled layout). Same agent resolution as BenchmarkConfig: the dataset's
+    # explicit `agent:` pin > the declaring agent block > the unique agent referencing the
+    # declaring resources server.
+    agents_by_rs = agents_by_resources_server(global_config_dict)
     benchmarks_dict: Dict[str, BenchmarkConfig] = dict()
     inspected_server_instances: List[str] = []
     for server_instance_name in global_config_dict:
         server_config = global_config_dict[server_instance_name]
-        if not isinstance(server_config, (dict, DictConfig)) or "responses_api_agents" not in server_config:
+        if not isinstance(server_config, (dict, DictConfig)):
+            continue
+        is_agent = "responses_api_agents" in server_config
+        if not is_agent and "resources_servers" not in server_config:
             continue
 
         inspected_server_instances.append(server_instance_name)
@@ -243,10 +252,21 @@ def prepare_benchmark() -> None:
 
         dataset = datasets[0]
 
-        benchmarks_dict[server_instance_name] = BenchmarkConfig(
+        agent_name = dataset.agent or (str(server_instance_name) if is_agent else None)
+        if agent_name is None:
+            candidates = agents_by_rs.get(str(server_instance_name), [])
+            if len(candidates) != 1:
+                raise ConfigError(
+                    f"Benchmark dataset {dataset.name!r} is declared by resources server "
+                    f"{server_instance_name!r}, which {len(candidates)} agents reference. Pin the "
+                    "harness with an `agent:` key on the dataset declaration."
+                )
+            agent_name = candidates[0]
+
+        benchmarks_dict[agent_name] = BenchmarkConfig(
             name=dataset.name,
             path=Path(""),
-            agent_name=server_instance_name,
+            agent_name=agent_name,
             num_repeats=dataset.num_repeats,
             dataset=dataset,
         )

@@ -512,6 +512,13 @@ class TrainDataProcessor(BaseModel):
             datasets,
         ) in local_datasets_not_found.items():  # pragma: no cover
             for d in datasets:
+                if not isinstance(d, DatasetConfig):
+                    # Benchmark datasets have no registry identifiers; their file comes from
+                    # their prepare_script (`gym eval prepare`), not a download.
+                    raise ValueError(
+                        f"Benchmark dataset {d.name!r} ({d.jsonl_fpath}) is missing on disk. Run "
+                        f"`gym eval prepare` (its prepare_script is {d.prepare_script}) before collating."
+                    )
                 if d.gitlab_identifier and d.huggingface_identifier:
                     backend = config.data_source
                 elif not d.gitlab_identifier:
