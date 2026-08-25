@@ -2,6 +2,8 @@ policy_model:
   responses_api_models:
     vllm_model:
       sampling_overrides:
+        temperature: 1.0
+        top_p: 0.95
         max_output_tokens: null
         max_tokens: null
         max_completion_tokens: null
