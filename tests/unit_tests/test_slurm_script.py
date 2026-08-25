@@ -230,6 +230,15 @@ def test_build_vllm_ray_command_installs_ray_if_missing(vllm_service):
     assert 'command -v ray >/dev/null 2>&1 || pip install -q "ray[default]"' in cmd
 
 
+def test_build_vllm_ray_command_symmetric_run_has_disable_escape_hatch(vllm_service):
+    # Workaround for https://github.com/ray-project/ray/issues/59795 (symmetric-run's own
+    # head-readiness check can misreport a healthy head as not-ready, hanging worker nodes) -
+    # VLLM_RAY_DISABLE_SYMMETRIC_RUN forces the manual ray start fallback even when symmetric-run
+    # is available.
+    cmd = _build_vllm_ray_command(vllm_service, total_nodes=2, gpus_per_node=8)
+    assert '[ -z "${VLLM_RAY_DISABLE_SYMMETRIC_RUN:-}" ] && ray symmetric-run' in cmd
+
+
 def test_build_vllm_ray_command_single_instance_omits_dp_backend_and_pack_strategy(vllm_service):
     # DP=1 regression anchor: must not gain the new multi-instance-spanning-nodes flags/env var.
     cmd = _build_vllm_ray_command(vllm_service, total_nodes=2, gpus_per_node=8)

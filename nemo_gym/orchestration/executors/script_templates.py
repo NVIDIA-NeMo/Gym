@@ -31,7 +31,7 @@ echo "Head node IP address: $HEAD_NODE_IP\""""
 _VLLM_RAY_SYMMETRIC_RUN = """\
 bash -lc '
     {env_exports}command -v ray >/dev/null 2>&1 || pip install -q "ray[default]"
-    if ray symmetric-run --help >/dev/null 2>&1; then
+    if [ -z "${{VLLM_RAY_DISABLE_SYMMETRIC_RUN:-}}" ] && ray symmetric-run --help >/dev/null 2>&1; then
         ray symmetric-run \\
             --address "$RAY_HEAD_NODE_IP" \\
             --min-nodes {total_nodes} \\
@@ -86,7 +86,11 @@ def render_vllm_ray_symmetric_run(
     Uses `ray symmetric-run` when available (Ray >= 2.50), which starts/joins a Ray cluster across
     every task and runs the entrypoint only on the elected head node. Containers with an older Ray
     pin fall back to manually starting head/worker Ray processes, keyed on Slurm's per-node task
-    rank ($SLURM_NODEID).
+    rank ($SLURM_NODEID). That same manual fallback can also be forced even when `ray symmetric-run`
+    is available, by setting VLLM_RAY_DISABLE_SYMMETRIC_RUN (any non-empty value) in the service's
+    env - a workaround for https://github.com/ray-project/ray/issues/59795, where symmetric-run's
+    own head-readiness check misreads an empty (but successful) GCS response as "not ready" and
+    worker nodes time out waiting for a head that's actually already up.
 
     env: extra environment variables to `export` inside the bash wrapper before starting Ray, so
     they reach every process the wrapper eventually execs (e.g. VLLM_RAY_DP_PACK_STRATEGY).
