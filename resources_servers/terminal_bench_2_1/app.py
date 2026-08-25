@@ -121,23 +121,36 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         task_folder = Path(body.task_folder)
 
         if self.config.is_verifying_golden_patch:
+            if self.config.debug:
+                print(f"Creating eval sandbox for {body.task_name}", file=stderr)
             eval_sandbox = await self._create_sandbox(body)
             await self._upload_folder(eval_sandbox, task_folder / "solution", "/solution")
+
+            if self.config.debug:
+                print(f"Running golden patch for {body.task_name}", file=stderr)
             golden_patch_result = await eval_sandbox.exec(
                 "bash /solution/solve.sh", timeout_s=self.config.evaluation_timeout
             )
             assert golden_patch_result.return_code == 0, golden_patch_result
             golden_patch_output = (golden_patch_result.stderr or "") + (golden_patch_result.stdout or "")
+            if self.config.debug:
+                print(f"Golden patch output for {body.task_name}: {golden_patch_output}", file=stderr)
         else:
             # Re-use the original sandbox
             eval_sandbox = self._session_id_to_sandbox.pop(request.session[SESSION_ID_KEY])
             golden_patch_output = None
             raise NotImplementedError
 
+        if self.config.debug:
+            print(f"Running tests for {body.task_name}", file=stderr)
         start_time = time()
         await self._upload_folder(eval_sandbox, task_folder / "tests", "/tests")
         eval_result = await eval_sandbox.exec("bash /tests/test.sh", timeout_s=self.config.evaluation_timeout)
         verification_time_taken = time() - start_time
+        test_output = (eval_result.stderr or "") + (eval_result.stdout or "")
+
+        if self.config.debug:
+            print(f"Test output for {body.task_name}: {test_output}", file=stderr)
 
         try:
             with NamedTemporaryFile(mode="w", suffix=".txt") as temp_file:
@@ -157,7 +170,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             evaluation_completed=evaluation_completed,
             reward=reward,
             verification_time_taken=verification_time_taken,
-            test_output=(eval_result.stderr or "") + (eval_result.stdout or ""),
+            test_output=test_output,
             golden_patch_output=golden_patch_output,
         )
 
