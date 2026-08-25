@@ -33,6 +33,7 @@ QUALITY_SUMMARY_FILENAME = "quality_summary.json"
 ROLLOUT_VERDICTS_FILENAME = "rollout_verdicts.jsonl"
 
 Verdict = Literal["healthy", "unhealthy", "unobserved"]
+_AgentStepSource = Literal["trajectory_turns", "trajectory_invocations", "response_output", "none"]
 
 
 class CheckScope(str, Enum):
@@ -82,6 +83,9 @@ CHECK_REGISTRY: tuple[CheckSpec, ...] = (
 
 _ROLLOUT_SPECS = tuple(spec for spec in CHECK_REGISTRY if spec.scope == CheckScope.ROLLOUT)
 _TASK_SPECS = tuple(spec for spec in CHECK_REGISTRY if spec.scope == CheckScope.TASK)
+_TRANSCRIPT_CHECK_IDS = frozenset(
+    {"missing_agent_steps", "hollow_steps", "missed_metrics", "transcript_capture_correspondence"}
+)
 
 
 def normalize_ignored_checks(checks: Sequence[str] | str | None) -> tuple[str, ...]:
@@ -143,6 +147,12 @@ class _WorkerInput:
 
 
 @dataclass(frozen=True, slots=True)
+class _WorkerResult:
+    digest: RolloutDigest
+    agent_step_source: _AgentStepSource
+
+
+@dataclass(frozen=True, slots=True)
 class _AgentStep:
     locator: dict[str, int | str]
     has_message: bool
@@ -194,6 +204,7 @@ def _nonempty(value: Any) -> bool:
                 "content",
                 "output_text",
                 "answer",
+                "refusal",
                 "encrypted_content",
                 "reasoning",
                 "reasoning_content",
@@ -212,15 +223,45 @@ def _call_ref_key(ref: Any) -> str | None:
     response_id = ref.get("response_id")
     if isinstance(model_ref, dict) and response_id:
         return f"response:{model_ref.get('type')}:{model_ref.get('name')}:{response_id}"
-    if response_id:
-        return f"response::{response_id}"
     return None
 
 
+_AGENT_TOOL_CALL_TYPES = frozenset(
+    {
+        "function_call",
+        "tool_call",
+        "tool_use",
+        "mcp_call",
+        "mcp_list_tools",
+        "mcp_approval_request",
+        "file_search_call",
+        "web_search_call",
+        "computer_call",
+        "image_generation_call",
+        "code_interpreter_call",
+        "local_shell_call",
+        "custom_tool_call",
+    }
+)
+_AGENT_TURN_BOUNDARY_TYPES = frozenset(
+    {
+        "function_call_output",
+        "tool_call_output",
+        "tool_result",
+        "computer_call_output",
+        "custom_tool_call_output",
+        "local_shell_call_output",
+        "mcp_approval_response",
+    }
+)
+
+
 def _item_has_tool_call(item: Any) -> bool:
+    if isinstance(item, (list, tuple)):
+        return any(_item_has_tool_call(value) for value in item)
     if not isinstance(item, dict):
         return False
-    if item.get("type") in {"function_call", "tool_call", "tool_use"}:
+    if item.get("type") in _AGENT_TOOL_CALL_TYPES:
         return True
     return bool(item.get("tool_calls"))
 
@@ -228,22 +269,13 @@ def _item_has_tool_call(item: Any) -> bool:
 def _item_is_agent_content(item: Any) -> bool:
     if not isinstance(item, dict):
         return False
-    return item.get("role") in {"assistant", "agent"} or item.get("type") in {
-        "function_call",
-        "reasoning",
-        "tool_call",
-        "tool_use",
-    }
+    return item.get("role") in {"assistant", "agent"} or item.get("type") == "reasoning" or _item_has_tool_call(item)
 
 
 def _item_ends_agent_turn(item: Any) -> bool:
     if not isinstance(item, dict):
         return False
-    return item.get("role") == "user" or item.get("type") in {
-        "function_call_output",
-        "tool_call_output",
-        "tool_result",
-    }
+    return item.get("role") == "user" or item.get("type") in _AGENT_TURN_BOUNDARY_TYPES
 
 
 def _response_output_steps(output: list[Any]) -> list[_AgentStep]:
@@ -281,8 +313,8 @@ def _response_output_steps(output: list[Any]) -> list[_AgentStep]:
     return steps
 
 
-def _agent_steps(record: dict[str, Any]) -> list[_AgentStep]:
-    """Return one normalized view of agent turns, preferring the projected trajectory."""
+def _agent_steps_with_source(record: dict[str, Any]) -> tuple[list[_AgentStep], _AgentStepSource]:
+    """Return agent-step evidence and the persisted source used to derive it."""
     trajectory = record.get("ng_trajectory")
     if isinstance(trajectory, dict):
         turns = trajectory.get("turns")
@@ -296,12 +328,13 @@ def _agent_steps(record: dict[str, Any]) -> list[_AgentStep]:
                     _AgentStep(
                         locator={"turn": turn.get("turn_no", position)},
                         has_message=_nonempty(turn.get("answer")) or _nonempty(turn.get("reasoning_content")),
-                        has_tool_calls=bool(turn.get("tool_calls")),
+                        has_tool_calls=_item_has_tool_call(turn.get("answer"))
+                        or _item_has_tool_call(turn.get("tool_calls")),
                         model_call_refs=refs,
                     )
                 )
             if normalized:
-                return normalized
+                return normalized, "trajectory_turns"
 
         invocations = trajectory.get("invocations")
         if isinstance(invocations, list):
@@ -318,19 +351,24 @@ def _agent_steps(record: dict[str, Any]) -> list[_AgentStep]:
                     normalized.append(
                         _AgentStep(
                             locator={"invocation": str(invocation.get("invocation_id", invocation_position))},
-                            has_message=any(_nonempty(item.get("content")) for item in agent_items),
+                            has_message=any(_nonempty(item) for item in agent_items),
                             has_tool_calls=any(_item_has_tool_call(item) for item in agent_items),
                             model_call_refs=invocation_refs,
                         )
                     )
             if normalized:
-                return normalized
+                return normalized, "trajectory_invocations"
 
     response = record.get("response")
     output = response.get("output") if isinstance(response, dict) else None
     if not isinstance(output, list):
-        return []
-    return _response_output_steps(output)
+        return [], "none"
+    return _response_output_steps(output), "response_output"
+
+
+def _agent_steps(record: dict[str, Any]) -> list[_AgentStep]:
+    """Return the best available agent-step evidence for health checks."""
+    return _agent_steps_with_source(record)[0]
 
 
 def _normalized_embedded_calls(record: dict[str, Any]) -> list[dict[str, Any]]:
@@ -676,8 +714,9 @@ def _read_record(line: _LineSlice) -> tuple[dict[str, Any], str | None]:
         return {}, type(exc).__name__
 
 
-def _worker(payload: _WorkerInput) -> RolloutDigest:
+def _worker(payload: _WorkerInput) -> _WorkerResult:
     record, parse_error = _read_record(payload.line)
+    agent_step_source: _AgentStepSource = "none" if parse_error else _agent_steps_with_source(record)[1]
     task_index = record.get(TASK_INDEX_KEY, payload.line.ordinal)
     rollout_index = record.get(ROLLOUT_INDEX_KEY, 0)
     trajectory = record.get("ng_trajectory")
@@ -753,24 +792,27 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
     duplicated = sum(count - 1 for count in Counter(identities).values() if count > 1)
     transcript_prompt, transcript_completion, _ = _transcript_tokens(record)
 
-    return RolloutDigest(
-        task_index=task_index,
-        rollout_index=rollout_index,
-        rollout_id=rollout_id,
-        verdict=verdict,
-        findings=findings,
-        unobserved=unobserved,
-        capture_observed=capture_observed,
-        model_calls=len(calls),
-        successful_model_calls=sum(_is_successful(call) for call in calls),
-        model_call_errors=len(failed),
-        errors_by_status=dict(errors_by_status),
-        ended_on_error=bool(calls and _is_failed(calls[-1])),
-        duplicated_calls=duplicated,
-        transcript_prompt_tokens=transcript_prompt,
-        transcript_completion_tokens=transcript_completion,
-        capture_prompt_tokens=sum(_token_count(call, "tokens_in") for call in calls),
-        capture_completion_tokens=sum(_token_count(call, "tokens_out") for call in calls),
+    return _WorkerResult(
+        digest=RolloutDigest(
+            task_index=task_index,
+            rollout_index=rollout_index,
+            rollout_id=rollout_id,
+            verdict=verdict,
+            findings=findings,
+            unobserved=unobserved,
+            capture_observed=capture_observed,
+            model_calls=len(calls),
+            successful_model_calls=sum(_is_successful(call) for call in calls),
+            model_call_errors=len(failed),
+            errors_by_status=dict(errors_by_status),
+            ended_on_error=bool(calls and _is_failed(calls[-1])),
+            duplicated_calls=duplicated,
+            transcript_prompt_tokens=transcript_prompt,
+            transcript_completion_tokens=transcript_completion,
+            capture_prompt_tokens=sum(_token_count(call, "tokens_in") for call in calls),
+            capture_completion_tokens=sum(_token_count(call, "tokens_out") for call in calls),
+        ),
+        agent_step_source=agent_step_source,
     )
 
 
@@ -951,6 +993,32 @@ def _write_reports(summary: dict[str, Any], digests: list[RolloutDigest], output
     return summary_path, verdicts_path
 
 
+def _warn_noncanonical_agent_steps(worker_results: Sequence[_WorkerResult], ignored_checks: frozenset[str]) -> None:
+    enabled_transcript_checks = _TRANSCRIPT_CHECK_IDS - ignored_checks
+    if not enabled_transcript_checks:
+        return
+    counts = Counter(
+        result.agent_step_source
+        for result in worker_results
+        if result.agent_step_source in {"trajectory_invocations", "response_output"}
+        and any(check_id not in result.digest.unobserved for check_id in enabled_transcript_checks)
+    )
+    if not counts:
+        return
+    details = []
+    if counts["trajectory_invocations"]:
+        details.append(f"{counts['trajectory_invocations']} used coarse ng_trajectory.invocations evidence")
+    if counts["response_output"]:
+        details.append(f"{counts['response_output']} used heuristic response.output grouping")
+    warnings.warn(
+        f"ng_trajectory.turns was unavailable for {sum(counts.values())} rollout record(s); "
+        f"{'; '.join(details)}. Turn-based health results for these records are best-effort. "
+        "Current producers should emit TrajectoryRecord.turns.",
+        RuntimeWarning,
+        stacklevel=3,
+    )
+
+
 def run_health_checks(
     rollout_paths: Path | Sequence[Path],
     *,
@@ -989,7 +1057,7 @@ def run_health_checks(
     if max_workers < 1:
         raise ValueError("workers must be at least 1")
     if len(worker_inputs) <= 1 or max_workers == 1:
-        digests = [_worker(item) for item in worker_inputs]
+        worker_results = [_worker(item) for item in worker_inputs]
     else:
         try:
             pool = ProcessPoolExecutor(max_workers=max_workers)
@@ -999,19 +1067,21 @@ def run_health_checks(
                 RuntimeWarning,
                 stacklevel=2,
             )
-            digests = [_worker(item) for item in worker_inputs]
+            worker_results = [_worker(item) for item in worker_inputs]
         else:
             try:
                 with pool:
-                    digests = list(pool.map(_worker, worker_inputs))
+                    worker_results = list(pool.map(_worker, worker_inputs))
             except (BrokenProcessPool, OSError) as exc:
                 warnings.warn(
                     f"Process pool failed ({exc}); running rollout health checks serially.",
                     RuntimeWarning,
                     stacklevel=2,
                 )
-                digests = [_worker(item) for item in worker_inputs]
+                worker_results = [_worker(item) for item in worker_inputs]
 
+    _warn_noncanonical_agent_steps(worker_results, ignored)
+    digests = [result.digest for result in worker_results]
     summary = _reduce(digests, ignored)
     report_dir = output_dir or paths[0].parent
     summary_path, verdicts_path = _write_reports(summary, digests, report_dir)

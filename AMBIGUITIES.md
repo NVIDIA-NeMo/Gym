@@ -40,15 +40,15 @@ The rollout-health RFC is the product specification for this branch. This docume
 
 ## Transcript and check behavior
 
-### 1. Choosing agent turns in historical records
+### 1. Missing canonical agent turns
 
-**RFC gap.** Current Gym has the standard `TrajectoryRecord` and `TrajectoryTurn` types, but historical rollout records may predate them. The RFC does not say how checks should read those older records.
+**RFC gap.** Current Gym stores agent turns in `TrajectoryRecord.turns`. Some records do not contain those turns, and the RFC does not say whether turn-based checks should reject them, become unobserved, or use weaker evidence.
 
-**Chosen behavior.** The runner uses the first usable source below and never combines sources:
+**Chosen behavior.** `ng_trajectory.turns` is the canonical input. The runner retains two compatibility fallbacks, but labels their turn-based results as best-effort with one aggregated warning per run. The warning reports how many records used each fallback. Sources are tried in this order and never combined:
 
 1. `ng_trajectory.turns`: each `TrajectoryTurn` is one agent turn.
-2. `ng_trajectory.invocations`: each `AgentInvocation` with conversation evidence is treated as one unit. An invocation may contain several messages and model calls. Its `model_calls` list is stored on the `AgentInvocation`, not on individual conversation items, so the runner cannot safely determine which call produced each message.
-3. `response.output`: adjacent reasoning, assistant-message, and function-call items are grouped into one turn. A user message or function-call output ends that turn.
+2. `ng_trajectory.invocations`: this is current Gym data, but it is coarser than turns. Each `AgentInvocation` with conversation evidence is treated as one unit. An invocation may contain several messages and model calls. Its `model_calls` list is stored on the `AgentInvocation`, not on individual conversation items, so the runner cannot safely determine which call produced each message.
+3. `response.output`: this legacy fallback reconstructs turns by grouping adjacent reasoning, assistant-message, and function-call items. A user message or function-call output ends the group.
 
 For example, this `response.output` sequence contains two agent turns:
 
@@ -62,7 +62,7 @@ assistant message     # second agent turn
 
 For health checks, each selected turn or invocation is reduced to three facts: whether it contains non-empty text or reasoning, whether it contains a tool call, and which model-call references it contains. The record has agent activity when at least one selected unit contains any of those facts.
 
-**Alternatives considered.** Reject all historical records, or treat every `response.output` item as a separate turn. Treating each item separately produced false `hollow_steps` findings when an empty assistant message and its real function call were sibling items in the same model response.
+**Alternatives considered.** Mark turn-based checks unobserved whenever `TrajectoryRecord.turns` is missing, reject such records, or treat every `response.output` item as a separate turn. Treating each item separately produced false `hollow_steps` findings when an empty assistant message and its real function call were sibling items in the same model response.
 
 ### 2. Whether reasoning counts as message content
 

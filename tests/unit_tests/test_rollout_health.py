@@ -3,6 +3,7 @@
 
 import json
 import sys
+import warnings
 from asyncio import Future
 from pathlib import Path
 
@@ -15,6 +16,7 @@ import nemo_gym.rollout_collection as rollout_collection
 import nemo_gym.rollout_health as health
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 from nemo_gym.rollout_health import CHECK_REGISTRY, run_health_checks
+from nemo_gym.rollout_observability import TrajectoryRecord
 
 
 CAPTURE_CHECKS = {
@@ -285,7 +287,7 @@ def test_health_check_cli_accepts_run_dir_workers_and_ignored_checks(
     }
 
 
-def test_persisted_trajectory_and_invocation_conversation_are_valid_capture_inputs(tmp_path: Path) -> None:
+def test_invocation_fallback_warns_and_remains_a_capture_input(tmp_path: Path) -> None:
     record = {
         "_ng_task_index": "task-a",
         "_ng_rollout_index": "repeat-a",
@@ -333,7 +335,8 @@ def test_persisted_trajectory_and_invocation_conversation_are_valid_capture_inpu
     rollout_path = tmp_path / "stored.jsonl"
     rollout_path.write_bytes(orjson.dumps(record, option=orjson.OPT_APPEND_NEWLINE))
 
-    result = run_health_checks(rollout_path, workers=1)
+    with pytest.warns(RuntimeWarning, match="coarse ng_trajectory.invocations evidence"):
+        result = run_health_checks(rollout_path, workers=1)
 
     [digest] = result.rollouts
     assert digest.rollout_id == "explicit-rollout"
@@ -345,8 +348,164 @@ def test_persisted_trajectory_and_invocation_conversation_are_valid_capture_inpu
         {"call_index": 1}
     ]
     assert health._nonempty(123) is False
+    assert health._call_ref_key({"response_id": "unqualified-response"}) is None
     assert health._item_has_tool_call("bad") is False
     assert health._item_is_agent_content("bad") is False
+
+
+def test_current_trajectory_turn_shape_recognizes_reasoning_and_function_calls(tmp_path: Path) -> None:
+    trajectory = TrajectoryRecord.model_validate(
+        {
+            "task_id": "0",
+            "rollout_id": "0-0",
+            "turns": [
+                {
+                    "invocation_id": "root",
+                    "task_id": "0",
+                    "rollout_id": "0-0",
+                    "turn_no": 1,
+                    "timestamp": 1.0,
+                    "answer": [
+                        {
+                            "type": "function_call",
+                            "call_id": "tool-1",
+                            "name": "tool",
+                            "arguments": "{}",
+                        }
+                    ],
+                    "reasoning_content": [
+                        {
+                            "type": "reasoning",
+                            "id": "reasoning-1",
+                            "summary": [{"type": "summary_text", "text": "thinking"}],
+                        }
+                    ],
+                    "step_count": 1,
+                    "model_calls": [{"model_call_id": "call-1"}],
+                }
+            ],
+        }
+    )
+    record = {
+        "_ng_task_index": 0,
+        "_ng_rollout_index": 0,
+        "response": {"output": []},
+        "ng_trajectory": trajectory.model_dump(mode="json"),
+    }
+    rollout_path = tmp_path / "rollouts.jsonl"
+    rollout_path.write_bytes(orjson.dumps(record, option=orjson.OPT_APPEND_NEWLINE))
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = run_health_checks(rollout_path, capture_enabled=False, workers=1)
+
+    steps, source = health._agent_steps_with_source(record)
+    assert source == "trajectory_turns"
+    assert len(steps) == 1
+    assert steps[0].has_message and steps[0].has_tool_calls
+    assert not any(finding.check == "hollow_steps" for finding in result.rollouts[0].findings)
+    assert not any("ng_trajectory.turns was unavailable" in str(warning.message) for warning in caught)
+
+
+def test_current_invocation_reasoning_is_message_content(tmp_path: Path) -> None:
+    trajectory = TrajectoryRecord.model_validate(
+        {
+            "task_id": "0",
+            "rollout_id": "0-0",
+            "invocations": [
+                {
+                    "invocation_id": "root",
+                    "model_calls": [{"model_call_id": "call-1"}],
+                    "conversation": [
+                        {
+                            "type": "reasoning",
+                            "id": "reasoning-1",
+                            "summary": [{"type": "summary_text", "text": "thinking"}],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    record = {
+        "_ng_task_index": 0,
+        "_ng_rollout_index": 0,
+        "ng_trajectory": trajectory.model_dump(mode="json"),
+    }
+    rollout_path = tmp_path / "rollouts.jsonl"
+    rollout_path.write_bytes(orjson.dumps(record, option=orjson.OPT_APPEND_NEWLINE))
+
+    with pytest.warns(RuntimeWarning, match="coarse ng_trajectory.invocations evidence"):
+        result = run_health_checks(rollout_path, capture_enabled=False, workers=1)
+
+    [step] = health._agent_steps(record)
+    assert step.has_message and not step.has_tool_calls
+    assert not any(finding.check == "hollow_steps" for finding in result.rollouts[0].findings)
+
+
+def test_noncanonical_transcript_warning_is_aggregated_and_only_emitted_when_used(tmp_path: Path) -> None:
+    invocation_record = {
+        "_ng_task_index": 0,
+        "_ng_rollout_index": 0,
+        "ng_trajectory": {
+            "task_id": "0",
+            "rollout_id": "0-0",
+            "invocations": [
+                {
+                    "invocation_id": "root",
+                    "conversation": [{"role": "assistant", "content": "answer"}],
+                }
+            ],
+        },
+    }
+    response_record = {
+        "_ng_task_index": 1,
+        "_ng_rollout_index": 0,
+        "response": {"output": [{"role": "assistant", "content": "answer"}]},
+    }
+    rollout_path = tmp_path / "rollouts.jsonl"
+    rollout_path.write_bytes(
+        orjson.dumps(invocation_record, option=orjson.OPT_APPEND_NEWLINE)
+        + orjson.dumps(response_record, option=orjson.OPT_APPEND_NEWLINE)
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        run_health_checks(rollout_path, capture_enabled=False, workers=1)
+
+    fallback_warnings = [
+        warning for warning in caught if "ng_trajectory.turns was unavailable" in str(warning.message)
+    ]
+    assert len(fallback_warnings) == 1
+    message = str(fallback_warnings[0].message)
+    assert "1 used coarse ng_trajectory.invocations evidence" in message
+    assert "1 used heuristic response.output grouping" in message
+
+    with warnings.catch_warnings(record=True) as ignored_caught:
+        warnings.simplefilter("always")
+        run_health_checks(
+            rollout_path,
+            capture_enabled=False,
+            ignored_checks=sorted(health._TRANSCRIPT_CHECK_IDS),
+            workers=1,
+        )
+    assert not any("ng_trajectory.turns was unavailable" in str(warning.message) for warning in ignored_caught)
+
+
+@pytest.mark.parametrize("item_type", sorted(health._AGENT_TOOL_CALL_TYPES))
+def test_current_response_tool_call_types_count_as_agent_activity(item_type: str) -> None:
+    item = {"type": item_type}
+    assert health._item_has_tool_call(item)
+    assert health._item_is_agent_content(item)
+
+
+@pytest.mark.parametrize("item_type", sorted(health._AGENT_TURN_BOUNDARY_TYPES))
+def test_current_response_tool_result_types_end_agent_turn(item_type: str) -> None:
+    assert health._item_ends_agent_turn({"type": item_type})
+
+
+def test_current_response_refusal_counts_as_message_content() -> None:
+    assert health._nonempty({"type": "refusal", "refusal": "cannot comply"})
 
 
 def test_response_output_groups_agent_items_into_turns_and_keeps_reasoning(tmp_path: Path) -> None:
@@ -367,7 +526,8 @@ def test_response_output_groups_agent_items_into_turns_and_keeps_reasoning(tmp_p
     rollout_path = tmp_path / "rollouts.jsonl"
     rollout_path.write_bytes(orjson.dumps(record, option=orjson.OPT_APPEND_NEWLINE))
 
-    result = run_health_checks(rollout_path, capture_enabled=False, workers=1)
+    with pytest.warns(RuntimeWarning, match="heuristic response.output grouping"):
+        result = run_health_checks(rollout_path, capture_enabled=False, workers=1)
 
     steps = health._agent_steps(record)
     assert len(steps) == 2
