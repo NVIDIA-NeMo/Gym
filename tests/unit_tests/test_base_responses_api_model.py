@@ -1563,3 +1563,76 @@ def test_capture_store_cross_process_append_no_loss(tmp_path):
     rows = CaptureStore(tmp_path).read("0-0")
     assert len(rows) == 400
     assert sorted(r["request"]["i"] for r in rows) == list(range(400))
+
+
+def _run_capture_middleware_on(path: str, *, token_store, sent: list | None = None, forwarded: list | None = None):
+    """Drive _CaptureMiddleware over one request to ``path`` with a token store."""
+    import asyncio
+
+    from nemo_gym.base_responses_api_model import _CaptureMiddleware
+
+    forwarded = forwarded if forwarded is not None else []
+    sent = sent if sent is not None else []
+
+    async def app(scope, receive, send):
+        forwarded.append(scope["path"])
+        await receive()
+        await send({"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"application/json")]})
+        await send({"type": "http.response.body", "body": b"{}", "more_body": False})
+
+    async def receive():
+        return {"type": "http.request", "body": b"{}", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(
+        _CaptureMiddleware(
+            app,
+            store=None,
+            model_server_name="srv",
+            token_store=token_store,
+            token_capture_enabled=True,
+        )({"type": "http", "path": path, "raw_path": path.encode(), "headers": []}, receive, send)
+    )
+    return forwarded, sent
+
+
+def test_unobserved_dialect_under_capture_prefix_marks_incomplete(tmp_path):
+    # The middleware cannot capture tokens from /v1/completions.
+    # Its output can still feed later prompts.
+    from nemo_gym.token_id_capture import TokenCaptureStore
+
+    token_store = TokenCaptureStore(tmp_path)
+    forwarded, sent = _run_capture_middleware_on(
+        "/ng-rollout/hole-0/training-token-capture/v1/completions", token_store=token_store
+    )
+
+    assert forwarded == ["/v1/completions"]
+    assert sent[0]["status"] == 200
+    assert token_store.is_incomplete("hole-0")
+
+
+def test_unobserved_dialect_marking_failure_still_forwards(tmp_path):
+    class _BrokenSink:
+        async def mark_incomplete(self, rollout_id, model_call_id=""):
+            raise RuntimeError("sink down")
+
+    forwarded, sent = _run_capture_middleware_on(
+        "/ng-rollout/hole-1/training-token-capture/v1/completions", token_store=_BrokenSink()
+    )
+
+    assert forwarded == ["/v1/completions"]
+    assert sent[0]["status"] == 200
+
+
+def test_observed_dialect_under_capture_prefix_is_not_marked_incomplete(tmp_path):
+    from nemo_gym.token_id_capture import TokenCaptureStore
+
+    token_store = TokenCaptureStore(tmp_path)
+    forwarded, _sent = _run_capture_middleware_on(
+        "/ng-rollout/hole-2/training-token-capture/v1/chat/completions", token_store=token_store
+    )
+
+    assert forwarded == ["/v1/chat/completions"]
+    assert not token_store.is_incomplete("hole-2")

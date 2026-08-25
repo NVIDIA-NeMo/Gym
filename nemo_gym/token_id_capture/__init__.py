@@ -25,6 +25,15 @@ Its ``snapshot_id`` identifies the exact frozen state.
 Framework transports may provide their own sink and source.
 There is no HTTP token reader.
 This leaf package avoids imports from Gym's server stack.
+The rollout-record finalizer needs Gym's server stack.
+It is deliberately not re-exported here.
+Import ``nemo_gym.token_id_capture.delivery`` from server-side code.
+The incomplete state prevents training on a rollout that lost a model call.
+Finalization freezes and rebuilds the rollout.
+Finalization does not retire the snapshot.
+The caller retires it only after durable handoff.
+Retirement uses the frozen ``snapshot_id`` and version.
+Failed or masked builds retain their capture evidence.
 """
 
 from nemo_gym.token_id_capture.builder import (
@@ -63,6 +72,7 @@ from nemo_gym.token_id_capture.sink import (
     capture_tokens,
     commit_entry,
     current_capture_context,
+    register_call_intent,
     reset_token_sink,
     set_token_sink,
 )
@@ -89,6 +99,7 @@ __all__ = [
     "CaptureContext",
     "set_token_sink",
     "reset_token_sink",
+    "register_call_intent",
     "capture_tokens",
     "commit_entry",
     "current_capture_context",
