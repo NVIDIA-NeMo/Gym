@@ -110,11 +110,13 @@ CONFIG_GLOBS = [
     "benchmarks/**/*.yaml",
     "responses_api_agents/*/configs/*.yaml",
 ]
+# Recursive: data dirs also exist at nested depths (benchmarks/swebench/verified/data/,
+# responses_api_agents/conversational_tool_use/*/data/, ...).
 DATA_GLOBS = [
-    "resources_servers/*/data/*.jsonl",
-    "environments/*/data/*.jsonl",
-    "benchmarks/*/data/*.jsonl",
-    "responses_api_agents/*/data/*.jsonl",
+    "resources_servers/**/data/*.jsonl",
+    "environments/**/data/*.jsonl",
+    "benchmarks/**/data/*.jsonl",
+    "responses_api_agents/**/data/*.jsonl",
 ]
 
 
