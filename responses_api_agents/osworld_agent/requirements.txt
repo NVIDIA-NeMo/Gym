@@ -35,7 +35,7 @@ numpy<2
 pynput
 ag2
 
-Pillow~=11.0.0
+Pillow==12.3.0
 scikit-learn
 matplotlib~=3.7.4
 func-timeout
