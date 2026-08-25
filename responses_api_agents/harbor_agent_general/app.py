@@ -93,8 +93,6 @@ class HarborAgentConfig(BaseResponsesAPIAgentConfig):
             jobs_dir=self.harbor_jobs_dir,
             n_attempts=1,
             n_concurrent_trials=1,
-            quiet=True,
-            debug=False,
             retry=RetryConfig(max_retries=0),
             datasets=[
                 self.harbor_dataset.model_copy(update={"task_names": [task_name]}),
