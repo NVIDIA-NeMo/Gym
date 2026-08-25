@@ -172,9 +172,7 @@ class TestMain:
         make_checkout(tmp_path, app="quiz")
         monkeypatch.setattr(prepare, "render_task_prompt", lambda *a, **k: "BRIEF")
         out = tmp_path / "out.jsonl"
-        monkeypatch.setattr(
-            sys, "argv", ["prepare.py", "--vibench-root", str(root), "--output", str(out)]
-        )
+        monkeypatch.setattr(sys, "argv", ["prepare.py", "--vibench-root", str(root), "--output", str(out)])
 
         prepare.main()
 
