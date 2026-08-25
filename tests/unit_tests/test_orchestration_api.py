@@ -204,16 +204,49 @@ def test_multi_node_dp_per_node_footprint_exceeds_raises():
         )
 
 
-def test_multi_instance_per_instance_multi_node_tp_not_supported():
-    # Each instance's own TP/PP footprint (TP5) already exceeds a single node's GPU count (4), so
-    # spreading 2 such instances across nodes would require each instance to itself span multiple
-    # nodes - that's not supported (only whole-instance placement across nodes is).
-    with pytest.raises(ValidationError, match="not supported"):
+def test_multi_instance_per_instance_multi_node_tp_pp_accepted_unvalidated():
+    # Each instance's own TP/PP footprint (TP5) exceeds a single node's GPU count (4), so each
+    # instance itself spans multiple nodes (see _build_vllm_multi_instance_multi_node_ray_command).
+    # GPU-footprint validation for this regime is deferred (tracked as follow-up work) - this now
+    # passes through unvalidated rather than raising.
+    config = SubmitConfig.model_validate(
+        _config(
+            services={"svc": {**SERVICE, "tensor_parallel_size": 5, "number_of_instances": 2}},
+            compute=COMPUTE_MULTI_NODE,
+        )
+    )
+    assert config.services["svc"].tensor_parallel_size == 5
+
+
+COMPUTE_4_NODES_8_GPUS_PER_NODE = {
+    "cluster": {
+        "type": "slurm",
+        "account": "my-account",
+        "hostname": "foo",
+        "node_pools": {"compute": {"partition": "batch", "nodes": 4, "gpus_per_node": 8}},
+    }
+}
+
+
+def test_multi_instance_per_instance_multi_node_tp_pp_target_topology_accepted():
+    # TP8 x PP2 = 16 GPUs/instance, spans 2 of the 4 available 8-GPU nodes; 2 instances x 2
+    # nodes/instance = 4 nodes = the whole allocation.
+    config = SubmitConfig.model_validate(
+        _config(
+            services={
+                "svc": {**SERVICE, "tensor_parallel_size": 8, "pipeline_parallel_size": 2, "number_of_instances": 2}
+            },
+            compute=COMPUTE_4_NODES_8_GPUS_PER_NODE,
+        )
+    )
+    assert config.services["svc"].number_of_instances == 2
+
+
+def test_multi_node_instance_count_neither_direction_divides_raises():
+    # 3 instances on 4 nodes: neither 3 % 4 nor 4 % 3 is zero - genuinely nonsensical, still raises.
+    with pytest.raises(ValidationError, match="evenly divisible"):
         SubmitConfig.model_validate(
-            _config(
-                services={"svc": {**SERVICE, "tensor_parallel_size": 5, "number_of_instances": 2}},
-                compute=COMPUTE_MULTI_NODE,
-            )
+            _config(services={"svc": {**SERVICE, "number_of_instances": 3}}, compute=COMPUTE_4_NODES_8_GPUS_PER_NODE)
         )
 
 

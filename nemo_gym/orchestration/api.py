@@ -179,11 +179,13 @@ class SubmitConfig(_StrictModel):
                 and isinstance(service, VllmServiceConfig)
                 and service.number_of_instances > 1
                 and service.number_of_instances % total_nodes != 0
+                and total_nodes % service.number_of_instances != 0
             ):
                 raise ValueError(
                     f"Service '{service_name}' has number_of_instances={service.number_of_instances}, which must "
-                    f"be evenly divisible by the number of nodes ({total_nodes}) for multi-node data-parallel "
-                    "deployment - each node hosts an equal share of the data-parallel replicas."
+                    f"be evenly divisible by (or evenly divide) the number of nodes ({total_nodes}) for "
+                    "multi-node data-parallel deployment - each node (or, when an instance itself spans multiple "
+                    "nodes, each instance) hosts an equal share."
                 )
 
             if isinstance(service, VllmServiceConfig):
@@ -229,20 +231,12 @@ class SubmitConfig(_StrictModel):
 
         if total_nodes > 1 and service.number_of_instances > 1:
             if tp_pp > max_gpus_per_node:
-                # Each instance's own TP/PP footprint already exceeds a single node's GPU count, so
-                # spreading multiple such instances across nodes would require every instance to
-                # itself span multiple nodes. That's not supported: multi-node data-parallel only
-                # distributes whole instances across nodes with tensor/pipeline parallelism kept
-                # local to each node (see _build_vllm_multi_instance_multi_node_command).
-                raise ValueError(
-                    f"Service '{service_name}' sets number_of_instances={service.number_of_instances} with "
-                    f"tensor_parallel_size={service.tensor_parallel_size} x "
-                    f"pipeline_parallel_size={service.pipeline_parallel_size}={tp_pp}, which exceeds a single "
-                    f"node's gpus_per_node ({max_gpus_per_node}). Multiple instances where each instance's own "
-                    "tensor/pipeline-parallel footprint spans multiple nodes is not supported - reduce "
-                    "tensor_parallel_size/pipeline_parallel_size to fit within one node, or set "
-                    "number_of_instances=1 to let a single instance span nodes."
-                )
+                # Each instance's own TP/PP footprint exceeds a single node's GPU count, so every
+                # instance itself spans multiple nodes (see
+                # _build_vllm_multi_instance_multi_node_ray_command). GPU-footprint validation for
+                # this regime isn't implemented yet - deferred to a follow-up - so skip through
+                # without raising or warning.
+                return
             # Multi-node data-parallel: each node runs its own equal share of the replicas with
             # local tensor/pipeline parallelism (see _build_vllm_multi_instance_multi_node_command);
             # the per-node share, not the total footprint, has to fit in that node's GPU count.

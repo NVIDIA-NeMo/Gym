@@ -204,13 +204,13 @@ def test_build_vllm_command_pipeline_parallel_1_omits_flag(vllm_service):
 
 
 def test_build_vllm_ray_command_uses_ray_distributed_executor(vllm_service):
-    cmd = _build_vllm_ray_command(vllm_service, total_nodes=2)
+    cmd = _build_vllm_ray_command(vllm_service, total_nodes=2, gpus_per_node=8)
     assert "--distributed-executor-backend ray" in cmd
     assert "vllm serve" in cmd
 
 
 def test_build_vllm_ray_command_wraps_in_symmetric_run(vllm_service):
-    cmd = _build_vllm_ray_command(vllm_service, total_nodes=2)
+    cmd = _build_vllm_ray_command(vllm_service, total_nodes=2, gpus_per_node=8)
     assert "ray symmetric-run" in cmd
     assert "--min-nodes 2" in cmd
     assert '--address "$RAY_HEAD_NODE_IP"' in cmd
@@ -219,15 +219,22 @@ def test_build_vllm_ray_command_wraps_in_symmetric_run(vllm_service):
 def test_build_vllm_ray_command_not_ray_serve_library():
     # Sanity check the plan constraint: this must not shell out to `serve` / ray.serve.
     service = VllmServiceConfig(type="vllm", container="vllm:latest", model="org/model")
-    cmd = _build_vllm_ray_command(service, total_nodes=2)
+    cmd = _build_vllm_ray_command(service, total_nodes=2, gpus_per_node=8)
     assert "ray.serve" not in cmd
     assert "serve.run" not in cmd
 
 
 def test_build_vllm_ray_command_installs_ray_if_missing(vllm_service):
     # Model-serving images (e.g. vllm/vllm-openai) don't necessarily bundle the ray CLI.
-    cmd = _build_vllm_ray_command(vllm_service, total_nodes=2)
+    cmd = _build_vllm_ray_command(vllm_service, total_nodes=2, gpus_per_node=8)
     assert 'command -v ray >/dev/null 2>&1 || pip install -q "ray[default]"' in cmd
+
+
+def test_build_vllm_ray_command_single_instance_omits_dp_backend_and_pack_strategy(vllm_service):
+    # DP=1 regression anchor: must not gain the new multi-instance-spanning-nodes flags/env var.
+    cmd = _build_vllm_ray_command(vllm_service, total_nodes=2, gpus_per_node=8)
+    assert "--data-parallel-backend" not in cmd
+    assert "VLLM_RAY_DP_PACK_STRATEGY" not in cmd
 
 
 # ---------------------------------------------------------------------------
@@ -236,14 +243,15 @@ def test_build_vllm_ray_command_installs_ray_if_missing(vllm_service):
 
 
 def test_build_vllm_ray_command_dp_does_not_use_ray():
-    # Multi-node DP uses vLLM's own --data-parallel-address/--headless coordination, not Ray.
+    # Multi-node DP uses vLLM's own --data-parallel-address/--headless coordination, not Ray, when
+    # each instance's own TP/PP footprint already fits on one node (gpus_per_node=4 >= tp_pp=1).
     service = VllmServiceConfig(
         type="vllm",
         container="vllm:latest",
         model="org/model",
         number_of_instances=4,
     )
-    cmd = _build_vllm_ray_command(service, total_nodes=2)
+    cmd = _build_vllm_ray_command(service, total_nodes=2, gpus_per_node=4)
     assert "ray" not in cmd
     assert "symmetric-run" not in cmd
 
@@ -255,7 +263,7 @@ def test_build_vllm_ray_command_dp_head_and_worker_branches():
         model="org/model",
         number_of_instances=4,
     )
-    cmd = _build_vllm_ray_command(service, total_nodes=2)
+    cmd = _build_vllm_ray_command(service, total_nodes=2, gpus_per_node=4)
     assert 'if [ "$SLURM_NODEID" = "0" ]; then' in cmd
     assert "--headless" in cmd
     assert "--data-parallel-size 4" in cmd
@@ -263,6 +271,50 @@ def test_build_vllm_ray_command_dp_head_and_worker_branches():
     assert '--data-parallel-address "$HEAD_NODE_IP"' in cmd
     assert "--data-parallel-rpc-port 13345" in cmd
     assert "--data-parallel-start-rank $(( SLURM_NODEID * 2 ))" in cmd
+
+
+def test_build_vllm_ray_command_dp_unknown_gpus_per_node_falls_back_to_native():
+    # No gpus_per_node info anywhere - can't tell whether each instance's footprint spans nodes, so
+    # fall back to the pre-existing native-DP path (mirrors api.py's "skip footprint validation
+    # when gpus_per_node is unset" escape hatch).
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        tensor_parallel_size=8,
+        number_of_instances=4,
+    )
+    cmd = _build_vllm_ray_command(service, total_nodes=2, gpus_per_node=None)
+    assert "--headless" in cmd
+    assert "ray" not in cmd
+
+
+# ---------------------------------------------------------------------------
+# _build_vllm_ray_command - multiple instances, each instance spans multiple nodes
+# ---------------------------------------------------------------------------
+
+
+def test_build_vllm_ray_command_dp_spanning_instances_uses_ray():
+    # TP8 x PP2 = 16 GPUs/instance, exceeds gpus_per_node=8 - each instance itself spans 2 nodes.
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        tensor_parallel_size=8,
+        pipeline_parallel_size=2,
+        number_of_instances=2,
+    )
+    cmd = _build_vllm_ray_command(service, total_nodes=4, gpus_per_node=8)
+    assert "ray symmetric-run" in cmd
+    assert "--min-nodes 4" in cmd
+    assert "--distributed-executor-backend ray" in cmd
+    assert "--data-parallel-backend ray" in cmd
+    assert "--data-parallel-size 2" in cmd
+    assert "--tensor-parallel-size 8" in cmd
+    assert "--pipeline-parallel-size 2" in cmd
+    assert "export VLLM_RAY_DP_PACK_STRATEGY=span" in cmd
+    assert "--headless" not in cmd
+    assert "--data-parallel-start-rank" not in cmd
 
 
 # ---------------------------------------------------------------------------
@@ -818,6 +870,57 @@ def test_build_sbatch_script_multi_node_node_flags_before_container_image(bench_
     script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
     vllm_line = next(line for line in script.splitlines() if "vllm:latest" in line)
     assert vllm_line.index("--nodes=4") < vllm_line.index("--container-image=")
+
+
+# ---------------------------------------------------------------------------
+# build_sbatch_script — multi-instance, each instance spans multiple nodes
+# ---------------------------------------------------------------------------
+
+
+def _multi_instance_spanning_multi_node_config():
+    return SubmitConfig.model_validate(
+        {
+            "services": {
+                "vllm_model": {
+                    "type": "vllm",
+                    "container": "vllm:latest",
+                    "model": "org/model",
+                    "tensor_parallel_size": 8,
+                    "pipeline_parallel_size": 2,
+                    "number_of_instances": 2,
+                }
+            },
+            "compute": {
+                "cluster": {
+                    "type": "slurm",
+                    "account": "my-account",
+                    "hostname": "foo",
+                    "node_pools": {"main": {"partition": "gpu", "nodes": 4, "gpus_per_node": 8, "ntasks_per_node": 1}},
+                }
+            },
+            "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}},
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )
+
+
+def test_build_sbatch_script_multi_instance_spanning_multi_node_uses_ray(bench_dir):
+    config = _multi_instance_spanning_multi_node_config()
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    vllm_line = next(line for line in script.splitlines() if "vllm:latest" in line)
+    assert "--nodes=4" in vllm_line
+    assert "--ntasks=4" in vllm_line
+    assert "ray symmetric-run" in script
+    assert "--min-nodes 4" in script
+    assert "--distributed-executor-backend ray" in script
+    assert "--data-parallel-backend ray" in script
+    assert "--data-parallel-size 2" in script
+    assert "--tensor-parallel-size 8" in script
+    assert "--pipeline-parallel-size 2" in script
+    assert "export VLLM_RAY_DP_PACK_STRATEGY=span" in script
+    assert "--headless" not in script
 
 
 def test_build_sbatch_script_single_node_pool_omits_node_flags_from_srun(bench_dir):

@@ -195,8 +195,37 @@ def _build_vllm_multi_instance_multi_node_command(service: VllmServiceConfig, to
     )
 
 
-def _build_vllm_ray_command(service: VllmServiceConfig, total_nodes: int) -> str:
+def _build_vllm_multi_instance_multi_node_ray_command(service: VllmServiceConfig, total_nodes: int) -> str:
+    # Each instance's own tensor/pipeline-parallel footprint exceeds one node's GPU count, so every
+    # instance itself spans multiple nodes. The native headless-DP mechanism above assumes the
+    # opposite (each instance fits on one node) and can't express this - instead, bootstrap ONE Ray
+    # cluster across the whole allocation (same mechanism as
+    # _build_vllm_single_instance_multi_node_command) and let vLLM's own Ray-backed DP+TP/PP
+    # executor (--data-parallel-backend ray, --distributed-executor-backend ray) place each
+    # data-parallel replica's placement group across it. VLLM_RAY_DP_PACK_STRATEGY=span (a vLLM env
+    # var) tells vLLM's placement-group scheduler that a single DP rank may spread across nodes;
+    # vLLM's default ("strict") packs each DP rank onto as few nodes as possible and isn't
+    # sufficient here.
+    #
+    # Note: vLLM's Ray executor places tensor_parallel_size x pipeline_parallel_size workers as a
+    # flat list of single-GPU bundles (Ray "PACK" strategy) - a full TP group only stays node-local
+    # when gpus_per_node % tensor_parallel_size == 0 (TP is the fastest-varying rank component).
+    # Not validated yet (GPU-footprint validation is deferred for this iteration) - misconfigured
+    # tensor_parallel_size/gpus_per_node combinations will silently split a TP group across nodes.
+    inner_cmd = _build_vllm_command(service) + " --distributed-executor-backend ray --data-parallel-backend ray"
+    resource_flags = (
+        "--num-cpus=${SLURM_CPUS_PER_TASK:-$SLURM_CPUS_ON_NODE} --num-gpus=${SLURM_GPUS_PER_TASK:-$SLURM_GPUS_ON_NODE}"
+    )
+    return render_vllm_ray_symmetric_run(
+        inner_cmd, total_nodes, resource_flags, env={"VLLM_RAY_DP_PACK_STRATEGY": "span"}
+    )
+
+
+def _build_vllm_ray_command(service: VllmServiceConfig, total_nodes: int, gpus_per_node: int | None) -> str:
     if service.number_of_instances > 1:
+        tp_pp = service.tensor_parallel_size * service.pipeline_parallel_size
+        if gpus_per_node is not None and tp_pp > gpus_per_node:
+            return _build_vllm_multi_instance_multi_node_ray_command(service, total_nodes)
         return _build_vllm_multi_instance_multi_node_command(service, total_nodes)
     return _build_vllm_single_instance_multi_node_command(service, total_nodes)
 
@@ -218,9 +247,11 @@ def _vllm_spans_multiple_nodes(service: VllmServiceConfig | RayServiceConfig, to
     return isinstance(service, VllmServiceConfig) and total_nodes > 1
 
 
-def _build_service_command(service: VllmServiceConfig | RayServiceConfig, total_nodes: int) -> str:
+def _build_service_command(
+    service: VllmServiceConfig | RayServiceConfig, total_nodes: int, gpus_per_node: int | None
+) -> str:
     if _vllm_spans_multiple_nodes(service, total_nodes):
-        return _build_vllm_ray_command(service, total_nodes)
+        return _build_vllm_ray_command(service, total_nodes, gpus_per_node)
     return _BUILDERS[type(service)](service)
 
 
@@ -228,6 +259,11 @@ def _node_totals(compute: SlurmComputeConfig) -> tuple[int, int]:
     total_nodes = sum(pool.nodes for pool in compute.node_pools.values())
     total_ntasks = sum(pool.nodes * pool.ntasks_per_node for pool in compute.node_pools.values())
     return total_nodes, total_ntasks
+
+
+def _max_gpus_per_node(compute: SlurmComputeConfig) -> int | None:
+    values = [pool.gpus_per_node for pool in compute.node_pools.values() if pool.gpus_per_node is not None]
+    return max(values) if values else None
 
 
 def build_sbatch_script(
@@ -240,6 +276,7 @@ def build_sbatch_script(
     directives = _render_directives(compute, remote_bench_dir, benchmark_name)
 
     total_nodes, total_ntasks = _node_totals(compute)
+    gpus_per_node = _max_gpus_per_node(compute)
     is_multi_node = total_nodes > 1
 
     ray_prelude = (
@@ -252,7 +289,7 @@ def build_sbatch_script(
         _render_service_command(
             name,
             service.container,
-            _build_service_command(service, total_nodes),
+            _build_service_command(service, total_nodes, gpus_per_node),
             service.env or None,
             service.mounts or None,
             # Only services that actually span multiple nodes need the whole allocation's --nodes/

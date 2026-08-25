@@ -30,7 +30,7 @@ echo "Head node IP address: $HEAD_NODE_IP\""""
 
 _VLLM_RAY_SYMMETRIC_RUN = """\
 bash -lc '
-    command -v ray >/dev/null 2>&1 || pip install -q "ray[default]"
+    {env_exports}command -v ray >/dev/null 2>&1 || pip install -q "ray[default]"
     if ray symmetric-run --help >/dev/null 2>&1; then
         ray symmetric-run \\
             --address "$RAY_HEAD_NODE_IP" \\
@@ -77,7 +77,9 @@ def render_ray_prelude() -> str:
     return _RAY_PRELUDE
 
 
-def render_vllm_ray_symmetric_run(inner_cmd: str, total_nodes: int, resource_flags: str) -> str:
+def render_vllm_ray_symmetric_run(
+    inner_cmd: str, total_nodes: int, resource_flags: str, env: dict[str, str] | None = None
+) -> str:
     """Render the Ray head/worker bootstrap that wraps a single vLLM instance's TP/PP command so
     it spans multiple Slurm nodes.
 
@@ -85,8 +87,14 @@ def render_vllm_ray_symmetric_run(inner_cmd: str, total_nodes: int, resource_fla
     every task and runs the entrypoint only on the elected head node. Containers with an older Ray
     pin fall back to manually starting head/worker Ray processes, keyed on Slurm's per-node task
     rank ($SLURM_NODEID).
+
+    env: extra environment variables to `export` inside the bash wrapper before starting Ray, so
+    they reach every process the wrapper eventually execs (e.g. VLLM_RAY_DP_PACK_STRATEGY).
     """
-    return _VLLM_RAY_SYMMETRIC_RUN.format(total_nodes=total_nodes, resource_flags=resource_flags, inner_cmd=inner_cmd)
+    env_exports = "".join(f"export {k}={shlex.quote(v)}\n    " for k, v in (env or {}).items())
+    return _VLLM_RAY_SYMMETRIC_RUN.format(
+        total_nodes=total_nodes, resource_flags=resource_flags, inner_cmd=inner_cmd, env_exports=env_exports
+    )
 
 
 def render_health_check(name: str, port: int, path: str, timeout: int) -> str:
