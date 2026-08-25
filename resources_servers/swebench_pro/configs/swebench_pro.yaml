@@ -8,6 +8,7 @@ swebench_pro_resources_server:
 
       evaluation_timeout: 3600
       image_repository: docker.io/jefzda/sweap-images
+      apply_anti_cheating: true
       is_verifying_golden_patch: false
       prefetch_go_modules: true
 
