@@ -18,6 +18,7 @@ import json
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 from pydantic import ValidationError
@@ -33,10 +34,13 @@ from nemo_gym.atif_reverification import (
     project_atif_manifest_entries,
     project_atif_manifest_entry,
 )
+from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.relay_atif import AtifTrajectoryV1_7
 from nemo_gym.responses_converter import ResponsesConverter
+from nemo_gym.server_utils import ServerClient
+from resources_servers.mcqa.app import MCQAResourcesServer, MCQAResourcesServerConfig, MCQAVerifyRequest
 
 
 _FIXTURE_PATH = Path(__file__).parent / "fixtures" / "relay_atif_v1_7_tool_trajectory.json"
@@ -206,6 +210,50 @@ def test_atif_and_equivalent_native_response_receive_the_same_reward() -> None:
     assert [item.type for item in native_response.output] == ["function_call", "function_call_output", "message"]
     assert _weather_reward(native_payload) == 1.0
     assert _weather_reward(atif_payload) == _weather_reward(native_payload)
+
+
+async def test_same_atif_trajectory_can_be_reverified_with_different_stateless_configs() -> None:
+    """Rescore one projected ATIF response without rerunning the agent or tools."""
+
+    loaded = load_atif_trajectory(_RESPONSES_FIXTURE_PATH)
+    payload = build_atif_verify_payload(
+        {
+            "responses_create_params": {
+                "input": [{"role": "user", "content": "Run the command, then answer B."}],
+                "tools": [],
+            },
+            "options": [{"A": "plain answer"}, {"B": "boxed answer"}],
+            "expected_answer": "B",
+        },
+        loaded.trajectory,
+    )
+    request = MCQAVerifyRequest.model_validate(payload)
+
+    def verifier(grading_mode: str) -> MCQAResourcesServer:
+        config = MCQAResourcesServerConfig(
+            host="127.0.0.1",
+            port=8080,
+            entrypoint="",
+            name="mcqa",
+            grading_mode=grading_mode,
+        )
+        assert config.REVERIFY_MODE == ReverifyMode.STATELESS
+        return MCQAResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    strict_result = await verifier("strict_single_letter_boxed").verify(request)
+    answer_colon_result = await verifier("lenient_answer_colon").verify(request)
+
+    assert request.response.output_text == r"\boxed{B}"
+    assert strict_result.response == answer_colon_result.response == request.response
+    assert (
+        strict_result.responses_create_params
+        == answer_colon_result.responses_create_params
+        == request.responses_create_params
+    )
+    assert strict_result.reward == 1.0
+    assert strict_result.extracted_answer == "B"
+    assert answer_colon_result.reward == 0.0
+    assert answer_colon_result.extracted_answer is None
 
 
 def test_fixed_relay_responses_fixture_preserves_invocation_correlation() -> None:
