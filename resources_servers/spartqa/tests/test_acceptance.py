@@ -313,7 +313,8 @@ class TestAcExampleDataset:
             assert isinstance(row["target"], str) and row["target"]
             assert isinstance(row["options"], list) and len(row["options"]) == 2
             assert row["verifier_metadata"]["options"] == row["options"]
-            assert row["agent_ref"]["name"] == "spartqa_simple_agent"
+            # Routing is a run-time lookup now (dataset-decoupling); source rows carry no agent.
+            assert "agent_ref" not in row
             # The four candidates must be visible to the model.
             content = messages[0]["content"]
             for label in [*row["options"], BOTH_LABEL, NONE_LABEL]:

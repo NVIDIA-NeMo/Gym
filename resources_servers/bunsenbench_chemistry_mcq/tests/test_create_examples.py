@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from resources_servers.bunsenbench_chemistry_mcq.create_examples import AGENT_REF, build_example_rows
+from resources_servers.bunsenbench_chemistry_mcq.create_examples import build_example_rows
 
 
 class TestCreateExamples:
@@ -9,7 +9,7 @@ class TestCreateExamples:
         rows = build_example_rows()
         assert len(rows) == 5
         for row in rows:
-            assert row["agent_ref"] == AGENT_REF
+            assert "agent_ref" not in row  # routing is a run-time lookup (dataset-decoupling)
             assert row["responses_create_params"]["input"]
             assert row["options"]
             assert row["expected_answer"]

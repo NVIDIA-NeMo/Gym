@@ -248,7 +248,6 @@ def build_rollout_input_rows(
         {
             "instance_id": f"{dataset_name}::{task['name']}",
             "responses_create_params": {"input": []},
-            "agent_ref": {"name": agent_name},
         }
         for task in registry_tasks
     ]
