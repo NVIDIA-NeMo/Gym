@@ -111,6 +111,7 @@ class ApptainerExecConfig:
     """Settings for running commands inside an Apptainer sandbox."""
 
     default_timeout_s: float | None = 180
+    timeout_grace_s: float = 15
     fakeroot_for_root: bool = True
     default_binds: list[str] = field(default_factory=list)
     extra_exec_args: list[str] = field(default_factory=list)
@@ -119,6 +120,8 @@ class ApptainerExecConfig:
     def __post_init__(self) -> None:
         if self.default_timeout_s is not None and self.default_timeout_s <= 0:
             raise ValueError("exec.default_timeout_s must be > 0")
+        if self.timeout_grace_s < 0:
+            raise ValueError("exec.timeout_grace_s must be >= 0")
         if self.concurrency < 1:
             raise ValueError("exec.concurrency must be >= 1")
 
@@ -338,11 +341,10 @@ class ApptainerProvider:
                 # Graceful timeout: SIGTERM the process group first and give it a short grace period
                 # to react (e.g. an in-container agent flushing a partial trace on its SIGTERM
                 # handler), THEN SIGKILL if it hasn't exited.
-                _grace_s = float(os.getenv("NEMO_GYM_SANDBOX_TIMEOUT_GRACE_S", "15"))
                 with contextlib.suppress(ProcessLookupError):
                     os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
                 with contextlib.suppress(asyncio.TimeoutError, Exception):
-                    await asyncio.wait_for(proc.wait(), timeout=_grace_s)
+                    await asyncio.wait_for(proc.wait(), timeout=self._exec_config.timeout_grace_s)
                 if proc.returncode is None:  # still alive after grace -> hard kill
                     with contextlib.suppress(ProcessLookupError):
                         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
@@ -375,11 +377,10 @@ class ApptainerProvider:
                 # Graceful timeout: SIGTERM the process group first and give it a short grace period
                 # to react (e.g. an in-container agent flushing a partial trace on its SIGTERM
                 # handler), THEN SIGKILL if it hasn't exited.
-                _grace_s = float(os.getenv("NEMO_GYM_SANDBOX_TIMEOUT_GRACE_S", "15"))
                 with contextlib.suppress(ProcessLookupError):
                     os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
                 with contextlib.suppress(asyncio.TimeoutError, Exception):
-                    await asyncio.wait_for(proc.wait(), timeout=_grace_s)
+                    await asyncio.wait_for(proc.wait(), timeout=self._exec_config.timeout_grace_s)
                 if proc.returncode is None:  # still alive after grace -> hard kill
                     with contextlib.suppress(ProcessLookupError):
                         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
