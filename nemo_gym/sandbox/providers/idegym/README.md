@@ -87,7 +87,7 @@ takes one section per concern:
 | `connection` | Orchestrator URL, namespace, auth, client name, HTTP pooling, tracing. |
 | `create` | Readiness budget, retries, generated server names, pod defaults (`run_as_root`, ports), orchestrator polling backoff. |
 | `exec` | Default command timeout, client-side overhead, how `exec(user=...)` is honored. |
-| `probe` | Post-start readiness verification and the working-directory check. |
+| `verify` | The post-start working-directory check. |
 | `files` | Upload/download chunk sizes and the download size cap. |
 | `operations` | Status and teardown timeouts and retries. |
 | `attribution` | How the registered IdeGYM client name is derived when it is not pinned. |
@@ -115,7 +115,7 @@ Per-sandbox IdeGYM options with no neutral equivalent, validated before a pod is
 | Field | Mapping |
 | --- | --- |
 | `image` | The IdeGYM server image. `docker://` is stripped; the rest must be a valid lowercase OCI reference. |
-| `workdir` | Not a pod setting — each command `cd`s into it, and create fails early if it does not exist (`probe.verify_workdir`). |
+| `workdir` | Not a pod setting — each command `cd`s into it, and create fails early if it does not exist (`verify.check_workdir`). |
 | `env` | Exported per command, since IdeGYM can only put ConfigMap/Secret env on the pod (`provider_options.env_from`). |
 | `resources` | Kubernetes **limits**. `cpu` → cores/millicores, `memory_mib` → `Mi`, `disk_gib` → `ephemeral-storage`. |
 | `files` | Uploaded after start by the sandbox API, through this provider's `upload_file`. |
@@ -162,9 +162,10 @@ call is a fresh `bash -c` in the server's project directory with a cleaned envir
 group, because IdeGYM runs `source <bash-integration> && <script>` and `&&` binds only to the first
 statement.
 
-**Create waits for readiness.** A scheduled pod is not yet a usable sandbox, so `create()` returns
-only after the probe command has passed `probe.stable_count` times, and after checking that
-`spec.workdir` exists. Anything that fails after provisioning stops the server.
+**Create trusts IdeGYM's readiness wait.** The orchestrator reports a server only once its pod
+passes the Kubernetes readiness probe against the server's health endpoint, so `create()` adds just
+one check of its own: that `spec.workdir` exists. Anything that fails after provisioning stops the
+server.
 
 **Files ride base64 over bash.** IdeGYM's filesystem API is not usable through the orchestrator: its
 read endpoint streams raw bytes while the orchestrator forwards requests as JSON text, and its typed

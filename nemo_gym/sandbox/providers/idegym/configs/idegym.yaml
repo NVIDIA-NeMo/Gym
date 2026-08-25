@@ -103,18 +103,13 @@ sandbox:
       # "ignore" drops exec(user=...) with one warning; "runuser"/"su" wrap the script
       # for images that ship those tools.
       user_mode: ignore
-    probe:
-      # Verification after the orchestrator reports the pod up -- a scheduled pod is
-      # not yet a sandbox that can run commands.
-      command: printf idegym-sandbox-ready
-      expected_stdout: idegym-sandbox-ready
+    verify:
+      # IdeGYM already waits for the pod's Kubernetes readiness probe against the
+      # server's health endpoint, so all that is left is the working-directory check.
       timeout_s: 30
-      deadline_s: 180
-      stable_count: 1
-      stable_delay_s: 2.0
       # Fail create when sandbox_spec.workdir is missing from the image, instead of
       # letting every later command fail on `cd`.
-      verify_workdir: true
+      check_workdir: true
     files:
       # Transfers ride base64 over the bash tool. Upload chunks are capped by the
       # sandbox shell's 128 KiB argument limit, downloads by how much text the

@@ -22,7 +22,7 @@ from nemo_gym.sandbox.providers.idegym.config import (
     IdeGymFilesConfig,
     IdeGymOperationsConfig,
     IdeGymPollingConfig,
-    IdeGymProbeConfig,
+    IdeGymVerifyConfig,
     TransportBackend,
     UserMode,
 )
@@ -58,7 +58,7 @@ __all__ = [
     "IdeGymOperationError",
     "IdeGymOperationsConfig",
     "IdeGymPollingConfig",
-    "IdeGymProbeConfig",
+    "IdeGymVerifyConfig",
     "IdeGymProvider",
     "IdeGymProviderOptions",
     "IdeGymServerRef",

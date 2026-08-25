@@ -71,7 +71,7 @@ gym env start \
 | `connection` | Orchestrator URL, namespace, auth, client name, HTTP pooling, tracing. |
 | `create` | Readiness budget, retries, generated server names, pod defaults, orchestrator polling backoff. |
 | `exec` | Default command timeout, client-side overhead, how `exec(user=...)` is honored. |
-| `probe` | Post-start readiness verification and the working-directory check. |
+| `verify` | The post-start working-directory check. |
 | `files` | Upload and download chunk sizes and the download size cap. |
 | `operations` | Status and teardown timeouts and retries. |
 | `attribution` | How the registered IdeGYM client name is derived when it is not pinned. |
@@ -135,7 +135,7 @@ IdeGYM's resource quota accounting reads limits first, so `spec.resources` is wh
 
 | Field | Behavior |
 | --- | --- |
-| `workdir` | Not a pod setting. Each command `cd`s into it, and `create()` fails early if it does not exist (`probe.verify_workdir`). |
+| `workdir` | Not a pod setting. Each command `cd`s into it, and `create()` fails early if it does not exist (`verify.check_workdir`). |
 | `env` | Exported per command. IdeGYM can only put ConfigMap/Secret env on the pod, via `provider_options.env_from`. |
 | `metadata` | Not Kubernetes labels — IdeGYM has no per-server label API. `create.server_name_metadata_keys` folds selected keys (default `instance_id`) into the pod name. |
 | `ttl_s` | Not enforced; warns. IdeGYM servers live until stopped, and its watcher reaps servers whose client stops heartbeating. |
@@ -195,7 +195,7 @@ Rewrites are ordered and the first matching prefix wins. The provider does not b
 
 **Client naming matters.** Resource-limit rules are matched by regex against the client name, so set `connection.client_name` to whatever your deployment's rule expects. Left unset, the name is derived from job attribution (`NEMO_GYM_TEAM` / `NEMO_GYM_USER` / `NEMO_GYM_WORKLOAD`, then Slurm job variables) so a run is attributable in the IdeGYM dashboard.
 
-**Create waits for readiness.** A scheduled pod is not yet a usable sandbox, so `create()` returns only after the probe command passes `probe.stable_count` times and `spec.workdir` is confirmed to exist. Anything that fails after provisioning stops the server.
+**Create trusts IdeGYM's readiness wait.** The orchestrator reports a server only once its pod passes the Kubernetes readiness probe against the server's health endpoint, so `create()` adds just one check of its own: that `spec.workdir` exists. Anything that fails after provisioning stops the server.
 
 **Command and output limits.** A command may not exceed roughly 100 KiB once shaped into a script — IdeGYM passes it to the shell as a single `execve()` argument — and an oversized command is reported as a failed `SandboxExecResult` with `error_type="command_too_long"` rather than raising. The IdeGYM executor also strips leading and trailing whitespace from stdout and stderr.
 

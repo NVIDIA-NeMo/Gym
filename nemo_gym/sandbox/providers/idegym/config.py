@@ -15,7 +15,7 @@
 """Configuration objects for the IdeGYM sandbox provider.
 
 The provider constructor takes one section per concern — ``connection``, ``create``,
-``exec``, ``probe``, ``files``, ``operations``, ``attribution`` — mirroring the shipped
+``exec``, ``verify``, ``files``, ``operations``, ``attribution`` — mirroring the shipped
 ``configs/idegym.yaml`` block. Every section validates in ``__post_init__`` so a bad
 Hydra value fails at server start rather than mid-rollout, and every section is frozen
 and hashable so the shared orchestrator session can be keyed on its connection config.
@@ -42,10 +42,6 @@ MAX_COMMAND_BYTES = 100 * 1024
 # the command budget with the `cd`, the `mkdir -p`, and the caller's env exports, so the
 # limit leaves real headroom rather than filling the budget with payload alone.
 MAX_UPLOAD_CHUNK_BYTES = 64 * 1024
-
-# The probe asserts stdout equality, so these two only make sense as a pair.
-DEFAULT_PROBE_COMMAND = "printf idegym-sandbox-ready"
-DEFAULT_PROBE_EXPECTED = "idegym-sandbox-ready"
 
 # RFC-1035 caps Kubernetes resource names at 63 characters, and the orchestrator derives
 # the pod name as `<server_name>-<server_id>`, so the name the provider sends leaves room
@@ -236,33 +232,21 @@ class IdeGymExecConfig:
 
 
 @dataclass(frozen=True)
-class IdeGymProbeConfig:
-    """Readiness verification run after the orchestrator reports a started server.
+class IdeGymVerifyConfig:
+    """Post-start verification, on top of the orchestrator's own readiness wait.
 
-    A started pod is not the same as a sandbox that can run commands, so ``create()``
-    only returns once this probe has passed ``stable_count`` times.
+    IdeGYM reports a server only once its pod passes the Kubernetes readiness probe
+    against the server's health endpoint, so the one thing left worth checking is that
+    ``spec.workdir`` exists in the image.
     """
 
-    command: str | None = DEFAULT_PROBE_COMMAND
-    expected_stdout: str | None = DEFAULT_PROBE_EXPECTED
     timeout_s: float = 30.0
-    deadline_s: float | None = 180.0
-    stable_count: int = 1
-    # Non-zero: the probe polls a remote orchestrator, so back-to-back retries would
-    # hammer it for the whole deadline while a pod is still warming up.
-    stable_delay_s: float = 2.0
     # Fail create on a missing `spec.workdir` instead of letting every later exec fail
     # on `cd`, long after the cause is visible.
-    verify_workdir: bool = True
+    check_workdir: bool = True
 
     def __post_init__(self) -> None:
-        if self.stable_count < 1:
-            raise ValueError("probe.stable_count must be >= 1")
-        # Always validated: the workdir check uses this timeout even when the probe
-        # command is disabled.
-        _require_positive(self.timeout_s, "probe.timeout_s")
-        _require_positive(self.deadline_s, "probe.deadline_s", allow_none=True)
-        _require_non_negative(self.stable_delay_s, "probe.stable_delay_s")
+        _require_positive(self.timeout_s, "verify.timeout_s")
 
 
 @dataclass(frozen=True)

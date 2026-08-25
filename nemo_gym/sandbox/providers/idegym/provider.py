@@ -28,6 +28,7 @@ through the registered client that owns it.
 
 import asyncio
 import logging
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -46,7 +47,7 @@ from nemo_gym.sandbox.providers.idegym.config import (
     IdeGymExecConfig,
     IdeGymFilesConfig,
     IdeGymOperationsConfig,
-    IdeGymProbeConfig,
+    IdeGymVerifyConfig,
 )
 from nemo_gym.sandbox.providers.idegym.errors import (
     IdeGymCommandTooLongError,
@@ -119,7 +120,7 @@ class IdeGymProvider:
         connection: IdeGymConnectionConfig | Mapping[str, Any] | None = None,
         create: IdeGymCreateConfig | Mapping[str, Any] | None = None,
         exec: IdeGymExecConfig | Mapping[str, Any] | None = None,
-        probe: IdeGymProbeConfig | Mapping[str, Any] | None = None,
+        verify: IdeGymVerifyConfig | Mapping[str, Any] | None = None,
         files: IdeGymFilesConfig | Mapping[str, Any] | None = None,
         operations: IdeGymOperationsConfig | Mapping[str, Any] | None = None,
         attribution: IdeGymAttributionConfig | Mapping[str, Any] | None = None,
@@ -127,7 +128,7 @@ class IdeGymProvider:
         self._connection = coerce_config(connection, IdeGymConnectionConfig)
         self._create = coerce_config(create, IdeGymCreateConfig)
         self._exec = coerce_config(exec, IdeGymExecConfig)
-        self._probe = coerce_config(probe, IdeGymProbeConfig)
+        self._verify = coerce_config(verify, IdeGymVerifyConfig)
         self._files = coerce_config(files, IdeGymFilesConfig)
         self._operations = coerce_config(operations, IdeGymOperationsConfig)
         self._attribution = coerce_config(attribution, IdeGymAttributionConfig)
@@ -137,27 +138,42 @@ class IdeGymProvider:
         # The session registers a client with the orchestrator, which is async, so
         # it is acquired on first use rather than in this constructor.
         self._session: IdeGymSession | None = None
-        self._session_lock = asyncio.Lock()
+        self._session_lock = threading.Lock()
         self._closed = False
 
     # --- session -----------------------------------------------------------
 
     async def session(self) -> IdeGymSession:
-        """Return this provider's shared orchestrator session, acquiring it once."""
+        """Return this provider's shared orchestrator session, acquiring it once.
+
+        A thread lock, not an ``asyncio.Lock``: one provider can be shared by two
+        sandboxes, and the sync ``Sandbox`` facade runs each on its own event loop,
+        which an ``asyncio.Lock`` cannot span without deadlocking.
+
+        The acquire therefore happens outside the lock, so two callers can race. That
+        is safe: ``acquire_session`` hands both of them the same session, and the loser
+        gives its spare reference back.
+        """
         if self._closed:
             raise IdeGymOperationError("This idegym provider has been closed")
         if self._session is not None:
             return self._session
-        async with self._session_lock:
-            if self._session is None:
-                self._session = await acquire_session(self._connection, self._attribution)
-            return self._session
+        session = await acquire_session(self._connection, self._attribution)
+        with self._session_lock:
+            if self._session is None and not self._closed:
+                self._session = session
+                return session
+            winner = self._session
+        await release_session(session)
+        if winner is None:
+            raise IdeGymOperationError("This idegym provider has been closed")
+        return winner
 
     async def health(self) -> str:
-        """Return the orchestrator's health status, registering the client if needed.
+        """Return the orchestrator's health, registering the client if needed.
 
-        Reaching this point already proves more than the endpoint being up: the
-        session had to register a client to exist.
+        Reaching this proves more than the endpoint being up: the session had to
+        register a client to exist.
         """
         session = await self.session()
         return await session.health()
@@ -167,9 +183,10 @@ class IdeGymProvider:
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         """Start an IdeGYM server for ``spec`` and return it ready to run commands.
 
-        The pod being scheduled is not the same as the sandbox being usable, so a
-        readiness probe runs before the handle is returned, and the server is torn
-        down if anything after provisioning fails.
+        The orchestrator reports a server only once its pod passes the Kubernetes
+        readiness probe against the IdeGYM server's own health endpoint, so the one
+        thing left to check is ``spec.workdir``. A failure after provisioning tears
+        the server down.
         """
         options = IdeGymProviderOptions.from_mapping(spec.provider_options)
         request = self._translator.translate(spec, options)
@@ -189,8 +206,9 @@ class IdeGymProvider:
         handle = SandboxHandle(sandbox_id=str(ref.server_id), provider_name=self.name, raw=sandbox)
         LOGGER.debug(f"Started IdeGYM sandbox {sandbox} from {sandbox.image!r} with metadata {sandbox.metadata}")
         try:
-            await self._verify(handle)
-        except BaseException:
+            await self._verify_workdir(handle)
+        except BaseException as e:
+            LOGGER.warning(f"Tearing down the IdeGYM sandbox {sandbox}, which create could not finish: {e!r}")
             await self._discard(handle)
             raise
         return handle
@@ -203,11 +221,10 @@ class IdeGymProvider:
     ) -> IdeGymServerRef:
         """Issue start-server, retrying failures that look transient.
 
-        ``ready_timeout_s`` is a deadline for the whole call, not per attempt: each
-        retry gets only the remaining budget, so a late failure cannot multiply the
-        wait the caller configured. Retries keep the same server name: IdeGYM derives
-        the Kubernetes name from its own server id, so a lost response that landed
-        anyway leaves an orphan the watcher reaps, not a name collision.
+        ``ready_timeout_s`` bounds the whole call, not each attempt, so a late failure
+        cannot multiply the wait the caller configured. Retries keep the server name:
+        IdeGYM derives the Kubernetes name from its own server id, so a lost response
+        that landed anyway leaves an orphan for the watcher, not a name collision.
         """
         create = self._create
         loop = asyncio.get_running_loop()
@@ -240,16 +257,6 @@ class IdeGymProvider:
                 await asyncio.sleep(backoff)
                 delay = min(delay * 2, create.retry_max_delay_s) if delay > 0 else create.retry_delay_s
 
-    async def _verify(self, handle: SandboxHandle) -> None:
-        """Check that the new sandbox can actually run commands.
-
-        The probe runs first: it is the retrying, deadline-bounded check, so letting
-        the single-shot workdir check go first would report a server that is merely
-        still warming up as a mis-set working directory.
-        """
-        await self._verify_probe(handle)
-        await self._verify_workdir(handle)
-
     async def _verify_workdir(self, handle: SandboxHandle) -> None:
         """Fail create when ``spec.workdir`` does not exist in the image.
 
@@ -257,11 +264,11 @@ class IdeGymProvider:
         ``cd``, which reads like a broken agent rather than a mis-set workdir.
         """
         sandbox: _IdeGymSandbox = handle.raw
-        if not self._probe.verify_workdir or not sandbox.workdir:
+        if not self._verify.check_workdir or not sandbox.workdir:
             return
         # Deliberately no cwd: the point is to test the directory, not enter it.
         script = self._script.build(directory_exists_script(sandbox.workdir))
-        result = await self._exec_script(handle, script, timeout_s=self._probe.timeout_s)
+        result = await self._exec_script(handle, script, timeout_s=self._verify.timeout_s)
         if result.return_code != 0:
             raise IdeGymCreateVerificationError(
                 f"The working directory {sandbox.workdir!r} is not usable in the IdeGYM sandbox {sandbox} "
@@ -269,40 +276,6 @@ class IdeGymProvider:
                 f"stderr {(result.stderr or '').strip()!r}. Point sandbox_spec.workdir at the image's project "
                 f"directory, or leave it unset to use the IdeGYM server's own project directory."
             )
-
-    async def _verify_probe(self, handle: SandboxHandle) -> None:
-        """Poll the readiness command until it passes ``stable_count`` times."""
-        probe = self._probe
-        if probe.command is None:
-            return
-        script = self._script.build(probe.command, cwd=handle.raw.workdir)
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + probe.deadline_s if probe.deadline_s is not None else None
-        consecutive = 0
-        detail = "no probe attempt completed"
-        while True:
-            result = await self._exec_script(handle, script, timeout_s=probe.timeout_s)
-            passed = result.return_code == 0 and (
-                probe.expected_stdout is None or probe.expected_stdout in (result.stdout or "")
-            )
-            if passed:
-                consecutive += 1
-                if consecutive >= probe.stable_count:
-                    return
-            else:
-                consecutive = 0
-                detail = f"return code {result.return_code}, stderr {(result.stderr or '').strip()!r}"
-                if deadline is None:
-                    raise IdeGymCreateVerificationError(
-                        f"IdeGYM sandbox {handle.raw} failed its readiness probe: {detail}"
-                    )
-            if deadline is not None and loop.time() >= deadline:
-                raise IdeGymCreateVerificationError(
-                    f"IdeGYM sandbox {handle.raw} did not pass its readiness probe within "
-                    f"{probe.deadline_s:g}s: {detail}"
-                )
-            if probe.stable_delay_s > 0:
-                await asyncio.sleep(probe.stable_delay_s)
 
     async def _discard(self, handle: SandboxHandle) -> None:
         """Best-effort teardown of a sandbox that never became usable."""
@@ -378,7 +351,11 @@ class IdeGymProvider:
                 )
             if is_sandbox_gone(e) or isinstance(e, IdeGymUnknownServerError):
                 sandbox.stopped = True
+                LOGGER.debug(f"IdeGYM sandbox {sandbox} is gone; further commands will short-circuit: {e}")
                 return _runtime_failure(f"IdeGYM sandbox {sandbox} is no longer available: {e}", error_type="sandbox")
+            # Unclassified: the return value keeps the rollout alive but throws the
+            # traceback away, so this is the only place it can still be recovered.
+            LOGGER.warning(f"IdeGYM sandbox {sandbox} failed to run the command", exc_info=True)
             return _runtime_failure(f"IdeGYM sandbox {sandbox} failed to run the command: {e}", error_type="sandbox")
         return SandboxExecResult(stdout=result.stdout, stderr=result.stderr, return_code=result.exit_code)
 
@@ -403,11 +380,10 @@ class IdeGymProvider:
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
         """Report the sandbox's lifecycle status.
 
-        IdeGYM has no server-status endpoint, so the capabilities call stands in:
-        it validates the server's database record *and* reaches the pod, which is
-        exactly the liveness question being asked. A "gone" answer from the
-        orchestrator (unknown or terminal server) is a stopped sandbox; anything
-        else that fails leaves the status unknown rather than guessing.
+        IdeGYM has no server-status endpoint, so the capabilities call stands in: it
+        validates the database record *and* reaches the pod, which is the liveness
+        question being asked. A "gone" answer means stopped; any other failure leaves
+        the status unknown rather than guessing.
         """
         sandbox: _IdeGymSandbox = handle.raw
         if sandbox.stopped:
@@ -426,10 +402,10 @@ class IdeGymProvider:
     async def close(self, handle: SandboxHandle) -> None:
         """Stop the sandbox and delete its Kubernetes resources.
 
-        Idempotent, and a server the orchestrator or the session no longer has counts
-        as success, so cleanup paths can call this without checking first. A stop that
-        fails for real raises and leaves the sandbox marked live, so ``status()``
-        keeps telling the truth and a caller can try again.
+        Idempotent, and a server neither the orchestrator nor the session still has
+        counts as success, so cleanup paths need not check first. A stop that fails for
+        real raises and leaves the sandbox marked live, so ``status()`` keeps telling
+        the truth and a caller can try again.
         """
         sandbox: _IdeGymSandbox = handle.raw
         if sandbox.stopped:
@@ -457,7 +433,12 @@ class IdeGymProvider:
                 if attempt >= self._operations.retries:
                     raise IdeGymOperationError(f"Failed to stop IdeGYM sandbox {sandbox}: {e}") from e
                 attempt += 1
-                await asyncio.sleep(min(delay, self._operations.retry_max_delay_s))
+                backoff = min(delay, self._operations.retry_max_delay_s)
+                LOGGER.warning(
+                    f"stop_server attempt {attempt}/{self._operations.retries + 1} for {sandbox} failed; "
+                    f"retrying in {backoff:g}s: {e}"
+                )
+                await asyncio.sleep(backoff)
                 delay = min(delay * 2, self._operations.retry_max_delay_s) if delay > 0 else 0.0
             else:
                 sandbox.stopped = True
@@ -469,9 +450,10 @@ class IdeGymProvider:
         The last provider to release it unregisters the IdeGYM client, which also
         terminates any server that was never closed.
         """
-        if self._closed:
-            return
-        self._closed = True
-        session, self._session = self._session, None
+        with self._session_lock:
+            if self._closed:
+                return
+            self._closed = True
+            session, self._session = self._session, None
         if session is not None:
             await release_session(session)

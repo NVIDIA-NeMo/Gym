@@ -24,8 +24,9 @@ the image cannot simply be a SWE-bench tag.
 | Validate the image against an allow-prefix and refuse anything else | Rejected as too rigid — registry layouts vary |
 
 Consequence: `spec.image` is normalized (`docker://` stripped) and validated against IdeGYM's OCI
-reference pattern, and nothing more. The failure mode for a non-IdeGYM image is a readiness-probe
-failure, which is why `create()` probes at all instead of trusting "pod is running".
+reference pattern, and nothing more. A non-IdeGYM image fails inside the orchestrator instead: its
+container never answers the health endpoint the pod's readiness probe polls, so `start_server` times
+out rather than handing back a server that cannot run commands.
 
 ### 2. What should `close()` do?
 
@@ -149,13 +150,14 @@ behavior explicit: `ignore` (default) warns once per provider, while `runuser` a
 script for images that ship those tools. `create.run_as_root` defaults to `true` in the shipped
 config, which makes `exec(user="root")` — what `mini_swe_agent_2` passes — a no-op rather than a lie.
 
-### `create()` verifies before returning
+### `create()` checks only the workdir
 
-Two checks, both because their absence produces a confusing failure much later:
-
-- The readiness probe, because a scheduled pod is not yet a sandbox that can run commands.
-- `spec.workdir` exists, because otherwise every later command fails on `cd` and reads like a broken
-  agent rather than a mis-set path.
+IdeGYM does not report a server until `wait_for_pods_ready` sees its pod `Running` with every
+container ready, and the container's readiness probe is an HTTP GET against the IdeGYM server's own
+health endpoint on the port the bash tool is served from. A provider-side readiness probe would only
+re-ask that question, so `create()` adds one check the orchestrator cannot make: that `spec.workdir`
+exists, because otherwise every later command fails on `cd` and reads like a broken agent rather
+than a mis-set path.
 
 ### Capabilities stands in for a status endpoint
 
