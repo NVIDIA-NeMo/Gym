@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import Any
 
 from nooa.unifiedllm import LLMResponse, Tool, ToolCall, UnifiedLLM
@@ -28,6 +29,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
 )
 from nemo_gym.server_utils import ServerClient, get_response_json, raise_for_status
+from responses_api_agents.nooa_agent.observability import TraceEvent
 
 
 class PolicyCallBudgetExceeded(RuntimeError):
@@ -113,6 +115,8 @@ class GymResponsesLLM(UnifiedLLM):
         max_steps: int,
         response_collector: list[NeMoGymResponse],
         cookies: dict[str, str],
+        timeline: list[TraceEvent] | None = None,
+        invocation_id: Callable[[], str] | None = None,
         model: str = "gym-policy",
     ) -> None:
         super().__init__(model=model)
@@ -122,6 +126,8 @@ class GymResponsesLLM(UnifiedLLM):
         self._max_steps = max_steps
         self._response_collector = response_collector
         self._cookies = cookies
+        self._timeline = timeline
+        self._invocation_id = invocation_id or (lambda: "root")
         self._calls = 0
 
     @property
@@ -185,6 +191,8 @@ class GymResponsesLLM(UnifiedLLM):
         response = NeMoGymResponse.model_validate(raw)
         self._cookies.update({name: morsel.value for name, morsel in http_response.cookies.items()})
         self._response_collector.append(response)
+        if self._timeline is not None:
+            self._timeline.append(TraceEvent(kind="model", value=response, invocation_id=self._invocation_id()))
 
         dumped_output = [item.model_dump(mode="json", exclude_none=True) for item in response.output]
         function_calls = [item for item in response.output if isinstance(item, NeMoGymResponseFunctionToolCall)]

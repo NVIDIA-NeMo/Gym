@@ -26,6 +26,7 @@ from responses_api_agents.nooa_agent.config import NOOAInvocationConfig, validat
 from responses_api_agents.nooa_agent.gym_llm import GymResponsesLLM
 from responses_api_agents.nooa_agent.gym_tools import GymToolExecution, GymTools
 from responses_api_agents.nooa_agent.mapping import materialize_arguments
+from responses_api_agents.nooa_agent.observability import NOOAEventTracker, TraceEvent
 
 
 @dataclass(slots=True)
@@ -46,6 +47,8 @@ class NOOARunResult:
     tool_executions: list[GymToolExecution]
     model_cookies: dict[str, str]
     resource_cookies: dict[str, str]
+    timeline: list[TraceEvent]
+    nooa_events: list[Any]
 
 
 class NOOARunner(Protocol):
@@ -74,6 +77,8 @@ class EmbeddedNOOARunner:
     async def run(self, request: NOOARunRequest) -> NOOARunResult:
         responses: list[NeMoGymResponse] = []
         executions: list[GymToolExecution] = []
+        timeline: list[TraceEvent] = []
+        tracker = NOOAEventTracker()
         llm = GymResponsesLLM(
             server_client=self._server_client,
             model_server_name=self._model_server_name,
@@ -81,20 +86,28 @@ class EmbeddedNOOARunner:
             max_steps=self._max_steps,
             response_collector=responses,
             cookies=request.model_cookies,
+            timeline=timeline,
+            invocation_id=lambda: tracker.invocation_id,
         )
         agent = self._agent_class(llm=llm, **self._invocation.init_kwargs)
+        unsubscribe = agent.event_manager.on("*", tracker.handle)
         tools = GymTools(
             server_client=self._server_client,
             resources_server_name=self._resources_server_name,
             tools=list(request.row.responses_create_params.tools),
             cookies=request.resource_cookies,
             observations=executions,
+            timeline=timeline,
+            invocation_id=lambda: tracker.invocation_id,
         )
         agent.gym_tools = tools
 
         arguments = materialize_arguments(request.row, self._invocation.arguments)
         entrypoint = getattr(agent, self._invocation.entrypoint)
-        return_value = await entrypoint(**arguments)
+        try:
+            return_value = await entrypoint(**arguments)
+        finally:
+            unsubscribe()
         return NOOARunResult(
             return_value=return_value,
             agent=agent,
@@ -102,4 +115,6 @@ class EmbeddedNOOARunner:
             tool_executions=executions,
             model_cookies=request.model_cookies,
             resource_cookies=request.resource_cookies,
+            timeline=timeline,
+            nooa_events=tracker.events,
         )
