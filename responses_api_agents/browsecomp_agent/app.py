@@ -58,14 +58,13 @@ def _qid(text: str) -> str:
     return hashlib.sha256((text or "").encode()).hexdigest()[:10]
 
 
-# --- Progress board (ported from bc_frankie_bash_tool_w_progress_tracking
-# commits 43e59bc / 5099589 / 8cdd075) ---
+# --- Progress board ---
 # An update_progress tool whose board is OVERWRITTEN on each call (not
 # appended) and persists in the system prompt across context resets. The board
-# is framed as a ledger of SETTLED state (not the live hypothesis): a kimi26
-# A/B showed a hypothesis-anchored board REGRESSED BrowseComp-400 61.2% ->
-# 49.5%; the settled-state slots + post-reset re-derivation rule below are the
-# de-anchoring fixes from that study.
+# is framed as a ledger of SETTLED state (not the live hypothesis): an A/B
+# study showed a hypothesis-anchored board REGRESSED BrowseComp accuracy by
+# more than 10 points; the settled-state slots + post-reset re-derivation rule
+# below are the de-anchoring fixes from that study.
 
 PROGRESS_TOOL = {
     "type": "function",
@@ -374,7 +373,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                         # The model cannot see the reset coming. Warn it on its
                         # latest tool result and give it this one turn to save the
                         # board; the armed reset fires on the next iteration's
-                        # pre-call check. (ported from bc_frankie 8cdd075)
+                        # pre-call check. (ported from an internal reference harness)
                         reset_armed = True
                         pre_reset_warning_steps.append(step)
                         print(
@@ -449,7 +448,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 if self.config.progress and not reset_armed:
                     # One warned turn: process this completion normally, inject the
                     # save-the-board warning after its tool results, and reset at
-                    # the end of the NEXT turn. (ported from bc_frankie 8cdd075)
+                    # the end of the NEXT turn. (ported from an internal reference harness)
                     reset_armed = True
                     pre_reset_nudge_due = True
                     pre_reset_warning_steps.append(step)
@@ -497,8 +496,8 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             # --- Execute tool calls ---
             for output_function_call in all_fn_calls:
                 num_tool_calls += 1
-                # The model can emit syntactically invalid JSON for `arguments` (seen on
-                # Inkling-Small: a call truncated mid-object). Parse once, up front, and
+                # The model can emit syntactically invalid JSON for `arguments` (observed
+                # in practice: a call truncated mid-object). Parse once, up front, and
                 # treat a failure the same way a >=400 tool response is treated below —
                 # report it back to the model — instead of letting it raise out of this
                 # handler, which 500s the agent and kills the ENTIRE rollout collection
@@ -661,7 +660,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 print(f"[browsecomp][max_steps][{qid}] step={step} max_steps={self.config.max_steps}", flush=True)
                 break
 
-        # --- Board-answer fallback (ported from bc_frankie 5099589): if the run
+        # --- Board-answer fallback (ported from an internal reference harness): if the run
         # ends without an answer commit in the last content-bearing assistant
         # message but the board contains one, surface the board's answer line so
         # the judge can extract it. Appends only — a trajectory that already
@@ -826,8 +825,8 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             )
             # CONTAIN the failure to this one sample. Re-raising makes /run return 500, which
             # the collector treats as fatal (raise_for_status in nemo_gym/rollout_collection.py)
-            # and every remaining sample dies with it — that cost two full 8-node allocations,
-            # one dying at 34/400 and one at 167/400, on one bad sample each.
+            # and every remaining sample dies with it — that cost two full multi-node
+            # allocations, each dying part-way through a run on one bad sample.
             #
             # Score it 0, but carry `agent_error` so the failure stays COUNTABLE in the results
             # instead of being indistinguishable from a genuine wrong answer. Always check that

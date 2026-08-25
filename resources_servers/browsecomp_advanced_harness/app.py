@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import functools
 import json
 import os
 import re
@@ -29,6 +30,7 @@ from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request
 from httpx import AsyncClient
+from pocketshell import run as pocketshell_run
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
 from tavily import AsyncTavilyClient
 from tavily.errors import BadRequestError
@@ -434,8 +436,8 @@ def _bash_truncate(s: str) -> str:
     )
 
 
-# --- bash_command guards (ported byte-for-byte from the bc_frankie_bash_tool
-# harness @ ee72d54: _bash_denylisted + _bash_allowlisted). Layered deny-first,
+# --- bash_command guards (ported byte-for-byte from an internal reference
+# harness: _bash_denylisted + _bash_allowlisted). Layered deny-first,
 # then default-deny allow-list. NOT a security boundary (the ulimit -f 0 in
 # _run_bash_readonly is the kernel backstop); these block destructive/network/
 # interpreter commands + command/process substitution + find -exec / sed -i. ---
@@ -863,51 +865,56 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return BashCommandResponse(results_string=out)
 
     async def _run_bash_readonly(self, keystrokes: str, duration: float, cwd: str) -> str:
-        # Layered guard (ported from bc_frankie @ ee72d54): deny-list first
-        # (specific reason), then default-deny read-only allow-list. Either one
-        # blocking returns [blocked: ...] and skips execution.
+        """Run the command IN-PROCESS via pocketshell -- no subprocess, no sandbox.
+
+        Replaces `asyncio.create_subprocess_exec("bash", "-c", ...)`. The old
+        design relied on a command-NAME deny/allow list plus `ulimit -f 0`, which
+        never inspected path arguments (so `cat /etc/passwd` passed the guard) and
+        which its own comment described as "NOT a security boundary". pocketshell
+        cannot execute anything it does not implement, and confines every path to
+        the sample workspace, so the protection is structural.
+
+        The legacy guard is deliberately kept IN FRONT so that anything it used to
+        reject still returns the identical `[blocked: ...]` string -- existing
+        synthetic-data corpora, and models trained on them, saw those exact responses.
+
+        Output shape (stdout / --- stderr --- / [exit_code=N]) is unchanged.
+        """
         blocked = _bash_denylisted(keystrokes) or _bash_allowlisted(keystrokes)
         if blocked is not None:
             print(f"[browsecomp][bash][blocked] {blocked}: {(keystrokes or '')[:160]!r}", flush=True)
             return f"[blocked: {blocked}]\n[exit_code=-3]"
-        # Read-only enforcement backstop: `ulimit -f 0` sets RLIMIT_FSIZE=0 so the
-        # command cannot write/grow ANY file; reads + pipes still work. cwd is
-        # pinned to the session workspace; env is minimal (no inherited secrets).
-        wrapped = f"ulimit -c 0 2>/dev/null; ulimit -f 0 2>/dev/null; {keystrokes}"
-        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": cwd, "LC_ALL": "C.UTF-8"}
-        async with self._bash_semaphore:
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    "bash",
-                    "-c",
-                    wrapped,
-                    cwd=cwd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    env=env,
-                )
-            except Exception as e:
-                return f"[bash error: {e}]\n[exit_code=-2]"
-            try:
-                stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=duration)
-            except asyncio.TimeoutError:
-                try:
-                    proc.kill()
-                    await proc.wait()
-                except ProcessLookupError:
-                    pass
-                return f"[command timed out after {duration:.0f}s]\n[exit_code=-1]"
 
-        stdout = _bash_truncate(stdout_b.decode(errors="replace"))
-        stderr = _bash_truncate(stderr_b.decode(errors="replace"))
-        truncated = len(stdout_b) + len(stderr_b) > (_BASH_HEAD_BYTES + _BASH_TAIL_BYTES) * 2
+        loop = asyncio.get_running_loop()
+        try:
+            # pocketshell is pure-Python and CPU-bound; keep the event loop free.
+            # A run_in_executor thread cannot be cancelled, so pocketshell enforces
+            # its own deadline internally (including a per-match regex timeout --
+            # Python backtracks where GNU grep's DFA does not). asyncio.wait_for is
+            # a belt-and-braces outer bound so a wedged thread can never stall the
+            # sample; the semaphore keeps the shared pool from being swamped.
+            async with self._bash_semaphore:
+                result = await asyncio.wait_for(
+                    loop.run_in_executor(None, functools.partial(pocketshell_run, keystrokes or "", cwd, duration)),
+                    timeout=duration + 30,
+                )
+        except asyncio.TimeoutError:
+            print(f"[browsecomp][bash] timeout: {(keystrokes or '')[:160]!r}", flush=True)
+            return f"[command timed out after {duration:.0f}s]\n[exit_code=-1]"
+        except Exception as e:  # pragma: no cover - defensive
+            print(f"🚨 [browsecomp][bash] pocketshell error: {e!r}", flush=True)
+            return f"[bash error: {e}]\n[exit_code=-2]"
+
+        stdout = _bash_truncate(result.stdout)
+        stderr = _bash_truncate(result.stderr)
+        truncated = (len(result.stdout) + len(result.stderr)) > (_BASH_HEAD_BYTES + _BASH_TAIL_BYTES) * 2
         parts = []
         if stdout:
             parts.append(stdout)
         if stderr:
             parts.append("--- stderr ---")
             parts.append(stderr)
-        parts.append(f"[exit_code={proc.returncode}{' truncated' if truncated else ''}]")
+        parts.append(f"[exit_code={result.exit_code}{' truncated' if truncated else ''}]")
         return "\n".join(parts)
 
     def _select_tavily_client(self) -> AsyncTavilyClient:
@@ -1271,7 +1278,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         judge_create_params = self.config.judge_responses_create_params.model_copy(deep=True)
         # Budget covers reasoning + final message combined (the reasoning parser splits
-        # post-hoc). 2048 made reasoning judges (e.g. GLM-5.1) burn the whole budget
+        # post-hoc). 2048 made reasoning judges burn the whole budget
         # thinking on ~2.7% of calls — no final message emitted, so output[-1] is the
         # reasoning item and parsing fails until a retry samples a shorter think.
         judge_create_params.max_output_tokens = 10240

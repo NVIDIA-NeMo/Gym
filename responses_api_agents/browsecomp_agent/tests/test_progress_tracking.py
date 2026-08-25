@@ -14,8 +14,7 @@
 # limitations under the License.
 """Unit tests for the progress-board feature (config.progress / update_progress).
 
-Ported from bc_frankie_bash_tool_w_progress_tracking tests/test_progress_tracking.py
-(commits 43e59bc, 5099589, 8cdd075). Key behaviours:
+Ported from an internal reference harness. Key behaviours:
   * the update_progress tool is offered only when progress=True;
   * each call OVERWRITES the whole board (not appended);
   * the board is rendered into the system prompt and rebuilt on every context
