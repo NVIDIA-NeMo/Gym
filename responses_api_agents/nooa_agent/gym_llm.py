@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable
 from typing import Any, Literal
 
 import aiohttp
@@ -32,6 +33,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.rollout_observability import ModelCallRef
 from nemo_gym.server_utils import ServerClient, get_response_json, raise_for_status
+from responses_api_agents.nooa_agent.observability import TraceEvent
 
 
 class PolicyCallBudgetExceeded(RuntimeError):
@@ -156,6 +158,8 @@ class GymResponsesLLM(UnifiedLLM):
         max_policy_calls: int,
         model_call_collector: list[ModelCallRef],
         cookies: dict[str, str],
+        timeline: list[TraceEvent] | None = None,
+        invocation_id: Callable[[], str] | None = None,
         model: str = "gym-policy",
     ) -> None:
         super().__init__(model=model)
@@ -165,6 +169,8 @@ class GymResponsesLLM(UnifiedLLM):
         self._max_policy_calls = max_policy_calls
         self._model_call_collector = model_call_collector
         self._cookies = cookies
+        self._timeline = timeline
+        self._invocation_id = invocation_id or (lambda: "root")
         self._calls = 0
         self._lock = asyncio.Lock()
 
@@ -248,12 +254,13 @@ class GymResponsesLLM(UnifiedLLM):
         raw = await get_response_json(http_response)
         response = NeMoGymResponse.model_validate(raw)
         self._cookies.update({name: morsel.value for name, morsel in http_response.cookies.items()})
-        self._model_call_collector.append(
-            ModelCallRef(
-                model_ref=ModelServerRef(name=self._model_server_name, type="responses_api_models"),
-                response_id=response.id,
-            )
+        model_call = ModelCallRef(
+            model_ref=ModelServerRef(name=self._model_server_name, type="responses_api_models"),
+            response_id=response.id,
         )
+        self._model_call_collector.append(model_call)
+        if self._timeline is not None:
+            self._timeline.append(TraceEvent(kind="model", value=response, invocation_id=self._invocation_id()))
 
         function_calls = [item for item in response.output if isinstance(item, NeMoGymResponseFunctionToolCall)]
         usage = response.usage.model_dump(mode="json") if response.usage is not None else None
