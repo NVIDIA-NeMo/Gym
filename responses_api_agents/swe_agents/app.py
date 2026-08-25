@@ -2516,7 +2516,7 @@ class RunOpenHandsAgent(BaseModel):
             recursive=True,
         )
         retained = latest_completion_paths(Path(path) for path in completion_candidates)
-        if self.config.model_call_capture_enabled and self.config.rollout_id is not None:
+        if self.config.rollout_id is not None:
             try:
                 observations = build_swe_observations(
                     (Path(path) for path in completion_candidates),
@@ -3807,7 +3807,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         updated_metrics = update_and_read_metrics(params.metrics_fpath, metrics_to_update)
 
         observations: Optional[AgentObservationBundle] = None
-        if params.model_call_capture_enabled and params.rollout_id is not None:
+        if params.rollout_id is not None:
             observations_path = params.persistent_dir / OBSERVATIONS_FILENAME
             try:
                 observations = AgentObservationBundle.model_validate_json(observations_path.read_text())
@@ -3908,7 +3908,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             if "subagent_trajectories" in metadata:
                 subagent_trajectories = json.loads(metadata["subagent_trajectories"])
             observations = None
-            if model_call_capture_enabled and rollout_id is not None and "agent_observations" in metadata:
+            if rollout_id is not None and "agent_observations" in metadata:
                 observations = AgentObservationBundle.model_validate_json(metadata["agent_observations"])
 
             return SWEBenchVerifyResponse(
