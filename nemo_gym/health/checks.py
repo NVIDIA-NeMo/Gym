@@ -25,6 +25,12 @@ from nemo_gym.rollout_observability import TrajectoryRecord
 
 CHECK_REGISTRY: tuple[CheckSpec, ...] = (
     CheckSpec(
+        id="check_execution_error",
+        evaluation_scope=CheckScope.ROLLOUT,
+        subject=CheckSubject.CHECK_EXECUTION,
+        reads=frozenset({CheckInput.RECORD}),
+    ),
+    CheckSpec(
         id="record_unreadable",
         evaluation_scope=CheckScope.ROLLOUT,
         subject=CheckSubject.RECORD,
@@ -535,6 +541,7 @@ _ROLLOUT_CHECKS: dict[
         list[Finding],
     ],
 ] = {
+    "check_execution_error": lambda record, trajectory, bindings, subject: [],
     "record_unreadable": lambda record, trajectory, bindings, subject: [],
     "rollout_missing_agent_turns": lambda record, trajectory, bindings, subject: _rollout_missing_agent_turns(
         trajectory, subject

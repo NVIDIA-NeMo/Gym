@@ -232,13 +232,13 @@ This does not affect the standalone command: `gym eval health-check` still requi
 
 **Alternative considered.** Fail the health check and therefore fail post-run aggregation after aggregate metrics were already produced.
 
-### 20. Handling a check that cannot parse one of its fields
+### 20. Handling a check execution error
 
-**RFC gap.** The RFC requires tolerant parsing but does not say how to distinguish a health finding from a check implementation failing on malformed input.
+**RFC gap.** The RFC requires tolerant parsing but does not define how to report an unexpected exception raised while evaluating one check.
 
-**Chosen behavior.** The runner catches the check failure, emits a `record_unreadable` finding whose detail names the affected check, and marks that check unobserved. Other checks continue.
+**Chosen behavior.** Expected missing or unsupported input makes the affected check unobserved. If a check nevertheless raises an unexpected exception, the runner emits a separate `check_execution_error` finding that identifies the failed check and exception type, marks that check unobserved, and continues evaluating the remaining checks. `record_unreadable` remains reserved for records or canonical trajectories that cannot be parsed.
 
-**Alternatives considered.** File the exception under the affected semantic check, which would pollute that check's issue histogram, or abort all verification.
+**Alternatives considered.** Report the exception as `record_unreadable`, which incorrectly blames a successfully parsed record, or abort verification before the other checks can run.
 
 ### 21. Duplicate task and rollout identities
 

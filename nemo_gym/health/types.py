@@ -29,6 +29,7 @@ class CheckScope(str, Enum):
 
 
 class CheckSubject(str, Enum):
+    CHECK_EXECUTION = "check_execution"
     RECORD = "record"
     ROLLOUT = "rollout"
     AGENT_TURN = "agent_turn"

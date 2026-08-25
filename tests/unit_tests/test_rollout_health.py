@@ -28,6 +28,7 @@ MODEL_CALL_CHECKS = {
     "rollout_token_count_mismatch",
     "model_call_runaway_generation",
 }
+RUNNER_CHECKS = {"check_execution_error", "record_unreadable"}
 
 
 def _record(
@@ -168,10 +169,8 @@ def test_all_registered_semantic_checks_fire_on_synthetic_artifacts(tmp_path: Pa
     result = run_health_checks(rollout_path, workers=2)
 
     assert set(result.summary["run"]["issues"]) == {spec.id for spec in CHECK_REGISTRY}
-    assert all(
-        result.summary["run"]["issues"][spec.id] > 0 for spec in CHECK_REGISTRY if spec.id != "record_unreadable"
-    )
-    assert result.summary["run"]["issues"]["record_unreadable"] == 0
+    assert all(result.summary["run"]["issues"][spec.id] > 0 for spec in CHECK_REGISTRY if spec.id not in RUNNER_CHECKS)
+    assert all(result.summary["run"]["issues"][check_id] == 0 for check_id in RUNNER_CHECKS)
     assert result.summary["tasks"]["0"]["flags"] == ["task_consistently_unhealthy"]
     assert "task_no_successful_model_calls" in result.summary["tasks"]["8"]["flags"]
     assert result.summary_path == tmp_path / "quality_summary.json"
@@ -226,7 +225,7 @@ def test_missing_canonical_trajectory_makes_trajectory_checks_unobserved(tmp_pat
     assert set(digest.unobserved) == {
         spec.id
         for spec in CHECK_REGISTRY
-        if spec.evaluation_scope == health.CheckScope.ROLLOUT and spec.id != "record_unreadable"
+        if spec.evaluation_scope == health.CheckScope.ROLLOUT and spec.id not in RUNNER_CHECKS
     }
     assert not digest.capture_observed
     assert digest.model_calls == 0
@@ -364,7 +363,7 @@ def test_invalid_canonical_trajectory_is_unreadable_without_fallback(tmp_path: P
     assert set(digest.unobserved) == {
         spec.id
         for spec in CHECK_REGISTRY
-        if spec.evaluation_scope == health.CheckScope.ROLLOUT and spec.id != "record_unreadable"
+        if spec.evaluation_scope == health.CheckScope.ROLLOUT and spec.id not in RUNNER_CHECKS
     }
     assert health_checks._nonempty(123) is False
     assert health_checks._call_ref_key({"response_id": "unqualified-response"}) is None
@@ -443,7 +442,7 @@ def test_trajectory_projection_failure_makes_trajectory_checks_unobserved(tmp_pa
     assert set(digest.unobserved) == {
         spec.id
         for spec in CHECK_REGISTRY
-        if spec.evaluation_scope == health.CheckScope.ROLLOUT and spec.id != "record_unreadable"
+        if spec.evaluation_scope == health.CheckScope.ROLLOUT and spec.id not in RUNNER_CHECKS
     }
     assert not digest.findings
 
@@ -773,6 +772,7 @@ def test_malformed_records_and_check_failures_become_findings(tmp_path: Path, mo
     assert digest.findings[0].locator == {"source_file": str(malformed), "line": 2}
     assert digest.findings[0].detail["reason"] == "rollout record is unreadable"
     assert set(digest.unobserved) == {
+        "check_execution_error",
         "rollout_missing_agent_turns",
         "agent_turn_hollow",
         "model_call_zero_completion_tokens",
@@ -802,13 +802,14 @@ def test_malformed_records_and_check_failures_become_findings(tmp_path: Path, mo
 
     monkeypatch.setitem(health_checks._ROLLOUT_CHECKS, "rollout_missing_agent_turns", broken_check)
     checked = run_health_checks(healthy, workers=1)
-    finding = next(item for item in checked.rollouts[0].findings if item.check == "record_unreadable")
+    finding = next(item for item in checked.rollouts[0].findings if item.check == "check_execution_error")
     assert finding.detail == {
-        "reason": "check input is unreadable",
+        "reason": "check raised an unexpected exception",
         "failed_check": "rollout_missing_agent_turns",
         "error": "TypeError",
     }
     assert "rollout_missing_agent_turns" in checked.rollouts[0].unobserved
+    assert not any(item.check == "record_unreadable" for item in checked.rollouts[0].findings)
 
 
 def test_process_pool_success_path_and_explicit_rollout_file(

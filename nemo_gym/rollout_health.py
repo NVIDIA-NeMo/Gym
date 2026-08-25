@@ -170,15 +170,16 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
             findings.extend(_ROLLOUT_CHECKS[spec.id](record, trajectory, bindings, subject))
         except Exception as exc:
             unobserved.append(spec.id)
-            findings.append(
-                _finding(
-                    "record_unreadable",
-                    subject,
-                    reason="check input is unreadable",
-                    failed_check=spec.id,
-                    error=type(exc).__name__,
+            if "check_execution_error" not in payload.ignored_checks:
+                findings.append(
+                    _finding(
+                        "check_execution_error",
+                        subject,
+                        reason="check raised an unexpected exception",
+                        failed_check=spec.id,
+                        error=type(exc).__name__,
+                    )
                 )
-            )
 
     verdict: Verdict = "unhealthy" if findings else "unobserved" if unobserved else "healthy"
     failed = [call for call in calls if _is_failed(call)]
