@@ -391,10 +391,9 @@ class GymVAgent(SimpleResponsesAPIAgent):
         env_id = seed_session_response.env_id
         model_response: NeMoGymResponse | None = None
         agent_state_history: list[NeMoGymResponseInput] = []
-        # Seed the flat output with the initial env observation so the chronological
-        # ordering (seed_obs → assistant_1 → step_obs_1 → assistant_2 → ...) is
-        # preserved in `output` itself.
-        all_messages: list[NeMoGymResponseOutputItem] = list(seed_obs)
+        # The initial observation is returned separately as `seed_obs`. Keep it
+        # out of the flat output so downstream multimodal consumers see it once.
+        all_messages: list[NeMoGymResponseOutputItem] = []
         model_server_cookies = None
 
         step = 0
@@ -532,10 +531,8 @@ class GymVAgent(SimpleResponsesAPIAgent):
             "group_id": str(req.task_idx),
             "contains_transitions": self.config.return_transitions,
             # seed_obs is the post-rules-injection initial observation that
-            # vLLM saw before the first model call. Mirrored here as a
-            # convenience for consumers (e.g. the inspector) that want the
-            # initial obs without walking `output`; the same messages also
-            # appear at the head of `output`.
+            # vLLM saw before the first model call. It stays separate from
+            # output so multimodal consumers do not process it twice.
             "seed_obs": (
                 [m.model_dump(mode="json") if hasattr(m, "model_dump") else m for m in seed_obs]
                 if not self.config.return_transitions
@@ -579,7 +576,12 @@ class GymVAgent(SimpleResponsesAPIAgent):
     async def run(self, body: GymVAgentRunRequest) -> GymVAgentVerifyResponse:
         try:
             response = await self.responses(body)
-            verify_request = GymVAgentVerifyRequest.model_validate({"response": response.model_dump()})
+            verify_request = GymVAgentVerifyRequest.model_validate(
+                {
+                    "responses_create_params": body.responses_create_params,
+                    "response": response.model_dump(),
+                }
+            )
             verify_response = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/verify",

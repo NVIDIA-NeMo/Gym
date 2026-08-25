@@ -181,17 +181,15 @@ class TestLifecycleHappyPath:
         assert result.group_id == "0"
         assert result.contains_transitions is False
 
-        # seed_obs mirror carries the initial observation.
+        # seed_obs carries the initial observation separately from output.
         assert result.seed_obs is not None
         assert len(result.seed_obs) == 1
         assert result.seed_obs[0].content == "Initial obs"
 
-        # output begins with the seed observation, then the assistant turn.
-        # The terminal /step observation is omitted because the model never saw it.
-        assert len(result.output) == 2  # seed_obs + assistant
-        assert result.output[0].role == "user"
-        assert result.output[0].content == "Initial obs"
-        assert result.output[1].role == "assistant"
+        # output contains the assistant turn but not the separately returned
+        # seed observation. The terminal /step observation is also omitted.
+        assert len(result.output) == 1
+        assert result.output[0].role == "assistant"
 
         calls = agent.server_client.post.await_args_list
         assert len(calls) == 4
@@ -207,6 +205,66 @@ class TestLifecycleHappyPath:
         assert calls[2][1]["url_path"] == "/step"
         assert calls[2][1]["json"] == {"env_id": env_id, "action_string": "step"}
         assert calls[3] == call(server_name="my resources name", url_path="/close", json={"env_id": env_id})
+
+
+class TestMultiTurnTokenReplay:
+    async def test_second_turn_replays_complete_token_metadata(self) -> None:
+        agent = _make_agent(max_steps=2)
+        env_id = str(uuid.uuid4())
+
+        seed = _seed_session(env_id=env_id)
+        first_response = _model_response("\\boxed{a}", resp_id="r1")
+        first_response["output"][0] |= {
+            "prompt_token_ids": [1, 2],
+            "generation_token_ids": [3],
+            "generation_log_probs": [-0.1],
+        }
+        first_step = _step(obs_text="Next obs", done=False)
+        second_response = _model_response("\\boxed{b}", resp_id="r2")
+        second_response["output"][0] |= {
+            "prompt_token_ids": [1, 2, 3, 4],
+            "generation_token_ids": [5],
+            "generation_log_probs": [-0.2],
+        }
+        second_step = _step(done=True)
+        close_data = {"message": "ok", "success": True}
+
+        dotjson_mock = AsyncMock()
+        dotjson_mock.json.side_effect = [
+            seed,
+            first_response,
+            first_step,
+            second_response,
+            second_step,
+            close_data,
+        ]
+        dotjson_mock.raise_for_status = MagicMock()
+        dotjson_mock.cookies = None
+        agent.server_client.post = AsyncMock(return_value=dotjson_mock)
+
+        request = GymVAgentRunRequest(
+            task_idx=0,
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        )
+        result = await agent.responses(request)
+
+        second_request = agent.server_client.post.await_args_list[3][1]["json"]
+        second_input = second_request.input
+        replayed = next(
+            item
+            for item in second_input
+            if getattr(item, "role", None) == "assistant"
+        )
+        assert replayed.prompt_token_ids == [1, 2]
+        assert replayed.generation_token_ids == [3]
+        assert replayed.generation_log_probs == [-0.1]
+        assert result.output[0].prompt_token_ids == [1, 2]
+
+        serialized_input = second_request.model_dump(exclude_none=True)["input"]
+        serialized_replay = next(item for item in serialized_input if item.get("role") == "assistant")
+        assert serialized_replay["prompt_token_ids"] == [1, 2]
+        assert serialized_replay["generation_token_ids"] == [3]
+        assert serialized_replay["generation_log_probs"] == [-0.1]
 
 
 class TestNoBoxedRecovery:
@@ -327,12 +385,10 @@ class TestReEmitRules:
         assert "REMINDER!" in seed_obs_contents
 
         output_contents = [getattr(m, "content", None) for m in result.output]
-        assert "Seed obs" in output_contents
-        assert "REMINDER!" in output_contents
-        # seed_obs entries must come before the first assistant message.
-        assistant_idx = next(i for i, m in enumerate(result.output) if getattr(m, "role", None) == "assistant")
-        assert output_contents.index("Seed obs") < assistant_idx
-        assert output_contents.index("REMINDER!") < assistant_idx
+        assert "Seed obs" not in output_contents
+        # The seed reminder is returned via seed_obs; the reminder following
+        # the first non-terminal step remains in the flat model-visible log.
+        assert output_contents.count("REMINDER!") == 1
 
         calls = agent.server_client.post.await_args_list
         second_model_call_input = calls[3][1]["json"].input
@@ -368,7 +424,9 @@ class TestReEmitRules:
         result = await agent.responses(request)
 
         contents = [getattr(m, "content", None) for m in result.output]
-        assert "Env obs" in contents
+        # Terminal observations are omitted because no subsequent model call
+        # saw them.
+        assert "Env obs" not in contents
         assert agent.config.rules_summary_template not in contents
 
 
@@ -445,6 +503,7 @@ class TestRunWorkflow:
         step_data = _step(done=True, reward=1.0)
         verify_data = {
             "reward": 1.0,
+            "responses_create_params": {"input": []},
             "response": {
                 "id": "resp_1",
                 "created_at": 1753983920.0,
@@ -487,6 +546,9 @@ class TestRunWorkflow:
             "/close",
             "/verify",
         ]
+        assert agent.server_client.post.await_args_list[-1][1]["json"][
+            "responses_create_params"
+        ]["input"] == []
 
 
 class TestSanity:

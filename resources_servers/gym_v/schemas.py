@@ -21,6 +21,8 @@ from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
 )
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -187,11 +189,8 @@ class GymVNeMoGymResponse(NeMoGymResponse):
     """Response shape extended with the server-issued Gym-V session id.
 
     ``seed_obs`` carries the post-rules-injection initial observation that
-    vLLM saw before the first model call. It is also prepended to
-    ``output`` so the flat message log preserves chronological order
-    (seed_obs → assistant_1 → step_obs_1 → …); the field is kept as a
-    convenience mirror for consumers (e.g. the inspector) that want the
-    initial observation without walking ``output``.
+    vLLM saw before the first model call. It is kept separate from ``output``
+    so consumers do not process the same initial media twice.
     """
 
     env_id: str
@@ -201,8 +200,8 @@ class GymVNeMoGymResponse(NeMoGymResponse):
         default=None,
         description=(
             "Post-rules-injection initial observation from /seed_session. "
-            "Also mirrored at the head of ``output``. None for legacy "
-            "responses or when return_transitions=True."
+            "Kept separate from ``output``. None for legacy responses or "
+            "when return_transitions=True."
         ),
     )
     agent_input: list[dict[str, Any]] | None = Field(
@@ -220,14 +219,11 @@ class GymVNeMoGymResponse(NeMoGymResponse):
     output: list[GymVNeMoGymResponseOutputItem] | list[list[GymVNeMoGymResponseOutputItem]]
 
 
-class GymVAgentVerifyRequest(BaseModel):
+class GymVAgentVerifyRequest(BaseVerifyRequest):
     model_config = ConfigDict(extra="forbid")
 
     response: GymVNeMoGymResponse
 
 
-class GymVAgentVerifyResponse(BaseModel):
+class GymVAgentVerifyResponse(GymVAgentVerifyRequest, BaseVerifyResponse):
     model_config = ConfigDict(extra="forbid")
-
-    response: GymVNeMoGymResponse
-    reward: float

@@ -261,7 +261,11 @@ class GymVResourcesServer(SimpleResourcesServer):
         reward = self.env_id_to_total_reward.pop(env_id, 0.0)
         if not known_env_id:
             logger.info("/verify drained unknown env_id=%s; returning 0.0", env_id)
-        return GymVAgentVerifyResponse(response=body.response, reward=reward)
+        return GymVAgentVerifyResponse(
+            responses_create_params=body.responses_create_params,
+            response=body.response,
+            reward=reward,
+        )
 
     @staticmethod
     def _description_for_agent_0(env: gym_v.Env) -> str:
