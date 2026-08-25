@@ -15,6 +15,7 @@
 import socket
 from unittest.mock import AsyncMock, MagicMock
 
+from aiohttp import ClientOSError
 from pytest import MonkeyPatch, raises
 
 import nemo_gym.global_config
@@ -375,3 +376,23 @@ class TestServerUtils:
             response = client.get("/session")
             assert response.json()["session_id"]
             assert 1 == len(response.headers.get_list("set-cookie"))
+
+    def _mock_global_client(self, monkeypatch: MonkeyPatch, connection_errors: int) -> MagicMock:
+        """Global-client stand-in whose request() raises ClientOSError `connection_errors` times, then succeeds."""
+        client = MagicMock()
+        client.request = AsyncMock(side_effect=[ClientOSError()] * connection_errors + [client.success_response])
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: client)
+        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
+        return client
+
+    async def test_request_bounded_connection_retries_surface_dead_endpoint(self, monkeypatch: MonkeyPatch) -> None:
+        client = self._mock_global_client(monkeypatch, connection_errors=10)
+        with raises(ClientOSError):
+            await nemo_gym.server_utils.request("POST", "http://dead-host:1/v1", _max_connection_retries=3)
+        assert client.request.await_count == 3
+
+    async def test_request_connection_retries_unbounded_by_default(self, monkeypatch: MonkeyPatch) -> None:
+        client = self._mock_global_client(monkeypatch, connection_errors=4)
+        response = await nemo_gym.server_utils.request("POST", "http://flaky-host:1/v1")
+        assert response is client.success_response
+        assert client.request.await_count == 5
