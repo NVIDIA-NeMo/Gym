@@ -1,0 +1,3 @@
+# NOOA's LiteLLM dependency over-constrains OpenAI, but this adapter never uses LiteLLM transport.
+# Keep NeMo Gym's SDK pin; all NOOA policy HTTP goes through GymResponsesLLM and aiohttp.
+openai<=2.7.2

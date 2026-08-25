@@ -1,2 +1,2 @@
 -e nemo-gym[dev] @ ../../
-nooa
+nooa==0.0.9
