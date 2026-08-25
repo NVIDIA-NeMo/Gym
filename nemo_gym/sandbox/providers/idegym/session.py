@@ -14,16 +14,18 @@
 
 """The registered IdeGYM client shared by every sandbox in a process.
 
-The only module that imports the ``idegym`` SDK, so the layers above it work in the
+The only module that imports the ``idegym`` SDK, so everything above works in the
 provider-owned types declared here and the tests have one seam to fake.
 
-*One registered client per process, not per sandbox,* reference-counted across
-providers: IdeGYM's client is a heartbeating owner of N server pods that carries the
-resource quota keyed on its name, and the orchestrator takes a table-level database
-lock per registration. *That client lives on a private event loop* in a daemon thread,
-because the SDK client is loop-bound (an httpx session plus a heartbeat task) while the
-sync ``Sandbox`` facade — the one the mini-swe-agent harness uses — gives every sandbox
-its own loop.
+*One client per process, not per sandbox.* An IdeGYM client is a heartbeating owner of
+N server pods; registering one takes a table-level lock on the orchestrator's database,
+and the resource quota is matched against its name. Sharing then forces the reference
+count: stopping a client also terminates every server it owns, so it may only be
+unregistered once the last provider has let go.
+
+*The client lives on a private event loop* in a daemon thread. It is loop-bound -- an
+httpx session plus a heartbeat task -- while the sync ``Sandbox`` facade gives every
+sandbox a loop of its own.
 """
 
 import asyncio
@@ -100,13 +102,15 @@ class IdeGymBashResult:
     exit_code: int
 
 
-def _resolve(future: "concurrent.futures.Future[Any]", exception: BaseException | None = None) -> None:
+def _resolve(
+    future: "concurrent.futures.Future[Any]", exception: BaseException | None = None, result: Any = None
+) -> None:
     """Complete ``future`` unless a racing cancellation already finished it."""
     try:
         if exception is not None:
             future.set_exception(exception)
         else:
-            future.set_result(None)
+            future.set_result(result)
     except concurrent.futures.InvalidStateError:
         pass
 
@@ -122,15 +126,9 @@ async def _settle(coro: Awaitable[T], future: "concurrent.futures.Future[T]") ->
     try:
         result = await coro
     except BaseException as e:  # noqa: BLE001 - the future is the only channel back to the caller
-        try:
-            future.set_exception(e)
-        except concurrent.futures.InvalidStateError:
-            pass
+        _resolve(future, e)
     else:
-        try:
-            future.set_result(result)
-        except concurrent.futures.InvalidStateError:
-            pass
+        _resolve(future, result=result)
 
 
 class _SessionLoop:
@@ -392,23 +390,24 @@ class IdeGymSession:
         )
         from idegym.api.resources import KubernetesResources
 
+        models = {"resources": KubernetesResources, "pod_overrides": KubernetesPodOverrides, "snapshot": SnapshotRef}
+        model_lists = {
+            "volumes": KubernetesVolume,
+            "volume_mounts": KubernetesVolumeMount,
+            "env_from": KubernetesEnvFromSource,
+        }
+        enums = {"reuse_strategy": ServerReuseStrategy, "server_kind": ServerKind}
+
         kwargs = dict(request)
-        if (resources := kwargs.get("resources")) is not None:
-            kwargs["resources"] = KubernetesResources.model_validate(resources)
-        if volumes := kwargs.get("volumes"):
-            kwargs["volumes"] = [KubernetesVolume.model_validate(volume) for volume in volumes]
-        if mounts := kwargs.get("volume_mounts"):
-            kwargs["volume_mounts"] = [KubernetesVolumeMount.model_validate(mount) for mount in mounts]
-        if env_from := kwargs.get("env_from"):
-            kwargs["env_from"] = [KubernetesEnvFromSource.model_validate(source) for source in env_from]
-        if (overrides := kwargs.get("pod_overrides")) is not None:
-            kwargs["pod_overrides"] = KubernetesPodOverrides.model_validate(overrides)
-        if (snapshot := kwargs.get("snapshot")) is not None:
-            kwargs["snapshot"] = SnapshotRef.model_validate(snapshot)
-        if (reuse := kwargs.get("reuse_strategy")) is not None:
-            kwargs["reuse_strategy"] = ServerReuseStrategy(reuse)
-        if (kind := kwargs.get("server_kind")) is not None:
-            kwargs["server_kind"] = ServerKind(kind)
+        for key, model in models.items():
+            if (value := kwargs.get(key)) is not None:
+                kwargs[key] = model.model_validate(value)
+        for key, model in model_lists.items():
+            if value := kwargs.get(key):
+                kwargs[key] = [model.model_validate(entry) for entry in value]
+        for key, enum in enums.items():
+            if (value := kwargs.get(key)) is not None:
+                kwargs[key] = enum(value)
         kwargs["namespace"] = self._connection.namespace
         # The SDK enforces the readiness budget itself, including its retries on
         # the orchestrator's 429 back-pressure, so it gets the whole budget.
@@ -491,9 +490,7 @@ class IdeGymSession:
 def _propagate_failure(source: "concurrent.futures.Future[Any]", target: "concurrent.futures.Future[None]") -> None:
     if target.done():
         return
-    exception: BaseException | None = None
-    if not source.cancelled():
-        exception = source.exception()
+    exception = None if source.cancelled() else source.exception()
     _resolve(target, exception or IdeGymError("The IdeGYM session ended before it became ready"))
 
 
