@@ -322,8 +322,8 @@ def _chat_messages_to_responses_input(messages: list[dict]) -> list[dict]:
 def _expected_action(message: dict) -> dict | None:
     tool_calls = message.get("tool_calls") or []
     if tool_calls:
-        # Refuse multi-call targets: expected_action is singular, so silently
-        # taking tool_calls[0] would drop the rest of the label.
+        # Refuse multi-call targets: this script predates `function_call_batch`, and silently
+        # taking tool_calls[0] would drop the rest of the label. A current converter emits a batch.
         if len(tool_calls) > 1:
             return None
         tool_call = tool_calls[0]
@@ -409,8 +409,8 @@ def _make_pivot_rows(row: dict, trajectory_id: int, agent_ref: dict, metrics: Co
         pivot_has_reasoning = bool(answer.get("reasoning_content"))
         previous_steps_in_turn_have_reasoning = previous_steps_in_turn_with_reasoning > 0
 
-        # Skip multi-call targets to keep the singular expected_action
-        # contract honest; surface the drop in the metrics summary.
+        # Skip multi-call targets, because this script predates `function_call_batch`;
+        # surface the drop in the metrics summary.
         answer_tool_calls = answer.get("tool_calls") or []
         if len(answer_tool_calls) > 1:
             metrics["skipped_multi_tool_targets"] += 1

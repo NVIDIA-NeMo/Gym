@@ -132,8 +132,8 @@ def chat_completion_create_params_to_responses_create_params(chat_completions_cr
 
 def chat_completion_message_to_expected_action(chat_completion_message):
     """Returns None to drop the sample when arguments are malformed JSON or
-    when the assistant target has multiple tool calls (the singular
-    `expected_action` contract cannot represent parallel tool calls)."""
+    when the assistant target has multiple tool calls (this script predates
+    `function_call_batch`, which is how a current converter labels them)."""
     tool_calls = chat_completion_message.get("tool_calls") or []
     if tool_calls:
         # Singular expected_action cannot encode parallel calls.
@@ -264,8 +264,8 @@ def extract_and_filter(args_tuple):
             skips["chat"] += 1
             continue
 
-        # Skip multi-call targets so the singular expected_action row
-        # contract is not silently violated by taking tool_calls[0].
+        # Skip multi-call targets: this script predates `function_call_batch`, so taking
+        # tool_calls[0] would silently drop the rest of the label.
         tc_list = msg.get("tool_calls") or []
         if len(tc_list) > 1:
             skips["multi_tool"] += 1

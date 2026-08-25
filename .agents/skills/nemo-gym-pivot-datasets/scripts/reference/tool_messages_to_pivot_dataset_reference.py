@@ -22,8 +22,9 @@ The output format targets the
 ``single_step_tool_use_with_argument_comparison`` Nemo Gym environment. Each
 assistant tool turn becomes one row: the prefix becomes
 ``responses_create_params.input`` and the assistant tool action becomes
-``expected_action``. Multi-tool assistant turns are skipped for compatibility
-with the singular `expected_action` row contract.
+``expected_action``. Multi-tool assistant turns are skipped: this script predates
+``function_call_batch``. A current converter labels such a turn as a single
+``function_call_batch`` row instead -- see ``references/row-contract.md``.
 """
 
 from __future__ import annotations
@@ -43,7 +44,7 @@ PROJECT_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_IN_PATH = PROJECT_DIR / "data" / "messages.jsonl"
 DEFAULT_OUT_PATH = PROJECT_DIR / "data" / "pivot_datasets" / "messages_pivot.jsonl"
 DEFAULT_AGENT_REF = "tool_use_single_step_tool_use_with_argument_comparison_agent"
-DEFAULT_GYM_REPO = Path("/lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/Gym-github")
+DEFAULT_GYM_REPO = Path("../Gym")
 
 
 def _content_to_text(content: Any) -> str:
@@ -199,7 +200,7 @@ def _chat_messages_to_responses_input(messages: list[dict[str, Any]]) -> list[di
     return responses_input
 
 
-def _expected_action(message: dict[str, Any], allow_parallel: bool = False) -> dict[str, Any] | None:
+def _expected_action(message: dict[str, Any]) -> dict[str, Any] | None:
     tool_calls = _message_tool_calls(message)
     if not tool_calls:
         return None
@@ -301,11 +302,10 @@ def _make_pivot_row(
     trajectory_id: int,
     message_index: int,
     agent_ref: dict[str, str],
-    allow_parallel: bool = False,
 ) -> dict[str, Any] | None:
     messages = source_row["messages"]
     target_message = messages[message_index]
-    expected_action = _expected_action(target_message, allow_parallel=allow_parallel)
+    expected_action = _expected_action(target_message)
     if expected_action is None:
         return None
 
@@ -458,7 +458,6 @@ def _write_metrics(
         "input": str(args.in_path),
         "output": str(args.out_path),
         "agent_ref": args.agent_ref,
-        "dataset_mode": args.dataset_mode,
         "elapsed_seconds": elapsed,
         "counts": {str(key): value for key, value in metrics.items() if not isinstance(key, tuple)},
         "action_type_distribution": action_type_distribution,
@@ -476,7 +475,6 @@ def _write_metrics(
         ["skipped_multi_tool_output", args.skipped_multi_tool_path],
         ["config_output", args.config_out_path],
         ["agent_ref", args.agent_ref],
-        ["dataset_mode", args.dataset_mode],
         ["source_trajectories_seen", metrics["source_trajectories_seen"]],
         ["assistant_turn_candidates", total_candidates],
         ["pivot_rows_written", metrics["pivot_rows_written"]],
@@ -628,7 +626,7 @@ def convert(args: argparse.Namespace) -> Counter:
                     continue
 
                 tool_calls = _message_tool_calls(message)
-                if args.dataset_mode == "single_only" and len(tool_calls) > 1:
+                if len(tool_calls) > 1:
                     skipped_f.write(json.dumps(_make_skip_record(source_row, trajectory_id, message_index)) + "\n")
                     metrics["skipped_multi_tool_targets"] += 1
                     metrics["skipped_multi_tool_count", len(tool_calls)] += 1
@@ -642,7 +640,6 @@ def convert(args: argparse.Namespace) -> Counter:
                     trajectory_id,
                     message_index,
                     agent_ref,
-                    allow_parallel=False,
                 )
                 if pivot_row is None:
                     metrics["malformed_expected_actions"] += 1
@@ -678,12 +675,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--in-path", type=Path, default=DEFAULT_IN_PATH)
     parser.add_argument("--out-path", type=Path, default=DEFAULT_OUT_PATH)
     parser.add_argument("--agent-ref", default=DEFAULT_AGENT_REF)
-    parser.add_argument(
-        "--dataset-mode",
-        choices=["single_only"],
-        default="single_only",
-        help="Which assistant tool turns to export",
-    )
     parser.add_argument("--config-out-path", type=Path)
     parser.add_argument("--metrics-path", type=Path)
     parser.add_argument("--info-path", type=Path)

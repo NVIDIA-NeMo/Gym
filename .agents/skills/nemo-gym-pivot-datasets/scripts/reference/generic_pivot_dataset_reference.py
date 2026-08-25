@@ -17,6 +17,11 @@
 This is a copied example from a concrete data pipeline. It may contain
 dataset-specific imports, assumptions, and config defaults, and should be
 adapted before reuse.
+
+It delegates expected-action construction to an external helper that predates
+``function_call_batch``, so parallel tool-call turns are not represented. A
+current converter labels such a turn as a single ``function_call_batch`` row --
+see ``references/row-contract.md``.
 """
 
 import argparse
