@@ -43,6 +43,17 @@ local_edgar_metrics_dir: /path/to/search_metrics
 
 # Optional. Defaults to the index path plus '.metadata' when that file exists.
 local_edgar_metadata_path: /path/to/sap500_sec_fts.sqlite.metadata
+
+# Filing content. Reads try cache_dir, then sec_dump_path, then SEC.gov.
+# use_cache defaults to false, which fetches fresh every time; set it true for
+# training so filings are fetched once and reused.
+cache_dir: /path/to/shared/cache/finance_sec_search
+use_cache: true
+sec_dump_path: /path/to/step-0-download/data
+
+# Latest filing date the date-filtered tools will return. Set this to the cutoff
+# the dataset's prompts were written against.
+max_end_date: "2025-04-07"
 ```
 
 The config uses `${oc.select:tavily_api_key,null}`, so `web_search` is disabled
