@@ -444,6 +444,7 @@ class TestApp:
             },
             "response": full_tool_call_response,
             "reward": 1,
+            "failure_reason": None,
         }
         assert valid_verify_response.json() == expected_valid_verify_response_json
         assert server_client_post_mock.call_args_list == expected_invalid_verify_response_calls
