@@ -222,7 +222,6 @@ def test_config_and_example_data_contract() -> None:
         "policy",
         "tools",
         "responses_create_params",
-        "agent_ref",
     }
     assert example["profile"] == "general"
     parsed_request = ScenarioGenerationRunRequest.model_validate(example)

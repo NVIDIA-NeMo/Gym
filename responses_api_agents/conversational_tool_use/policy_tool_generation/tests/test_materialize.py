@@ -89,10 +89,7 @@ def test_materializer_keeps_accepted_order_and_next_agent_fields(tmp_path: Path)
     assert [row["policy"] for row in written] == [first_policy, second_policy]
     assert [row["domain_name"] for row in written] == ["Order_Support", "Billing_Support"]
     assert written[0]["tools"] == [{"name": "a", "doc": "A", "params": None, "returns": None}]
-    assert written[0]["agent_ref"] == {
-        "type": "responses_api_agents",
-        "name": "conversational_tool_use_scenario_generation",
-    }
+    assert "agent_ref" not in written[0]  # routing is a run-time lookup (dataset-decoupling)
     assert written[0]["id"] == "first_ng_t4_r2_a1"
     assert written[0]["profile"] == "general"
     assert written[0]["source_artifacts"] == {
@@ -105,7 +102,6 @@ def test_materializer_keeps_accepted_order_and_next_agent_fields(tmp_path: Path)
         }
     }
     assert set(written[0]) == {
-        "agent_ref",
         "id",
         "responses_create_params",
         "profile",

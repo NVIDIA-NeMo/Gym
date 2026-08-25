@@ -51,10 +51,6 @@ OUTPUT_FPATH = DATA_DIR / "iheval_benchmark.jsonl"
 _SRC_PREPARE = GYM_ROOT / "resources_servers" / "iheval" / "prepare_iheval.py"
 _SRC_TEST = GYM_ROOT / "resources_servers" / "iheval" / "data" / "test.jsonl"
 
-# Agent that runs this benchmark (see config.yaml). Rows are tagged with it so
-# they align with the agent selected at eval time.
-_BENCHMARK_AGENT = "iheval_benchmark_simple_agent"
-
 
 def _chat_tools_to_responses(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Chat ``[{type,function:{name,description,parameters}}]`` -> Responses
@@ -120,8 +116,6 @@ def convert_row(row: Dict[str, Any]) -> Dict[str, Any]:
 
     converted = dict(row)
     converted["responses_create_params"] = new_rcp
-    if "agent_ref" in converted:
-        converted["agent_ref"] = {"type": "responses_api_agents", "name": _BENCHMARK_AGENT}
     # Upstream IHEval uses int ``id`` for some tasks and str for others. Gym's
     # dataset metric aggregator (train_data_utils.aggregate_other_metrics) keys a
     # single accumulator per top-level field and cannot mix numeric (AvgMinMax)

@@ -94,10 +94,6 @@ def convert_record(record: dict) -> dict:
         "responses_create_params": {"input": input_msgs},
         "schema_str": json_schema_str,
         "schema_type": fmt,
-        "agent_ref": {
-            "type": "responses_api_agents",
-            "name": "structured_outputs_v3_simple_agent",
-        },
     }
 
 

@@ -22,7 +22,6 @@ from pathlib import Path
 import pytest
 
 from responses_api_agents.conversational_tool_use.domain_generation.materialize import (
-    POLICY_TOOL_AGENT_REF,
     main,
     materialize_policy_tool_rows,
     read_jsonl,
@@ -54,7 +53,7 @@ def test_materializer_preserves_objects_and_uses_casefold_only_first_wins(tmp_pa
     assert [row["domain"] for row in rows] == [original[0], original[2], original[3], original[4]]
     assert all(row["responses_create_params"] == {"input": []} for row in rows)
     assert all(row["profile"] == "general" for row in rows)
-    assert all(row["agent_ref"] == POLICY_TOOL_AGENT_REF for row in rows)
+    assert all("agent_ref" not in row for row in rows)  # routing is a run-time lookup (dataset-decoupling)
     assert [row["source_artifacts"]["domain_generation"]["candidate_index"] for row in rows] == [0, 0, 1, 2]
     assert all(PolicyToolGenerationRunRequest.model_validate(row) for row in rows)
 

@@ -11,7 +11,6 @@ from pathlib import Path
 import reasoning_gym
 
 
-AGENT_NAME = "openclaw_reasoning_gym_agent"
 ANSWER_FORMAT_INSTRUCTION = (
     "Put only your final answer inside <answer></answer> tags or \\boxed{...}. "
     "Do not mention either delimiter elsewhere in your response."
@@ -29,7 +28,6 @@ def format_entry_to_nemo_gym(entry: dict) -> dict:
             ]
         },
         **entry,
-        "agent_ref": {"type": "responses_api_agents", "name": AGENT_NAME},
     }
 
 

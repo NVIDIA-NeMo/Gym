@@ -36,7 +36,6 @@ from responses_api_agents.conversational_tool_use.simulation.prompt import (
 )
 
 
-AGENT_NAME = "conversational_tool_use_agent"
 SCENARIO_FIELDS = (
     "customer_persona",
     "reason_for_contact",
@@ -174,10 +173,6 @@ def _materialized_rows(
             "customer_scenario": scenario,
             "source_artifacts": source_artifacts,
             "responses_create_params": responses_create_params,
-            "agent_ref": {
-                "type": "responses_api_agents",
-                "name": AGENT_NAME,
-            },
         }
         yield row
 

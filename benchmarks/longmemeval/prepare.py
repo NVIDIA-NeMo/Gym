@@ -16,7 +16,7 @@
 
 LongMemEval rows are already in Responses API shape (single user message
 carrying the rendered session history + question). This script only needs to
-tag each row with the benchmark ``agent_ref`` and write the benchmark JSONL.
+copy the rows into the benchmark JSONL.
 
 If ``resources_servers/longmemeval/data/oracle.jsonl`` does not exist it is
 built first by invoking ``prepare_longmemeval.py`` with default arguments
@@ -37,10 +37,6 @@ OUTPUT_FPATH = DATA_DIR / "longmemeval_benchmark.jsonl"
 # Whole-dataset source built by the resources server's own prepare script.
 _SRC_PREPARE = GYM_ROOT / "resources_servers" / "longmemeval" / "prepare_longmemeval.py"
 _SRC_ORACLE = GYM_ROOT / "resources_servers" / "longmemeval" / "data" / "oracle.jsonl"
-
-# Agent that runs this benchmark (see config.yaml). Rows are tagged with it so
-# they align with the agent selected at eval time.
-_BENCHMARK_AGENT = "longmemeval_benchmark_simple_agent"
 
 
 def _ensure_source() -> None:
@@ -63,7 +59,7 @@ def _ensure_source() -> None:
 
 
 def prepare() -> Path:
-    """Build the gym-native LongMemEval benchmark JSONL (oracle split, tagged)."""
+    """Build the gym-native LongMemEval benchmark JSONL (oracle split)."""
     _ensure_source()
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -73,7 +69,6 @@ def prepare() -> Path:
             if not line.strip():
                 continue
             row = json.loads(line)
-            row["agent_ref"] = {"type": "responses_api_agents", "name": _BENCHMARK_AGENT}
             fout.write(json.dumps(row, ensure_ascii=False) + "\n")
             n += 1
 

@@ -16,7 +16,6 @@ def format_entry(entry: dict) -> dict:
     return {
         "responses_create_params": {"input": [{"role": "user", "content": f"{entry['question']}\n\n{ANSWER_FORMAT}"}]},
         **entry,
-        "agent_ref": {"type": "responses_api_agents", "name": "simple_strands_reasoning_gym_agent"},
     }
 
 

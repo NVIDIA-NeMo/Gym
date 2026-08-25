@@ -5,14 +5,9 @@
 
 The output JSONL has the structure expected by NeMo Gym / nemo-rl:
     {
-        "agent_ref": {"name": "<agent>"},
         "responses_create_params": {"input": [{"role": "user", "content": "<prompt>"}]},
         "problem": "<raw problem text>"
     }
-
-agent_ref is required by both Gym's rollout_collection (for routing to the correct agent)
-and nemo-rl's rollouts.py (for per-agent metrics). The name must match the top-level
-YAML key of the agent config in proof_judge.yaml.
 
 Usage:
     python prepare_data.py \
@@ -43,14 +38,10 @@ def _load_prompt_template(filename: str) -> str:
 PROVER_PROMPT_TEMPLATE = _load_prompt_template("prover.yaml")
 
 
-DEFAULT_AGENT_NAME = "proof_simple_agent"
-
-
 def convert_proof_jsonl(
     input_path: str,
     output_path: str,
     problem_field: str = "problem",
-    agent_name: str = DEFAULT_AGENT_NAME,
 ) -> int:
     """Convert raw proof JSONL to Gym-compatible format.
 
@@ -66,7 +57,6 @@ def convert_proof_jsonl(
             problem = row[problem_field]
             user_content = PROVER_PROMPT_TEMPLATE.format(problem=problem)
             gym_example = {
-                "agent_ref": {"name": agent_name},
                 "responses_create_params": {
                     "input": [{"role": "user", "content": user_content}],
                 },
@@ -86,17 +76,10 @@ def main():
         default="problem",
         help="JSON field name containing the problem text (default: 'problem')",
     )
-    parser.add_argument(
-        "--agent-name",
-        default=DEFAULT_AGENT_NAME,
-        help=f"Agent name for agent_ref routing (default: '{DEFAULT_AGENT_NAME}'). "
-        "Must match the top-level YAML key in proof_judge.yaml.",
-    )
     args = parser.parse_args()
 
-    count = convert_proof_jsonl(args.input, args.output, args.problem_field, args.agent_name)
+    count = convert_proof_jsonl(args.input, args.output, args.problem_field)
     print(f"Converted {count} examples: {args.input} -> {args.output}")
-    print(f"Agent ref: {args.agent_name}")
 
 
 if __name__ == "__main__":

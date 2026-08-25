@@ -112,7 +112,6 @@ _GITHUB_ZIP = "https://github.com/ytyz1307zzh/IHEval/archive/refs/heads/main.zip
 _ZIP_TOP_DIR = "IHEval-main"
 
 _DATA_DIR = Path(__file__).resolve().parent / "data"
-_AGENT = "iheval_simple_agent"
 
 # (domain, task) pairs. ``task`` doubles as the verifier's scorer key.
 # ``multi-turn`` rule-following is included: its ``conversation_history`` is
@@ -309,7 +308,6 @@ def _to_task(row: Dict[str, Any], domain: str, task: str) -> Dict[str, Any]:
         "setting": row.get("_setting", ""),
         "instruction": str(row.get("instruction", "")),
         "answer": json.dumps(row.get("answer"), ensure_ascii=False),
-        "agent_ref": {"type": "responses_api_agents", "name": _AGENT},
     }
 
 
