@@ -1840,6 +1840,25 @@ class TestConfigLoadErrors:
         config = DictConfig({"my_server": {"resources_servers": {"x": {"entrypoint": "app.py", "domain": "other"}}}})
         parser.raise_on_no_server_instances(config)
 
+    def test_all_repo_configs_load_without_duplicate_keys(self) -> None:
+        # OmegaConf.load (the loader `gym env start` actually uses) rejects duplicate YAML keys,
+        # but a plain PyYAML parse silently allows them (last-writer-wins). A repeated key like a
+        # second `datasets:` block can land unnoticed and only surface at runtime. Sweep every real
+        # config in the repo so this fails fast in CI instead.
+        repo_root = Path(__file__).resolve().parents[2]
+        config_dirs = ("responses_api_agents", "resources_servers", "nemo_gym/sandbox/providers")
+        config_paths = [p for d in config_dirs for p in (repo_root / d).rglob("*.yaml")]
+        assert config_paths, "no config files discovered -- sweep dirs may have moved"
+
+        failures = []
+        for path in config_paths:
+            try:
+                OmegaConf.load(path)
+            except Exception as e:
+                failures.append(f"{path.relative_to(repo_root)}: {e}")
+
+        assert not failures, "malformed config(s) found:\n" + "\n".join(failures)
+
 
 class TestOpenAIVersionMatchesNemoGymConstraint:
     @mark.parametrize(

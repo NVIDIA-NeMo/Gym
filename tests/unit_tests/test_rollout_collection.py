@@ -903,6 +903,34 @@ class TestRolloutCollection:
         ]
         assert expected_aggregate_metrics == actual_aggregate_metrics
 
+    async def test_run_from_config_clears_failure_sidecar_on_fresh_run(
+        self, tmp_path: Path, empty_global_config: MagicMock
+    ) -> None:
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my agent"}}) + "\n"
+        )
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+        failures_fpath = _failures_path_for(output_jsonl_fpath)
+        failures_fpath.write_text(json.dumps({"_ng_failure_class": "stale_failure"}) + "\n")
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            resume_from_cache=False,
+            disable_aggregation=True,
+        )
+
+        class Helper(RolloutCollectionHelper):
+            def run_examples(self, examples, *args, **kwargs):
+                future = Future()
+                future.set_result((examples[0], {"reward": 1.0}))
+                return [future]
+
+        await Helper().run_from_config(config)
+
+        assert failures_fpath.read_bytes() == b""
+
     @pytest.mark.parametrize("resume_from_cache", [False, True])
     async def test_run_from_config_creates_missing_output_dir(
         self, tmp_path: Path, empty_global_config: MagicMock, resume_from_cache: bool
