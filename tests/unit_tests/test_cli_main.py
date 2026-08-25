@@ -258,6 +258,45 @@ class TestEvalRunFlags:
         assert "+responses_create_params.tool_choice=auto" in overrides  # unknown +override passes through
 
 
+class TestEvalExportFlags:
+    def test_flags_map_to_atif_export_config(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            [
+                "eval",
+                "export",
+                "--format",
+                "atif",
+                "--rollouts",
+                "rollouts.jsonl",
+                "--output-dir",
+                "atif",
+                "--session-id",
+                "evaluation-42",
+                "--agent-version",
+                "2.3.1",
+            ],
+        )
+
+        assert target == "nemo_gym.cli.eval:export_rollouts_as_atif"
+        assert set(overrides) == {
+            "+format=atif",
+            "+rollouts_jsonl_fpath=rollouts.jsonl",
+            "+output_dirpath=atif",
+            '+session_id="evaluation-42"',
+            '+agent_version="2.3.1"',
+        }
+
+    def test_scalar_like_identity_values_remain_strings(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(
+            monkeypatch,
+            ["eval", "export", "--session-id", "123", "--agent-version", "1.0"],
+        )
+
+        assert '+session_id="123"' in overrides
+        assert '+agent_version="1.0"' in overrides
+
+
 class TestEnvTestResourceServerFlag:
     def test_no_resource_server_runs_all(self, monkeypatch: MonkeyPatch) -> None:
         target, overrides = _dispatch_for(monkeypatch, ["env", "test"])

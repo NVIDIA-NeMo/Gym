@@ -19,6 +19,34 @@ Captured request and response payloads are included in `ng_trajectory`. LabBench
 `prompt_tokens`, `completion_tokens`, `reasoning_tokens`, `total_tokens`, and `cached_tokens`. The fields are nullable, and
 provider-reported details are preserved when available.
 
+## ATIF export
+
+`gym eval export --format atif` converts the supported `ng_trajectory` version `1.0` subset into ATIF v1.7 without loading
+NeMo Relay. The initial converter accepts a completed root invocation with one initial system/user input phase, exact
+one-model-call-per-turn evidence, text-only output, and unambiguous function-call and function-result relationships. It
+rejects later user/system turns and source records when their status, evidence gaps, content type, invocation structure, or
+tool correlation would require dropping or guessing information. This strict boundary means an accepted
+conversion is complete for the supported source profile; it does not claim that the original agent harness observed every
+action outside Gym.
+
+The semantic profile maps ordered messages, reasoning, function calls and results, turn identity and resolution, tool timing,
+model identity, and token counts. Exact captured provider request and response copies are retained under step-level
+`extra.nemo_gym.model_call` metadata because ATIF's standard step fields do not carry those provider-specific payloads.
+
+The ATIF `agent.name` comes from each rollout row's `agent_ref.name`. The initial batch exporter accepts one agent identity
+per input file because the caller supplies one corresponding agent implementation version. Conversion provenance is kept under the ATIF root's
+`extra.nemo_gym` namespace rather than overloading the agent identity fields:
+
+| Metadata | Value | Purpose |
+| --- | --- | --- |
+| Exporter | NeMo Gym and its package version | Identifies the implementation that created the ATIF file. |
+| Source | Gym rollout and `ng_trajectory` schema version | Records the format that was converted. |
+| Conversion status | `complete` | Confirms that the supported semantic trajectory profile was mapped without omission. |
+| Conversion warnings | Not emitted by strict v1 | Reserved for a future best-effort mode that can describe information it could not represent. |
+
+The initial strict converter does not emit partial files or conversion warnings. Unsupported or lossy inputs fail validation.
+A future best-effort mode would need an explicit `partial` status and structured warnings rather than reusing `complete`.
+
 ## Acceptance criteria
 
 | ID | Criterion |

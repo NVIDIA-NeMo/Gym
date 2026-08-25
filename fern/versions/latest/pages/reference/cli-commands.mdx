@@ -49,6 +49,7 @@ gym env status                # show running servers
 gym eval prepare              # prepare benchmark data and dump it to disk
 gym eval run                  # collate data, start servers, and collect rollouts
 gym eval aggregate            # merge sharded rollout results
+gym eval export               # export supported Gym trajectories as ATIF
 gym eval profile              # compute a reward profile from rollouts
 gym eval reverify             # recompute rewards from existing rollouts without re-running inference
 
@@ -703,6 +704,35 @@ gym eval aggregate \
     --input-glob 'results/rollouts-rs*-chunk*.jsonl' \
     --output results/rollouts.jsonl
 ```
+
+### `gym eval export`
+
+Export supported `ng_trajectory` attachments from a Gym rollouts JSONL file as ATIF v1.7. The command writes one ATIF
+trajectory per rollout plus a manifest that preserves Gym's task and rollout identity. It is a strict offline conversion:
+if Gym cannot represent a source trajectory completely in the supported ATIF subset, the export fails instead of silently
+omitting data. The destination directory must not already exist.
+
+This command does not parse ATOF and does not load NeMo Relay. Each ATIF trajectory takes its agent name from the source
+row's `agent_ref.name`; `--agent-version` records the version of that agent implementation.
+
+| Option | Description |
+| --- | --- |
+| `--format atif` | Output format. ATIF is the only format supported initially. |
+| `--rollouts PATH` | Gym rollouts JSONL containing `ng_trajectory` version `1.0` attachments. |
+| `--output-dir DIR` | New directory for the ATIF files and manifest. |
+| `--session-id ID` | Stable identifier for the source evaluation run. |
+| `--agent-version VERSION` | Version of the agent implementation that produced the rollouts. |
+
+```bash
+gym eval export \
+    --format atif \
+    --rollouts results/rollouts.jsonl \
+    --output-dir results/atif \
+    --session-id eval-2026-08-25 \
+    --agent-version 1.2.3
+```
+
+See the [trajectory capability matrix](/reference/trajectory-capabilities#atif-export) for the initial conversion boundary.
 
 ### `gym eval profile`
 
