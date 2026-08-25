@@ -72,10 +72,6 @@ def build_record(row: dict, idx: int) -> dict:
         "id": record_id,
         "question": question,
         "answer": answer,
-        "agent_ref": {
-            "type": "responses_api_agents",
-            "name": "abstention_simple_agent",
-        },
         "responses_create_params": {
             "input": [
                 {"role": "system", "content": SYSTEM_PROMPT},

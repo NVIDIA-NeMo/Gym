@@ -158,7 +158,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--agent-name",
         default=DEFAULT_AGENT_NAME,
-        help=f"agent_ref.name written into rollout input rows (default: {DEFAULT_AGENT_NAME}).",
+        help=f"agent name recorded in the materialization manifest (default: {DEFAULT_AGENT_NAME}).",
     )
     parser.add_argument(
         "--environment-type",

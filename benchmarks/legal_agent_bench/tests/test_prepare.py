@@ -28,10 +28,6 @@ def _write_task_index(parent: Path, count: int) -> tuple[Path, list[str]]:
     for task_name in task_names:
         rows.append(
             {
-                "agent_ref": {
-                    "name": "legal_agent_bench_harbor_agent",
-                    "type": "responses_api_agents",
-                },
                 "instance_id": f"legal_agent_bench::{task_name}",
                 "responses_create_params": {
                     "input": [],
@@ -73,14 +69,7 @@ def test_prepare_writes_deterministic_complete_benchmark_index(monkeypatch, tmp_
     rows = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
     assert len(rows) == EXPECTED_TASK_COUNT
     assert [row["instance_id"].split("::", 1)[1] for row in rows] == task_names
-    assert all(
-        row["agent_ref"]
-        == {
-            "name": benchmark_prepare.BENCHMARK_AGENT_NAME,
-            "type": "responses_api_agents",
-        }
-        for row in rows
-    )
+    assert all("agent_ref" not in row for row in rows)  # routing is a run-time lookup (dataset-decoupling)
 
 
 def test_wrong_row_count_does_not_replace_existing_output(monkeypatch, tmp_path) -> None:
@@ -148,5 +137,8 @@ def test_benchmark_config_is_isolated_and_resolves_shared_cache_paths() -> None:
     assert agent.harbor_datasets.legal_agent_bench.local_dataset_path == resource.harbor_tasks_dir
     assert agent.harbor_agent_kwargs.skills_dir == resource.harness_skills_dir
     assert agent.harbor_agent_kwargs.max_turns == 60
-    assert len(agent.datasets) == 1
-    assert agent.datasets[0].type == "benchmark"
+    # The benchmark dataset is declared on the resources server (dataset-decoupling); the
+    # harness is bound via the dataset's `agent:` pin rather than by declaring the dataset.
+    assert len(resource.datasets) == 1
+    assert resource.datasets[0].type == "benchmark"
+    assert resource.datasets[0].agent == "legal_agent_bench_benchmark_harbor_agent"

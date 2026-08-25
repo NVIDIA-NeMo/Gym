@@ -927,10 +927,6 @@ def make_gym_record(
         "instruction_detail_level": instruction_detail_level,
         "system_instruction_style": system_instruction_style,
         "source_record_id": record.get("_record_id", "unknown"),
-        "agent_ref": {
-            "type": "responses_api_agents",
-            "name": "structured_outputs_v4_simple_agent",
-        },
     }
 
 

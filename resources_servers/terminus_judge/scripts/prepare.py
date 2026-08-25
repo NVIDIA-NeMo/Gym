@@ -56,11 +56,6 @@ SCHEMA_MAP = {
     "terminus_2": TERMINUS_2_SCHEMA,
 }
 
-AGENT_REF = {
-    "type": "responses_api_agents",
-    "name": "terminus_judge_simple_agent",
-}
-
 BUCKETS = [
     "0-200",
     "200-500",
@@ -394,7 +389,6 @@ def run_convert(args: argparse.Namespace) -> Path:
                 },
                 "expected_answer": stripped,
                 "metadata": metadata,
-                "agent_ref": copy.deepcopy(AGENT_REF),
             }
             if args.threshold is not None:
                 sample["threshold"] = args.threshold

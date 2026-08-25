@@ -94,7 +94,6 @@ def format_row(row: dict, boxed_letter_format: bool = False) -> dict:
             "id": row.get("id"),
             **extra_meta,
         },
-        "agent_ref": {"type": "responses_api_agents", "name": "ether0_simple_agent"},
     }
 
 

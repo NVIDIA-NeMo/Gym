@@ -51,7 +51,6 @@ from app import BOTH_LABEL, NONE_LABEL, PROMPT, _label_key
 
 _HF_DATASET = "mteb/SpartQA"
 _DEFAULT_SPLIT = "test"
-_AGENT = {"type": "responses_api_agents", "name": "spartqa_simple_agent"}
 
 
 def _load_split(config: str, split: str):
@@ -157,7 +156,6 @@ def _to_task(record: dict[str, Any]) -> dict[str, Any]:
             "target": record["target"],
             "options": record["options"],
         },
-        "agent_ref": _AGENT,
     }
 
 

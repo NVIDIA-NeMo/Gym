@@ -186,7 +186,6 @@ def format_entry_to_nemo_gym(entry: dict) -> dict:
             ],
         },
         **entry,
-        "agent_ref": {"type": "responses_api_agents", "name": "hermes_reasoning_gym_agent"},
     }
 
 

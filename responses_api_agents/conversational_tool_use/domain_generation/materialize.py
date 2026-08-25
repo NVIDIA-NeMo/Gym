@@ -33,10 +33,6 @@ from nemo_gym.global_config import (
 )
 
 
-POLICY_TOOL_AGENT_REF = {
-    "type": "responses_api_agents",
-    "name": "conversational_tool_use_policy_tool_generation",
-}
 GenerationProfile = Literal["general", "proactive"]
 GYM_IDENTITY_KEYS = (
     "id",
@@ -140,7 +136,6 @@ def materialize_policy_tool_rows(
                         rollout,
                         candidate_index=candidate_index,
                     ),
-                    "agent_ref": POLICY_TOOL_AGENT_REF.copy(),
                 }
             )
 
