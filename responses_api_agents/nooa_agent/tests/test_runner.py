@@ -43,10 +43,16 @@ class FakeAgent:
         self.llm = llm
         self.label = label
         self.gym_tools: Any = None
+        self.event_manager = FakeEventManager()
 
     async def analyze(self, text: str, customer_id: str) -> str:
         weather = await self.gym_tools.get_weather(city=customer_id)
         return f"{text}: {weather['weather']}"
+
+
+class FakeEventManager:
+    def on(self, event_type: str, handler: Any) -> Any:
+        return lambda: None
 
 
 class Row(BaseModel):

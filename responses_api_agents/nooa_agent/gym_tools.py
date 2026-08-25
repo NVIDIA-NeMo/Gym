@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import inspect
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from time import perf_counter, time
 from types import MethodType
@@ -27,6 +28,7 @@ from jsonschema import Draft202012Validator, ValidationError
 from pydantic import BaseModel
 
 from nemo_gym.server_utils import ServerClient
+from responses_api_agents.nooa_agent.observability import TraceEvent
 
 
 @dataclass(slots=True)
@@ -39,6 +41,7 @@ class GymToolExecution:
     started_at: float
     completed_at: float
     duration_ms: float
+    invocation_id: str = "root"
     error_type: str | None = None
 
 
@@ -74,11 +77,15 @@ class GymTools:
         tools: list[Any],
         cookies: dict[str, str],
         observations: list[GymToolExecution],
+        timeline: list[TraceEvent] | None = None,
+        invocation_id: Callable[[], str] | None = None,
     ) -> None:
         self._server_client = server_client
         self._resources_server_name = resources_server_name
         self._cookies = cookies
         self._observations = observations
+        self._timeline = timeline
+        self._invocation_id = invocation_id or (lambda: "root")
         self._install(tools)
 
     def _install(self, tools: list[Any]) -> None:
@@ -139,19 +146,23 @@ class GymTools:
                     error_type = f"http_{response.status}"
 
             completed_at = max(started_at, time())
-            namespace._observations.append(
-                GymToolExecution(
-                    tool_call_id=call_id,
-                    name=name,
-                    arguments=kwargs,
-                    output=output,
-                    status=status,
-                    started_at=started_at,
-                    completed_at=completed_at,
-                    duration_ms=(perf_counter() - started_monotonic) * 1000,
-                    error_type=error_type,
-                )
+            execution = GymToolExecution(
+                tool_call_id=call_id,
+                name=name,
+                arguments=kwargs,
+                output=output,
+                status=status,
+                started_at=started_at,
+                completed_at=completed_at,
+                duration_ms=(perf_counter() - started_monotonic) * 1000,
+                invocation_id=namespace._invocation_id(),
+                error_type=error_type,
             )
+            namespace._observations.append(execution)
+            if namespace._timeline is not None:
+                namespace._timeline.append(
+                    TraceEvent(kind="tool", value=execution, invocation_id=execution.invocation_id)
+                )
             return output
 
         invoke.__name__ = name
