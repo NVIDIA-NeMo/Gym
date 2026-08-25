@@ -1949,9 +1949,18 @@ class TestComposeUnboundAgent:
         config.update(extra)
         return DictConfig(config)
 
+    def _composed_name(self, original: str) -> str:
+        """The name an instance takes once rehosted: its environment prefix plus the new agent type."""
+        stem = original.removesuffix("_simple_agent").removesuffix("simple_agent").rstrip("_")
+        if stem == original:
+            stem = original.removesuffix("_agent").rstrip("_")
+        return f"{stem}_hermes_agent" if stem else "hermes_agent"
+
     def _composed_block(self, config: DictConfig, instance: str) -> DictConfig:
-        agents = config[instance]["responses_api_agents"]
-        assert list(agents) == ["hermes_agent"], f"{instance} was not rehosted on the harness"
+        renamed = self._composed_name(instance)
+        assert instance == renamed or instance not in config, f"{instance} was not renamed after rehosting"
+        agents = config[renamed]["responses_api_agents"]
+        assert list(agents) == ["hermes_agent"], f"{renamed} was not rehosted on the harness"
         return agents["hermes_agent"]
 
     def _guarded_config(self, *required_agents: str) -> DictConfig:
@@ -2004,14 +2013,14 @@ class TestComposeUnboundAgent:
 
         GlobalConfigDictParser().compose_unbound_agent(config)
 
-        assert list(config["gpqa_mcqa_simple_agent"]["responses_api_agents"]) == ["hermes_agent"]
+        assert list(config[self._composed_name("gpqa_mcqa_simple_agent")]["responses_api_agents"]) == ["hermes_agent"]
 
     def test_swap_allowed_when_the_selected_agent_is_declared(self) -> None:
         config = self._guarded_config("simple_agent", "hermes_agent")
 
         GlobalConfigDictParser().compose_unbound_agent(config)
 
-        assert list(config["gpqa_mcqa_simple_agent"]["responses_api_agents"]) == ["hermes_agent"]
+        assert list(config[self._composed_name("gpqa_mcqa_simple_agent")]["responses_api_agents"]) == ["hermes_agent"]
 
     def _set_allowed_agents(self, declared) -> DictConfig:
         """The standard config with `allowed_agents` set to an arbitrary value, not just a list."""
@@ -2064,7 +2073,7 @@ class TestComposeUnboundAgent:
 
         GlobalConfigDictParser().compose_unbound_agent(config)
 
-        assert list(config["gpqa_mcqa_simple_agent"]["responses_api_agents"]) == ["hermes_agent"]
+        assert list(config[self._composed_name("gpqa_mcqa_simple_agent")]["responses_api_agents"]) == ["hermes_agent"]
 
     @mark.parametrize("value, allowed", [("1", True), ("true", True), ("0", False), ("", False)])
     def test_override_env_var(self, monkeypatch: MonkeyPatch, value: str, allowed: bool) -> None:
@@ -2073,7 +2082,9 @@ class TestComposeUnboundAgent:
 
         if allowed:
             GlobalConfigDictParser().compose_unbound_agent(config)
-            assert list(config["gpqa_mcqa_simple_agent"]["responses_api_agents"]) == ["hermes_agent"]
+            assert list(config[self._composed_name("gpqa_mcqa_simple_agent")]["responses_api_agents"]) == [
+                "hermes_agent"
+            ]
         else:
             with raises(UnsupportedAgentPairingError):
                 GlobalConfigDictParser().compose_unbound_agent(config)
@@ -2091,7 +2102,7 @@ class TestComposeUnboundAgent:
 
         GlobalConfigDictParser().compose_unbound_agent(config)
 
-        assert list(config["gpqa_mcqa_simple_agent"]["responses_api_agents"]) == ["hermes_agent"]
+        assert list(config[self._composed_name("gpqa_mcqa_simple_agent")]["responses_api_agents"]) == ["hermes_agent"]
 
     def test_every_target_is_checked_not_just_the_first(self) -> None:
         """A permissive verifier must not vouch for a restrictive one in the same config."""
@@ -2156,6 +2167,60 @@ class TestComposeUnboundAgent:
             GlobalConfigDictParser().compose_unbound_agent(config)
 
         assert "Select one of: simple_agent." in str(error.value)
+
+    def test_instance_is_renamed_after_the_agent_that_runs_it(self) -> None:
+        """#2657: the instance advertises the harness actually running it, not the one it was written for."""
+        config = self._config()
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert "gpqa_mcqa_simple_agent" not in config
+        assert list(config["gpqa_mcqa_hermes_agent"]["responses_api_agents"]) == ["hermes_agent"]
+
+    @mark.parametrize(
+        "original, expected",
+        [
+            ("gpqa_mcqa_simple_agent", "gpqa_mcqa_hermes_agent"),
+            # Names not ending in their agent type keep their whole stem rather than losing part of it.
+            ("osworld_nano_omni", "osworld_nano_omni_hermes_agent"),
+            # Falls back to the generic `_agent` suffix rather than keeping the whole old name.
+            ("scicode_benchmark_agent", "scicode_benchmark_hermes_agent"),
+            ("simple_agent", "hermes_agent"),
+        ],
+    )
+    def test_rename_substitutes_the_trailing_agent_type(self, original: str, expected: str) -> None:
+        config = self._config()
+        config[original] = DictConfig(self._environment_agent("gpqa_mcqa_resources_server"))
+        if original != "gpqa_mcqa_simple_agent":
+            config.pop("gpqa_mcqa_simple_agent")
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert expected in config, f"expected {expected}, got {sorted(config)}"
+
+    def test_rename_follows_through_dataset_agent_pins(self) -> None:
+        """Benchmark datasets pin an agent by instance name, so the pin has to move with the rename."""
+        environment_agent = self._environment_agent("gpqa_mcqa_resources_server")
+        environment_agent["responses_api_agents"]["simple_agent"]["datasets"][0]["agent"] = "gpqa_mcqa_simple_agent"
+        config = self._config()
+        config["gpqa_mcqa_simple_agent"] = DictConfig(environment_agent)
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert (
+            self._composed_block(config, "gpqa_mcqa_simple_agent")["datasets"][0]["agent"] == "gpqa_mcqa_hermes_agent"
+        )
+
+    def test_raises_when_the_rename_would_collide(self) -> None:
+        config = self._config()
+        config["gpqa_mcqa_hermes_agent"] = DictConfig(
+            {"resources_servers": {"mcqa": {"entrypoint": "app.py", "domain": "knowledge"}}}
+        )
+
+        with raises(AgentCompositionError) as error:
+            GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert "same name" in str(error.value)
 
     def test_rehosts_environment_instance_on_the_standalone_agent(self) -> None:
         config = self._config()
@@ -2314,7 +2379,7 @@ class TestComposeUnboundAgent:
     def test_parse_fills_unbound_binding_before_missing_value_check(self) -> None:
         resolved = self._parse(self._config())
 
-        block = resolved["gpqa_mcqa_simple_agent"]["responses_api_agents"]["hermes_agent"]
+        block = resolved[self._composed_name("gpqa_mcqa_simple_agent")]["responses_api_agents"]["hermes_agent"]
         assert block["resources_server"]["name"] == "gpqa_mcqa_resources_server"
 
     def test_raises_when_every_other_agent_is_self_contained(self) -> None:
@@ -2336,7 +2401,7 @@ class TestComposeUnboundAgent:
             "responses_api_agents/hermes_agent/configs/hermes_agent.yaml",
         )
 
-        block = resolved["gpqa_mcqa_simple_agent"]["responses_api_agents"]["hermes_agent"]
+        block = resolved[self._composed_name("gpqa_mcqa_simple_agent")]["responses_api_agents"]["hermes_agent"]
         assert block["resources_server"]["name"] == "gpqa_mcqa_resources_server"
         assert block["max_turns"] == 30
         assert "max_steps" not in block

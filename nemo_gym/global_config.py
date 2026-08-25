@@ -615,16 +615,68 @@ Duplicate config paths:
 
         self._raise_on_unsupported_pairing(global_config_dict, source, targets)
 
+        renames = {target.name: self._composed_instance_name(target, source.agent_type) for target in targets}
+        self._raise_on_name_collision(global_config_dict, renames, source.name)
+
         # Struct mode would reject the key removals below - we need open_dict to allow it.
         with open_dict(global_config_dict):
+            # delete the source instance before any renames to avoid corner cases
+            global_config_dict.pop(source.name)
             for target in targets:
                 composed = deepcopy(source.server_config)
                 self._carry_over_agent_bindings(target.server_config, composed)
-                # Instance names are kept: `agent_ref` is baked into prepared data, so renaming breaks collection.
-                agents = global_config_dict[target.name][AGENT_SERVER_TYPE_KEY_NAME]
+
+                # extract the target instance, remove the old agent config, add the new agent
+                # and add the whole thing back to the config under the new name
+                instance = global_config_dict.pop(target.name)
+                agents = instance[AGENT_SERVER_TYPE_KEY_NAME]
                 agents.pop(target.agent_type)
                 agents[source.agent_type] = composed
-            global_config_dict.pop(source.name)
+                global_config_dict[renames[target.name]] = instance
+
+            self._repin_agents(global_config_dict, renames)
+
+    @staticmethod
+    def _composed_instance_name(target: _AgentInstance, agent_type: str) -> str:
+        """Rename the instance after swapping the agent.
+
+        Substituting the trailing agent type keeps the environment prefix that makes the name readable
+        (`gpqa_mcqa_simple_agent` -> `gpqa_mcqa_hermes_agent`); names not ending in their agent type just
+        gain the suffix. Safe because routing resolves `task_source` through the resources server edge,
+        not through this name.
+        """
+        stem = target.name.removesuffix(f"_{target.agent_type}").removesuffix(target.agent_type).rstrip("_")
+        if stem == target.name:
+            # The name does not end in its agent type, so fall back to the generic suffix most of them
+            # share; without this the whole old name survives and the result carries two agent names.
+            stem = target.name.removesuffix("_agent").rstrip("_")
+        return f"{stem}_{agent_type}" if stem else agent_type
+
+    @staticmethod
+    def _raise_on_name_collision(global_config_dict: DictConfig, renames: dict, source_name: str) -> None:
+        # The source instance is dropped by the composition, so its name is free to reuse.
+        taken = set(global_config_dict) - set(renames) - {source_name}
+        clashes = sorted(
+            f"{old} -> {new}" for old, new in renames.items() if new in taken or list(renames.values()).count(new) > 1
+        )
+        if clashes:
+            raise AgentCompositionError(
+                f"Composing would give two instances the same name: {', '.join(clashes)}. "
+                f"Rename the environment's agent instance or compose the config manually."
+            )
+
+    @staticmethod
+    def _repin_agents(global_config_dict: DictConfig, renames: dict) -> None:
+        """Follow the rename through `agent:` pins on datasets, which name an instance."""
+        for instance in global_config_dict.values():
+            if not isinstance(instance, DictConfig):
+                continue
+            for server_type in (RESOURCES_SERVER_TYPE_KEY_NAME, AGENT_SERVER_TYPE_KEY_NAME):
+                for block in (instance.get(server_type) or {}).values():
+                    for dataset in block.get("datasets") or []:
+                        pinned = dataset.get("agent") if isinstance(dataset, DictConfig) else None
+                        if pinned in renames:
+                            dataset["agent"] = renames[pinned]
 
     def _raise_on_unsupported_pairing(
         self, global_config_dict: DictConfig, source: _AgentInstance, targets: List[_AgentInstance]
