@@ -49,6 +49,7 @@ from resources_servers.swebench_pro.verification import (
 
 class SWEBenchProResourcesServerConfig(BaseResourcesServerConfig):
     is_verifying_golden_patch: bool = False
+    apply_anti_cheating: bool = True
     prefetch_go_modules: bool = False
     evaluation_timeout: int | None = None
     image_repository: str = "docker.io/jefzda/sweap-images"
@@ -206,6 +207,18 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                 print("Failed to stop previous SWE-bench Pro sandbox", format_exc(), file=sys.stderr)
 
         sandbox = await self._create_sandbox(body)
+        if self.config.apply_anti_cheating:
+            anti_cheat_setup_fpath = Path(__file__).parent.parent / "swebench" / "anti_cheat_setup.sh"
+            await sandbox.upload(anti_cheat_setup_fpath, "/app/anti_cheat_setup.sh")
+            result = await sandbox.exec(
+                "git reset --hard && WORKING_DIRECTORY=/app bash anti_cheat_setup.sh && rm anti_cheat_setup.sh",
+                timeout_s=600,
+            )
+            if result.return_code != 0:
+                print(
+                    f"Failed to setup anti-cheating for {body.instance_id}. Return code: {result.return_code}\n"
+                    f"Stdout:\n{result.stdout}\nStderr:\n{result.stderr}"
+                )
         self._session_id_to_sandbox[session_id] = sandbox
         return SWEBenchProSeedSessionResponse(sandbox_handle=sandbox._handle.sandbox_id)
 

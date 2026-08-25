@@ -124,6 +124,11 @@ def test_sdk_import_helpers_and_retry_classification() -> None:
     nonretryable_api_error = SandboxApiException("not found")
     nonretryable_api_error.status_code = 404
     assert opensandbox_provider._is_retryable_create_error(nonretryable_api_error) is False
+    starting_pod_error = SandboxApiException(
+        "Get command status failed: Pod IP is not yet available. The Pod may still be starting."
+    )
+    starting_pod_error.status_code = 404
+    assert opensandbox_provider._is_retryable_create_error(starting_pod_error) is True
     assert opensandbox_provider._is_retryable_create_error(SandboxException("gateway timeout")) is True
 
     retry_state = SimpleNamespace(
@@ -1529,6 +1534,51 @@ async def test_exec_retries_backend_connect_502_despite_zero_command_retries(
 
     assert result.return_code == 0
     assert calls["n"] == 3  # two 502s absorbed, command never double-ran
+
+
+@pytest.mark.asyncio
+async def test_exec_retries_unrouted_404_despite_zero_command_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pod-IP 404 means the command never started, so retry it without enabling mutating-command retries."""
+
+    class FakeRunCommandOpts:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class PodIp404Error(Exception):
+        status_code = 404
+
+    calls = {"n": 0}
+
+    class FakeCommands:
+        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise PodIp404Error("Failed to run command. Status code: 404")
+            return SimpleNamespace(logs=SimpleNamespace(stdout=[], stderr=[]), error=None, exit_code=0)
+
+    class FakeRaw:
+        def __init__(self) -> None:
+            self.commands = FakeCommands()
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, FakeRunCommandOpts, object, object),
+    )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 5},
+        probe={"command": None},
+        operations={"retries": 3},
+    )
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="sb-starting", provider_name="opensandbox", raw=FakeRaw())
+
+    result = await provider.exec(handle, "echo ok", timeout_s=30)
+
+    assert result.return_code == 0
+    assert calls["n"] == 3
 
 
 @pytest.mark.asyncio

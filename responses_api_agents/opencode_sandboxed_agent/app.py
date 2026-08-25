@@ -64,6 +64,7 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     opencode_version: str
     remote_opencode_install_script_path: Optional[str] = None
     remote_opencode_binary_path: Optional[str] = None
+    remote_opencode_musl_binary_path: Optional[str] = None
     opencode_config: Dict[str, Any] = Field(default_factory=dict)
     opencode_max_context_window: int
 
@@ -78,6 +79,31 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
 class OpenCodeSandboxedAgentRunRequest(BaseRunRequest):
     # Allow for benchmark params to propagate properly
     model_config = ConfigDict(extra="allow")
+
+
+def _build_remote_opencode_install_command(
+    install_script_path: str,
+    binary_path: str,
+    musl_binary_path: str,
+) -> str:
+    """Build the invocation for the network-free, libc-aware cached installer."""
+    return (
+        f"bash {quote(install_script_path)} "
+        f"--glibc-binary {quote(binary_path)} "
+        f"--musl-binary {quote(musl_binary_path)}"
+    )
+
+
+def _extract_opencode_session_id(session_list_stdout: str) -> str:
+    """Return the newest OpenCode session ID from ``session list`` JSON output."""
+    sessions = json.loads(session_list_stdout)
+    if not isinstance(sessions, list) or not sessions:
+        raise ValueError("OpenCode did not return any sessions")
+
+    session_id = sessions[0].get("id") if isinstance(sessions[0], dict) else None
+    if not isinstance(session_id, str) or not session_id:
+        raise ValueError("The newest OpenCode session does not have a valid ID")
+    return session_id
 
 
 class OpenCodeSandboxedAgentVerifyRequest(BaseVerifyRequest):
@@ -288,7 +314,17 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         opencode_thinking_str = "--thinking"
 
         if self.config.remote_opencode_binary_path and self.config.remote_opencode_install_script_path:
-            install_str = f"""bash {self.config.remote_opencode_install_script_path} --binary {self.config.remote_opencode_binary_path}"""
+            if self.config.remote_opencode_musl_binary_path:
+                install_str = _build_remote_opencode_install_command(
+                    install_script_path=self.config.remote_opencode_install_script_path,
+                    binary_path=self.config.remote_opencode_binary_path,
+                    musl_binary_path=self.config.remote_opencode_musl_binary_path,
+                )
+            else:
+                install_str = (
+                    f"bash {quote(self.config.remote_opencode_install_script_path)} "
+                    f"--binary {quote(self.config.remote_opencode_binary_path)}"
+                )
         else:
             print(
                 "Downloading and installing OpenCode in the sandbox. Please consider mounting or uploading the appropriate OpenCode binary instead!",
@@ -339,13 +375,22 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         export_fname = "export.json"
         try:
-            export_result = await sandbox.exec(
-                command=f"""export PATH=$HOME/.opencode/bin:$PATH \
-            && (command -v jq >/dev/null 2>&1 || (apt-get update && apt-get install -y --no-install-recommends jq)) \
-            && session_id=$(opencode session list --format json | jq -r '.[0].id') \
-            && opencode export $session_id > {export_fname}"""
+            session_list_result = await sandbox.exec(
+                command="export PATH=$HOME/.opencode/bin:$PATH && opencode session list --format json"
             )
-        except:
+            if session_list_result.return_code != 0:
+                raise RuntimeError(
+                    "Failed to list OpenCode sessions: "
+                    f"{(session_list_result.stderr or session_list_result.stdout or '').strip()}"
+                )
+            session_id = _extract_opencode_session_id(session_list_result.stdout or "")
+            export_result = await sandbox.exec(
+                command=(
+                    "export PATH=$HOME/.opencode/bin:$PATH "
+                    f"&& opencode export {quote(session_id)} > {quote(export_fname)}"
+                )
+            )
+        except Exception:
             export_result = None
             print("Failed to export results", format_exc(), file=sys.stderr)
         if self.config.debug and export_result:

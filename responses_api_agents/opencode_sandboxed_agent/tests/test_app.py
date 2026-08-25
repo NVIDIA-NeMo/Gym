@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import os
+import subprocess
 from pathlib import Path
 from typing import Any, Dict
 from unittest.mock import AsyncMock, MagicMock
@@ -35,7 +37,61 @@ from nemo_gym.openai_utils import (
     NeMoGymSummary,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
-from responses_api_agents.opencode_sandboxed_agent.app import OpenCodeSandboxedAgent, OpenCodeSandboxedAgentConfig
+from responses_api_agents.opencode_sandboxed_agent.app import (
+    OpenCodeSandboxedAgent,
+    OpenCodeSandboxedAgentConfig,
+    _build_remote_opencode_install_command,
+)
+
+
+def _run_remote_install_command(tmp_path: Path, ldd_output: str) -> subprocess.CompletedProcess[str]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    ldd = bin_dir / "ldd"
+    ldd.write_text(f"#!/bin/sh\nprintf '%s\\n' {ldd_output!r}\n")
+    ldd.chmod(0o755)
+
+    binary = tmp_path / "opencode binary"
+    binary.write_text("#!/bin/sh\necho glibc\n")
+    musl_binary = tmp_path / "opencode musl binary"
+    musl_binary.write_text("#!/bin/sh\necho musl\n")
+    installer = Path(__file__).parent.parent / "install_cached_opencode.sh"
+
+    command = _build_remote_opencode_install_command(
+        install_script_path=str(installer),
+        binary_path=str(binary),
+        musl_binary_path=str(musl_binary),
+    )
+    return subprocess.run(
+        ["/bin/sh", "-c", command],
+        cwd=tmp_path,
+        env=os.environ
+        | {
+            "HOME": str(tmp_path),
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_remote_opencode_install_command_uses_mounted_binary_on_glibc(tmp_path: Path) -> None:
+    result = _run_remote_install_command(tmp_path, "ldd (GNU libc) 2.40")
+
+    assert result.returncode == 0, result.stderr
+    assert "S3-cached OpenCode glibc binary" in result.stdout
+    installed = tmp_path / ".opencode" / "bin" / "opencode"
+    assert subprocess.run([installed], capture_output=True, text=True, check=True).stdout.strip() == "glibc"
+
+
+def test_remote_opencode_install_command_uses_mounted_musl_binary_on_musl(tmp_path: Path) -> None:
+    result = _run_remote_install_command(tmp_path, "musl libc (x86_64)")
+
+    assert result.returncode == 0, result.stderr
+    assert "S3-cached OpenCode musl binary" in result.stdout
+    installed = tmp_path / ".opencode" / "bin" / "opencode"
+    assert subprocess.run([installed], capture_output=True, text=True, check=True).stdout.strip() == "musl"
 
 
 class TestOpenCodeSandboxedAgent:
@@ -135,10 +191,9 @@ class TestOpenCodeSandboxedAgent:
 
         sandbox_mock = AsyncMock()
         monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox_mock})
-        monkeypatch.setattr(server, "_create_opencode_config", lambda: dict())
+        monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value={}))
 
-        sandbox_mock.return_value.exec.return_value = MagicMock()
-        sandbox_mock.return_value.exec.return_value.stdout = "my dir"
+        sandbox_mock.exec.return_value = MagicMock(stdout="my dir")
 
         monkeypatch.setattr(
             "responses_api_agents.opencode_sandboxed_agent.app.Path.exists",
