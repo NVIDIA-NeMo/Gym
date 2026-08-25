@@ -46,25 +46,25 @@ CHECK_REGISTRY: tuple[CheckSpec, ...] = (
         id="rollout_missing_agent_turns",
         evaluation_scope=CheckScope.ROLLOUT,
         subject=CheckSubject.ROLLOUT,
-        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.AGENT_TURNS}),
+        reads=frozenset({CheckInput.RECORD, CheckInput.AGENT_TURNS}),
     ),
     CheckSpec(
         id="agent_turn_hollow",
         evaluation_scope=CheckScope.ROLLOUT,
         subject=CheckSubject.AGENT_TURN,
-        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.AGENT_TURNS}),
+        reads=frozenset({CheckInput.RECORD, CheckInput.AGENT_TURNS}),
     ),
     CheckSpec(
         id="model_call_zero_completion_tokens",
         evaluation_scope=CheckScope.ROLLOUT,
         subject=CheckSubject.MODEL_CALL,
-        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.BOUND_CALLS}),
+        reads=frozenset({CheckInput.RECORD, CheckInput.MODEL_CALLS}),
     ),
     CheckSpec(
         id="model_call_missing_token_counts",
         evaluation_scope=CheckScope.ROLLOUT,
         subject=CheckSubject.MODEL_CALL,
-        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.BOUND_CALLS}),
+        reads=frozenset({CheckInput.RECORD, CheckInput.MODEL_CALLS}),
     ),
     CheckSpec(
         id="trajectory_capture_mismatch",
@@ -76,7 +76,7 @@ CHECK_REGISTRY: tuple[CheckSpec, ...] = (
         id="model_call_failed",
         evaluation_scope=CheckScope.ROLLOUT,
         subject=CheckSubject.MODEL_CALL,
-        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.BOUND_CALLS}),
+        reads=frozenset({CheckInput.RECORD, CheckInput.MODEL_CALLS}),
     ),
     CheckSpec(
         id="rollout_token_count_mismatch",
@@ -88,7 +88,7 @@ CHECK_REGISTRY: tuple[CheckSpec, ...] = (
         id="model_call_runaway_generation",
         evaluation_scope=CheckScope.ROLLOUT,
         subject=CheckSubject.MODEL_CALL,
-        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.BOUND_CALLS}),
+        reads=frozenset({CheckInput.RECORD, CheckInput.MODEL_CALLS}),
     ),
     CheckSpec(
         id="task_consistently_unhealthy",

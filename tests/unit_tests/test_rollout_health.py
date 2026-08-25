@@ -3,6 +3,7 @@
 
 import json
 import sys
+import warnings
 from asyncio import Future
 from copy import deepcopy
 from pathlib import Path
@@ -30,6 +31,25 @@ MODEL_CALL_CHECKS = {
     "model_call_runaway_generation",
 }
 RUNNER_CHECKS = {"check_execution_error", "record_unreadable"}
+LEGACY_TURN_CHECKS = {"rollout_missing_agent_turns", "agent_turn_hollow"}
+LEGACY_MODEL_CALL_CHECKS = {
+    "model_call_zero_completion_tokens",
+    "model_call_missing_token_counts",
+    "model_call_failed",
+    "model_call_runaway_generation",
+}
+BINDING_CHECKS = {"trajectory_capture_mismatch", "rollout_token_count_mismatch"}
+EVIDENCE_DEPENDENT_CHECKS = {
+    spec.id
+    for spec in CHECK_REGISTRY
+    if spec.reads
+    & {
+        health.CheckInput.TRAJECTORY,
+        health.CheckInput.AGENT_TURNS,
+        health.CheckInput.MODEL_CALLS,
+        health.CheckInput.BOUND_CALLS,
+    }
+}
 
 
 def _record(
@@ -134,9 +154,8 @@ def test_check_ids_encode_subject_without_replacing_evaluation_scope() -> None:
     assert by_id["trajectory_capture_mismatch"].reads == frozenset(
         {health.CheckInput.RECORD, health.CheckInput.TRAJECTORY, health.CheckInput.BOUND_CALLS}
     )
-    assert by_id["agent_turn_hollow"].reads == frozenset(
-        {health.CheckInput.RECORD, health.CheckInput.TRAJECTORY, health.CheckInput.AGENT_TURNS}
-    )
+    assert by_id["agent_turn_hollow"].reads == frozenset({health.CheckInput.RECORD, health.CheckInput.AGENT_TURNS})
+    assert by_id["model_call_failed"].reads == frozenset({health.CheckInput.RECORD, health.CheckInput.MODEL_CALLS})
     assert by_id["rollout_token_count_mismatch"].reads == frozenset(
         {health.CheckInput.RECORD, health.CheckInput.TRAJECTORY, health.CheckInput.BOUND_CALLS}
     )
@@ -214,20 +233,148 @@ def test_each_canonical_model_call_unobserved_state_is_not_unhealthy(tmp_path: P
     assert result.summary["run"]["verdicts"] == {"healthy": 0, "unhealthy": 0, "unobserved": 1}
 
 
-def test_missing_canonical_trajectory_makes_trajectory_checks_unobserved(tmp_path: Path) -> None:
+def test_missing_canonical_trajectory_uses_deprecated_compatibility_evidence(tmp_path: Path) -> None:
     record = _record(0, 0)
     record.pop("ng_trajectory")
     record["ng_model_call_capture"] = {"calls": [_call()]}
     rollout_path = tmp_path / "rollouts.jsonl"
     rollout_path.write_bytes(orjson.dumps(record, option=orjson.OPT_APPEND_NEWLINE))
 
-    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+    with pytest.warns(FutureWarning, match="deprecated compatibility evidence") as caught:
+        result = run_health_checks(rollout_path, workers=1)
 
+    assert len(caught) == 1
+    [digest] = result.rollouts
     assert digest.verdict == "unobserved"
-    assert set(digest.unobserved) == {spec.id for spec in CHECK_REGISTRY if health.CheckInput.TRAJECTORY in spec.reads}
-    assert not digest.capture_observed
-    assert digest.model_calls == 0
+    assert set(digest.unobserved) == BINDING_CHECKS
+    assert digest.capture_observed
+    assert digest.model_calls == 1
     assert not digest.findings
+    assert digest.legacy_evidence == {
+        **dict.fromkeys(LEGACY_TURN_CHECKS, "response.output"),
+        **dict.fromkeys(LEGACY_MODEL_CALL_CHECKS, "ng_model_call_capture.calls"),
+    }
+    assert result.summary["run"]["artifacts"]["legacy_evidence"] == {
+        "ng_model_call_capture.calls": {
+            "records": 1,
+            "checks": dict.fromkeys(sorted(LEGACY_MODEL_CALL_CHECKS), 1),
+        },
+        "response.output": {
+            "records": 1,
+            "checks": dict.fromkeys(sorted(LEGACY_TURN_CHECKS), 1),
+        },
+    }
+
+
+def test_legacy_response_output_groups_agent_items_into_turns(tmp_path: Path) -> None:
+    record = _record(0, 0)
+    record.pop("ng_trajectory")
+    record["response"]["output"] = [
+        {"type": "reasoning", "summary": [{"type": "summary_text", "text": "thinking"}]},
+        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": ""}]},
+        {"type": "function_call", "call_id": "tool-1", "name": "tool", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "tool-1", "output": "done"},
+        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": ""}]},
+    ]
+    rollout_path = tmp_path / "rollouts.jsonl"
+    rollout_path.write_bytes(orjson.dumps(record, option=orjson.OPT_APPEND_NEWLINE))
+
+    with pytest.warns(FutureWarning, match="response.output"):
+        [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    hollow = [finding for finding in digest.findings if finding.check == "agent_turn_hollow"]
+    assert len(hollow) == 1
+    assert hollow[0].locator == {"turn": 1}
+    assert hollow[0].detail["evidence_source"] == "response.output"
+    assert "rollout_missing_agent_turns" not in {finding.check for finding in digest.findings}
+    assert digest.legacy_evidence == dict.fromkeys(LEGACY_TURN_CHECKS, "response.output")
+
+
+def test_legacy_embedded_calls_feed_only_call_local_checks(tmp_path: Path) -> None:
+    record = _record(0, 0)
+    record.pop("ng_trajectory")
+    record["ng_model_call_capture"] = {
+        "calls": [
+            _call(model_call_id="zero", tokens_out=0),
+            _call(model_call_id="missing", tokens_out=None),
+            _call(model_call_id="failed", status_code=500, error_category="upstream"),
+            _call(model_call_id="runaway", finish_reason="length", response={}),
+        ]
+    }
+    rollout_path = tmp_path / "rollouts.jsonl"
+    rollout_path.write_bytes(orjson.dumps(record, option=orjson.OPT_APPEND_NEWLINE))
+
+    with pytest.warns(FutureWarning, match="ng_model_call_capture.calls") as caught:
+        result = run_health_checks(rollout_path, workers=1)
+
+    assert len(caught) == 1
+    [digest] = result.rollouts
+    findings_by_check = {finding.check: finding for finding in digest.findings}
+    assert LEGACY_MODEL_CALL_CHECKS <= findings_by_check.keys()
+    assert all(
+        findings_by_check[check_id].detail["evidence_source"] == "ng_model_call_capture.calls"
+        for check_id in LEGACY_MODEL_CALL_CHECKS
+    )
+    assert set(digest.unobserved) == BINDING_CHECKS
+    assert not digest.policy_calls_observed
+    assert digest.successful_model_calls == 0
+    assert result.summary["run"]["artifacts"]["coverage"]["model_call_failed"] == {
+        "evaluated": 1,
+        "unobserved": 0,
+        "ignored": 0,
+        "legacy_evaluated": 1,
+    }
+    assert result.summary["run"]["artifacts"]["coverage"]["trajectory_capture_mismatch"] == {
+        "evaluated": 0,
+        "unobserved": 1,
+        "ignored": 0,
+        "legacy_evaluated": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    "capture",
+    [
+        {"calls": []},
+        {"calls": ["malformed"]},
+        {"calls": [_call()], "gaps": [{"code": "model_call_capture_incomplete"}]},
+    ],
+)
+def test_unusable_legacy_capture_keeps_call_local_checks_unobserved(tmp_path: Path, capture: dict) -> None:
+    record = _record(0, 0)
+    record.pop("ng_trajectory")
+    record["ng_model_call_capture"] = capture
+    rollout_path = tmp_path / "rollouts.jsonl"
+    rollout_path.write_bytes(orjson.dumps(record, option=orjson.OPT_APPEND_NEWLINE))
+
+    with pytest.warns(FutureWarning, match="response.output"):
+        [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    assert LEGACY_MODEL_CALL_CHECKS <= set(digest.unobserved)
+    assert not digest.capture_observed
+    assert "ng_model_call_capture.calls" not in digest.legacy_evidence.values()
+
+
+def test_task_coverage_records_legacy_evaluation(tmp_path: Path) -> None:
+    rows = []
+    for rollout in range(2):
+        record = _record(0, rollout, answer=None)
+        record.pop("ng_trajectory")
+        rows.append(record)
+    rollout_path = tmp_path / "rollouts.jsonl"
+    rollout_path.write_bytes(b"".join(orjson.dumps(row, option=orjson.OPT_APPEND_NEWLINE) for row in rows))
+
+    with pytest.warns(FutureWarning) as caught:
+        result = run_health_checks(rollout_path, workers=1)
+
+    assert len(caught) == 1
+    assert result.summary["tasks"]["0"]["flags"] == ["task_consistently_unhealthy"]
+    assert result.summary["run"]["artifacts"]["coverage"]["task_consistently_unhealthy"] == {
+        "evaluated": 1,
+        "unobserved": 0,
+        "ignored": 0,
+        "legacy_evaluated": 1,
+    }
 
 
 async def test_health_on_and_off_leave_collection_and_metrics_byte_identical(
@@ -284,7 +431,9 @@ async def test_health_on_and_off_leave_collection_and_metrics_byte_identical(
             disable_health_check=disabled,
         )
 
-        await GoldenHelper().run_from_config(config)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", FutureWarning)
+            await GoldenHelper().run_from_config(config)
         stdout = capsys.readouterr().out
 
         artifacts[disabled] = {
@@ -350,7 +499,9 @@ def test_invalid_canonical_trajectory_is_unreadable_without_fallback(tmp_path: P
     rollout_path = tmp_path / "stored.jsonl"
     rollout_path.write_bytes(orjson.dumps(record, option=orjson.OPT_APPEND_NEWLINE))
 
-    result = run_health_checks(rollout_path, workers=1)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        result = run_health_checks(rollout_path, workers=1)
 
     [digest] = result.rollouts
     assert digest.verdict == "unhealthy"
@@ -358,7 +509,8 @@ def test_invalid_canonical_trajectory_is_unreadable_without_fallback(tmp_path: P
     assert digest.model_calls == 0
     assert [finding.check for finding in digest.findings] == ["record_unreadable"]
     assert digest.findings[0].detail["reason"] == "canonical trajectory is unreadable"
-    assert set(digest.unobserved) == {spec.id for spec in CHECK_REGISTRY if health.CheckInput.TRAJECTORY in spec.reads}
+    assert set(digest.unobserved) == EVIDENCE_DEPENDENT_CHECKS
+    assert digest.legacy_evidence == {}
     assert health_checks._nonempty(123) is False
     assert health_checks._call_ref_key({"response_id": "unqualified-response"}) is None
     assert health_checks._item_has_tool_call("bad") is False
@@ -430,11 +582,14 @@ def test_trajectory_projection_failure_makes_trajectory_checks_unobserved(tmp_pa
     rollout_path = tmp_path / "rollouts.jsonl"
     rollout_path.write_bytes(orjson.dumps(record, option=orjson.OPT_APPEND_NEWLINE))
 
-    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        [digest] = run_health_checks(rollout_path, workers=1).rollouts
 
     assert digest.verdict == "unobserved"
-    assert set(digest.unobserved) == {spec.id for spec in CHECK_REGISTRY if health.CheckInput.TRAJECTORY in spec.reads}
+    assert set(digest.unobserved) == EVIDENCE_DEPENDENT_CHECKS
     assert not digest.findings
+    assert digest.legacy_evidence == {}
 
 
 def test_missing_canonical_turn_evidence_is_unobserved_not_missing(tmp_path: Path) -> None:
@@ -502,6 +657,7 @@ def test_ignored_check_is_excluded_from_execution_and_verdict(tmp_path: Path) ->
         "evaluated": 0,
         "unobserved": 0,
         "ignored": 1,
+        "legacy_evaluated": 0,
     }
     assert "(ignored: model_call_zero_completion_tokens)" in health.format_health_report(result)
 
@@ -528,6 +684,7 @@ def test_ignored_failing_and_task_checks_do_not_emit_findings(tmp_path: Path) ->
         "evaluated": 0,
         "unobserved": 0,
         "ignored": 1,
+        "legacy_evaluated": 0,
     }
 
 
@@ -538,13 +695,16 @@ def test_noncanonical_embedded_capture_is_ignored(tmp_path: Path) -> None:
     rollout_path = tmp_path / "rollouts.jsonl"
     rollout_path.write_bytes(orjson.dumps(record, option=orjson.OPT_APPEND_NEWLINE))
 
-    result = run_health_checks(rollout_path, workers=1)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        result = run_health_checks(rollout_path, workers=1)
 
     [digest] = result.rollouts
     assert not digest.capture_observed
     assert digest.model_calls == 0
     assert set(digest.unobserved) == MODEL_CALL_CHECKS
     assert digest.verdict == "unobserved"
+    assert digest.legacy_evidence == {}
 
 
 def test_turn_without_a_model_call_reference_is_not_a_token_count_failure(tmp_path: Path) -> None:
@@ -787,6 +947,7 @@ def test_duplicate_rollout_identity_counts_once_at_task_scope(tmp_path: Path) ->
         "evaluated": 0,
         "unobserved": 1,
         "ignored": 0,
+        "legacy_evaluated": 0,
     }
 
     ignored = run_health_checks(rollout_path, workers=1, ignored_checks=["rollout_duplicate_identity"])

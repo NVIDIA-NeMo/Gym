@@ -45,8 +45,13 @@ class CheckInput(str, Enum):
     RECORD = "record"
     # The canonical TrajectoryRecord persisted under the rollout's ng_trajectory key.
     TRAJECTORY = "trajectory"
-    # Canonical TrajectoryTurn objects from TrajectoryRecord.turns.
+    # Agent turns from canonical TrajectoryTurn objects or the deprecated
+    # response.output compatibility projection when ng_trajectory is absent.
     AGENT_TURNS = "agent_turns"
+    # Calls selected for call-local checks. Canonical records contribute only
+    # explicitly bound policy calls; legacy records may contribute embedded
+    # ng_model_call_capture calls without claiming policy ownership.
+    MODEL_CALLS = "model_calls"
     # Canonical model calls joined in memory to explicit TrajectoryTurn references.
     BOUND_CALLS = "bound_calls"
     # Runner-derived rollout verdicts grouped by task for task-level reduction.
@@ -82,6 +87,7 @@ class RolloutDigest(BaseModel):
     verdict: Verdict
     findings: list[Finding]
     unobserved: list[str]
+    legacy_evidence: dict[str, str] = Field(default_factory=dict)
     capture_observed: bool
     policy_calls_observed: bool = False
     model_calls: int = 0
@@ -153,3 +159,4 @@ class _TaskRepeat:
     verdict: Verdict
     policy_calls_observed: bool
     successful_model_calls: int
+    legacy_evidence_sources: tuple[str, ...]

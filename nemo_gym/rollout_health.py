@@ -42,6 +42,12 @@ from nemo_gym.health.checks import (
     _transcript_tokens,
     normalize_ignored_checks,
 )
+from nemo_gym.health.legacy import (
+    MODEL_CALL_CAPTURE_SOURCE,
+    RESPONSE_OUTPUT_SOURCE,
+    embedded_model_calls,
+    response_output_trajectory,
+)
 from nemo_gym.health.types import (
     QUALITY_SUMMARY_FILENAME,
     ROLLOUT_ID_KEY,
@@ -56,6 +62,7 @@ from nemo_gym.health.types import (
     HealthCheckResult,
     RolloutDigest,
     Verdict,
+    _CallBindings,
     _LineSlice,
     _TaskRepeat,
     _WorkerInput,
@@ -97,12 +104,15 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
     unreadable_identity = f"__unreadable_record__:input-{payload.line.source_index}:line-{payload.line.line_number}"
     task_index = record.get(TASK_INDEX_KEY, unreadable_identity if parse_error else payload.line.ordinal)
     rollout_index = record.get(ROLLOUT_INDEX_KEY, 0)
-    trajectory = record.get("ng_trajectory")
-    trajectory_rollout_id = trajectory.get("rollout_id") if isinstance(trajectory, dict) else None
+    raw_trajectory = record.get("ng_trajectory")
+    trajectory_rollout_id = raw_trajectory.get("rollout_id") if isinstance(raw_trajectory, dict) else None
     rollout_id = str(record.get(ROLLOUT_ID_KEY) or trajectory_rollout_id or f"{task_index}-{rollout_index}")
     subject = _subject(task_index, rollout_index)
 
     trajectory, trajectory_error = (None, None) if parse_error else _canonical_trajectory(record)
+    legacy_allowed = not parse_error and raw_trajectory is None
+    legacy_turn_trajectory = response_output_trajectory(record) if legacy_allowed else None
+    legacy_calls = embedded_model_calls(record) if legacy_allowed else None
     trajectory_observed = trajectory is not None and not _trajectory_has_gap(
         trajectory, "trajectory_projection_failed"
     )
@@ -110,10 +120,21 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
     model_calls_observed = trajectory_observed and not _trajectory_has_any_gap(trajectory, _INCOMPLETE_MODEL_CALL_GAPS)
     calls = _normalized_trajectory_calls(trajectory) if trajectory_observed else []
     bindings = _bind_policy_calls(trajectory, calls) if trajectory_observed else _bind_policy_calls({}, [])
+    legacy_bindings = _CallBindings(
+        references=(),
+        matched_calls=tuple(legacy_calls or []),
+        missing_references=(),
+        duplicated_references=(),
+    )
+    artifact_calls = calls if trajectory_observed else list(legacy_bindings.matched_calls)
     findings: list[Finding] = []
     unobserved: list[str] = []
+    legacy_evidence: dict[str, str] = {}
 
     for spec in _ROLLOUT_SPECS:
+        check_trajectory = trajectory or {}
+        check_bindings = bindings
+        legacy_source: str | None = None
         if spec.id in payload.ignored_checks:
             continue
         if parse_error:
@@ -143,9 +164,24 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
         if CheckInput.TRAJECTORY in spec.reads and not trajectory_observed:
             unobserved.append(spec.id)
             continue
-        if CheckInput.AGENT_TURNS in spec.reads and not turns_observed:
-            unobserved.append(spec.id)
-            continue
+        if CheckInput.AGENT_TURNS in spec.reads:
+            if turns_observed:
+                pass
+            elif legacy_turn_trajectory is not None:
+                check_trajectory = legacy_turn_trajectory
+                legacy_source = RESPONSE_OUTPUT_SOURCE
+            else:
+                unobserved.append(spec.id)
+                continue
+        if CheckInput.MODEL_CALLS in spec.reads:
+            if model_calls_observed and bindings.matched_calls:
+                pass
+            elif legacy_bindings.matched_calls:
+                check_bindings = legacy_bindings
+                legacy_source = MODEL_CALL_CAPTURE_SOURCE
+            else:
+                unobserved.append(spec.id)
+                continue
         if CheckInput.BOUND_CALLS in spec.reads:
             if not model_calls_observed:
                 unobserved.append(spec.id)
@@ -167,7 +203,12 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
             unobserved.append(spec.id)
             continue
         try:
-            findings.extend(_ROLLOUT_CHECKS[spec.id](record, trajectory, bindings, subject))
+            produced = _ROLLOUT_CHECKS[spec.id](record, check_trajectory, check_bindings, subject)
+            if legacy_source is not None:
+                legacy_evidence[spec.id] = legacy_source
+                for finding in produced:
+                    finding.detail.setdefault("evidence_source", legacy_source)
+            findings.extend(produced)
         except Exception as exc:
             unobserved.append(spec.id)
             if "check_execution_error" not in payload.ignored_checks:
@@ -182,11 +223,11 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
                 )
 
     verdict: Verdict = "unhealthy" if findings else "unobserved" if unobserved else "healthy"
-    failed = [call for call in calls if _is_failed(call)]
+    failed = [call for call in artifact_calls if _is_failed(call)]
     errors_by_status = Counter(
         str(call.get("status_code") if call.get("status_code") is not None else "unknown") for call in failed
     )
-    identities = [identity for call in calls if (identity := _replay_identity(call)) is not None]
+    identities = [identity for call in artifact_calls if (identity := _replay_identity(call)) is not None]
     duplicated = sum(count - 1 for count in Counter(identities).values() if count > 1)
     transcript_prompt, transcript_completion, _ = _transcript_tokens(record)
 
@@ -197,18 +238,19 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
         verdict=verdict,
         findings=findings,
         unobserved=unobserved,
-        capture_observed=bool(calls),
+        legacy_evidence=legacy_evidence,
+        capture_observed=bool(artifact_calls),
         policy_calls_observed=bindings.complete,
-        model_calls=len(calls),
+        model_calls=len(artifact_calls),
         successful_model_calls=sum(_is_successful(call) for call in bindings.matched_calls),
         model_call_errors=len(failed),
         errors_by_status=dict(errors_by_status),
-        ended_on_error=bool(calls and _is_failed(calls[-1])),
+        ended_on_error=bool(artifact_calls and _is_failed(artifact_calls[-1])),
         duplicated_calls=duplicated,
         transcript_prompt_tokens=transcript_prompt,
         transcript_completion_tokens=transcript_completion,
-        capture_prompt_tokens=sum(_token_count(call, "tokens_in") for call in calls),
-        capture_completion_tokens=sum(_token_count(call, "tokens_out") for call in calls),
+        capture_prompt_tokens=sum(_token_count(call, "tokens_in") for call in artifact_calls),
+        capture_completion_tokens=sum(_token_count(call, "tokens_out") for call in artifact_calls),
     )
 
 
@@ -255,6 +297,9 @@ def _unique_task_repeats(digests: list[RolloutDigest]) -> list[_TaskRepeat]:
                 verdict=verdicts.pop() if len(verdicts) == 1 else "unobserved",
                 policy_calls_observed=all(copy.policy_calls_observed for copy in copies),
                 successful_model_calls=max(copy.successful_model_calls for copy in copies),
+                legacy_evidence_sources=tuple(
+                    sorted({source for copy in copies for source in copy.legacy_evidence.values()})
+                ),
             )
         )
     return repeats
@@ -288,7 +333,9 @@ def _task_findings(
     ignored_checks: frozenset[str],
 ) -> tuple[dict[int | str, list[Finding]], dict[str, dict[str, int]]]:
     findings: dict[int | str, list[Finding]] = defaultdict(list)
-    coverage = {spec.id: {"evaluated": 0, "unobserved": 0, "ignored": 0} for spec in _TASK_SPECS}
+    coverage = {
+        spec.id: {"evaluated": 0, "unobserved": 0, "ignored": 0, "legacy_evaluated": 0} for spec in _TASK_SPECS
+    }
     for task_index, repeats in grouped.items():
         subject = _subject(task_index)
 
@@ -298,12 +345,16 @@ def _task_findings(
             computable = [repeat for repeat in repeats if repeat.verdict != "unobserved"]
             if len(computable) >= 2:
                 coverage["task_consistently_unhealthy"]["evaluated"] += 1
+                legacy_sources = sorted({source for repeat in computable for source in repeat.legacy_evidence_sources})
+                if legacy_sources:
+                    coverage["task_consistently_unhealthy"]["legacy_evaluated"] += 1
                 if all(repeat.verdict == "unhealthy" for repeat in computable):
                     findings[task_index].append(
                         _finding(
                             "task_consistently_unhealthy",
                             subject,
                             computable_repeats=len(computable),
+                            **({"evidence_sources": legacy_sources} if legacy_sources else {}),
                         )
                     )
             else:
@@ -330,7 +381,9 @@ def _reduce(digests: list[RolloutDigest], ignored_checks: frozenset[str]) -> dic
     grouped = {task_index: _unique_task_repeats(records) for task_index, records in records_by_task.items()}
     task_findings, task_coverage = _task_findings(grouped, ignored_checks)
 
-    coverage = {spec.id: {"evaluated": 0, "unobserved": 0, "ignored": 0} for spec in CHECK_REGISTRY}
+    coverage = {
+        spec.id: {"evaluated": 0, "unobserved": 0, "ignored": 0, "legacy_evaluated": 0} for spec in CHECK_REGISTRY
+    }
     for digest in digests:
         unobserved = set(digest.unobserved)
         for spec in _ROLLOUT_SPECS:
@@ -338,6 +391,7 @@ def _reduce(digests: list[RolloutDigest], ignored_checks: frozenset[str]) -> dic
                 coverage[spec.id]["ignored"] += 1
             else:
                 coverage[spec.id]["unobserved" if spec.id in unobserved else "evaluated"] += 1
+                coverage[spec.id]["legacy_evaluated"] += spec.id in digest.legacy_evidence
     coverage.update(task_coverage)
 
     issues = Counter(finding.check for digest in digests for finding in digest.findings)
@@ -366,6 +420,7 @@ def _reduce(digests: list[RolloutDigest], ignored_checks: frozenset[str]) -> dic
                 "records": len(digests),
                 "captures": sum(digest.capture_observed for digest in digests),
                 "coverage": coverage,
+                "legacy_evidence": _legacy_evidence_summary(digests),
             },
             "verdicts": {
                 "healthy": verdicts["healthy"],
@@ -394,6 +449,36 @@ def _reduce(digests: list[RolloutDigest], ignored_checks: frozenset[str]) -> dic
         },
         "tasks": tasks,
     }
+
+
+def _legacy_evidence_summary(digests: list[RolloutDigest]) -> dict[str, dict[str, Any]]:
+    sources: dict[str, dict[str, Any]] = {}
+    all_sources = sorted({source for digest in digests for source in digest.legacy_evidence.values()})
+    for source in all_sources:
+        checks = Counter(
+            check_id
+            for digest in digests
+            for check_id, check_source in digest.legacy_evidence.items()
+            if check_source == source
+        )
+        sources[source] = {
+            "records": sum(source in digest.legacy_evidence.values() for digest in digests),
+            "checks": dict(sorted(checks.items())),
+        }
+    return sources
+
+
+def _warn_legacy_evidence(digests: list[RolloutDigest]) -> None:
+    summary = _legacy_evidence_summary(digests)
+    if not summary:
+        return
+    used = ", ".join(f"{source} for {details['records']} rollout(s)" for source, details in summary.items())
+    warnings.warn(
+        "ng_trajectory is absent; rollout health used deprecated compatibility evidence: "
+        f"{used}. Future Gym versions will require ng_trajectory.",
+        FutureWarning,
+        stacklevel=2,
+    )
 
 
 def _sort_key(digest: RolloutDigest) -> tuple[tuple[int, Any], tuple[int, Any]]:
@@ -479,6 +564,7 @@ def run_health_checks(
 
     digests = worker_results
     _mark_duplicate_identities(digests, ignored)
+    _warn_legacy_evidence(digests)
     summary = _reduce(digests, ignored)
     report_dir = output_dir or paths[0].parent
     summary_path, verdicts_path = _write_reports(summary, digests, report_dir)
