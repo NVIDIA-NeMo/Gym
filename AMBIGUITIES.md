@@ -6,7 +6,9 @@ The rollout-health RFC is the product specification for this branch. This docume
 
 - [`BaseVerifyResponse`](nemo_gym/base_resources_server.py) defines the common fields returned by a Gym verifier. The agent-specific `response` inside it can have different shapes.
 - [`TrajectoryRecord`, `TrajectoryTurn`, `AgentInvocation`, and `ModelCallRef`](nemo_gym/rollout_observability.py) define Gym's standard trajectory and correlation data.
-- [`CheckSpec`, `Finding`, `RolloutDigest`, and `run_health_checks`](nemo_gym/rollout_health.py) define the health-check registry, evidence, per-rollout result, and runner implemented by this branch.
+- [`CheckSpec`, `Finding`, and `RolloutDigest`](nemo_gym/health/types.py) define the health-check data contracts and per-rollout result.
+- [The check registry and check functions](nemo_gym/health/checks.py) normalize persisted evidence and emit findings for one rollout.
+- [`run_health_checks`](nemo_gym/rollout_health.py) coordinates byte-offset indexing, worker processes, reduction, report writing, and the CLI-facing workflow.
 - [`RolloutCollectionHelper`](nemo_gym/rollout_collection.py) collects and aggregates rollouts. It also attaches `ng_trajectory` to new rollout records.
 - [`gym eval health-check`](nemo_gym/cli/main.py) is the standalone command. The same runner executes automatically after `gym eval run` and `gym eval aggregate`.
 

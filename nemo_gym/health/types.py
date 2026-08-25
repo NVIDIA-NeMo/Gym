@@ -1,0 +1,155 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Data contracts shared by rollout-health checks and orchestration."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+TASK_INDEX_KEY = "_ng_task_index"
+ROLLOUT_INDEX_KEY = "_ng_rollout_index"
+ROLLOUT_ID_KEY = "_ng_rollout_id"
+QUALITY_SUMMARY_FILENAME = "quality_summary.json"
+ROLLOUT_VERDICTS_FILENAME = "rollout_verdicts.jsonl"
+
+Verdict = Literal["healthy", "unhealthy", "unobserved"]
+_AgentStepSource = Literal["trajectory_turns", "trajectory_invocations", "response_output", "none"]
+
+
+class CheckScope(str, Enum):
+    ROLLOUT = "rollout"
+    TASK = "task"
+    RUN = "run"
+
+
+class CheckSubject(str, Enum):
+    RECORD = "record"
+    ROLLOUT = "rollout"
+    AGENT_TURN = "agent_turn"
+    MODEL_CALL = "model_call"
+    TRAJECTORY_CAPTURE = "trajectory_capture"
+    TASK = "task"
+
+
+class CheckReads(str, Enum):
+    RECORD = "record"
+    CAPTURE = "capture"
+    BOTH = "both"
+    BOUND_CALLS = "bound_calls"
+    REPEAT_VERDICTS = "repeat_verdicts"
+    REPEAT_DIGESTS = "repeat_digests"
+
+
+class CheckSpec(BaseModel):
+    """Stable, self-describing health-check contract."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    evaluation_scope: CheckScope
+    subject: CheckSubject
+    reads: CheckReads
+
+
+class Finding(BaseModel):
+    """Evidence emitted by a check. Checks never emit verdicts."""
+
+    check: str
+    subject: dict[str, int | str]
+    locator: dict[str, int | str] | None = None
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+
+class RolloutDigest(BaseModel):
+    task_index: int | str
+    rollout_index: int | str
+    rollout_id: str
+    verdict: Verdict
+    findings: list[Finding]
+    unobserved: list[str]
+    capture_observed: bool
+    policy_calls_observed: bool = False
+    model_calls: int = 0
+    successful_model_calls: int = 0
+    model_call_errors: int = 0
+    errors_by_status: dict[str, int] = Field(default_factory=dict)
+    ended_on_error: bool = False
+    duplicated_calls: int = 0
+    transcript_prompt_tokens: int = 0
+    transcript_completion_tokens: int = 0
+    capture_prompt_tokens: int = 0
+    capture_completion_tokens: int = 0
+
+
+class HealthCheckResult(BaseModel):
+    summary: dict[str, Any]
+    rollouts: list[RolloutDigest]
+    summary_path: Path
+    verdicts_path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class _LineSlice:
+    path: str
+    offset: int
+    length: int
+    ordinal: int
+
+
+@dataclass(frozen=True, slots=True)
+class _WorkerInput:
+    line: _LineSlice
+    capture_dirs: tuple[str, ...]
+    captures_exist: bool
+    capture_enabled: bool | None
+    driver_bypass: bool
+    ignored_checks: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
+class _WorkerResult:
+    digest: RolloutDigest
+    agent_step_source: _AgentStepSource
+
+
+@dataclass(frozen=True, slots=True)
+class _AgentStep:
+    locator: dict[str, int | str]
+    has_message: bool
+    has_tool_calls: bool
+    model_call_refs: tuple[str, ...]
+
+    @property
+    def has_model_activity(self) -> bool:
+        return self.has_message or self.has_tool_calls or bool(self.model_call_refs)
+
+
+@dataclass(frozen=True, slots=True)
+class _CallBindings:
+    references: tuple[str, ...]
+    matched_calls: tuple[dict[str, Any], ...]
+    missing_references: tuple[str, ...]
+    duplicated_references: tuple[tuple[str, int], ...]
+
+    @property
+    def observed(self) -> bool:
+        return bool(self.references)
+
+    @property
+    def complete(self) -> bool:
+        return self.observed and not self.missing_references and not self.duplicated_references
+
+
+@dataclass(frozen=True, slots=True)
+class _TaskRepeat:
+    rollout_index: int | str
+    verdict: Verdict
+    policy_calls_observed: bool
+    successful_model_calls: int

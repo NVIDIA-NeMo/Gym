@@ -12,6 +12,7 @@ import pytest
 
 import nemo_gym.cli.eval as cli_eval
 import nemo_gym.cli.main as cli_main
+import nemo_gym.health.checks as health_checks
 import nemo_gym.rollout_collection as rollout_collection
 import nemo_gym.rollout_health as health
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
@@ -360,13 +361,13 @@ def test_invocation_fallback_warns_and_remains_a_capture_input(tmp_path: Path) -
     assert digest.model_calls == 1
     assert digest.capture_prompt_tokens == 4
     assert not any(finding.check == "rollout_missing_agent_turns" for finding in digest.findings)
-    assert health._normalized_embedded_calls({"ng_model_call_capture": {"calls": [None, {"call_index": 1}]}}) == [
-        {"call_index": 1}
-    ]
-    assert health._nonempty(123) is False
-    assert health._call_ref_key({"response_id": "unqualified-response"}) is None
-    assert health._item_has_tool_call("bad") is False
-    assert health._item_is_agent_content("bad") is False
+    assert health_checks._normalized_embedded_calls(
+        {"ng_model_call_capture": {"calls": [None, {"call_index": 1}]}}
+    ) == [{"call_index": 1}]
+    assert health_checks._nonempty(123) is False
+    assert health_checks._call_ref_key({"response_id": "unqualified-response"}) is None
+    assert health_checks._item_has_tool_call("bad") is False
+    assert health_checks._item_is_agent_content("bad") is False
 
 
 def test_current_trajectory_turn_shape_recognizes_reasoning_and_function_calls(tmp_path: Path) -> None:
@@ -415,7 +416,7 @@ def test_current_trajectory_turn_shape_recognizes_reasoning_and_function_calls(t
         warnings.simplefilter("always")
         result = run_health_checks(rollout_path, capture_enabled=False, workers=1)
 
-    steps, source = health._agent_steps_with_source(record)
+    steps, source = health_checks._agent_steps_with_source(record)
     assert source == "trajectory_turns"
     assert len(steps) == 1
     assert steps[0].has_message and steps[0].has_tool_calls
@@ -454,7 +455,7 @@ def test_current_invocation_reasoning_is_message_content(tmp_path: Path) -> None
     with pytest.warns(RuntimeWarning, match="coarse ng_trajectory.invocations evidence"):
         result = run_health_checks(rollout_path, capture_enabled=False, workers=1)
 
-    [step] = health._agent_steps(record)
+    [step] = health_checks._agent_steps(record)
     assert step.has_message and not step.has_tool_calls
     assert not any(finding.check == "agent_turn_hollow" for finding in result.rollouts[0].findings)
 
@@ -502,26 +503,26 @@ def test_noncanonical_transcript_warning_is_aggregated_and_only_emitted_when_use
         run_health_checks(
             rollout_path,
             capture_enabled=False,
-            ignored_checks=sorted(health._FALLBACK_TRANSCRIPT_CHECK_IDS),
+            ignored_checks=sorted(health_checks._FALLBACK_TRANSCRIPT_CHECK_IDS),
             workers=1,
         )
     assert not any("ng_trajectory.turns was unavailable" in str(warning.message) for warning in ignored_caught)
 
 
-@pytest.mark.parametrize("item_type", sorted(health._AGENT_TOOL_CALL_TYPES))
+@pytest.mark.parametrize("item_type", sorted(health_checks._AGENT_TOOL_CALL_TYPES))
 def test_current_response_tool_call_types_count_as_agent_activity(item_type: str) -> None:
     item = {"type": item_type}
-    assert health._item_has_tool_call(item)
-    assert health._item_is_agent_content(item)
+    assert health_checks._item_has_tool_call(item)
+    assert health_checks._item_is_agent_content(item)
 
 
-@pytest.mark.parametrize("item_type", sorted(health._AGENT_TURN_BOUNDARY_TYPES))
+@pytest.mark.parametrize("item_type", sorted(health_checks._AGENT_TURN_BOUNDARY_TYPES))
 def test_current_response_tool_result_types_end_agent_turn(item_type: str) -> None:
-    assert health._item_ends_agent_turn({"type": item_type})
+    assert health_checks._item_ends_agent_turn({"type": item_type})
 
 
 def test_current_response_refusal_counts_as_message_content() -> None:
-    assert health._nonempty({"type": "refusal", "refusal": "cannot comply"})
+    assert health_checks._nonempty({"type": "refusal", "refusal": "cannot comply"})
 
 
 def test_response_output_groups_agent_items_into_turns_and_keeps_reasoning(tmp_path: Path) -> None:
@@ -545,7 +546,7 @@ def test_response_output_groups_agent_items_into_turns_and_keeps_reasoning(tmp_p
     with pytest.warns(RuntimeWarning, match="heuristic response.output grouping"):
         result = run_health_checks(rollout_path, capture_enabled=False, workers=1)
 
-    steps = health._agent_steps(record)
+    steps = health_checks._agent_steps(record)
     assert len(steps) == 2
     assert steps[0].has_message and steps[0].has_tool_calls
     assert steps[1].has_message and not steps[1].has_tool_calls
@@ -736,8 +737,8 @@ def test_correspondence_reports_only_explicit_capture_contradictions(tmp_path: P
         "model_call_runaway_generation",
     } <= set(result.rollouts[0].unobserved)
     assert result.summary["run"]["stats"]["duplicated_calls"] == {"replayed": 1, "rollouts": 1}
-    assert health._call_identity({"response_id": "loose"}) == "response::loose"
-    assert health._call_identity({}) is None
+    assert health_checks._call_identity({"response_id": "loose"}) == "response::loose"
+    assert health_checks._call_identity({}) is None
 
 
 def test_correspondence_uses_bound_calls_and_gym_ids_for_replay(tmp_path: Path) -> None:
@@ -855,8 +856,8 @@ def test_zero_token_call_is_flagged_and_nonempty_length_response_is_exempt(tmp_p
     checks = {finding.check for finding in result.rollouts[0].findings}
     assert "model_call_zero_completion_tokens" in checks
     assert "model_call_runaway_generation" not in checks
-    assert health._response_has_content("malformed") is False
-    assert health._response_has_content({"content": "visible"}) is True
+    assert health_checks._response_has_content("malformed") is False
+    assert health_checks._response_has_content({"content": "visible"}) is True
 
 
 def test_malformed_records_and_check_failures_become_findings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -886,7 +887,7 @@ def test_malformed_records_and_check_failures_become_findings(tmp_path: Path, mo
     def broken_check(*args, **kwargs):
         raise TypeError("bad shape")
 
-    monkeypatch.setitem(health._ROLLOUT_CHECKS, "rollout_missing_agent_turns", broken_check)
+    monkeypatch.setitem(health_checks._ROLLOUT_CHECKS, "rollout_missing_agent_turns", broken_check)
     checked = run_health_checks(healthy, capture_enabled=False, workers=1)
     finding = next(item for item in checked.rollouts[0].findings if item.check == "record_unreadable")
     assert finding.detail == {
