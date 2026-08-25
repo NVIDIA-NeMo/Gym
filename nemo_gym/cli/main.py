@@ -826,14 +826,15 @@ COMMANDS = {
             _value_flag(
                 "input-format",
                 "input_format",
-                "Input format: gym, or atif for the initial Relay-exported ATIF v1.7 text-only/stateless subset.",
+                "Reverification input format.",
+                choices=("gym", "atif"),
             ),
             _value_flag("inputs", "materialized_inputs_jsonl_fpath", "Materialized inputs JSONL."),
             _value_flag("rollouts", "rollouts_jsonl_fpath", "Rollouts JSONL to re-verify."),
             _value_flag(
                 "atif-manifest",
                 "atif_manifest_jsonl_fpath",
-                "JSONL manifest mapping ATIF trajectory paths to materialized Gym task and rollout IDs.",
+                "Manifest joining ATIF trajectories to materialized Gym inputs.",
             ),
             _value_flag("output", "output_jsonl_fpath", "Output JSONL with recomputed rewards.", aliases=("-o",)),
             _value_flag("concurrency", "num_samples_in_parallel", "Maximum number of concurrent samples."),
