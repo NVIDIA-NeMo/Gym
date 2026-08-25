@@ -44,7 +44,7 @@ from nemo_gym.health.types import (
     ROLLOUT_INDEX_KEY,
     ROLLOUT_VERDICTS_FILENAME,
     TASK_INDEX_KEY,
-    CheckReads,
+    CheckInput,
     CheckScope,
     CheckSpec,
     CheckSubject,
@@ -62,7 +62,7 @@ from nemo_gym.health.types import (
 
 __all__ = [
     "CHECK_REGISTRY",
-    "CheckReads",
+    "CheckInput",
     "CheckScope",
     "CheckSpec",
     "CheckSubject",
@@ -139,11 +139,11 @@ def _worker(payload: _WorkerInput) -> _WorkerResult:
             else:
                 unobserved.append(spec.id)
             continue
-        needs_capture = spec.reads in {CheckReads.CAPTURE, CheckReads.BOTH, CheckReads.BOUND_CALLS}
+        needs_capture = CheckInput.CAPTURE in spec.reads
         if needs_capture and not capture_observed:
             unobserved.append(spec.id)
             continue
-        if spec.reads == CheckReads.BOUND_CALLS and not bindings.matched_calls:
+        if CheckInput.BOUND_CALLS in spec.reads and not bindings.matched_calls:
             unobserved.append(spec.id)
             continue
         if spec.id == "trajectory_capture_mismatch" and not bindings.observed and not invalid_capture_lines:

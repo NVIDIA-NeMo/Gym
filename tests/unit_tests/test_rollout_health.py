@@ -112,6 +112,12 @@ def test_check_ids_encode_subject_without_replacing_evaluation_scope() -> None:
     assert by_id["model_call_failed"].subject == health.CheckSubject.MODEL_CALL
     assert by_id["task_consistently_unhealthy"].evaluation_scope == health.CheckScope.TASK
     assert by_id["task_consistently_unhealthy"].subject == health.CheckSubject.TASK
+    assert by_id["trajectory_capture_mismatch"].reads == frozenset(
+        {health.CheckInput.RECORD, health.CheckInput.CAPTURE}
+    )
+    assert by_id["rollout_token_count_mismatch"].reads == frozenset(
+        {health.CheckInput.RECORD, health.CheckInput.CAPTURE, health.CheckInput.BOUND_CALLS}
+    )
 
 
 def test_all_registered_semantic_checks_fire_on_synthetic_artifacts(tmp_path: Path) -> None:

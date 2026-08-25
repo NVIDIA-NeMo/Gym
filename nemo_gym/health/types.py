@@ -38,10 +38,9 @@ class CheckSubject(str, Enum):
     TASK = "task"
 
 
-class CheckReads(str, Enum):
+class CheckInput(str, Enum):
     RECORD = "record"
     CAPTURE = "capture"
-    BOTH = "both"
     BOUND_CALLS = "bound_calls"
     REPEAT_VERDICTS = "repeat_verdicts"
     REPEAT_DIGESTS = "repeat_digests"
@@ -55,7 +54,7 @@ class CheckSpec(BaseModel):
     id: str
     evaluation_scope: CheckScope
     subject: CheckSubject
-    reads: CheckReads
+    reads: frozenset[CheckInput]
 
 
 class Finding(BaseModel):
