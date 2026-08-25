@@ -12,10 +12,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
+import errno
 import socket
 from unittest.mock import AsyncMock, MagicMock
 
-from pytest import MonkeyPatch, raises
+from aiohttp import (
+    ClientConnectionResetError,
+    ClientConnectorDNSError,
+    ClientConnectorError,
+    ClientError,
+    ClientOSError,
+    ClientPayloadError,
+    ClientProxyConnectionError,
+    ServerDisconnectedError,
+)
+from aiohttp.client_exceptions import ConnectionTimeoutError, InvalidUrlClientError, SocketTimeoutError
+from aiohttp.client_reqrep import ConnectionKey
+from pytest import CaptureFixture, MonkeyPatch, raises
 
 import nemo_gym.global_config
 import nemo_gym.server_utils
@@ -31,9 +45,26 @@ from nemo_gym.server_utils import (
     HeadServer,
     ServerClient,
     SimpleServer,
+    _classify_request_failure,
     _make_keepalive_socket_factory,
+    _next_failure_report,
+    _report_request_failure,
+    _request_origin,
+    _RequestFailureKind,
     initialize_ray,
 )
+
+
+def _connection_key() -> ConnectionKey:
+    return ConnectionKey(
+        host="localhost",
+        port=8000,
+        is_ssl=False,
+        ssl=True,
+        proxy=None,
+        proxy_auth=None,
+        proxy_headers_hash=None,
+    )
 
 
 _TCP_KEEPALIVE_TEST_IDLE = 42
@@ -375,3 +406,206 @@ class TestServerUtils:
             response = client.get("/session")
             assert response.json()["session_id"]
             assert 1 == len(response.headers.get_list("set-cookie"))
+
+    def test_classify_request_failure_never_connected(self) -> None:
+        key = _connection_key()
+
+        assert _RequestFailureKind.UNREACHABLE == _classify_request_failure(
+            ClientConnectorError(key, OSError(errno.ECONNREFUSED, "refused"))
+        )
+        assert _RequestFailureKind.UNREACHABLE == _classify_request_failure(
+            ClientConnectorDNSError(key, OSError("name resolution failed"))
+        )
+        # A ClientConnectorError subclass, and easy to miss.
+        assert _RequestFailureKind.UNREACHABLE == _classify_request_failure(
+            ClientProxyConnectionError(key, OSError(errno.ECONNREFUSED, "refused"))
+        )
+
+    def test_classify_request_failure_resource_exhaustion(self) -> None:
+        key = _connection_key()
+
+        for err in (errno.EMFILE, errno.ENFILE, errno.ENOBUFS, errno.ENOMEM):
+            assert _RequestFailureKind.RESOURCE == _classify_request_failure(
+                ClientConnectorError(key, OSError(err, "out of descriptors"))
+            )
+
+    def test_classify_request_failure_peer_drop(self) -> None:
+        assert _RequestFailureKind.PEER_DROP == _classify_request_failure(ServerDisconnectedError())
+        assert _RequestFailureKind.PEER_DROP == _classify_request_failure(ClientConnectionResetError("reset"))
+        assert _RequestFailureKind.PEER_DROP == _classify_request_failure(ClientOSError(errno.ECONNRESET, "reset"))
+        # An aiohttp error we do not recognise is retried rather than failed fast.
+        assert _RequestFailureKind.PEER_DROP == _classify_request_failure(ClientPayloadError("truncated"))
+
+    def test_classify_request_failure_timeout_and_fatal(self) -> None:
+        assert _RequestFailureKind.TIMEOUT == _classify_request_failure(ConnectionTimeoutError())
+        assert _RequestFailureKind.TIMEOUT == _classify_request_failure(SocketTimeoutError())
+        assert _RequestFailureKind.TIMEOUT == _classify_request_failure(asyncio.TimeoutError())
+
+        assert _RequestFailureKind.FATAL == _classify_request_failure(InvalidUrlClientError("http://[bad"))
+        assert _RequestFailureKind.FATAL == _classify_request_failure(TypeError("programming error"))
+        assert _RequestFailureKind.FATAL == _classify_request_failure(ValueError("programming error"))
+
+    def test_classify_request_failure_subclass_ordering(self) -> None:
+        """Both orderings fail silently if broken, and breaking the first reinstates the bug."""
+        # ClientConnectorError subclasses ClientOSError; testing the parent first would sort every
+        # refused connection into PEER_DROP.
+        refused = ClientConnectorError(_connection_key(), OSError(errno.ECONNREFUSED, "refused"))
+        assert isinstance(refused, ClientOSError)
+        assert _RequestFailureKind.UNREACHABLE == _classify_request_failure(refused)
+
+        # InvalidURL is both a ClientError and a ValueError.
+        bad_url = InvalidUrlClientError("http://[bad")
+        assert isinstance(bad_url, ClientError) and isinstance(bad_url, ValueError)
+        assert _RequestFailureKind.FATAL == _classify_request_failure(bad_url)
+
+    def test_classify_request_failure_tolerates_missing_os_error(self) -> None:
+        """`classify` runs inside an `except` block, so raising here would crash a retryable call."""
+        # A bare ClientOSError carries no `os_error` attribute at all.
+        assert not hasattr(ClientOSError(), "os_error")
+        assert _RequestFailureKind.PEER_DROP == _classify_request_failure(ClientOSError())
+
+        # An OSError carrying no errno at all still classifies rather than raising.
+        assert _RequestFailureKind.UNREACHABLE == _classify_request_failure(
+            ClientConnectorError(_connection_key(), OSError("no errno"))
+        )
+
+    def test_request_origin(self) -> None:
+        assert "http://localhost:8000" == _request_origin("http://localhost:8000/v1/responses")
+        assert "https://api.openai.com" == _request_origin("https://api.openai.com/v1/responses")
+        assert "/v1/responses" == _request_origin("/v1/responses")
+
+    def test_next_failure_report_throttles_per_origin_and_kind(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(nemo_gym.server_utils, "_FAILURE_REPORT_STATE", {})
+        interval = nemo_gym.server_utils._FAILURE_REPORT_INTERVAL_SECONDS
+
+        # First sighting prints in full.
+        assert 0 == _next_failure_report("http://a:8000", _RequestFailureKind.UNREACHABLE, 0.0)
+        # Inside the interval, quiet, but counting.
+        assert _next_failure_report("http://a:8000", _RequestFailureKind.UNREACHABLE, 1.0) is None
+        assert _next_failure_report("http://a:8000", _RequestFailureKind.UNREACHABLE, 2.0) is None
+        # Once it passes, one line carrying the suppressed count.
+        assert 3 == _next_failure_report("http://a:8000", _RequestFailureKind.UNREACHABLE, interval)
+        # The count restarts after a report.
+        assert _next_failure_report("http://a:8000", _RequestFailureKind.UNREACHABLE, interval + 1) is None
+
+        # A different kind at the same origin, and a different origin, are tracked separately.
+        assert 0 == _next_failure_report("http://a:8000", _RequestFailureKind.PEER_DROP, 1.0)
+        assert 0 == _next_failure_report("http://b:8000", _RequestFailureKind.UNREACHABLE, 1.0)
+
+    def test_report_request_failure_message_matches_the_kind(
+        self, monkeypatch: MonkeyPatch, capsys: CaptureFixture
+    ) -> None:
+        monkeypatch.setattr(nemo_gym.server_utils, "_FAILURE_REPORT_STATE", {})
+        key = _connection_key()
+
+        _report_request_failure(
+            "http://localhost:8000/v1/responses",
+            ClientConnectorError(key, OSError(errno.ECONNREFUSED, "refused")),
+            _RequestFailureKind.UNREACHABLE,
+            0.0,
+        )
+        unreachable = capsys.readouterr().out
+        assert "http://localhost:8000/v1/responses" in unreachable
+        assert "policy_base_url" in unreachable
+        # The ulimit and replica advice cannot apply when no socket was opened.
+        assert "Increase ulimit" not in unreachable
+        assert "adapter server replicas" not in unreachable
+
+        _report_request_failure(
+            "http://localhost:8000/v1/responses",
+            ClientConnectorError(key, OSError(errno.EMFILE, "too many open files")),
+            _RequestFailureKind.RESOURCE,
+            0.0,
+        )
+        assert "Increase ulimit" in capsys.readouterr().out
+
+        _report_request_failure(
+            "http://localhost:8000/v1/responses", ServerDisconnectedError(), _RequestFailureKind.PEER_DROP, 0.0
+        )
+        assert "adapter server replicas" in capsys.readouterr().out
+
+    def test_report_request_failure_bounds_output_volume(
+        self, monkeypatch: MonkeyPatch, capsys: CaptureFixture
+    ) -> None:
+        """500 in-flight requests against one dead endpoint must not print 500 diagnostics."""
+        monkeypatch.setattr(nemo_gym.server_utils, "_FAILURE_REPORT_STATE", {})
+        refused = ClientConnectorError(_connection_key(), OSError(errno.ECONNREFUSED, "refused"))
+
+        for _ in range(500):
+            _report_request_failure(
+                "http://localhost:8000/v1/responses", refused, _RequestFailureKind.UNREACHABLE, 0.0
+            )
+
+        assert 1 == capsys.readouterr().out.count("[request_retry")
+
+    async def test_request_still_retries_unreachable_endpoints_forever(self, monkeypatch: MonkeyPatch) -> None:
+        """M1 changes reporting only. A refused connect must still retry without limit."""
+        monkeypatch.setattr(nemo_gym.server_utils, "_FAILURE_REPORT_STATE", {})
+        refused = ClientConnectorError(_connection_key(), OSError(errno.ECONNREFUSED, "refused"))
+
+        num_calls = 0
+
+        async def request_mock(**_kwargs) -> str:
+            nonlocal num_calls
+            num_calls += 1
+            if num_calls < 200:
+                raise refused
+            return "my mock response"
+
+        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
+        client_mock = MagicMock()
+        client_mock.return_value.request = request_mock
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", client_mock)
+
+        assert "my mock response" == await nemo_gym.server_utils.request("POST", "http://localhost:8000/v1/responses")
+        assert 200 == num_calls
+
+    async def test_request_still_retries_dropped_connections_forever(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(nemo_gym.server_utils, "_FAILURE_REPORT_STATE", {})
+
+        num_calls = 0
+
+        async def request_mock(**_kwargs) -> str:
+            nonlocal num_calls
+            num_calls += 1
+            if num_calls < 200:
+                raise ServerDisconnectedError()
+            return "my mock response"
+
+        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
+        client_mock = MagicMock()
+        client_mock.return_value.request = request_mock
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", client_mock)
+
+        assert "my mock response" == await nemo_gym.server_utils.request("POST", "http://localhost:8000/v1/responses")
+        assert 200 == num_calls
+
+    async def test_request_still_raises_unknown_errors_after_max_num_tries(self, monkeypatch: MonkeyPatch) -> None:
+        """The generic branch keeps its 3-tries-then-raise behaviour for external calls."""
+        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
+        client_mock = MagicMock()
+        client_mock.return_value.request = AsyncMock(side_effect=TypeError("programming error"))
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", client_mock)
+
+        with raises(TypeError):
+            await nemo_gym.server_utils.request("POST", "http://localhost:8000/v1/responses")
+
+        assert nemo_gym.server_utils.MAX_NUM_TRIES == client_mock.return_value.request.await_count
+
+    async def test_request_success_path_is_untouched(self, monkeypatch: MonkeyPatch, capsys: CaptureFixture) -> None:
+        client_mock = MagicMock()
+        client_mock.return_value.request = AsyncMock(return_value="my mock response")
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", client_mock)
+
+        assert "my mock response" == await nemo_gym.server_utils.request("POST", "http://localhost:8000/v1/responses")
+        assert 1 == client_mock.return_value.request.await_count
+        assert "" == capsys.readouterr().out
+
+    async def test_request_propagates_cancellation(self, monkeypatch: MonkeyPatch) -> None:
+        """CancelledError is a BaseException, so `except Exception` must never swallow it."""
+        client_mock = MagicMock()
+        client_mock.return_value.request = AsyncMock(side_effect=asyncio.CancelledError())
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", client_mock)
+
+        with raises(asyncio.CancelledError):
+            await nemo_gym.server_utils.request("POST", "http://localhost:8000/v1/responses")
