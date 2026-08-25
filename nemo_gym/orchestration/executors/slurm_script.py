@@ -111,12 +111,16 @@ def _render_service_command(
     env_prefix = _resolve_env(env) if env else ""
     node_flags = f" --nodes={nodes} --ntasks={ntasks}" if (nodes is not None and nodes > 1) else ""
     mounts_flag = f" --container-mounts={','.join(shlex.quote(m) for m in mounts)}" if mounts else ""
+    # Spanning multiple nodes means multiple tasks share this srun step - without a per-node token
+    # in the pattern, Slurm interleaves every task's output into one file, making multi-node
+    # startup issues (e.g. Ray cluster formation) very hard to read.
+    log_pattern = f"logs/{name}.%N.log" if node_flags else f"logs/{name}.log"
     # --overlap lets this step share the allocation with other concurrent steps (driver + services).
     # --no-container-mount-home avoids polluting the container with host home directory contents.
     # PID is captured so the health check can detect early service death.
     return (
         f"# service: {name}\n"
-        f"{env_prefix}srun --overlap --no-container-mount-home{node_flags}{mounts_flag} --container-image={shlex.quote(container)} --output=logs/{name}.log {command} &\n"
+        f"{env_prefix}srun --overlap --no-container-mount-home{node_flags}{mounts_flag} --container-image={shlex.quote(container)} --output={log_pattern} {command} &\n"
         f"{var}_PID=$!"
     )
 

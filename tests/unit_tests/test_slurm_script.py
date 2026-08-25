@@ -765,6 +765,19 @@ def test_render_service_command_single_node_omits_node_flags():
     assert "--ntasks=" not in out
 
 
+def test_render_service_command_multi_node_uses_per_node_log_pattern():
+    # Static filenames merge every task's output into one file, interleaving nodes - use %N so
+    # each node's srun task writes its own log.
+    out = _render_service_command("vllm_model", "vllm:latest", "vllm serve model", nodes=4, ntasks=4)
+    assert "--output=logs/vllm_model.%N.log" in out
+
+
+def test_render_service_command_single_node_uses_plain_log_filename():
+    out = _render_service_command("vllm_model", "vllm:latest", "vllm serve model", nodes=1, ntasks=1)
+    assert "--output=logs/vllm_model.log" in out
+    assert "%N" not in out
+
+
 def test_render_service_command_no_nodes_kwarg_omits_node_flags():
     out = _render_service_command("vllm_model", "vllm:latest", "vllm serve model")
     assert "--nodes=" not in out
