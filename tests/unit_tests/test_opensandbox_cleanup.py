@@ -4,7 +4,6 @@
 import asyncio
 import os
 import subprocess
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -330,6 +329,21 @@ def test_reap_sweeps_catch_list_stragglers(monkeypatch: pytest.MonkeyPatch) -> N
     assert deletes == [f"{base}/first", f"{base}/straggler"]
 
 
+def test_reap_succeeds_when_final_sweep_removes_last_straggler(monkeypatch: pytest.MonkeyPatch) -> None:
+    base = "https://sandbox.example/v1/sandboxes"
+    sandbox_ids = [f"straggler-{index}" for index in range(cleanup_sandboxes.REAP_SWEEPS)]
+    session = Session(
+        *(page([sandbox(sandbox_id)]) for sandbox_id in sandbox_ids),
+        page([]),
+        delete_responses={f"{base}/{sandbox_id}": Response(status=204) for sandbox_id in sandbox_ids},
+    )
+    install_session(monkeypatch, session)
+
+    assert run_cleanup() == 0
+    deletes = [url for method, url, _kwargs in session.requests if method == "DELETE"]
+    assert deletes == [f"{base}/{sandbox_id}" for sandbox_id in sandbox_ids]
+
+
 def test_reap_gives_up_after_bounded_sweeps(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -508,7 +522,7 @@ def test_cli_rejects_invalid_connection_config(
 
 def test_script_help_runs_by_direct_path() -> None:
     result = subprocess.run(
-        [sys.executable, "-I", str(SCRIPT), "--help"],
+        [str(SCRIPT), "--help"],
         check=False,
         capture_output=True,
         text=True,
