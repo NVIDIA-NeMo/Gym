@@ -839,7 +839,7 @@ class OpenSandboxProvider:
         command failure). When that budget is exhausted the backend is dead, so
         raise a typed error and fail fast instead of retrying for hours.
         """
-        attempts = self._operations.retries + 1
+        attempts = 1
         for attempt in range(1, attempts + 1):
             try:
                 return await self._await_sdk_operation(
@@ -1312,7 +1312,7 @@ class OpenSandboxProvider:
             operation="command run (background submit)",
             sandbox_id=handle.sandbox_id,
             timeout_s=sdk_timeout_s,
-            retries=retries,
+            retries=0,
         )
         execution_id = getattr(execution, "id", None)
         if not execution_id:
