@@ -415,6 +415,11 @@ def _validate_supported_trajectory(trajectory: AtifTrajectoryV1_7) -> None:
         _reject_known_incomplete_or_failed_step(step)
         _reject_unprojected_provider_outputs(step)
         if step.source == "agent":
+            if step.tool_calls and _text_parts(step.message, f"step {step.step_id} message"):
+                raise AtifProjectionError(
+                    f"agent step {step.step_id} contains both message text and tool calls; "
+                    "ATIF does not preserve their provider output-item ordering"
+                )
             if step.llm_call_count is not None and step.llm_call_count > 1:
                 raise AtifProjectionError(
                     f"agent step {step.step_id} aggregates {step.llm_call_count} LLM calls and cannot be "
@@ -551,12 +556,19 @@ def _reject_known_incomplete_or_failed_step(step: Any) -> None:
     choices = provider_response.get("choices")
     if isinstance(choices, list):
         for choice in choices:
-            if isinstance(choice, Mapping) and choice.get("finish_reason") in {"content_filter", "length"}:
-                raise AtifProjectionError(
-                    f"step {step.step_id} has incomplete finish_reason {choice['finish_reason']!r}"
-                )
-    if provider_response.get("stop_reason") == "max_tokens":
-        raise AtifProjectionError(f"step {step.step_id} stopped because the provider token limit was reached")
+            finish_reason = choice.get("finish_reason") if isinstance(choice, Mapping) else None
+            if finish_reason not in {"stop", "tool_calls"}:
+                raise AtifProjectionError(f"step {step.step_id} has non-terminal chat finish_reason {finish_reason!r}")
+
+    content = provider_response.get("content")
+    if isinstance(content, list):
+        stop_reason = provider_response.get("stop_reason")
+        if stop_reason not in {"end_turn", "stop_sequence", "tool_use"}:
+            raise AtifProjectionError(f"step {step.step_id} has non-terminal Anthropic stop_reason {stop_reason!r}")
+    else:
+        stop_reason = provider_response.get("stop_reason")
+        if stop_reason is not None and stop_reason not in {"end_turn", "stop_sequence", "tool_use"}:
+            raise AtifProjectionError(f"step {step.step_id} has non-terminal Anthropic stop_reason {stop_reason!r}")
 
 
 def _responses_reasoning_items(trajectory: AtifTrajectoryV1_7, step: Any) -> list[NeMoGymResponseReasoningItem]:
@@ -639,13 +651,27 @@ def _reject_unprojected_provider_outputs(step: Any) -> None:
     output = llm_response.get("output")
     if isinstance(output, list):
         supported_item_types = {"reasoning", "function_call", "message", "output_text"}
+        saw_non_reasoning_item = False
         for item_index, item in enumerate(output):
             item_type = item.get("type") if isinstance(item, Mapping) else None
             if item_type not in supported_item_types:
                 raise AtifProjectionError(
                     f"step {step.step_id} contains unsupported Responses output item {item_type!r} at index {item_index}"
                 )
+            if item_type == "reasoning":
+                if saw_non_reasoning_item:
+                    raise AtifProjectionError(
+                        f"step {step.step_id} Responses reasoning item {item_index} appears after output; "
+                        "the projection would reorder it"
+                    )
+            else:
+                saw_non_reasoning_item = True
             if item_type == "message":
+                role = item.get("role")
+                if role != "assistant":
+                    raise AtifProjectionError(
+                        f"step {step.step_id} Responses message {item_index} has non-assistant role {role!r}"
+                    )
                 content = item.get("content")
                 if not isinstance(content, list):
                     raise AtifProjectionError(
@@ -661,12 +687,46 @@ def _reject_unprojected_provider_outputs(step: Any) -> None:
                         f"step {step.step_id} Responses message {item_index} contains unsupported content "
                         f"{unsupported_parts!r}"
                     )
+                for part_index, part in enumerate(content):
+                    _reject_dropped_text_metadata(
+                        part,
+                        f"step {step.step_id} Responses message {item_index} part {part_index}",
+                    )
+            elif item_type == "output_text":
+                _reject_dropped_text_metadata(
+                    item,
+                    f"step {step.step_id} Responses output_text {item_index}",
+                )
+
+            if item_type in {"message", "function_call"}:
+                item_status = item.get("status")
+                if item_status is not None and (
+                    not isinstance(item_status, str) or item_status.lower() != "completed"
+                ):
+                    raise AtifProjectionError(
+                        f"step {step.step_id} Responses {item_type} {item_index} "
+                        f"has non-completed status {item_status!r}"
+                    )
+        response_status = llm_response.get("status")
+        if not isinstance(response_status, str) or response_status.lower() != "completed":
+            raise AtifProjectionError(
+                f"step {step.step_id} Responses provider status is not completed: {response_status!r}"
+            )
         _validate_responses_raw_coverage(step, output)
         return
 
     output_text = llm_response.get("output_text")
     if isinstance(output_text, str):
-        _validate_raw_coverage(step, raw_message=output_text, raw_tool_calls=[])
+        response_status = llm_response.get("status")
+        if not isinstance(response_status, str) or response_status.lower() != "completed":
+            raise AtifProjectionError(
+                f"step {step.step_id} Responses provider status is not completed: {response_status!r}"
+            )
+        _validate_raw_coverage(
+            step,
+            raw_message_parts=[output_text] if output_text else [],
+            raw_tool_calls=[],
+        )
         return
 
     choices = llm_response.get("choices")
@@ -688,6 +748,9 @@ def _reject_unprojected_provider_outputs(step: Any) -> None:
 
     content = llm_response.get("content")
     if isinstance(content, list):
+        role = llm_response.get("role")
+        if role != "assistant":
+            raise AtifProjectionError(f"step {step.step_id} Anthropic message has non-assistant role {role!r}")
         supported_content_types = {"text", "tool_use"}
         unsupported_types = [
             block.get("type") if isinstance(block, Mapping) else None
@@ -709,6 +772,7 @@ def _reject_unprojected_provider_outputs(step: Any) -> None:
 def _validate_responses_raw_coverage(step: Any, output: list[Any]) -> None:
     raw_message_parts: list[str] = []
     raw_tool_calls: list[tuple[str, str, dict[str, Any]]] = []
+    message_item_count = 0
     for item_index, item in enumerate(output):
         if not isinstance(item, Mapping):
             raise AtifProjectionError(f"step {step.step_id} Responses output item {item_index} is not an object")
@@ -723,6 +787,7 @@ def _validate_responses_raw_coverage(step: Any, output: list[Any]) -> None:
                 )
             )
         elif item_type == "message":
+            message_item_count += 1
             for part_index, part in enumerate(item.get("content", [])):
                 if not isinstance(part, Mapping) or not isinstance(part.get("text"), str):
                     raise AtifProjectionError(
@@ -730,33 +795,42 @@ def _validate_responses_raw_coverage(step: Any, output: list[Any]) -> None:
                     )
                 raw_message_parts.append(part["text"])
         elif item_type == "output_text":
+            message_item_count += 1
             text = item.get("text")
             if not isinstance(text, str):
                 raise AtifProjectionError(f"step {step.step_id} Responses output_text {item_index} is invalid")
             raw_message_parts.append(text)
 
-    _validate_raw_coverage(step, raw_message="\n".join(raw_message_parts), raw_tool_calls=raw_tool_calls)
+    if message_item_count > 1:
+        raise AtifProjectionError(
+            f"step {step.step_id} contains {message_item_count} Responses message/output_text items; "
+            "ATIF cannot preserve their item boundaries"
+        )
+
+    _validate_raw_coverage(step, raw_message_parts=raw_message_parts, raw_tool_calls=raw_tool_calls)
 
 
 def _validate_chat_raw_coverage(step: Any, choice: Mapping[str, Any]) -> None:
     message = choice.get("message")
     if not isinstance(message, Mapping):
         raise AtifProjectionError(f"step {step.step_id} chat choice has no message object")
+    role = message.get("role")
+    if role != "assistant":
+        raise AtifProjectionError(f"step {step.step_id} chat message has non-assistant role {role!r}")
 
     content = message.get("content")
     if content is None:
-        raw_message = ""
+        raw_message_parts: list[str] = []
     elif isinstance(content, str):
-        raw_message = content
+        raw_message_parts = [content] if content else []
     elif isinstance(content, list):
-        raw_parts: list[str] = []
+        raw_message_parts = []
         for part_index, part in enumerate(content):
             if not isinstance(part, Mapping) or part.get("type") != "text" or not isinstance(part.get("text"), str):
                 raise AtifProjectionError(
                     f"step {step.step_id} chat message content part {part_index} is not lossless text"
                 )
-            raw_parts.append(part["text"])
-        raw_message = "\n".join(raw_parts)
+            raw_message_parts.append(part["text"])
     else:
         raise AtifProjectionError(f"step {step.step_id} chat message content has an unsupported type")
 
@@ -778,7 +852,15 @@ def _validate_chat_raw_coverage(step: Any, choice: Mapping[str, Any]) -> None:
                 )
             )
 
-    _validate_raw_coverage(step, raw_message=raw_message, raw_tool_calls=raw_tool_calls)
+    finish_reason = choice.get("finish_reason")
+    if raw_tool_calls and finish_reason != "tool_calls":
+        raise AtifProjectionError(
+            f"step {step.step_id} chat tool calls have inconsistent finish_reason {finish_reason!r}"
+        )
+    if not raw_tool_calls and finish_reason == "tool_calls":
+        raise AtifProjectionError(f"step {step.step_id} chat finish_reason='tool_calls' has no tool calls")
+
+    _validate_raw_coverage(step, raw_message_parts=raw_message_parts, raw_tool_calls=raw_tool_calls)
 
 
 def _validate_anthropic_raw_coverage(step: Any, content: list[Any]) -> None:
@@ -802,7 +884,16 @@ def _validate_anthropic_raw_coverage(step: Any, content: list[Any]) -> None:
                 )
             )
 
-    _validate_raw_coverage(step, raw_message="\n".join(raw_message_parts), raw_tool_calls=raw_tool_calls)
+    _validate_raw_coverage(step, raw_message_parts=raw_message_parts, raw_tool_calls=raw_tool_calls)
+
+
+def _reject_dropped_text_metadata(part: Mapping[str, Any], field_name: str) -> None:
+    for metadata_field in ("annotations", "logprobs"):
+        value = part.get(metadata_field)
+        if value:
+            raise AtifProjectionError(
+                f"{field_name} contains non-empty {metadata_field} that the ATIF projection cannot preserve"
+            )
 
 
 def _raw_tool_call(
@@ -829,11 +920,11 @@ def _raw_tool_call(
 def _validate_raw_coverage(
     step: Any,
     *,
-    raw_message: str,
+    raw_message_parts: list[str],
     raw_tool_calls: list[tuple[str, str, dict[str, Any]]],
 ) -> None:
-    canonical_message = "\n".join(_text_parts(step.message, f"step {step.step_id} message"))
-    if raw_message != canonical_message:
+    canonical_message_parts = _text_parts(step.message, f"step {step.step_id} message")
+    if raw_message_parts != canonical_message_parts:
         raise AtifProjectionError(
             f"step {step.step_id} raw provider message does not match the canonical ATIF message"
         )

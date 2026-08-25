@@ -105,7 +105,7 @@ class AtifFinalMetrics(_RelayAtifModel):
     total_completion_tokens: int | None = None
     total_cached_tokens: int | None = None
     total_cost_usd: float | None = None
-    total_steps: int | None = None
+    total_steps: int | None = Field(default=None, ge=0)
     extra: dict[str, Any] | None = None
 
 

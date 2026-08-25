@@ -823,7 +823,11 @@ COMMANDS = {
             RESOURCES_SERVER_CONFIG,
             MODEL_TYPE,
             SEARCH_DIR,
-            _value_flag("input-format", "input_format", "Input format: gym or atif."),
+            _value_flag(
+                "input-format",
+                "input_format",
+                "Input format: gym, or atif for the initial Relay-exported ATIF v1.7 text-only/stateless subset.",
+            ),
             _value_flag("inputs", "materialized_inputs_jsonl_fpath", "Materialized inputs JSONL."),
             _value_flag("rollouts", "rollouts_jsonl_fpath", "Rollouts JSONL to re-verify."),
             _value_flag(

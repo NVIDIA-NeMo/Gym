@@ -76,7 +76,10 @@ _RECOVERY_TWO_SOURCES_WARNING = (
 class RolloutReverificationConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
     input_format: Literal["gym", "atif"] = Field(
         default="gym",
-        description="Input format: native Gym rollout JSONL or an explicit ATIF manifest JSONL.",
+        description=(
+            "Input format: native Gym rollout JSONL, or a manifest for the initial "
+            "Relay-exported ATIF v1.7 text-only/stateless subset."
+        ),
     )
     materialized_inputs_jsonl_fpath: str = Field(
         description="The file path of the materialized inputs as output by `gym eval run`."
