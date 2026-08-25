@@ -117,6 +117,8 @@ DATA_GLOBS = [
     "environments/**/data/*.jsonl",
     "benchmarks/**/data/*.jsonl",
     "responses_api_agents/**/data/*.jsonl",
+    # harbor_agent ships example inputs under example/ instead of data/.
+    "responses_api_agents/**/example/*.jsonl",
 ]
 
 
@@ -124,7 +126,7 @@ def _is_run_artifact(path: Path) -> bool:
     """Rollout outputs and collate sidecars committed under data/ are run artifacts, not
     datasets — they legitimately carry agent_ref (provenance) and must not be rewritten."""
     name = path.name
-    return "_rollouts" in name or name.endswith("rollouts.jsonl") or "_prepare" in name
+    return "_rollouts" in name or name.endswith("rollouts.jsonl") or "_prepare" in name or "_output" in name
 
 
 # Row keys that are part of the (current or reserved) row contract rather than
