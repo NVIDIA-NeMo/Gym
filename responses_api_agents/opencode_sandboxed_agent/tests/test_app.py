@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -343,7 +344,7 @@ class TestOpenCodeSandboxedAgent:
 
         assert config["provider"]["nemo_gym"]["options"]["baseURL"] == expected_base_url
 
-    async def test_run_builds_observation_primitives_from_opencode_database(
+    async def test_run_builds_observations_from_live_wal_snapshot(
         self,
         tmp_path: Path,
         opencode_export_test_data: Dict[str, Any],
@@ -374,11 +375,14 @@ class TestOpenCodeSandboxedAgent:
 
         db_path = tmp_path / "source.db"
         connection = sqlite3.connect(db_path)
+        connection.execute("pragma journal_mode=wal")
         connection.execute("create table session (id text, parent_id text, time_created integer)")
         connection.execute("create table message (id text, session_id text, data text, time_created integer)")
         connection.execute(
             "create table part (id text, message_id text, session_id text, data text, time_created integer)"
         )
+        connection.commit()
+        connection.execute("pragma wal_checkpoint(truncate)")
         connection.execute("insert into session values ('root', null, 0)")
         connection.execute(
             "insert into message values (?, ?, ?, ?)",
@@ -407,7 +411,11 @@ class TestOpenCodeSandboxedAgent:
             ),
         )
         connection.commit()
-        connection.close()
+        assert db_path.with_name(f"{db_path.name}-wal").stat().st_size > 0
+        main_only_path = tmp_path / "main-only.db"
+        main_only_path.write_bytes(db_path.read_bytes())
+        with sqlite3.connect(main_only_path) as main_only:
+            assert main_only.execute("select count(*) from session").fetchone() == (0,)
 
         server_client = MagicMock(spec=ServerClient)
         server_client.global_config_dict = {
@@ -424,15 +432,27 @@ class TestOpenCodeSandboxedAgent:
                 SimpleNamespace(stdout="OpenCode run finished", stderr="", return_code=0, error_type=None),
                 SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
                 SimpleNamespace(stdout="/workspace\n"),
+                SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
             ]
         )
+        snapshot_path = tmp_path / "snapshot.db"
+
+        def local_quote(value: str) -> str:
+            if value.endswith("/opencode/opencode.db"):
+                value = str(db_path)
+            elif value.endswith("/opencode/nemo-gym-observations.db"):
+                value = str(snapshot_path)
+            return shlex.quote(value)
+
+        monkeypatch.setattr("responses_api_agents.opencode_sandboxed_agent.app.quote", local_quote)
 
         async def download(remote_path: str, local_path: Path) -> None:
-            if remote_path.endswith("/opencode/opencode.db"):
-                local_path.write_bytes(db_path.read_bytes())
-            else:
-                assert remote_path == "/workspace/export.json"
+            if remote_path == "/workspace/export.json":
                 local_path.write_text(json.dumps(opencode_export_test_data))
+            else:
+                assert remote_path.endswith("/opencode/nemo-gym-observations.db")
+                subprocess.run(shlex.split(sandbox.exec.await_args_list[-1].kwargs["command"]), check=True)
+                local_path.write_bytes(snapshot_path.read_bytes())
 
         sandbox.download = AsyncMock(side_effect=download)
         sandbox.stop = AsyncMock(side_effect=RuntimeError("resource server already stopped the sandbox"))
@@ -472,7 +492,10 @@ class TestOpenCodeSandboxedAgent:
             }
         )
 
-        result = await server.run(request, body)
+        try:
+            result = await server.run(request, body)
+        finally:
+            connection.close()
 
         assert result.ng_agent_observations is not None
         [invocation] = [

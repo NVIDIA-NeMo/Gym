@@ -2740,6 +2740,28 @@ class TestSWEBenchWrapperResponses:
                 assert sandbox.sandbox_id is None
                 assert ("sandbox_identity_unavailable", "agent") in {(gap.code, gap.detail) for gap in bundle.gaps}
 
+    @pytest.mark.asyncio
+    async def test_inner_responses_invalid_sandbox_metrics_fail_open(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        monkeypatch.setattr(swe_app, "runner_ray_remote", MagicMock(remote=AsyncMock(return_value=None)))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            params = _make_instance_config(tmpdir, rollout_id="7-2")
+            params.metrics_fpath.write_text(json.dumps({"openhands_run_time": -1}))
+            monkeypatch.setattr(
+                SWEBenchWrapper,
+                "get_openhands_trajectory_from_completions",
+                MagicMock(return_value=([], [], 0)),
+            )
+
+            response = await wrapper._inner_responses(params, MagicMock())
+
+        bundle = AgentObservationBundle.model_validate_json(response.metadata["agent_observations"])
+        assert not any(isinstance(record, SandboxObservation) for record in bundle.records)
+        assert [gap.code for gap in bundle.gaps if gap.code.startswith("sandbox_")] == [
+            "sandbox_observation_unavailable"
+        ]
+
 
 class TestSWEBenchWrapperRun:
     @pytest.mark.parametrize(

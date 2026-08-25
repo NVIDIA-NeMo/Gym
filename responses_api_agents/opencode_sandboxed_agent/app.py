@@ -745,23 +745,29 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         observations = None
         if collect_observations:
             assert remote_data_home is not None
+            observations_remote_fpath = f"{remote_data_home}/opencode/opencode.db"
+            snapshot_remote_fpath = f"{remote_data_home}/opencode/nemo-gym-observations.db"
             observations_local_fpath = results_dir / "opencode.db"
             observations_local_fpath.unlink(missing_ok=True)
             try:
-                await sandbox.download(
-                    f"{remote_data_home}/opencode/opencode.db",
-                    observations_local_fpath,
+                snapshot_script = (
+                    "import sqlite3,sys;"
+                    "source=sqlite3.connect(f'file:{sys.argv[1]}?mode=ro',uri=True);"
+                    "destination=sqlite3.connect(sys.argv[2]);"
+                    "source.backup(destination);destination.close();source.close()"
                 )
-            except Exception:
-                print(
-                    f"Failed to download OpenCode database to {observations_local_fpath}",
-                    format_exc(),
-                    file=sys.stderr,
+                snapshot_result = await sandbox.exec(
+                    command=(
+                        f"python3 -c {quote(snapshot_script)} "
+                        f"{quote(observations_remote_fpath)} {quote(snapshot_remote_fpath)}"
+                    )
                 )
-            try:
+                if snapshot_result.return_code != 0 or snapshot_result.error_type is not None:
+                    raise RuntimeError("OpenCode database snapshot failed")
+                await sandbox.download(snapshot_remote_fpath, observations_local_fpath)
                 observations = parse_opencode_observations(observations_local_fpath, observation_invocation_id)
             except Exception:
-                print("Failed to build OpenCode observations", format_exc(), file=sys.stderr)
+                print("Failed to capture OpenCode observations", format_exc(), file=sys.stderr)
                 observations = AgentObservationBundle(
                     source="opencode",
                     records=[AgentInvocation(invocation_id=observation_invocation_id)],

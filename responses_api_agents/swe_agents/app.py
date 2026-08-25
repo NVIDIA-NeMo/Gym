@@ -3838,7 +3838,12 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                         code="model_call_capture_correlation_unavailable",
                     )
                 )
-            sandbox_observations = sandbox_observations_from_metrics(updated_metrics)
+            try:
+                sandbox_observations = sandbox_observations_from_metrics(updated_metrics)
+            except ValueError:
+                print(f"Error creating sandbox observations: {format_exc()}", flush=True)
+                observations.gaps.append(ObservationGap(code="sandbox_observation_unavailable"))
+                sandbox_observations = []
             observations.records.extend(sandbox_observations)
             for sandbox in sandbox_observations:
                 observations.gaps.append(
