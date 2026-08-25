@@ -152,7 +152,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         start_time = time()
         await self._upload_folder(eval_sandbox, task_folder / "tests", "/tests")
         eval_result = await eval_sandbox.pty.exec(
-            "bash /tests/test.sh", session=pty_session, timeout_s=self.config.evaluation_timeout
+            "bash /tests/test.sh", session=pty_session, timeout_s=self.config.evaluation_timeout, detach=True
         )
         verification_time_taken = time() - start_time
         test_output = (eval_result.stderr or "") + (eval_result.stdout or "")
