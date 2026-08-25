@@ -121,7 +121,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
     _sem: asyncio.Semaphore = PrivateAttr()
 
     def model_post_init(self, context) -> None:
-        num_samples_in_parallel = get_global_config_dict().get(NUM_SAMPLES_IN_PARALLEL_KEY_NAME, 1)
+        num_samples_in_parallel = get_global_config_dict().get(NUM_SAMPLES_IN_PARALLEL_KEY_NAME) or 1
         self._sem = asyncio.Semaphore(num_samples_in_parallel)
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
