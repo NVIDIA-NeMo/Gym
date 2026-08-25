@@ -28,6 +28,7 @@ from resources_servers.gdpval.app import (
     GDPValResourcesServerConfig,
     GDPValVerifyRequest,
     _iter_ref_repeat_dirs,
+    _strict_comparison_trial_failure,
 )
 
 
@@ -78,6 +79,195 @@ def _verify_request(**fields) -> GDPValVerifyRequest:
         rubric_pretty=fields.pop("rubric_pretty", ""),
         **fields,
     )
+
+
+class TestStrictComparisonTrials:
+    @staticmethod
+    def _comparison_server_and_body(tmp_path, *, strict: bool | None, num_references: int = 1):
+        eval_dir = tmp_path / "eval" / "task_task-1" / "repeat_0"
+        eval_dir.mkdir(parents=True)
+        (eval_dir / "finish_params.json").write_text("{}")
+
+        reference_models = {}
+        for index in range(num_references):
+            ref_id = f"ref-{index}"
+            ref_root = tmp_path / ref_id
+            ref_dir = ref_root / "task_task-1" / "repeat_0"
+            ref_dir.mkdir(parents=True)
+            (ref_dir / "finish_params.json").write_text("{}")
+            reference_models[ref_id] = {"deliverables_dir": str(ref_root), "elo": 1200.0}
+
+        extra = {}
+        if strict is not None:
+            extra["strict_comparison_trials"] = strict
+        server = _server(
+            reward_mode="comparison",
+            reference_models=reference_models,
+            preconvert_office_to_pdf=False,
+            num_comparison_trials=4,
+            **extra,
+        )
+        return server, _verify_request(deliverables_dir=str(eval_dir))
+
+    @staticmethod
+    def _missing_artifact_server_and_body(tmp_path, *, missing: str, strict: bool | None):
+        eval_dir = tmp_path / "eval" / "task_task-1" / "repeat_0"
+        ref_root = tmp_path / "ref"
+        ref_dir = ref_root / "task_task-1" / "repeat_0"
+        if missing != "eval":
+            eval_dir.mkdir(parents=True)
+            (eval_dir / "finish_params.json").write_text("{}")
+        if missing != "reference":
+            ref_dir.mkdir(parents=True)
+            (ref_dir / "finish_params.json").write_text("{}")
+
+        extra = {}
+        if strict is not None:
+            extra["strict_comparison_trials"] = strict
+        server = _server(
+            reward_mode="comparison",
+            reference_deliverables_dir=str(ref_root),
+            **extra,
+        )
+        return server, _verify_request(deliverables_dir=str(eval_dir))
+
+    @staticmethod
+    async def _verify_with_trials(server, body, side_effect):
+        run_trials = MagicMock()
+        if isinstance(side_effect, dict):
+            run_trials.return_value = side_effect
+        else:
+            run_trials.side_effect = side_effect
+        with (
+            patch("resources_servers.gdpval.comparison.run_trials", new=run_trials),
+            patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
+            patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
+            patch("openai.OpenAI", return_value=MagicMock()),
+        ):
+            return await server.verify(body)
+
+    @pytest.mark.asyncio
+    async def test_complete_contract_passes_when_enabled(self, tmp_path) -> None:
+        server, body = self._comparison_server_and_body(tmp_path, strict=True)
+        complete = {
+            "winner": "[[B]]",
+            "win_count_a": 0,
+            "win_count_b": 4,
+            "tie_count": 0,
+            "task_count": 4,
+            "invalid_count": 0,
+        }
+
+        response = await self._verify_with_trials(server, body, complete)
+
+        assert response.total_wins == 4
+        assert response.judge_response["total_judged"] == 4
+        assert response.judge_response["total_invalid"] == 0
+
+    @pytest.mark.parametrize(
+        ("result", "expected"),
+        [
+            (
+                {
+                    "winner": "[[B]]",
+                    "win_count_a": 0,
+                    "win_count_b": 3,
+                    "tie_count": 0,
+                    "task_count": 3,
+                    "invalid_count": 0,
+                },
+                "matchups=1 judged=3/4 invalid=0 reference_errors=0",
+            ),
+            (
+                {
+                    "winner": "[[B]]",
+                    "win_count_a": 0,
+                    "win_count_b": 3,
+                    "tie_count": 0,
+                    "task_count": 3,
+                    "invalid_count": 1,
+                },
+                "matchups=1 judged=3/4 invalid=1 reference_errors=0",
+            ),
+        ],
+        ids=["incomplete-judged", "invalid-trial"],
+    )
+    @pytest.mark.asyncio
+    async def test_incomplete_contract_fails_when_enabled(self, tmp_path, result, expected) -> None:
+        server, body = self._comparison_server_and_body(tmp_path, strict=True)
+
+        with pytest.raises(RuntimeError, match=expected):
+            await self._verify_with_trials(server, body, result)
+
+    @pytest.mark.asyncio
+    async def test_reference_error_fails_when_enabled(self, tmp_path) -> None:
+        server, body = self._comparison_server_and_body(tmp_path, strict=True, num_references=2)
+        complete = {
+            "winner": "[[B]]",
+            "win_count_a": 0,
+            "win_count_b": 4,
+            "tie_count": 0,
+            "task_count": 4,
+            "invalid_count": 0,
+        }
+
+        with pytest.raises(
+            RuntimeError,
+            match="matchups=2 judged=4/8 invalid=0 reference_errors=1",
+        ):
+            await self._verify_with_trials(server, body, [RuntimeError("judge timeout"), complete])
+
+    def test_zero_matchups_is_incomplete(self) -> None:
+        assert (
+            _strict_comparison_trial_failure(
+                attempted_matchups=0,
+                num_trials=4,
+                total_judged=0,
+                total_invalid=0,
+                ref_errors={},
+            )
+            == "matchups=0 judged=0/0 invalid=0 reference_errors=0"
+        )
+
+    @pytest.mark.parametrize("missing", ["reference", "eval"])
+    @pytest.mark.asyncio
+    async def test_missing_artifact_fails_when_enabled(self, tmp_path, missing) -> None:
+        server, body = self._missing_artifact_server_and_body(tmp_path, missing=missing, strict=True)
+
+        with pytest.raises(
+            RuntimeError,
+            match=rf"strict comparison trial contract failed for task task-1: {missing}_missing",
+        ):
+            await server.verify(body)
+
+    @pytest.mark.parametrize("missing", ["reference", "eval"])
+    @pytest.mark.asyncio
+    async def test_missing_artifact_keeps_legacy_response_by_default(self, tmp_path, missing) -> None:
+        server, body = self._missing_artifact_server_and_body(tmp_path, missing=missing, strict=None)
+
+        response = await server.verify(body)
+
+        assert server.config.strict_comparison_trials is False
+        assert response.reward == 0.0
+        assert response.judge_response == {"error": f"{missing}_missing"}
+
+    @pytest.mark.asyncio
+    async def test_default_is_non_strict_for_backward_compatibility(self, tmp_path) -> None:
+        server, body = self._comparison_server_and_body(tmp_path, strict=None)
+        incomplete = {
+            "winner": "[[B]]",
+            "win_count_a": 0,
+            "win_count_b": 3,
+            "tie_count": 0,
+            "task_count": 3,
+            "invalid_count": 1,
+        }
+
+        response = await self._verify_with_trials(server, body, incomplete)
+
+        assert server.config.strict_comparison_trials is False
+        assert response.judge_response["total_judged"] == 3
+        assert response.judge_response["total_invalid"] == 1
 
 
 class TestIterRefRepeatDirs:

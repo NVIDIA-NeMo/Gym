@@ -2373,6 +2373,10 @@ class TestFingerprint:
         changed_policy["policy_model"]["responses_api_models"]["vllm"]["model"] = "/checkpoints/policy-b"
         changed_judge = deepcopy(runtime)
         changed_judge["gdpval_resources_server"]["resources_servers"]["gdpval"]["num_comparison_trials"] = 4
+        changed_strict_trials = deepcopy(runtime)
+        changed_strict_trials["gdpval_resources_server"]["resources_servers"]["gdpval"]["strict_comparison_trials"] = (
+            True
+        )
         changed_logging = deepcopy(runtime)
         changed_logging["operational_logging"]["level"] = "DEBUG"
 
@@ -2383,6 +2387,16 @@ class TestFingerprint:
                 dist,
                 materialized_rows=rows,
                 resolved_global_config=changed_policy,
+            )
+            != baseline
+        )
+        assert (
+            compute_fingerprint(
+                cfg,
+                REF_ELOS,
+                dist,
+                materialized_rows=rows,
+                resolved_global_config=changed_strict_trials,
             )
             != baseline
         )
