@@ -51,7 +51,8 @@ rm -rf venv
 uv venv --python 3.12 venv
 
 echo "Installing R2E-Gym in editable mode..."
-uv pip install -p $r2e_gym_dir/venv/bin/python -e . --no-cache
+# --no-cache removes uv's temporary cache, so the venv cannot use symlinked packages.
+UV_LINK_MODE=copy uv pip install -p $r2e_gym_dir/venv/bin/python -e . --no-cache
 
 echo "Verifying installation..."
 $r2e_gym_dir/venv/bin/python -c "import r2egym; print('✓ r2egym installed successfully')"
