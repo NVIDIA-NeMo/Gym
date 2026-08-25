@@ -3,6 +3,58 @@ This is a resources server that is to be used to verify a single action taken by
 
 Data links: ?
 
+# Parallel tool calls
+
+## Authoring a parallel row: you must write the expectation as a batch
+
+To verify several tool calls in one step, the dataset row **must** set `expected_action.type` to `function_call_batch` and list them under `calls`. This is not inferred — `type` is a required discriminator, and a row written as a plain `function_call` is only ever checked for that one call, no matter how many the model emits.
+
+```jsonc
+// expects three parallel calls in a single turn
+"expected_action": {
+  "type": "function_call_batch",
+  "calls": [
+    {"type": "function_call", "name": "get_weather", "arguments": "{\"city\": \"Paris\"}"},
+    {"type": "function_call", "name": "get_weather", "arguments": "{\"city\": \"Tokyo\"}"},
+    {"type": "function_call", "name": "get_weather", "arguments": "{\"city\": \"Cairo\"}"}
+  ]
+}
+```
+
+The `calls` entries are exactly the `function_call` objects a single-call row uses, so an existing row is converted by wrapping it in a batch. A batch of one call is legal and behaves like the single-call row it came from.
+
+**The response side needs nothing.** You never author the actual side: `extract_action` collects every `function_call` item in the model's response and builds the batch itself, so a model emitting N calls is compared as a set automatically.
+
+## Matching
+
+The verifier matches parallel tool calls as an unordered multiset, so response output order does not matter. Because argument matching is fuzzy, one actual call can satisfy several expected calls; the verifier resolves this with a maximum bipartite matching rather than pairing calls greedily.
+
+## `parallel_tool_call_rewarding`: the master switch
+
+`tool_call_comparator_config.parallel_tool_call_rewarding` decides whether the **number** of tool calls a response makes affects its reward. It defaults to `false`.
+
+While it is off, the call count is not part of the verdict at all: a response is asked only whether it made the expected call(s), and surplus calls cost nothing. This is exactly how the server behaved before parallel tool-call support existed, so **every pre-existing dataset scores identically whether or not this feature is merged**. It is also the honest default — chat templates do not render differently for `parallel_tool_calls` (the Nemotron template never references the flag), so a model is never told how many calls it may make, and charging it for an extra call would penalize behaviour it had no signal to avoid.
+
+Turn it on for datasets that use `function_call_batch`. The two stages below are only consulted when it is on.
+
+## Cardinality gate: which responses are admissible
+
+`allow_subset` admits responses that make **fewer** calls than expected, and `allow_superset` admits responses that make **more**. Both default to `false`, so the call count must match exactly and anything else scores zero.
+
+## Reward mode: how much credit an admissible response earns
+
+`parallel_tool_call_reward_mode` accepts:
+
+| Mode | Reward |
+| --- | --- |
+| `binary_strict` (default) | `1.0` only if every required call matched, else `0.0` |
+| `fractional` | the matched fraction of the required calls |
+| `f1` | `2 * matched / (expected + actual)` — the harmonic mean of precision and recall |
+
+The two stages are complementary. Under `binary_strict` and `fractional` the gate is a *free pass*: once a shape is admitted, surplus calls cost nothing and `allow_subset` lets a response earn full credit for emitting only the easiest call. Concretely, with `allow_superset: true` a response that makes both expected calls plus twenty junk calls still scores `1.0`.
+
+Under `f1` the gate instead decides which imperfect shapes are worth *partial* credit, and missing and surplus calls are penalized symmetrically — the same twenty-junk-call response scores `2 * 2 / (2 + 22) = 0.167`. Only an exact set of calls reaches `1.0`. Prefer `f1` for RL, where the permissive gates are otherwise reward-hacking vectors.
+
 # Example usage
 
 ## Running servers

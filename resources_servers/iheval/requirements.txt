@@ -5,3 +5,4 @@ rouge-score>=0.1.2
 immutabledict>=2.0
 langdetect>=1.0.9
 nltk>=3.10.0
+defusedxml>=0.7.1

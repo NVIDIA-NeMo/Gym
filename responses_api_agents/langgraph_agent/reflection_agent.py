@@ -55,6 +55,7 @@ class ReflectionAgentVerifyResponse(BaseVerifyResponse):
 class ReflectionState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
     policy_outputs: list
+    policy_usages: list
     cookies: dict
     reflections: int
     request_body: NeMoGymResponseCreateParamsNonStreaming
@@ -96,6 +97,7 @@ class ReflectionAgent(LangGraphAgentAdapter):
             return {
                 "messages": [AIMessage(content=text)],
                 "policy_outputs": all_outputs,
+                "policy_usages": state["policy_usages"] + ([policy_response.usage] if policy_response.usage else []),
                 "cookies": resp.cookies,
                 "reflections": state["reflections"],
                 "last_policy_response": policy_response,
@@ -136,6 +138,7 @@ class ReflectionAgent(LangGraphAgentAdapter):
             return {
                 "messages": [HumanMessage(content=text)],
                 "policy_outputs": state["policy_outputs"] + [reflection_prompt] + policy_response.output,
+                "policy_usages": state["policy_usages"] + ([policy_response.usage] if policy_response.usage else []),
                 "cookies": resp.cookies,
                 "reflections": state["reflections"] + 1,
                 "last_policy_response": policy_response,
@@ -187,6 +190,7 @@ class ReflectionAgent(LangGraphAgentAdapter):
         return {
             "messages": initial_messages,
             "policy_outputs": policy_outputs,
+            "policy_usages": [],
             "cookies": cookies,
             "reflections": 0,
             "request_body": body,

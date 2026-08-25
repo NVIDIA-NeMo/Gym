@@ -75,6 +75,7 @@ class ParallelThinkingVerifyResponse(BaseVerifyResponse):
 class ParallelThinkingState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
     policy_outputs: list
+    policy_usages: list
     cookies: dict
     request_body: NeMoGymResponseCreateParamsNonStreaming
     last_policy_response: NeMoGymResponse
@@ -124,16 +125,20 @@ class ParallelThinkingAgent(LangGraphAgentAdapter):
             last_cookies = results[-1][2]
 
             all_policy_outputs = list(state["policy_outputs"])
+            all_policy_usages = list(state["policy_usages"])
             for i, (text, policy_response, _) in enumerate(results):
                 prompt_msg = NeMoGymEasyInputMessage(role="user", content=f"{prompts[i]}\n\nProblem: {task}")
                 all_policy_outputs.append(prompt_msg)
                 all_policy_outputs.extend(policy_response.output)
+                if policy_response.usage:
+                    all_policy_usages.append(policy_response.usage)
 
             summary = "\n\n".join(f"[Path {i + 1}]: {t}" for i, t in enumerate(parallel_texts))
 
             return {
                 "messages": [AIMessage(content=summary)],
                 "policy_outputs": all_policy_outputs,
+                "policy_usages": all_policy_usages,
                 "cookies": last_cookies,
                 "last_policy_response": last_response,
                 "request_body": state["request_body"],
@@ -159,6 +164,7 @@ class ParallelThinkingAgent(LangGraphAgentAdapter):
             return {
                 "messages": [HumanMessage(content=prompt), AIMessage(content=text)],
                 "policy_outputs": state["policy_outputs"] + [prompt_msg] + policy_response.output,
+                "policy_usages": state["policy_usages"] + ([policy_response.usage] if policy_response.usage else []),
                 "cookies": cookies,
                 "last_policy_response": policy_response,
                 "request_body": state["request_body"],
@@ -188,6 +194,7 @@ class ParallelThinkingAgent(LangGraphAgentAdapter):
         return {
             "messages": [HumanMessage(content=task)],
             "policy_outputs": [],
+            "policy_usages": [],
             "cookies": cookies,
             "request_body": body,
             "last_policy_response": None,
