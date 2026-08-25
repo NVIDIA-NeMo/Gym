@@ -14,10 +14,10 @@
 # limitations under the License.
 """ViBench resources server (P0).
 
-ViBench is "case 2" in NVIDIA-NeMo/Gym#2082: the rollout copies an artifact out of its own
-box and the verifier grades it in a fresh one. So this server never touches the agent's
-sandbox -- that would be case 3, which is the one shape that needs the (unmerged) sandbox
-server, and which node-local providers like Docker deliberately cannot support.
+The rollout copies an artifact out of its own box and this server grades it in a fresh one,
+so it never touches the agent's sandbox. Reaching into the agent's box instead would need
+serialize()/connect(), which only the OpenSandbox provider implements -- node-local providers
+such as Docker cannot support it at all.
 
   * ``seed_session`` returns the PRD text and asset directory for the task. It creates no
     sandbox and hands out no handle. The agent never sees the test plans.

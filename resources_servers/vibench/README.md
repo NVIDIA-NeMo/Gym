@@ -5,11 +5,11 @@ working web application from a product requirements document. A task hands the a
 and an empty container; grading stands the finished app up for real, seeds it with data
 through its own UI, and then drives it in a browser against a human-written test plan.
 
-ViBench is **"case 2"** in [#2082](https://github.com/NVIDIA-NeMo/Gym/issues/2082): the
-rollout copies an artifact out of its own box and the verifier grades it in a fresh one. So
-this server never touches the agent's sandbox. That is not a stylistic choice — sharing a box
-is case 3, which needs the (unmerged) sandbox server, and node-local providers like Docker
-deliberately cannot support it. Only OpenSandbox implements `serialize()`/`connect()`.
+The agent copies the built app out of its own sandbox and this server grades it in a fresh
+one, so the sandbox is never shared. That is not a stylistic choice: reaching into the agent's
+box requires `serialize()`/`connect()`, which only the OpenSandbox provider implements, so the
+shape `swebench` uses cannot run on Docker, Apptainer or enroot. See
+[#2082](https://github.com/NVIDIA-NeMo/Gym/issues/2082) for the design discussion.
 
 ## Shape
 
@@ -78,8 +78,15 @@ python resources_servers/vibench/prepare.py \
 That yields 24 tasks across 74 test plans. `data/example.jsonl` holds five of them
 (`notes`, `quiz`, `barber`, `wedding`, `market_place`).
 
-P0 covers `mvp` artifacts only. `--artifacts feature1 feature1-on_mvp` is wired but needs a
-reference-implementation starting tree that the public ViBench repo does not ship.
+P0 covers `mvp` artifacts only. `prepare.py` already resolves the PRD chain and test plans
+for feature artifacts, but `seed_session` only ever hands the agent a PRD — there is no path
+yet to stage an existing codebase into the build sandbox, which a feature task starts from.
+
+ViBench ships reference implementations (`results/<app>/RI_MVP/app/`, 21 of its 24 apps),
+including the `setup-environment.sh` and `start-server.sh` the grader requires, so
+`feature-ri` — building a feature on top of the reference implementation — is a follow-up
+rather than a blocked one. `feature-mvp` (`featureN-on_mvp`) is harder: it starts from the
+model's own MVP output and so depends on a prior rollout's artifact.
 
 ## Run
 
@@ -155,7 +162,7 @@ These are known and deliberate; each is a follow-up rather than a bug.
   Profile that variance — repeated grading of one fixed app — before treating this as a
   training signal. `REVERIFY_MODE` is `UNSUPPORTED` for the same reason: scores cannot be
   recomputed from stored rollouts, since grading depends on live app and database state.
-- **`mvp` artifacts only.** See above.
+- **`mvp` artifacts only.** Feature tasks need sandbox staging of a starting codebase; see above.
 - **Cost per rollout is high**: one coding agent, plus a seeding agent and an evaluation
   agent per test plan.
 

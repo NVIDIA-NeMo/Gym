@@ -14,11 +14,10 @@
 # limitations under the License.
 """ViBench agent: owns the build sandbox and copies the finished app out.
 
-ViBench is "case 2" in NVIDIA-NeMo/Gym#2082 -- the rollout produces an artifact and the
-verifier grades it in a fresh box -- so the sandbox never has to be shared. That matters
-practically: only OpenSandbox implements ``serialize()``/``connect()``, so a design where
-the resources server creates the box and the agent attaches to it cannot run on Docker,
-Apptainer or enroot at all.
+This agent owns the build sandbox and copies the finished app out, so the sandbox never has
+to be shared. That matters practically: only the OpenSandbox provider implements
+``serialize()``/``connect()``, so a design where the resources server creates the box and the
+agent attaches to it cannot run on Docker, Apptainer or enroot at all.
 
 Flow, mirroring ``responses_api_agents/cvdp_agent``:
 

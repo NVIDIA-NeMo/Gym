@@ -1,6 +1,5 @@
 # Resources server: owns the task data and ViBench-backed grading. It creates no sandbox --
-# see NVIDIA-NeMo/Gym#2082 "case 2": the agent copies the built app out, this server grades
-# it in a fresh stack.
+# the agent copies the built app out and this server grades it in a fresh stack.
 vibench_resources_server:
   resources_servers:
     vibench:

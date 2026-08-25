@@ -23,9 +23,9 @@ per test plan instead would rebuild the same app for every plan.
         --output resources_servers/vibench/data/example.jsonl \
         --limit 5
 
-P0 covers ``mvp`` artifacts only. Feature artifacts (``feature1``, ``feature1-on_mvp``)
-need a reference-implementation starting tree that the public ViBench repo does not ship;
-``--artifacts`` accepts them so the wiring is testable once those land.
+P0 covers ``mvp`` artifacts only. ``--artifacts`` accepts feature artifacts and resolves
+their PRD chain and test plans, but the environment cannot stage a starting codebase into
+the build sandbox yet, which is what a feature task builds on top of.
 """
 
 import argparse

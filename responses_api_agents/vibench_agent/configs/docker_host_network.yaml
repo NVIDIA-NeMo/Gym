@@ -8,8 +8,7 @@
 # bridged container 127.0.0.1 is the container itself, so the model is unreachable and the
 # harness silently makes zero LLM calls -- the OpenCode session exports with
 # `"tokens": {"input": 0, "output": 0}` and an empty app. Sharing the host network namespace
-# makes 127.0.0.1:<port> mean the same thing in both places. Same lever as the example in
-# NVIDIA-NeMo/Gym#2082.
+# makes 127.0.0.1:<port> mean the same thing in both places.
 #
 # Trade-off: `network: host` drops network isolation for a container running model-written
 # code -- it can reach anything the host can, including other Gym servers and the Docker
