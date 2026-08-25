@@ -446,6 +446,7 @@ def aggregate_rollouts():  # pragma: no cover
 def health_check_rollouts(
     run_dir: str | Path,
     *,
+    rollout_file: str | Path | None = None,
     workers: int | None = None,
     ignored_checks: Sequence[str] = (),
 ):
@@ -454,6 +455,7 @@ def health_check_rollouts(
 
     return health_check_run_dir(
         run_dir,
+        rollout_file=rollout_file,
         workers=workers,
         ignored_checks=ignored_checks,
     )

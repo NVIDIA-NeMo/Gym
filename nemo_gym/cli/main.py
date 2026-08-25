@@ -486,10 +486,11 @@ def _eval_health_check(args: argparse.Namespace, overrides: list[str]) -> None:
     try:
         health_check_rollouts(
             args.run_dir,
+            rollout_file=args.rollout_file,
             workers=args.workers,
             ignored_checks=args.ignore_checks or (),
         )
-    except ValueError as exc:
+    except (FileNotFoundError, ValueError) as exc:
         args._parser.error(str(exc))
 
 
@@ -873,6 +874,15 @@ COMMANDS = {
         summary="Verify rollout quality for an existing run directory.",
         flags=(
             Flag(register=lambda p: p.add_argument("run_dir", metavar="RUN_DIR")),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--rollouts-file",
+                    dest="rollout_file",
+                    type=Path,
+                    metavar="PATH",
+                    help="Rollout JSONL path; relative paths resolve under RUN_DIR (default: rollouts.jsonl).",
+                )
+            ),
             Flag(register=lambda p: p.add_argument("--workers", type=int, help="Number of worker processes.")),
             Flag(
                 register=lambda p: p.add_argument(

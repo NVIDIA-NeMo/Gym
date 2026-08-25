@@ -447,23 +447,14 @@ def run_health_checks(
     )
 
 
-def _discover_rollouts(run_dir: Path) -> list[Path]:
-    if run_dir.is_file():
-        return [run_dir]
+def _resolve_rollout_path(run_dir: Path, rollout_file: str | Path | None) -> Path:
     if not run_dir.is_dir():
         raise FileNotFoundError(f"Run directory not found: {run_dir}")
-    conventional = run_dir / "rollouts.jsonl"
-    if conventional.is_file():
-        return [conventional]
-    excluded = ("rollout_verdicts", "failures", "materialized")
-    candidates = [
-        path
-        for path in sorted(run_dir.glob("*.jsonl"))
-        if not any(marker in path.stem for marker in excluded) and not path.name.endswith(".capture.jsonl")
-    ]
-    if len(candidates) != 1:
-        raise ValueError(f"Expected {conventional} or exactly one rollout JSONL in {run_dir}; found {len(candidates)}")
-    return candidates
+    selected = Path(rollout_file) if rollout_file is not None else Path("rollouts.jsonl")
+    rollout_path = selected if selected.is_absolute() else run_dir / selected
+    if not rollout_path.is_file():
+        raise FileNotFoundError(f"Rollout JSONL not found: {rollout_path}")
+    return rollout_path
 
 
 def format_health_report(result: HealthCheckResult) -> str:
@@ -481,14 +472,15 @@ def format_health_report(result: HealthCheckResult) -> str:
 def health_check_run_dir(
     run_dir: str | Path,
     *,
+    rollout_file: str | Path | None = None,
     workers: int | None = None,
     ignored_checks: Sequence[str] = (),
 ) -> HealthCheckResult:
     path = Path(run_dir)
-    rollout_paths = _discover_rollouts(path)
+    rollout_path = _resolve_rollout_path(path, rollout_file)
     result = run_health_checks(
-        rollout_paths,
-        output_dir=path if path.is_dir() else path.parent,
+        rollout_path,
+        output_dir=path,
         workers=workers,
         ignored_checks=ignored_checks,
     )

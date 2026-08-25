@@ -202,9 +202,9 @@ This preserves the difference between “the evidence is absent” and “the av
 
 **RFC gap.** The standalone command receives a directory, but the RFC does not require a rollout filename.
 
-**Chosen behavior.** The command first looks for `rollouts.jsonl`. If absent, it accepts exactly one top-level JSONL after excluding prepared input files whose names contain `materialized`, failure files, capture files, and `rollout_verdicts.jsonl`. More than one candidate is an error rather than an arbitrary choice.
+**Chosen behavior.** The command reads `<run-dir>/rollouts.jsonl` by default and performs no filename discovery. A nonstandard path must be supplied explicitly with `--rollouts-file PATH`; relative paths resolve under the run directory and absolute paths are used as written. If the selected file does not exist, the command fails even when another JSONL is present.
 
-**Alternative considered.** Select the first candidate by filename order. That could silently check the wrong artifact.
+**Alternative considered.** Infer a rollout file when exactly one plausible JSONL is present. Even unique-looking files can be prepared inputs or unrelated outputs, so inference could silently check the wrong artifact.
 
 ### 17. Running after aggregation without shard merging
 

@@ -309,9 +309,10 @@ def test_health_check_cli_accepts_run_dir_workers_and_ignored_checks(
 ) -> None:
     received = {}
 
-    def fake_health_check(run_dir, *, workers=None, ignored_checks=()):
+    def fake_health_check(run_dir, *, rollout_file=None, workers=None, ignored_checks=()):
         received.update(
             run_dir=run_dir,
+            rollout_file=rollout_file,
             workers=workers,
             ignored_checks=ignored_checks,
         )
@@ -325,6 +326,8 @@ def test_health_check_cli_accepts_run_dir_workers_and_ignored_checks(
             "eval",
             "health-check",
             str(tmp_path),
+            "--rollouts-file",
+            "evaluator_rollouts.jsonl",
             "--workers",
             "3",
             "--ignore-checks",
@@ -336,6 +339,7 @@ def test_health_check_cli_accepts_run_dir_workers_and_ignored_checks(
 
     assert received == {
         "run_dir": str(tmp_path),
+        "rollout_file": Path("evaluator_rollouts.jsonl"),
         "workers": 3,
         "ignored_checks": ["model_call_missing_token_counts", "model_call_zero_completion_tokens"],
     }
@@ -794,7 +798,9 @@ def test_malformed_records_and_check_failures_become_findings(tmp_path: Path, mo
     assert "rollout_missing_agent_turns" in checked.rollouts[0].unobserved
 
 
-def test_process_pool_success_path_and_run_discovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+def test_process_pool_success_path_and_explicit_rollout_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
     class InlinePool:
         def __init__(self, *, max_workers):
             assert max_workers == 2
@@ -811,7 +817,7 @@ def test_process_pool_success_path_and_run_discovery(tmp_path: Path, monkeypatch
     monkeypatch.setattr(health, "ProcessPoolExecutor", InlinePool)
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    rollout_path = run_dir / "custom-name.jsonl"
+    rollout_path = run_dir / "rollouts.jsonl"
     rollout_path.write_bytes(
         b"\n"
         + orjson.dumps(_record(0, 0), option=orjson.OPT_APPEND_NEWLINE)
@@ -822,11 +828,14 @@ def test_process_pool_success_path_and_run_discovery(tmp_path: Path, monkeypatch
 
     assert len(result.rollouts) == 2
     assert "2 checked" in capsys.readouterr().out
-    file_result = health.health_check_run_dir(rollout_path, workers=1)
+
+    custom_path = run_dir / "custom-name.jsonl"
+    rollout_path.rename(custom_path)
+    file_result = health.health_check_run_dir(run_dir, rollout_file="custom-name.jsonl", workers=1)
     assert len(file_result.rollouts) == 2
 
 
-def test_input_validation_and_ambiguous_discovery_errors(tmp_path: Path) -> None:
+def test_input_validation_and_nonstandard_filename_errors(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="at least one"):
         run_health_checks([], workers=1)
     with pytest.raises(FileNotFoundError, match="Rollout JSONL"):
@@ -834,12 +843,14 @@ def test_input_validation_and_ambiguous_discovery_errors(tmp_path: Path) -> None
     with pytest.raises(FileNotFoundError, match="Run directory"):
         health.health_check_run_dir(tmp_path / "missing-run", workers=1)
 
-    run_dir = tmp_path / "ambiguous"
+    run_dir = tmp_path / "nonstandard"
     run_dir.mkdir()
     (run_dir / "a.jsonl").write_text("{}\n")
     (run_dir / "b.jsonl").write_text("{}\n")
-    with pytest.raises(ValueError, match="exactly one"):
+    with pytest.raises(FileNotFoundError, match="rollouts.jsonl"):
         health.health_check_run_dir(run_dir, workers=1)
+    explicit = health.health_check_run_dir(run_dir, rollout_file="a.jsonl", workers=1)
+    assert len(explicit.rollouts) == 1
 
     one = tmp_path / "one.jsonl"
     one.write_text("{}\n")
