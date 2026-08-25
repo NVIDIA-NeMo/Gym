@@ -492,7 +492,7 @@ class ResponsesConverter(BaseModel):
     def postprocess_assistant_message_dict(self, message_dict: Dict[str, Any]) -> List[NeMoGymResponseOutputItem]:
         response_output = []
 
-        content = message_dict.get("content") or ""
+        content = _message_content_to_text(message_dict.get("content"))
         if self.uses_reasoning_parser:
             reasoning_matches, content = self._extract_reasoning_from_content(content)
         else:

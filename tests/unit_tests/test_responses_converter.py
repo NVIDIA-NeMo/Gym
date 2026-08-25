@@ -835,6 +835,21 @@ def test_postprocess_empty_output_emits_empty_message(converter: ResponsesConver
     assert output[0].content[0].text == ""
 
 
+def test_postprocess_flattens_assistant_text_parts(converter: ResponsesConverter):
+    output = converter.postprocess_assistant_message_dict(
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "first"},
+                {"type": "text", "text": " second"},
+            ],
+        }
+    )
+    assert len(output) == 1
+    assert isinstance(output[0], NeMoGymResponseOutputMessage)
+    assert output[0].content[0].text == "first second"
+
+
 def test_postprocess_tool_calls(converter: ResponsesConverter):
     output = converter.postprocess_assistant_message_dict(
         {

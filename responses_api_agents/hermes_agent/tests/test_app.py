@@ -14,29 +14,30 @@
 # limitations under the License.
 import asyncio
 import json
+import signal
+import sys
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from nemo_gym.openai_utils import (
-    NeMoGymEasyInputMessage,
-    NeMoGymFunctionCallOutput,
     NeMoGymResponse,
-    NeMoGymResponseFunctionToolCall,
-    NeMoGymResponseOutputMessageForTraining,
+    NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
+from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle, ObservationGap
 from nemo_gym.server_utils import ServerClient
+from responses_api_agents.hermes_agent import runner
 from responses_api_agents.hermes_agent.app import (
     HermesAgent,
     HermesAgentConfig,
     HermesAgentRunRequest,
     ModelServerRef,
     ResourcesServerRef,
-    _split_input_to_user_and_history,
-    _trajectory_to_output_items,
+    _split_chat_messages,
 )
-from responses_api_agents.hermes_agent.observability import HermesAgentObserver
+from responses_api_agents.hermes_agent.observability import build_hermes_observations
+from responses_api_agents.hermes_agent.setup_hermes import HERMES_COMMIT, HERMES_RELEASE, HERMES_VERSION
 
 
 class _FakeResponse:
@@ -62,13 +63,26 @@ def _config(**kwargs) -> HermesAgentConfig:
     )
 
 
+@pytest.fixture(autouse=True)
+def _skip_managed_runtime_install(monkeypatch) -> None:
+    monkeypatch.setattr("responses_api_agents.hermes_agent.app.ensure_hermes", lambda: Path(sys.executable))
+
+
 class TestSanity:
     def test_construct(self) -> None:
         HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
 
+    def test_upstream_release_api_matches_adapter(self) -> None:
+        assert HERMES_RELEASE == "v2026.8.19"
+        assert HERMES_VERSION == "0.20.5"
+        assert HERMES_COMMIT == "fcbd1076a93841fa88855acce810e342a5b78101"
+
     def test_concurrency_semaphore_initialized(self) -> None:
         agent = HermesAgent(config=_config(concurrency=4), server_client=MagicMock(spec=ServerClient))
         assert agent.sem._value == 4
+
+    def test_training_token_capture_disabled_by_default(self) -> None:
+        assert _config().token_id_capture is False
 
     def test_model_defaults_to_server_name(self) -> None:
         agent = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
@@ -79,14 +93,13 @@ class TestSanity:
         assert agent._model_name() == "Qwen3.6-35B-A3B"
 
 
-class _FakeAgent:
-    """Stand-in for AIAgent — only needs .interrupt() for the SIGTERM dispatch path."""
-
+class _FakeProcess:
     def __init__(self) -> None:
-        self.interrupt_reason = None
+        self.returncode = None
+        self.signal = None
 
-    def interrupt(self, reason: str) -> None:
-        self.interrupt_reason = reason
+    def send_signal(self, sig: signal.Signals) -> None:
+        self.signal = sig
 
 
 class TestSigtermHandler:
@@ -98,12 +111,12 @@ class TestSigtermHandler:
     in-flight agents.
     """
 
-    def test_active_agents_initialized_empty(self) -> None:
+    def test_active_processes_initialized_empty(self) -> None:
         agent = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
-        assert agent.active_agents == set()
+        assert agent.active_processes == set()
         assert agent.sigterm_installed is False
 
-    def test_handler_installed_once_and_interrupts_all_in_flight(self) -> None:
+    def test_handler_installed_once_and_signals_all_in_flight(self) -> None:
         agent = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
 
         registered: list = []
@@ -121,20 +134,20 @@ class TestSigtermHandler:
 
             dispatch = registered[0]
 
-            # Two concurrent in-flight agents: SIGTERM must interrupt BOTH (the old code lost one).
-            a, b = _FakeAgent(), _FakeAgent()
-            agent.active_agents.update({a, b})
+            # Two concurrent child processes: SIGTERM must reach both.
+            a, b = _FakeProcess(), _FakeProcess()
+            agent.active_processes.update({a, b})
             dispatch()
-            assert a.interrupt_reason == "timeout"
-            assert b.interrupt_reason == "timeout"
+            assert a.signal == signal.SIGTERM
+            assert b.signal == signal.SIGTERM
 
-            # Once an agent finishes (discarded), a later SIGTERM no longer touches it.
-            a.interrupt_reason = None
-            b.interrupt_reason = None
-            agent.active_agents.discard(a)
+            # Once a child finishes (discarded), a later SIGTERM no longer touches it.
+            a.signal = None
+            b.signal = None
+            agent.active_processes.discard(a)
             dispatch()
-            assert a.interrupt_reason is None
-            assert b.interrupt_reason == "timeout"
+            assert a.signal is None
+            assert b.signal == signal.SIGTERM
         finally:
             asyncio.set_event_loop(None)
             loop.close()
@@ -159,31 +172,31 @@ class TestSigtermHandler:
             loop.close()
 
 
-class TestSplitInputToUserAndHistory:
+class TestSplitChatMessages:
     def test_user_only(self) -> None:
-        items = [NeMoGymEasyInputMessage(role="user", content="hi")]
-        user, history, system = _split_input_to_user_and_history(items)
+        items = [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+        user, history, system = _split_chat_messages(items)
         assert user == "hi"
         assert history == []
         assert system is None
 
     def test_system_plus_user(self) -> None:
         items = [
-            NeMoGymEasyInputMessage(role="system", content="be helpful"),
-            NeMoGymEasyInputMessage(role="user", content="hi"),
+            {"role": "system", "content": "be helpful"},
+            {"role": "user", "content": "hi"},
         ]
-        user, history, system = _split_input_to_user_and_history(items)
+        user, history, system = _split_chat_messages(items)
         assert user == "hi"
         assert history == []
         assert system == "be helpful"
 
     def test_history_then_user(self) -> None:
         items = [
-            NeMoGymEasyInputMessage(role="user", content="first"),
-            NeMoGymEasyInputMessage(role="assistant", content="reply"),
-            NeMoGymEasyInputMessage(role="user", content="follow-up"),
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "reply"},
+            {"role": "user", "content": "follow-up"},
         ]
-        user, history, system = _split_input_to_user_and_history(items)
+        user, history, system = _split_chat_messages(items)
         assert user == "follow-up"
         assert history == [
             {"role": "user", "content": "first"},
@@ -193,10 +206,10 @@ class TestSplitInputToUserAndHistory:
 
     def test_resumed_ends_on_assistant(self) -> None:
         items = [
-            NeMoGymEasyInputMessage(role="user", content="q"),
-            NeMoGymEasyInputMessage(role="assistant", content="a"),
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "a"},
         ]
-        user, history, system = _split_input_to_user_and_history(items)
+        user, history, system = _split_chat_messages(items)
         assert user == ""
         assert history == [
             {"role": "user", "content": "q"},
@@ -205,72 +218,93 @@ class TestSplitInputToUserAndHistory:
 
     def test_dict_inputs(self) -> None:
         items = [{"role": "system", "content": "be brief"}, {"role": "user", "content": "ok"}]
-        user, history, system = _split_input_to_user_and_history(items)
+        user, history, system = _split_chat_messages(items)
         assert user == "ok"
         assert history == []
         assert system == "be brief"
 
-
-class TestTrajectoryToOutputItems:
-    def test_empty(self) -> None:
-        assert _trajectory_to_output_items([], 0) == []
-
-    def test_drops_input_prefix(self) -> None:
-        msgs = [
-            {"role": "user", "content": "q"},
-            {"role": "assistant", "content": "a"},
+    def test_preserves_tool_call_history(self) -> None:
+        tool_call = {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "terminal", "arguments": "{}"}}],
+        }
+        items = [
+            {"role": "user", "content": "list files"},
+            tool_call,
+            {"role": "tool", "tool_call_id": "c1", "content": "file.txt"},
+            {"role": "user", "content": "continue"},
         ]
-        out = _trajectory_to_output_items(msgs, 1)
-        assert len(out) == 1
-        assert isinstance(out[0], NeMoGymResponseOutputMessageForTraining)
 
-    def test_assistant_with_tokens(self) -> None:
-        routed_experts = [
-            [[0, 1]],
-            [[2, 3]],
-            [[4, 5]],
-            [[6, 7]],
-        ]
-        msgs = [
+        user, history, system = _split_chat_messages(items)
+
+        assert user == "continue"
+        assert history == items[:-1]
+        assert system is None
+
+
+class TestResponsesConversion:
+    def test_uses_shared_converter_for_input_history_and_output(self, monkeypatch) -> None:
+        import nemo_gym.base_responses_api_agent as base_agent
+
+        monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _gc, _name: {"host": "h", "port": 1})
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {}
+        server_client._build_server_base_url = lambda _cfg: "http://h:1"
+        agent = HermesAgent(config=_config(), server_client=server_client)
+        seen: dict = {}
+
+        async def run_runtime(payload):
+            seen.update(payload)
+            return (
+                {
+                    "messages": [
+                        *payload["history"],
+                        {"role": "user", "content": payload["user_message"]},
+                        {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "c2",
+                                    "type": "function",
+                                    "function": {"name": "terminal", "arguments": '{"cmd":"pwd"}'},
+                                }
+                            ],
+                        },
+                        {"role": "tool", "tool_call_id": "c2", "content": "/workspace"},
+                        {"role": "assistant", "content": "done"},
+                    ]
+                },
+                None,
+            )
+
+        monkeypatch.setattr(agent, "_run_hermes_subprocess", run_runtime)
+        body = NeMoGymResponseCreateParamsNonStreaming.model_validate(
             {
-                "role": "assistant",
-                "content": "answer",
-                "prompt_token_ids": [1, 2],
-                "generation_token_ids": [3, 4],
-                "generation_log_probs": [0.0, -0.1],
-                "routed_experts": routed_experts,
+                "input": [
+                    {"role": "user", "type": "message", "content": "list files"},
+                    {
+                        "type": "function_call",
+                        "call_id": "c1",
+                        "name": "terminal",
+                        "arguments": '{"cmd":"ls"}',
+                    },
+                    {"type": "function_call_output", "call_id": "c1", "output": "file.txt"},
+                    {"role": "user", "type": "message", "content": "where am I?"},
+                ]
             }
-        ]
-        out = _trajectory_to_output_items(msgs, 0)
-        assert len(out) == 1
-        assert isinstance(out[0], NeMoGymResponseOutputMessageForTraining)
-        assert out[0].generation_token_ids == [3, 4]
-        assert out[0].prompt_token_ids == [1, 2]
-        assert out[0].routed_experts == routed_experts
+        )
 
-    def test_assistant_with_tool_call_and_tool_result(self) -> None:
-        msgs = [
-            {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [{"id": "c1", "function": {"name": "terminal", "arguments": '{"cmd":"ls"}'}}],
-            },
-            {"role": "tool", "tool_call_id": "c1", "content": "file.txt\n"},
-        ]
-        out = _trajectory_to_output_items(msgs, 0)
-        assert len(out) == 3
-        assert isinstance(out[0], NeMoGymResponseOutputMessageForTraining)
-        assert isinstance(out[1], NeMoGymResponseFunctionToolCall)
-        assert out[1].name == "terminal"
-        assert out[1].arguments == '{"cmd":"ls"}'
-        assert isinstance(out[2], NeMoGymFunctionCallOutput)
-        assert out[2].call_id == "c1"
-        assert out[2].output == "file.txt\n"
+        response = asyncio.run(agent._create_response(body))
 
-    def test_skips_non_dict_items(self) -> None:
-        msgs = [None, "string", {"role": "assistant", "content": "ok"}]
-        out = _trajectory_to_output_items(msgs, 0)
-        assert len(out) == 1
+        assert seen["user_message"] == "where am I?"
+        assert [message["role"] for message in seen["history"]] == ["user", "assistant", "tool"]
+        assert seen["history"][1]["tool_calls"][0]["function"]["name"] == "terminal"
+        assert [item.type for item in response.output] == ["function_call", "function_call_output", "message"]
+        assert response.output[0].name == "terminal"
+        assert response.output[1].output == "/workspace"
+        assert response.output[2].content[0].text == "done"
 
 
 class TestRolloutCorrelation:
@@ -286,26 +320,20 @@ class TestRolloutCorrelation:
         server_client._build_server_base_url = lambda _cfg: "http://h:1"
         agent = HermesAgent(config=_config(), server_client=server_client)
         monkeypatch.setattr(agent, "_ensure_sigterm_handler", lambda: None)
-
-        seen: dict = {}
-
-        class _StubAIAgent:
-            def __init__(self, **kwargs) -> None:
-                seen["base_url"] = kwargs.get("base_url")
-                self._build_api_kwargs = lambda _messages: {}
-                self.compression_enabled = True
-
-            def run_conversation(self, *args, **kwargs) -> dict:
-                return {"messages": [{"role": "assistant", "content": "ok"}]}
-
-        monkeypatch.setattr("run_agent.AIAgent", _StubAIAgent)
+        run_runtime = AsyncMock(
+            return_value=(
+                {"messages": [{"role": "assistant", "content": "ok"}]},
+                AgentObservationBundle(source="hermes"),
+            )
+        )
+        monkeypatch.setattr(agent, "_run_hermes_subprocess", run_runtime)
         client = TestClient(agent.setup_webserver())
 
         assert client.post("/ng-rollout/rid/v1/responses", json={"input": "hi"}).status_code == 200
-        assert seen["base_url"] == "http://h:1/ng-rollout/rid/v1"
+        assert run_runtime.await_args.args[0]["base_url"] == "http://h:1/ng-rollout/rid/v1"
 
         direct = asyncio.run(agent.responses(request=None, body=NeMoGymResponseCreateParamsNonStreaming(input="hi")))
-        assert seen["base_url"] == "http://h:1/v1"
+        assert run_runtime.await_args.args[0]["base_url"] == "http://h:1/v1"
         assert "_ng_agent_observations" not in direct.model_dump(mode="json")
 
         episode = asyncio.run(
@@ -314,9 +342,8 @@ class TestRolloutCorrelation:
                 rollout_id="rid",
             )
         )
-        assert seen["base_url"] == "http://h:1/ng-rollout/rid/v1"
+        assert run_runtime.await_args.args[0]["base_url"] == "http://h:1/ng-rollout/rid/v1"
         assert episode.observations.source == "hermes"
-        assert episode.observations.records[0].invocation_id == "root"
 
 
 class TestMaxTokens:
@@ -329,19 +356,13 @@ class TestMaxTokens:
         server_client._build_server_base_url = lambda _cfg: "http://h:1"
         agent = HermesAgent(config=_config(**config_kwargs), server_client=server_client)
         monkeypatch.setattr(agent, "_ensure_sigterm_handler", lambda: None)
-
         seen: dict = {}
 
-        class _StubAIAgent:
-            def __init__(self, **kwargs) -> None:
-                seen["max_tokens"] = kwargs.get("max_tokens")
-                self._build_api_kwargs = lambda _messages: {}
-                self.compression_enabled = True
+        async def run_runtime(payload):
+            seen.update(payload)
+            return {"messages": [{"role": "assistant", "content": "ok"}]}, None
 
-            def run_conversation(self, *args, **kwargs) -> dict:
-                return {"messages": [{"role": "assistant", "content": "ok"}]}
-
-        monkeypatch.setattr("run_agent.AIAgent", _StubAIAgent)
+        monkeypatch.setattr(agent, "_run_hermes_subprocess", run_runtime)
         return agent, seen
 
     def test_max_tokens_passed_to_ai_agent(self, monkeypatch) -> None:
@@ -358,6 +379,99 @@ class TestMaxTokens:
         asyncio.run(agent.responses(request=None, body=NeMoGymResponseCreateParamsNonStreaming(input="hi")))
         assert seen["max_tokens"] is None
 
+    def test_uses_request_overrides(self, monkeypatch) -> None:
+        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+
+        agent, seen = self._agent_and_seen(monkeypatch, temperature=0.25)
+        asyncio.run(agent.responses(request=None, body=NeMoGymResponseCreateParamsNonStreaming(input="hi")))
+
+        assert seen["request_overrides"] == {
+            "temperature": 0.25,
+            "extra_body": {
+                "chat_template_kwargs": {
+                    "enable_thinking": True,
+                    "truncate_history_thinking": False,
+                }
+            },
+        }
+
+    def test_can_disable_chat_template_overrides(self, monkeypatch) -> None:
+        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+
+        agent, seen = self._agent_and_seen(
+            monkeypatch,
+            temperature=None,
+            chat_template_kwargs_enabled=False,
+        )
+        asyncio.run(agent.responses(request=None, body=NeMoGymResponseCreateParamsNonStreaming(input="hi")))
+
+        assert seen["request_overrides"] == {}
+
+
+class TestManagedRunner:
+    def test_uses_upstream_constructor_contract(self, monkeypatch) -> None:
+        seen: dict = {}
+
+        class _StubAIAgent:
+            def __init__(self, **kwargs) -> None:
+                seen.update(kwargs)
+                seen["agent"] = self
+
+            def run_conversation(self, *args) -> dict:
+                seen["run_args"] = args
+                return {"messages": [{"role": "assistant", "content": "ok"}]}
+
+            def interrupt(self, reason: str) -> None:
+                seen["interrupt"] = reason
+
+            def close(self) -> None:
+                seen["closed"] = True
+
+        monkeypatch.setattr(runner, "_load_ai_agent", lambda: _StubAIAgent)
+        result, observations = runner.run(
+            {
+                "base_url": "http://model/v1",
+                "api_key": "gym",  # pragma: allowlist secret
+                "model": "model",
+                "max_iterations": 7,
+                "max_tokens": 4096,
+                "enabled_toolsets": ["terminal"],
+                "disabled_toolsets": ["browser"],
+                "request_overrides": {"temperature": 0.2},
+                "user_message": "question",
+                "system_message": "system",
+                "history": [{"role": "user", "content": "earlier"}],
+                "capture_observations": True,
+            }
+        )
+
+        assert result["messages"][-1]["content"] == "ok"
+        assert seen["base_url"] == "http://model/v1"
+        assert seen["max_tokens"] == 4096
+        assert seen["request_overrides"] == {"temperature": 0.2}
+        assert seen["skip_background_review"] is True
+        assert seen["agent"]._persist_disabled is True
+        assert seen["agent"]._disable_streaming is True
+        assert seen["run_args"] == (
+            "question",
+            "system",
+            [{"role": "user", "content": "earlier"}],
+        )
+        assert observations is not None
+        assert observations["source"] == "hermes"
+        assert observations["invocations"][0]["messages"][-1]["content"] == "ok"
+        json.dumps(observations)
+        bundle = build_hermes_observations(
+            observations,
+            model_ref=ModelServerRef(type="responses_api_models", name="policy"),
+        )
+        root = next(record for record in bundle.records if record.kind == "agent_invocation")
+        assert root.conversation[-1].content[0].text == "ok"
+        assert seen["closed"] is True
+        assert "use_streaming" not in seen
+        assert "insert_reasoning" not in seen
+        assert "persist_session" not in seen
+
 
 class TestObservability:
     @pytest.mark.parametrize(
@@ -373,32 +487,33 @@ class TestObservability:
         server_client.global_config_dict = {}
         server_client._build_server_base_url = lambda _cfg: "http://h:1"
         agent = HermesAgent(config=_config(terminal_backend=terminal_backend), server_client=server_client)
-        monkeypatch.setattr(agent, "_ensure_sigterm_handler", lambda: None)
+        runtime_result = {
+            "completed": True,
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "ok"},
+            ],
+        }
 
-        class _StubAIAgent:
-            def __init__(self, **kwargs) -> None:
-                self._build_api_kwargs = lambda _messages: {}
+        async def run_runtime(payload):
+            observations = (
+                AgentObservationBundle(
+                    source="hermes",
+                    gaps=[ObservationGap(code="observation_capture_failed")],
+                )
+                if payload["capture_observations"]
+                else None
+            )
+            return runtime_result, observations
 
-            def run_conversation(self, *args, **kwargs) -> dict:
-                return {
-                    "completed": True,
-                    "messages": [
-                        {"role": "user", "content": "hi"},
-                        {"role": "assistant", "content": "ok"},
-                    ],
-                }
-
-        monkeypatch.setattr("run_agent.AIAgent", _StubAIAgent)
+        monkeypatch.setattr(agent, "_run_hermes_subprocess", run_runtime)
         body = NeMoGymResponseCreateParamsNonStreaming(input="hi")
         baseline = asyncio.run(agent.responses(request=None, body=body))
-
-        def fail_finish(*args, **kwargs):
-            raise RuntimeError("observer failed")
-
-        monkeypatch.setattr(HermesAgentObserver, "finish", fail_finish)
         episode = asyncio.run(agent._create_episode(body=body, rollout_id="rid"))
 
-        assert episode.response.output == baseline.output
+        assert [item.model_dump(exclude={"id"}) for item in episode.response.output] == [
+            item.model_dump(exclude={"id"}) for item in baseline.output
+        ]
         assert episode.response.usage == baseline.usage
         assert [gap.code for gap in episode.observations.gaps] == [
             "observation_capture_failed",
@@ -465,21 +580,11 @@ class TestObservability:
         server_client.global_config_dict = {}
         server_client._build_server_base_url = lambda _cfg: "http://h:1"
         agent = HermesAgent(config=_config(), server_client=server_client)
-        monkeypatch.setattr(agent, "_ensure_sigterm_handler", lambda: None)
 
-        class _FailingAIAgent:
-            def __init__(self, **kwargs) -> None:
-                self._build_api_kwargs = lambda _messages: {}
+        async def run_runtime(_payload):
+            raise ValueError("agent failed")
 
-            def run_conversation(self, *args, **kwargs) -> dict:
-                raise ValueError("agent failed")
-
-        monkeypatch.setattr("run_agent.AIAgent", _FailingAIAgent)
-        monkeypatch.setattr(
-            HermesAgentObserver,
-            "finish",
-            MagicMock(side_effect=RuntimeError("observer failed")),
-        )
+        monkeypatch.setattr(agent, "_run_hermes_subprocess", run_runtime)
 
         with pytest.raises(ValueError, match="agent failed"):
             asyncio.run(

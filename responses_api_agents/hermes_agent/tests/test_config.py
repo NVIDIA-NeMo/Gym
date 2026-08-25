@@ -29,12 +29,27 @@ def test_config_yaml_parses():
     assert "hermes_agent" in data
     inner = data["hermes_agent"]["responses_api_agents"]["hermes_agent"]
     assert inner["entrypoint"] == "app.py"
+    assert inner.get("token_id_capture", False) is False
     assert inner["max_turns"] == 30
     assert inner["enabled_toolsets"] is None
     assert inner["system_prompt"] is None
     assert inner["terminal_backend"] == "local"
     assert inner["terminal_timeout"] == 60
     assert "disabled_toolsets" not in inner
+
+
+def test_hermes_runtime_uses_named_upstream_release():
+    root = Path(__file__).resolve().parent.parent
+    requirements = (root / "requirements.txt").read_text()
+    setup = (root / "setup_hermes.py").read_text()
+
+    assert "hermes-agent" not in requirements
+    assert 'HERMES_RELEASE = "v2026.8.19"' in setup
+    assert 'HERMES_VERSION = "0.20.5"' in setup
+    assert 'HERMES_COMMIT = "fcbd1076a93841fa88855acce810e342a5b78101"' in setup
+    assert "HERMES_INSTALLER_SHA256" in setup
+    assert '"--frozen"' in setup
+    assert "cmunley1/hermes-agent" not in requirements
 
 
 if __name__ == "__main__":
