@@ -106,7 +106,8 @@ except ImportError:  # pragma: no cover - environment-dependent
 CONFIG_GLOBS = [
     "resources_servers/*/configs/*.yaml",
     "environments/*/config*.yaml",
-    "benchmarks/**/config*.yaml",
+    # Benchmark overlays are not all named config*.yaml (opencode.yaml, cascade.yaml, ...).
+    "benchmarks/**/*.yaml",
     "responses_api_agents/*/configs/*.yaml",
 ]
 DATA_GLOBS = [
