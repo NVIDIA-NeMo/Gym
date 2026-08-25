@@ -39,10 +39,17 @@ class CheckSubject(str, Enum):
 
 
 class CheckInput(str, Enum):
+    """Persisted or derived evidence required to evaluate a check."""
+
+    # One parsed object from a rollout JSONL file.
     RECORD = "record"
+    # Model-call evidence from a capture sidecar or an embedded rollout projection.
     CAPTURE = "capture"
+    # Captured calls matched in memory to explicit TrajectoryTurn model-call references.
     BOUND_CALLS = "bound_calls"
+    # Runner-derived rollout verdicts grouped by task for task-level reduction.
     REPEAT_VERDICTS = "repeat_verdicts"
+    # Runner-derived RolloutDigest objects grouped by task for task-level reduction.
     REPEAT_DIGESTS = "repeat_digests"
 
 
