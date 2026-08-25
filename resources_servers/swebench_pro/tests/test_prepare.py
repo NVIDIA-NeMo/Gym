@@ -43,6 +43,7 @@ def dataset_row(instance_id: str = "instance_example", dockerhub_tag: str = "exa
         "patch": "patch",
         "test_patch": "",
         "problem_statement": "Fix it",
+        "repo_language": "python",
         "fail_to_pass": '["new_test"]',
         "pass_to_pass": '["old_test"]',
         "before_repo_set_cmd": "",
@@ -61,7 +62,11 @@ def test_enrich_row_embeds_pinned_evaluator_assets(tmp_path) -> None:
     assert row["base_dockerfile"] == "FROM base\n"
     assert row["image_digest"] == "sha256:digest"
     assert row["evaluator_commit"] == UPSTREAM_COMMIT
-    assert row["responses_create_params"]["input"][0]["content"] == "Fix it"
+    prompt = row["responses_create_params"]["input"][0]["content"]
+    assert "Implement the necessary changes to the repository ( /app )" in prompt
+    assert "I've uploaded a python code repository in the directory /app" in prompt
+    assert "<issue_details>\nFix it\n</issue_details>" in prompt
+    assert "{{" not in prompt
 
 
 def test_prepare_writes_self_contained_jsonl(tmp_path) -> None:

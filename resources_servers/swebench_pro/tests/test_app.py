@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -20,11 +21,12 @@ import pytest
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.swebench_pro.app import (
     SWEBenchProInstanceRequest,
     SWEBenchProResourcesServer,
     SWEBenchProResourcesServerConfig,
+    SWEBenchProSeedSessionRequest,
 )
 from resources_servers.swebench_pro.verification import VerificationResult
 
@@ -58,7 +60,7 @@ def request_body() -> dict:
     }
 
 
-def make_server(*, golden: bool) -> SWEBenchProResourcesServer:
+def make_server(*, golden: bool, apply_anti_cheating: bool = True) -> SWEBenchProResourcesServer:
     config = SWEBenchProResourcesServerConfig(
         host="0.0.0.0",
         port=8080,
@@ -67,6 +69,7 @@ def make_server(*, golden: bool) -> SWEBenchProResourcesServer:
         sandbox_provider="test",
         sandbox_config={},
         is_verifying_golden_patch=golden,
+        apply_anti_cheating=apply_anti_cheating,
         prefetch_go_modules=True,
     )
     return SWEBenchProResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
@@ -149,6 +152,48 @@ def test_image_digest_avoids_case_sensitive_tag_rewriting() -> None:
     instance = SWEBenchProInstanceRequest.model_validate(body)
 
     assert make_server(golden=True)._image(instance) == "docker.io/jefzda/sweap-images@sha256:abc123"
+
+
+@pytest.mark.asyncio
+async def test_seed_session_applies_shared_anti_cheat_setup(monkeypatch: MonkeyPatch) -> None:
+    server = make_server(golden=False)
+    sandbox = SimpleNamespace(
+        _handle=SimpleNamespace(sandbox_id="sandbox-id"),
+        upload=AsyncMock(),
+        exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="", stderr="")),
+    )
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=sandbox))
+    request = SimpleNamespace(session={SESSION_ID_KEY: "session"})
+    body = SWEBenchProSeedSessionRequest.model_validate(request_body())
+
+    response = await server.seed_session(request, body)
+
+    expected_script = Path(__file__).parents[2] / "swebench" / "anti_cheat_setup.sh"
+    sandbox.upload.assert_awaited_once_with(expected_script, "/app/anti_cheat_setup.sh")
+    sandbox.exec.assert_awaited_once_with(
+        "git reset --hard && WORKING_DIRECTORY=/app bash anti_cheat_setup.sh && rm anti_cheat_setup.sh",
+        timeout_s=600,
+    )
+    assert response.sandbox_handle == "sandbox-id"
+    assert server._session_id_to_sandbox["session"] is sandbox
+
+
+@pytest.mark.asyncio
+async def test_seed_session_can_skip_anti_cheat_setup(monkeypatch: MonkeyPatch) -> None:
+    server = make_server(golden=False, apply_anti_cheating=False)
+    sandbox = SimpleNamespace(
+        _handle=SimpleNamespace(sandbox_id="sandbox-id"),
+        upload=AsyncMock(),
+        exec=AsyncMock(),
+    )
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=sandbox))
+    request = SimpleNamespace(session={SESSION_ID_KEY: "session"})
+    body = SWEBenchProSeedSessionRequest.model_validate(request_body())
+
+    await server.seed_session(request, body)
+
+    sandbox.upload.assert_not_awaited()
+    sandbox.exec.assert_not_awaited()
 
 
 @pytest.mark.asyncio
