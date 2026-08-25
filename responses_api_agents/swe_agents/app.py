@@ -70,6 +70,12 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.profiling import Profiler
 from nemo_gym.server_utils import get_first_server_config_dict
+from responses_api_agents.swe_agents.opencode_replay import (
+    build_replay_subagent_manifest,
+    merge_replay_subagent_trajectories,
+    parse_replay_subagent_manifest,
+    parse_replay_subagent_payload,
+)
 from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
 
 
@@ -1588,6 +1594,32 @@ fi
         report_path.write_text(json.dumps(report, indent=2))
 
 
+def _parse_replay_messages(problem_info: Dict[str, Any]) -> Optional[list]:
+    """Parse `problem_info["replay_messages"]` (JSON-encoded chat-completion
+    message list, or already-decoded list; metadata is typed Dict[str, str] so
+    the wire form is always a JSON string, but tests may pass a list directly).
+    """
+    raw = problem_info.get("replay_messages")
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+    if isinstance(raw, list):
+        return raw
+    return None
+
+
+def _extract_replay_system_content(replay_messages_list: list) -> Optional[str]:
+    """First non-empty system-role message content in a chat-completion message list."""
+    for m in replay_messages_list:
+        if isinstance(m, dict) and m.get("role") == "system":
+            content = m.get("content")
+            if isinstance(content, str) and content.strip():
+                return content
+    return None
+
+
 class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
     def _sync_openhands_to_commit(self, openhands_dir: Path, target: str) -> None:
         """Ensure the OpenHands checkout is at `target` (a resolved, full commit SHA).
@@ -1739,14 +1771,7 @@ AGENT_FRAMEWORK_COMMIT={commit} \\
         # persistent_dir (mounted as /trajectories_mount inside the apptainer) and
         # forward the path as positional arg #18 to run_infer.sh.
         replay_messages_mounted_path = ""
-        replay_messages_raw = self.config.problem_info.get("replay_messages")
-        if isinstance(replay_messages_raw, str):
-            try:
-                replay_messages_list = json.loads(replay_messages_raw)
-            except json.JSONDecodeError:
-                replay_messages_list = None
-        else:
-            replay_messages_list = replay_messages_raw
+        replay_messages_list = _parse_replay_messages(self.config.problem_info)
         if replay_messages_list:
             replay_messages_host_path = self.config.persistent_dir / "replay_messages.json"
             replay_messages_host_path.write_text(json.dumps(replay_messages_list))
@@ -1762,13 +1787,7 @@ AGENT_FRAMEWORK_COMMIT={commit} \\
             # YAML-level agent_prompt_overrides). The standard mount logic in
             # _build_apptainer_command bind-mounts this file at the container's
             # system_prompt.j2 path.
-            replay_system_content = None
-            for m in replay_messages_list:
-                if isinstance(m, dict) and m.get("role") == "system":
-                    c = m.get("content")
-                    if isinstance(c, str) and c.strip():
-                        replay_system_content = c
-                        break
+            replay_system_content = _extract_replay_system_content(replay_messages_list)
             if replay_system_content:
                 sp_host_path = self.config.persistent_dir / "replay_system_prompt.j2"
                 sp_host_path.write_text(replay_system_content)
@@ -2039,6 +2058,45 @@ def _render_opencode_user_message(
 class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
     """Drives the opencode fork; mirrors OpenHandsHarnessProcessor."""
 
+    def _opencode_at_config_commit(self, opencode_dir: Path) -> bool:
+        """Whether `opencode_dir`'s checkout already matches config.agent_framework_commit.
+
+        Unlike OpenHandsHarnessProcessor's equivalent check, this always fetches
+        first: `agent_framework_commit` is commonly a branch name (e.g. `sdd/dev`)
+        rather than a pinned SHA for opencode, so comparing against a possibly
+        stale local ref would silently miss commits pushed to that branch since
+        the last fetch — exactly the "already set up, so I never re-synced"
+        failure mode this check exists to prevent.
+        """
+        if not (opencode_dir / ".git").exists():
+            return False
+
+        target = self.config.agent_framework_commit
+
+        def _git(*args: str) -> Optional[str]:
+            try:
+                result = subprocess_run(
+                    ["git", "-C", str(opencode_dir), *args],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                return result.stdout.strip()
+            except Exception:
+                return None
+
+        current_commit = _git("rev-parse", "HEAD")
+        if not current_commit:
+            return False
+
+        _git("fetch", "--all", "--tags", "--prune")
+        # Prefer the remote-tracking ref so a moving branch name resolves to
+        # what's actually on the remote, not a stale local branch tip.
+        resolved_target = _git("rev-parse", "--verify", f"origin/{target}^{{commit}}") or _git(
+            "rev-parse", "--verify", f"{target}^{{commit}}"
+        )
+        return bool(resolved_target) and resolved_target == current_commit
+
     def setup(self) -> Path:
         setup_dir = self.resolve_setup_dir("swe_opencode_setup")
 
@@ -2047,15 +2105,23 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             bun_dir = setup_dir / "bun"
 
             opencode_bundle = opencode_dir / ".bench-build" / "opencode.js"
-            if (
+            already_built = (
                 (opencode_dir / "node_modules").exists()
                 and (bun_dir / "bin" / "bun").exists()
                 and opencode_bundle.exists()
-            ):
-                print(f"opencode already set up at {setup_dir}", flush=True)
+            )
+            if already_built and self._opencode_at_config_commit(opencode_dir):
+                print(f"opencode already set up at {setup_dir} (at config commit)", flush=True)
                 return setup_dir
 
-            print(f"Setting up opencode environment at {setup_dir}...", flush=True)
+            if already_built:
+                print(
+                    f"opencode at {setup_dir} does not match config commit "
+                    f"{self.config.agent_framework_commit}; re-syncing (bun install + rebuild)...",
+                    flush=True,
+                )
+            else:
+                print(f"Setting up opencode environment at {setup_dir}...", flush=True)
             setup_dir.mkdir(parents=True, exist_ok=True)
 
             script_fpath = self.parent_dir / "setup_scripts/opencode.sh"
@@ -2103,6 +2169,43 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             if self.config.inference_params.get(key) is not None:
                 llm_model_cfg[key] = self.config.inference_params[key]
         config_str = json.dumps({"llm": {"model": llm_model_cfg}})
+
+        # REPLAY_MESSAGES_PATH support: mirrors OpenHandsHarnessProcessor. When
+        # problem_info carries `replay_messages`, dump it to a file under
+        # persistent_dir (mounted as /trajectories_mount inside the apptainer)
+        # and forward the mounted path to run_infer.sh / bench/cli.ts as
+        # positional arg #13. The bench harness replays each recorded tool call
+        # for real against the fresh sandbox (via a scripted turn in the
+        # nemo-gym provider that feeds opencode's normal tool-execution path —
+        # same "swap the transport, keep the loop" design as live turns) before
+        # falling through to live model calls, so the container's filesystem
+        # state stays consistent with the replayed conversation.
+        #
+        # The replay's own system message is pinned as resolved_system_prompt_template
+        # UNCONDITIONALLY (overriding any agent_prompt_overrides selection), same
+        # rationale as OpenHands: it's the canonical source of truth for the
+        # recorded conversation, and the standard mount logic in
+        # _build_apptainer_command already bind-mounts resolved_system_prompt_template
+        # to /opencode_setup/opencode/system_prompt.txt for the opencode path.
+        replay_messages_mounted_path = ""
+        replay_subagents_mounted_path = ""
+        replay_messages_list = _parse_replay_messages(data_point)
+        if replay_messages_list:
+            replay_messages_host_path = self.config.persistent_dir / "replay_messages.json"
+            replay_messages_host_path.write_text(json.dumps(replay_messages_list))
+            replay_messages_mounted_path = f"{self.config.base_mounted_dir}/replay_messages.json"
+
+            replay_system_content = _extract_replay_system_content(replay_messages_list)
+            if replay_system_content:
+                sp_host_path = self.config.persistent_dir / "replay_system_prompt.txt"
+                sp_host_path.write_text(replay_system_content)
+                self.config.resolved_system_prompt_template = str(sp_host_path)
+
+            replay_subagent_manifest = parse_replay_subagent_manifest(data_point)
+            if replay_subagent_manifest:
+                replay_subagents_host_path = self.config.persistent_dir / "replay_subagents.json"
+                replay_subagents_host_path.write_text(json.dumps(replay_subagent_manifest))
+                replay_subagents_mounted_path = f"{self.config.base_mounted_dir}/replay_subagents.json"
 
         workspace_path = _resolve_opencode_workspace_path(data_point)
         user_message = _render_opencode_user_message(
@@ -2186,7 +2289,7 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             f"export NEMO_GYM_MODEL_SERVER_NAME={self.config.model_server_name} && "
             f"export NEMO_GYM_MODEL_SERVER_BASE_URL={shlex.quote(model_server_base_url)} && "
             f"export COMMAND_EXEC_TIMEOUT={self.config.command_exec_timeout} && "
-            f"export ENABLE_SUBAGENTS={'1' if self.config.opencode_subagents_enabled else '0'} && "
+            f"export ENABLE_SUBAGENTS={'1' if self.config.opencode_subagents_enabled or replay_subagents_mounted_path else '0'} && "
             "export OPENCODE_DISABLE_MODELS_FETCH=1 && "
             "mkdir -p /root/.cache/opencode && "
             "echo '{}' >/root/.cache/opencode/models.json && "
@@ -2208,8 +2311,19 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             f"    {user_message_in_sif} "  # $11: pre-rendered user message file
         )
 
-        if self.config.resolved_system_prompt_template is not None:
-            agent_main_cmd += "    /opencode_setup/opencode/system_prompt.txt "  # $12: system override
+        # Positional args 12..14 of run_infer.sh. Empty = shell-side default.
+        # Emit up to the LAST non-empty slot so a trailing placeholder is only
+        # inserted when a later arg (REPLAY_MESSAGES_PATH at #13) needs it at
+        # the right shift index.
+        sp_set = self.config.resolved_system_prompt_template is not None
+        positional_args = [
+            "/opencode_setup/opencode/system_prompt.txt" if sp_set else "",  # 12 SYSTEM_PROMPT_PATH
+            replay_messages_mounted_path or "",  # 13 REPLAY_MESSAGES_PATH
+            replay_subagents_mounted_path or "",  # 14 REPLAY_SUBAGENTS_PATH
+        ]
+        last_set = max((i for i, a in enumerate(positional_args) if a), default=-1)
+        for a in positional_args[: last_set + 1]:
+            agent_main_cmd += f"    {a} " if a else "    '' "
 
         agent_script_name = f"agent_script_{agent_run_id}.sh"
         agent_script_path = self.config.persistent_dir / agent_script_name
@@ -3038,14 +3152,25 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             by_session[sess_id] = data
         for sess_id, data in by_session.items():
             messages, tools = self._materialize_trajectory(data)
-            out.append(
-                {
-                    "session_id": sess_id,
-                    "parent_session_id": data.get("parent_session_id"),
-                    "messages": messages,
-                    "tools": tools,
-                }
-            )
+            entry = {
+                "session_id": sess_id,
+                "parent_session_id": data.get("parent_session_id"),
+                "messages": messages,
+                "tools": tools,
+            }
+            for key in [
+                "recorded_session_id",
+                "recorded_parent_session_id",
+                "spawn_call_id",
+                "spawn_index",
+                "subagent_type",
+                "replay_prefix_message_count",
+                "global_turn",
+                "session_start_global_turn",
+            ]:
+                if data.get(key) is not None:
+                    entry[key] = data[key]
+            out.append(entry)
         return out
 
     ########################################
@@ -3494,8 +3619,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         Returns None for plain seed inputs (system + user only) — there is nothing
         to replay in that case. Returns a JSON-encoded `list[dict]` (chat-completion
         message format) when function_call / function_call_output items are present.
+
+        Supported for both `openhands` and `opencode` harnesses.
         """
-        if self.config.agent_framework != "openhands":
+        if self.config.agent_framework not in ("openhands", "opencode"):
             return None
         input_items = body.input if isinstance(body.input, list) else []
 
@@ -3522,17 +3649,29 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         problem_info = body.metadata | {"container_formatter": self.config.container_formatter}
         instance_id = problem_info.get("instance_id", "unknown")
 
-        # REPLAY_MESSAGES_PATH support (OpenHands harness only): when the request's
-        # input carries a prior agent trajectory (function_call / function_call_output
-        # items beyond the initial system+user messages), convert the partial
-        # Responses-format input to OpenAI chat-completion format here in the gym
-        # layer and surface it via problem_info["replay_messages"] (JSON-encoded
-        # because metadata is typed as Dict[str, str]). OpenHandsHarnessProcessor
-        # then writes it to a file and forwards the path to run_infer.sh as
-        # positional arg #18.
+        # REPLAY_MESSAGES_PATH support (openhands + opencode harnesses): when the
+        # request's input carries a prior agent trajectory (function_call /
+        # function_call_output items beyond the initial system+user messages),
+        # convert the partial Responses-format input to OpenAI chat-completion
+        # format here in the gym layer and surface it via
+        # problem_info["replay_messages"] (JSON-encoded because metadata is typed
+        # as Dict[str, str]). OpenHandsHarnessProcessor / OpenCodeHarnessProcessor
+        # then write it to a file and forward the path to run_infer.sh as a
+        # positional arg (openhands: #18; opencode: #13).
         replay_messages_json = self._maybe_build_replay_messages(body)
         if replay_messages_json is not None:
             problem_info = {**problem_info, "replay_messages": replay_messages_json}
+            subagent_payload = parse_replay_subagent_payload(problem_info)
+            if subagent_payload:
+                replay_subagent_manifest = build_replay_subagent_manifest(
+                    json.loads(replay_messages_json),
+                    subagent_payload,
+                )
+                if replay_subagent_manifest:
+                    problem_info = {
+                        **problem_info,
+                        "replay_subagent_manifest": json.dumps(replay_subagent_manifest),
+                    }
 
         # Create persistent directory for I/O and logs in local workspace
         instance_dir = f"{instance_id}_{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
@@ -3619,6 +3758,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             generation_apptainer_spinup_timestamp_mounted_fpath=base_mounted_dir
             / "generation_apptainer_spinup_timestamp",
         )
+
+        if parse_replay_subagent_manifest(problem_info):
+            params.opencode_subagents_enabled = True
 
         params.metrics_fpath.write_text("{}")
 
@@ -3791,12 +3933,25 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             "metrics": json.dumps(updated_metrics),
             "instance_config": params.model_dump_json(),
         }
-        if params.opencode_subagents_enabled:
-            subagent_trajectories = [
+        replay_subagent_manifest = parse_replay_subagent_manifest(params.problem_info)
+        if params.opencode_subagents_enabled or replay_subagent_manifest:
+            captured_subagents = [
                 entry
                 for entry in self.get_all_session_trajectories_from_completions(trajectories_dir, params.instance_id)
                 if entry.get("parent_session_id")
             ]
+            if captured_subagents:
+                captured_manifest = build_replay_subagent_manifest(
+                    chat_completions_trajectory,
+                    {"sessions": captured_subagents},
+                    strict=False,
+                )
+                if captured_manifest:
+                    captured_subagents = captured_manifest["sessions"]
+            subagent_trajectories = merge_replay_subagent_trajectories(
+                replay_subagent_manifest,
+                captured_subagents,
+            )
             metadata["subagent_trajectories"] = json.dumps(subagent_trajectories)
 
         return NeMoGymResponse(
@@ -3827,6 +3982,14 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             subagent_trajectories = None
             if "subagent_trajectories" in metadata:
                 subagent_trajectories = json.loads(metadata["subagent_trajectories"])
+                # Make the returned create params replay-ready. Historical
+                # rollout rows exposed this only as a sibling result field,
+                # which meant callers had to copy it into request metadata
+                # manually before branching the trajectory.
+                responses_create_params["metadata"] = {
+                    **(responses_create_params.get("metadata") or {}),
+                    "subagent_trajectories": metadata["subagent_trajectories"],
+                }
 
             return SWEBenchVerifyResponse(
                 responses_create_params=responses_create_params,
