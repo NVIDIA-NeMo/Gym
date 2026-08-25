@@ -1086,6 +1086,7 @@ class TestRolloutCollection:
                 },
                 "key_metrics": {"mean/abc usage": 1.0},
                 "group_level_metrics": actual_aggregate_metrics[0]["group_level_metrics"],
+                "perf_summary": None,
             }
         ]
         assert expected_aggregate_metrics == actual_aggregate_metrics
@@ -1749,6 +1750,64 @@ class TestRolloutCollection:
             assert "ng_model_call_capture" not in item
             assert "ng_trajectory" not in item
             assert "usage" in item["response"]
+
+    async def test_call_aggregate_metrics_includes_perf_summary_when_present(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """perf_summary must survive _call_aggregate_metrics' hand-picked agent_entry dict --
+        it's easy to add a field to AggregateMetrics and forget this call site only forwards an
+        explicit allowlist rather than the whole model."""
+        agg = AggregateMetrics(
+            agent_metrics={"mean/reward": 0.5},
+            key_metrics={"mean/reward": 0.5},
+            group_level_metrics=[{"mean/reward": 1.0}],
+            perf_summary={"mean_num_turns": 3.0, "total_latency_mean_ms": 1000.0},
+        )
+
+        mock_response = AsyncMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.read = AsyncMock(return_value=orjson.dumps(agg.model_dump()))
+        mock_response.status = 200
+
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(return_value=mock_response)
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
+        )
+        helper = RolloutCollectionHelper()
+
+        rows = [{AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}]
+        results = [{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0}]
+
+        metrics_fpath = await helper._call_aggregate_metrics(results, rows, tmp_path / "output.jsonl")
+
+        written = json.loads(metrics_fpath.read_text())
+        assert written[0]["perf_summary"] == {"mean_num_turns": 3.0, "total_latency_mean_ms": 1000.0}
+
+    async def test_call_aggregate_metrics_omits_perf_summary_when_absent(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        agg = AggregateMetrics(agent_metrics={"mean/reward": 0.5}, key_metrics={"mean/reward": 0.5})
+
+        mock_response = AsyncMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.read = AsyncMock(return_value=orjson.dumps(agg.model_dump()))
+        mock_response.status = 200
+
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(return_value=mock_response)
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
+        )
+        helper = RolloutCollectionHelper()
+
+        rows = [{AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}]
+        results = [{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0}]
+
+        metrics_fpath = await helper._call_aggregate_metrics(results, rows, tmp_path / "output.jsonl")
+
+        written = json.loads(metrics_fpath.read_text())
+        assert "perf_summary" not in written[0]
 
     async def test_call_aggregate_metrics_multiple_agents(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

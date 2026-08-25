@@ -28,6 +28,7 @@ from nemo_gym.reward_profile import (
     add_avg_sample_std_dev,
     compute_aggregate_metrics,
     compute_pass_majority_metrics,
+    compute_perf_summary,
     compute_subset_metrics,
     highest_k_metrics,
 )
@@ -474,3 +475,116 @@ class TestAddAvgSampleStdDev:
         before = dict(metrics)
         add_avg_sample_std_dev(metrics, all_score_dicts, score_names, max_k)
         assert metrics == before
+
+
+class TestComputePerfSummary:
+    def test_empty_input_returns_none(self) -> None:
+        assert compute_perf_summary([]) is None
+
+    def test_percentiles_and_means_over_five_rollouts(self) -> None:
+        # total_latency_ms = 100, 200, 300, 400, 500 -> exact quartile/percentile boundaries at
+        # this size make the expected linear-interpolation values easy to hand-verify.
+        ng_perf_records = [{"total_latency_ms": ms, "num_turns": 1} for ms in (100, 200, 300, 400, 500)]
+
+        summary = compute_perf_summary(ng_perf_records)
+
+        assert summary["total_latency_mean_ms"] == 300.0
+        assert summary["total_latency_p50_ms"] == 300.0
+        assert summary["total_latency_p90_ms"] == 460.0
+        assert summary["total_latency_p99_ms"] == 496.0
+
+    def test_single_rollout_std_is_zero_not_nan(self) -> None:
+        summary = compute_perf_summary([{"num_turns": 4}])
+
+        assert summary["mean_num_turns"] == 4.0
+        assert summary["std_num_turns"] == 0.0
+        assert summary["min_num_turns"] == 4.0
+        assert summary["max_num_turns"] == 4.0
+        assert summary["p90_num_turns"] == 4.0
+
+    def test_token_totals_and_means(self) -> None:
+        ng_perf_records = [
+            {"prompt_tokens": 100, "completion_tokens": 20, "num_turns": 2},
+            {"prompt_tokens": 300, "completion_tokens": 60, "num_turns": 4},
+        ]
+
+        summary = compute_perf_summary(ng_perf_records)
+
+        assert summary["total_prompt_tokens"] == 400
+        assert summary["mean_prompt_tokens"] == 200.0
+        assert summary["median_prompt_tokens"] == 200.0
+        assert summary["total_completion_tokens"] == 80
+        assert summary["mean_completion_tokens"] == 40.0
+        # tokens_per_turn is a per-rollout ratio, averaged after division: 20/2=10, 60/4=15.
+        assert summary["mean_tokens_per_turn"] == 12.5
+        assert summary["median_tokens_per_turn"] == 12.5
+
+    def test_field_absent_when_no_rollout_reports_it(self) -> None:
+        # No rollout reports cached_prompt_tokens or reasoning_tokens (e.g. the provider never
+        # surfaces cache usage) -- those stats must be missing, not present as 0 or None.
+        ng_perf_records = [{"prompt_tokens": 100, "completion_tokens": 20, "num_turns": 2}]
+
+        summary = compute_perf_summary(ng_perf_records)
+
+        for absent_key in (
+            "mean_cached_prompt_tokens",
+            "total_cached_prompt_tokens",
+            "mean_reasoning_tokens",
+            "total_latency_mean_ms",
+        ):
+            assert absent_key not in summary
+
+    def test_tokens_per_turn_skips_zero_turn_rollouts(self) -> None:
+        # A rollout with num_turns == 0 would divide by zero; it must be excluded from the ratio
+        # rather than raising or being silently treated as some default.
+        ng_perf_records = [
+            {"completion_tokens": 10, "num_turns": 0},
+            {"completion_tokens": 20, "num_turns": 2},
+        ]
+
+        summary = compute_perf_summary(ng_perf_records)
+
+        assert summary["mean_tokens_per_turn"] == 10.0
+
+    def test_mixed_presence_only_averages_over_reporting_rollouts(self) -> None:
+        # Rollout 2 never reports cached_prompt_tokens -- the mean must be computed over the
+        # rollouts that did report it (just rollout 1's value), not treat the missing one as 0.
+        ng_perf_records = [
+            {"cached_prompt_tokens": 40, "num_turns": 1},
+            {"num_turns": 1},
+        ]
+
+        summary = compute_perf_summary(ng_perf_records)
+
+        assert summary["mean_cached_prompt_tokens"] == 40.0
+        assert summary["total_cached_prompt_tokens"] == 40
+
+
+class TestPerfSummaryInAggregateMetrics:
+    def test_absent_when_no_rollout_carries_ng_perf(self) -> None:
+        responses = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0, "response": {}},
+        ]
+
+        result = compute_aggregate_metrics(responses)
+
+        assert result.perf_summary is None
+
+    def test_present_when_a_rollout_carries_ng_perf(self) -> None:
+        responses = [
+            {
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                "reward": 1.0,
+                "response": {},
+                "ng_perf": {"num_turns": 3, "prompt_tokens": 90, "total_latency_ms": 1000.0},
+            },
+            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0, "response": {}},
+        ]
+
+        result = compute_aggregate_metrics(responses)
+
+        assert result.perf_summary is not None
+        assert result.perf_summary["mean_num_turns"] == 3.0
+        assert result.perf_summary["total_prompt_tokens"] == 90
+        assert result.perf_summary["total_latency_mean_ms"] == 1000.0

@@ -1409,6 +1409,8 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
                 "key_metrics": agg_result.key_metrics,
                 "group_level_metrics": agg_result.group_level_metrics,
             }
+            if agg_result.perf_summary is not None:
+                agent_entry["perf_summary"] = agg_result.perf_summary
             return agent_entry
 
         all_agent_metrics: List[Dict] = []
