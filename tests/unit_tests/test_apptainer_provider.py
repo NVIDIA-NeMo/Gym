@@ -251,7 +251,7 @@ def test_prepare_image_existing_target_without_force_skips_build(
 
 
 def test_prepare_image_retries_then_atomically_installs_image(
-    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     attempts = 0
 
@@ -269,15 +269,16 @@ def test_prepare_image_retries_then_atomically_installs_image(
     monkeypatch.setattr(apptainer_provider.time, "sleep", sleeps.append)
     provider = apptainer_provider.ApptainerProvider()
 
-    result = provider.prepare_image(
-        SandboxImagePrepareRequest(
-            image="example/image:tag",
-            target_dir=tmp_path,
-            target_name="task",
-            attempts=3,
-            retry_delay_s=2,
+    with caplog.at_level("WARNING", logger=apptainer_provider.LOGGER.name):
+        result = provider.prepare_image(
+            SandboxImagePrepareRequest(
+                image="example/image:tag",
+                target_dir=tmp_path,
+                target_name="task",
+                attempts=3,
+                retry_delay_s=2,
+            )
         )
-    )
 
     assert result.ok is True
     assert result.prepared is True
@@ -287,6 +288,9 @@ def test_prepare_image_retries_then_atomically_installs_image(
     assert (tmp_path / "task.sif").read_text() == "complete"
     assert list(tmp_path.iterdir()) == [tmp_path / "task.sif"]
     assert sleeps == [2]
+    assert "attempt 1/3" in caplog.text
+    assert "retrying in 2s" in caplog.text
+    assert "truncated manifest" in caplog.text
 
 
 def test_prepare_image_removes_intermediate_output_after_failures(

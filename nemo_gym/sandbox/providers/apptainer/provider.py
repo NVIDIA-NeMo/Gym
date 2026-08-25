@@ -328,6 +328,7 @@ class ApptainerProvider:
             build_dir = Path(tempfile.mkdtemp(prefix=f".{target_path.stem}-", dir=target_path.parent))
             staged_path = build_dir / target_path.name
             built = False
+            attempt_detail = ""
             try:
                 proc = subprocess.run(
                     [self._binary, "build", "--force", str(staged_path), source_image],
@@ -338,19 +339,17 @@ class ApptainerProvider:
                 )
                 if proc.returncode != 0:
                     error = proc.stderr.strip() or proc.stdout.strip() or f"exit code {proc.returncode}"
-                    failures.append(
-                        f"attempt {attempt}/{request.attempts}: {error[-APPTAINER_BUILD_ERROR_TAIL_CHARS:]}"
-                    )
+                    attempt_detail = error[-APPTAINER_BUILD_ERROR_TAIL_CHARS:]
+                    failures.append(f"attempt {attempt}/{request.attempts}: {attempt_detail}")
                 elif not staged_path.is_file():
-                    failures.append(
-                        f"attempt {attempt}/{request.attempts}: "
-                        f"apptainer succeeded without producing {staged_path.name}"
-                    )
+                    attempt_detail = f"apptainer succeeded without producing {staged_path.name}"
+                    failures.append(f"attempt {attempt}/{request.attempts}: {attempt_detail}")
                 else:
                     os.replace(staged_path, target_path)
                     built = True
             except OSError as exc:
-                failures.append(f"attempt {attempt}/{request.attempts}: {exc}")
+                attempt_detail = str(exc)
+                failures.append(f"attempt {attempt}/{request.attempts}: {attempt_detail}")
 
             try:
                 shutil.rmtree(build_dir)
@@ -359,6 +358,7 @@ class ApptainerProvider:
                 if built:
                     LOGGER.warning(message)
                 else:
+                    attempt_detail = message
                     failures.append(message)
 
             if built:
@@ -369,8 +369,19 @@ class ApptainerProvider:
                     prepared=True,
                     detail=detail,
                 )
-            if attempt < request.attempts and request.retry_delay_s > 0:
-                time.sleep(request.retry_delay_s * attempt)
+            if attempt < request.attempts:
+                retry_delay_s = request.retry_delay_s * attempt
+                LOGGER.warning(
+                    "apptainer image build failed for %s -> %s on attempt %s/%s; retrying in %ss: %s",
+                    source_image,
+                    target_path,
+                    attempt,
+                    request.attempts,
+                    retry_delay_s,
+                    attempt_detail,
+                )
+                if retry_delay_s > 0:
+                    time.sleep(retry_delay_s)
 
         return SandboxImagePrepareResult(
             image=str(target_path),
