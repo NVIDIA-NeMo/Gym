@@ -507,7 +507,7 @@ def test_translate_passes_pod_shape_options_through() -> None:
             {
                 "runtime_class_name": "gvisor",
                 "node_selector": {"pool": "sandbox"},
-                "volumes": [{"name": "creds", "secret": {"secretName": "creds"}}],
+                "volumes": [{"name": "creds", "secret": {"secretName": "creds"}}],  # pragma: allowlist secret
                 "volume_mounts": [{"name": "creds", "mountPath": "/etc/creds"}],
                 "env_from": [{"secretRef": {"name": "creds"}}],
                 "service_account_name": "runner",
@@ -526,7 +526,7 @@ def test_translate_passes_pod_shape_options_through() -> None:
     assert request["server_name"] == "pinned-name"
     assert request["runtime_class_name"] == "gvisor"
     assert request["node_selector"] == {"pool": "sandbox"}
-    assert request["volumes"] == [{"name": "creds", "secret": {"secretName": "creds"}}]
+    assert request["volumes"] == [{"name": "creds", "secret": {"secretName": "creds"}}]  # pragma: allowlist secret
     assert request["env_from"] == [{"secretRef": {"name": "creds"}}]
     assert request["pod_overrides"]["tolerations"][0]["key"] == "dedicated"
     assert request["snapshot"] == {"id": "17"}

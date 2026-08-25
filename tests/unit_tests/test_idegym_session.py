@@ -433,7 +433,7 @@ def test_build_client_constructs_a_real_sdk_client(monkeypatch: pytest.MonkeyPat
     config = connection(
         client_name="build-client-test",
         username="user" if with_auth else None,
-        password="secret" if with_auth else None,
+        password="secret" if with_auth else None,  # pragma: allowlist secret
         heartbeat_interval_s=17,
         request_timeout_s=23,
     )
@@ -481,7 +481,7 @@ async def test_start_server_builds_real_sdk_models() -> None:
                 "server_name": "nemo-gym-abcdef12",
                 "run_as_root": True,
                 "resources": {"requests": {"cpu": "500m"}, "limits": {"cpu": "2", "memory": "8192Mi"}},
-                "volumes": [{"name": "creds", "secret": {"secretName": "creds"}}],
+                "volumes": [{"name": "creds", "secret": {"secretName": "creds"}}],  # pragma: allowlist secret
                 "volume_mounts": [{"name": "creds", "mountPath": "/etc/creds"}],
                 "env_from": [{"secretRef": {"name": "creds"}}],
                 "pod_overrides": {"tolerations": [{"key": "dedicated", "operator": "Exists"}]},
