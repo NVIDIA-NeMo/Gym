@@ -25,6 +25,7 @@ from nemo_gym.rollout_observability import ModelCallRef
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig, validate_invocation
 from responses_api_agents.nooa_agent.gym_llm import GymResponsesLLM
+from responses_api_agents.nooa_agent.observability import NOOAEventTracker, TraceEvent
 from responses_api_agents.nooa_agent.resource_tools import (
     ResourceToolDispatcher,
     create_agent_class_with_resource_methods,
@@ -49,6 +50,8 @@ class NOOARunResult:
     model_calls: list[ModelCallRef]
     model_cookies: dict[str, str]
     resource_cookies: dict[str, str]
+    timeline: list[TraceEvent]
+    nooa_events: list[Any]
 
 
 class NOOARunner(Protocol):
@@ -78,6 +81,8 @@ class EmbeddedNOOARunner:
 
     async def run(self, request: NOOARunRequest) -> NOOARunResult:
         model_calls: list[ModelCallRef] = []
+        timeline: list[TraceEvent] = []
+        tracker = NOOAEventTracker()
         llm = GymResponsesLLM(
             server_client=self._server_client,
             model_server_name=self._model_server_name,
@@ -85,6 +90,8 @@ class EmbeddedNOOARunner:
             max_policy_calls=self._max_policy_calls,
             model_call_collector=model_calls,
             cookies=request.model_cookies,
+            timeline=timeline,
+            invocation_id=lambda: tracker.invocation_id,
         )
         dispatcher = ResourceToolDispatcher(
             server_client=self._server_client,
@@ -98,12 +105,18 @@ class EmbeddedNOOARunner:
         )
         agent = agent_class(llm=llm, **self._invocation.init_kwargs)
         validate_agent_resource_method_bindings(agent)
+        unsubscribe = agent.event_manager.on("*", tracker.handle)
 
-        return_value = await self._invocation_adapter(agent, request.responses_create_params)
+        try:
+            return_value = await self._invocation_adapter(agent, request.responses_create_params)
+        finally:
+            unsubscribe()
         return NOOARunResult(
             return_value=return_value,
             agent=agent,
             model_calls=model_calls,
             model_cookies=request.model_cookies,
             resource_cookies=request.resource_cookies,
+            timeline=timeline,
+            nooa_events=tracker.events,
         )

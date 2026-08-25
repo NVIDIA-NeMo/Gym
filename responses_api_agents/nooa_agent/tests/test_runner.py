@@ -42,6 +42,7 @@ class FakeAgent:
         FakeAgent.instances += 1
         self.llm = llm
         self.label = label
+        self.event_manager = FakeEventManager()
 
     async def analyze(self, text: str, customer_id: str) -> str:
         weather = await self.get_weather(city=customer_id)
@@ -49,6 +50,11 @@ class FakeAgent:
 
 
 adapter_requests: list[NeMoGymResponseCreateParamsNonStreaming] = []
+
+
+class FakeEventManager:
+    def on(self, event_type: str, handler: Any) -> Any:
+        return lambda: None
 
 
 async def invoke(agent: Any, request: NeMoGymResponseCreateParamsNonStreaming) -> object:
