@@ -1311,6 +1311,20 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         Rows that already have an agent_ref are left untouched, so this is a no-op on legacy
         datasets and on already-resolved (materialized) rows. Runs before any dispatch.
         """
+        legacy_routed = sum(
+            1
+            for row in examples
+            if (row.get(AGENT_REF_KEY_NAME) or {}).get("name") is not None and row.get(TASK_SOURCE_KEY_NAME) is None
+        )
+        if legacy_routed:
+            warnings.warn(
+                f"{legacy_routed} rows routed via their baked-in agent_ref (no task_source). This "
+                "legacy path is deprecated: re-collate the dataset with current Gym to produce "
+                "task_source-routed rows, or re-route explicitly with +agent_map.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
         unresolved = {
             ts
             for row in examples

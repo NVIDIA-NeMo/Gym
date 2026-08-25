@@ -2409,6 +2409,19 @@ class TestResolveTaskSources:
         rows = self._resolve([{"task_source": "math_rs"}])
         assert rows[0]["task_source"] == "math_rs"
 
+    def test_legacy_agent_ref_rows_warn_deprecation(self) -> None:
+        """Rows routed purely by their baked-in agent_ref (no task_source) are the legacy
+        path, slated for removal after the deprecation cycle; each run warns once with a count."""
+        rows = [{"agent_ref": {"name": "math_agent"}}, {"agent_ref": {"name": "math_agent"}}]
+        with pytest.warns(DeprecationWarning, match="2 rows routed via their baked-in agent_ref"):
+            self._resolve(rows)
+        assert all(r["agent_ref"] == {"name": "math_agent"} for r in rows)
+
+    def test_task_source_rows_do_not_warn(self) -> None:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            self._resolve([{"task_source": "math_rs"}])
+
 
 class TestFanOut:
     def _write_rows(self, tmp_path, rows):
