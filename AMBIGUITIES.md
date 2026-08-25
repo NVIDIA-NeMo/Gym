@@ -1,34 +1,259 @@
 # Rollout Health RFC Ambiguities
 
-This implementation uses the RFC as its only product specification. The choices below are conservative readings made where the RFC does not define an executable rule or an artifact-location convention.
+The rollout-health RFC is the product specification for this branch. This document records only decisions that the RFC leaves open; it is not a second specification. Each numbered section states the gap, the behavior implemented in this branch, and the alternatives considered.
 
-## Transcript and check semantics
+## Code map
 
-1. **Canonical turns and legacy fallback.** Current Gym defines canonical agent turns in `TrajectoryRecord` / `TrajectoryTurn`. The runner uses `ng_trajectory.turns` when available. For historical records without canonical turns, it falls back to one step per `ng_trajectory` agent invocation. If invocation data is also unavailable, it reconstructs turns from `response.output`: adjacent reasoning, assistant-message, and function-call items form one agent turn; user messages and function-call outputs end it. Invocation-level model-call references remain attached to the whole invocation because they cannot safely be assigned to individual messages. A normalized step counts as model activity when it contains non-empty text or reasoning, a tool call, or a model-call reference. Sources are tried in this order and never merged. Alternatives were to reject historical records or to treat every Responses output item as a separate turn; the latter produced false hollow-step findings when an assistant message and its function call were sibling items.
-2. **Hollow-step message content.** The RFC says “no message and no tool calls” without defining whether reasoning-only output is a message. The implementation counts non-empty answer, content, text, output text, reasoning, reasoning content, reasoning summary, or encrypted reasoning content as a message. The narrower alternative was to count visible answer text only.
-3. **Deterministic-dispatch exemption.** A deterministic dispatch is an agent step that does not call the model. It therefore has no captured model call and is automatically outside `zero_token_turns`. Every captured model call reporting zero completion tokens is flagged; no special marker or inference is used.
-4. **Missed-metrics binding.** The RFC does not define binding for transcript steps. The implementation requires explicit `model_call_id`, or the existing `(model_ref, response_id)` reference, and requires both prompt and completion token counts on a bound call. If no normalized step carries any binding reference, the check lacks its binding input and is unobserved; if the transcript supplies bindings but an individual step lacks one, cannot resolve one, or resolves to usage without both token counts, that step produces a finding. Alternatives were positional matching, treating schema-wide binding absence as one finding per step, and accepting partial usage; these can silently bind the wrong call, flood legacy corpora, or hide absent metrics.
-5. **Correspondence subchecks and call success.** The RFC lists call-count deltas, replayed calls, retry-dropped calls, token-sum mismatch, and failed calls but does not specify algorithms. The implementation compares explicit transcript references to captured calls; reports missing referenced calls but does not treat unbound captures as a count delta because capture can include auxiliary calls; identifies replay by duplicate Gym `model_call_id`, falling back to response identity only when that invocation identity is absent; calls a failed unreferenced call “retry-dropped” only when a later successful call exists; and compares top-level transcript usage with the token sum of explicitly bound calls only when both sides report usage. HTTP 4xx/5xx, an error category, or a failed/error/cancelled response status is a failure. A call with no failure signal and no status code is treated as successful because status is optional in the existing model. Alternatives included summing every captured call, trusting provider response IDs over Gym invocation IDs, payload hashing, positional matching, requiring an explicit 2xx code, and treating every unreferenced call as a dropped retry. Summing all captures produced systematic false mismatches when one auxiliary judge call was captured per rollout; reused placeholder response IDs likewise produced false replay findings for calls with distinct Gym IDs.
-6. **Runaway-generation emptiness.** “Empty content” has multiple provider shapes. The implementation considers Responses output text/output, Chat choices, and Messages content. It does not consider reasoning-only output user-visible content. The alternative was a dialect-specific implementation for each provider.
+- [`BaseVerifyResponse`](nemo_gym/base_resources_server.py) defines the common fields returned by a Gym verifier. The agent-specific `response` inside it can have different shapes.
+- [`TrajectoryRecord`, `TrajectoryTurn`, `AgentInvocation`, and `ModelCallRef`](nemo_gym/rollout_observability.py) define Gym's standard trajectory and correlation data.
+- [`CheckSpec`, `Finding`, `RolloutDigest`, and `run_health_checks`](nemo_gym/rollout_health.py) define the health-check registry, evidence, per-rollout result, and runner implemented by this branch.
+- [`RolloutCollectionHelper`](nemo_gym/rollout_collection.py) collects and aggregates rollouts. It also attaches `ng_trajectory` to new rollout records.
+- [`gym eval health-check`](nemo_gym/cli/main.py) is the standalone command. The same runner executes automatically after `gym eval run` and `gym eval aggregate`.
 
-## Verdicts and aggregation
+## Glossary
 
-7. **Overall rollout verdict reduction.** The RFC defines per-check verdict derivation but does not state how they reduce to one rollout verdict. The implementation uses unhealthy if any finding exists; otherwise unobserved if any rollout check is unobserved; otherwise healthy. Alternatives were to report healthy when all computable checks pass or to omit the overall verdict when coverage is partial.
-8. **Consistently-unhealthy input verdict.** “Computable repeat verdict” is read as an overall rollout verdict other than unobserved. The check fires only with at least two such repeats and all unhealthy, even if additional repeats are unobserved, following R4's explicit rule. The alternative was to require every repeat to be observed.
-9. **No-healthy-model-calls under partial coverage.** Proving that no repeat contains a successful call requires capture coverage for every repeat. The task check is therefore unobserved if any repeat lacks capture evidence. The alternative was to fire from the observed subset, which could misclassify a task whose unobserved repeat had a successful call.
-10. **Task report verdicts.** The schema gives per-task repeat verdict counts and flags, but no task verdict field. The implementation emits exactly those fields and does not add a task verdict. The alternative was to derive an undocumented fourth report field.
-11. **Issue histogram meaning.** The RFC calls `issues` a histogram but does not say whether N counts findings or affected subjects. The implementation counts individual findings and includes all eight stable IDs, including zeros. The alternatives were subject counts and omitting zero-valued IDs.
+- **Task:** One benchmark problem. A task may be attempted more than once.
+- **Rollout or repeat:** One agent attempt at a task. `_ng_task_index` identifies the task and `_ng_rollout_index` identifies the repeat.
+- **Artifact:** A file saved by an evaluation run, such as rollout records, aggregate metrics, model-call captures, or health reports.
+- **JSONL:** A text file containing one complete JSON value per line. Gym stores one rollout record per non-empty line.
+- **Rollout record:** One JSON object in the rollout JSONL file. It contains the task and repeat identity, the agent result, verifier output, and any observability data attached during collection.
+- **Observability data:** Evidence recorded so a completed run can be inspected, such as conversations, model calls, token counts, status codes, and timing. It does not change the rollout or its score.
+- **Transcript:** Saved conversation evidence for the user, agent, and tools. New Gym records standardize this evidence in `ng_trajectory`.
+- **Agent turn:** One unit of agent activity. It may include reasoning, an assistant message, and one or more function calls. A user message or function-call output starts the next interaction.
+- **Agent invocation:** One execution of a root agent or subagent. An invocation can contain several conversation items, turns, tool calls, and model calls. The code type is `AgentInvocation`.
+- **Model call:** One request sent to a language model and its response.
+- **Model-call capture:** Saved request, response, token, status, and timing evidence for model calls.
+- **Sidecar:** A separate file associated with a rollout. Raw model-call capture usually lives in a `*.capture.jsonl` sidecar.
+- **Embedded projection:** A normalized copy of capture data stored inside the rollout record, in `ng_trajectory.model_calls` or `ng_model_call_capture`.
+- **Model-call reference:** An identifier that connects transcript evidence to a captured model call. `ModelCallRef` accepts either `model_call_id` or the pair `model_ref` and `response_id`.
+- **Binding:** A successful match between a transcript model-call reference and a captured model call.
+- **Correlation:** The information needed to make bindings between transcript activity and captured model calls.
+- **Policy model:** The model being evaluated.
+- **Auxiliary model:** A model used to support the evaluation, such as a user simulator or judge. Its calls may appear in the same capture as policy-model calls.
+- **Check:** One registered health rule. `CheckSpec` gives it a stable ID, a scope, and required inputs. Scope says whether the rule evaluates one rollout, one task across repeats, or the run as a whole.
+- **Finding:** Evidence that a check failed for a rollout or task. A check emits `Finding`; it never emits a verdict.
+- **Healthy:** Every enabled rollout check had enough input to run, and none produced a finding.
+- **Unhealthy:** At least one enabled rollout check produced a finding.
+- **Unobserved:** No enabled rollout check produced a finding, but at least one could not run because required evidence was missing.
+- **Driver bypass:** A custom collection path that does not use Gym's normal model-server capture and correlation path.
+- **Shard:** One part of a larger rollout file. Separate workers may write shards that are later aggregated.
 
-## Artifact discovery and resilience
+## Transcript and check behavior
 
-12. **Capture location.** The standalone CLI accepts only `<run-dir>`, while capture directories are configurable absolute paths and the RFC defines no run manifest that records them. Standalone discovery recursively finds `*.capture.jsonl` below the run directory. Automatic execution passes the configured capture directory directly. The alternatives were adding a non-RFC CLI argument or making all standalone capture checks unobserved.
-13. **Persisted capture projection.** Current Gym rollouts may contain model-call evidence in `ng_trajectory` or an `ng_model_call_capture` attachment even when raw sidecars are no longer colocated or a sidecar filename does not match. The implementation prefers a matching sidecar and otherwise treats a non-empty embedded projection as observed capture evidence. An explicitly empty embedded list is not evidence that the rollout's calls traversed capture, so capture checks remain unobserved; this covers drivers that persist the projection shape but bypass Gym's model server. Alternatives were to ignore all persisted observability, or to treat an empty list as a successfully observed zero-call rollout; the latter produced false task-wide no-healthy-call findings on driver-bypass corpora.
-14. **Unobserved cause serialization.** The RFC names capture-off, uncorrelated-agent, and driver-bypass causes, but the report schema permits only a list of unobserved check IDs. The runner distinguishes all three while deciding input presence but serializes only the specified IDs. The alternative was adding an undocumented reasons object.
-15. **Driver bypass.** A configured custom collection driver is treated as driver bypass for automatic execution, so all capture-dependent checks are unobserved even if files happen to be present. This follows the RFC's explicit state table. The alternative was opportunistically evaluating those files without proof that the standard correlation contract held.
-16. **Run-directory rollout discovery.** The RFC does not prescribe a rollout filename. The standalone command prefers `rollouts.jsonl`; otherwise it requires exactly one top-level JSONL after excluding materialized inputs, failures, capture files, and the verdict report. The alternative was choosing an arbitrary file when several exist.
-17. **`aggregate` without shard merging.** Health checks still run when `merge_shards=false`, but map over the selected shard paths and write one report beside the requested aggregate output. The alternative was creating an unrequested merged artifact or skipping the required automatic check.
-18. **Malformed rollout identity and issue ID.** The RFC says tolerant parsing and that an unparseable record is itself a finding, but provides neither a parse-error check ID nor an identity recovery rule. The implementation deliberately extends the eight-check RFC registry with a ninth stable `unreadable_record` issue ID and uses the zero-based non-empty line ordinal as task index with rollout index 0 when identity cannot be parsed. Checks requiring the unreadable record are unobserved rather than allowed to produce cascading findings. Alternatives were misclassifying parse failures under an existing semantic check or dropping the malformed rollout from reports.
-19. **Platforms without process-pool semaphore support.** The normal map phase uses `ProcessPoolExecutor` as required. On a platform where Python cannot initialize a process pool, the runner warns and completes serially to honor “verification always completes.” The alternative was failing the entire post-run aggregation after metrics had already been produced.
-20. **Malformed check-specific fields.** The RFC requires tolerant parsing and that verification always completes, but does not distinguish a semantic finding from a check crashing on malformed input. The implementation reports a caught check failure under `unreadable_record`, records the failed check ID in the detail, and marks that check unobserved. The alternatives were filing the crash under the semantic check's stable ID, which pollutes its issue histogram, or aborting verification.
-21. **Duplicate rollout identities.** The RFC says reports are keyed by `_ng_task_index` / `_ng_rollout_index` but does not define behavior when an input JSONL repeats that pair. The implementation classifies and reports every non-empty input line, but collapses duplicate rollout indices before task-scope checks and task repeat counts; identical duplicate verdicts count once, while conflicting copies make that repeat unobserved at task scope. Run-level counts remain line-level because silently deleting persisted records would violate the requirement to classify every rollout. Alternatives were rejecting the run, deduplicating first/last wins everywhere, or extending `unreadable_record` to cover identity collisions. A validation corpus contained repeated pairs; counting those lines as separate repeats produced a false `consistently_unhealthy_task` flag.
-22. **Operator-selected check exclusion.** The RFC defines a fixed registry and a whole-run opt-out, but does not define running a strict subset. The implementation keeps every check registered and enabled by default, while allowing operators to explicitly ignore validated registry IDs for a run. Ignored rollout checks are not executed and do not contribute findings, unobserved states, or rollout verdicts; ignored task checks do not contribute task flags. `quality_summary.json` records the sorted IDs in `run.ignored_checks` and adds an `ignored` subject count to every coverage entry. `rollout_verdicts.jsonl` retains the RFC row schema, so the summary is the authoritative context for interpreting reduced-check-set verdicts. Alternatives were removing checks from the registry, treating ignored checks as unobserved (which would defeat the purpose), or silently changing the default check set. This extension was requested to validate legacy corpora that predate transcript-to-capture bindings without weakening production defaults.
+### 1. Choosing agent turns in historical records
+
+**RFC gap.** Current Gym has the standard `TrajectoryRecord` and `TrajectoryTurn` types, but historical rollout records may predate them. The RFC does not say how checks should read those older records.
+
+**Chosen behavior.** The runner uses the first usable source below and never combines sources:
+
+1. `ng_trajectory.turns`: each `TrajectoryTurn` is one agent turn.
+2. `ng_trajectory.invocations`: each `AgentInvocation` with conversation evidence is treated as one unit. An invocation may contain several messages and model calls. Its `model_calls` list is stored on the `AgentInvocation`, not on individual conversation items, so the runner cannot safely determine which call produced each message.
+3. `response.output`: adjacent reasoning, assistant-message, and function-call items are grouped into one turn. A user message or function-call output ends that turn.
+
+For example, this `response.output` sequence contains two agent turns:
+
+```text
+reasoning
+assistant message
+function call
+function-call output  # ends the first agent turn
+assistant message     # second agent turn
+```
+
+For health checks, each selected turn or invocation is reduced to three facts: whether it contains non-empty text or reasoning, whether it contains a tool call, and which model-call references it contains. The record has agent activity when at least one selected unit contains any of those facts.
+
+**Alternatives considered.** Reject all historical records, or treat every `response.output` item as a separate turn. Treating each item separately produced false `hollow_steps` findings when an empty assistant message and its real function call were sibling items in the same model response.
+
+### 2. Whether reasoning counts as message content
+
+**RFC gap.** `hollow_steps` means “no message and no tool calls,” but the RFC does not say whether a reasoning-only turn has a message.
+
+**Chosen behavior.** Any non-empty answer, content, text, output text, reasoning content, reasoning summary, or encrypted reasoning content means the turn is not hollow. A tool call also means the turn is not hollow.
+
+**Alternative considered.** Count only user-visible answer text. That would mark reasoning-only model activity as hollow.
+
+### 3. Deterministic dispatch and zero-token calls
+
+**RFC gap.** The RFC exempts deterministic-dispatch steps from `zero_token_turns` without explaining the term.
+
+**Chosen behavior.** A deterministic dispatch is agent logic that produces a step without calling the model. Because `zero_token_turns` examines captured model calls, such a step has no captured call and is automatically outside this check. Every captured model call reporting zero completion tokens produces a finding. The runner does not infer an exemption from request parameters or metadata.
+
+**Alternative considered.** Add or infer a special marker on captured calls. No such marker exists in the specified artifacts, so doing this would invent a new contract.
+
+### 4. Connecting transcript steps to model-call metrics
+
+**RFC gap.** `missed_metrics` needs to know which captured model call belongs to each transcript step, but the RFC does not define how to make that connection.
+
+**Chosen behavior.** The runner accepts only an explicit `ModelCallRef`: either `model_call_id`, or both `model_ref` and `response_id`. A bound call must contain both prompt-token and completion-token counts.
+
+- If no selected transcript unit contains any model-call reference, the check is unobserved. The artifact lacks the input needed to evaluate this check.
+- If the transcript contains references, a unit produces a finding when its reference is absent, cannot be matched to capture, or matches a call missing either required token count.
+
+**Alternatives considered.** Match transcript steps and calls by list position, emit one finding per step when the entire record format lacks references, or accept partial token usage. These choices can connect the wrong call, flood historical corpora with false failures, or hide missing metrics.
+
+### 5. Comparing the transcript with captured model calls
+
+**RFC gap.** `transcript_capture_correspondence` includes missing calls, replayed calls, dropped retries, token-sum mismatches, and failed calls. The RFC names these cases but does not define their algorithms.
+
+**Chosen behavior.** The check uses these rules:
+
+- A transcript reference with no matching capture produces a call-count-delta finding.
+- An unreferenced captured call does not by itself produce a call-count-delta finding. Capture may include user-simulator, judge, or other auxiliary calls that are not part of the policy transcript.
+- Repeated `model_call_id` values mean a replayed call. The provider's `response_id` is used only when Gym's `model_call_id` is absent because some providers reuse placeholder response IDs across distinct calls.
+- A failed captured call not referenced by the transcript is called a dropped retry only when a later captured call succeeds.
+- A failed call means an HTTP status from 400 through 599, a recorded error category, or response status `failed`, `error`, or `cancelled`.
+- A call with no failure signal and no HTTP status is treated as successful because status is optional in Gym's capture model.
+- Transcript token totals are compared only with explicitly bound calls, and only when both sides contain token usage. Summing every captured call would mix policy tokens with auxiliary-model tokens.
+- An unreadable capture line produces an `unreadable_capture_records` correspondence finding.
+- A failed final captured call produces a `trial_ended_on_failed_call` correspondence finding.
+
+**Alternatives considered.** Sum all captured calls, prefer provider response IDs over Gym call IDs, identify calls by request-payload hashes or list position, require an explicit HTTP 2xx status for success, or treat every unreferenced call as a dropped retry. Validation showed false token mismatches from captured judge calls and false replay findings from reused provider response IDs.
+
+### 6. Deciding whether a length-limited response is empty
+
+**RFC gap.** `runaway_generations` applies when a call ends because of the length limit and has empty content, but model providers serialize response content differently.
+
+**Chosen behavior.** The runner looks for non-empty text, content, output text, answer, encrypted content, reasoning, or reasoning summary in OpenAI Responses output, Chat Completions choices, and Messages-style content. Any of those fields means the response is not empty.
+
+**Alternative considered.** Implement separate content rules for each model provider's response format. That would make results depend on provider-specific code paths rather than one rule over saved artifacts.
+
+## Verdicts and task aggregation
+
+### 7. Combining check results into one rollout verdict
+
+**RFC gap.** The RFC explains how individual checks are evaluated but does not define how their results become the rollout's single verdict.
+
+**Chosen behavior.** Verdict priority is:
+
+1. `unhealthy` when any enabled check produced a finding.
+2. Otherwise `unobserved` when any enabled check lacked required input.
+3. Otherwise `healthy`.
+
+This makes `healthy` a strong claim that every enabled rollout check ran and passed.
+
+**Alternatives considered.** Call a rollout healthy when every computable check passes, even if other checks lack evidence, or omit the overall verdict whenever coverage is partial.
+
+### 8. Inputs to `consistently_unhealthy_task`
+
+**RFC gap.** The RFC says this task-level check uses “computable repeat verdicts” but does not define that phrase.
+
+**Chosen behavior.** A computable repeat is a rollout whose verdict is `healthy` or `unhealthy`, not `unobserved`. The task check runs when at least two repeats are computable and produces a finding when all computable repeats are unhealthy. Additional unobserved repeats do not prevent the finding; this follows R4.
+
+**Alternative considered.** Require every repeat for the task to be observed before evaluating the task check.
+
+### 9. Inputs to `no_healthy_model_calls_task`
+
+**RFC gap.** The RFC does not say whether this task-level check may draw a conclusion from only the repeats that have capture evidence.
+
+**Chosen behavior.** Every repeat must have capture evidence. If any repeat lacks capture, this task check is unobserved. When every repeat is observed, the check produces a finding only if none contains a successful model call.
+
+**Alternative considered.** Evaluate only the observed repeats. That could report failure even though an unobserved repeat contained a successful call.
+
+### 10. Whether tasks receive their own verdict
+
+**RFC gap.** The report schema gives each task repeat counts and task-level flags but defines no task verdict field.
+
+**Chosen behavior.** Task entries contain only `repeats`, `healthy`, `unhealthy`, `unobserved`, and `flags`, exactly as specified.
+
+**Alternative considered.** Add a task verdict. That would extend the report schema without a rule for deriving it.
+
+### 11. Meaning of the `issues` counts
+
+**RFC gap.** The RFC calls `run.issues` a histogram—a mapping from check IDs to counts—but does not say whether those numbers count findings or affected rollouts and tasks.
+
+**Chosen behavior.** Each number counts individual `Finding` objects. The histogram contains every registered check ID, including IDs with a zero count.
+
+**Alternatives considered.** Count affected rollouts and tasks once per check, or omit check IDs whose count is zero.
+
+## Artifact discovery and failure handling
+
+### 12. Finding capture files from the standalone command
+
+**RFC gap.** `gym eval health-check <run-dir>` accepts only the run directory. Capture output can be configured at an absolute path, and the RFC defines no manifest that records that path.
+
+**Chosen behavior.** The standalone command recursively searches the supplied run directory for `*.capture.jsonl`. Automatic execution after `run` or `aggregate` receives the configured capture directory directly and does not need discovery.
+
+**Alternatives considered.** Add another standalone CLI argument not defined by the RFC, or make every capture-dependent check unobserved in standalone mode.
+
+### 13. Using model-call evidence embedded in a rollout
+
+**RFC gap.** A rollout may retain model-call evidence inside `ng_trajectory` or `ng_model_call_capture` after raw sidecars have moved, or when sidecar filenames do not match the rollout identity. The RFC does not state which source wins.
+
+**Chosen behavior.** A sidecar whose filename matches the rollout is preferred. If none matches, a non-empty embedded model-call projection counts as observed capture. An embedded but empty call list does not prove that the rollout used Gym's capture path, so capture-dependent checks remain unobserved.
+
+**Alternatives considered.** Ignore embedded evidence, or treat an empty embedded list as proof of a successfully captured rollout with zero calls. The latter produced false `no_healthy_model_calls_task` findings for collection drivers that bypass Gym's model server.
+
+### 14. Recording why a check is unobserved
+
+**RFC gap.** The RFC distinguishes capture disabled, an agent that cannot correlate calls, and driver bypass. Its `rollout_verdicts.jsonl` schema allows only a list of unobserved check IDs, not a reason for each ID.
+
+**Chosen behavior.** The runner distinguishes these causes while deciding whether input exists, then writes only the check IDs allowed by the schema.
+
+**Alternative considered.** Add an unobserved-reasons object to each verdict row. That would change the specified report schema.
+
+### 15. Treating custom collection drivers as capture bypass
+
+**RFC gap.** None. The RFC's state table says a custom collection driver bypasses the standard correlation path. The remaining choice is whether to trust capture-looking files found beside such a run.
+
+**Chosen behavior.** Automatic execution marks all capture-dependent checks unobserved when a custom collection driver is configured, even if files named like captures are present.
+
+**Alternative considered.** Evaluate those files opportunistically. Their presence does not prove they follow Gym's standard rollout-correlation contract.
+
+### 16. Finding the rollout JSONL from a run directory
+
+**RFC gap.** The standalone command receives a directory, but the RFC does not require a rollout filename.
+
+**Chosen behavior.** The command first looks for `rollouts.jsonl`. If absent, it accepts exactly one top-level JSONL after excluding prepared input files whose names contain `materialized`, failure files, capture files, and `rollout_verdicts.jsonl`. More than one candidate is an error rather than an arbitrary choice.
+
+**Alternative considered.** Select the first candidate by filename order. That could silently check the wrong artifact.
+
+### 17. Running after aggregation without shard merging
+
+**RFC gap.** `gym eval aggregate` can run with `merge_shards=false`, while the RFC requires automatic health checks after aggregation but does not say whether health checking requires a merged rollout file.
+
+**Chosen behavior.** The runner reads each selected shard directly and writes one combined health report beside the requested aggregate output. It does not create a merged rollout artifact.
+
+**Alternatives considered.** Create an unrequested merged JSONL, or skip the required health check when shard merging is disabled.
+
+### 18. Reporting an unreadable rollout record
+
+**RFC gap.** The RFC says parsing must be tolerant and an unparseable record is a finding. It defines neither an issue ID for that finding nor a fallback identity for the report row.
+
+**Chosen behavior.** The implementation adds `unreadable_record` as a ninth registered check ID. For an unreadable JSONL entry, its zero-based position among all non-empty input lines becomes `_ng_task_index` and `_ng_rollout_index` becomes `0`. Checks that need the parsed record are marked unobserved, preventing meaningless follow-on findings.
+
+**Alternatives considered.** Report the parse failure under an unrelated semantic check, or omit the line from reports. The first corrupts another check's issue count; the second violates the requirement to classify every rollout record.
+
+### 19. Running where process pools are unavailable
+
+**RFC gap.** The execution model requires multiple worker processes and also says verification must always complete. Some operating systems cannot start Python's `ProcessPoolExecutor` because required process-synchronization support is unavailable.
+
+**Chosen behavior.** The runner normally uses `ProcessPoolExecutor`. If pool creation or execution fails for a platform reason, it emits a warning and processes the same inputs serially.
+
+**Alternative considered.** Fail the health check and therefore fail post-run aggregation after aggregate metrics were already produced.
+
+### 20. Handling a check that cannot parse one of its fields
+
+**RFC gap.** The RFC requires tolerant parsing but does not say how to distinguish a health finding from a check implementation failing on malformed input.
+
+**Chosen behavior.** The runner catches the check failure, emits an `unreadable_record` finding whose detail names the affected check, and marks that check unobserved. Other checks continue.
+
+**Alternatives considered.** File the exception under the affected semantic check, which would pollute that check's issue histogram, or abort all verification.
+
+### 21. Duplicate task and rollout identities
+
+**RFC gap.** Reports are keyed by `_ng_task_index` and `_ng_rollout_index`, but the RFC does not say what to do when the input JSONL contains the same pair more than once.
+
+**Chosen behavior.** Every non-empty input line still receives a rollout verdict and contributes to run-level counts. Before task-level checks and repeat counts, records with the same identity are collapsed into one repeat:
+
+- Copies with the same verdict produce that verdict once.
+- Copies with conflicting verdicts make that repeat unobserved for task-level evaluation.
+
+**Alternatives considered.** Reject the run, keep only the first or last copy everywhere, or classify identity collisions as `unreadable_record`. Validation found that counting duplicate lines as separate repeats could create a false `consistently_unhealthy_task` finding.
+
+### 22. Running only a selected subset of checks
+
+**RFC gap.** The RFC defines a fixed check registry and a whole-run `--no-health-check` option, but not a way to exclude individual checks.
+
+**Chosen behavior.** All checks remain registered and enabled by default. Operators may explicitly ignore known check IDs for one run. An ignored check does not execute and does not affect findings, unobserved states, rollout verdicts, or task flags. `quality_summary.json` records sorted IDs in `run.ignored_checks` and records an `ignored` count in each check's coverage. `rollout_verdicts.jsonl` keeps the RFC schema, so readers must use the summary to know that verdicts came from a reduced check set.
+
+**Alternatives considered.** Remove checks from the registry, treat ignored checks as unobserved, or silently change the default check set. This extension exists for explicit validation of historical corpora and does not weaken default production behavior.
