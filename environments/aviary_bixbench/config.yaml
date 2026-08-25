@@ -2,7 +2,7 @@ bixbench_aviary_resources_server:
   resources_servers:
     aviary:
       entrypoint: notebook_app.py
-      domain: coding 
+      domain: coding
       verified: false
 bixbench_aviary_agent:
   responses_api_agents:
@@ -14,3 +14,7 @@ bixbench_aviary_agent:
       model_server:
         type: responses_api_models
         name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: environments/aviary_bixbench/data/example.jsonl

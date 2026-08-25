@@ -19,20 +19,12 @@ hotpotqa_aviary_agent:
       datasets:
       - name: train
         type: train
-        jsonl_fpath: resources_servers/aviary/data/hotpotqa_train.jsonl
-        gitlab_identifier:
-          dataset_name: PLACEHOLDER
-          version: 0.0.1
-          artifact_fpath: train.jsonl
-        license: Apache 2.0
+        jsonl_fpath: environments/aviary_hotpotqa/data/hotpotqa_train.jsonl
+        license: Creative Commons Attribution-ShareAlike 4.0 International
       - name: validation
         type: validation
-        jsonl_fpath: resources_servers/aviary/data/hotpotqa_validation.jsonl
-        gitlab_identifier:
-          dataset_name: PLACEHOLDER
-          version: 0.0.1
-          artifact_fpath: validation.jsonl
-        license: Apache 2.0
+        jsonl_fpath: environments/aviary_hotpotqa/data/hotpotqa_validation.jsonl
+        license: Creative Commons Attribution-ShareAlike 4.0 International
       - name: example
         type: example
-        jsonl_fpath: resources_servers/aviary/data/hotpotqa_example.jsonl
+        jsonl_fpath: environments/aviary_hotpotqa/data/example.jsonl
