@@ -19,7 +19,7 @@ from collections import Counter, defaultdict
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
 from omegaconf import DictConfig
@@ -27,6 +27,12 @@ from pydantic import BaseModel, Field, model_validator
 from tqdm.asyncio import tqdm
 
 from nemo_gym import _resolve_under_cwd_or_install
+from nemo_gym.atif_reverification import (
+    AtifProjectionError,
+    index_materialized_inputs,
+    load_atif_manifest,
+    project_atif_manifest_entries,
+)
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest, ReverifyMode
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError, UploadRolloutsConfigMixin
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
@@ -55,6 +61,7 @@ from nemo_gym.server_utils import (
 
 # Todo after merging branch `edobrowolska/judge_failures_v2`: replace this by importing from judge.py
 JUDGE_FAILED_FAILURE_CLASS = "judge_failed"
+ATIF_PROVENANCE_KEY = "_ng_atif_provenance"
 
 # Printed at the start of a `--judge-failed-only` run.
 _RECOVERY_TWO_SOURCES_WARNING = (
@@ -67,11 +74,21 @@ _RECOVERY_TWO_SOURCES_WARNING = (
 
 
 class RolloutReverificationConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
+    input_format: Literal["gym", "atif"] = Field(
+        default="gym",
+        description="Input format: native Gym rollout JSONL or an explicit ATIF manifest JSONL.",
+    )
     materialized_inputs_jsonl_fpath: str = Field(
         description="The file path of the materialized inputs as output by `gym eval run`."
     )
-    rollouts_jsonl_fpath: str = Field(
-        description="The file path of the rollouts to re-verify, as output by `gym eval run`."
+    rollouts_jsonl_fpath: Optional[str] = Field(
+        default=None, description="The file path of the rollouts to re-verify, as output by `gym eval run`."
+    )
+    atif_manifest_jsonl_fpath: Optional[str] = Field(
+        default=None,
+        description=(
+            "A JSONL manifest explicitly mapping each ATIF trajectory path to a materialized Gym task and rollout."
+        ),
     )
     output_jsonl_fpath: str = Field(description="The output data jsonl file path with recomputed rewards.")
     force: bool = Field(
@@ -138,6 +155,24 @@ class RolloutReverificationConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLIConfi
             raise ValueError("`append` is only valid together with `judge_failed_only` (pass --judge-failed-only).")
         if self.append and self.overwrite:
             raise ValueError("`append` and `overwrite` are mutually exclusive: one appends, the other clears.")
+        if self.input_format == "gym":
+            if not self.rollouts_jsonl_fpath:
+                raise ValueError("native Gym reverification requires `rollouts_jsonl_fpath` (pass --rollouts).")
+            if self.atif_manifest_jsonl_fpath is not None:
+                raise ValueError("`atif_manifest_jsonl_fpath` is only valid with input_format=atif.")
+        else:
+            if not self.atif_manifest_jsonl_fpath:
+                raise ValueError("ATIF reverification requires `atif_manifest_jsonl_fpath` (pass --atif-manifest).")
+            if self.rollouts_jsonl_fpath is not None:
+                raise ValueError("`rollouts_jsonl_fpath` cannot be combined with input_format=atif.")
+            if self.judge_failed_only or self.append:
+                raise ValueError("ATIF reverification does not support judge-failure recovery or append mode.")
+            if self.force:
+                raise ValueError("ATIF reverification requires a stateless verifier; --force is not supported.")
+            if self.resume_from_cache:
+                raise ValueError(
+                    "ATIF reverification does not support --resume until cache keys include source hashes."
+                )
         return self
 
 
@@ -427,6 +462,70 @@ def _prepare_payloads(
             materialized_inputs_jsonl_fpath, rollouts_jsonl_fpath, limit=limit, rollout_predicate=rollout_predicate
         )
     ]
+    return _apply_reverify_cache(all_payloads, output_fpaths, resume_from_cache)
+
+
+def _prepare_atif_payloads(
+    materialized_inputs_jsonl_fpath: Path,
+    atif_manifest_jsonl_fpath: Path,
+    output_fpaths: OutputPaths,
+    resume_from_cache: bool,
+    limit: Optional[int] = None,
+) -> List[Dict]:
+    """Build verifier payloads from an explicit ATIF-to-materialized-task manifest."""
+
+    materialized_rows: list[Dict[str, Any]] = []
+    try:
+        materialized_inputs = materialized_inputs_jsonl_fpath.open("rb")
+    except OSError as exc:
+        raise AtifProjectionError(
+            f"could not read materialized inputs {materialized_inputs_jsonl_fpath}: {exc}"
+        ) from exc
+    with materialized_inputs:
+        for line_number, line in enumerate(materialized_inputs, start=1):
+            if not line.strip():
+                continue
+            try:
+                row = orjson.loads(line)
+            except orjson.JSONDecodeError as exc:
+                raise AtifProjectionError(
+                    f"invalid materialized input row {line_number} in {materialized_inputs_jsonl_fpath}: {exc}"
+                ) from exc
+            if not isinstance(row, dict):
+                raise AtifProjectionError(
+                    f"materialized input row {line_number} in {materialized_inputs_jsonl_fpath} is not an object"
+                )
+            materialized_rows.append(row)
+
+    entries = load_atif_manifest(atif_manifest_jsonl_fpath)
+    if limit is not None:
+        entries = entries[:limit]
+    projected = project_atif_manifest_entries(
+        entries,
+        index_materialized_inputs(materialized_rows),
+        manifest_directory=atif_manifest_jsonl_fpath.parent,
+    )
+    all_payloads = [
+        item.payload
+        | {
+            ATIF_PROVENANCE_KEY: {
+                "trajectory_id": item.trajectory_id,
+                "session_id": item.session_id,
+                "source_sha256": item.source_sha256,
+                "schema_version": item.schema_version,
+                "projection_status": item.projection_status,
+            }
+        }
+        for item in projected
+    ]
+    return _apply_reverify_cache(all_payloads, output_fpaths, resume_from_cache)
+
+
+def _apply_reverify_cache(
+    all_payloads: List[Dict],
+    output_fpaths: OutputPaths,
+    resume_from_cache: bool,
+) -> List[Dict]:
     if resume_from_cache:
         cache = _load_cache_keys_by_status(output_fpaths)
         payloads = list(_drop_cache_from_payloads(all_payloads, cache))
@@ -450,7 +549,8 @@ def _run_verification_payloads(
     async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
         async with semaphore:
             rs_name = agent_to_rs[row[AGENT_REF_KEY_NAME]["name"]]
-            res = await server_client.post(server_name=rs_name, url_path="/verify", json=row)
+            request_row = {key: value for key, value in row.items() if key != ATIF_PROVENANCE_KEY}
+            res = await server_client.post(server_name=rs_name, url_path="/verify", json=request_row)
             try:
                 await raise_for_status(
                     res
@@ -566,7 +666,9 @@ async def _call_aggregate_metrics(
         # Strip heavyweight fields before sending, but preserve response.usage
         stripped = []
         for r in agent_result_list:
-            entry = {k: v for k, v in r.items() if k not in ("response", "responses_create_params")}
+            entry = {
+                k: v for k, v in r.items() if k not in ("response", "responses_create_params", ATIF_PROVENANCE_KEY)
+            }
             usage = (r.get("response") or {}).get("usage")
             if usage:
                 entry["response"] = {"usage": usage}
@@ -684,28 +786,37 @@ class RolloutReverificationHelper(BaseModel):
             output_name_prefix, config.output_jsonl_fpath, config.resume_from_cache, config.overwrite, config.append
         )
         materialized_inputs_jsonl_fpath = _resolve_under_cwd_or_install(config.materialized_inputs_jsonl_fpath)
-        rollouts_jsonl_fpath = _resolve_under_cwd_or_install(
-            config.rollouts_jsonl_fpath
-        )  # rollouts are inputs for the verification
+        if config.input_format == "atif":
+            assert config.atif_manifest_jsonl_fpath is not None
+            atif_manifest_jsonl_fpath = _resolve_under_cwd_or_install(config.atif_manifest_jsonl_fpath)
+            payloads_to_reverify = _prepare_atif_payloads(
+                materialized_inputs_jsonl_fpath,
+                atif_manifest_jsonl_fpath,
+                output_fpaths,
+                config.resume_from_cache,
+                config.limit,
+            )
+        else:
+            assert config.rollouts_jsonl_fpath is not None
+            rollouts_jsonl_fpath = _resolve_under_cwd_or_install(config.rollouts_jsonl_fpath)
+            reverify_source_fpath = rollouts_jsonl_fpath
+            rollout_predicate = None
 
-        reverify_source_fpath = rollouts_jsonl_fpath
-        rollout_predicate = None
+            if config.judge_failed_only:
+                print(_RECOVERY_TWO_SOURCES_WARNING)
+                reverify_source_fpath = failures_path_for(rollouts_jsonl_fpath)
+                # Seed the successes and dedup so the re-verification doesn't judge successes again.
+                skip_keys = _seed_output_with_successes(rollouts_jsonl_fpath, output_fpaths.output)
+                rollout_predicate = _recovery_rollout_predicate(skip_keys)
 
-        if config.judge_failed_only:
-            print(_RECOVERY_TWO_SOURCES_WARNING)
-            reverify_source_fpath = failures_path_for(rollouts_jsonl_fpath)
-            # Seed the successes and dedup so the re-verification doesn't judge successes again.
-            skip_keys = _seed_output_with_successes(rollouts_jsonl_fpath, output_fpaths.output)
-            rollout_predicate = _recovery_rollout_predicate(skip_keys)
-
-        payloads_to_reverify = _prepare_payloads(
-            materialized_inputs_jsonl_fpath,
-            reverify_source_fpath,
-            output_fpaths,
-            config.resume_from_cache,
-            config.limit,
-            rollout_predicate=rollout_predicate,
-        )
+            payloads_to_reverify = _prepare_payloads(
+                materialized_inputs_jsonl_fpath,
+                reverify_source_fpath,
+                output_fpaths,
+                config.resume_from_cache,
+                config.limit,
+                rollout_predicate=rollout_predicate,
+            )
 
         semaphore = nullcontext()
         if config.num_samples_in_parallel is not None:
@@ -726,6 +837,8 @@ class RolloutReverificationHelper(BaseModel):
                 result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
                 if SKILLS_REF_KEY_NAME in row:
                     result[SKILLS_REF_KEY_NAME] = row[SKILLS_REF_KEY_NAME]
+                if ATIF_PROVENANCE_KEY in row:
+                    result[ATIF_PROVENANCE_KEY] = row[ATIF_PROVENANCE_KEY]
 
                 no_persist = bool(result.get(NG_NO_PERSIST_KEY))
                 failure_class = result.get(NG_FAILURE_CLASS_KEY)

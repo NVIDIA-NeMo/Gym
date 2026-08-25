@@ -1,0 +1,132 @@
+{
+  "schema_version": "ATIF-v1.7",
+  "session_id": "relay-responses-run",
+  "trajectory_id": "relay-responses-trajectory",
+  "agent": {
+    "name": "codex-relay-fixture",
+    "version": "0.147.0",
+    "model_name": "nvidia/nemotron-3-super-120b-a12b",
+    "extra": {
+      "fixture_origin": "minimized live Codex through Relay output"
+    }
+  },
+  "steps": [
+    {
+      "step_id": 1,
+      "source": "user",
+      "message": "Run the command, then answer B."
+    },
+    {
+      "step_id": 2,
+      "timestamp": "2026-08-24T21:37:52Z",
+      "source": "agent",
+      "model_name": "nvidia/nemotron-3-super-120b-a12b",
+      "message": "",
+      "tool_calls": [
+        {
+          "tool_call_id": "call-live-1",
+          "function_name": "exec_command",
+          "arguments": {
+            "cmd": "printf RELAY_ATIF_GYM_OK"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "source_call_id": "call-live-1",
+            "content": "RELAY_ATIF_GYM_OK"
+          }
+        ]
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "invocation": {
+          "invocation_id": "llm-live-1",
+          "framework": "nemo_relay",
+          "status": "completed"
+        },
+        "tool_invocations": [
+          {
+            "invocation_id": "call-live-1",
+            "framework": "nemo_relay",
+            "status": "completed"
+          }
+        ],
+        "llm_response": {
+          "status": "completed",
+          "output": [
+            {
+              "id": "rs-live-1",
+              "type": "reasoning",
+              "summary": [],
+              "content": [
+                {
+                  "text": "Use the requested tool."
+                }
+              ]
+            },
+            {
+              "id": "fc-live-1",
+              "call_id": "call-live-1",
+              "type": "function_call",
+              "name": "exec_command",
+              "arguments": "{\"cmd\":\"printf RELAY_ATIF_GYM_OK\"}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "step_id": 3,
+      "timestamp": "2026-08-24T21:37:55Z",
+      "source": "agent",
+      "model_name": "nvidia/nemotron-3-super-120b-a12b",
+      "message": "\\boxed{B}",
+      "llm_call_count": 1,
+      "extra": {
+        "invocation": {
+          "invocation_id": "llm-live-2",
+          "framework": "nemo_relay",
+          "status": "completed"
+        },
+        "llm_response": {
+          "status": "completed",
+          "output": [
+            {
+              "id": "rs-live-2",
+              "type": "reasoning",
+              "summary": [],
+              "content": [
+                {
+                  "text": "Return the requested answer."
+                }
+              ]
+            },
+            {
+              "id": "msg-live-2",
+              "type": "message",
+              "role": "assistant",
+              "status": "completed",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "\\boxed{B}",
+                  "annotations": []
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "final_metrics": {
+    "total_prompt_tokens": 100,
+    "total_completion_tokens": 20,
+    "total_steps": 3
+  },
+  "extra": {
+    "relay_revision": "23f33cb0-plus-atif-call-id-fix"
+  }
+}

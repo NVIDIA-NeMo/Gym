@@ -632,8 +632,10 @@ class TestEvalReverifyFlags:
     @pytest.mark.parametrize(
         "flag_argv, expected_override",
         [
+            (["--input-format", "atif"], "+input_format=atif"),
             (["--inputs", "in.jsonl"], "+materialized_inputs_jsonl_fpath=in.jsonl"),
             (["--rollouts", "r.jsonl"], "+rollouts_jsonl_fpath=r.jsonl"),
+            (["--atif-manifest", "manifest.jsonl"], "+atif_manifest_jsonl_fpath=manifest.jsonl"),
             (["--output", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
             (["-o", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
             (["--concurrency", "10"], "+num_samples_in_parallel=10"),

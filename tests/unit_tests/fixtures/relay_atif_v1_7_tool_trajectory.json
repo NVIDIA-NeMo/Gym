@@ -1,0 +1,210 @@
+{
+  "schema_version": "ATIF-v1.7",
+  "session_id": "gym-atif-spike-session",
+  "trajectory_id": "gym-atif-spike-session",
+  "agent": {
+    "name": "relay-gym-fixture-agent",
+    "version": "0.9.0",
+    "model_name": "fixture-model",
+    "tool_definitions": [
+      {
+        "function": {
+          "description": "Return deterministic fixture weather",
+          "name": "lookup_weather",
+          "parameters": {
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "city"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ],
+    "extra": {
+      "fixture": "gym-400",
+      "relay_revision": "39885b04174be74a7c8fe7aad55686722e815dc8"
+    }
+  },
+  "steps": [
+    {
+      "step_id": 1,
+      "source": "user",
+      "message": "What is the weather in Raleigh?",
+      "timestamp": "2026-08-24T16:08:52.614535+00:00",
+      "extra": {
+        "ancestry": {
+          "function_id": "01a03488-2486-78d1-b238-988cd3961d6e",
+          "function_name": "openai.chat_completions",
+          "parent_id": "01a03488-2485-7640-b173-d4ef8e13f9a8",
+          "parent_name": "gym-atif-spike-agent"
+        },
+        "llm_request": {
+          "messages": [
+            {
+              "content": "Answer using tools when useful.",
+              "role": "system"
+            },
+            {
+              "content": "What is the weather in Raleigh?",
+              "role": "user"
+            }
+          ],
+          "model": "fixture-model",
+          "tools": [
+            {
+              "function": {
+                "name": "lookup_weather",
+                "parameters": {
+                  "properties": {
+                    "city": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "city"
+                  ],
+                  "type": "object"
+                }
+              },
+              "type": "function"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "step_id": 2,
+      "source": "agent",
+      "message": "",
+      "timestamp": "2026-08-24T16:08:52.615201+00:00",
+      "model_name": "fixture-model",
+      "tool_calls": [
+        {
+          "tool_call_id": "call-weather-1",
+          "function_name": "lookup_weather",
+          "arguments": {
+            "city": "Raleigh"
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "source_call_id": "call-weather-1",
+            "extra": {
+              "event_name": "lookup_weather",
+              "event_uuid": "01a03488-2486-78d1-b238-989d52ac221e",
+              "parent_event_uuid": "01a03488-2485-7640-b173-d4ef8e13f9a8",
+              "tool_result": {
+                "condition": "sunny",
+                "temperature_f": 72
+              }
+            }
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 21,
+        "completion_tokens": 9,
+        "extra": {
+          "total_tokens": 30
+        }
+      },
+      "llm_call_count": 1
+    },
+    {
+      "step_id": 3,
+      "source": "agent",
+      "message": "It is 72 degrees and sunny in Raleigh.",
+      "timestamp": "2026-08-24T16:08:52.615411+00:00",
+      "model_name": "fixture-model",
+      "metrics": {
+        "prompt_tokens": 42,
+        "completion_tokens": 11,
+        "extra": {
+          "total_tokens": 53
+        }
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "ancestry": {
+          "function_id": "01a03488-2486-78d1-b238-98ad73ff1659",
+          "function_name": "openai.chat_completions",
+          "parent_id": "01a03488-2485-7640-b173-d4ef8e13f9a8",
+          "parent_name": "gym-atif-spike-agent"
+        },
+        "invocation": {
+          "end_timestamp": 1787587732.615,
+          "framework": "nemo_relay",
+          "invocation_id": "01a03488-2486-78d1-b238-98ad73ff1659",
+          "start_timestamp": 1787587732.614,
+          "status": "completed"
+        },
+        "llm_request": {
+          "messages": [
+            {
+              "content": "Answer using tools when useful.",
+              "role": "system"
+            },
+            {
+              "content": "What is the weather in Raleigh?",
+              "role": "user"
+            },
+            {
+              "content": null,
+              "role": "assistant",
+              "tool_calls": [
+                {
+                  "function": {
+                    "arguments": "{\"city\":\"Raleigh\"}",
+                    "name": "lookup_weather"
+                  },
+                  "id": "call-weather-1",
+                  "type": "function"
+                }
+              ]
+            },
+            {
+              "content": "{\"temperature_f\":72,\"condition\":\"sunny\"}",
+              "role": "tool",
+              "tool_call_id": "call-weather-1"
+            }
+          ],
+          "model": "fixture-model"
+        },
+        "llm_response": {
+          "choices": [
+            {
+              "finish_reason": "stop",
+              "index": 0,
+              "message": {
+                "content": "It is 72 degrees and sunny in Raleigh.",
+                "role": "assistant"
+              }
+            }
+          ],
+          "created": 0,
+          "id": "chatcmpl-fixture-2",
+          "model": "fixture-model",
+          "object": "chat.completion",
+          "usage": {
+            "completion_tokens": 11,
+            "prompt_tokens": 42,
+            "total_tokens": 53
+          }
+        }
+      }
+    }
+  ],
+  "final_metrics": {
+    "total_prompt_tokens": 63,
+    "total_completion_tokens": 20,
+    "total_steps": 3
+  }
+}

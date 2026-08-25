@@ -22,11 +22,13 @@ import orjson
 import pytest
 from pydantic import ValidationError
 
+from nemo_gym.atif_reverification import AtifProjectionError
 from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.config_types import ConfigError
 from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, SKILLS_REF_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.rollout_reverification import (
     _RECOVERY_TWO_SOURCES_WARNING,
+    ATIF_PROVENANCE_KEY,
     JUDGE_FAILED_FAILURE_CLASS,
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
@@ -49,6 +51,7 @@ from nemo_gym.rollout_reverification import (
     _load_cache_keys_by_status,
     _load_reverified_results,
     _parse_output_line_key,
+    _prepare_atif_payloads,
     _prepare_output_fpaths,
     _prepare_payloads,
     _recovery_rollout_predicate,
@@ -114,6 +117,70 @@ class TestRolloutReverificationConfig:
     def test_append_with_judge_failed_only_is_valid(self) -> None:
         cfg = RolloutReverificationConfig(**self._kwargs(append=True, judge_failed_only=True))
         assert cfg.append is True
+
+    def test_atif_manifest_is_a_distinct_input_mode(self) -> None:
+        cfg = RolloutReverificationConfig(
+            **self._kwargs(
+                input_format="atif",
+                rollouts_jsonl_fpath=None,
+                atif_manifest_jsonl_fpath="manifest.jsonl",
+            )
+        )
+
+        assert cfg.input_format == "atif"
+        assert cfg.atif_manifest_jsonl_fpath == "manifest.jsonl"
+
+    @pytest.mark.parametrize(
+        ("overrides", "match"),
+        [
+            ({"rollouts_jsonl_fpath": None}, "requires `rollouts_jsonl_fpath`"),
+            ({"atif_manifest_jsonl_fpath": "manifest.jsonl"}, "only valid with input_format=atif"),
+            (
+                {"input_format": "atif", "rollouts_jsonl_fpath": None, "atif_manifest_jsonl_fpath": None},
+                "requires `atif_manifest_jsonl_fpath`",
+            ),
+            (
+                {"input_format": "atif", "atif_manifest_jsonl_fpath": "manifest.jsonl"},
+                "cannot be combined with input_format=atif",
+            ),
+            (
+                {
+                    "input_format": "atif",
+                    "rollouts_jsonl_fpath": None,
+                    "atif_manifest_jsonl_fpath": "manifest.jsonl",
+                    "force": True,
+                },
+                "requires a stateless verifier",
+            ),
+            (
+                {
+                    "input_format": "atif",
+                    "rollouts_jsonl_fpath": None,
+                    "atif_manifest_jsonl_fpath": "manifest.jsonl",
+                    "resume_from_cache": True,
+                },
+                "cache keys include source hashes",
+            ),
+        ],
+    )
+    def test_input_mode_conflicts_are_rejected(self, overrides: dict, match: str) -> None:
+        with pytest.raises(ValidationError, match=match):
+            RolloutReverificationConfig(**self._kwargs(**overrides))
+
+    def test_atif_projection_error_exits_the_cli_cleanly(self, capsys: pytest.CaptureFixture[str]) -> None:
+        from nemo_gym.cli.utils import exit_cleanly_on_config_error
+
+        @exit_cleanly_on_config_error
+        def fail_projection() -> None:
+            raise AtifProjectionError("invalid ATIF manifest row 2")
+
+        with pytest.raises(SystemExit) as exc_info:
+            fail_projection()
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "Error: invalid ATIF manifest row 2" in captured.out
+        assert "Traceback" not in captured.out + captured.err
 
 
 class TestAgentToRsMappingFromAgentBlocks:
@@ -813,6 +880,83 @@ class TestPreparePayloads:
         assert capture["rollout_predicate"] is None
 
 
+class TestPrepareAtifPayloads:
+    def _paths(self, tmp_path: Path) -> OutputPaths:
+        return OutputPaths(output=tmp_path / "out.jsonl", failures=tmp_path / "out_failures.jsonl")
+
+    def _write_inputs_and_manifest(self, tmp_path: Path) -> tuple[Path, Path]:
+        fixture = Path(__file__).parent / "fixtures" / "relay_atif_v1_7_tool_trajectory.json"
+        trajectory = tmp_path / "trajectory.json"
+        trajectory.write_bytes(fixture.read_bytes())
+        materialized = tmp_path / "materialized.jsonl"
+        materialized.write_bytes(
+            orjson.dumps(
+                {
+                    TASK_INDEX_KEY_NAME: 7,
+                    ROLLOUT_INDEX_KEY_NAME: 2,
+                    AGENT_REF_KEY_NAME: {"name": "fixture-agent"},
+                    "responses_create_params": {
+                        "input": [{"role": "user", "content": "What is the weather in Raleigh?"}],
+                        "tools": [],
+                    },
+                }
+            )
+            + b"\n"
+        )
+        manifest = tmp_path / "manifest.jsonl"
+        manifest.write_bytes(
+            orjson.dumps(
+                {
+                    "trajectory_path": trajectory.name,
+                    TASK_INDEX_KEY_NAME: 7,
+                    ROLLOUT_INDEX_KEY_NAME: 2,
+                }
+            )
+            + b"\n"
+        )
+        return materialized, manifest
+
+    def test_builds_payload_and_declared_path_provenance(self, tmp_path: Path) -> None:
+        materialized, manifest = self._write_inputs_and_manifest(tmp_path)
+
+        payloads = _prepare_atif_payloads(
+            materialized,
+            manifest,
+            self._paths(tmp_path),
+            resume_from_cache=False,
+        )
+
+        assert len(payloads) == 1
+        payload = payloads[0]
+        assert payload[TASK_INDEX_KEY_NAME] == 7
+        assert payload[ROLLOUT_INDEX_KEY_NAME] == 2
+        assert [item["type"] for item in payload["response"]["output"]] == [
+            "function_call",
+            "function_call_output",
+            "message",
+        ]
+        assert payload[ATIF_PROVENANCE_KEY] == {
+            "trajectory_id": "gym-atif-spike-session",
+            "session_id": "gym-atif-spike-session",
+            "source_sha256": "84fa0a1eeaa6520c5bcb870dfcb49c066602c639982265cc43624410ed4465da",
+            "schema_version": "ATIF-v1.7",
+            "projection_status": "complete",
+        }
+
+    def test_rejects_non_object_materialized_rows(self, tmp_path: Path) -> None:
+        _, manifest = self._write_inputs_and_manifest(tmp_path)
+        materialized = tmp_path / "materialized-invalid.jsonl"
+        materialized.write_text("[]\n")
+
+        with pytest.raises(AtifProjectionError, match="is not an object"):
+            _prepare_atif_payloads(
+                materialized,
+                manifest,
+                self._paths(tmp_path),
+                resume_from_cache=False,
+            )
+
+
 class TestRunVerificationPayloads:
     """Tests for _run_verification_payloads: routing, success/error paths, and semaphore enforcement."""
 
@@ -879,6 +1023,24 @@ class TestRunVerificationPayloads:
         await self._collect(_run_verification_payloads([row_a, row_b]))
 
         assert set(posted_to) == {("rs_a", "agent_a"), ("rs_b", "agent_b")}
+
+    async def test_atif_provenance_is_not_sent_to_the_verifier(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        row = self._make_row("agent_a") | {ATIF_PROVENANCE_KEY: {"source_sha256": "a" * 64}}
+        mock_client = MagicMock()
+        mock_client.global_config_dict = {}
+        posted_rows: list[dict] = []
+
+        async def capture_post(server_name, url_path, json):  # noqa: ARG001
+            posted_rows.append(json)
+            return MagicMock()
+
+        mock_client.post = capture_post
+        self._patch(monkeypatch, mock_client, {"agent_a": "rs_a"})
+
+        returned = await self._collect(_run_verification_payloads([row]))
+
+        assert ATIF_PROVENANCE_KEY not in posted_rows[0]
+        assert returned[0][0][ATIF_PROVENANCE_KEY] == {"source_sha256": "a" * 64}
 
     async def test_failed_response_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         row = self._make_row("agent_a")
@@ -1240,6 +1402,10 @@ class TestCallAggregateMetrics:
                     "usage": {"prompt_tokens": 10, "completion_tokens": 5},
                 },
                 "responses_create_params": {"input": "large prompt content", "model": "llm"},
+                ATIF_PROVENANCE_KEY: {
+                    "trajectory_id": "trajectory-1",
+                    "source_sha256": "a" * 64,
+                },
             }
         ]
 
@@ -1261,6 +1427,7 @@ class TestCallAggregateMetrics:
 
         # response body stripped, responses_create_params stripped
         assert "responses_create_params" not in sent
+        assert ATIF_PROVENANCE_KEY not in sent
         assert sent.get("response") == {"usage": {"prompt_tokens": 10, "completion_tokens": 5}}
 
         # other fields preserved
@@ -1542,6 +1709,94 @@ class TestRolloutReverificationRunFromConfig:
         return [orjson.loads(line) for line in path.read_bytes().splitlines() if line.strip()]
 
     # ------------------------------------------------------------------ tests
+
+    async def test_atif_manifest_runs_through_stateless_verify_and_persists_provenance(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Exercise the public ATIF mode from manifest loading through persisted reward output."""
+
+        fixture = Path(__file__).parent / "fixtures" / "relay_atif_v1_7_responses_tool_trajectory.json"
+        materialized = tmp_path / "inputs.jsonl"
+        materialized.write_bytes(
+            orjson.dumps(
+                {
+                    TASK_INDEX_KEY_NAME: 0,
+                    ROLLOUT_INDEX_KEY_NAME: 0,
+                    AGENT_REF_KEY_NAME: {"name": "codex-relay-fixture"},
+                    "responses_create_params": {
+                        "input": [{"role": "user", "content": "Run the command, then answer B."}],
+                        "tools": [],
+                    },
+                    "expected_answer": "B",
+                }
+            )
+            + b"\n"
+        )
+        manifest = tmp_path / "manifest.jsonl"
+        manifest.write_bytes(
+            orjson.dumps(
+                {
+                    "trajectory_path": str(fixture),
+                    TASK_INDEX_KEY_NAME: 0,
+                    ROLLOUT_INDEX_KEY_NAME: 0,
+                    "expected_sha256": "d31dd5eb9370aa690f92fa2ba3ab8ea57645b183de6ebdd81c8a5552bb1e3aa1",
+                }
+            )
+            + b"\n"
+        )
+
+        reverify_mode_response = object()
+        verify_response = object()
+        mock_client = MagicMock()
+        mock_client.global_config_dict = {
+            "fixture-rs": {"resources_servers": {"fixture": {}}},
+        }
+        mock_client.get = AsyncMock(return_value=reverify_mode_response)
+        posted_rows: list[dict] = []
+
+        async def capture_verify(server_name: str, url_path: str, json: dict) -> object:
+            assert server_name == "fixture-rs"
+            assert url_path == "/verify"
+            posted_rows.append(json)
+            return verify_response
+
+        async def response_json(response: object) -> str | dict:
+            if response is reverify_mode_response:
+                return ReverifyMode.STATELESS
+            assert response is verify_response
+            return {"reward": 1.0}
+
+        mock_client.post = capture_verify
+        monkeypatch.setattr("nemo_gym.rollout_reverification.setup_server_client", lambda: mock_client)
+        monkeypatch.setattr("nemo_gym.rollout_reverification.raise_for_status", AsyncMock())
+        monkeypatch.setattr("nemo_gym.rollout_reverification.get_response_json", response_json)
+        monkeypatch.setattr("nemo_gym.rollout_reverification.get_exporters", list)
+
+        config = RolloutReverificationConfig(
+            input_format="atif",
+            materialized_inputs_jsonl_fpath=str(materialized),
+            rollouts_jsonl_fpath=None,
+            atif_manifest_jsonl_fpath=str(manifest),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            disable_aggregation=True,
+        )
+
+        returned = await RolloutReverificationHelper().run_from_config(config)
+
+        assert len(posted_rows) == 1
+        assert ATIF_PROVENANCE_KEY not in posted_rows[0]
+        correlated_items = [item for item in posted_rows[0]["response"]["output"] if "call_id" in item]
+        assert [item["call_id"] for item in correlated_items] == ["call-live-1", "call-live-1"]
+        assert all(item["call_id"] != "fc-live-1" for item in correlated_items)
+        assert returned == self._read_jsonl(tmp_path / "output.jsonl")
+        assert returned[0]["reward"] == 1.0
+        assert returned[0][ATIF_PROVENANCE_KEY] == {
+            "trajectory_id": "relay-responses-trajectory",
+            "session_id": "relay-responses-run",
+            "source_sha256": "d31dd5eb9370aa690f92fa2ba3ab8ea57645b183de6ebdd81c8a5552bb1e3aa1",
+            "schema_version": "ATIF-v1.7",
+            "projection_status": "complete",
+        }
 
     async def test_results_routed_to_correct_output_files_and_metadata_stamped_on_results(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

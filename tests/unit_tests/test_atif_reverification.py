@@ -1,0 +1,729 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+from __future__ import annotations
+
+import json
+from copy import deepcopy
+from pathlib import Path
+from typing import Any
+
+import pytest
+from pydantic import ValidationError
+
+from nemo_gym.atif_reverification import (
+    AtifProjectionError,
+    AtifReverifyManifestEntry,
+    atif_trajectory_to_response,
+    build_atif_verify_payload,
+    index_materialized_inputs,
+    load_atif_manifest,
+    load_atif_trajectory,
+    project_atif_manifest_entries,
+    project_atif_manifest_entry,
+)
+from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.relay_atif import AtifTrajectoryV1_7
+from nemo_gym.responses_converter import ResponsesConverter
+
+
+_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "relay_atif_v1_7_tool_trajectory.json"
+_FIXTURE_SHA256 = "84fa0a1eeaa6520c5bcb870dfcb49c066602c639982265cc43624410ed4465da"
+_RESPONSES_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "relay_atif_v1_7_responses_tool_trajectory.json"
+_RESPONSES_FIXTURE_SHA256 = "d31dd5eb9370aa690f92fa2ba3ab8ea57645b183de6ebdd81c8a5552bb1e3aa1"
+
+
+def _trajectory_data() -> dict[str, Any]:
+    return {
+        "schema_version": "ATIF-v1.7",
+        "session_id": "run-1",
+        "trajectory_id": "trajectory-1",
+        "agent": {"name": "fixture-agent", "version": "1", "model_name": "fixture-model"},
+        "steps": [
+            {"step_id": 1, "source": "user", "message": "Use both tools."},
+            {
+                "step_id": 2,
+                "source": "agent",
+                "timestamp": "2026-08-24T12:00:00Z",
+                "message": "",
+                "reasoning_content": "I need both results.",
+                "tool_calls": [
+                    {"tool_call_id": "call-a", "function_name": "lookup", "arguments": {"q": "x"}},
+                    {"tool_call_id": "call-b", "function_name": "calculate", "arguments": {"x": 2}},
+                ],
+                # Deliberately reverse the result order. Pairing must use source_call_id,
+                # not the positional assumption used by the older Harbor-only mapper.
+                "observation": {
+                    "results": [
+                        {"source_call_id": "call-b", "content": "4"},
+                        {"source_call_id": "call-a", "content": "found"},
+                    ]
+                },
+            },
+            {"step_id": 3, "source": "agent", "message": "The answer is 4."},
+        ],
+    }
+
+
+def _materialized_input() -> dict[str, Any]:
+    return {
+        "responses_create_params": {
+            "input": [{"role": "user", "content": "What is the weather in Raleigh?"}],
+            "instructions": "Answer using tools when useful.",
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "lookup_weather",
+                    "description": "Return deterministic fixture weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                    "strict": False,
+                }
+            ],
+        },
+        TASK_INDEX_KEY_NAME: 7,
+        ROLLOUT_INDEX_KEY_NAME: 2,
+        "expected_answer": "72 and sunny",
+    }
+
+
+def test_relay_atif_parser_rejects_unknown_structural_fields() -> None:
+    data = _trajectory_data()
+    data["unknown_root_field"] = "would otherwise be silently ignored"
+
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        AtifTrajectoryV1_7.model_validate(data)
+
+
+def test_atif_v1_7_parser_accepts_missing_optional_session_id() -> None:
+    data = _trajectory_data()
+    del data["session_id"]
+
+    trajectory = AtifTrajectoryV1_7.model_validate(data)
+
+    assert trajectory.session_id is None
+
+
+def _weather_reward(payload: dict[str, Any]) -> float:
+    """Small stateless verifier used to compare native and ATIF payloads."""
+
+    NeMoGymResponseCreateParamsNonStreaming.model_validate(payload["responses_create_params"])
+    response = NeMoGymResponse.model_validate(payload["response"])
+    calls = {item.call_id: (item.name, item.arguments) for item in response.output if item.type == "function_call"}
+    results = {item.call_id: item.output for item in response.output if item.type == "function_call_output"}
+    answer = "".join(
+        part.text
+        for item in response.output
+        if item.type == "message"
+        for part in item.content
+        if part.type == "output_text"
+    )
+    try:
+        weather = json.loads(results.get("call-weather-1", ""))
+    except (TypeError, json.JSONDecodeError):
+        weather = None
+    return float(
+        calls.get("call-weather-1") == ("lookup_weather", '{"city":"Raleigh"}')
+        and weather == {"condition": "sunny", "temperature_f": 72}
+        and answer == "It is 72 degrees and sunny in Raleigh."
+    )
+
+
+def test_current_relay_fixture_builds_a_valid_gym_verify_request() -> None:
+    loaded = load_atif_trajectory(_FIXTURE_PATH)
+    materialized = _materialized_input()
+    original = deepcopy(materialized)
+
+    payload = build_atif_verify_payload(materialized, loaded.trajectory)
+    NeMoGymResponseCreateParamsNonStreaming.model_validate(payload["responses_create_params"])
+    response = NeMoGymResponse.model_validate(payload["response"])
+
+    assert loaded.source_sha256 == _FIXTURE_SHA256
+    assert loaded.trajectory.agent.version == "0.9.0"
+    assert loaded.trajectory.agent.extra == {
+        "fixture": "gym-400",
+        "relay_revision": "39885b04174be74a7c8fe7aad55686722e815dc8",
+    }
+    assert materialized == original
+    assert payload[TASK_INDEX_KEY_NAME] == 7
+    assert payload["expected_answer"] == "72 and sunny"
+    assert response.instructions == "Answer using tools when useful."
+    assert response.parallel_tool_calls is False
+    assert response.tools[0].name == "lookup_weather"
+    assert [item.type for item in response.output] == [
+        "function_call",
+        "function_call_output",
+        "message",
+    ]
+    assert response.output[1].call_id == "call-weather-1"
+    assert response.output[1].output == '{"condition":"sunny","temperature_f":72}'
+
+
+def test_atif_and_equivalent_native_response_receive_the_same_reward() -> None:
+    loaded = load_atif_trajectory(_FIXTURE_PATH)
+    materialized = _materialized_input()
+    atif_payload = build_atif_verify_payload(materialized, loaded.trajectory)
+    final_step = loaded.trajectory.steps[-1]
+    assert final_step.extra is not None
+    raw_request = final_step.extra["llm_request"]
+    raw_response = final_step.extra["llm_response"]
+    converter = ResponsesConverter(return_token_id_information=False, uses_reasoning_parser=False)
+    native_items = converter.chat_completions_messages_to_responses_items(
+        deepcopy(raw_request["messages"][2:]) + [deepcopy(raw_response["choices"][0]["message"])]
+    )
+    params = NeMoGymResponseCreateParamsNonStreaming.model_validate(materialized["responses_create_params"])
+    native_response = NeMoGymResponse(
+        id="native-response",
+        created_at=raw_response["created"],
+        model=raw_response["model"],
+        object="response",
+        output=native_items,
+        parallel_tool_calls=params.parallel_tool_calls,
+        tool_choice=params.tool_choice or "auto",
+        tools=params.tools,
+        instructions=params.instructions,
+        status="completed",
+    )
+    native_payload = materialized | {"response": native_response.model_dump(mode="json")}
+
+    assert [item.type for item in native_response.output] == ["function_call", "function_call_output", "message"]
+    assert _weather_reward(native_payload) == 1.0
+    assert _weather_reward(atif_payload) == _weather_reward(native_payload)
+
+
+def test_fixed_relay_responses_fixture_preserves_invocation_correlation() -> None:
+    loaded = load_atif_trajectory(_RESPONSES_FIXTURE_PATH)
+
+    response = atif_trajectory_to_response(loaded.trajectory)
+
+    assert loaded.source_sha256 == _RESPONSES_FIXTURE_SHA256
+    assert [item.type for item in response.output] == [
+        "reasoning",
+        "function_call",
+        "function_call_output",
+        "reasoning",
+        "message",
+    ]
+    correlated_items = [item for item in response.output if hasattr(item, "call_id")]
+    assert [item.call_id for item in correlated_items] == ["call-live-1", "call-live-1"]
+    assert all(item.call_id != "fc-live-1" for item in correlated_items)
+
+
+def test_prefixed_responses_item_id_orphan_shape_is_rejected() -> None:
+    data = json.loads(_RESPONSES_FIXTURE_PATH.read_text())
+    tool_step = data["steps"][1]
+    tool_step["tool_calls"][0]["tool_call_id"] = "fc-live-1"
+    tool_step.pop("observation")
+    final_step = data["steps"][2]
+    final_step["step_id"] = 4
+    data["steps"].insert(
+        2,
+        {
+            "step_id": 3,
+            "source": "system",
+            "message": "",
+            "observation": {"results": [{"source_call_id": None, "content": "RELAY_ATIF_GYM_OK"}]},
+        },
+    )
+
+    with pytest.raises(AtifProjectionError, match="raw provider tool calls do not match"):
+        atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+
+
+def test_manifest_explicitly_joins_trajectory_to_materialized_rollout() -> None:
+    materialized = _materialized_input()
+    indexed = index_materialized_inputs([materialized])
+    entry = AtifReverifyManifestEntry.model_validate(
+        {
+            "trajectory_path": _FIXTURE_PATH.name,
+            TASK_INDEX_KEY_NAME: 7,
+            ROLLOUT_INDEX_KEY_NAME: 2,
+            "expected_sha256": _FIXTURE_SHA256,
+        }
+    )
+
+    projected = project_atif_manifest_entry(
+        entry,
+        indexed,
+        manifest_directory=_FIXTURE_PATH.parent,
+    )
+
+    assert projected.task_index == 7
+    assert projected.rollout_index == 2
+    assert projected.trajectory_id == "gym-atif-spike-session"
+    assert projected.session_id == "gym-atif-spike-session"
+    assert projected.source_sha256 == _FIXTURE_SHA256
+    assert projected.schema_version == "ATIF-v1.7"
+    assert projected.projection_status == "complete"
+    assert projected.payload["expected_answer"] == "72 and sunny"
+    assert _weather_reward(projected.payload) == 1.0
+
+
+def test_manifest_rejects_wrong_source_hash() -> None:
+    indexed = index_materialized_inputs([_materialized_input()])
+    entry = AtifReverifyManifestEntry.model_validate(
+        {
+            "trajectory_path": _FIXTURE_PATH.name,
+            TASK_INDEX_KEY_NAME: 7,
+            ROLLOUT_INDEX_KEY_NAME: 2,
+            "expected_sha256": "0" * 64,
+        }
+    )
+
+    with pytest.raises(AtifProjectionError, match="source hash mismatch"):
+        project_atif_manifest_entry(entry, indexed, manifest_directory=_FIXTURE_PATH.parent)
+
+
+def test_manifest_loader_reports_the_invalid_jsonl_row(tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text(
+        json.dumps(
+            {
+                "trajectory_path": "first.json",
+                TASK_INDEX_KEY_NAME: 7,
+                ROLLOUT_INDEX_KEY_NAME: 2,
+            }
+        )
+        + "\nnot-json\n"
+    )
+
+    with pytest.raises(AtifProjectionError, match="invalid ATIF manifest row 2"):
+        load_atif_manifest(manifest)
+
+
+def test_manifest_loader_rejects_empty_input(tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text("\n")
+
+    with pytest.raises(AtifProjectionError, match="contains no entries"):
+        load_atif_manifest(manifest)
+
+
+@pytest.mark.parametrize(
+    ("loader", "filename", "match"),
+    [
+        (load_atif_trajectory, "missing-trajectory.json", "could not read ATIF trajectory"),
+        (load_atif_manifest, "missing-manifest.jsonl", "could not read ATIF manifest"),
+    ],
+)
+def test_missing_atif_inputs_raise_clean_config_errors(loader: Any, filename: str, match: str, tmp_path: Path) -> None:
+    with pytest.raises(AtifProjectionError, match=match):
+        loader(tmp_path / filename)
+
+
+def test_manifest_batch_rejects_more_than_one_trajectory_for_a_rollout() -> None:
+    indexed = index_materialized_inputs([_materialized_input()])
+    entry = AtifReverifyManifestEntry.model_validate(
+        {
+            "trajectory_path": _FIXTURE_PATH.name,
+            TASK_INDEX_KEY_NAME: 7,
+            ROLLOUT_INDEX_KEY_NAME: 2,
+        }
+    )
+
+    with pytest.raises(AtifProjectionError, match="maps materialized rollout.*more than once"):
+        project_atif_manifest_entries(
+            [entry, entry],
+            indexed,
+            manifest_directory=_FIXTURE_PATH.parent,
+        )
+
+
+def test_manifest_batch_accepts_distinct_trajectories_without_trajectory_ids(tmp_path: Path) -> None:
+    first_data = _trajectory_data()
+    first_data["trajectory_id"] = None
+    first_data["session_id"] = "shared-run"
+    second_data = deepcopy(first_data)
+    second_data["steps"][-1]["message"] = "A distinct response."
+
+    first_path = tmp_path / "first.json"
+    second_path = tmp_path / "second.json"
+    first_path.write_text(json.dumps(first_data))
+    second_path.write_text(json.dumps(second_data))
+    first_input = _materialized_input()
+    second_input = _materialized_input() | {ROLLOUT_INDEX_KEY_NAME: 3}
+    indexed = index_materialized_inputs([first_input, second_input])
+    entries = [
+        AtifReverifyManifestEntry(
+            trajectory_path=first_path,
+            task_index=7,
+            rollout_index=2,
+        ),
+        AtifReverifyManifestEntry(
+            trajectory_path=second_path,
+            task_index=7,
+            rollout_index=3,
+        ),
+    ]
+
+    projected = project_atif_manifest_entries(entries, indexed, manifest_directory=tmp_path)
+
+    assert len(projected) == 2
+
+
+def test_materialized_input_index_rejects_duplicate_rollout_keys() -> None:
+    row = _materialized_input()
+
+    with pytest.raises(AtifProjectionError, match="duplicate materialized input key"):
+        index_materialized_inputs([row, row])
+
+
+@pytest.mark.parametrize("value", ["7", 7.0, True])
+def test_manifest_indices_do_not_coerce_non_integer_values(value: Any) -> None:
+    with pytest.raises(ValueError):
+        AtifReverifyManifestEntry.model_validate(
+            {
+                "trajectory_path": _FIXTURE_PATH.name,
+                TASK_INDEX_KEY_NAME: value,
+                ROLLOUT_INDEX_KEY_NAME: 2,
+            }
+        )
+
+
+def test_observation_results_are_paired_by_source_call_id() -> None:
+    response = atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(_trajectory_data()))
+    outputs = {item.call_id: item.output for item in response.output if item.type == "function_call_output"}
+
+    assert outputs == {"call-b": "4", "call-a": "found"}
+    assert response.output[0].type == "reasoning"
+    assert response.output[0].summary[0].text == "I need both results."
+    assert response.output[0].content is None
+    assert [item.type for item in response.output] == [
+        "reasoning",
+        "function_call",
+        "function_call",
+        "function_call_output",
+        "function_call_output",
+        "message",
+    ]
+
+
+def test_tool_call_without_a_result_is_not_marked_completed() -> None:
+    data = _trajectory_data()
+    data["steps"][1]["observation"]["results"] = [
+        result for result in data["steps"][1]["observation"]["results"] if result["source_call_id"] != "call-b"
+    ]
+
+    with pytest.raises(AtifProjectionError, match="no observation result.*call-b"):
+        atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+
+
+@pytest.mark.parametrize("step_ids", [[1, 1, 3], [1, 3, 4], [2, 3, 4]])
+def test_parser_requires_sequential_step_ids(step_ids: list[int]) -> None:
+    data = _trajectory_data()
+    for step, step_id in zip(data["steps"], step_ids, strict=True):
+        step["step_id"] = step_id
+
+    with pytest.raises(ValidationError, match="sequential from 1"):
+        AtifTrajectoryV1_7.model_validate(data)
+
+
+@pytest.mark.parametrize("field,value", [("reasoning_content", "hidden"), ("tool_calls", []), ("metrics", {})])
+def test_parser_rejects_agent_only_fields_on_user_steps(field: str, value: Any) -> None:
+    data = _trajectory_data()
+    data["steps"][0][field] = value
+
+    with pytest.raises(ValidationError, match="only valid for agent steps"):
+        AtifTrajectoryV1_7.model_validate(data)
+
+
+def test_parser_requires_object_tool_arguments() -> None:
+    data = _trajectory_data()
+    data["steps"][1]["tool_calls"][0]["arguments"] = "not-an-object"
+
+    with pytest.raises(ValidationError, match="dictionary"):
+        AtifTrajectoryV1_7.model_validate(data)
+
+
+def test_raw_responses_reasoning_is_preserved_when_structured_reasoning_is_absent() -> None:
+    data = _trajectory_data()
+    data["steps"][1]["reasoning_content"] = None
+    data["steps"][1]["extra"] = {
+        "llm_response": {
+            "output": [
+                {
+                    "id": "rs-live-shape",
+                    "type": "reasoning",
+                    "summary": [],
+                    # NVIDIA's OpenAI-compatible Responses endpoint omits the
+                    # upstream reasoning_text discriminator on these parts.
+                    "content": [{"text": "Use both tool results."}],
+                },
+                {
+                    "id": "fc-a",
+                    "call_id": "call-a",
+                    "type": "function_call",
+                    "name": "lookup",
+                    "arguments": '{"q":"x"}',
+                },
+                {
+                    "id": "fc-b",
+                    "call_id": "call-b",
+                    "type": "function_call",
+                    "name": "calculate",
+                    "arguments": '{"x":2}',
+                },
+            ]
+        }
+    }
+
+    response = atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+
+    assert response.output[0].type == "reasoning"
+    assert response.output[0].id == "rs-live-shape"
+    assert response.output[0].content[0].type == "reasoning_text"
+    assert response.output[0].content[0].text == "Use both tool results."
+
+
+def test_completed_empty_agent_answer_is_preserved_for_scoring() -> None:
+    data = _trajectory_data()
+    data["steps"] = [data["steps"][0], {"step_id": 2, "source": "agent", "message": ""}]
+
+    response = atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+
+    assert [item.type for item in response.output] == ["message"]
+    assert response.output[0].content[0].text == ""
+    assert response.status == "completed"
+
+
+def test_aggregated_llm_step_is_rejected_instead_of_flattened() -> None:
+    data = _trajectory_data()
+    data["steps"][1]["llm_call_count"] = 2
+
+    with pytest.raises(AtifProjectionError, match="aggregates 2 LLM calls"):
+        atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+
+
+def test_unrecognized_raw_provider_shape_is_not_reported_as_complete() -> None:
+    data = _trajectory_data()
+    data["steps"][-1]["extra"] = {"llm_response": {"actions": [{"type": "future_action"}]}}
+
+    with pytest.raises(AtifProjectionError, match="unrecognized raw provider response shape"):
+        atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+
+
+def test_raw_responses_tool_calls_must_match_canonical_atif() -> None:
+    data = _trajectory_data()
+    data["steps"][1]["extra"] = {
+        "llm_response": {
+            "status": "completed",
+            "output": [
+                {
+                    "type": "function_call",
+                    "id": "fc-a",
+                    "call_id": "call-a",
+                    "name": "lookup",
+                    "arguments": '{"q":"x"}',
+                }
+            ],
+        }
+    }
+
+    with pytest.raises(AtifProjectionError, match="raw provider tool calls do not match"):
+        atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+
+
+def test_raw_provider_message_must_match_canonical_atif() -> None:
+    data = _trajectory_data()
+    data["steps"][-1]["extra"] = {
+        "llm_response": {
+            "status": "completed",
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "A different answer."}],
+                }
+            ],
+        }
+    }
+
+    with pytest.raises(AtifProjectionError, match="raw provider message does not match"):
+        atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+
+
+@pytest.mark.parametrize("item_type", ["computer_call", "mcp_call", "custom_tool_call", "local_shell_call"])
+def test_known_unprojected_responses_actions_are_rejected(item_type: str) -> None:
+    data = _trajectory_data()
+    data["steps"][-1]["extra"] = {"llm_response": {"output": [{"type": item_type}]}}
+
+    with pytest.raises(AtifProjectionError, match="unsupported Responses output item"):
+        atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+
+
+@pytest.mark.parametrize(
+    ("mutate", "match"),
+    [
+        (lambda data: data.update(schema_version="ATIF-v1.6"), "unsupported ATIF schema version"),
+        (lambda data: data.update(continued_trajectory_ref="next.json"), "continued ATIF trajectories"),
+        (
+            lambda data: data.update(
+                subagent_trajectories=[
+                    {
+                        "schema_version": "ATIF-v1.7",
+                        "trajectory_id": "child-1",
+                        "agent": {"name": "child", "version": "1"},
+                        "steps": [],
+                    }
+                ]
+            ),
+            "embedded subagent trajectories",
+        ),
+        (lambda data: data["steps"][1].update(is_copied_context=True), "copied continuation context"),
+        (
+            lambda data: data["steps"][1].update(
+                message=[
+                    {
+                        "type": "image",
+                        "source": {"media_type": "image/png", "path": "fixture.png"},
+                    }
+                ]
+            ),
+            "multimodal ATIF content",
+        ),
+        (lambda data: data["steps"][1].update(timestamp="2026-08-24T12:00:00"), "timestamp has no timezone"),
+    ],
+)
+def test_strict_initial_scope_rejects_unsupported_trajectories(mutate: Any, match: str) -> None:
+    data = _trajectory_data()
+    mutate(data)
+    trajectory = AtifTrajectoryV1_7.model_validate(data)
+
+    with pytest.raises(AtifProjectionError, match=match):
+        atif_trajectory_to_response(trajectory)
+
+
+def test_tool_result_without_content_or_relay_extension_is_rejected() -> None:
+    data = _trajectory_data()
+    data["steps"][1]["observation"]["results"][0] = {"source_call_id": "call-b"}
+    trajectory = AtifTrajectoryV1_7.model_validate(data)
+
+    with pytest.raises(AtifProjectionError, match="neither content nor Relay extra.tool_result"):
+        atif_trajectory_to_response(trajectory)
+
+
+@pytest.mark.parametrize(("trajectory_id", "session_id"), [(None, "run-1"), ("", ""), ("  ", "\t")])
+def test_missing_or_empty_atif_ids_use_a_deterministic_content_identity(
+    trajectory_id: str | None,
+    session_id: str | None,
+) -> None:
+    data = _trajectory_data()
+    data["trajectory_id"] = trajectory_id
+    data["session_id"] = session_id
+    trajectory = AtifTrajectoryV1_7.model_validate(data)
+
+    first = atif_trajectory_to_response(trajectory)
+    second = atif_trajectory_to_response(trajectory)
+
+    assert first.id == second.id
+    assert [item.id for item in first.output] == [item.id for item in second.output]
+
+
+def test_interactive_input_after_agent_output_is_rejected_instead_of_dropped() -> None:
+    data = _trajectory_data()
+    data["steps"].append({"step_id": 4, "source": "user", "message": "Try a different answer."})
+    data["steps"].append({"step_id": 5, "source": "agent", "message": "The answer is 5."})
+    trajectory = AtifTrajectoryV1_7.model_validate(data)
+
+    with pytest.raises(AtifProjectionError, match="non-agent step 4 appears after agent output"):
+        atif_trajectory_to_response(trajectory)
+
+
+def test_non_agent_observation_is_rejected_instead_of_dropped() -> None:
+    data = _trajectory_data()
+    data["steps"][0]["observation"] = {"results": [{"content": "external event"}]}
+    trajectory = AtifTrajectoryV1_7.model_validate(data)
+
+    with pytest.raises(AtifProjectionError, match="non-agent step 1 contains an observation"):
+        atif_trajectory_to_response(trajectory)
+
+
+def test_external_subagent_reference_is_rejected_without_being_dropped() -> None:
+    data = _trajectory_data()
+    data["steps"][1]["observation"]["results"][0]["subagent_trajectory_ref"] = [
+        {"trajectory_path": "child-trajectory.json"}
+    ]
+    trajectory = AtifTrajectoryV1_7.model_validate(data)
+
+    with pytest.raises(AtifProjectionError, match="references a subagent trajectory"):
+        atif_trajectory_to_response(trajectory)
+
+
+@pytest.mark.parametrize(
+    ("extra", "match"),
+    [
+        ({"invocation": {"status": "failed"}}, "non-completed Relay invocation status"),
+        ({"invocation": {"status": "in_progress"}}, "non-completed Relay invocation status"),
+        ({"tool_invocations": [{"status": "timeout"}]}, "tool invocation 0 has non-completed status"),
+        ({"llm_response": {"status": "incomplete"}}, "provider response status"),
+        ({"llm_response": {"status": "queued"}}, "provider response status"),
+        ({"llm_response": {"choices": [{"finish_reason": "length"}]}}, "incomplete finish_reason"),
+        ({"llm_response": {"stop_reason": "max_tokens"}}, "provider token limit"),
+    ],
+)
+def test_known_failed_or_incomplete_outcomes_are_not_relabelled_completed(
+    extra: dict[str, Any],
+    match: str,
+) -> None:
+    data = _trajectory_data()
+    data["steps"][-1]["extra"] = extra
+    trajectory = AtifTrajectoryV1_7.model_validate(data)
+
+    with pytest.raises(AtifProjectionError, match=match):
+        atif_trajectory_to_response(trajectory)
+
+
+def test_unknown_invocation_status_is_not_relabelled_completed() -> None:
+    data = _trajectory_data()
+    data["steps"][-1]["extra"] = {"invocation": {"status": "success"}}
+
+    with pytest.raises(AtifProjectionError, match="non-completed Relay invocation status"):
+        atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+
+
+def test_duplicate_tool_call_id_across_steps_is_rejected() -> None:
+    data = _trajectory_data()
+    data["steps"].append(
+        {
+            "step_id": 4,
+            "source": "agent",
+            "message": "",
+            "tool_calls": [{"tool_call_id": "call-a", "function_name": "lookup", "arguments": {"q": "again"}}],
+        }
+    )
+    trajectory = AtifTrajectoryV1_7.model_validate(data)
+
+    with pytest.raises(AtifProjectionError, match="repeats tool_call_id.*across steps"):
+        atif_trajectory_to_response(trajectory)
+
+
+def test_multiple_outputs_for_one_tool_call_are_rejected() -> None:
+    data = _trajectory_data()
+    data["steps"][1]["observation"]["results"].append({"source_call_id": "call-b", "content": "second result"})
+    trajectory = AtifTrajectoryV1_7.model_validate(data)
+
+    with pytest.raises(AtifProjectionError, match="multiple outputs for tool call"):
+        atif_trajectory_to_response(trajectory)
+
+
+def test_materialized_task_must_supply_responses_create_params() -> None:
+    trajectory = AtifTrajectoryV1_7.model_validate(_trajectory_data())
+
+    with pytest.raises(AtifProjectionError, match="responses_create_params"):
+        build_atif_verify_payload({"task_index": 1}, trajectory)
