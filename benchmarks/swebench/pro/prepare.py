@@ -38,6 +38,16 @@ BENCHMARK_DIR = Path(__file__).parent.parent
 DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "swebench_pro_benchmark.jsonl"
 UPSTREAM_CACHE_DIR = DATA_DIR / "swebench_pro_upstream"
+PROMPT_TEMPLATE = Path(__file__).with_name("prompt.txt").read_text(encoding="utf-8")
+
+def render_prompt(row: Mapping[str, Any]) -> str:
+    """Render the SWE-bench Pro coding prompt."""
+    materialized_prompt = PROMPT_TEMPLATE.format(
+        problem_statement=str(row["problem_statement"]),
+        requirements=str(row["requirements"]),
+        interface=str(row["interface"]),
+    )
+    return materialized_prompt
 
 
 def fetch_upstream_assets(cache_dir: Path = UPSTREAM_CACHE_DIR) -> Path:
@@ -126,7 +136,7 @@ def enrich_row(row: Mapping[str, Any], upstream_root: Path, image_digest: str) -
                 "input": [
                     {
                         "role": "user",
-                        "content": row["problem_statement"],
+                        "content": render_prompt(row),
                     }
                 ],
             },
