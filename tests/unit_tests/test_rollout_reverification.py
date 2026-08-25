@@ -1739,7 +1739,7 @@ class TestRolloutReverificationRunFromConfig:
                     "trajectory_path": str(fixture),
                     TASK_INDEX_KEY_NAME: 0,
                     ROLLOUT_INDEX_KEY_NAME: 0,
-                    "expected_sha256": "d31dd5eb9370aa690f92fa2ba3ab8ea57645b183de6ebdd81c8a5552bb1e3aa1",
+                    "expected_sha256": "fa25ccc019cbecca9aae49aeefb4e2ed2676909dfc1ca9dd854a25ee44832cf9",
                 }
             )
             + b"\n"
@@ -1786,14 +1786,17 @@ class TestRolloutReverificationRunFromConfig:
         assert len(posted_rows) == 1
         assert ATIF_PROVENANCE_KEY not in posted_rows[0]
         correlated_items = [item for item in posted_rows[0]["response"]["output"] if "call_id" in item]
-        assert [item["call_id"] for item in correlated_items] == ["call-live-1", "call-live-1"]
-        assert all(item["call_id"] != "fc-live-1" for item in correlated_items)
+        assert [item["call_id"] for item in correlated_items] == [
+            "call-abab8ac6-3a43-46a2-9224-d14a2d380504",
+            "call-abab8ac6-3a43-46a2-9224-d14a2d380504",
+        ]
+        assert all(item["call_id"] != "fc_56a9401eb39a449c982424abb3b0fdc2" for item in correlated_items)
         assert returned == self._read_jsonl(tmp_path / "output.jsonl")
         assert returned[0]["reward"] == 1.0
         assert returned[0][ATIF_PROVENANCE_KEY] == {
-            "trajectory_id": "relay-responses-trajectory",
-            "session_id": "relay-responses-run",
-            "source_sha256": "d31dd5eb9370aa690f92fa2ba3ab8ea57645b183de6ebdd81c8a5552bb1e3aa1",
+            "trajectory_id": "relay-887-live-trajectory",
+            "session_id": "relay-887-live-session",
+            "source_sha256": "fa25ccc019cbecca9aae49aeefb4e2ed2676909dfc1ca9dd854a25ee44832cf9",
             "schema_version": "ATIF-v1.7",
             "projection_status": "complete",
         }

@@ -21,6 +21,8 @@ LLM-as-judge verifiers will re-invoke the judge model during reverification. Thi
 
 ## Prerequisites
 
+### Native Gym rollouts
+
 You need the two artifact files that `gym eval run` writes alongside the main rollouts output:
 
 | File | Contents |
@@ -29,6 +31,18 @@ You need the two artifact files that `gym eval run` writes alongside the main ro
 | `rollouts_materialized_inputs.jsonl` | One row per rollout — includes per-task verifier inputs (for example, `options` and `expected_answer` in the `mcqa` resources server) that are not echoed back into the rollout row |
 
 Both files are required. `rollouts.jsonl` alone is not sufficient because many resources servers drop verifier-specific fields from the verify response; those fields are preserved in `*_materialized_inputs.jsonl`.
+
+### Relay ATIF trajectories
+
+The initial external-trajectory path accepts the completed, text-only ATIF v1.7 profile emitted by NeMo Relay. It does not load the Relay runtime. You need:
+
+| File | Contents |
+| --- | --- |
+| Relay ATIF trajectory | The external agent's messages, reasoning, function calls, and correlated function outputs |
+| Materialized Gym inputs | The authoritative verifier metadata, task identity, expected answer, and resources-server routing |
+| ATIF manifest | An explicit one-to-one mapping from each trajectory to `(_ng_task_index, _ng_rollout_index)`; it may pin the trajectory's SHA-256 |
+
+Gym never joins a trajectory to a task by filename or row order.
 
 ## Step 1 — Run reverification
 
@@ -61,6 +75,35 @@ The command:
 4. POSTs each joined row to `/verify` — no model calls.
 5. Writes recomputed rollouts to `--output` and aggregate metrics to `<output>_aggregate_metrics.json`.
 
+## Reverify a Relay ATIF trajectory
+
+Create a JSONL manifest with one row per trajectory:
+
+```json
+{"trajectory_path":"trajectory-01.json","_ng_task_index":0,"_ng_rollout_index":0,"expected_sha256":"<sha256-of-trajectory-01.json>"}
+```
+
+`trajectory_path` is resolved relative to the manifest. `expected_sha256` is optional; when present, Gym rejects the trajectory if its bytes have changed.
+
+Then run:
+
+```bash
+gym eval reverify \
+  --config my_resources_server.yaml \
+  --input-format atif \
+  --inputs results/materialized_inputs.jsonl \
+  --atif-manifest relay-atif/manifest.jsonl \
+  --output results/relay_atif_reverified.jsonl
+```
+
+Every selected resources server must report `stateless`. ATIF mode does not permit `--force`, `--resume`, `--judge-failed-only`, or `--append`. Each result records the ATIF schema version, trajectory and session IDs, source SHA-256, and projection status under `_ng_atif_provenance`; local source paths are not persisted or sent to the verifier.
+
+This is a deliberately bounded Relay-produced ATIF profile, not general ATIF ingestion. Gym rejects trajectories when projection could change what the verifier sees, including multimodal content, continuations or subagents, incomplete provider output, uncorrelated or incomplete tool call/result pairs, aggregated LLM calls, unsupported provider actions, or output ordering that ATIF does not prove.
+
+<Warning>
+This initial path preserves harness-facing function names and call/result correlation, but ATIF does not by itself prove Gym MCP `(server, tool)` identity. Do not use it with a verifier whose reward depends on canonical MCP tool identity unless that identity is supplied by a supported provenance contract.
+</Warning>
+
 ### Reverifying against a benchmark config
 
 You don't have to write a resources-server-only config. You can point `--config` at an existing benchmark or agent config and override verifier parameters inline with `++` — convenient when you'd rather not maintain a separate file just to tweak a hyperparameter e.g.:
@@ -92,8 +135,10 @@ A benchmark/agent config's agent references a model server, so a model config mu
 | Option | Description |
 | --- | --- |
 | `--config PATH` | Resources-server config YAML. Repeatable. |
+| `--input-format gym\|atif` | Select native Gym rollout input or the bounded Relay ATIF v1.7 profile. Defaults to `gym`. |
 | `--inputs PATH` | `*_materialized_inputs.jsonl` from `gym eval run`. |
-| `--rollouts PATH` | `rollouts.jsonl` from `gym eval run`. |
+| `--rollouts PATH` | `rollouts.jsonl` from `gym eval run`. Required for native Gym input and invalid with ATIF input. |
+| `--atif-manifest PATH` | JSONL manifest joining Relay ATIF trajectories to materialized task and rollout IDs. Required with `--input-format atif`. |
 | `--output PATH`, `-o` | Output JSONL for recomputed rollouts. |
 | `--force` | Override the `UNSUPPORTED` or `UNKNOWN` reverify mode guard (see below). Output is prefixed with `unsafe_`. |
 | `--overwrite` | Delete an existing output file instead of raising an error. |
@@ -101,6 +146,8 @@ A benchmark/agent config's agent references a model server, so a model config mu
 | `--judge-failed-only` | Recover only the rollouts whose judge call failed in the original run (see [Recover judge failures](#recover-judge-failures)). |
 | `--append` | With `--judge-failed-only`: append recovered rows to an existing `--output` instead of writing a fresh file. Mutually exclusive with `--overwrite`. |
 | `--disable-aggregation` | Skip aggregate-metrics computation. Use when sharding (see [Sharding](#sharding)). |
+
+`--force`, `--resume`, `--judge-failed-only`, and `--append` apply only to native Gym rollout input.
 
 Hydra overrides work the same as in other `gym eval` commands:
 

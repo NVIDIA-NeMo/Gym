@@ -42,7 +42,7 @@ from nemo_gym.responses_converter import ResponsesConverter
 _FIXTURE_PATH = Path(__file__).parent / "fixtures" / "relay_atif_v1_7_tool_trajectory.json"
 _FIXTURE_SHA256 = "84fa0a1eeaa6520c5bcb870dfcb49c066602c639982265cc43624410ed4465da"
 _RESPONSES_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "relay_atif_v1_7_responses_tool_trajectory.json"
-_RESPONSES_FIXTURE_SHA256 = "d31dd5eb9370aa690f92fa2ba3ab8ea57645b183de6ebdd81c8a5552bb1e3aa1"
+_RESPONSES_FIXTURE_SHA256 = "fa25ccc019cbecca9aae49aeefb4e2ed2676909dfc1ca9dd854a25ee44832cf9"
 
 
 def _trajectory_data() -> dict[str, Any]:
@@ -222,14 +222,17 @@ def test_fixed_relay_responses_fixture_preserves_invocation_correlation() -> Non
         "message",
     ]
     correlated_items = [item for item in response.output if hasattr(item, "call_id")]
-    assert [item.call_id for item in correlated_items] == ["call-live-1", "call-live-1"]
-    assert all(item.call_id != "fc-live-1" for item in correlated_items)
+    assert [item.call_id for item in correlated_items] == [
+        "call-abab8ac6-3a43-46a2-9224-d14a2d380504",
+        "call-abab8ac6-3a43-46a2-9224-d14a2d380504",
+    ]
+    assert all(item.call_id != "fc_56a9401eb39a449c982424abb3b0fdc2" for item in correlated_items)
 
 
 def test_prefixed_responses_item_id_orphan_shape_is_rejected() -> None:
     data = json.loads(_RESPONSES_FIXTURE_PATH.read_text())
     tool_step = data["steps"][1]
-    tool_step["tool_calls"][0]["tool_call_id"] = "fc-live-1"
+    tool_step["tool_calls"][0]["tool_call_id"] = "fc_56a9401eb39a449c982424abb3b0fdc2"
     tool_step.pop("observation")
     final_step = data["steps"][2]
     final_step["step_id"] = 4
