@@ -455,6 +455,13 @@ def training_variant_of(item_cls: type) -> type:
 
 NeMoGymResponseInputItem = Annotated[
     Union[
+        # Keep the training variants before their base classes so serialization
+        # preserves the token metadata needed to replay an exact prefix.
+        NeMoGymEasyInputMessageForTraining,
+        NeMoGymMessageForTraining,
+        NeMoGymResponseOutputMessageForTraining,
+        NeMoGymResponseFunctionToolCallForTraining,
+        NeMoGymResponseReasoningItemForTraining,
         NeMoGymEasyInputMessage,
         NeMoGymMessage,
         NeMoGymResponseOutputMessage,
@@ -477,12 +484,6 @@ NeMoGymResponseInputItem = Annotated[
         NeMoGymResponseCustomToolCallOutput,
         NeMoGymLocalShellCallOutput,
         NeMoGymMcpApprovalResponse,
-        # Training variants.
-        NeMoGymEasyInputMessageForTraining,
-        NeMoGymMessageForTraining,
-        NeMoGymResponseOutputMessageForTraining,
-        NeMoGymResponseFunctionToolCallForTraining,
-        NeMoGymResponseReasoningItemForTraining,
     ],
     BeforeValidator(_validate_atomic_token_metadata),
 ]
@@ -653,7 +654,7 @@ class NeMoGymChatCompletionMessageForTraining(NeMoGymChatCompletionMessage, Toke
 
 
 NeMoGymChatCompletionOutputMessage: TypeAlias = Annotated[
-    Union[NeMoGymChatCompletionMessage, NeMoGymChatCompletionMessageForTraining],
+    Union[NeMoGymChatCompletionMessageForTraining, NeMoGymChatCompletionMessage],
     BeforeValidator(_validate_atomic_token_metadata),
 ]
 

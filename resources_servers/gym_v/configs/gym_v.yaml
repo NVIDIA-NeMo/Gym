@@ -1,0 +1,17 @@
+gym_v_resources_server:
+  resources_servers:
+    gym_v:
+      entrypoint: app.py
+      domain: games
+      description: "Env-id-parametric wrapper around any gym_v.Env."
+      # Deprecated compatibility path. Stateless clients pass the full
+      # GymVTaskRow to /seed_session, so the server no longer needs a task
+      # JSONL at startup. Tests still cover task_idx fallback with explicit
+      # per-test JSONLs.
+      task_jsonl_fpaths: []
+      image_format: "PNG"
+      image_jpeg_quality: 90
+      max_image_wh: null   # cap rendered image max(W,H); null = no cap
+      enforce_horizon_cap: true
+      return_transitions: false
+      disable_text_feedback: true
