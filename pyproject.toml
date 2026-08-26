@@ -293,6 +293,39 @@ openshell = [
     "openshell>=0.0.92,<0.1",
 ]
 
+# Telemetry is opt-in: without this extra (or with `telemetry.enabled: false`) every
+# instrumentation site in nemo_gym is a ~0-cost no-op and Gym behaves identically.
+#
+# NOTE: uv resolves one unified lockfile across all optional-dependency groups, so this
+# extra's floor on opentelemetry-api (via nemo-lens[sdk] and the instrumentation packages
+# below) raises the version uv.lock records for *every* install, not just one that
+# requests `telemetry` — opentelemetry-api was already a transitive dependency (via
+# mlflow-tracing, a core dependency) and moved from 1.38.0 to 1.44.0 when this extra was
+# added. Accepted: OpenTelemetry's Python API keeps strict backward compatibility within
+# 1.x, and the full test suite passes unchanged at 1.44.0. There's no clean uv mechanism
+# to isolate one extra's transitive floor from the shared lockfile while still letting it
+# be installed alongside other extras (`[tool.uv] conflicts` forces extras to be mutually
+# exclusive, which `telemetry` is not — it needs to coexist with `dev`/`sandbox` in CI).
+telemetry = [
+    # nemo-lens: OpenTelemetry instrumentation shared across the NeMo ecosystem. Provides the
+    # tracer/meter lifecycle, span-group gating, W3C context propagation, and the FastAPI /
+    # aiohttp auto-instrumentation Gym uses to stitch one trace across its server processes.
+    # Pinned to a Lens commit via [tool.uv.sources] until 0.2.0 ships to PyPI; then drop that
+    # entry and use a version range. Megatron-LM pins this same commit.
+    # Updated: Tue Aug 18, 2026 with nemo-lens @ b85578fc
+    # License: Apache 2.0 https://github.com/NVIDIA-NeMo/Lens/blob/main/LICENSE
+    "nemo-lens[sdk]",
+
+    # FastAPI + aiohttp OTel auto-instrumentation. Not pulled in by nemo-lens[sdk]: its
+    # `contrib.instrument_fastapi` / `instrument_aiohttp_client` helpers import these lazily
+    # and raise ImportError when they are missing. Gym needs both — the FastAPI instrumentor
+    # extracts inbound traceparent on every server, the aiohttp one is the egress side.
+    # Updated: Tue Aug 18, 2026 with opentelemetry-instrumentation-*==0.65b0
+    # License: Apache 2.0 https://github.com/open-telemetry/opentelemetry-python-contrib/blob/main/LICENSE
+    "opentelemetry-instrumentation-fastapi>=0.60b0",
+    "opentelemetry-instrumentation-aiohttp-client>=0.60b0",
+]
+
 # We include dev dependencies as an extra since technically each server module is a consumer (which means we cannot use dependency groups, which are intended to be within a project).
 dev = [
     # gprof2dot: Used for outputting dot graphs for profiling.
@@ -417,6 +450,17 @@ exclude-dependencies = [
     # Explicitly block it to prevent re-introduction via future transitive pulls.
     "diskcache",
 ]
+
+# nemo-lens has no 0.2.0 release on PyPI yet (only 0.1.0), and Gym needs post-0.1.0 APIs
+# (compact single-line JSON console export, the gym.* instruments). Pin the git rev until
+# 0.2.0 is published, then delete this table and put a version range on the extra above.
+# NOTE: [tool.uv.sources] is a uv-only mechanism and is NOT recorded in a built wheel, so
+# `pip install nemo-gym[telemetry]` from PyPI resolves nemo-lens 0.1.0 from PyPI instead.
+# The pin governs source checkouts, `uv sync`, and the uv lock — including the per-server
+# venvs that `gym env test` / `gym env start` build, which inherit it through the editable
+# nemo-gym install exactly as override-dependencies does.
+[tool.uv.sources]
+nemo-lens = { git = "https://github.com/NVIDIA-NeMo/Lens.git", rev = "b85578fc2b736a1804705e537001b5f45e9c715d" }
 
 [tool.setuptools.package-data]
 # The built-in asset trees (resources_servers, responses_api_agents, responses_api_models,

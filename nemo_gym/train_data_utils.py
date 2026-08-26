@@ -13,8 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import warnings
 from abc import abstractmethod
 from collections import Counter, defaultdict
+from itertools import chain, count
 from math import sqrt
 from pathlib import Path
 from shutil import copyfileobj
@@ -29,7 +31,6 @@ from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import BaseRunRequest
 from nemo_gym.config_types import (
     AGENT_REF_KEY,
-    AgentServerRef,
     BaseNeMoGymCLIConfig,
     DatasetConfig,
     DatasetType,
@@ -40,6 +41,7 @@ from nemo_gym.config_types import (
 from nemo_gym.gitlab_utils import download_jsonl_dataset
 from nemo_gym.global_config import (
     HF_TOKEN_KEY_NAME,
+    TASK_SOURCE_KEY_NAME,
     GlobalConfigDictParser,
     get_global_config_dict,
 )
@@ -360,9 +362,25 @@ class TrainDataProcessor(BaseModel):
         parser = GlobalConfigDictParser()
         server_instance_configs = parser.filter_for_server_instance_configs(global_config_dict)
 
+        # Datasets may be declared by resources servers (the normal, decoupled home: the RS owns
+        # the task schema and verifier) or by agents (self-contained environments that verify
+        # in-process, e.g. tau2 — and, transitionally, legacy configs that have not moved their
+        # datasets yet). Model servers cannot declare datasets.
         agent_configs: List[ServerInstanceConfig] = [
             c for c in server_instance_configs if c.SERVER_TYPE == "responses_api_agents"
         ]
+        declaring_configs: List[ServerInstanceConfig] = [
+            c for c in server_instance_configs if c.SERVER_TYPE in ("responses_api_agents", "resources_servers")
+        ]
+        model_configs_with_data = [
+            c for c in server_instance_configs if c.SERVER_TYPE == "responses_api_models" and c.datasets
+        ]
+        if model_configs_with_data:
+            raise ValueError(
+                "Datasets cannot be declared on model servers: "
+                f"{sorted(c.name for c in model_configs_with_data)}. Declare them on the resources "
+                "server that owns their task schema (or on the agent for self-contained environments)."
+            )
 
         server_names_list_str = "\n- ".join([""] + [f"{c.name} ({c.SERVER_TYPE})" for c in server_instance_configs])
         print(
@@ -371,11 +389,16 @@ class TrainDataProcessor(BaseModel):
 
         agent_configs_with_data: List[ServerInstanceConfig] = []
         agent_configs_without_data: List[ServerInstanceConfig] = []
-        for agent_config in agent_configs:
+        for agent_config in declaring_configs:
             if agent_config.datasets:
                 agent_configs_with_data.append(agent_config)
-            else:
+            elif agent_config.SERVER_TYPE == "responses_api_agents":
                 agent_configs_without_data.append(agent_config)
+
+        # NOTE(dataset-decoupling): the deprecation warning for datasets declared on agents that
+        # reference a resources server ships with the config migration PR, not here — otherwise
+        # every un-migrated in-repo config would warn about a move the migration performs anyway.
+        # Until then both declaration homes are equally supported.
 
         server_names_list_str = "\n- ".join([""] + [f"{c.name} ({c.SERVER_TYPE})" for c in agent_configs_without_data])
         print(
@@ -708,6 +731,7 @@ This could be due to a change in how metrics are calculated, leading to outdated
         server_instance_configs: List[ServerInstanceConfig],
     ) -> List[Path]:
         paths_to_collate = []
+        used_prepare_paths: set[Path] = set()
         for c in server_instance_configs:
             for d in c.datasets:
                 if d.type != type:
@@ -718,21 +742,52 @@ This could be due to a change in how metrics are calculated, leading to outdated
                     prompt_cfg = load_prompt_config(d.prompt_config)
 
                 data_path = Path(d.jsonl_fpath)
-                prepare_path = data_path.with_name(f"{data_path.stem}_prepare.jsonl")
+                # Per-declaration output: every declaration of a jsonl_fpath gets its own prepared
+                # file (previously a second declaration silently truncated the first, so all copies
+                # carried the last declarer's stamp). Candidates are tried until one is unused, so
+                # repeats WITHIN one instance also stay distinct: bare stem, then instance-
+                # qualified, then instance+dataset-qualified, then numbered.
+                candidates = chain(
+                    (
+                        data_path.with_name(f"{data_path.stem}_prepare.jsonl"),
+                        data_path.with_name(f"{data_path.stem}_prepare.{c.name}.jsonl"),
+                        data_path.with_name(f"{data_path.stem}_prepare.{c.name}.{d.name}.jsonl"),
+                    ),
+                    (data_path.with_name(f"{data_path.stem}_prepare.{c.name}.{d.name}.{k}.jsonl") for k in count(2)),
+                )
+                prepare_path = next(p for p in candidates if p not in used_prepare_paths)
+                used_prepare_paths.add(prepare_path)
                 # Create the artifact dir if needed (the prepared file is written next to the
                 # cwd-relative jsonl_fpath, which may not exist when collating from a fresh cwd).
                 prepare_path.parent.mkdir(parents=True, exist_ok=True)
+
+                # The routing stamp: task_source names the declaring instance; the agent is
+                # resolved from it at dispatch time. Collated output carries NO agent_ref — the
+                # agent is a run-time choice, never part of the data. Incoming rows that still
+                # carry a legacy agent_ref get it stripped (with one warning per file): routing
+                # for this dataset comes from the declaration, and passing the stale field
+                # through would leak the old coupling into the clean format.
+                legacy_agent_ref_rows = 0
                 with open(prepare_path, "w") as target:
                     for line in self._iter_dataset_lines(d):
-                        d = json.loads(line)
+                        row = json.loads(line)
 
                         if prompt_cfg:
-                            validate_prompt_compatibility([d], prompt_cfg)
-                            d = apply_prompt_to_row(d, prompt_cfg)
+                            validate_prompt_compatibility([row], prompt_cfg)
+                            row = apply_prompt_to_row(row, prompt_cfg)
 
-                        d[AGENT_REF_KEY] = AgentServerRef(type="responses_api_agents", name=c.name).model_dump()
-                        target.write(f"{json.dumps(d)}\n")
+                        if row.pop(AGENT_REF_KEY, None) is not None:
+                            legacy_agent_ref_rows += 1
+                        row[TASK_SOURCE_KEY_NAME] = c.name
+                        target.write(f"{json.dumps(row)}\n")
 
+                if legacy_agent_ref_rows:
+                    warnings.warn(
+                        f"{d.jsonl_fpath}: stripped legacy agent_ref from {legacy_agent_ref_rows} rows "
+                        "(deprecated in source datasets; routing comes from the config declaration).",
+                        DeprecationWarning,
+                        stacklevel=2,
+                    )
                 paths_to_collate.append(prepare_path)
 
         return paths_to_collate
