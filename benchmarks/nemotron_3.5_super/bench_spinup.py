@@ -24,7 +24,6 @@ output_jsonl_fpath = global_config["output_jsonl_fpath"]
 num_repeats = global_config["num_repeats"]
 
 print(f"src={getsize(input_jsonl_fpath) / 2**30:.2f} GB num_repeats={num_repeats}\n")
-makedirs(input_jsonl_fpath, exist_ok=True)
 makedirs(Path(output_jsonl_fpath).parent, exist_ok=True)
 
 rc_config = RolloutCollectionConfig.model_validate(
