@@ -47,8 +47,9 @@ from nemo_gym.rollout_observability import (
     ObservationGap,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
-from responses_api_agents.hermes_agent.observability import build_hermes_observations, project_hermes_response_messages
+from responses_api_agents.hermes_agent.observability import build_hermes_observations
 from responses_api_agents.hermes_agent.setup_hermes import ensure_hermes
+from responses_api_agents.hermes_agent.trajectory import project_hermes_response_messages
 
 
 LOG = logging.getLogger(__name__)
@@ -252,28 +253,56 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
     def _rollout_mcp_servers(self, seed_response_json: dict[str, Any]) -> Optional[dict[str, Any]]:
         """Build the per-rollout Hermes MCP config from resources-server metadata."""
-        metadata = seed_response_json.get(NEMO_GYM_MCP_METADATA_KEY)
-        if not isinstance(metadata, dict):
+        if NEMO_GYM_MCP_METADATA_KEY not in seed_response_json:
             return None
+        metadata = seed_response_json[NEMO_GYM_MCP_METADATA_KEY]
+        if not isinstance(metadata, dict):
+            raise ValueError("MCP seed metadata must be an object")
 
-        transport = str(metadata.get("transport") or "http").replace("_", "-").lower()
-        if transport not in {"http", "streamable-http"}:
-            raise ValueError(f"Hermes supports Gym MCP metadata only over HTTP, got transport={transport!r}")
+        transport = metadata.get("transport") or "http"
+        if not isinstance(transport, str):
+            raise ValueError("MCP seed metadata transport must be a string")
+        transport = transport.replace("_", "-").lower()
+        if transport not in {"http", "streamable-http", "sse"}:
+            raise ValueError("MCP seed metadata transport is not supported by Hermes")
 
-        server_name = str(metadata.get("server_name") or self.config.resources_server.name)
-        url_path = str(metadata.get("url_path") or "/mcp")
+        server_name = metadata.get("server_name") or self.config.resources_server.name
+        if not isinstance(server_name, str) or not server_name:
+            raise ValueError("MCP seed metadata server_name must be a non-empty string")
+
+        url_path = metadata.get("url_path") or "/mcp"
+        if not isinstance(url_path, str):
+            raise ValueError("MCP seed metadata url_path must be a string")
+
         entry: dict[str, Any] = {
             "url": f"{self._resources_server_base_url().rstrip('/')}/{url_path.lstrip('/')}",
         }
+        if transport == "sse":
+            entry["transport"] = "sse"
+
         headers = metadata.get("headers")
-        if isinstance(headers, dict) and headers:
-            entry["headers"] = {str(key): str(value) for key, value in headers.items()}
-        else:
+        if headers is None:
             LOG.warning(
                 "MCP seed metadata for %r has no headers; the tool endpoint will be called without a "
                 "session token and will reject the calls.",
                 server_name,
             )
+        elif not isinstance(headers, dict):
+            raise ValueError("MCP seed metadata headers must be an object")
+        else:
+            normalized_headers: dict[str, str] = {}
+            for key, value in headers.items():
+                if not isinstance(key, str) or not isinstance(value, (str, int, float, bool)):
+                    raise ValueError("MCP seed metadata headers must contain scalar values")
+                normalized_headers[key] = str(value)
+            if normalized_headers:
+                entry["headers"] = normalized_headers
+            else:
+                LOG.warning(
+                    "MCP seed metadata for %r has no headers; the tool endpoint will be called without a "
+                    "session token and will reject the calls.",
+                    server_name,
+                )
         return {server_name: entry}
 
     async def _run_hermes_subprocess(

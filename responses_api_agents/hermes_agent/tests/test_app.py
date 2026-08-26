@@ -151,8 +151,48 @@ class TestRolloutMCPServers:
 
     def test_rejects_non_http_transport(self) -> None:
         agent = self._agent_with_resources_server()
-        with pytest.raises(ValueError, match="only over HTTP"):
+        with pytest.raises(ValueError, match="not supported"):
             agent._rollout_mcp_servers({"mcp": {"transport": "stdio"}})
+
+    def test_preserves_sse_transport(self) -> None:
+        agent = self._agent_with_resources_server()
+        servers = agent._rollout_mcp_servers(
+            {
+                "mcp": {
+                    "server_name": "example_mcp_weather",
+                    "transport": "sse",
+                    "headers": {"X-NeMo-Gym-Session-Token": "token"},
+                }
+            }
+        )
+
+        assert servers["example_mcp_weather"]["transport"] == "sse"
+
+    @pytest.mark.parametrize(
+        "metadata",
+        [
+            "not-an-object",
+            {"server_name": 42},
+            {"url_path": 42},
+            {"transport": 42},
+            {"headers": "not-an-object"},
+        ],
+    )
+    def test_rejects_malformed_metadata(self, metadata) -> None:
+        agent = self._agent_with_resources_server()
+        with pytest.raises(ValueError):
+            agent._rollout_mcp_servers({"mcp": metadata})
+
+    def test_rejects_malformed_headers_without_exposing_token(self, caplog) -> None:
+        secret = "do-not-log-this-token"  # pragma: allowlist secret
+        agent = self._agent_with_resources_server()
+
+        with pytest.raises(ValueError) as exc_info:
+            agent._rollout_mcp_servers({"mcp": {"headers": {"Authorization": {"token": secret}}}})
+
+        assert "scalar values" in str(exc_info.value)
+        assert secret not in str(exc_info.value)
+        assert secret not in caplog.text
 
     def test_run_passes_rollout_mcp_config_and_session_cookie(self, monkeypatch) -> None:
         agent = self._agent_with_resources_server()
@@ -375,6 +415,48 @@ class TestManagedSubprocessIsolation:
             "token-1",
             "token-2",
         }
+
+    def test_failed_rollout_cleans_up_token_config(self, monkeypatch) -> None:
+        agent = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        monkeypatch.setattr(agent, "_ensure_sigterm_handler", lambda: None)
+        homes: list[Path] = []
+        workdirs: list[Path] = []
+
+        class FakeProcess:
+            returncode = 1
+
+            async def communicate(self):
+                return b"", b"runtime failed"
+
+        async def create_process(*args, **kwargs):
+            home = Path(kwargs["env"]["HERMES_HOME"])
+            homes.append(home)
+            workdirs.append(Path(kwargs["cwd"]))
+            config = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+            assert config["mcp_servers"]["workplace"]["headers"] == {"X-NeMo-Gym-Session-Token": "secret-token"}
+            return FakeProcess()
+
+        monkeypatch.setattr(
+            "responses_api_agents.hermes_agent.app.asyncio.create_subprocess_exec",
+            create_process,
+        )
+
+        with pytest.raises(RuntimeError, match="runtime failed"):
+            asyncio.run(
+                agent._run_hermes_subprocess(
+                    {},
+                    mcp_servers={
+                        "workplace": {
+                            "url": "http://resources/mcp",
+                            "headers": {"X-NeMo-Gym-Session-Token": "secret-token"},
+                        }
+                    },
+                )
+            )
+
+        assert agent.active_processes == set()
+        assert all(not home.exists() for home in homes)
+        assert all(not workdir.exists() for workdir in workdirs)
 
 
 class TestSplitChatMessages:
