@@ -50,7 +50,6 @@ def generate_sokoban_example(level_id: int, seed: int, dim_room: List[int], num_
                 {"role": "user", "content": "Solve the Sokoban puzzle step by step."},
             ],
         },
-        "agent_ref": {"type": "responses_api_agents", "name": "grl_sokoban_gymnasium_agent"},
     }
 
 
