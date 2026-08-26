@@ -93,6 +93,11 @@ export SBATCH_GRES=${SBATCH_GRES:-gpu:4}
 # restartable -- it resumes from the materialized inputs -- so latency to first rollout matters
 # more than protection from preemption.
 export SBATCH_QOS=${SBATCH_QOS:-interactive}
+
+# nemo_gym.server_utils.DEFAULT_HEAD_SERVER_PORT. 36 environments starting from baked venvs took
+# well under a minute in testing; the ceiling is for a cold container that has to install.
+HEAD_SERVER_PORT=${HEAD_SERVER_PORT:-11000}
+HEAD_SERVER_TIMEOUT_S=${HEAD_SERVER_TIMEOUT_S:-900}
 SLURM_COMMENT="${SLURM_COMMENT:-}"
 
 # Fixed vLLM Port configurations
@@ -118,6 +123,27 @@ gym env start --config $SWEEP_DIR/sweep_config.yaml \\
     ++policy_model_name=$MODEL &
 gym_servers_pid=\$!
 trap 'kill \$gym_servers_pid 2>/dev/null || true' EXIT
+
+# Wait for the head server before starting collection. gym env start backgrounds itself and 36
+# environments take a while to come up, so without this gym eval run --no-serve races it and dies
+# with "Could not connect to the head server at http://127.0.0.1:11000". Any HTTP response means
+# it is listening; the body does not matter.
+echo "waiting for the Gym head server on :$HEAD_SERVER_PORT ..."
+for _i in \$(seq 1 $((HEAD_SERVER_TIMEOUT_S / 10))); do
+    if curl -s -o /dev/null -m 3 "http://127.0.0.1:$HEAD_SERVER_PORT/"; then
+        echo "head server up after \$(( _i * 10 ))s"
+        break
+    fi
+    if ! kill -0 "\$gym_servers_pid" 2>/dev/null; then
+        echo "ERROR: gym env start exited before the head server came up" >&2
+        exit 1
+    fi
+    sleep 10
+done
+if ! curl -s -o /dev/null -m 3 "http://127.0.0.1:$HEAD_SERVER_PORT/"; then
+    echo "ERROR: head server never came up within ${HEAD_SERVER_TIMEOUT_S}s" >&2
+    exit 1
+fi
 
 # --resume is load-bearing: Gym reads the pre-expanded inputs instead of re-expanding them
 # (~100 min single-threaded for a full sweep), and a walltime kill continues where it stopped.
