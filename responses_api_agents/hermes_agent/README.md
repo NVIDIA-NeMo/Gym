@@ -90,7 +90,20 @@ sampling overrides remain authoritative for on-policy training. Evaluation does 
 
 ## Resources server compatibility
 
-Works with any resources server based verifier, but does not work for resources server tools or other endpoints out of the box. Hermes Agent ships its own toolset (terminal, file, code_execution, web, etc.), so it does not rely on tools defined in the dataset. It may work with Gymnasium style resources servers, though. In testing, only the resources server's task data and `verify` are used. This means existing benchmarks (math, code, reasoning_gym, mcqa, instruction_following, ...) can be used as-is by adding a `<server>_hermes_agent` config.
+Hermes works with verifier-only resources servers without additional configuration. When a resources server uses
+`expose_tools_over_mcp: true`, its `/seed_session` response includes a rollout-specific HTTP MCP endpoint and signed
+session header. The Hermes agent adds that server to the current rollout's temporary `HERMES_HOME`, discovers its tools
+before constructing `AIAgent`, and deletes the configuration with the rest of the rollout home afterward. Concurrent
+rollouts therefore do not share MCP session credentials.
+
+Resources-server MCP tools coexist with Hermes's built-in toolsets (terminal, file, code execution, web, and others).
+Hermes exposes each MCP tool to the model as `mcp__<server>__<tool>`. Resources servers that do not return MCP metadata
+retain the verifier-only behavior.
+
+When the seed metadata advertises the server's tool names, the agent also records each executed MCP call's raw
+`server_name` and `tool_name` in `mcp_tool_call_provenance`, keyed by the Responses API `call_id`. Verification and
+reverification can therefore use the canonical identity without parsing Hermes's model-facing alias. Built-in tools
+and MCP calls from other servers are not attributed to the rollout resources server.
 
 ## Configuration example
 

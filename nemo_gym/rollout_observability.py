@@ -16,6 +16,7 @@ from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseInputItem
 
 
 if TYPE_CHECKING:
+    from nemo_gym.base_resources_server import MCPToolCallProvenance
     from nemo_gym.base_responses_api_model import ModelCallRecord
 
 
@@ -447,3 +448,4 @@ class AgentEpisode:
 
     response: NeMoGymResponse
     observations: AgentObservationBundle
+    mcp_tool_call_provenance: Optional[dict[str, MCPToolCallProvenance]] = None

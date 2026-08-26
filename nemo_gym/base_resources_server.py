@@ -17,7 +17,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Optional
 
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 if TYPE_CHECKING:
@@ -38,18 +38,19 @@ from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, Simpl
 
 NEMO_GYM_MCP_SESSION_TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
 NEMO_GYM_MCP_METADATA_KEY = "mcp"
+NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY = "mcp_tool_call_provenance"
 # Salt namespacing the signed MCP session token, so it can't be confused with another signer
 # that happens to share the same session-middleware secret.
 _MCP_TOKEN_SALT = "nemo-gym-mcp-session-token"
 
 
 def normalize_tool_name(name: str, server_name: Optional[str] = None) -> str:
-    """Map a trajectory tool-call name to the server's bare tool name.
+    """Legacy fallback for provenance-free Claude Code MCP tool names.
 
     HTTP-driven agents record bare tool names ("email_reply_email"); MCP-native agents (e.g.
     Claude Code) record them namespaced per server ("mcp__workplace_assistant__email_reply_email").
-    Verifiers compare trajectory names against dataset/ground-truth vocabulary, so names are
-    normalized before verify sees them and rollouts score identically on both transports.
+    New trajectories should carry ``MCPToolCallProvenance`` instead of relying on this client-specific
+    string convention. This fallback keeps existing saved trajectories reverifiable.
     Non-namespaced names pass through unchanged. When ``server_name`` is given, only that server's
     prefix is stripped (robust to tool names that themselves contain double underscores).
     This runs only for servers exposed over MCP and mirrors how MCP clients namespace tool names,
@@ -89,8 +90,21 @@ class BaseRunRequest(BaseModel):
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
 
 
+class MCPToolCallProvenance(BaseModel):
+    """Canonical identity of one adapter-observed MCP call."""
+
+    server_name: str = Field(min_length=1, pattern=r"\S")
+    tool_name: str = Field(min_length=1, pattern=r"\S")
+
+
 class BaseVerifyRequest(BaseRunRequest):
     response: NeMoGymResponse
+    # None means a historical/unknown trajectory, so the narrow Claude Code fallback may run.
+    # A mapping (including an empty one) is authoritative and complete: absent call IDs are non-MCP.
+    mcp_tool_call_provenance: Optional[dict[str, MCPToolCallProvenance]] = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
 
 class BaseVerifyResponse(BaseVerifyRequest):
@@ -132,6 +146,7 @@ class MCPServerMetadata(BaseModel):
     url_path: str = "/mcp"
     transport: str = "http"
     headers: dict[str, str]
+    tool_names: list[str]
 
 
 class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleServer):

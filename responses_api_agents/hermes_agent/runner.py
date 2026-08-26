@@ -24,6 +24,7 @@ Hermes-installed interpreter, and reads the complete result back as JSON.
 """
 
 import json
+import logging
 import signal
 import sys
 import traceback
@@ -41,15 +42,77 @@ def _load_ai_agent():
     return AIAgent
 
 
+def _discover_mcp_tools() -> None:
+    from hermes_cli.mcp_startup import ensure_mcp_discovery_before_agent_build
+
+    ensure_mcp_discovery_before_agent_build(
+        logger=logging.getLogger(__name__),
+        single_query=True,
+        thread_name="nemo-gym-mcp-discovery",
+    )
+
+
+def _mcp_server_status(server_name: str) -> str:
+    from tools.mcp_tool import get_mcp_status
+
+    return next(
+        (entry.get("status", "unknown") for entry in get_mcp_status() if entry.get("name") == server_name),
+        "missing",
+    )
+
+
+def _mcp_toolset_names(toolset_name: str) -> set[str]:
+    from tools.registry import registry
+
+    return set(registry.get_tool_names_for_toolset(toolset_name))
+
+
+def _prepare_mcp_tools(server_name: str, expected_tool_names: list[str]) -> str:
+    """Discover and validate one MCP toolset before ``AIAgent`` snapshots it."""
+    _discover_mcp_tools()
+    toolset_name = f"mcp-{server_name}"
+    registered_tool_names = _mcp_toolset_names(toolset_name)
+    missing_tool_names = sorted(set(expected_tool_names) - registered_tool_names)
+    server_status = _mcp_server_status(server_name)
+    if server_status != "connected" or not registered_tool_names or missing_tool_names:
+        missing_preview = ", ".join(missing_tool_names[:5])
+        missing_summary = (
+            f"; missing {len(missing_tool_names)} expected tools"
+            + (f" ({missing_preview})" if missing_preview else "")
+            if missing_tool_names
+            else ""
+        )
+        raise RuntimeError(
+            f"Hermes MCP server {server_name!r} is not ready: status={server_status!r}, "
+            f"registered_tools={len(registered_tool_names)}{missing_summary}"
+        )
+    return toolset_name
+
+
 def run(request: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    enabled_toolsets = request.get("enabled_toolsets")
+    disabled_toolsets = request.get("disabled_toolsets")
+    if request.get("mcp_enabled"):
+        server_name = request.get("mcp_server_name")
+        expected_tool_names = request.get("mcp_expected_tool_names")
+        if not isinstance(server_name, str) or not server_name:
+            raise ValueError("Hermes MCP rollout is missing a server name")
+        if (
+            not isinstance(expected_tool_names, list)
+            or not expected_tool_names
+            or not all(isinstance(tool_name, str) and tool_name for tool_name in expected_tool_names)
+        ):
+            raise ValueError("Hermes MCP rollout expected tool names must be a non-empty string array")
+        enabled_toolsets = [_prepare_mcp_tools(server_name, expected_tool_names)]
+        disabled_toolsets = None
     agent = _load_ai_agent()(
         base_url=request["base_url"],
         api_key=request["api_key"],
         model=request["model"],
         max_iterations=request["max_iterations"],
         max_tokens=request.get("max_tokens"),
-        enabled_toolsets=request.get("enabled_toolsets"),
-        disabled_toolsets=request.get("disabled_toolsets"),
+        enabled_toolsets=enabled_toolsets,
+        disabled_toolsets=disabled_toolsets,
         quiet_mode=True,
         skip_context_files=True,
         skip_memory=True,

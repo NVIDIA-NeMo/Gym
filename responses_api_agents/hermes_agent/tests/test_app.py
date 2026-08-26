@@ -20,7 +20,10 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import yaml
 
+from nemo_gym.base_resources_server import MCPToolCallProvenance
+from nemo_gym.mcp import AgentExecutionResult, parse_rollout_mcp_server
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -39,6 +42,14 @@ from responses_api_agents.hermes_agent.app import (
 )
 from responses_api_agents.hermes_agent.observability import build_hermes_observations
 from responses_api_agents.hermes_agent.setup_hermes import HERMES_COMMIT, HERMES_RELEASE, HERMES_VERSION
+
+
+def _parse_mcp_seed(seed: dict):
+    return parse_rollout_mcp_server(
+        seed,
+        resources_server_name="example_mcp_weather",
+        resources_server_base_url="http://127.0.0.1:8123",
+    )
 
 
 class _FakeResponse:
@@ -92,6 +103,191 @@ class TestSanity:
     def test_configured_model_overrides_server_name(self) -> None:
         agent = HermesAgent(config=_config(model="Qwen3.6-35B-A3B"), server_client=MagicMock(spec=ServerClient))
         assert agent._model_name() == "Qwen3.6-35B-A3B"
+
+
+class TestRolloutMCPServers:
+    def _agent_with_resources_server(self) -> HermesAgent:
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {
+            "example_mcp_weather": {
+                "resources_servers": {
+                    "example_mcp_weather": {
+                        "host": "127.0.0.1",
+                        "port": 8123,
+                    }
+                }
+            }
+        }
+        server_client._build_server_base_url.side_effect = lambda config: (f"http://{config['host']}:{config['port']}")
+        return HermesAgent(
+            config=HermesAgentConfig(
+                host="0.0.0.0",
+                port=8080,
+                entrypoint="",
+                name="hermes",
+                resources_server=ResourcesServerRef(
+                    type="resources_servers",
+                    name="example_mcp_weather",
+                ),
+                model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            ),
+            server_client=server_client,
+        )
+
+    def test_no_metadata_preserves_verifier_only_behavior(self) -> None:
+        agent = self._agent_with_resources_server()
+        assert agent._hermes_mcp_servers(None) is None
+        assert "mcp_servers" not in yaml.safe_load(agent._build_config())
+
+    def test_builds_streamable_http_entry_with_session_header(self) -> None:
+        agent = self._agent_with_resources_server()
+        servers = agent._hermes_mcp_servers(
+            _parse_mcp_seed(
+                {
+                    "mcp": {
+                        "server_name": "example_mcp_weather",
+                        "url_path": "/mcp",
+                        "transport": "http",
+                        "headers": {"X-NeMo-Gym-Session-Token": "secret-token"},
+                    }
+                }
+            )
+        )
+
+        assert servers == {
+            "example_mcp_weather": {
+                "url": "http://127.0.0.1:8123/mcp",
+                "headers": {"X-NeMo-Gym-Session-Token": "secret-token"},
+            }
+        }
+        assert yaml.safe_load(agent._build_config(servers))["mcp_servers"] == servers
+
+    def test_rejects_non_http_transport(self) -> None:
+        agent = self._agent_with_resources_server()
+        with pytest.raises(ValueError, match="not supported"):
+            agent._hermes_mcp_servers(_parse_mcp_seed({"mcp": {"transport": "stdio"}}))
+
+    def test_preserves_sse_transport(self) -> None:
+        agent = self._agent_with_resources_server()
+        servers = agent._hermes_mcp_servers(
+            _parse_mcp_seed(
+                {
+                    "mcp": {
+                        "server_name": "example_mcp_weather",
+                        "transport": "sse",
+                        "headers": {"X-NeMo-Gym-Session-Token": "token"},
+                    }
+                }
+            )
+        )
+
+        assert servers["example_mcp_weather"]["transport"] == "sse"
+
+    @pytest.mark.parametrize(
+        "metadata",
+        [
+            "not-an-object",
+            {"server_name": 42},
+            {"url_path": 42},
+            {"transport": 42},
+            {"headers": "not-an-object"},
+        ],
+    )
+    def test_rejects_malformed_metadata(self, metadata) -> None:
+        with pytest.raises(ValueError):
+            _parse_mcp_seed({"mcp": metadata})
+
+    def test_rejects_malformed_headers_without_exposing_token(self, caplog) -> None:
+        secret = "do-not-log-this-token"  # pragma: allowlist secret
+        with pytest.raises(ValueError) as exc_info:
+            _parse_mcp_seed({"mcp": {"headers": {"Authorization": {"token": secret}}}})
+
+        assert "scalar values" in str(exc_info.value)
+        assert secret not in str(exc_info.value)
+        assert secret not in caplog.text
+
+    def test_run_passes_rollout_mcp_config_and_session_cookie(self, monkeypatch) -> None:
+        agent = self._agent_with_resources_server()
+        response = NeMoGymResponse.model_validate(
+            {
+                "id": "resp-1",
+                "created_at": 1,
+                "model": "model",
+                "object": "response",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call-1",
+                        "name": "mcp__example_mcp_weather__get_weather",
+                        "arguments": '{"city":"Seattle"}',
+                    }
+                ],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+        )
+
+        create_response = AsyncMock(
+            return_value=AgentExecutionResult(
+                response=response,
+                mcp_tool_call_provenance={
+                    "call-1": MCPToolCallProvenance(
+                        server_name="example_mcp_weather",
+                        tool_name="get_weather",
+                    )
+                },
+            )
+        )
+        monkeypatch.setattr(agent, "_create_response", create_response)
+        captured: dict = {}
+
+        async def post(server_name, url_path, json=None, cookies=None, **kwargs):
+            if url_path == "/seed_session":
+                return _FakeResponse(
+                    {
+                        "mcp": {
+                            "server_name": "example_mcp_weather",
+                            "url_path": "/mcp",
+                            "transport": "http",
+                            "headers": {"X-NeMo-Gym-Session-Token": "rollout-token"},
+                            "tool_names": ["get_weather"],
+                        }
+                    },
+                    {"session": "rollout-cookie"},
+                )
+            if url_path == "/verify":
+                captured["verify_cookies"] = cookies
+                return _FakeResponse(json | {"reward": 1.0})
+            raise AssertionError(f"unexpected post: {server_name} {url_path}")
+
+        agent.server_client.post = AsyncMock(side_effect=post)
+        request = MagicMock()
+        request.cookies = {}
+        body = HermesAgentRunRequest.model_validate({"responses_create_params": {"input": "use the tool"}})
+
+        result = asyncio.run(agent.run(request, body))
+
+        assert result.reward == 1.0
+        assert create_response.await_args.kwargs["hermes_mcp_servers"] == {
+            "example_mcp_weather": {
+                "url": "http://127.0.0.1:8123/mcp",
+                "headers": {"X-NeMo-Gym-Session-Token": "rollout-token"},
+            }
+        }
+        assert captured["verify_cookies"] == {"session": "rollout-cookie"}
+        assert agent.server_client.post.await_args_list[-1].kwargs["json"]["mcp_tool_call_provenance"] == {
+            "call-1": {
+                "server_name": "example_mcp_weather",
+                "tool_name": "get_weather",
+            }
+        }
+        assert result.model_dump(mode="json")["mcp_tool_call_provenance"] == {
+            "call-1": {
+                "server_name": "example_mcp_weather",
+                "tool_name": "get_weather",
+            }
+        }
 
 
 class _FakeProcess:
@@ -181,6 +377,8 @@ class TestManagedSubprocessIsolation:
         processes = []
         homes: list[Path] = []
         workdirs: list[Path] = []
+        configs: list[dict] = []
+        request_mcp_metadata: list[dict] = []
         all_started = asyncio.Event()
         max_active = 0
 
@@ -215,6 +413,15 @@ class TestManagedSubprocessIsolation:
             assert home.parent == workdir
             assert Path(args[2]).is_file()
             assert Path(args[3]).parent == workdir
+            configs.append(yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8")))
+            request_payload = json.loads(Path(args[2]).read_text(encoding="utf-8"))
+            request_mcp_metadata.append(
+                {
+                    "enabled": request_payload["mcp_enabled"],
+                    "server_name": request_payload["mcp_server_name"],
+                    "tool_names": request_payload["mcp_expected_tool_names"],
+                }
+            )
             process = FakeProcess(Path(args[3]))
             processes.append(process)
             homes.append(home)
@@ -227,7 +434,21 @@ class TestManagedSubprocessIsolation:
         )
 
         async def run_concurrently():
-            return await asyncio.gather(*(agent._run_hermes_subprocess({"rollout": index}) for index in range(3)))
+            return await asyncio.gather(
+                *(
+                    agent._run_hermes_subprocess(
+                        {"rollout": index},
+                        hermes_mcp_servers={
+                            "workplace": {
+                                "url": "http://resources/mcp",
+                                "headers": {"X-NeMo-Gym-Session-Token": f"token-{index}"},
+                            }
+                        },
+                        mcp_expected_tool_names=["mcp__workplace__email_reply_email"],
+                    )
+                    for index in range(3)
+                )
+            )
 
         results = asyncio.run(run_concurrently())
 
@@ -237,6 +458,64 @@ class TestManagedSubprocessIsolation:
         assert len(set(workdirs)) == 3
         assert agent.active_processes == set()
         assert all(process.returncode == 0 for process in processes)
+        assert all(not home.exists() for home in homes)
+        assert all(not workdir.exists() for workdir in workdirs)
+        assert (
+            request_mcp_metadata
+            == [
+                {
+                    "enabled": True,
+                    "server_name": "workplace",
+                    "tool_names": ["mcp__workplace__email_reply_email"],
+                }
+            ]
+            * 3
+        )
+        assert {config["mcp_servers"]["workplace"]["headers"]["X-NeMo-Gym-Session-Token"] for config in configs} == {
+            "token-0",
+            "token-1",
+            "token-2",
+        }
+
+    def test_failed_rollout_cleans_up_token_config(self, monkeypatch) -> None:
+        agent = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        monkeypatch.setattr(agent, "_ensure_sigterm_handler", lambda: None)
+        homes: list[Path] = []
+        workdirs: list[Path] = []
+
+        class FakeProcess:
+            returncode = 1
+
+            async def communicate(self):
+                return b"", b"runtime failed"
+
+        async def create_process(*args, **kwargs):
+            home = Path(kwargs["env"]["HERMES_HOME"])
+            homes.append(home)
+            workdirs.append(Path(kwargs["cwd"]))
+            config = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+            assert config["mcp_servers"]["workplace"]["headers"] == {"X-NeMo-Gym-Session-Token": "secret-token"}
+            return FakeProcess()
+
+        monkeypatch.setattr(
+            "responses_api_agents.hermes_agent.app.asyncio.create_subprocess_exec",
+            create_process,
+        )
+
+        with pytest.raises(RuntimeError, match="runtime failed"):
+            asyncio.run(
+                agent._run_hermes_subprocess(
+                    {},
+                    hermes_mcp_servers={
+                        "workplace": {
+                            "url": "http://resources/mcp",
+                            "headers": {"X-NeMo-Gym-Session-Token": "secret-token"},
+                        }
+                    },
+                )
+            )
+
+        assert agent.active_processes == set()
         assert all(not home.exists() for home in homes)
         assert all(not workdir.exists() for workdir in workdirs)
 
@@ -365,7 +644,7 @@ class TestResponsesConversion:
             }
         )
 
-        response = asyncio.run(agent._create_response(body))
+        response = asyncio.run(agent._create_response(body)).response
 
         assert seen["user_message"] == "where am I?"
         assert [message["role"] for message in seen["history"]] == ["user", "assistant", "tool"]
@@ -519,11 +798,43 @@ class TestMaxTokens:
 
 
 class TestManagedRunner:
+    def test_mcp_preflight_returns_registered_toolset(self, monkeypatch) -> None:
+        monkeypatch.setattr(runner, "_discover_mcp_tools", lambda: None)
+        monkeypatch.setattr(runner, "_mcp_server_status", lambda _server_name: "connected")
+        monkeypatch.setattr(
+            runner,
+            "_mcp_toolset_names",
+            lambda _toolset_name: {
+                "mcp__workplace__email_reply_email",
+                "mcp__workplace__calendar_delete_event",
+            },
+        )
+
+        toolset = runner._prepare_mcp_tools(
+            "workplace",
+            ["mcp__workplace__email_reply_email", "mcp__workplace__calendar_delete_event"],
+        )
+
+        assert toolset == "mcp-workplace"
+
+    @pytest.mark.parametrize("status", ["failed", "configured", "missing"])
+    def test_mcp_preflight_fails_closed_when_expected_tools_are_unavailable(self, monkeypatch, status) -> None:
+        monkeypatch.setattr(runner, "_discover_mcp_tools", lambda: None)
+        monkeypatch.setattr(runner, "_mcp_server_status", lambda _server_name: status)
+        monkeypatch.setattr(runner, "_mcp_toolset_names", lambda _toolset_name: set())
+
+        with pytest.raises(
+            RuntimeError,
+            match=r"status=.*registered_tools=0; missing 1 expected tools",
+        ):
+            runner._prepare_mcp_tools("workplace", ["mcp__workplace__email_reply_email"])
+
     def test_uses_upstream_constructor_contract(self, monkeypatch) -> None:
         seen: dict = {}
 
         class _StubAIAgent:
             def __init__(self, **kwargs) -> None:
+                assert seen["mcp_prepared"] == ("workplace", ["mcp__workplace__email_reply_email"])
                 seen.update(kwargs)
                 seen["agent"] = self
 
@@ -537,6 +848,11 @@ class TestManagedRunner:
             def close(self) -> None:
                 seen["closed"] = True
 
+        def prepare_mcp_tools(server_name, expected_tool_names):
+            seen["mcp_prepared"] = (server_name, expected_tool_names)
+            return "mcp-workplace"
+
+        monkeypatch.setattr(runner, "_prepare_mcp_tools", prepare_mcp_tools)
         monkeypatch.setattr(runner, "_load_ai_agent", lambda: _StubAIAgent)
         result, observations = runner.run(
             {
@@ -552,6 +868,9 @@ class TestManagedRunner:
                 "system_message": "system",
                 "history": [{"role": "user", "content": "earlier"}],
                 "capture_observations": True,
+                "mcp_enabled": True,
+                "mcp_server_name": "workplace",
+                "mcp_expected_tool_names": ["mcp__workplace__email_reply_email"],
             }
         )
 
@@ -578,6 +897,9 @@ class TestManagedRunner:
         root = next(record for record in bundle.records if record.kind == "agent_invocation")
         assert root.conversation[-1].content[0].text == "ok"
         assert seen["closed"] is True
+        assert seen["mcp_prepared"] == ("workplace", ["mcp__workplace__email_reply_email"])
+        assert seen["enabled_toolsets"] == ["mcp-workplace"]
+        assert seen["disabled_toolsets"] is None
         assert "use_streaming" not in seen
         assert "insert_reasoning" not in seen
         assert "persist_session" not in seen
