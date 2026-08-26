@@ -29,7 +29,6 @@ from nemo_gym.health.checks import (
     CHECK_REGISTRY,
     _bind_policy_calls,
     _canonical_trajectory,
-    _finding,
     _is_failed,
     _is_successful,
     _normalized_trajectory_calls,
@@ -119,12 +118,11 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
         if parse_error:
             if spec.id == "record_unreadable":
                 findings.append(
-                    _finding(
-                        "record_unreadable",
-                        subject,
+                    Finding(
+                        check="record_unreadable",
+                        subject=subject,
                         locator={"source_file": payload.line.path, "line": payload.line.line_number},
-                        reason="rollout record is unreadable",
-                        error=parse_error,
+                        detail={"reason": "rollout record is unreadable", "error": parse_error},
                     )
                 )
             else:
@@ -132,11 +130,10 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
             continue
         if trajectory_error and spec.id == "record_unreadable":
             findings.append(
-                _finding(
-                    "record_unreadable",
-                    subject,
-                    reason="canonical trajectory is unreadable",
-                    error=trajectory_error,
+                Finding(
+                    check="record_unreadable",
+                    subject=subject,
+                    detail={"reason": "canonical trajectory is unreadable", "error": trajectory_error},
                 )
             )
             continue
@@ -172,12 +169,14 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
             unobserved.append(spec.id)
             if "check_execution_error" not in payload.ignored_checks:
                 findings.append(
-                    _finding(
-                        "check_execution_error",
-                        subject,
-                        reason="check raised an unexpected exception",
-                        failed_check=spec.id,
-                        error=type(exc).__name__,
+                    Finding(
+                        check="check_execution_error",
+                        subject=subject,
+                        detail={
+                            "reason": "check raised an unexpected exception",
+                            "failed_check": spec.id,
+                            "error": type(exc).__name__,
+                        },
                     )
                 )
 
@@ -274,10 +273,10 @@ def _mark_duplicate_identities(digests: list[RolloutDigest], ignored_checks: fro
             continue
         for digest in copies:
             digest.findings.append(
-                _finding(
-                    "rollout_duplicate_identity",
-                    _subject(digest.task_index, digest.rollout_index),
-                    duplicate_count=len(copies),
+                Finding(
+                    check="rollout_duplicate_identity",
+                    subject=_subject(digest.task_index, digest.rollout_index),
+                    detail={"duplicate_count": len(copies)},
                 )
             )
             digest.verdict = "unhealthy"
@@ -300,10 +299,10 @@ def _task_findings(
                 coverage["task_consistently_unhealthy"]["evaluated"] += 1
                 if all(repeat.verdict == "unhealthy" for repeat in computable):
                     findings[task_index].append(
-                        _finding(
-                            "task_consistently_unhealthy",
-                            subject,
-                            computable_repeats=len(computable),
+                        Finding(
+                            check="task_consistently_unhealthy",
+                            subject=subject,
+                            detail={"computable_repeats": len(computable)},
                         )
                     )
             else:
@@ -316,7 +315,11 @@ def _task_findings(
                 coverage["task_no_successful_model_calls"]["evaluated"] += 1
                 if not any(repeat.successful_model_calls for repeat in repeats):
                     findings[task_index].append(
-                        _finding("task_no_successful_model_calls", subject, repeats=len(repeats))
+                        Finding(
+                            check="task_no_successful_model_calls",
+                            subject=subject,
+                            detail={"repeats": len(repeats)},
+                        )
                     )
             else:
                 coverage["task_no_successful_model_calls"]["unobserved"] += 1
@@ -518,6 +521,7 @@ def health_check_run_dir(
     rollout_file: str | Path | None = None,
     workers: int | None = None,
     ignored_checks: Sequence[str] = (),
+    json_output: bool = False,
 ) -> HealthCheckResult:
     path = Path(run_dir)
     rollout_path = _resolve_rollout_path(path, rollout_file)
@@ -527,5 +531,8 @@ def health_check_run_dir(
         workers=workers,
         ignored_checks=ignored_checks,
     )
-    print(format_health_report(result))
+    if json_output:
+        print(orjson.dumps(result.summary).decode())
+    else:
+        print(format_health_report(result))
     return result

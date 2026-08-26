@@ -231,7 +231,10 @@ def test_missing_canonical_trajectory_makes_trajectory_checks_unobserved(tmp_pat
 
 
 async def test_health_on_and_off_leave_collection_and_metrics_byte_identical(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     monkeypatch.setattr(rollout_collection, "get_global_config_dict", lambda: {})
     source = {
@@ -297,8 +300,29 @@ async def test_health_on_and_off_leave_collection_and_metrics_byte_identical(
         assert (run_dir / "rollout_verdicts.jsonl").exists() is not disabled
         if not disabled:
             assert stdout.rstrip().endswith(str(run_dir / "quality_summary.json"))
+            assert stdout.index("Finished rollout collection") < stdout.index("Rollout health")
 
     assert artifacts[False] == artifacts[True]
+
+    failed_run_dir = tmp_path / "health-failure"
+    failed_run_dir.mkdir()
+    failed_input_path = failed_run_dir / "input.jsonl"
+    failed_input_path.write_bytes(orjson.dumps(source, option=orjson.OPT_APPEND_NEWLINE))
+    failed_output_path = failed_run_dir / "rollouts.jsonl"
+    failed_config = RolloutCollectionConfig(
+        input_jsonl_fpath=str(failed_input_path),
+        output_jsonl_fpath=str(failed_output_path),
+        upload_rollouts=False,
+    )
+
+    def broken_health_check(*args, **kwargs):
+        raise RuntimeError("health failed")
+
+    monkeypatch.setattr(health, "run_health_checks", broken_health_check)
+    await GoldenHelper().run_from_config(failed_config)
+
+    assert failed_output_path.exists()
+    assert "Rollout health checks failed after collection" in caplog.text
 
 
 def test_health_check_cli_accepts_run_dir_workers_and_ignored_checks(
@@ -306,12 +330,13 @@ def test_health_check_cli_accepts_run_dir_workers_and_ignored_checks(
 ) -> None:
     received = {}
 
-    def fake_health_check(run_dir, *, rollout_file=None, workers=None, ignored_checks=()):
+    def fake_health_check(run_dir, *, rollout_file=None, workers=None, ignored_checks=(), json_output=False):
         received.update(
             run_dir=run_dir,
             rollout_file=rollout_file,
             workers=workers,
             ignored_checks=ignored_checks,
+            json_output=json_output,
         )
 
     monkeypatch.setattr(cli_eval, "health_check_rollouts", fake_health_check)
@@ -329,6 +354,7 @@ def test_health_check_cli_accepts_run_dir_workers_and_ignored_checks(
             "3",
             "--ignore-checks",
             "model_call_missing_token_counts,model_call_zero_completion_tokens",
+            "--json",
         ],
     )
 
@@ -339,7 +365,17 @@ def test_health_check_cli_accepts_run_dir_workers_and_ignored_checks(
         "rollout_file": Path("evaluator_rollouts.jsonl"),
         "workers": 3,
         "ignored_checks": ["model_call_missing_token_counts", "model_call_zero_completion_tokens"],
+        "json_output": True,
     }
+
+
+def test_health_check_json_output_is_machine_readable(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    rollout_path = tmp_path / "rollouts.jsonl"
+    rollout_path.write_bytes(orjson.dumps(_record(0, 0), option=orjson.OPT_APPEND_NEWLINE))
+
+    result = health.health_check_run_dir(tmp_path, workers=1, json_output=True)
+
+    assert json.loads(capsys.readouterr().out) == result.summary
 
 
 def test_invalid_canonical_trajectory_is_unreadable_without_fallback(tmp_path: Path) -> None:

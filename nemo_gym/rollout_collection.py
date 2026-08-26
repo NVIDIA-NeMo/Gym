@@ -1066,7 +1066,6 @@ class RolloutCollectionHelper(BaseModel):
         # Compute and write aggregate metrics via /aggregate_metrics using only the
         # rows written to the main rollouts jsonl so runtime aggregation matches
         # `gym eval aggregate`.
-        health_result = None
         if config.disable_aggregation:
             print(
                 "Skipping aggregate-metrics computation because disable_aggregation=True. "
@@ -1079,22 +1078,26 @@ class RolloutCollectionHelper(BaseModel):
                 persisted_results, persisted_rows, output_fpath
             )
 
-            if not config.disable_health_check:
-                from nemo_gym.rollout_health import format_health_report, run_health_checks
-
-                health_result = run_health_checks(
-                    output_fpath,
-                    workers=config.health_check_workers,
-                    ignored_checks=config.health_check_ignored_checks,
-                )
-
         print(f"""Finished rollout collection! View results at:
 Fully materialized inputs: {config.materialized_jsonl_fpath}
 Rollouts: {output_fpath}
 Aggregate metrics: {aggregate_metrics_fpath}""")
 
-        if health_result is not None:
-            print(format_health_report(health_result))
+        if not config.disable_aggregation and not config.disable_health_check:
+            from nemo_gym.rollout_health import format_health_report, run_health_checks
+
+            try:
+                health_result = run_health_checks(
+                    output_fpath,
+                    workers=config.health_check_workers,
+                    ignored_checks=config.health_check_ignored_checks,
+                )
+            except Exception:
+                logger.exception(
+                    "Rollout health checks failed after collection; rollout artifacts are still available."
+                )
+            else:
+                print(format_health_report(health_result))
 
         return results
 
@@ -1355,23 +1358,26 @@ class RolloutAggregationHelper(BaseModel):
         helper = RolloutCollectionHelper()
         aggregate_metrics_fpath = await helper._call_aggregate_metrics(results, results, output_fpath)
 
-        health_result = None
-        if not config.disable_health_check:
-            from nemo_gym.rollout_health import format_health_report, run_health_checks
-
-            health_result = run_health_checks(
-                output_fpath if config.merge_shards else [Path(path) for path in input_paths],
-                output_dir=output_fpath.parent,
-                workers=config.health_check_workers,
-                ignored_checks=config.health_check_ignored_checks,
-            )
-
         print(f"""Finished rollout aggregation! View results at:
 Merged rollouts: {output_fpath if config.merge_shards else "<not merged>"}
 Aggregate metrics: {aggregate_metrics_fpath}""")
 
-        if health_result is not None:
-            print(format_health_report(health_result))
+        if not config.disable_health_check:
+            from nemo_gym.rollout_health import format_health_report, run_health_checks
+
+            try:
+                health_result = run_health_checks(
+                    output_fpath if config.merge_shards else [Path(path) for path in input_paths],
+                    output_dir=output_fpath.parent,
+                    workers=config.health_check_workers,
+                    ignored_checks=config.health_check_ignored_checks,
+                )
+            except Exception:
+                logger.exception(
+                    "Rollout health checks failed after aggregation; aggregate artifacts are still available."
+                )
+            else:
+                print(format_health_report(health_result))
 
         return aggregate_metrics_fpath
 

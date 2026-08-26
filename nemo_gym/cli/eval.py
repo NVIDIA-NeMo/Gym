@@ -15,6 +15,7 @@
 import asyncio
 import importlib
 import json
+import logging
 from collections.abc import Sequence
 from copy import deepcopy
 from multiprocessing import Pool
@@ -51,6 +52,9 @@ from nemo_gym.global_config import (
     get_first_server_config_dict,
     get_global_config_dict,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 # NOTE: `reward_profile`, `rollout_collection`, `rollout_reverification` and `train_data_utils` are imported lazily inside the run/aggregate/
@@ -414,12 +418,16 @@ def e2e_rollout_collection():  # pragma: no cover
     if health_check_enabled and collection_completed:
         from nemo_gym.rollout_health import format_health_report, run_health_checks
 
-        health_result = run_health_checks(
-            output_fpath,
-            workers=rollout_collection_config.health_check_workers,
-            ignored_checks=rollout_collection_config.health_check_ignored_checks,
-        )
-        print(format_health_report(health_result))
+        try:
+            health_result = run_health_checks(
+                output_fpath,
+                workers=rollout_collection_config.health_check_workers,
+                ignored_checks=rollout_collection_config.health_check_ignored_checks,
+            )
+        except Exception:
+            logger.exception("Rollout health checks failed after collection; rollout artifacts are still available.")
+        else:
+            print(format_health_report(health_result))
 
 
 @exit_cleanly_on_config_error
@@ -449,6 +457,7 @@ def health_check_rollouts(
     rollout_file: str | Path | None = None,
     workers: int | None = None,
     ignored_checks: Sequence[str] = (),
+    json_output: bool = False,
 ):
     """Run rollout quality verification for an existing run directory."""
     from nemo_gym.rollout_health import health_check_run_dir
@@ -458,6 +467,7 @@ def health_check_rollouts(
         rollout_file=rollout_file,
         workers=workers,
         ignored_checks=ignored_checks,
+        json_output=json_output,
     )
 
 

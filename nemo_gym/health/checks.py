@@ -128,16 +128,6 @@ def _subject(task_index: int | str, rollout_index: int | str | None = None) -> d
     return subject
 
 
-def _finding(
-    check: str,
-    subject: dict[str, int | str],
-    *,
-    locator: dict[str, int | str] | None = None,
-    **detail: Any,
-) -> Finding:
-    return Finding(check=check, subject=subject, locator=locator, detail=detail)
-
-
 def _nonempty(value: Any) -> bool:
     if value is None:
         return False
@@ -422,12 +412,23 @@ def _rollout_missing_agent_turns(trajectory: dict[str, Any], subject: dict[str, 
     steps = _agent_steps(trajectory)
     if any(step.has_model_activity for step in steps):
         return []
-    return [_finding("rollout_missing_agent_turns", subject, reason="no agent turn with model activity")]
+    return [
+        Finding(
+            check="rollout_missing_agent_turns",
+            subject=subject,
+            detail={"reason": "no agent turn with model activity"},
+        )
+    ]
 
 
 def _agent_turn_hollow(trajectory: dict[str, Any], subject: dict[str, int | str]) -> list[Finding]:
     return [
-        _finding("agent_turn_hollow", subject, locator=step.locator, reason="agent turn has no message or tool calls")
+        Finding(
+            check="agent_turn_hollow",
+            subject=subject,
+            locator=step.locator,
+            detail={"reason": "agent turn has no message or tool calls"},
+        )
         for step in _agent_steps(trajectory)
         if not step.has_message and not step.has_tool_calls
     ]
@@ -435,11 +436,11 @@ def _agent_turn_hollow(trajectory: dict[str, Any], subject: dict[str, int | str]
 
 def _model_call_zero_completion_tokens(bindings: _CallBindings, subject: dict[str, int | str]) -> list[Finding]:
     return [
-        _finding(
-            "model_call_zero_completion_tokens",
-            subject,
+        Finding(
+            check="model_call_zero_completion_tokens",
+            subject=subject,
             locator=_call_locator(call, position),
-            completion_tokens=0,
+            detail={"completion_tokens": 0},
         )
         for position, call in enumerate(bindings.matched_calls)
         if call.get("tokens_out") == 0
@@ -448,15 +449,17 @@ def _model_call_zero_completion_tokens(bindings: _CallBindings, subject: dict[st
 
 def _model_call_missing_token_counts(bindings: _CallBindings, subject: dict[str, int | str]) -> list[Finding]:
     return [
-        _finding(
-            "model_call_missing_token_counts",
-            subject,
+        Finding(
+            check="model_call_missing_token_counts",
+            subject=subject,
             locator=_call_locator(call, position),
-            missing=[
-                field
-                for field, key in (("prompt_tokens", "tokens_in"), ("completion_tokens", "tokens_out"))
-                if call.get(key) is None
-            ],
+            detail={
+                "missing": [
+                    field
+                    for field, key in (("prompt_tokens", "tokens_in"), ("completion_tokens", "tokens_out"))
+                    if call.get(key) is None
+                ]
+            },
         )
         for position, call in enumerate(bindings.matched_calls)
         if call.get("tokens_in") is None or call.get("tokens_out") is None
@@ -474,23 +477,22 @@ def _trajectory_capture_mismatch(
         locator = reference.split(":")[-1]
         seen.add(("missing_captured_call", locator))
         findings.append(
-            _finding(
-                "trajectory_capture_mismatch",
-                subject,
+            Finding(
+                check="trajectory_capture_mismatch",
+                subject=subject,
                 locator={"call_id": locator},
-                kind="missing_captured_call",
+                detail={"kind": "missing_captured_call"},
             )
         )
     for reference, count in bindings.duplicated_references:
         locator = reference.split(":")[-1]
         seen.add(("duplicated_captured_call", locator))
         findings.append(
-            _finding(
-                "trajectory_capture_mismatch",
-                subject,
+            Finding(
+                check="trajectory_capture_mismatch",
+                subject=subject,
                 locator={"call_id": locator},
-                kind="duplicated_captured_call",
-                count=count,
+                detail={"kind": "duplicated_captured_call", "count": count},
             )
         )
     for gap in _trajectory_reference_contradictions(trajectory):
@@ -500,13 +502,15 @@ def _trajectory_capture_mismatch(
         if (kind, locator) in seen:
             continue
         findings.append(
-            _finding(
-                "trajectory_capture_mismatch",
-                subject,
+            Finding(
+                check="trajectory_capture_mismatch",
+                subject=subject,
                 locator={"call_id": locator},
-                kind=kind,
-                observation_gap=gap["code"],
-                invocation_id=gap.get("invocation_id"),
+                detail={
+                    "kind": kind,
+                    "observation_gap": gap["code"],
+                    "invocation_id": gap.get("invocation_id"),
+                },
             )
         )
     return findings
@@ -514,13 +518,15 @@ def _trajectory_capture_mismatch(
 
 def _model_call_failed(bindings: _CallBindings, subject: dict[str, int | str]) -> list[Finding]:
     return [
-        _finding(
-            "model_call_failed",
-            subject,
+        Finding(
+            check="model_call_failed",
+            subject=subject,
             locator=_call_locator(call, position),
-            status=call.get("status_code"),
-            error_category=call.get("error_category"),
-            terminal=bindings.complete and position == len(bindings.matched_calls) - 1,
+            detail={
+                "status": call.get("status_code"),
+                "error_category": call.get("error_category"),
+                "terminal": bindings.complete and position == len(bindings.matched_calls) - 1,
+            },
         )
         for position, call in enumerate(bindings.matched_calls)
         if _is_failed(call)
@@ -537,13 +543,15 @@ def _rollout_token_count_mismatch(
         transcript_prompt != capture_prompt or transcript_completion != capture_completion
     ):
         return [
-            _finding(
-                "rollout_token_count_mismatch",
-                subject,
-                transcript_prompt=transcript_prompt,
-                transcript_completion=transcript_completion,
-                capture_prompt=capture_prompt,
-                capture_completion=capture_completion,
+            Finding(
+                check="rollout_token_count_mismatch",
+                subject=subject,
+                detail={
+                    "transcript_prompt": transcript_prompt,
+                    "transcript_completion": transcript_completion,
+                    "capture_prompt": capture_prompt,
+                    "capture_completion": capture_completion,
+                },
             )
         ]
     return []
@@ -551,11 +559,11 @@ def _rollout_token_count_mismatch(
 
 def _model_call_runaway_generation(bindings: _CallBindings, subject: dict[str, int | str]) -> list[Finding]:
     return [
-        _finding(
-            "model_call_runaway_generation",
-            subject,
+        Finding(
+            check="model_call_runaway_generation",
+            subject=subject,
             locator=_call_locator(call, position),
-            finish_reason=call.get("finish_reason"),
+            detail={"finish_reason": call.get("finish_reason")},
         )
         for position, call in enumerate(bindings.matched_calls)
         if call.get("finish_reason") in _LENGTH_LIMIT_FINISH_REASONS

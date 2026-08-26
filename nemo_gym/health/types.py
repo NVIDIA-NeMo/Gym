@@ -12,10 +12,16 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from nemo_gym.global_config import (
+    ROLLOUT_ID_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+)
 
-TASK_INDEX_KEY = "_ng_task_index"
-ROLLOUT_INDEX_KEY = "_ng_rollout_index"
-ROLLOUT_ID_KEY = "_ng_rollout_id"
+
+TASK_INDEX_KEY = TASK_INDEX_KEY_NAME
+ROLLOUT_INDEX_KEY = ROLLOUT_INDEX_KEY_NAME
+ROLLOUT_ID_KEY = ROLLOUT_ID_KEY_NAME
 QUALITY_SUMMARY_FILENAME = "quality_summary.json"
 ROLLOUT_VERDICTS_FILENAME = "rollout_verdicts.jsonl"
 

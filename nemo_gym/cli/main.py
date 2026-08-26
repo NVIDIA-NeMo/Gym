@@ -479,7 +479,10 @@ def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
 
 
 def _eval_health_check(args: argparse.Namespace, overrides: list[str]) -> None:
-    if overrides:
+    expected_overrides = ["+verbose=true"] if args.verbose else []
+    if args.json:
+        expected_overrides.append("+json=true")
+    if overrides != expected_overrides:
         args._parser.error("health-check does not accept Hydra overrides")
     from nemo_gym.cli.eval import health_check_rollouts
 
@@ -489,6 +492,7 @@ def _eval_health_check(args: argparse.Namespace, overrides: list[str]) -> None:
             rollout_file=args.rollout_file,
             workers=args.workers,
             ignored_checks=args.ignore_checks or (),
+            json_output=args.json,
         )
     except (FileNotFoundError, ValueError) as exc:
         args._parser.error(str(exc))
@@ -893,6 +897,7 @@ COMMANDS = {
                     help="Comma-separated check IDs to exclude from verdict derivation.",
                 )
             ),
+            JSON,
         ),
     ),
     "eval reverify": Command(
