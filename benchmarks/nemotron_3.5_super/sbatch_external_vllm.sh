@@ -15,6 +15,17 @@ OPENSANDBOX_DOMAIN="${OPENSANDBOX_DOMAIN:-}"
 OPENSANDBOX_API_KEY="${OPENSANDBOX_API_KEY:-}"
 OPENSANDBOX_PROTOCOL="${OPENSANDBOX_PROTOCOL:-http}"
 
+# The checkout this script ships in; a caller running a copy of it names its own.
+gym_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
+if [[ "${1:-}" == "--gym-root" ]]; then
+    if [[ -z "${2:-}" ]]; then
+        echo "--gym-root needs a path" >&2
+        exit 2
+    fi
+    gym_root=$2
+    shift 2
+fi
+
 should_run_eval=$(( $# > 0 ))
 if (( should_run_eval )); then
     EXPERIMENT_NAME=$EXPERIMENT_NAME
@@ -252,9 +263,7 @@ EOF
 
 # --segment > 0 otherwise the engine will hang on the second or third engine step.
 submit_dir=$(pwd -P)
-gym_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
-# A caller that exports the connection sends it as arguments; a checkout that
-# keeps one in env.yaml is read from there, as before.
+# An exported connection is sent as arguments; otherwise env.yaml is read.
 if [[ -n "$OPENSANDBOX_DOMAIN" ]]; then
     cleanup_connection=(--domain "$OPENSANDBOX_DOMAIN" --api-key "$OPENSANDBOX_API_KEY" --protocol "$OPENSANDBOX_PROTOCOL")
 else
