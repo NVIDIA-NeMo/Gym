@@ -15,7 +15,9 @@ from nemo_gym.rollout_observability import (
 )
 from responses_api_agents.hermes_agent.observability import (
     HermesAgentObserver,
+    normalize_hermes_chat_messages,
     normalize_hermes_messages,
+    project_hermes_response_messages,
 )
 
 
@@ -93,6 +95,90 @@ def test_normalize_hermes_messages_preserves_conversation_order():
     assert items[3].arguments == '{"command": "pwd"}'
     assert items[4].call_id == "call-1"
     assert items[5].content[0].text == "done"
+
+
+def test_normalize_hermes_dispatcher_call_exposes_actual_mcp_tool():
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "function": {
+                        "name": "tool_call",
+                        "arguments": (
+                            '{"name":"mcp__workplace__email_reply_email",'
+                            '"arguments":{"email_id":"57","body":"Thanks"}}'
+                        ),
+                    },
+                }
+            ],
+        }
+    ]
+
+    normalized = normalize_hermes_chat_messages(messages)
+    items = normalize_hermes_messages(messages)
+
+    assert normalized[0]["tool_calls"][0]["function"] == {
+        "name": "mcp__workplace__email_reply_email",
+        "arguments": '{"email_id": "57", "body": "Thanks"}',
+    }
+    assert items[0].name == "mcp__workplace__email_reply_email"
+    assert items[0].arguments == '{"email_id": "57", "body": "Thanks"}'
+    assert messages[0]["tool_calls"][0]["function"]["name"] == "tool_call"
+
+
+def test_response_projection_omits_internal_and_unexecuted_dispatch_calls():
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "describe",
+                    "function": {"name": "tool_describe", "arguments": '{"name":"mcp__workplace__reply"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "describe", "content": '{"name":"mcp__workplace__reply"}'},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "direct",
+                    "function": {"name": "mcp__workplace__reply", "arguments": '{"body":"Thanks"}'},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "direct",
+            "content": "Tool 'mcp__workplace__reply' does not exist. Available tools: tool_call",
+        },
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "executed",
+                    "function": {
+                        "name": "tool_call",
+                        "arguments": '{"name":"mcp__workplace__reply","arguments":{"body":"Thanks"}}',
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "executed", "content": "Email replied successfully."},
+        {"role": "assistant", "content": "done"},
+    ]
+
+    projected = project_hermes_response_messages(messages)
+
+    assert [message.get("role") for message in projected] == ["assistant", "tool", "assistant"]
+    assert projected[0]["tool_calls"][0]["function"] == {
+        "name": "mcp__workplace__reply",
+        "arguments": '{"body": "Thanks"}',
+    }
+    assert projected[1]["tool_call_id"] == "executed"
+    assert messages[0]["tool_calls"][0]["function"]["name"] == "tool_describe"
 
 
 def test_matching_invoke_tool_records_executor_interval():

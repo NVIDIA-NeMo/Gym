@@ -24,6 +24,7 @@ Hermes-installed interpreter, and reads the complete result back as JSON.
 """
 
 import json
+import logging
 import signal
 import sys
 import traceback
@@ -41,7 +42,20 @@ def _load_ai_agent():
     return AIAgent
 
 
+def _prepare_mcp_tools() -> None:
+    """Discover configured MCP tools before AIAgent snapshots the tool registry."""
+    from hermes_cli.mcp_startup import ensure_mcp_discovery_before_agent_build
+
+    ensure_mcp_discovery_before_agent_build(
+        logger=logging.getLogger(__name__),
+        single_query=True,
+        thread_name="nemo-gym-mcp-discovery",
+    )
+
+
 def run(request: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    if request.get("mcp_enabled"):
+        _prepare_mcp_tools()
     agent = _load_ai_agent()(
         base_url=request["base_url"],
         api_key=request["api_key"],

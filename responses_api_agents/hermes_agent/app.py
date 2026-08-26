@@ -29,9 +29,10 @@ from uuid import uuid4
 from fastapi import Request
 from pydantic import ConfigDict, Field, PrivateAttr
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -46,7 +47,7 @@ from nemo_gym.rollout_observability import (
     ObservationGap,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
-from responses_api_agents.hermes_agent.observability import build_hermes_observations
+from responses_api_agents.hermes_agent.observability import build_hermes_observations, project_hermes_response_messages
 from responses_api_agents.hermes_agent.setup_hermes import ensure_hermes
 
 
@@ -104,7 +105,7 @@ def _result_to_response(
     model_name: str,
     n_input: int,
 ) -> NeMoGymResponse:
-    messages = result.get("messages") or []
+    messages = project_hermes_response_messages(result.get("messages") or [])
     output_items = _RESPONSES_CONVERTER.chat_completions_messages_to_responses_items(messages[n_input:])
 
     return NeMoGymResponse(
@@ -189,7 +190,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         except (NotImplementedError, OSError):
             pass  # not supported on this platform (e.g. Windows, non-main thread)
 
-    def _build_config(self) -> str:
+    def _build_config(self, mcp_servers: Optional[dict[str, Any]] = None) -> str:
         import yaml
 
         config: dict[str, Any] = {
@@ -216,6 +217,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 "enabled": self.config.checkpoints_enabled,
             },
         }
+        if mcp_servers:
+            config["mcp_servers"] = mcp_servers
         return yaml.dump(config, default_flow_style=False)
 
     def model_post_init(self, __context: Any) -> None:
@@ -240,18 +243,54 @@ class HermesAgent(SimpleResponsesAPIAgent):
             }
         return overrides
 
+    def _resources_server_base_url(self) -> str:
+        config = get_first_server_config_dict(
+            self.server_client.global_config_dict,
+            self.config.resources_server.name,
+        )
+        return self.server_client._build_server_base_url(config)
+
+    def _rollout_mcp_servers(self, seed_response_json: dict[str, Any]) -> Optional[dict[str, Any]]:
+        """Build the per-rollout Hermes MCP config from resources-server metadata."""
+        metadata = seed_response_json.get(NEMO_GYM_MCP_METADATA_KEY)
+        if not isinstance(metadata, dict):
+            return None
+
+        transport = str(metadata.get("transport") or "http").replace("_", "-").lower()
+        if transport not in {"http", "streamable-http"}:
+            raise ValueError(f"Hermes supports Gym MCP metadata only over HTTP, got transport={transport!r}")
+
+        server_name = str(metadata.get("server_name") or self.config.resources_server.name)
+        url_path = str(metadata.get("url_path") or "/mcp")
+        entry: dict[str, Any] = {
+            "url": f"{self._resources_server_base_url().rstrip('/')}/{url_path.lstrip('/')}",
+        }
+        headers = metadata.get("headers")
+        if isinstance(headers, dict) and headers:
+            entry["headers"] = {str(key): str(value) for key, value in headers.items()}
+        else:
+            LOG.warning(
+                "MCP seed metadata for %r has no headers; the tool endpoint will be called without a "
+                "session token and will reject the calls.",
+                server_name,
+            )
+        return {server_name: entry}
+
     async def _run_hermes_subprocess(
         self,
         payload: dict[str, Any],
+        *,
+        mcp_servers: Optional[dict[str, Any]] = None,
     ) -> tuple[dict[str, Any], AgentObservationBundle | None]:
         with tempfile.TemporaryDirectory(prefix="nemo_gym_hermes_") as temp_dir_str:
             temp_dir = Path(temp_dir_str)
             hermes_home = temp_dir / "home"
             hermes_home.mkdir()
-            (hermes_home / "config.yaml").write_text(self._build_config(), encoding="utf-8")
+            (hermes_home / "config.yaml").write_text(self._build_config(mcp_servers), encoding="utf-8")
             request_path = temp_dir / "request.json"
             response_path = temp_dir / "response.json"
-            request_path.write_text(json.dumps(payload), encoding="utf-8")
+            request_payload = payload | {"mcp_enabled": bool(mcp_servers)}
+            request_path.write_text(json.dumps(request_payload), encoding="utf-8")
 
             env = os.environ.copy()
             env.pop("PYTHONPATH", None)
@@ -326,6 +365,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         *,
         rollout_id: Optional[str] = None,
         observation_collector: Optional[Callable[[AgentObservationBundle], None]] = None,
+        mcp_servers: Optional[dict[str, Any]] = None,
     ) -> NeMoGymResponse:
         chat_params = _RESPONSES_CONVERTER.responses_to_chat_completion_create_params(body)
         user_message, history, input_system = _split_chat_messages(chat_params.messages)
@@ -333,22 +373,24 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
         base_url = self.resolve_model_base_url(self.config.model_server.name, rollout_id)
         model_name = self._model_name()
-        result, observations = await self._run_hermes_subprocess(
-            {
-                "user_message": user_message,
-                "system_message": system_message,
-                "history": history,
-                "base_url": base_url,
-                "api_key": self.config.api_key or os.environ.get("OPENAI_API_KEY", "gym"),  # pragma: allowlist secret
-                "model": model_name,
-                "max_iterations": self.config.max_turns,
-                "max_tokens": self.config.max_tokens,
-                "enabled_toolsets": self.config.enabled_toolsets,
-                "disabled_toolsets": self.config.disabled_toolsets,
-                "request_overrides": self._request_overrides(),
-                "capture_observations": observation_collector is not None,
-            }
-        )
+        run_payload = {
+            "user_message": user_message,
+            "system_message": system_message,
+            "history": history,
+            "base_url": base_url,
+            "api_key": self.config.api_key or os.environ.get("OPENAI_API_KEY", "gym"),  # pragma: allowlist secret
+            "model": model_name,
+            "max_iterations": self.config.max_turns,
+            "max_tokens": self.config.max_tokens,
+            "enabled_toolsets": self.config.enabled_toolsets,
+            "disabled_toolsets": self.config.disabled_toolsets,
+            "request_overrides": self._request_overrides(),
+            "capture_observations": observation_collector is not None,
+        }
+        if mcp_servers:
+            result, observations = await self._run_hermes_subprocess(run_payload, mcp_servers=mcp_servers)
+        else:
+            result, observations = await self._run_hermes_subprocess(run_payload)
         if observation_collector is not None:
             try:
                 observation_collector(
@@ -383,6 +425,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         body: NeMoGymResponseCreateParamsNonStreaming,
         *,
         rollout_id: str,
+        mcp_servers: Optional[dict[str, Any]] = None,
     ) -> AgentEpisode:
         observations: Optional[AgentObservationBundle] = None
 
@@ -394,6 +437,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             body,
             rollout_id=rollout_id,
             observation_collector=collect,
+            mcp_servers=mcp_servers,
         )
         if observations is None:
             observations = AgentObservationBundle(
@@ -428,23 +472,44 @@ class HermesAgent(SimpleResponsesAPIAgent):
             )
             await raise_for_status(seed_resp)
             cookies = seed_resp.cookies
+            seed_resp_json = await get_response_json(seed_resp)
+            mcp_servers = self._rollout_mcp_servers(seed_resp_json)
 
             rollout_id = self.rollout_id_from_run(body)
-            agent_resp = await self.server_client.post(
-                server_name=self.config.name,
-                url_path=self.url_path_for_run("/v1/responses", body),
-                json=body.responses_create_params,
-                cookies=cookies,
-            )
-            await raise_for_status(agent_resp)
-            cookies = agent_resp.cookies
-            agent_resp_json = await get_response_json(agent_resp)
-            raw_observations = (
-                agent_resp_json.pop(_INTERNAL_OBSERVATIONS_KEY, None) if rollout_id is not None else None
-            )
-            observations = (
-                AgentObservationBundle.model_validate(raw_observations) if isinstance(raw_observations, dict) else None
-            )
+            observations = None
+            if mcp_servers:
+                if rollout_id is not None:
+                    episode = await self._create_episode(
+                        body.responses_create_params,
+                        rollout_id=rollout_id,
+                        mcp_servers=mcp_servers,
+                    )
+                    agent_resp_json = episode.response.model_dump(mode="json")
+                    observations = episode.observations
+                else:
+                    response = await self._create_response(
+                        body.responses_create_params,
+                        mcp_servers=mcp_servers,
+                    )
+                    agent_resp_json = response.model_dump(mode="json")
+            else:
+                agent_resp = await self.server_client.post(
+                    server_name=self.config.name,
+                    url_path=self.url_path_for_run("/v1/responses", body),
+                    json=body.responses_create_params,
+                    cookies=cookies,
+                )
+                await raise_for_status(agent_resp)
+                cookies = agent_resp.cookies
+                agent_resp_json = await get_response_json(agent_resp)
+                raw_observations = (
+                    agent_resp_json.pop(_INTERNAL_OBSERVATIONS_KEY, None) if rollout_id is not None else None
+                )
+                observations = (
+                    AgentObservationBundle.model_validate(raw_observations)
+                    if isinstance(raw_observations, dict)
+                    else None
+                )
 
             verify_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,

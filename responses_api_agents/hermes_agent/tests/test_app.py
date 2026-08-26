@@ -20,6 +20,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import yaml
 
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
@@ -91,6 +92,119 @@ class TestSanity:
     def test_configured_model_overrides_server_name(self) -> None:
         agent = HermesAgent(config=_config(model="Qwen3.6-35B-A3B"), server_client=MagicMock(spec=ServerClient))
         assert agent._model_name() == "Qwen3.6-35B-A3B"
+
+
+class TestRolloutMCPServers:
+    def _agent_with_resources_server(self) -> HermesAgent:
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {
+            "example_mcp_weather": {
+                "resources_servers": {
+                    "example_mcp_weather": {
+                        "host": "127.0.0.1",
+                        "port": 8123,
+                    }
+                }
+            }
+        }
+        server_client._build_server_base_url.side_effect = lambda config: (f"http://{config['host']}:{config['port']}")
+        return HermesAgent(
+            config=HermesAgentConfig(
+                host="0.0.0.0",
+                port=8080,
+                entrypoint="",
+                name="hermes",
+                resources_server=ResourcesServerRef(
+                    type="resources_servers",
+                    name="example_mcp_weather",
+                ),
+                model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            ),
+            server_client=server_client,
+        )
+
+    def test_no_metadata_preserves_verifier_only_behavior(self) -> None:
+        agent = self._agent_with_resources_server()
+        assert agent._rollout_mcp_servers({}) is None
+        assert "mcp_servers" not in yaml.safe_load(agent._build_config())
+
+    def test_builds_streamable_http_entry_with_session_header(self) -> None:
+        agent = self._agent_with_resources_server()
+        servers = agent._rollout_mcp_servers(
+            {
+                "mcp": {
+                    "server_name": "example_mcp_weather",
+                    "url_path": "/mcp",
+                    "transport": "http",
+                    "headers": {"X-NeMo-Gym-Session-Token": "secret-token"},
+                }
+            }
+        )
+
+        assert servers == {
+            "example_mcp_weather": {
+                "url": "http://127.0.0.1:8123/mcp",
+                "headers": {"X-NeMo-Gym-Session-Token": "secret-token"},
+            }
+        }
+        assert yaml.safe_load(agent._build_config(servers))["mcp_servers"] == servers
+
+    def test_rejects_non_http_transport(self) -> None:
+        agent = self._agent_with_resources_server()
+        with pytest.raises(ValueError, match="only over HTTP"):
+            agent._rollout_mcp_servers({"mcp": {"transport": "stdio"}})
+
+    def test_run_passes_rollout_mcp_config_and_session_cookie(self, monkeypatch) -> None:
+        agent = self._agent_with_resources_server()
+        response = NeMoGymResponse.model_validate(
+            {
+                "id": "resp-1",
+                "created_at": 1,
+                "model": "model",
+                "object": "response",
+                "output": [],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+        )
+        create_response = AsyncMock(return_value=response)
+        monkeypatch.setattr(agent, "_create_response", create_response)
+        captured: dict = {}
+
+        async def post(server_name, url_path, json=None, cookies=None, **kwargs):
+            if url_path == "/seed_session":
+                return _FakeResponse(
+                    {
+                        "mcp": {
+                            "server_name": "example_mcp_weather",
+                            "url_path": "/mcp",
+                            "transport": "http",
+                            "headers": {"X-NeMo-Gym-Session-Token": "rollout-token"},
+                        }
+                    },
+                    {"session": "rollout-cookie"},
+                )
+            if url_path == "/verify":
+                captured["verify_cookies"] = cookies
+                return _FakeResponse(json | {"reward": 1.0})
+            raise AssertionError(f"unexpected post: {server_name} {url_path}")
+
+        agent.server_client.post = AsyncMock(side_effect=post)
+        request = MagicMock()
+        request.cookies = {}
+        body = HermesAgentRunRequest.model_validate({"responses_create_params": {"input": "use the tool"}})
+
+        result = asyncio.run(agent.run(request, body))
+
+        assert result.reward == 1.0
+        assert create_response.await_args.kwargs["mcp_servers"] == {
+            "example_mcp_weather": {
+                "url": "http://127.0.0.1:8123/mcp",
+                "headers": {"X-NeMo-Gym-Session-Token": "rollout-token"},
+            }
+        }
+        assert captured["verify_cookies"] == {"session": "rollout-cookie"}
 
 
 class _FakeProcess:
@@ -180,6 +294,8 @@ class TestManagedSubprocessIsolation:
         processes = []
         homes: list[Path] = []
         workdirs: list[Path] = []
+        configs: list[dict] = []
+        request_flags: list[bool] = []
         all_started = asyncio.Event()
         max_active = 0
 
@@ -214,6 +330,8 @@ class TestManagedSubprocessIsolation:
             assert home.parent == workdir
             assert Path(args[2]).is_file()
             assert Path(args[3]).parent == workdir
+            configs.append(yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8")))
+            request_flags.append(json.loads(Path(args[2]).read_text(encoding="utf-8"))["mcp_enabled"])
             process = FakeProcess(Path(args[3]))
             processes.append(process)
             homes.append(home)
@@ -226,7 +344,20 @@ class TestManagedSubprocessIsolation:
         )
 
         async def run_concurrently():
-            return await asyncio.gather(*(agent._run_hermes_subprocess({"rollout": index}) for index in range(3)))
+            return await asyncio.gather(
+                *(
+                    agent._run_hermes_subprocess(
+                        {"rollout": index},
+                        mcp_servers={
+                            "workplace": {
+                                "url": "http://resources/mcp",
+                                "headers": {"X-NeMo-Gym-Session-Token": f"token-{index}"},
+                            }
+                        },
+                    )
+                    for index in range(3)
+                )
+            )
 
         results = asyncio.run(run_concurrently())
 
@@ -238,6 +369,12 @@ class TestManagedSubprocessIsolation:
         assert all(process.returncode == 0 for process in processes)
         assert all(not home.exists() for home in homes)
         assert all(not workdir.exists() for workdir in workdirs)
+        assert request_flags == [True, True, True]
+        assert {config["mcp_servers"]["workplace"]["headers"]["X-NeMo-Gym-Session-Token"] for config in configs} == {
+            "token-0",
+            "token-1",
+            "token-2",
+        }
 
 
 class TestSplitChatMessages:
@@ -482,6 +619,7 @@ class TestManagedRunner:
 
         class _StubAIAgent:
             def __init__(self, **kwargs) -> None:
+                assert seen["mcp_prepared"] is True
                 seen.update(kwargs)
                 seen["agent"] = self
 
@@ -495,6 +633,7 @@ class TestManagedRunner:
             def close(self) -> None:
                 seen["closed"] = True
 
+        monkeypatch.setattr(runner, "_prepare_mcp_tools", lambda: seen.__setitem__("mcp_prepared", True))
         monkeypatch.setattr(runner, "_load_ai_agent", lambda: _StubAIAgent)
         result, observations = runner.run(
             {
@@ -510,6 +649,7 @@ class TestManagedRunner:
                 "system_message": "system",
                 "history": [{"role": "user", "content": "earlier"}],
                 "capture_observations": True,
+                "mcp_enabled": True,
             }
         )
 
@@ -536,6 +676,7 @@ class TestManagedRunner:
         root = next(record for record in bundle.records if record.kind == "agent_invocation")
         assert root.conversation[-1].content[0].text == "ok"
         assert seen["closed"] is True
+        assert seen["mcp_prepared"] is True
         assert "use_streaming" not in seen
         assert "insert_reasoning" not in seen
         assert "persist_session" not in seen
