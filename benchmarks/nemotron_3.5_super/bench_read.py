@@ -34,7 +34,7 @@ with open(
     buffering=1024 * 1024,
 ) as file:
     rows = ((line_no, (line_no, line)) for line_no, line in enumerate(tqdm(file, desc="Reading file")))
-    batches = list(batched(rows, 1))
+    batches = list(batched(rows, 10_000))
 
 print("Starting json load")
 refs = [decode_batch.remote(batch) for batch in batches]
