@@ -6,6 +6,7 @@ set -euo pipefail
 NUM_PREFILL_NODES=$NUM_PREFILL_NODES
 NUM_DECODE_NODES=$NUM_DECODE_NODES
 MODEL=$MODEL
+MODEL_NAME="${MODEL_NAME:-$MODEL}"
 CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
 VLLM_CONFIG=$VLLM_CONFIG
@@ -68,7 +69,7 @@ gym eval run \
     ++reuse_existing_data_preparation=true \
     ++policy_base_url=http://\$(getent hosts "\$ROUTER_NODE" | awk 'NR == 1 {print \$1}'):$ROUTER_SERVER_PORT/v1 \
     ++policy_api_key=dummy_api_key \
-    ++policy_model_name=$MODEL \
+    ++policy_model_name=$MODEL_NAME \
     ++upload_rollouts=false \
     ++global_aiohttp_connector_limit_per_host=16384 \
     ++port_range_low=63000 \
@@ -153,14 +154,14 @@ if (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
     # Prefill
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
+    vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
         --host \$this_node_hostname \
         --port $WORKER_SERVER_PORT
 else
     # Decode
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
+    vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
         --host \$this_node_hostname \
         --port $WORKER_SERVER_PORT
 fi
