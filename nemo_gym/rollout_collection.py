@@ -22,7 +22,7 @@ from asyncio import Future, Semaphore
 from collections import Counter, defaultdict
 from contextlib import nullcontext
 from datetime import timedelta
-from itertools import islice, repeat
+from itertools import batched, repeat
 from pathlib import Path
 from time import time
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
@@ -576,29 +576,15 @@ def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
 
 
 class RolloutCollectionHelper(BaseModel):
-    def _read_jsonl_file_using_ray(self, _input_path: Path, range_iterator) -> List[Dict]:
-        @ray.remote
-        def _load_batch(batch: List):
-            results = []
-            for line_no, (row_idx, row_str) in batch:
-                results.append((row_idx, row_str, loads_jsonl_line(row_str, _input_path, line_no)))
-            return results
-
-        def batched(iterable, size):
-            iterator = iter(iterable)
-
-            while batch := list(islice(iterator, size)):
-                yield batch
-
+    def _load_jsonl_via_ray(self, lines_range_iter: Iterator[Tuple[int, str]]) -> List[Dict]:
         initialize_ray()
 
-        with open(_input_path) as input_file:
-            rows_iterator: List[str] = list(tqdm(input_file, desc="Reading rows"))
-        rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
-        batches = list(batched(rows_iterator, 10_000))
-        refs = [_load_batch.remote(batch) for batch in batches]
-        raw_rows = [row for batch in ray.get(refs) for row in batch]
-        return raw_rows
+        @ray.remote
+        def _load_batch(batch: List[Tuple[int, str]]):
+            return [(row_idx, row_str, orjson.loads(row_str)) for row_idx, row_str in batch]
+
+        refs = [_load_batch.remote(batch) for batch in batched(lines_range_iter, 10_000)]
+        return [row for batch in ray.get(refs) for row in batch]
 
     def _preprocess_rows_from_config(self, config: RolloutCollectionConfig) -> List[Dict]:
         range_iterator = repeat(0)
@@ -658,7 +644,10 @@ class RolloutCollectionHelper(BaseModel):
                 f"Input file not found: '{config.input_jsonl_fpath}' (--input). Check the path is spelled correctly."
             )
         if True:
-            raw_rows = self._read_jsonl_file_using_ray(_input_path, range_iterator)
+            with open(_input_path) as input_file:
+                rows_iterator: List[str] = list(tqdm(input_file, desc="Reading rows"))
+            lines_range_iter: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
+            raw_rows = self._read_jsonl_file_using_ray(lines_range_iter)
         else:
             with open(_input_path) as input_file:
                 rows_iterator: Iterator[str] = tqdm(input_file, desc="Reading rows")
