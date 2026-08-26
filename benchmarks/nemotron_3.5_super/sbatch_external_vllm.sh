@@ -278,6 +278,7 @@ if (( should_run_eval )); then
             --partition=cpu \
             --qos=cpu-short \
             --gres=none \
+            --gpus-per-node=0 \
             --nodes=1 \
             --ntasks=1 \
             --cpus-per-task=1 \

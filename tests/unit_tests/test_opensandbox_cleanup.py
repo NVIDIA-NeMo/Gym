@@ -628,6 +628,7 @@ def test_slurm_launcher_submits_one_dependent_cpu_cleanup_job(tmp_path: Path) ->
         "--partition=cpu",
         "--qos=cpu-short",
         "--gres=none",
+        "--gpus-per-node=0",
         "--nodes=1",
         "--ntasks=1",
         "--cpus-per-task=1",
