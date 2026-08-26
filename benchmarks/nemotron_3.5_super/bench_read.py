@@ -37,3 +37,4 @@ with open(
 print("Starting json load")
 refs = [decode_batch.remote(batch) for batch in batches]
 records = [record for batch in ray.get(refs) for record in batch]
+print(f"Finished json loading {len(records)} rows")
