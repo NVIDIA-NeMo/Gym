@@ -334,10 +334,10 @@ class VibenchResourcesServer(SimpleResourcesServer):
         A timeout is a failed grade, not an exception: one wedged compose stack should score
         zero rather than take the whole rollout down.
 
-        On timeout the process *group* gets SIGTERM before SIGKILL. ViBench tears its compose
-        project down in a ``finally`` block, which SIGKILL skips -- and the wedged-stack case
-        this timeout exists for is exactly when postgres, the app, Playwright, the image tag
-        and a port in the 50000-60000 range would otherwise leak.
+        On timeout the process *group* is interrupted rather than terminated; see
+        ``_terminate_group``. The wedged-stack case this timeout exists for is exactly when
+        postgres, the app, Playwright, the image tag and a port in the 50000-60000 range
+        would otherwise leak.
         """
         env = await self._grader_env()
         try:
