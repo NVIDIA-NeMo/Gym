@@ -404,3 +404,39 @@ class TestReadEnvironmentDetails:
         assert details["resources_servers"] == ["my_rs"]
         assert details["agent"] == "simple_agent"
         assert details["datasets"] == ["train", "example"]
+
+
+def _entry(name: str, kind: str = "environment") -> registry_module.EnvironmentCatalogEntry:
+    return registry_module.EnvironmentCatalogEntry(
+        name=name, config_path=Path(f"/tmp/{name}/config.yaml"), path=Path(f"/tmp/{name}"), kind=kind
+    )
+
+
+class TestPathIdentity:
+    def test_manifest_directly_in_tree_root_is_rejected(self, tmp_path: Path) -> None:
+        """A manifest must live in a named catalog subdirectory — one sitting directly in the
+        tree root has no name to derive an identity from."""
+        manifest_path = tmp_path / "manifest.yaml"
+        manifest_path.write_text("kind: environment\n")
+
+        with pytest.raises(RegistryError, match="must be inside a named catalog directory"):
+            registry_module._path_identity(tmp_path, manifest_path)
+
+
+class TestResolveCatalogEntry:
+    def test_unknown_kind_raises(self) -> None:
+        with pytest.raises(RegistryError, match="Unknown catalog kind"):
+            resolve_catalog_entry("anything", kind="not_a_real_kind", entries=[])
+
+    def test_ambiguous_name_across_kinds_raises(self) -> None:
+        entries = [_entry("shared_name", kind="environment"), _entry("shared_name", kind="benchmark")]
+
+        with pytest.raises(RegistryError, match="is ambiguous"):
+            resolve_catalog_entry("shared_name", entries=entries)
+
+    def test_ambiguous_name_resolved_by_specifying_kind(self) -> None:
+        entries = [_entry("shared_name", kind="environment"), _entry("shared_name", kind="benchmark")]
+
+        resolved = resolve_catalog_entry("shared_name", kind="benchmark", entries=entries)
+
+        assert resolved.kind == "benchmark"

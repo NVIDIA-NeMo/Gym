@@ -21,7 +21,7 @@ from omegaconf import OmegaConf
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
 from nemo_gym.agent_registry import AgentEntry
-from nemo_gym.cli.agents import list_agents
+from nemo_gym.cli.agents import _inspect_agent, list_agents
 
 
 def _mock_global_config(config: dict = None):
@@ -137,6 +137,19 @@ class TestListAgents:
                 list_agents()
         out = capsys.readouterr().out
         assert "Unknown agent 'swe_agent'" in out and "swe_agents" in out
+
+    def test_inspect_agent_stops_after_reporting_unknown_name(self) -> None:
+        # `exit_unknown_component` always exits the process (verified above); this pins the guard
+        # clause's own control flow in isolation — it must return immediately after delegating,
+        # never falling through to render an inspection for a name that was never found.
+        with (
+            patch("nemo_gym.cli.agents.exit_unknown_component") as mock_exit,
+            patch("nemo_gym.cli.agents.render_component_inspection") as mock_render,
+        ):
+            _inspect_agent("nonexistent", _AGENTS, _mock_global_config())
+
+        mock_exit.assert_called_once_with("nonexistent", _AGENTS, "agent")
+        mock_render.assert_not_called()
 
     def test_inspect_shows_absolute_path(self, tmp_path: Path, capsys, monkeypatch) -> None:
         # Real discovery (via an extra root): the path line must be the agent dir's absolute path.

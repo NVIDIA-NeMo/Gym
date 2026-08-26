@@ -17,6 +17,7 @@ from pathlib import Path
 from nemo_gym.agent_registry import (
     AgentEntry,
     _discover_agents_in_dir,
+    _iter_agent_blocks,
     discover_agents,
 )
 
@@ -135,3 +136,19 @@ class TestRealAgents:
         entry = AgentEntry(name="a", path=Path("a"), config_paths=(Path("a/configs/a.yaml"),), self_contained=True)
         assert {entry: 1}[entry] == 1
         assert entry.variants == {"a": Path("a/configs/a.yaml")}
+
+
+class TestIterAgentBlocks:
+    def test_non_mapping_yaml_document_yields_nothing(self, tmp_path: Path) -> None:
+        # A YAML file whose top level is a list (not a mapping) isn't a Gym config at all.
+        config_path = tmp_path / "list.yaml"
+        config_path.write_text("- just\n- a\n- list\n")
+
+        assert list(_iter_agent_blocks(config_path)) == []
+
+    def test_top_level_value_that_is_not_a_mapping_is_skipped(self, tmp_path: Path) -> None:
+        # A top-level key whose value is a scalar, not a `{responses_api_agents: {...}}` mapping.
+        config_path = tmp_path / "scalar.yaml"
+        config_path.write_text("some_key: just a string\n")
+
+        assert list(_iter_agent_blocks(config_path)) == []

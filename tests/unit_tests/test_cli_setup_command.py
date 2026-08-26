@@ -202,6 +202,20 @@ class TestCLISetupCommandSetupEnvCommand:
 
         assert actual_path == uv_venv_dir / "first_level/second_level/.venv"
 
+    def test_venv_path_defaults_to_server_local_dot_venv(self, tmp_path: Path) -> None:
+        # When the configured venv root is the repo itself (the default, unset case), each server's
+        # venv lives next to it (`<server_dir>/.venv`), not under a shared external root.
+        from nemo_gym import PARENT_DIR
+
+        server_dir = self._setup_server_dir(tmp_path)
+
+        actual_path = get_venv_path(
+            server_dir,
+            self._debug_global_config_dict(tmp_path) | {"uv_venv_dir": str(PARENT_DIR)},
+        )
+
+        assert actual_path == (server_dir / ".venv").absolute()
+
     @pytest.mark.parametrize("version", ["0.3.0", "0.3.0rc0", "1.0.0", "2.1.3rc1"])
     def test_installs_from_pypi_when_not_editable(
         self, tmp_path: Path, version: str, monkeypatch: MonkeyPatch

@@ -99,11 +99,15 @@ jobs:
           uv sync --extra dev --extra sandbox --extra openshell
 
       # Sandbox is public-GitHub-only and is intentionally outside scripts/ci contract v3.
+      # This is also the pre-merge coverage gate: it appends to the coverage data from
+      # "Core unit tests" and enforces the repo-wide fail_under threshold (pyproject.toml
+      # [tool.coverage.report]) explicitly via --cov-fail-under, so a coverage regression
+      # fails this required PR check instead of only being reported after merge.
       - name: Sandbox unit tests
         if: needs.detect.outputs.run_full == 'true'
         run: |
           source .venv/bin/activate
-          pytest --cov=. --cov-append --cov-report=term-missing --durations=10 -m sandbox
+          pytest --cov=. --cov-append --cov-report=term-missing --cov-fail-under=96 --durations=10 -m sandbox
 
       # The changed-server optimization is specific to GitHub pull requests; internal
       # GitLab merge requests always run the full eight-shard server suite.

@@ -63,6 +63,8 @@ from nemo_gym.token_id_capture import (
     current_capture_context,
     extract_token_fields,
     install_token_sink,
+    install_token_source,
+    installed_token_source,
     register_call_intent,
     reset_token_sink,
     set_token_sink,
@@ -1306,3 +1308,17 @@ def test_a_newer_record_in_the_store_fails_the_read_rather_than_being_skipped(tm
 
     with pytest.raises(ValidationError):
         store.read_entries("r0")
+
+
+def test_install_token_source_sets_and_clears_the_process_wide_default():
+    sentinel = object()
+    try:
+        assert installed_token_source() is None
+
+        install_token_source(sentinel)
+        assert installed_token_source() is sentinel
+
+        install_token_source(None)
+        assert installed_token_source() is None
+    finally:
+        install_token_source(None)

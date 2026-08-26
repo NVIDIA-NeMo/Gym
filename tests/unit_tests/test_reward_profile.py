@@ -623,3 +623,29 @@ class TestRewardProfile:
         assert summary["complete_input_rows"] == 1
         assert summary["missing_input_rows"] == 1
         assert summary["partial_input_rows"] == 0
+
+    def test_index_by_rollout_key_rejects_duplicate_rollout_keys(self) -> None:
+        """Two rows/results sharing a (task, rollout) key are a data bug, not a valid input —
+        indexing must fail loudly instead of silently dropping one."""
+        rows = [self._row(0, 0), self._row(0, 0)]
+
+        with pytest.raises(ValueError, match="Duplicate materialized input row for rollout key"):
+            RewardProfiler()._index_by_rollout_key(rows, "materialized input")
+
+    def test_rollout_info_from_result_coerces_bool_usage_fields_to_int(self) -> None:
+        """Usage fields are occasionally booleans (e.g. a `cached` flag) rather than counts;
+        they must be coerced to 0/1 like every other numeric usage field, not dropped."""
+        result = self._result(0, 0)
+        result["response"]["usage"]["cached"] = True
+
+        rollout_info = RewardProfiler().rollout_info_from_result(result)
+
+        assert rollout_info["cached"] == 1
+
+    def test_profile_from_data_empty_input_returns_empty_metrics(self) -> None:
+        """No rows/results (e.g. a fully-filtered run) must return empty metrics rather than
+        raising on an empty DataFrame downstream."""
+        group_level_metrics, agent_level_metrics = RewardProfiler().profile_from_data([], [])
+
+        assert group_level_metrics == []
+        assert agent_level_metrics == []
