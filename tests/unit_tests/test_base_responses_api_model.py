@@ -1087,6 +1087,28 @@ def test_reconstruct_chat_sse():
     assert resp["usage"]["total_tokens"] == 8
 
 
+def test_chat_stream_without_model_keeps_request_model_in_capture_record() -> None:
+    from nemo_gym.base_responses_api_model import _reconstruct_chat_sse
+
+    response = _reconstruct_chat_sse(
+        [
+            {"choices": [{"index": 0, "delta": {"role": "assistant", "content": "Hello"}}]},
+            {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+        ]
+    )
+    record = build_model_call_record(
+        {
+            "dialect": "chat",
+            "request": {"model": "routing-alias"},
+            "response": response,
+        },
+        call_index=0,
+    )
+
+    assert response is not None and response["model"] is None
+    assert record.model == "routing-alias"
+
+
 def test_reconstruct_responses_sse_uses_terminal_envelope():
     from nemo_gym.base_responses_api_model import _reconstruct_streamed_response
 

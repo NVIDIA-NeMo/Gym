@@ -29,6 +29,9 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError, field_validator
 
 from nemo_gym import __version__
+from nemo_gym.atif_json import json_values_equal as _json_values_equal
+from nemo_gym.atif_json import strict_json_loads as _strict_json_loads
+from nemo_gym.atif_provider_reconciliation import ProviderReconciliationError, reconcile_provider_model_call
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError
 from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
@@ -130,120 +133,6 @@ _KNOWN_INCOMPLETE_FINISH_REASONS = frozenset(
 
 def _path_error(path: str, detail: str) -> AtifExportError:
     return AtifExportError(f"{path}: {detail}")
-
-
-def _provider_termination_evidence(
-    call: TrajectoryModelCall,
-    *,
-    path: str,
-) -> tuple[str | None, str | None, bool]:
-    """Read termination fields from provider responses whose dialect is known."""
-
-    response = call.response
-    dialect = call.response_metadata.dialect
-    if dialect not in {"responses", "chat", "messages"}:
-        return None, None, False
-    if response is None:
-        return None, None, False
-    if not isinstance(response, dict):
-        raise _path_error(path, f"{dialect} provider response is not an object")
-    if response.get("error") is not None:
-        raise _path_error(path, f"{dialect} provider response contains error evidence")
-
-    if dialect == "responses":
-        status = response.get("status")
-        if status is not None and not isinstance(status, str):
-            raise _path_error(path, "Responses status is not a string")
-        incomplete_details = response.get("incomplete_details")
-        if incomplete_details is None:
-            return status, None, False
-        if not isinstance(incomplete_details, dict):
-            raise _path_error(path, "Responses incomplete_details is not an object")
-        reason = incomplete_details.get("reason")
-        if reason is not None and not isinstance(reason, str):
-            raise _path_error(path, "Responses incomplete_details.reason is not a string")
-        return status, reason, True
-    if dialect == "chat":
-        choices = response.get("choices")
-        if choices is None:
-            return None, None, False
-        if not isinstance(choices, list):
-            raise _path_error(path, "Chat choices is not an array")
-        if not choices:
-            return None, None, False
-        if not isinstance(choices[0], dict):
-            raise _path_error(path, "Chat first choice is not an object")
-        first_choice = choices[0]
-        finish_reason = first_choice.get("finish_reason")
-        if finish_reason is not None and not isinstance(finish_reason, str):
-            raise _path_error(path, "Chat finish_reason is not a string")
-        return None, finish_reason, False
-
-    response_type = response.get("type")
-    if response_type is not None and not isinstance(response_type, str):
-        raise _path_error(path, "Messages type is not a string")
-    if response_type == "error":
-        raise _path_error(path, "messages provider response contains error evidence")
-    stop_reason = response.get("stop_reason")
-    if stop_reason is not None and not isinstance(stop_reason, str):
-        raise _path_error(path, "Messages stop_reason is not a string")
-    return None, stop_reason, False
-
-
-def _reconciled_finish_reason(call: TrajectoryModelCall, *, path: str) -> str | None:
-    """Reject provider-native failure evidence and reconcile redundant metadata."""
-
-    metadata = call.response_metadata
-    raw_status, raw_finish_reason, raw_incomplete = _provider_termination_evidence(call, path=path)
-    if (
-        metadata.response_status is not None
-        and raw_status is not None
-        and metadata.response_status.strip().lower() != raw_status.strip().lower()
-    ):
-        raise _path_error(path, "normalized response_status conflicts with the provider response")
-    if (
-        metadata.finish_reason is not None
-        and raw_finish_reason is not None
-        and metadata.finish_reason.strip().lower() != raw_finish_reason.strip().lower()
-    ):
-        raise _path_error(path, "normalized finish_reason conflicts with the provider response")
-    if raw_status is not None and raw_status.strip().lower() != "completed":
-        raise _path_error(path, f"provider response is {raw_status!r}, not completed")
-    if raw_incomplete:
-        raise _path_error(path, "Responses provider response contains incomplete_details")
-    return metadata.finish_reason if metadata.finish_reason is not None else raw_finish_reason
-
-
-def _strict_json_loads(value: str | bytes) -> Any:
-    """Parse standards-compliant JSON without narrowing arbitrary-size integers."""
-
-    def reject_constant(constant: str) -> None:
-        raise ValueError(f"non-standard JSON number {constant!r}")
-
-    def finite_float(number: str) -> float:
-        parsed = float(number)
-        if not math.isfinite(parsed):
-            raise ValueError(f"JSON number {number!r} is outside the finite float range")
-        if parsed == 0.0:
-            significand = number.lower().split("e", 1)[0]
-            if any(character in "123456789" for character in significand):
-                raise ValueError(f"JSON number {number!r} underflows the finite float range")
-        return parsed
-
-    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, item in pairs:
-            if key in result:
-                raise ValueError(f"duplicate JSON object key {key!r}")
-            result[key] = item
-        return result
-
-    return json.loads(
-        value,
-        parse_constant=reject_constant,
-        parse_float=finite_float,
-        object_pairs_hook=reject_duplicate_keys,
-    )
 
 
 def _reject_unknown_fields(value: dict[Any, Any], allowed: set[str] | frozenset[str], *, path: str) -> None:
@@ -447,42 +336,6 @@ def _json_value(value: Any) -> Any:
     return value
 
 
-def _json_values_equal(left: Any, right: Any) -> bool:
-    """Compare JSON values without Python's bool/integer equality aliasing."""
-
-    if left is None or right is None:
-        return left is right
-    if isinstance(left, bool) or isinstance(right, bool):
-        return isinstance(left, bool) and isinstance(right, bool) and left == right
-    if isinstance(left, (int, float)) or isinstance(right, (int, float)):
-        return (
-            isinstance(left, (int, float))
-            and not isinstance(left, bool)
-            and isinstance(right, (int, float))
-            and not isinstance(right, bool)
-            and left == right
-        )
-    if isinstance(left, str) or isinstance(right, str):
-        return isinstance(left, str) and isinstance(right, str) and left == right
-    if isinstance(left, list) or isinstance(right, list):
-        return (
-            isinstance(left, list)
-            and isinstance(right, list)
-            and len(left) == len(right)
-            and all(
-                _json_values_equal(left_item, right_item) for left_item, right_item in zip(left, right, strict=True)
-            )
-        )
-    if isinstance(left, dict) or isinstance(right, dict):
-        return (
-            isinstance(left, dict)
-            and isinstance(right, dict)
-            and left.keys() == right.keys()
-            and all(_json_values_equal(left[key], right[key]) for key in left)
-        )
-    return False
-
-
 def _canonical_conversation_copy(value: Any, *, path: str) -> Any:
     """Validate a redundant turn copy and compare its normalized supported fields."""
 
@@ -495,17 +348,33 @@ def _canonical_conversation_copy(value: Any, *, path: str) -> Any:
     return _json_value(items)
 
 
-def _reject_non_finite_numbers(value: Any, *, path: str) -> None:
-    """Reject values that JSON cannot encode without changing them."""
+def _validate_json_value(value: Any, *, path: str) -> None:
+    """Reject Python values that cannot round-trip through UTF-8 JSON unchanged."""
 
-    if isinstance(value, float) and not math.isfinite(value):
-        raise _path_error(path, "non-finite numbers are not valid JSON")
+    if value is None or isinstance(value, bool) or isinstance(value, int):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise _path_error(path, "non-finite numbers are not valid JSON")
+        return
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise _path_error(path, "contains an unpaired Unicode surrogate and is not valid UTF-8 JSON") from exc
+        return
     if isinstance(value, list):
         for index, item in enumerate(value):
-            _reject_non_finite_numbers(item, path=f"{path}[{index}]")
-    elif isinstance(value, dict):
+            _validate_json_value(item, path=f"{path}[{index}]")
+        return
+    if isinstance(value, dict):
         for key, item in value.items():
-            _reject_non_finite_numbers(item, path=f"{path}.{key}")
+            if not isinstance(key, str):
+                raise _path_error(path, "JSON object keys must be strings")
+            _validate_json_value(key, path=f"{path}.<key>")
+            _validate_json_value(item, path=f"{path}.{key}")
+        return
+    raise _path_error(path, f"{type(value).__name__} is not a JSON value")
 
 
 def _text_content(value: Any, *, path: str) -> AtifContent:
@@ -885,13 +754,17 @@ def _apply_turns(trajectory: TrajectoryRecord, groups: list[_AgentGroup]) -> Non
         if call_index in used_calls:
             raise _path_error(f"{path}.model_calls[0]", "model call is referenced by more than one turn")
         used_calls.add(call_index)
-        finish_reason = _reconciled_finish_reason(call, path=path)
+        try:
+            reconciliation = reconcile_provider_model_call(call, group.step, path=path)
+        except ProviderReconciliationError as exc:
+            raise AtifExportError(str(exc)) from exc
         if call.response_metadata.response_status not in (None, "completed"):
             raise _path_error(path, f"model call is {call.response_metadata.response_status!r}, not completed")
         if call.response_metadata.error_category is not None:
             raise _path_error(path, "model call contains provider error evidence")
         if call.response_metadata.status_code is not None and not 200 <= call.response_metadata.status_code < 300:
             raise _path_error(path, f"model call returned non-success status {call.response_metadata.status_code}")
+        finish_reason = reconciliation.finish_reason
         normalized_finish_reason = finish_reason.strip().lower() if finish_reason is not None else None
         if normalized_finish_reason in _KNOWN_INCOMPLETE_FINISH_REASONS:
             raise _path_error(path, f"finish reason {finish_reason!r} indicates an incomplete model response")
@@ -904,9 +777,9 @@ def _apply_turns(trajectory: TrajectoryRecord, groups: list[_AgentGroup]) -> Non
             group.step.timestamp = datetime.fromtimestamp(turn.timestamp, UTC).isoformat().replace("+00:00", "Z")
         except (OverflowError, OSError, ValueError) as exc:
             raise _path_error(f"{path}.timestamp", "cannot be represented as an ISO 8601 timestamp") from exc
-        group.step.model_name = call.response_metadata.model
+        group.step.model_name = reconciliation.model_name
         group.step.llm_call_count = 1
-        stats = call.token_stats
+        stats = reconciliation.token_stats
         training = _training_metadata(
             [*group.reasoning, *group.answer],
             path=f"{path}.answer",
@@ -1036,7 +909,7 @@ def gym_rollout_to_atif(rollout: dict[str, Any], *, session_id: str, agent_versi
         raise _path_error("session_id", "expected a non-empty string")
     if not isinstance(agent_version, str) or not agent_version.strip():
         raise _path_error("agent_version", "expected a non-empty string")
-    _reject_non_finite_numbers(rollout, path="rollout")
+    _validate_json_value(rollout, path="rollout")
     raw_trajectory = rollout.get("ng_trajectory")
     _preflight_raw_trajectory(raw_trajectory)
     try:
@@ -1117,7 +990,10 @@ def _index(row: dict[str, Any], key: str, *, path: str) -> int:
 
 
 def _encoded_trajectory(trajectory: AtifTrajectoryV1_7) -> bytes:
-    return (trajectory.model_dump_json(indent=2, exclude_none=True) + "\n").encode()
+    try:
+        return (trajectory.model_dump_json(indent=2, exclude_none=True) + "\n").encode("utf-8")
+    except (TypeError, ValueError, UnicodeEncodeError) as exc:
+        raise AtifExportError("Generated ATIF trajectory is not valid UTF-8 JSON") from exc
 
 
 def export_rollouts_to_atif(config: ExportAtifConfig) -> AtifExportResult:
