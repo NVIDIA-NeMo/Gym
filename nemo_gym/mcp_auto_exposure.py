@@ -661,20 +661,17 @@ def _wrap_verify(app: FastAPI, server: Any) -> None:
         key, container = located
 
         calls = _function_calls(container)
-        emitted: dict[str, list[str]] = {}
+        emitted_response = container.response.model_copy(deep=True)
+        call_id_counts: dict[str, int] = {}
         for item in calls:
-            emitted.setdefault(item.call_id, []).append(item.name)
+            call_id_counts[item.call_id] = call_id_counts.get(item.call_id, 0) + 1
 
         normalized = container.model_copy(deep=True)
         provenance = getattr(normalized, NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY, None)
         resources_server_name = server.config.name or type(server).__name__
         for item in _function_calls(normalized):
-            if provenance is None:
+            if provenance is None or call_id_counts.get(item.call_id, 0) != 1:
                 item.name = server.normalize_tool_name(item.name)
-                continue
-            # Duplicate IDs make a sidecar lookup ambiguous. Fail closed instead of canonicalizing
-            # either call under provenance that cannot identify one unique emitted action.
-            if len(emitted.get(item.call_id, [])) != 1:
                 continue
             identity = provenance.get(item.call_id)
             if identity is not None and identity.server_name == resources_server_name:
@@ -685,13 +682,21 @@ def _wrap_verify(app: FastAPI, server: Any) -> None:
         if inspect.isawaitable(result):
             result = await result
 
-        restored_counts: dict[str, int] = {}
-        for item in _function_calls(result):
-            index = restored_counts.get(item.call_id, 0)
-            emitted_names = emitted.get(item.call_id, [])
-            if index < len(emitted_names):
-                item.name = emitted_names[index]
-                restored_counts[item.call_id] = index + 1
+        if isinstance(result, BaseModel):
+            result = result.model_copy(
+                update={
+                    "response": emitted_response,
+                    NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY: provenance,
+                }
+            )
+        elif isinstance(result, dict):
+            result["response"] = emitted_response.model_dump(mode="json")
+            if provenance is None:
+                result.pop(NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY, None)
+            else:
+                result[NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY] = {
+                    call_id: identity.model_dump(mode="json") for call_id, identity in provenance.items()
+                }
         return result
 
     _swap_route(app, idx, "/verify", verify_normalized)

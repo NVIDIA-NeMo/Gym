@@ -949,6 +949,66 @@ def test_duplicate_call_ids_do_not_use_ambiguous_provenance():
     assert echoed == ["first-alias", "second-alias"]
 
 
+def test_duplicate_call_ids_use_legacy_prefix_fallback():
+    seen: dict[str, list] = {}
+
+    class Recorder(Store):
+        async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+            seen["names"] = [o.name for o in body.response.output if o.type == "function_call"]
+            return BaseVerifyResponse(**body.model_dump(), reward=1.0)
+
+    server = _server(Recorder, name="store")
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    emitted = ["mcp__store__append", "mcp__store__ns__tool"]
+    body = _verify_body(emitted)
+    for item in body["response"]["output"]:
+        item["call_id"] = "duplicate"
+    body["mcp_tool_call_provenance"] = {
+        "duplicate": {"server_name": "store", "tool_name": "forged"},
+    }
+
+    with TestClient(app) as client:
+        resp = client.post("/verify", json=body)
+        assert resp.status_code == 200, resp.text
+        payload = resp.json()
+
+    assert seen["names"] == ["append", "ns__tool"]
+    assert [o["name"] for o in payload["response"]["output"] if o["type"] == "function_call"] == emitted
+    assert payload["mcp_tool_call_provenance"] == body["mcp_tool_call_provenance"]
+
+
+def test_verify_stamps_provenance_for_reverification():
+    seen: list[list[str]] = []
+
+    class Recorder(Store):
+        async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+            seen.append([o.name for o in body.response.output if o.type == "function_call"])
+            return BaseVerifyResponse(
+                responses_create_params=body.responses_create_params,
+                response=body.response,
+                reward=1.0,
+            )
+
+    server = _server(Recorder, name="store")
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    body = _verify_body(["provider-specific-alias"])
+    body["mcp_tool_call_provenance"] = {
+        "c0": {"server_name": "store", "tool_name": "append"},
+    }
+
+    with TestClient(app) as client:
+        first = client.post("/verify", json=body)
+        assert first.status_code == 200, first.text
+        second = client.post("/verify", json=first.json())
+        assert second.status_code == 200, second.text
+
+    assert seen == [["append"], ["append"]]
+    assert second.json()["response"]["output"][0]["name"] == "provider-specific-alias"
+    assert second.json()["mcp_tool_call_provenance"] == body["mcp_tool_call_provenance"]
+
+
 def test_litmus_pattern_reregistered_verify_is_still_normalized():
     """Servers that strip and re-register /verify (litmus_agent pattern) get the install-time wrap
     on their own handler: it sees bare names, and the response restores the emitted ones."""
