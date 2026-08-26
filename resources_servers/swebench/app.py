@@ -43,7 +43,6 @@ from nemo_gym.server_utils import SESSION_ID_KEY
 from resources_servers.swebench.swebench_patches import (
     patch_swebench_multilingual_golden_patch_pass,
     patch_swebench_multilingual_log_parsing,
-    patch_swebench_multilingual_resources_request,
     patch_swebench_multilingual_sandbox,
     run_instance,
 )
@@ -242,8 +241,6 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         resolved_sandbox_provider = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
         provider_default_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
         resources = dict(self.config.sandbox_config.get("resources", {}))
-
-        patch_swebench_multilingual_resources_request(resources, test_spec.instance_id)
 
         eval_sandbox_spec = SandboxSpec(
             image=test_spec.instance_image_key,
