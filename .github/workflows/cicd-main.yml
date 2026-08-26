@@ -71,7 +71,10 @@ jobs:
   container_build:
     name: Build Gym container
     needs: [pre-flight, classify_changes, unit_tests]
-    if: needs.classify_changes.outputs.docs_only != 'true'
+    # Temporarily disabled: the nemo-ci-aws-gpu-x2 self-hosted runner pool is
+    # queuing indefinitely and blocking PRs. Re-enable once the pool backlog
+    # is resolved.
+    if: false
     runs-on: ${{ needs.pre-flight.outputs.runner_prefix }}
     environment: ${{ contains(needs.pre-flight.outputs.registry, 'azure') && 'nemo-ci' || '' }}
     outputs:
@@ -130,7 +133,9 @@ jobs:
   gpu_e2e_tests:
     name: ${{ matrix.name }}
     needs: [pre-flight, classify_changes, unit_tests, container_build]
-    if: needs.classify_changes.outputs.docs_only != 'true'
+    # Temporarily disabled: depends on container_build, which is disabled
+    # while the nemo-ci-aws-gpu-x2 runner pool backlog is resolved.
+    if: false
     strategy:
       fail-fast: false
       matrix:
@@ -232,9 +237,9 @@ jobs:
           echo "Classify changes: $CLASSIFY_RESULT"
           echo "Docs only: $DOCS_ONLY"
           echo "Unit tests: $UNIT_TEST_RESULT"
-          echo "Container build: $CONTAINER_BUILD_RESULT"
-          echo "GPU E2E tests: $GPU_E2E_TEST_RESULT"
-          echo "Provider E2E tests: $PROVIDER_E2E_TEST_RESULT"
+          echo "Container build: $CONTAINER_BUILD_RESULT (not gating - temporarily disabled)"
+          echo "GPU E2E tests: $GPU_E2E_TEST_RESULT (not gating - temporarily disabled)"
+          echo "Provider E2E tests: $PROVIDER_E2E_TEST_RESULT (not gating)"
 
           if [[ "$PREFLIGHT_RESULT" != "success" ]]; then
             echo "Pre-flight did not succeed."
@@ -247,10 +252,8 @@ jobs:
           fi
 
           if [[ "$DOCS_ONLY" == "true" ]]; then
-            if [[ "$UNIT_TEST_RESULT" == "skipped" && \
-                  "$CONTAINER_BUILD_RESULT" == "skipped" && \
-                  "$GPU_E2E_TEST_RESULT" == "skipped" ]]; then
-              echo "Docs-only change: tests and container build were skipped as expected."
+            if [[ "$UNIT_TEST_RESULT" == "skipped" ]]; then
+              echo "Docs-only change: tests were skipped as expected."
               exit 0
             fi
 
@@ -258,9 +261,7 @@ jobs:
             exit 1
           fi
 
-          if [[ "$UNIT_TEST_RESULT" == "success" && \
-                "$CONTAINER_BUILD_RESULT" == "success" && \
-                "$GPU_E2E_TEST_RESULT" == "success" ]]; then
+          if [[ "$UNIT_TEST_RESULT" == "success" ]]; then
             echo "All required test jobs completed successfully."
             exit 0
           fi
