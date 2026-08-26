@@ -28,12 +28,17 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
+from nemo_gym.rollout_observability import ObservationGap
 from nemo_gym.server_utils import ServerClient, get_response_json, raise_for_status
 from responses_api_agents.nooa_agent.observability import TraceEvent
 
 
 class PolicyCallBudgetExceeded(RuntimeError):
     """Raised when one rollout exceeds its configured policy-call budget."""
+
+
+class InvalidPolicyOutputError(ValueError):
+    """Raised when a valid model response contains unusable generated output."""
 
 
 def _dump(value: Any) -> Any:
@@ -103,6 +108,19 @@ def _output_text(response: NeMoGymResponse) -> str:
     return "\n".join(parts)
 
 
+def _assistant_content_matches(content: Any, expected: str) -> bool:
+    if isinstance(content, str):
+        return content == expected
+    if not isinstance(content, list):
+        return False
+    texts = [
+        part.get("text", "")
+        for part in content
+        if isinstance(part, dict) and part.get("type") in {"input_text", "output_text", "text"}
+    ]
+    return bool(texts) and expected in {"".join(texts), "\n".join(texts)}
+
+
 class GymResponsesLLM(UnifiedLLM):
     """NOOA LLM implementation backed exclusively by a Gym Responses model server."""
 
@@ -116,6 +134,7 @@ class GymResponsesLLM(UnifiedLLM):
         response_collector: list[NeMoGymResponse],
         cookies: dict[str, str],
         timeline: list[TraceEvent] | None = None,
+        observation_gaps: list[ObservationGap] | None = None,
         invocation_id: Callable[[], str] | None = None,
         model: str = "gym-policy",
     ) -> None:
@@ -127,8 +146,10 @@ class GymResponsesLLM(UnifiedLLM):
         self._response_collector = response_collector
         self._cookies = cookies
         self._timeline = timeline
+        self._observation_gaps = observation_gaps
         self._invocation_id = invocation_id or (lambda: "root")
         self._prior_outputs: list[dict[str, Any]] = []
+        self._reported_unrestored_outputs: set[int] = set()
         self._calls = 0
 
     @property
@@ -217,7 +238,7 @@ class GymResponsesLLM(UnifiedLLM):
             try:
                 content = output_model.model_validate(json.loads(content))
             except (json.JSONDecodeError, ValueError, TypeError) as error:
-                raise ValueError(f"Gym model returned invalid {output_model.__name__} JSON") from error
+                raise InvalidPolicyOutputError(f"Gym model returned invalid {output_model.__name__} JSON") from error
 
         reasoning = [
             item.model_dump(mode="json", exclude_none=True) for item in response.output if item.type == "reasoning"
@@ -235,7 +256,7 @@ class GymResponsesLLM(UnifiedLLM):
     def _restore_prior_output_metadata(self, input_items: list[dict[str, Any]]) -> None:
         """Replace NOOA's normalized history items with the exact prior Gym outputs."""
 
-        for raw in self._prior_outputs:
+        for output_index, raw in enumerate(self._prior_outputs):
             item_type = raw.get("type")
             identity = raw.get("call_id") or raw.get("id")
             replacement_index = next(
@@ -258,9 +279,25 @@ class GymResponsesLLM(UnifiedLLM):
                     (
                         index
                         for index, item in enumerate(input_items)
-                        if item.get("role") == "assistant" and item.get("content") == raw_text
+                        if item.get("role") == "assistant"
+                        and _assistant_content_matches(item.get("content"), raw_text)
                     ),
                     None,
                 )
             if replacement_index is not None:
                 input_items[replacement_index] = raw
+            elif (
+                self._observation_gaps is not None
+                and "prompt_token_ids" in raw
+                and output_index not in self._reported_unrestored_outputs
+            ):
+                self._reported_unrestored_outputs.add(output_index)
+                self._observation_gaps.append(
+                    ObservationGap(
+                        code="prior_output_metadata_unrestored",
+                        detail=(
+                            f"Could not restore training metadata for prior {item_type!r} output "
+                            f"at index {output_index}; its generated tokens may be masked."
+                        ),
+                    )
+                )

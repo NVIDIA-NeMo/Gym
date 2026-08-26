@@ -27,6 +27,7 @@ from nemo_gym.openai_utils import (
 from nemo_gym.responses_converter import ResponsesConverter
 from nemo_gym.rollout_observability import (
     AgentInvocation,
+    ObservationGap,
     ToolCallObservation,
     join_model_call_observations,
 )
@@ -171,6 +172,26 @@ def test_marks_return_value_fallback_as_non_trainable() -> None:
 
     assert projected.output[0].content[0].text == '{"answer": "fallback"}'
     assert [gap.code for gap in bundle.gaps] == ["non_trainable_fallback_output"]
+
+
+def test_preserves_llm_observation_gaps() -> None:
+    gap = ObservationGap(
+        code="prior_output_metadata_unrestored",
+        detail="Prior generated tokens may be masked.",
+    )
+
+    _, bundle = project_nooa_result(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="Hello"),
+        return_value=None,
+        model_responses=[],
+        tool_executions=[],
+        timeline=[],
+        nooa_events=[],
+        model_ref=ModelServerRef(type="responses_api_models", name="policy_model"),
+        observation_gaps=[gap],
+    )
+
+    assert bundle.gaps == [gap]
 
 
 def test_projected_model_output_is_consumable_by_training_converter() -> None:

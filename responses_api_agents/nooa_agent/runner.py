@@ -21,9 +21,14 @@ from typing import Any, Protocol
 from nooa import Agent
 
 from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.rollout_observability import ObservationGap
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig, validate_invocation
-from responses_api_agents.nooa_agent.gym_llm import GymResponsesLLM, PolicyCallBudgetExceeded
+from responses_api_agents.nooa_agent.gym_llm import (
+    GymResponsesLLM,
+    InvalidPolicyOutputError,
+    PolicyCallBudgetExceeded,
+)
 from responses_api_agents.nooa_agent.gym_tools import GymToolExecution, GymTools
 from responses_api_agents.nooa_agent.mapping import materialize_arguments
 from responses_api_agents.nooa_agent.observability import NOOAEventTracker, TraceEvent
@@ -51,6 +56,7 @@ class NOOARunResult:
     nooa_events: list[Any]
     termination_reason: str | None = None
     termination_error: str | None = None
+    observation_gaps: list[ObservationGap] = field(default_factory=list)
 
 
 class NOOARunner(Protocol):
@@ -80,6 +86,7 @@ class EmbeddedNOOARunner:
         responses: list[NeMoGymResponse] = []
         executions: list[GymToolExecution] = []
         timeline: list[TraceEvent] = []
+        observation_gaps: list[ObservationGap] = []
         tracker = NOOAEventTracker()
         llm = GymResponsesLLM(
             server_client=self._server_client,
@@ -89,6 +96,7 @@ class EmbeddedNOOARunner:
             response_collector=responses,
             cookies=request.model_cookies,
             timeline=timeline,
+            observation_gaps=observation_gaps,
             invocation_id=lambda: tracker.invocation_id,
         )
         agent = self._agent_class(llm=llm, **self._invocation.init_kwargs)
@@ -114,6 +122,10 @@ class EmbeddedNOOARunner:
             return_value = None
             termination_reason = "policy_budget_exceeded"
             termination_error = str(error)
+        except InvalidPolicyOutputError as error:
+            return_value = None
+            termination_reason = "invalid_policy_output"
+            termination_error = str(error)
         finally:
             unsubscribe()
         return NOOARunResult(
@@ -127,4 +139,5 @@ class EmbeddedNOOARunner:
             nooa_events=tracker.events,
             termination_reason=termination_reason,
             termination_error=termination_error,
+            observation_gaps=observation_gaps,
         )
