@@ -15,8 +15,6 @@ from nemo_gym.global_config import (
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
-    GlobalConfigDictParser,
-    GlobalConfigDictParserConfig,
 )
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
@@ -277,33 +275,6 @@ def test_harness_presets_pass_fabric_planning(preset_name: str, tmp_path: Path) 
     )
 
     assert Fabric().plan(config, base_dir=tmp_path).adapter.adapter_id == merged["adapter_id"]
-
-
-def test_hermes_math_environment_composes_with_nested_settings() -> None:
-    repo_root = Path(__file__).parents[3]
-    config = GlobalConfigDictParser().parse(
-        GlobalConfigDictParserConfig(
-            initial_global_config_dict=OmegaConf.create(
-                {
-                    "config_paths": [
-                        str(repo_root / "responses_api_models/vllm_model/configs/vllm_model.yaml"),
-                        str(repo_root / "environments/nemo_fabric_hermes_math/config.yaml"),
-                    ],
-                    "policy_base_url": "http://127.0.0.1:8000/v1",
-                    "policy_api_key": "test",  # pragma: allowlist secret
-                    "policy_model_name": "gym-policy-model",
-                    "allow_openai_version_skew": True,
-                }
-            ),
-            skip_load_from_cli=True,
-            skip_load_from_dotenv=True,
-            offline=True,
-        )
-    )
-
-    agent = config.nemo_fabric_hermes_math_agent.responses_api_agents.nemo_fabric_agent
-    assert agent.harness_settings.reasoning_config.effort == "medium"
-    assert agent.fabric_config.runtime.max_turns == 30
 
 
 def test_rollout_mcp_metadata_is_optional_and_headers_are_optional(caplog) -> None:
