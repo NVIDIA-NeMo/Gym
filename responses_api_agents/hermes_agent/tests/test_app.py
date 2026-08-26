@@ -159,6 +159,33 @@ class TestSigtermHandler:
             asyncio.set_event_loop(None)
             loop.close()
 
+    def test_interrupted_agent_id_cleared_when_run_conversation_raises(self, monkeypatch) -> None:
+        import nemo_gym.base_responses_api_agent as base_agent
+        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+
+        monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _gc, _name: {"host": "h", "port": 1})
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {}
+        server_client._build_server_base_url = lambda _cfg: "http://h:1"
+        hermes = HermesAgent(config=_config(), server_client=server_client)
+        monkeypatch.setattr(hermes, "_ensure_sigterm_handler", lambda: None)
+
+        class _FailingInterruptedAIAgent:
+            def __init__(self, **kwargs) -> None:
+                self._build_api_kwargs = lambda _messages: {}
+
+            def run_conversation(self, *args, **kwargs) -> dict:
+                hermes.interrupted_agents.add(id(self))
+                raise RuntimeError("agent failed")
+
+        monkeypatch.setattr("run_agent.AIAgent", _FailingInterruptedAIAgent)
+
+        with pytest.raises(RuntimeError, match="agent failed"):
+            asyncio.run(hermes.responses(request=None, body=NeMoGymResponseCreateParamsNonStreaming(input="hi")))
+
+        assert hermes.active_agents == set()
+        assert hermes.interrupted_agents == set()
+
 
 class TestSplitInputToUserAndHistory:
     def test_user_only(self) -> None:

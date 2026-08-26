@@ -341,10 +341,12 @@ class HermesAgent(SimpleResponsesAPIAgent):
         # instead of being killed mid-turn (which would leave response.json unwritten). A single
         # shared dispatcher interrupts every in-flight agent; we just register this one in the set.
         self._ensure_sigterm_handler()
+        agent_id = id(agent)
         self.active_agents.add(agent)
 
         result = None
         agent_error: Optional[BaseException] = None
+        interrupted_by_dispatch = False
         try:
             result = await asyncio.to_thread(
                 agent.run_conversation,
@@ -357,6 +359,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
             raise
         finally:
             self.active_agents.discard(agent)
+            interrupted_by_dispatch = agent_id in self.interrupted_agents
+            self.interrupted_agents.discard(agent_id)
             if observation_collector is not None:
                 try:
                     observations = (
@@ -425,8 +429,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         agent_completed = bool(result.get("completed", True))
 
         # Expose harness run outcome fields for diagnosability
-        was_interrupted = bool(result.get("interrupted")) or id(agent) in self.interrupted_agents
-        self.interrupted_agents.discard(id(agent))
+        was_interrupted = bool(result.get("interrupted")) or interrupted_by_dispatch
 
         harness_error = result.get("error")
         metadata: dict[str, str] = {
