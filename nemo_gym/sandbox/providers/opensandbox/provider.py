@@ -377,8 +377,8 @@ class OpenSandboxConnectionConfig:
     ``keepalive_expiry_s`` must stay below the server's own keep-alive idle
     timeout (uvicorn defaults to 5s), or pooled sockets are reused after the
     server has closed them; null falls back to the SDK's default transport.
-    ``transport_backend`` is "httpx" or "aiohttp" (via the optional
-    ``httpx-aiohttp`` bridge, falling back to httpx when it is absent).
+    ``transport_backend`` is "httpx" or "aiohttp" (the in-house aiohttp
+    transport, ``nemo_gym.sandbox.providers.opensandbox.aiohttp_transport``).
     The pool is shared, so ``max_connections`` also caps in-flight sandbox
     operations per process; null means no cap.
     """
@@ -692,15 +692,16 @@ class OpenSandboxProvider:
             keepalive_expiry=self._connection.keepalive_expiry_s,
         )
         if self._connection.transport_backend == "aiohttp":
-            try:
-                from httpx_aiohttp import AiohttpTransport
+            from nemo_gym.sandbox.providers.opensandbox.aiohttp_transport import AiohttpTransport
 
-                return AiohttpTransport(limits=limits, retries=self._connection.connect_retries)
-            except ImportError:
-                LOGGER.warning(
-                    "connection.transport_backend=aiohttp requested but httpx-aiohttp "
-                    "is not installed; falling back to the httpx transport"
-                )
+            return AiohttpTransport(
+                limits=limits,
+                # aiohttp has no idle-pool-size knob, so zeroing the keepalive
+                # count (how the httpx backend disables pooling) does nothing
+                # here; a force-closed connector is the aiohttp equivalent.
+                force_close=self._connection.disable_connection_pooling,
+                retries=self._connection.connect_retries,
+            )
         return httpx.AsyncHTTPTransport(limits=limits, retries=self._connection.connect_retries)
 
     async def _retire_closed_pty_sessions(self) -> None:
