@@ -41,8 +41,5 @@ refs = [decode_batch.remote(batch) for batch in batches]
 
 records = []
 for batch_result in tqdm(ray.util.as_completed(refs), desc="Loading batches"):
-    print(type(batch_result))
-    break
-    res = ray.get(batch_result)
-    records.extend(ray.get(batch_result))
+    records.extend(batch_result)
 print(f"Finished loading {len(records)} rows in {time() - start_time:.2f}s")
