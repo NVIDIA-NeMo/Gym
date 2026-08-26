@@ -32,6 +32,7 @@ from nemo_gym.atif_reverification import (
     index_materialized_inputs,
     load_atif_manifest,
     project_atif_manifest_entries,
+    strict_json_loads,
 )
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest, ReverifyMode
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError, UploadRolloutsConfigMixin
@@ -285,21 +286,18 @@ def _response_has_function_calls(row: Dict[str, Any]) -> bool:
 
 
 def _guard_atif_tool_identity(payloads: List[Dict[str, Any]]) -> None:
-    """Reject tool-bearing ATIF when the verifier requires Gym MCP identity.
+    """Validate ATIF routing and reject tool traffic that lacks required identity.
 
-    Relay ATIF can prove call/result correlation, but it does not currently carry
-    Gym's canonical ``(server_name, tool_name)`` provenance.  An MCP-exposed
-    resources server may otherwise treat a colliding harness-facing name as one
-    of its own tools during verification.
+    Routing is checked for every row before output paths are touched. Relay ATIF
+    can prove call/result correlation, but it does not currently carry Gym's
+    canonical ``(server_name, tool_name)`` provenance. An MCP-exposed resources
+    server may otherwise treat a colliding harness-facing name as one of its own
+    tools during verification.
     """
-
-    tool_payloads = [row for row in payloads if _response_has_function_calls(row)]
-    if not tool_payloads:
-        return
 
     server_client = setup_server_client()
     agent_to_rs = _build_agent_to_resources_server_mapping(server_client.global_config_dict)
-    for row in tool_payloads:
+    for row in payloads:
         agent_ref = row.get(AGENT_REF_KEY_NAME)
         agent_name = agent_ref.get("name") if isinstance(agent_ref, dict) else None
         if not isinstance(agent_name, str) or not agent_name:
@@ -308,7 +306,9 @@ def _guard_atif_tool_identity(payloads: List[Dict[str, Any]]) -> None:
             resources_server_name = agent_to_rs[agent_name]
         except KeyError as exc:
             raise ConfigError(f"reverify: agent {agent_name!r} has no resources server mapping.") from exc
-        if _resources_server_exposes_tools_over_mcp(server_client.global_config_dict, resources_server_name):
+        if _response_has_function_calls(row) and _resources_server_exposes_tools_over_mcp(
+            server_client.global_config_dict, resources_server_name
+        ):
             raise AtifProjectionError(
                 "Relay ATIF tool calls cannot be reverified against MCP-exposed resources server "
                 f"{resources_server_name!r}: ATIF proves call/result correlation but does not carry Gym's "
@@ -555,8 +555,8 @@ def _prepare_atif_payloads(
             if not line.strip():
                 continue
             try:
-                row = orjson.loads(line)
-            except orjson.JSONDecodeError as exc:
+                row = strict_json_loads(line)
+            except ValueError as exc:
                 raise AtifProjectionError(
                     f"invalid materialized input row {line_number} in {materialized_inputs_jsonl_fpath}: {exc}"
                 ) from exc

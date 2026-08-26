@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import json
 from asyncio import Semaphore
 from collections import defaultdict
 from pathlib import Path
@@ -380,10 +381,13 @@ class TestAtifToolIdentityGuard:
         with pytest.raises(AtifProjectionError, match="MCP-exposed resources server 'fixture-rs'"):
             _guard_atif_tool_identity([self._tool_payload("external-agent")])
 
-    def test_text_only_atif_does_not_require_mcp_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_text_only_atif_validates_routing_without_inspecting_mcp_config(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._patch_client(monkeypatch, self._config(exposes_tools_over_mcp=True))
         monkeypatch.setattr(
-            "nemo_gym.rollout_reverification.setup_server_client",
-            lambda: pytest.fail("text-only ATIF should not inspect MCP configuration"),
+            "nemo_gym.rollout_reverification._resources_server_exposes_tools_over_mcp",
+            lambda *_args: pytest.fail("text-only ATIF should not inspect MCP configuration"),
         )
         payload = {
             AGENT_REF_KEY_NAME: {"name": "fixture-agent"},
@@ -391,6 +395,16 @@ class TestAtifToolIdentityGuard:
         }
 
         _guard_atif_tool_identity([payload])
+
+    def test_text_only_atif_rejects_an_unroutable_agent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._patch_client(monkeypatch, self._config(exposes_tools_over_mcp=False))
+        payload = {
+            AGENT_REF_KEY_NAME: {"name": "unknown-agent"},
+            "response": {"output": [{"type": "message", "content": []}]},
+        }
+
+        with pytest.raises(ConfigError, match="agent 'unknown-agent' has no resources server mapping"):
+            _guard_atif_tool_identity([payload])
 
     async def test_run_rejects_before_preparing_output_paths(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._patch_client(monkeypatch, self._config(exposes_tools_over_mcp=True))
@@ -418,6 +432,40 @@ class TestAtifToolIdentityGuard:
 
         with pytest.raises(AtifProjectionError, match="does not carry Gym's canonical"):
             await RolloutReverificationHelper().run_from_config(config)
+
+    async def test_invalid_text_routing_preserves_existing_output_before_overwrite(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._patch_client(monkeypatch, self._config(exposes_tools_over_mcp=False))
+        monkeypatch.setattr("nemo_gym.rollout_reverification._guard_reverify_mode", AsyncMock(return_value=None))
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification._resolve_under_cwd_or_install",
+            lambda value: Path(value),
+        )
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification._prepare_atif_payloads",
+            lambda *_args, **_kwargs: [
+                {
+                    AGENT_REF_KEY_NAME: {"name": "unknown-agent"},
+                    "response": {"output": [{"type": "message", "content": []}]},
+                }
+            ],
+        )
+        output = tmp_path / "existing-output.jsonl"
+        output.write_text("existing result\n")
+        config = RolloutReverificationConfig(
+            input_format="atif",
+            materialized_inputs_jsonl_fpath="inputs.jsonl",
+            rollouts_jsonl_fpath=None,
+            atif_manifest_jsonl_fpath="manifest.jsonl",
+            output_jsonl_fpath=str(output),
+            overwrite=True,
+        )
+
+        with pytest.raises(ConfigError, match="agent 'unknown-agent' has no resources server mapping"):
+            await RolloutReverificationHelper().run_from_config(config)
+
+        assert output.read_text() == "existing result\n"
 
 
 class TestGetRsNames:
@@ -1090,6 +1138,35 @@ class TestPrepareAtifPayloads:
                 materialized,
                 manifest,
             )
+
+    def test_materialized_input_preserves_arbitrary_size_json_integers(self, tmp_path: Path) -> None:
+        materialized, manifest = self._write_inputs_and_manifest(tmp_path)
+        row = json.loads(materialized.read_text())
+        value = 10**100 + 123
+        row["verifier_metadata"] = {"large_integer": value}
+        materialized.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+        payload = _prepare_atif_payloads(materialized, manifest)[0]
+
+        assert payload["verifier_metadata"]["large_integer"] == value
+        assert isinstance(payload["verifier_metadata"]["large_integer"], int)
+
+    @pytest.mark.parametrize(
+        "invalid_member",
+        [
+            '"duplicate":1,"duplicate":2',
+            '"nonfinite":NaN',
+            '"overflow":1e400',
+        ],
+    )
+    def test_materialized_input_rejects_ambiguous_or_nonstandard_json(
+        self, tmp_path: Path, invalid_member: str
+    ) -> None:
+        materialized, manifest = self._write_inputs_and_manifest(tmp_path)
+        materialized.write_text("{" + invalid_member + "}\n", encoding="utf-8")
+
+        with pytest.raises(AtifProjectionError, match="invalid materialized input row 1"):
+            _prepare_atif_payloads(materialized, manifest)
 
 
 class TestRunVerificationPayloads:
