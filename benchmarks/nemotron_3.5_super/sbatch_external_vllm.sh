@@ -10,7 +10,6 @@ CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
 VLLM_CONFIG=$VLLM_CONFIG
 SLURM_COMMENT="${SLURM_COMMENT:-}"
-# The Gym checkout, for a caller that launches from somewhere else.
 NEMO_GYM_REPO_ROOT="${NEMO_GYM_REPO_ROOT:-$(pwd -P)}"
 
 should_run_eval=$(( $# > 0 ))

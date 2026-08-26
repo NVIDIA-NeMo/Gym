@@ -142,13 +142,7 @@ async def cleanup_sandboxes(
 
 
 def connection_from_environment() -> tuple[str, str, str]:
-    """The connection a caller exports rather than writes to a file.
-
-    A caller that runs from a directory it does not own -- a scheduler run
-    directory, say -- cannot drop an env.yaml there: the same file is merged
-    over every config the run names, and it would carry the access key into
-    whatever permissions that directory happens to have.
-    """
+    """The connection a caller exports rather than writes to a file."""
     domain = os.environ.get(DOMAIN_ENV_VAR, "").strip()
     access_key = os.environ.get(API_KEY_ENV_VAR, "").strip()
     protocol = os.environ.get(PROTOCOL_ENV_VAR, "").strip() or "http"

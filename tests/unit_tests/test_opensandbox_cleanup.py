@@ -811,8 +811,7 @@ def test_cli_without_config_names_the_variable_it_needs(
 
 
 def test_slurm_launcher_reads_the_checkout_from_the_environment(tmp_path: Path) -> None:
-    """The caller launches from a run directory that holds no Gym tree, so the
-    working directory cannot name the checkout the cleanup script lives in."""
+    """The run directory holds no Gym tree, so it cannot name the checkout."""
     calls_path, env = install_sbatch_stub(tmp_path)
     env["NEMO_GYM_REPO_ROOT"] = "/elsewhere/Gym"
     result = subprocess.run(
