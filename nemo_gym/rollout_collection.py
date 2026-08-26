@@ -23,13 +23,14 @@ from collections import Counter, defaultdict
 from contextlib import nullcontext
 from copy import deepcopy
 from datetime import timedelta
+from difflib import get_close_matches
 from itertools import repeat
 from pathlib import Path
 from time import time
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, Field, field_validator, model_validator
 from tqdm.asyncio import tqdm
 
@@ -56,6 +57,8 @@ from nemo_gym.global_config import (
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
+    TASK_SOURCE_KEY_NAME,
+    agents_by_resources_server,
     get_global_config_dict,
 )
 from nemo_gym.path_utils import failures_path_for
@@ -505,7 +508,29 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
 
     agent_name: Optional[str] = Field(
         default=None,
-        description="The agent to collect rollouts from. If not specified, uses agent_ref from each data row.",
+        description=(
+            "The agent to collect rollouts from. Routes every row to this agent, overriding any "
+            "agent_ref already present in the data (a warning lists overridden values). "
+            "Shorthand for agent_map={_default: <agent_name>}."
+        ),
+    )
+    agent_map: Optional[Dict[str, str]] = Field(
+        default=None,
+        description=(
+            "Explicit per-agent re-routing, keyed by the agent_ref.name or task_source found in "
+            "the data (e.g. {old_agent: new_agent}). The special key '_default' applies to every "
+            "row with no specific entry, including rows with no agent_ref at all. "
+            "Precedence: agent_map[<row value>] > agent_map._default > row agent_ref > task_source resolution."
+        ),
+    )
+    fan_out: Optional[Dict[str, List[str]]] = Field(
+        default=None,
+        description=(
+            "Run each matching row once per listed agent (cross-product), keyed by the row's "
+            "agent_ref.name or task_source (e.g. {genrm_compare_resources_server: [agent_a, agent_b]}). "
+            "Each copy gets its own rollout index; outputs are tagged with the agent that produced them, "
+            "so per-agent metrics separate naturally. Composes with num_repeats (repeats apply per agent)."
+        ),
     )
     input_jsonl_fpath: str = Field(
         description="The input data source to use to collect rollouts, in the form of a file path to a jsonl file."
@@ -517,9 +542,11 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         default=1,
         description=(
             "How many times to repeat each example. Either an int (applied to every row) or a "
-            "dict keyed by agent_ref.name (e.g. {simple_agent: 32, swe_agent: 1}). In dict form, "
-            "every agent that appears in the input rows must have an entry, unless a special "
-            '"_default" key is provided as a fallback. Useful for mean@k.'
+            "dict keyed by the dispatched agent name or by the row's own routing key (its "
+            "agent_ref.name or task_source as written in the data, before any agent_map/fan_out "
+            "re-route); the dispatched agent wins when both have entries. In dict form, every row "
+            "must match an entry, unless a special '_default' key is provided as a fallback. "
+            "Useful for mean@k."
         ),
     )
     num_repeats_add_seed: bool = Field(
@@ -547,6 +574,20 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         return 1 if v is None else v
 
     @model_validator(mode="after")
+    def _fold_agent_name_into_agent_map(self) -> "RolloutCollectionConfig":
+        # agent_name is sugar for agent_map._default; fold it so downstream code has one knob.
+        if self.agent_name is None:
+            return self
+        existing_default = (self.agent_map or {}).get("_default")
+        if existing_default is not None and existing_default != self.agent_name:
+            raise ValueError(
+                f"agent_name={self.agent_name!r} conflicts with agent_map._default={existing_default!r}. "
+                "Set only one of them."
+            )
+        self.agent_map = {**(self.agent_map or {}), "_default": self.agent_name}
+        return self
+
+    @model_validator(mode="after")
     def _validate_num_repeats(self) -> "RolloutCollectionConfig":
         nr = self.num_repeats
         if isinstance(nr, int):
@@ -556,6 +597,22 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
             bad = {name: n for name, n in nr.items() if n < 1}
             if bad:
                 raise ValueError(f"num_repeats dict values must be >= 1, got {bad}")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_fan_out(self) -> "RolloutCollectionConfig":
+        for key, agents in (self.fan_out or {}).items():
+            if not agents:
+                raise ValueError(
+                    f"fan_out[{key!r}] is an empty list, which would silently drop every matching row "
+                    "(zero rollouts collected). Remove the key, or list at least one agent."
+                )
+            duplicates = sorted({a for a in agents if list(agents).count(a) > 1})
+            if duplicates:
+                raise ValueError(
+                    f"fan_out[{key!r}] lists the same agent more than once: {duplicates}. Each listed "
+                    "agent already runs every matching row; use num_repeats for repetition."
+                )
         return self
 
     @property
@@ -581,13 +638,81 @@ class RolloutCollectionHelper(BaseModel):
             range_iterator = range(config.limit)
             print(f"Limiting the number of rows to {config.limit}")
 
+        # Load prompt config if specified
+        prompt_cfg = None
+        if config.prompt_config:
+            prompt_cfg = load_prompt_config(config.prompt_config)
+            print(f"Using prompt config: {config.prompt_config}")
+
+        # Search NEMO_GYM_EXTRA_ROOTS, cwd, then the install root.
+        _input_path = _resolve_under_cwd_or_install(config.input_jsonl_fpath)
+        if not _input_path.exists():
+            raise ConfigPathNotFoundError(
+                f"Input file not found: '{config.input_jsonl_fpath}' (--input). Check the path is spelled correctly."
+            )
+        with open(_input_path) as input_file:
+            rows_iterator: Iterator[str] = tqdm(input_file, desc="Reading rows")
+            rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
+            raw_rows = [
+                (row_idx, row_str, loads_jsonl_line(row_str, _input_path, line_no))
+                for line_no, (row_idx, row_str) in enumerate(rows_iterator, 1)
+            ]
+
+        # Validate and apply prompt config before per-row processing
+        if prompt_cfg is not None:
+            validate_prompt_compatibility([row for _, _, row in raw_rows], prompt_cfg)
+            raw_rows = [(idx, s, apply_prompt_to_row(row, prompt_cfg)) for idx, s, row in raw_rows]
+
+        return RolloutCollectionHelper._preprocess_raw_rows(raw_rows, config)
+
+    def preprocess_examples(
+        self,
+        examples: List[Dict],
+        *,
+        agent_map: Optional[Dict[str, str]] = None,
+        fan_out: Optional[Dict[str, List[str]]] = None,
+        num_repeats: Union[int, Dict[str, int]] = 1,
+        num_repeats_add_seed: bool = False,
+        global_config_dict: Optional[DictConfig] = None,
+    ) -> List[Dict]:
+        """Apply run-level routing and repetition to caller-held rows.
+
+        Public entry point for direct ``run_examples`` callers (e.g. trainer integrations that
+        drive dispatch themselves): ``run_examples`` resolves task_sources and validates agent
+        names, but ``agent_map``, ``fan_out`` and ``num_repeats`` are applied only during
+        preprocessing. Call this first, then pass the returned rows to ``run_examples``.
+
+        Pass ``global_config_dict`` (the merged config) to also resolve task_source-only rows to
+        their agents here; leave it None to defer that to ``run_examples``, which does it against
+        the head server's config. Input rows are not mutated; the expanded, stamped copies are
+        returned.
+        """
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath="<in-memory>",
+            output_jsonl_fpath="<in-memory>",
+            agent_map=agent_map,
+            fan_out=fan_out,
+            num_repeats=num_repeats,
+            num_repeats_add_seed=num_repeats_add_seed,
+        )
+        raw_rows = [
+            (idx, orjson.dumps(row, option=orjson.OPT_SORT_KEYS).decode(), deepcopy(row))
+            for idx, row in enumerate(examples)
+        ]
+        rows = self._preprocess_raw_rows(raw_rows, config)
+        if global_config_dict is not None:
+            self.resolve_task_sources(rows, global_config_dict)
+        return rows
+
+    @staticmethod
+    def _preprocess_raw_rows(raw_rows: List[Tuple[int, str, Dict]], config: RolloutCollectionConfig) -> List[Dict]:
         if config.num_repeats_add_seed:
             print(
                 "Adding unique `seed` values to each input via metadata.extra_body (only honored by vLLM model servers)"
             )
 
-        if config.agent_name:
-            print(f"Using `{config.agent_name}` for rows that do not already have an agent ref")
+        if config.agent_map:
+            print(f"Routing rows via agent_map {config.agent_map}")
 
         if config.responses_create_params:
             print(f"Overriding responses_create_params fields with {config.responses_create_params}")
@@ -609,12 +734,6 @@ class RolloutCollectionHelper(BaseModel):
             print(f"Per-agent num_repeats: {dict(config.num_repeats)}")
         agents_seen: set[str] = set()
 
-        # Load prompt config if specified
-        prompt_cfg = None
-        if config.prompt_config:
-            prompt_cfg = load_prompt_config(config.prompt_config)
-            print(f"Using prompt config: {config.prompt_config}")
-
         # Resolve skills once for the whole run (hash is content-derived, computed at startup).
         skills_ref_dict = None
         if config.skills:
@@ -626,42 +745,50 @@ class RolloutCollectionHelper(BaseModel):
                 f"{', '.join(s.name for s in skills_ref.skills)})"
             )
 
-        # Search NEMO_GYM_EXTRA_ROOTS, cwd, then the install root.
-        _input_path = _resolve_under_cwd_or_install(config.input_jsonl_fpath)
-        if not _input_path.exists():
-            raise ConfigPathNotFoundError(
-                f"Input file not found: '{config.input_jsonl_fpath}' (--input). Check the path is spelled correctly."
-            )
-        with open(_input_path) as input_file:
-            rows_iterator: Iterator[str] = tqdm(input_file, desc="Reading rows")
-            rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
-            raw_rows = [
-                (row_idx, row_str, loads_jsonl_line(row_str, _input_path, line_no))
-                for line_no, (row_idx, row_str) in enumerate(rows_iterator, 1)
-            ]
-
-        # Validate and apply prompt config before per-row processing
-        if prompt_cfg is not None:
-            validate_prompt_compatibility([row for _, _, row in raw_rows], prompt_cfg)
-            raw_rows = [(idx, s, apply_prompt_to_row(row, prompt_cfg)) for idx, s, row in raw_rows]
-
         # For gym eval profile to match rollouts to tasks
         row_to_task_idx: Dict[str, int] = dict()
         task_idx_to_rollout_idx: Dict[int, int] = Counter()
         row_idxs_missing_agent_ref: List[int] = []
         agents_missing_from_num_repeats: set[str] = set()
         rows: List[Dict] = []
+        overridden_agents: set[Tuple[str, str]] = set()
         for row_idx, row_str, row in raw_rows:
-            # Resolve agent name. Missing agent_ref is a hard error reported in
-            # bulk after the loop; skip the row immediately so the rest of the
-            # body can assume agent_name is non-None.
-            if config.agent_name:
-                row.setdefault(AGENT_REF_KEY_NAME, {"name": config.agent_name})
+            # Routing basis: the name this row routes by — its agent_ref.name when present, else
+            # its task_source (resolved to an agent by resolve_task_sources once the merged config
+            # is in hand). agent_map[<basis>] > agent_map._default > row agent_ref > task_source.
             agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
-            if agent_name is None:
+            basis = agent_name if agent_name is not None else row.get(TASK_SOURCE_KEY_NAME)
+            if config.agent_map:
+                # A row may carry both an agent_ref and a task_source (derived artifacts do);
+                # a map entry for either re-routes it, the agent name taking precedence.
+                mapped = next(
+                    (
+                        config.agent_map[key]
+                        for key in (agent_name, row.get(TASK_SOURCE_KEY_NAME))
+                        if key is not None and key in config.agent_map
+                    ),
+                    None,
+                )
+                if mapped is None:
+                    mapped = config.agent_map.get("_default")
+                if mapped is not None:
+                    if agent_name is not None and agent_name != mapped:
+                        overridden_agents.add((agent_name, mapped))
+                    agent_name = mapped
+                    row[AGENT_REF_KEY_NAME] = {"name": agent_name}
+
+            # Fan-out: run this row once per listed agent (cross-product). Otherwise a single
+            # target — the row's agent when known, else deferred to task_source resolution.
+            targets: List[Optional[str]]
+            if config.fan_out and basis is not None and basis in config.fan_out:
+                targets = list(config.fan_out[basis])
+            elif agent_name is not None:
+                targets = [agent_name]
+            elif row.get(TASK_SOURCE_KEY_NAME) is not None:
+                targets = [None]
+            else:
                 row_idxs_missing_agent_ref.append(row_idx)
                 continue
-            agents_seen.add(agent_name)
 
             # Responses create params
             row[RESPONSES_CREATE_PARAMS_KEY_NAME] = (
@@ -680,42 +807,62 @@ class RolloutCollectionHelper(BaseModel):
             if TASK_INDEX_KEY_NAME not in row:
                 row[TASK_INDEX_KEY_NAME] = row_to_task_idx.setdefault(row_str, len(row_to_task_idx))
 
-            # Resolve num_repeats for this row, batching dict-form misses for
-            # one consolidated raise after the loop.
-            if fixed_num_repeats is not None:
-                row_num_repeats = fixed_num_repeats
-            elif agent_name in per_agent_repeats:
-                row_num_repeats = per_agent_repeats[agent_name]
-            elif default_repeats is not None:
-                row_num_repeats = default_repeats
-            else:
-                agents_missing_from_num_repeats.add(agent_name)
-                continue
+            base_row = row
+            for target in targets:
+                # num_repeats keys match either side of a re-route: the dispatched agent (the
+                # fan-out/agent_map target) or the row's original routing key (its agent_ref.name
+                # or task_source as written in the data). The dispatched agent wins when both have
+                # entries, so `agent_map={source: agent}` composes with `num_repeats={source: k}`.
+                # Dict-form misses batch into one consolidated raise after the loop.
+                repeat_keys = [k for k in dict.fromkeys((target, basis)) if k is not None]
+                agents_seen.update(repeat_keys)
+                if fixed_num_repeats is not None:
+                    row_num_repeats = fixed_num_repeats
+                elif (matched := next((k for k in repeat_keys if k in per_agent_repeats), None)) is not None:
+                    row_num_repeats = per_agent_repeats[matched]
+                elif default_repeats is not None:
+                    row_num_repeats = default_repeats
+                else:
+                    agents_missing_from_num_repeats.add(" / ".join(repeat_keys))
+                    continue
 
-            for _ in range(row_num_repeats):
-                row = deepcopy(row)
+                for _ in range(row_num_repeats):
+                    row = deepcopy(base_row)
+                    # Restamp only when fan-out routes this copy somewhere else; otherwise keep
+                    # the row's agent_ref dict byte-for-byte (it may carry extra fields like type).
+                    if target is not None and (row.get(AGENT_REF_KEY_NAME) or {}).get("name") != target:
+                        row[AGENT_REF_KEY_NAME] = {"name": target}
 
-                # Resolve rollout index
-                row[ROLLOUT_INDEX_KEY_NAME] = task_idx_to_rollout_idx[row[TASK_INDEX_KEY_NAME]]
-                task_idx_to_rollout_idx[row[TASK_INDEX_KEY_NAME]] += 1
+                    # Resolve rollout index
+                    row[ROLLOUT_INDEX_KEY_NAME] = task_idx_to_rollout_idx[row[TASK_INDEX_KEY_NAME]]
+                    task_idx_to_rollout_idx[row[TASK_INDEX_KEY_NAME]] += 1
 
-                if config.num_repeats_add_seed:
-                    metadata = row[RESPONSES_CREATE_PARAMS_KEY_NAME].setdefault("metadata", {})
-                    extra_body = json.loads(metadata.get("extra_body", "{}"))
-                    extra_body["seed"] = row[ROLLOUT_INDEX_KEY_NAME]
-                    metadata["extra_body"] = json.dumps(extra_body)
+                    if config.num_repeats_add_seed:
+                        metadata = row[RESPONSES_CREATE_PARAMS_KEY_NAME].setdefault("metadata", {})
+                        extra_body = json.loads(metadata.get("extra_body", "{}"))
+                        extra_body["seed"] = row[ROLLOUT_INDEX_KEY_NAME]
+                        metadata["extra_body"] = json.dumps(extra_body)
 
-                rows.append(row)
+                    rows.append(row)
+
+        if overridden_agents:
+            warnings.warn(
+                "agent_map overrode agent_ref values already present in the data: "
+                f"{sorted(overridden_agents)}. Prior to this release, +agent_name only filled rows "
+                "missing an agent_ref; it now re-routes every row.",
+                stacklevel=2,
+            )
 
         if row_idxs_missing_agent_ref:
             raise ValueError(
-                f"No agent specified for rows {row_idxs_missing_agent_ref}. Either provide +agent_name config or include agent_ref in data."
+                f"No agent specified for rows {row_idxs_missing_agent_ref}. Provide +agent_name (or "
+                "+agent_map with a _default entry), or include agent_ref or task_source in the data."
             )
 
         if agents_missing_from_num_repeats:
             raise ValueError(
-                f"num_repeats dict has no entry for agents {sorted(agents_missing_from_num_repeats)} "
-                f"and no '_default' fallback. Listed agents: {sorted(per_agent_repeats)}"
+                f"num_repeats dict has no entry for routing keys {sorted(agents_missing_from_num_repeats)} "
+                f"and no '_default' fallback. Listed keys: {sorted(per_agent_repeats)}"
             )
 
         unknown_agents = set(per_agent_repeats) - agents_seen
@@ -830,6 +977,16 @@ class RolloutCollectionHelper(BaseModel):
             input_rows = self._preprocess_rows_from_config(config)
             # Returned rows are sorted by (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
 
+            # Resolve task_source rows to agents BEFORE the materialized write: materialized
+            # inputs are the run-scoped artifact and must carry the resolved agent_ref (custom
+            # drivers, e.g. gdpval's multistage orchestrator, read it from there). Guarded so
+            # legacy agent_ref-only runs never need the head server at this point.
+            if any(
+                (r.get(AGENT_REF_KEY_NAME) or {}).get("name") is None and r.get(TASK_SOURCE_KEY_NAME) is not None
+                for r in input_rows
+            ):
+                self.resolve_task_sources(input_rows, self.setup_server_client().global_config_dict)
+
             with config.materialized_jsonl_fpath.open("wb") as f:
                 for row in input_rows:
                     f.write(orjson.dumps(row) + b"\n")
@@ -907,6 +1064,8 @@ class RolloutCollectionHelper(BaseModel):
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
             result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
             result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
+            if TASK_SOURCE_KEY_NAME in row:
+                result[TASK_SOURCE_KEY_NAME] = row[TASK_SOURCE_KEY_NAME]
             if SKILLS_REF_KEY_NAME in row:
                 result[SKILLS_REF_KEY_NAME] = row[SKILLS_REF_KEY_NAME]
             if ATTEMPT_INDEX_KEY_NAME in row:
@@ -1201,6 +1360,113 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
 
         return metrics_fpath
 
+    @staticmethod
+    def resolve_task_sources(examples: List[Dict], global_config_dict: DictConfig) -> None:
+        """Stamp an agent_ref onto every row that carries only a task_source.
+
+        task_source names the config instance that declared the row's dataset. Resolution against
+        the merged config, first match wins:
+        - the instance is an agent (self-contained environment) -> route to it directly;
+        - the instance is a resources server -> route to the unique agent whose
+          resources_server.name edge points at it (inversion of the edge every agent
+          config already declares);
+        - zero or 2+ candidate agents, or an unknown/non-routable instance -> hard error
+          (2+ names +agent_map as the disambiguator).
+
+        Rows that already have an agent_ref are left untouched, so this is a no-op on legacy
+        datasets and on already-resolved (materialized) rows. Runs before any dispatch.
+        """
+        legacy_routed = sum(
+            1
+            for row in examples
+            if (row.get(AGENT_REF_KEY_NAME) or {}).get("name") is not None and row.get(TASK_SOURCE_KEY_NAME) is None
+        )
+        if legacy_routed:
+            warnings.warn(
+                f"{legacy_routed} rows routed via their baked-in agent_ref (no task_source). This "
+                "legacy path is deprecated: re-collate the dataset with current Gym to produce "
+                "task_source-routed rows, or re-route explicitly with +agent_map.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
+        unresolved = {
+            ts
+            for row in examples
+            if (row.get(AGENT_REF_KEY_NAME) or {}).get("name") is None
+            and (ts := row.get(TASK_SOURCE_KEY_NAME)) is not None
+        }
+        if not unresolved:
+            return
+
+        agents_by_rs = agents_by_resources_server(global_config_dict)
+
+        resolution: Dict[str, str] = {}
+        errors: List[str] = []
+        for ts in sorted(unresolved):
+            block = global_config_dict.get(ts)
+            if block is None:
+                close = get_close_matches(ts, list(global_config_dict.keys()), n=1)
+                errors.append(
+                    f"{ts!r}: not in the running config" + (f" (did you mean {close[0]!r}?)" if close else "")
+                )
+            elif not isinstance(block, DictConfig):
+                errors.append(f"{ts!r}: not a server instance")
+            elif "responses_api_agents" in block:
+                resolution[ts] = ts
+            elif "resources_servers" in block:
+                candidates = agents_by_rs.get(ts, [])
+                if len(candidates) == 1:
+                    resolution[ts] = candidates[0]
+                elif not candidates:
+                    errors.append(f"{ts!r}: no agent in the running config references this resources server")
+                else:
+                    errors.append(
+                        f"{ts!r}: {len(candidates)} agents reference this resources server "
+                        f"({sorted(candidates)}); pass +agent_map={{{ts}: <agent>}} to pick one"
+                    )
+            else:
+                errors.append(f"{ts!r}: instance is not an agent or resources server (datasets cannot route here)")
+
+        if errors:
+            raise ValueError("Cannot resolve task_source to an agent: " + "; ".join(errors))
+
+        for row in examples:
+            if (row.get(AGENT_REF_KEY_NAME) or {}).get("name") is None:
+                ts = row.get(TASK_SOURCE_KEY_NAME)
+                if ts is not None:
+                    row[AGENT_REF_KEY_NAME] = {"name": resolution[ts]}
+
+    @staticmethod
+    def _validate_agent_names(examples: List[Dict], global_config_dict: DictConfig) -> None:
+        """Fail before any dispatch when a row names an agent absent from the running config.
+
+        Without this, the first bad row dies mid-collection with a raw omegaconf ConfigKeyError
+        after valid rows have already been dispatched.
+        """
+        requested = {name for row in examples if (name := (row.get(AGENT_REF_KEY_NAME) or {}).get("name")) is not None}
+        available = {
+            str(name)
+            for name, block in global_config_dict.items()
+            if isinstance(block, DictConfig) and "responses_api_agents" in block
+        }
+        unknown = sorted(requested - available)
+        if not unknown:
+            return
+        hints = []
+        for name in unknown:
+            # Naming a non-agent instance (e.g. a resources server via agent_map) is as fatal as a
+            # typo: /run only exists on agent servers.
+            if name in global_config_dict:
+                hints.append(f"{name!r} (exists but is not an agent instance)")
+                continue
+            close = get_close_matches(name, available, n=1)
+            hints.append(f"{name!r}" + (f" (did you mean {close[0]!r}?)" if close else ""))
+        raise ValueError(
+            f"Rows reference agents not present in the running config: {', '.join(hints)}. "
+            "Include the agent's config in the run, or re-route with +agent_map/+agent_name."
+        )
+
     def run_examples(
         self,
         examples: List[Dict],
@@ -1209,8 +1475,14 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
     ) -> Iterator[Future]:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
+
+        Rows are dispatched as given: task_sources are resolved and agent names validated here,
+        but run-level knobs (``agent_map``, ``fan_out``, ``num_repeats``) are NOT applied — call
+        ``preprocess_examples`` first if you need them.
         """
         server_client = self.setup_server_client(head_server_config)
+        self.resolve_task_sources(examples, server_client.global_config_dict)
+        self._validate_agent_names(examples, server_client.global_config_dict)
         semaphore = semaphore or nullcontext()
 
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
