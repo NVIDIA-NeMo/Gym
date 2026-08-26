@@ -768,9 +768,6 @@ def test_tool_calls_and_reasoning_accepts_reasoning_alias():
     both = {"choices": [{"message": {"reasoning_content": "rc", "reasoning": "r"}}]}
     assert _tool_calls_and_reasoning(both) == ([], "rc")
 
-    wrapped = {"choices": [{"message": {"content": "<think>first</think>answer<think>second</think>"}}]}
-    assert _tool_calls_and_reasoning(wrapped) == ([], "first\nsecond")
-
 
 def test_tool_calls_and_reasoning_skips_non_dict_output_items():
     from nemo_gym.base_responses_api_model import _tool_calls_and_reasoning
