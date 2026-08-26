@@ -995,7 +995,6 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         return _prompt_tokens_from_tokenize_response(tokenize_response)
 
 
-
 def _prompt_tokens_from_tokenize_response(tokenize_response: dict) -> int:
     """Prompt token count from a vLLM /tokenize response.
 
@@ -1011,10 +1010,8 @@ def _prompt_tokens_from_tokenize_response(tokenize_response: dict) -> int:
     tokens = tokenize_response.get("tokens")
     if tokens is not None:
         return len(tokens)
-    raise KeyError(
-        "/tokenize response has neither 'count' nor 'tokens'; "
-        f"got keys: {sorted(tokenize_response)}"
-    )
+    raise KeyError(f"/tokenize response has neither 'count' nor 'tokens'; got keys: {sorted(tokenize_response)}")
+
 
 if __name__ == "__main__":
     BrowsecompAgent.run_webserver()
