@@ -59,6 +59,9 @@ class SweepEntry(BaseModel):
     data: str
     configs: List[str] = Field(min_length=1)
     agent: str
+    # Who to ask about this dataset. Datasets outlive the person who built them, and the /lustre
+    # path is not a reliable answer once data is copied or a blend is re-cut.
+    owner: Optional[str] = None
     # Set only to deliberately run a dataset through a different agent than its rows name.
     # The rewrite is applied while concatenating and recorded in the build report.
     agent_ref_override: Optional[str] = None

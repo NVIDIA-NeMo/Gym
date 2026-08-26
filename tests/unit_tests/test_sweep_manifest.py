@@ -376,3 +376,17 @@ def test_materialize_writes_observed_counts_report(tmp_path):
     assert doc["total_materialized_rows"] == 15
     assert doc["entries"]["one"] == {"source_rows": 5, "materialized_rows": 15, "num_repeats": 3}
     assert doc["materialized_bytes"] == report.materialized_fpath.stat().st_size
+
+
+def test_owner_is_optional_and_round_trips(tmp_path):
+    _write_config(tmp_path, "a.yaml", "agent_a")
+    manifest = _manifest(
+        tmp_path,
+        [
+            {"label": "owned", "agent": "agent_a", "configs": ["a.yaml"], "data": "x.jsonl", "owner": "jiaqiz"},
+            {"label": "unowned", "agent": "agent_a", "configs": ["a.yaml"], "data": "y.jsonl"},
+        ],
+    )
+    by_label = {e.label: e for e in manifest.entries}
+    assert by_label["owned"].owner == "jiaqiz"
+    assert by_label["unowned"].owner is None

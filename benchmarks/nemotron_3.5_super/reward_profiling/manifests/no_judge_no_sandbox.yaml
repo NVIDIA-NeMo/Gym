@@ -25,160 +25,213 @@ extra_configs:
   - responses_api_models/vllm_model/configs/vllm_model.yaml
 
 entries:
-  # non judge envs
+
+  # ==========================================================================
+  # Agentic / tool use (9)
+  # ==========================================================================
   - label: tau_pivot
     agent: single_step_tool_use_with_argument_comparison_agent
     configs:
       - resources_servers/single_step_tool_use_with_argument_comparison/configs/single_step_tool_use_with_argument_comparison.yaml
     data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/tau_pivot/super_row_54_1000_synthetic_tau_all_rollouts_leq_60_passrate.jsonl
-
-  - label: swe_pivot
-    agent: swe_pivot_single_step_tool_use_with_argument_comparison_agent
-    configs:
-      - resources_servers/single_step_tool_use_with_argument_comparison/configs/swe_pivot_single_step_tool_use_with_argument_comparison.yaml
-    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/swe_pivot/sugam_reasoning_minimax_128k_super_yian3_mixed_agent_ref_swe.jsonl
-
-  - label: instruction_following
-    agent: instruction_following_simple_agent
-    configs:
-      - resources_servers/instruction_following/configs/instruction_following.yaml
-    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/instruction_following/instruction_following_out.jsonl
-
-  - label: search_pivot
-    agent: search_pivot_single_step_tool_use_with_argument_comparison_agent
-    configs:
-      - resources_servers/single_step_tool_use_with_argument_comparison/configs/search_pivot_single_step_tool_use_with_argument_comparison.yaml
-    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jkyi/current/nemo/data_gym/search_pivot/260331_search_pivot_updated.jsonl
-
-  - label: comp_coding
-    agent: code_gen_simple_agent
-    configs:
-      - resources_servers/code_gen/configs/code_gen.yaml
-    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/comp_coding/comp_coding_out.jsonl
-
-  - label: reasoning_gym
-    agent: reasoning_gym_simple_agent
-    configs:
-      - resources_servers/reasoning_gym/configs/reasoning_gym.yaml
-    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/reasoning_gym/reasoning_gym_out.jsonl
-
-  - label: calendar_v2
-    agent: calendar_simple_agent
-    configs:
-      - resources_servers/calendar/configs/calendar.yaml
-    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/calendar_v2/calendar_out.jsonl
-
-  - label: toolcall_schema
-    agent: toolcall_schema_single_step_tool_use_with_argument_comparison_agent
-    configs:
-      - resources_servers/single_step_tool_use_with_argument_comparison/configs/toolcall_schema_single_step_tool_use_with_argument_comparison.yaml
-    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/toolcall_schema_following/single-step-bfcl-30k-processed-balanced_depth-train.jsonl
-
-  - label: structured_outputs
-    agent: structured_outputs_simple_agent
-    configs:
-      - resources_servers/structured_outputs/configs/structured_outputs_json.yaml
-    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/structured_outputs/structured_outputs_out.jsonl
-
-  - label: comp_coding_nemotronx
-    agent: code_gen_simple_agent
-    configs:
-      - resources_servers/code_gen/configs/code_gen.yaml
-    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/comp_coding/nemotronx_code_out.jsonl
-
-  - label: terminal_pivot
-    agent: terminus_judge_string_only_simple_agent
-    configs:
-      - resources_servers/terminus_judge/configs/terminus_judge_string_only.yaml
-    data: /lustre/fsw/portfolios/llmservice/users/charlwang/cluster/tb/data/trainset/260327_ultra_pivot_aq2k_aq5k_t08_cap3_k02_k12_r16_stringonly_nemotron3_maxseq49152/train.jsonl
-
-  - label: workbench
-    agent: workplace_assistant_simple_agent
-    configs:
-      - resources_servers/workplace_assistant/configs/workplace_assistant.yaml
-    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/workbench/workplace_assistant_out.jsonl
-
-  - label: droid_pivot_v1
-    agent: droid_pivot_single_step_tool_use_with_argument_comparison_agent
-    configs:
-      - resources_servers/single_step_tool_use_with_argument_comparison/configs/droid_pivot_single_step_tool_use_with_argument_comparison.yaml
-    data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/ultra_v3_sets/260501_ultra_v3_set/droid_pivot_v1/droid_pivot_v1_260501_20k.jsonl
-
-  - label: equivalence_rule
-    agent: lc_equivalence_rule_simple_agent
-    configs:
-      - resources_servers/equivalence_rule/configs/lc.yaml
-    data: /lustre/fsw/portfolios/llmservice/users/fjia/rl/nano_v3/data/mrcr/processed_p67_sampled_10pct_shuf_rl_fmt.train.jsonl
-
-  - label: stem_mcqa_ultra_0
-    agent: mcqa_simple_agent
-    configs:
-      - resources_servers/mcqa/configs/mcqa.yaml
-    data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/ultra_v3_sets/260501_ultra_v3_set/stem_mcqa_ultra_0/stem_mcqa_ultra_0_260501.jsonl
-
-  - label: nvarc_inductive
-    agent: nvarc_inductive_simple_agent
-    configs:
-      - resources_servers/nvarc/configs/inductive.yaml
-    data: /lustre/fsw/portfolios/llmservice/users/jiaqiz/data/gym/nvarc/python_inductive/train.jsonl
-
-  - label: nvarc_transductive
-    agent: nvarc_transductive_simple_agent
-    configs:
-      - resources_servers/nvarc/configs/transductive.yaml
-    data: /lustre/fsw/portfolios/llmservice/users/jiaqiz/data/gym/nvarc/transductive/train.jsonl
-
-  - label: ether0
-    agent: ether0_simple_agent
-    configs:
-      - resources_servers/ether0/configs/ether0.yaml
-    data: /lustre/fsw/portfolios/llmservice/users/jiaqiz/data/gym/ether0/train_curriculum_10k.jsonl
+    owner: jkyi
 
   - label: tau_pivot_aq_mms
     agent: single_step_tool_use_with_argument_comparison_agent
     configs:
       - resources_servers/single_step_tool_use_with_argument_comparison/configs/single_step_tool_use_with_argument_comparison.yaml
     data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/tau2_afterquery/pivot_datasets/evaluator_rollouts_260507_1057_mixed_rewards_pivot.jsonl
+    owner: jkyi
+
+  - label: swe_pivot
+    agent: swe_pivot_single_step_tool_use_with_argument_comparison_agent
+    configs:
+      - resources_servers/single_step_tool_use_with_argument_comparison/configs/swe_pivot_single_step_tool_use_with_argument_comparison.yaml
+    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/swe_pivot/sugam_reasoning_minimax_128k_super_yian3_mixed_agent_ref_swe.jsonl
+    owner: sdevare
+
+  - label: search_pivot
+    agent: search_pivot_single_step_tool_use_with_argument_comparison_agent
+    configs:
+      - resources_servers/single_step_tool_use_with_argument_comparison/configs/search_pivot_single_step_tool_use_with_argument_comparison.yaml
+    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jkyi/current/nemo/data_gym/search_pivot/260331_search_pivot_updated.jsonl
+    owner: rgala
+
+  - label: droid_pivot_v1
+    agent: droid_pivot_single_step_tool_use_with_argument_comparison_agent
+    configs:
+      - resources_servers/single_step_tool_use_with_argument_comparison/configs/droid_pivot_single_step_tool_use_with_argument_comparison.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/ultra_v3_sets/260501_ultra_v3_set/droid_pivot_v1/droid_pivot_v1_260501_20k.jsonl
+    owner: jkyi, mengxiw
 
   - label: gdpval_pivot_v1
     agent: gdpval_single_step_tool_use_with_argument_comparison_agent
     configs:
       - /lustre/fsw/portfolios/llmservice/users/jkyi/research-scratch/260511_gdpval/data/pivot_datasets/gdpval_single_step_tool_use_with_argument_comparison.yaml
     data: /lustre/fsw/portfolios/llmservice/users/jkyi/research-scratch/260511_gdpval/data/pivot_datasets/afterquery_sft_GLM51_20260509_002133_pivot.jsonl
+    owner: venkats
+
+  - label: terminal_pivot
+    agent: terminus_judge_string_only_simple_agent
+    configs:
+      - resources_servers/terminus_judge/configs/terminus_judge_string_only.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/charlwang/cluster/tb/data/trainset/260327_ultra_pivot_aq2k_aq5k_t08_cap3_k02_k12_r16_stringonly_nemotron3_maxseq49152/train.jsonl
+    owner: charlwang, kbhardwaj
+
+  - label: workbench
+    agent: workplace_assistant_simple_agent
+    configs:
+      - resources_servers/workplace_assistant/configs/workplace_assistant.yaml
+    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/workbench/workplace_assistant_out.jsonl
+    owner: abhibhag
+
+  - label: calendar_v2
+    agent: calendar_simple_agent
+    configs:
+      - resources_servers/calendar/configs/calendar.yaml
+    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/calendar_v2/calendar_out.jsonl
+    owner: ???
+
+
+  # ==========================================================================
+  # Reasoning (7)
+  # ==========================================================================
+  - label: comp_coding
+    agent: code_gen_simple_agent
+    configs:
+      - resources_servers/code_gen/configs/code_gen.yaml
+    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/comp_coding/comp_coding_out.jsonl
+    owner: ???
+
+  - label: comp_coding_nemotronx
+    agent: code_gen_simple_agent
+    configs:
+      - resources_servers/code_gen/configs/code_gen.yaml
+    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/comp_coding/nemotronx_code_out.jsonl
+    owner: ???
+
+  - label: stem_mcqa_ultra_0
+    agent: mcqa_simple_agent
+    configs:
+      - resources_servers/mcqa/configs/mcqa.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/ultra_v3_sets/260501_ultra_v3_set/stem_mcqa_ultra_0/stem_mcqa_ultra_0_260501.jsonl
+    owner: ???
+
+  - label: reasoning_gym
+    agent: reasoning_gym_simple_agent
+    configs:
+      - resources_servers/reasoning_gym/configs/reasoning_gym.yaml
+    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/reasoning_gym/reasoning_gym_out.jsonl
+    owner: ???
+
+  - label: nvarc_inductive
+    agent: nvarc_inductive_simple_agent
+    configs:
+      - resources_servers/nvarc/configs/inductive.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/jiaqiz/data/gym/nvarc/python_inductive/train.jsonl
+    owner: ???
+
+  - label: nvarc_transductive
+    agent: nvarc_transductive_simple_agent
+    configs:
+      - resources_servers/nvarc/configs/transductive.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/jiaqiz/data/gym/nvarc/transductive/train.jsonl
+    owner: ???
+
+  - label: ether0
+    agent: ether0_simple_agent
+    configs:
+      - resources_servers/ether0/configs/ether0.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/jiaqiz/data/gym/ether0/train_curriculum_10k.jsonl
+    owner: ???
+
+
+  # ==========================================================================
+  # Long context (1)
+  # ==========================================================================
+  - label: equivalence_rule
+    agent: lc_equivalence_rule_simple_agent
+    configs:
+      - resources_servers/equivalence_rule/configs/lc.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/fjia/rl/nano_v3/data/mrcr/processed_p67_sampled_10pct_shuf_rl_fmt.train.jsonl
+    owner: fjia
+
+
+  # ==========================================================================
+  # Usability / format adherence (9)
+  # ==========================================================================
+  - label: instruction_following
+    agent: instruction_following_simple_agent
+    configs:
+      - resources_servers/instruction_following/configs/instruction_following.yaml
+    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/instruction_following/instruction_following_out.jsonl
+    owner: ???
+
+  - label: toolcall_schema
+    agent: toolcall_schema_single_step_tool_use_with_argument_comparison_agent
+    configs:
+      - resources_servers/single_step_tool_use_with_argument_comparison/configs/toolcall_schema_single_step_tool_use_with_argument_comparison.yaml
+    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/toolcall_schema_following/single-step-bfcl-30k-processed-balanced_depth-train.jsonl
+    owner: jkyi
+
+  - label: structured_outputs
+    agent: structured_outputs_simple_agent
+    configs:
+      - resources_servers/structured_outputs/configs/structured_outputs_json.yaml
+    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/structured_outputs/structured_outputs_out.jsonl
+    owner: jkyi
 
   - label: structured_outputs_v2
     agent: structured_outputs_simple_agent
     configs:
       - resources_servers/structured_outputs/configs/structured_outputs_json_yaml_xml_v1.yaml
     data: /lustre/fsw/portfolios/llmservice/users/jiaqiz/data/gym/structured_output_v2/train.jsonl
-
-  - label: ds1_augmented
-    agent: structured_outputs_v3_simple_agent
-    configs:
-      - resources_servers/structured_outputs/configs/structured_outputs_v3.yaml
-    data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/structured_outputs_v3/ds1_augmented_train.jsonl
-
-  - label: ds1_basic
-    agent: structured_outputs_v3_simple_agent
-    configs:
-      - resources_servers/structured_outputs/configs/structured_outputs_v3.yaml
-    data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/structured_outputs_v3/ds1_basic_train.jsonl
-
-  - label: ds2_freeform
-    agent: freeform_formatting_simple_agent
-    configs:
-      - resources_servers/format_verification/configs/freeform_formatting.yaml
-    data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/structured_outputs_v3/ds2_freeform_train.jsonl
-
-  - label: ds3_citation
-    agent: citation_format_simple_agent
-    configs:
-      - resources_servers/format_verification/configs/citation_format.yaml
-    data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/structured_outputs_v3/ds3_citation_train.jsonl
+    owner: jkyi
 
   - label: structured_outputs_v4
     agent: structured_outputs_v4_simple_agent
     configs:
       - resources_servers/structured_outputs/configs/structured_outputs_v4.yaml
     data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/structured_outputs_v4/structured_outputs_v4_tool_call.jsonl
+    owner: jkyi
 
+  - label: ds1_augmented
+    agent: structured_outputs_v3_simple_agent
+    configs:
+      - resources_servers/structured_outputs/configs/structured_outputs_v3.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/structured_outputs_v3/ds1_augmented_train.jsonl
+    owner: jkyi
+
+  - label: ds1_basic
+    agent: structured_outputs_v3_simple_agent
+    configs:
+      - resources_servers/structured_outputs/configs/structured_outputs_v3.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/structured_outputs_v3/ds1_basic_train.jsonl
+    owner: jkyi
+
+  - label: ds2_freeform
+    agent: freeform_formatting_simple_agent
+    configs:
+      - resources_servers/format_verification/configs/freeform_formatting.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/structured_outputs_v3/ds2_freeform_train.jsonl
+    owner: jkyi
+
+  - label: ds3_citation
+    agent: citation_format_simple_agent
+    configs:
+      - resources_servers/format_verification/configs/citation_format.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/structured_outputs_v3/ds3_citation_train.jsonl
+    owner: jkyi
+
+
+  # ==========================================================================
+  # Other (0)
+  #   Uncategorised. Put new entries here until they have an obvious home.
+  # ==========================================================================
+
+  # ==========================================================================
+  # Security (0)
+  #   Safety, jailbreak, and over-refusal environments. All currently need an LLM judge
+  #   (e.g. Nemotron-Content-Safety-Reasoning-4B), so they live in the judge lane until
+  #   judge hosting is settled.
+  # ==========================================================================
