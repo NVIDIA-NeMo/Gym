@@ -23,6 +23,7 @@ import types
 import urllib.request
 from contextlib import asynccontextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import aiohttp
@@ -791,6 +792,17 @@ class TestRolloutCorrelationCheck:
         server.check_rollout_correlation()
 
         assert "no session id will reach Switchyard" not in caplog.text
+
+    def test_shipped_config_does_not_restate_the_forwarding_default(self) -> None:
+        """The yaml restating forward_session_id would make every run look like an explicit
+        request for it, turning the intended startup warning into a refusal for any eval that
+        runs without observability. Found live; pinned here."""
+        import yaml
+
+        config_path = Path(__file__).parents[1] / "configs" / "switchyard_model.yaml"
+        block = yaml.safe_load(config_path.read_text())["policy_model"]["responses_api_models"]["switchyard_model"]
+
+        assert "forward_session_id" not in block
 
 
 @pytest.mark.skipif(

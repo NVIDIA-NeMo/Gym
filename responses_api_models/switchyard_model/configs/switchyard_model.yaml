@@ -43,7 +43,10 @@ policy_model:
       # on that name.
       session_id_headers:
         - x-switchyard-session-id
-      forward_session_id: true
+      # forward_session_id defaults to true, and the id only exists when observability or token
+      # capture is on -- without one the server warns and sends nothing. Deliberately NOT set
+      # here: an explicitly set true is a promise, and the server refuses to start when it
+      # cannot keep it.
 
       # Directory for this run's routing-condition record: a provenance manifest at startup
       # (route, deployment hash + archived contents, nemo-switchyard version) and a /v1/stats
