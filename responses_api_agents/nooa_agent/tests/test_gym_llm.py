@@ -23,6 +23,7 @@ from pydantic import BaseModel
 
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCallForTraining,
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
@@ -83,6 +84,7 @@ def make_llm(
     *,
     max_steps: int = 2,
     observation_gaps: list[ObservationGap] | None = None,
+    request_collector: list[NeMoGymResponseCreateParamsNonStreaming] | None = None,
 ) -> tuple[GymResponsesLLM, MagicMock, list[NeMoGymResponse]]:
     server_client = MagicMock()
     server_client.post = AsyncMock(return_value=FakeHTTPResponse(payload))
@@ -92,6 +94,7 @@ def make_llm(
         model_server_name="policy_model",
         model_url_path="/ng-rollout/rollout-1/v1/responses",
         max_steps=max_steps,
+        request_collector=request_collector if request_collector is not None else [],
         response_collector=collected,
         cookies={},
         observation_gaps=observation_gaps,
@@ -109,7 +112,8 @@ async def test_routes_messages_tools_and_sampling_to_gym() -> None:
         generation_log_probs=[-0.2],
         routed_experts=[[[0, 1]]],
     )
-    llm, client, collected = make_llm(model_response(output))
+    requests: list[NeMoGymResponseCreateParamsNonStreaming] = []
+    llm, client, collected = make_llm(model_response(output), request_collector=requests)
 
     result = await llm.acall(
         [{"role": "system", "content": "Be concise."}, {"role": "user", "content": "Weather?"}],
@@ -125,6 +129,8 @@ async def test_routes_messages_tools_and_sampling_to_gym() -> None:
     assert request["json"].temperature == 0.3
     assert request["json"].max_output_tokens == 128
     assert request["json"].tools[0]["name"] == "weather"
+    assert requests == [request["json"]]
+    assert requests[0] is not request["json"]
     assert result.content == "Cold"
     assert collected[0].output[0].prompt_token_ids == [1, 2]
     assert collected[0].output[0].routed_experts == [[[0, 1]]]

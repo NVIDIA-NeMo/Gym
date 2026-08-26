@@ -110,6 +110,7 @@ def runner_result(run_request: object) -> NOOARunResult:
     return NOOARunResult(
         return_value="The weather is cold.",
         agent=MagicMock(),
+        model_requests=[],
         model_responses=[],
         tool_executions=[],
         model_cookies=run_request.model_cookies,

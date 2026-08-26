@@ -20,7 +20,7 @@ from typing import Any, Protocol
 
 from nooa import Agent
 
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import ObservationGap
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig, validate_invocation
@@ -48,6 +48,7 @@ class NOOARunRequest:
 class NOOARunResult:
     return_value: Any
     agent: Agent
+    model_requests: list[NeMoGymResponseCreateParamsNonStreaming]
     model_responses: list[NeMoGymResponse]
     tool_executions: list[GymToolExecution]
     model_cookies: dict[str, str]
@@ -83,6 +84,7 @@ class EmbeddedNOOARunner:
         self._agent_class, _ = validate_invocation(invocation)
 
     async def run(self, request: NOOARunRequest) -> NOOARunResult:
+        model_requests: list[NeMoGymResponseCreateParamsNonStreaming] = []
         responses: list[NeMoGymResponse] = []
         executions: list[GymToolExecution] = []
         timeline: list[TraceEvent] = []
@@ -93,6 +95,7 @@ class EmbeddedNOOARunner:
             model_server_name=self._model_server_name,
             model_url_path=request.model_url_path,
             max_steps=self._max_steps,
+            request_collector=model_requests,
             response_collector=responses,
             cookies=request.model_cookies,
             timeline=timeline,
@@ -131,6 +134,7 @@ class EmbeddedNOOARunner:
         return NOOARunResult(
             return_value=return_value,
             agent=agent,
+            model_requests=model_requests,
             model_responses=responses,
             tool_executions=executions,
             model_cookies=request.model_cookies,
