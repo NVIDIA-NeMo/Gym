@@ -48,6 +48,7 @@ from nemo_gym.rollout_observability import (
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_agents.hermes_agent.observability import build_hermes_observations
 from responses_api_agents.hermes_agent.setup_hermes import ensure_hermes
+from responses_api_agents.hermes_agent.trajectory import project_hermes_response_messages
 
 
 LOG = logging.getLogger(__name__)
@@ -104,7 +105,7 @@ def _result_to_response(
     model_name: str,
     n_input: int,
 ) -> NeMoGymResponse:
-    messages = result.get("messages") or []
+    messages = project_hermes_response_messages(result.get("messages") or [])
     output_items = _RESPONSES_CONVERTER.chat_completions_messages_to_responses_items(messages[n_input:])
 
     return NeMoGymResponse(
