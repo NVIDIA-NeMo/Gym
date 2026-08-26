@@ -66,6 +66,27 @@ config_overlay:
           type: responses_api_models
           name: math_judge_model
 
+  # The shipped ns_tools.yaml registers only math_with_judge. Our rows carry per-row verifier_type
+  # of mcqa and equivalence_llm_judge, and an unregistered name is a hard failure --
+  # "ValueError: Unknown verifier: mcqa" surfaces to the driver as a bare 500 from the agent.
+  # Registering all three is what lets the three ns_tools entries share one agent.
+  ns_tools:
+    resources_servers:
+      ns_tools:
+        verifiers:
+          math_with_judge:
+            type: resources_servers
+            name: math_with_judge
+          mcqa:
+            type: resources_servers
+            name: mcqa
+          equivalence_llm_judge:
+            type: resources_servers
+            name: equivalence_llm_judge
+        # Carried over from the pre-sweep configs, which note it improves stability: after a
+        # sandbox worker restarts, replaying the session is what tends to wedge the tool call.
+        disable_session_restore: true
+
 entries:
 
   - label: math_tir

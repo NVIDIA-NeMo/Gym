@@ -92,6 +92,12 @@ config_overlay:
         judge_model_server:
           type: responses_api_models
           name: nl2bash_judge_model
+        judge_responses_create_params:
+          # Upstream caps this at 64. That was fine for a judge that emits a bare verdict, but
+          # qwen-235b is a reasoning model and 64 tokens truncates it mid-thought, so the verdict
+          # never arrives. The pre-sweep configs raised it to 8192 for exactly this reason; every
+          # other judge env here already ships 8192 or no cap. abstention is the lone holdout.
+          max_output_tokens: 8192
 
   inverse_if:
     resources_servers:
