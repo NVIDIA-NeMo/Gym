@@ -98,8 +98,8 @@ class VibenchResourcesServerConfig(BaseResourcesServerConfig):
     # Wall-clock ceiling for one test plan, shared across its seed and evaluate phases --
     # not per phase, or a slow-but-successful seed would still hand evaluate a full window.
     evaluation_timeout_s: int = 5400
-    # Grace period for a timed-out grading script to tear its compose project down.
-    cleanup_grace_s: float = 60.0
+    # Window a timed-out grading script gets to run `docker-compose down` after SIGINT.
+    cleanup_grace_s: float = 120.0
     # ViBench grading is compose-heavy (postgres + app + playwright per test plan). Cap how
     # many run at once *within one rollout*; Gym's own concurrency multiplies on top of this.
     max_concurrent_test_plans: int = 2
@@ -362,18 +362,26 @@ class VibenchResourcesServer(SimpleResourcesServer):
         return code, self._redact((stdout or b"").decode(errors="replace"), env)
 
     async def _terminate_group(self, proc: Any) -> None:
-        """SIGTERM the process group, then SIGKILL what is left."""
-        with suppress(ProcessLookupError, PermissionError, OSError):
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        with suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(proc.wait(), timeout=self.config.cleanup_grace_s)
-            return
-        with suppress(ProcessLookupError, PermissionError, OSError):
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        # Bounded: an unkillable process (uninterruptible I/O) must not hang the rollout
-        # after we have already given up on it.
-        with suppress(Exception):
-            await asyncio.wait_for(proc.wait(), timeout=self.config.cleanup_grace_s)
+        """Escalate SIGINT -> SIGTERM -> SIGKILL across the process group.
+
+        SIGINT first, and this ordering is load-bearing. ViBench's grading scripts tear their
+        compose project down in a ``finally`` block, and CPython does not unwind ``finally``
+        on default SIGTERM -- it dies immediately, leaving postgres, the app, Playwright and
+        the network running. SIGINT raises KeyboardInterrupt, which *does* unwind, so the
+        script gets to run ``docker-compose down``. A forced-timeout run leaked two
+        containers and a network on SIGTERM and cleaned up fully on SIGINT.
+
+        SIGTERM and SIGKILL remain as escalation for anything that ignores the interrupt.
+        """
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGKILL):
+            with suppress(ProcessLookupError, PermissionError, OSError):
+                os.killpg(os.getpgid(proc.pid), sig)
+            # SIGINT needs a real window: cleanup shells out to docker-compose down.
+            grace = self.config.cleanup_grace_s if sig is signal.SIGINT else self.config.cleanup_grace_s / 2
+            with suppress(asyncio.TimeoutError, Exception):
+                await asyncio.wait_for(proc.wait(), timeout=grace)
+                if proc.returncode is not None:
+                    return
 
     async def _grade_one_test_plan(
         self,

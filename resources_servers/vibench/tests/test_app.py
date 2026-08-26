@@ -374,15 +374,19 @@ class TestRunVibenchScript:
         assert code == 1
         assert "timed out" in log
         # SIGTERM first so cleanup can run, SIGKILL only for what ignores it.
-        assert signals == [signal.SIGTERM, signal.SIGKILL]
+        # SIGINT first: ViBench cleans up in a finally, which SIGTERM does not unwind.
+        assert signals == [signal.SIGINT, signal.SIGTERM, signal.SIGKILL]
 
     @pytest.mark.asyncio
-    async def test_a_process_that_exits_on_sigterm_is_not_killed(self, tmp_path, monkeypatch):
+    async def test_a_process_that_exits_on_sigint_is_not_escalated(self, tmp_path, monkeypatch):
         server = make_server(tmp_path, cleanup_grace_s=5)
         monkeypatch.setattr(server, "_grader_env", _const_env({}))
         signals: list[int] = []
 
         class _Polite:
+            """Exits on the first signal, as a real process does: wait() returning means
+            the process is gone, so returncode is set."""
+
             returncode = None
             pid = 99
 
@@ -390,7 +394,8 @@ class TestRunVibenchScript:
                 raise asyncio.TimeoutError()
 
             async def wait(self):
-                return None
+                self.returncode = -signal.SIGINT
+                return self.returncode
 
         async def fake_exec(*a, **k):
             return _Polite()
@@ -401,7 +406,7 @@ class TestRunVibenchScript:
 
         await server._run_vibench_script(["/bin/sleep", "99"], timeout_s=0.05)
 
-        assert signals == [signal.SIGTERM]
+        assert signals == [signal.SIGINT]
 
 
 class TestPlanFailureIsolation:
