@@ -105,8 +105,9 @@ def _result_to_response(
     model_name: str,
     n_input: int,
 ) -> NeMoGymResponse:
-    messages = project_hermes_response_messages(result.get("messages") or [])
-    output_items = _RESPONSES_CONVERTER.chat_completions_messages_to_responses_items(messages[n_input:])
+    output_messages = (result.get("messages") or [])[n_input:]
+    messages = project_hermes_response_messages(output_messages)
+    output_items = _RESPONSES_CONVERTER.chat_completions_messages_to_responses_items(messages)
 
     return NeMoGymResponse(
         id=f"resp_{uuid4().hex}",

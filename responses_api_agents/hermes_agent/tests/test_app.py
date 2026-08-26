@@ -34,6 +34,7 @@ from responses_api_agents.hermes_agent.app import (
     HermesAgentRunRequest,
     ModelServerRef,
     ResourcesServerRef,
+    _result_to_response,
     _split_chat_messages,
 )
 from responses_api_agents.hermes_agent.observability import build_hermes_observations
@@ -369,6 +370,47 @@ class TestResponsesConversion:
         assert seen["user_message"] == "where am I?"
         assert [message["role"] for message in seen["history"]] == ["user", "assistant", "tool"]
         assert seen["history"][1]["tool_calls"][0]["function"]["name"] == "terminal"
+        assert [item.type for item in response.output] == ["function_call", "function_call_output", "message"]
+        assert response.output[0].name == "terminal"
+        assert response.output[1].output == "/workspace"
+        assert response.output[2].content[0].text == "done"
+
+    def test_slices_input_prefix_before_projecting_internal_dispatch_messages(self) -> None:
+        body = NeMoGymResponseCreateParamsNonStreaming(input="continue")
+        result = {
+            "messages": [
+                {"role": "user", "content": "earlier"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "describe-1",
+                            "type": "function",
+                            "function": {"name": "tool_describe", "arguments": '{"name":"terminal"}'},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "describe-1", "content": "description"},
+                {"role": "user", "content": "continue"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "terminal-1",
+                            "type": "function",
+                            "function": {"name": "terminal", "arguments": '{"cmd":"pwd"}'},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "terminal-1", "content": "/workspace"},
+                {"role": "assistant", "content": "done"},
+            ]
+        }
+
+        response = _result_to_response(body, result, model_name="model", n_input=4)
+
         assert [item.type for item in response.output] == ["function_call", "function_call_output", "message"]
         assert response.output[0].name == "terminal"
         assert response.output[1].output == "/workspace"
