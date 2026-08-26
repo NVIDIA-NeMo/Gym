@@ -44,6 +44,7 @@ from nemo_gym.global_config import SKILLS_REF_KEY_NAME
 from nemo_gym.mcp import (
     AgentExecutionResult,
     RolloutMCPServer,
+    build_mcp_verify_payload,
     parse_rollout_mcp_server,
     resources_server_base_url,
 )
@@ -644,10 +645,12 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 total_tokens=input_tokens + output_tokens,
             ),
         )
-        provenance = {
-            call_id: MCPToolCallProvenance.model_validate(identity)
-            for call_id, identity in usage[NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY].items()
-        }
+        raw_provenance = usage.get(NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY)
+        provenance = (
+            {call_id: MCPToolCallProvenance.model_validate(identity) for call_id, identity in raw_provenance.items()}
+            if raw_provenance is not None
+            else None
+        )
         return AgentExecutionResult(response=response, mcp_tool_call_provenance=provenance)
 
     async def responses(
@@ -692,20 +695,12 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 rollout_id=rollout_id,
             )
             agent_resp = execution.response
-            mcp_tool_call_provenance = execution.mcp_tool_call_provenance or {}
             agent_resp_json = agent_resp.model_dump(mode="json")
 
             verify_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/verify",
-                json=body.model_dump()
-                | {
-                    "response": agent_resp_json,
-                    NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY: {
-                        call_id: identity.model_dump(mode="json")
-                        for call_id, identity in mcp_tool_call_provenance.items()
-                    },
-                },
+                json=build_mcp_verify_payload(body, agent_resp, execution.mcp_tool_call_provenance),
                 cookies=cookies,
             )
             await raise_for_status(verify_resp)

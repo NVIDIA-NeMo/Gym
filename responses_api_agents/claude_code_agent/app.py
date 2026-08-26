@@ -32,7 +32,6 @@ from fastapi import Request
 from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.base_resources_server import (
-    NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY,
     BaseRunRequest,
     BaseVerifyResponse,
     MCPToolCallProvenance,
@@ -44,6 +43,7 @@ from nemo_gym.mcp import (
     AgentExecutionResult,
     RolloutMCPServer,
     build_mcp_tool_aliases,
+    build_mcp_verify_payload,
     parse_rollout_mcp_server,
     provenance_from_response_aliases,
     resources_server_base_url,
@@ -772,11 +772,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                     observations = None
                 agent_resp_json = agent_resp.model_dump(mode="json")
 
-            verify_body = body.model_dump() | {"response": agent_resp_json}
-            if mcp_tool_call_provenance is not None:
-                verify_body[NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY] = {
-                    call_id: identity.model_dump(mode="json") for call_id, identity in mcp_tool_call_provenance.items()
-                }
+            verify_body = build_mcp_verify_payload(body, agent_resp, mcp_tool_call_provenance)
             verify_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/verify",

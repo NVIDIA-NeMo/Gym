@@ -12,6 +12,7 @@ from typing import Any, Optional
 
 from nemo_gym.base_resources_server import (
     NEMO_GYM_MCP_METADATA_KEY,
+    NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY,
     MCPToolCallProvenance,
 )
 from nemo_gym.global_config import get_first_server_config_dict
@@ -56,7 +57,9 @@ def parse_rollout_mcp_server(
 
     metadata = seed_response_json[NEMO_GYM_MCP_METADATA_KEY]
     if not isinstance(metadata, Mapping):
-        raise ValueError("MCP seed metadata must be an object")
+        if logger is not None:
+            logger.warning("Ignoring non-object MCP seed metadata")
+        return None
 
     raw_server_name = metadata.get("server_name")
     server_name = resources_server_name if raw_server_name is None else raw_server_name
@@ -64,12 +67,12 @@ def parse_rollout_mcp_server(
         raise ValueError("MCP seed metadata server_name must be a non-empty string")
 
     raw_url_path = metadata.get("url_path")
-    url_path = "/mcp" if raw_url_path is None else raw_url_path
+    url_path = "/mcp" if raw_url_path is None or raw_url_path == "" else raw_url_path
     if not isinstance(url_path, str):
         raise ValueError("MCP seed metadata url_path must be a string")
 
     raw_transport = metadata.get("transport")
-    transport = "http" if raw_transport is None else raw_transport
+    transport = "http" if raw_transport is None or raw_transport == "" else raw_transport
     if not isinstance(transport, str):
         raise ValueError("MCP seed metadata transport must be a string")
     transport = transport.replace("_", "-")
@@ -97,7 +100,9 @@ def parse_rollout_mcp_server(
     elif not isinstance(raw_tool_names, list):
         raise ValueError("MCP seed metadata tool_names must be an array")
     else:
-        tool_names = tuple(name for name in raw_tool_names if isinstance(name, str) and name)
+        if not all(isinstance(name, str) and name for name in raw_tool_names):
+            raise ValueError("MCP seed metadata tool_names must contain non-empty strings")
+        tool_names = tuple(raw_tool_names)
 
     base_url = resources_server_base_url() if callable(resources_server_base_url) else resources_server_base_url
     return RolloutMCPServer(
@@ -129,14 +134,17 @@ def build_mcp_tool_aliases(
             ambiguous_aliases.add(alias)
         elif alias not in ambiguous_aliases:
             aliases[alias] = identity
-    return aliases
+    return aliases or None
 
 
 def provenance_from_response_aliases(
     response: NeMoGymResponse,
     aliases: Mapping[str, MCPToolCallProvenance],
-) -> dict[str, MCPToolCallProvenance]:
+) -> Optional[dict[str, MCPToolCallProvenance]]:
     """Join emitted Responses function calls to canonical identities by wire name."""
+    if not aliases:
+        return None
+
     provenance: dict[str, MCPToolCallProvenance] = {}
     for item in response.output:
         if getattr(item, "type", None) != "function_call":
@@ -148,4 +156,22 @@ def provenance_from_response_aliases(
         identity = aliases.get(name)
         if identity is not None:
             provenance[call_id] = identity
+        elif name.startswith("mcp__"):
+            return None
     return provenance
+
+
+def build_mcp_verify_payload(
+    body: Any,
+    response: NeMoGymResponse,
+    provenance: Optional[Mapping[str, MCPToolCallProvenance]],
+) -> dict[str, Any]:
+    """Build a verify payload without accepting caller-supplied provenance."""
+    payload = body.model_dump()
+    payload.pop(NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY, None)
+    payload["response"] = response.model_dump(mode="json")
+    if provenance is not None:
+        payload[NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY] = {
+            call_id: identity.model_dump(mode="json") for call_id, identity in provenance.items()
+        }
+    return payload
