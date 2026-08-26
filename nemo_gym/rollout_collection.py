@@ -585,11 +585,11 @@ class RolloutCollectionHelper(BaseModel):
         def _load_batch(batch: List[Tuple[int, str]]):
             return [(row_idx, row_str, orjson.loads(row_str)) for row_idx, row_str in batch]
 
-        start_time = time()
         refs = [_load_batch.remote(batch) for batch in batched(lines_range_iter, 10_000)]
-        res = [row for batch in tqdm(ray.get(refs), desc="Loading JSON batches", total=len(refs)) for row in batch]
-        print(f"Loading {len(res)} JSON rows took {time() - start_time:.2f}s!")
-        return res
+        rows = []
+        for batch_result in tqdm(ray.util.as_completed(refs), desc="Loading JSON batches", total=len(refs)):
+            rows.extend(batch_result)
+        return rows
 
     def _preprocess_rows_from_config(self, config: RolloutCollectionConfig) -> List[Dict]:
         range_iterator = repeat(0)
