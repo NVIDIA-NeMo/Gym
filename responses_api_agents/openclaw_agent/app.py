@@ -75,7 +75,6 @@ from responses_api_agents.openclaw_agent.setup_openclaw import ensure_openclaw
 
 LOG = logging.getLogger(__name__)
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
-_INTERNAL_MCP_PROVENANCE_KEY = "_ng_mcp_tool_call_provenance"
 
 
 def _decode_last_json_dict_suffix(raw: str) -> Optional[dict[str, Any]]:
@@ -447,7 +446,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         base: dict[str, Any],
         rollout_id: Optional[str] = None,
         *,
-        mcp_servers: Optional[dict[str, Any]] = None,
+        openclaw_mcp_servers: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         cfg = copy.deepcopy(base)
         self._deep_merge(cfg, copy.deepcopy(self.config.openclaw_config))
@@ -473,14 +472,14 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                     "models": [model_entry],
                 }
             )
-        if mcp_servers:
+        if openclaw_mcp_servers:
             mcp = cfg.setdefault("mcp", {})
             if not isinstance(mcp, dict):
                 raise ValueError("OpenClaw config field mcp must be an object")
             servers = mcp.setdefault("servers", {})
             if not isinstance(servers, dict):
                 raise ValueError("OpenClaw config field mcp.servers must be an object")
-            servers.update(copy.deepcopy(mcp_servers))
+            servers.update(copy.deepcopy(openclaw_mcp_servers))
         self._merge_headless_tool_denies(cfg)
         return cfg
 
@@ -499,7 +498,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         )
         return self.server_client._build_server_base_url(cfg)
 
-    def _rollout_mcp_servers(self, seed_response_json: dict[str, Any]) -> Optional[dict[str, Any]]:
+    def _openclaw_mcp_servers_from_seed(self, seed_response_json: dict[str, Any]) -> Optional[dict[str, Any]]:
         """Translate rollout-specific Gym MCP metadata into OpenClaw config."""
         if NEMO_GYM_MCP_METADATA_KEY not in seed_response_json:
             return None
@@ -526,34 +525,28 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         if openclaw_transport is None:
             raise ValueError("MCP seed metadata transport is not supported by OpenClaw")
 
-        entry: dict[str, Any] = {
+        server_config: dict[str, Any] = {
             "url": f"{self._resources_server_base_url().rstrip('/')}/{url_path.lstrip('/')}",
             "transport": openclaw_transport,
         }
         headers = metadata.get("headers")
-        if headers is None:
+        if headers is not None and not isinstance(headers, dict):
+            raise ValueError("MCP seed metadata headers must be an object")
+        normalized_headers: dict[str, str] = {}
+        if isinstance(headers, dict):
+            for key, value in headers.items():
+                if not isinstance(key, str) or not isinstance(value, (str, int, float, bool)):
+                    raise ValueError("MCP seed metadata headers must contain scalar values")
+                normalized_headers[key] = str(value)
+        if normalized_headers:
+            server_config["headers"] = normalized_headers
+        else:
             LOG.warning(
                 "MCP seed metadata for %r has no headers; the tool endpoint will be called without a "
                 "session token and will reject the calls.",
                 server_name,
             )
-        elif not isinstance(headers, dict):
-            raise ValueError("MCP seed metadata headers must be an object")
-        else:
-            normalized_headers: dict[str, str] = {}
-            for key, value in headers.items():
-                if not isinstance(key, str) or not isinstance(value, (str, int, float, bool)):
-                    raise ValueError("MCP seed metadata headers must contain scalar values")
-                normalized_headers[key] = str(value)
-            if normalized_headers:
-                entry["headers"] = normalized_headers
-            else:
-                LOG.warning(
-                    "MCP seed metadata for %r has no headers; the tool endpoint will be called without a "
-                    "session token and will reject the calls.",
-                    server_name,
-                )
-        return {server_name: entry}
+        return {server_name: server_config}
 
     def _workspace_root(self) -> Path:
         root = Path(self.config.workspace_root).expanduser() / f"openclaw_{uuid4().hex[:8]}"
@@ -607,10 +600,9 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         observation_collector: Optional[
             Callable[[str, list[dict[str, Any]], OpenClawSessionTree, list[ObservationGap]], None]
         ] = None,
-        provenance_collector: Optional[Callable[[dict[str, dict[str, str]]], None]] = None,
-        mcp_servers: Optional[dict[str, Any]] = None,
-    ) -> tuple[list[Any], dict[str, int], str]:
-        """setup and run agent. returns (output_items, usage, model_name)."""
+        openclaw_mcp_servers: Optional[dict[str, Any]] = None,
+    ) -> tuple[list[Any], dict[str, int], str, dict[str, dict[str, str]]]:
+        """Set up and run OpenClaw, returning output, usage, model, and MCP provenance."""
         prompt = instruction if not system_prompt else f"{system_prompt}\n\n{instruction}"
         work_dir = self._workspace_root()
         home = work_dir / ".openclaw-home"
@@ -633,7 +625,11 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             base_cfg = json.loads(config_path.read_text())
             config_path.write_text(
                 json.dumps(
-                    self._build_openclaw_config(base_cfg, rollout_id, mcp_servers=mcp_servers),
+                    self._build_openclaw_config(
+                        base_cfg,
+                        rollout_id,
+                        openclaw_mcp_servers=openclaw_mcp_servers,
+                    ),
                     indent=2,
                 )
                 + "\n"
@@ -687,11 +683,9 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                         observation_collector(native_session_id, session_events, session_tree, tree_gaps)
                     except Exception:
                         LOG.exception("failed to record OpenClaw session artifact")
-            if provenance_collector is not None:
-                provenance_collector(mcp_tool_call_provenance)
             if not output_items:
                 output_items = fallback_items
-            return output_items, usage, self.config.model
+            return output_items, usage, self.config.model, mcp_tool_call_provenance
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
 
@@ -703,9 +697,8 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             Callable[[str, list[dict[str, Any]], OpenClawSessionTree, list[ObservationGap]], None]
         ] = None,
         output_collector: Optional[Callable[[list[Any]], None]] = None,
-        provenance_collector: Optional[Callable[[dict[str, dict[str, str]]], None]] = None,
-        mcp_servers: Optional[dict[str, Any]] = None,
-    ) -> NeMoGymResponse:
+        openclaw_mcp_servers: Optional[dict[str, Any]] = None,
+    ) -> tuple[NeMoGymResponse, dict[str, dict[str, str]]]:
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
@@ -715,17 +708,17 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         system_prompt = "\n\n".join(system_parts) if system_parts else None
 
         try:
-            output_items, usage, model_name = await self._run_openclaw(
+            output_items, usage, model_name, mcp_tool_call_provenance = await self._run_openclaw(
                 user_message,
                 system_prompt,
                 rollout_id=rollout_id,
                 observation_collector=observation_collector,
-                provenance_collector=provenance_collector,
-                mcp_servers=mcp_servers,
+                openclaw_mcp_servers=openclaw_mcp_servers,
             )
         except TimeoutError:
             LOG.warning("OpenClaw timed out, padding empty output so the rollout scores instead of erroring")
             output_items, usage, model_name = [], {"input_tokens": 0, "output_tokens": 0}, self.config.model
+            mcp_tool_call_provenance = {}
 
         if output_collector is not None:
             output_collector(list(output_items))
@@ -745,22 +738,25 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         output_tokens = usage.get("output_tokens", 0)
         cached_tokens = usage.get("cached_tokens", 0)
 
-        return NeMoGymResponse(
-            id=f"resp_{uuid4().hex}",
-            created_at=int(time()),
-            model=model_name,
-            object="response",
-            output=output_items,
-            tool_choice=body.tool_choice,
-            tools=body.tools,
-            parallel_tool_calls=body.parallel_tool_calls,
-            usage=NeMoGymResponseUsage(
-                input_tokens=input_tokens,
-                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=cached_tokens),
-                output_tokens=output_tokens,
-                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
-                total_tokens=input_tokens + output_tokens,
+        return (
+            NeMoGymResponse(
+                id=f"resp_{uuid4().hex}",
+                created_at=int(time()),
+                model=model_name,
+                object="response",
+                output=output_items,
+                tool_choice=body.tool_choice,
+                tools=body.tools,
+                parallel_tool_calls=body.parallel_tool_calls,
+                usage=NeMoGymResponseUsage(
+                    input_tokens=input_tokens,
+                    input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=cached_tokens),
+                    output_tokens=output_tokens,
+                    output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+                    total_tokens=input_tokens + output_tokens,
+                ),
             ),
+            mcp_tool_call_provenance,
         )
 
     async def responses(
@@ -771,22 +767,15 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         path_params = getattr(request, "path_params", None)
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
         if not isinstance(rollout_id, str):
-            return await self._create_response(body)
-        mcp_tool_call_provenance: dict[str, dict[str, str]] = {}
+            response, _ = await self._create_response(body)
+            return response
 
-        def collect_provenance(value: dict[str, dict[str, str]]) -> None:
-            mcp_tool_call_provenance.update(value)
-
-        episode = await self._create_episode(
+        episode, _ = await self._create_episode(
             body,
             rollout_id=rollout_id,
-            provenance_collector=collect_provenance,
         )
         return episode.response.model_copy(
-            update={
-                _INTERNAL_OBSERVATIONS_KEY: episode.observations.model_dump(mode="json"),
-                _INTERNAL_MCP_PROVENANCE_KEY: mcp_tool_call_provenance,
-            }
+            update={_INTERNAL_OBSERVATIONS_KEY: episode.observations.model_dump(mode="json")}
         )
 
     async def _create_episode(
@@ -794,9 +783,8 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         body: NeMoGymResponseCreateParamsNonStreaming,
         *,
         rollout_id: str,
-        provenance_collector: Optional[Callable[[dict[str, dict[str, str]]], None]] = None,
-        mcp_servers: Optional[dict[str, Any]] = None,
-    ) -> AgentEpisode:
+        openclaw_mcp_servers: Optional[dict[str, Any]] = None,
+    ) -> tuple[AgentEpisode, dict[str, dict[str, str]]]:
         session_id: Optional[str] = None
         session_events: list[dict[str, Any]] = []
         session_tree: OpenClawSessionTree = []
@@ -823,13 +811,12 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         def collect_output(value: list[Any]) -> None:
             observed_output.extend(value)
 
-        response = await self._create_response(
+        response, mcp_tool_call_provenance = await self._create_response(
             body,
             rollout_id=rollout_id,
             observation_collector=collect,
             output_collector=collect_output,
-            provenance_collector=provenance_collector,
-            mcp_servers=mcp_servers,
+            openclaw_mcp_servers=openclaw_mcp_servers,
         )
         try:
             if session_tree:
@@ -870,7 +857,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 source=OPENCLAW_OBSERVATION_SOURCE,
                 gaps=[ObservationGap(code="observation_capture_failed")],
             )
-        return AgentEpisode(response=response, observations=observations)
+        return AgentEpisode(response=response, observations=observations), mcp_tool_call_provenance
 
     async def run(self, request: Request, body: OpenClawAgentRunRequest) -> OpenClawAgentVerifyResponse:
         async with self.sem:
@@ -887,25 +874,19 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             seed_resp_json = await get_response_json(seed_resp)
 
             rollout_id = self.rollout_id_from_run(body)
-            mcp_servers = self._rollout_mcp_servers(seed_resp_json)
-            mcp_tool_call_provenance: dict[str, dict[str, str]] = {}
-
-            def collect_provenance(value: dict[str, dict[str, str]]) -> None:
-                mcp_tool_call_provenance.update(value)
+            openclaw_mcp_servers = self._openclaw_mcp_servers_from_seed(seed_resp_json)
 
             if rollout_id is not None:
-                episode = await self._create_episode(
+                episode, mcp_tool_call_provenance = await self._create_episode(
                     body.responses_create_params,
                     rollout_id=rollout_id,
-                    provenance_collector=collect_provenance,
-                    mcp_servers=mcp_servers,
+                    openclaw_mcp_servers=openclaw_mcp_servers,
                 )
                 agent_resp, observations = episode.response, episode.observations
             else:
-                agent_resp = await self._create_response(
+                agent_resp, mcp_tool_call_provenance = await self._create_response(
                     body.responses_create_params,
-                    provenance_collector=collect_provenance,
-                    mcp_servers=mcp_servers,
+                    openclaw_mcp_servers=openclaw_mcp_servers,
                 )
                 observations = None
             agent_resp_json = agent_resp.model_dump(mode="json")

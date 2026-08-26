@@ -373,7 +373,7 @@ class TestBuildOpenclawConfig:
 
         async def run_openclaw(*args, **kwargs):
             assert kwargs["rollout_id"] == "7-2"
-            return [], {"input_tokens": 0, "output_tokens": 0}, "model"
+            return [], {"input_tokens": 0, "output_tokens": 0}, "model", {}
 
         request = MagicMock(path_params={"rollout_id": "7-2"})
         with patch.object(agent, "_run_openclaw", run_openclaw):
@@ -448,7 +448,7 @@ class TestRolloutMCPConfig:
     def test_builds_rollout_server_from_seed_metadata(self) -> None:
         agent = _make_agent()
         with patch.object(agent, "_resources_server_base_url", return_value="http://resources:8080"):
-            servers = agent._rollout_mcp_servers(_mcp_seed())
+            servers = agent._openclaw_mcp_servers_from_seed(_mcp_seed())
 
         assert servers == {
             "workplace_assistant": {
@@ -465,15 +465,14 @@ class TestRolloutMCPConfig:
         }
         agent = _make_agent(openclaw_config={"mcp": {"servers": {"external": static_server}}})
 
-        assert agent._rollout_mcp_servers({}) is None
+        assert agent._openclaw_mcp_servers_from_seed({}) is None
         assert agent._build_openclaw_config({})["mcp"]["servers"] == {"external": static_server}
 
     def test_run_without_seed_metadata_keeps_verifier_only_path(self) -> None:
         agent = _make_agent()
 
-        async def run_openclaw(*args, mcp_servers=None, provenance_collector=None, **kwargs):
-            assert mcp_servers is None
-            provenance_collector({})
+        async def run_openclaw(*args, openclaw_mcp_servers=None, **kwargs):
+            assert openclaw_mcp_servers is None
             return (
                 [
                     NeMoGymResponseOutputMessage(
@@ -483,6 +482,7 @@ class TestRolloutMCPConfig:
                 ],
                 {"input_tokens": 1, "output_tokens": 1},
                 "model",
+                {},
             )
 
         async def post(server_name, url_path, json=None, cookies=None, **kwargs):
@@ -526,7 +526,7 @@ class TestRolloutMCPConfig:
             }
         }
 
-        cfg = agent._build_openclaw_config({}, mcp_servers=rollout_server)
+        cfg = agent._build_openclaw_config({}, openclaw_mcp_servers=rollout_server)
 
         assert cfg["mcp"]["servers"]["external"]["url"] == "https://external.example/mcp"
         assert cfg["mcp"]["servers"]["workplace_assistant"] == rollout_server["workplace_assistant"]
@@ -535,7 +535,7 @@ class TestRolloutMCPConfig:
     def test_preserves_openclaw_native_transports(self, transport: str) -> None:
         agent = _make_agent()
         with patch.object(agent, "_resources_server_base_url", return_value="http://resources:8080"):
-            servers = agent._rollout_mcp_servers(_mcp_seed(transport=transport))
+            servers = agent._openclaw_mcp_servers_from_seed(_mcp_seed(transport=transport))
 
         assert servers["workplace_assistant"]["transport"] == transport
 
@@ -544,7 +544,7 @@ class TestRolloutMCPConfig:
         agent = _make_agent()
 
         with pytest.raises(ValueError) as exc_info:
-            agent._rollout_mcp_servers(_mcp_seed(token=secret, transport="websocket"))
+            agent._openclaw_mcp_servers_from_seed(_mcp_seed(token=secret, transport="websocket"))
 
         assert "not supported" in str(exc_info.value)
         assert secret not in str(exc_info.value)
@@ -558,7 +558,7 @@ class TestRolloutMCPConfig:
 
         with patch.object(agent, "_resources_server_base_url", return_value="http://resources:8080"):
             with pytest.raises(ValueError) as exc_info:
-                agent._rollout_mcp_servers(seed)
+                agent._openclaw_mcp_servers_from_seed(seed)
 
         assert "scalar values" in str(exc_info.value)
         assert secret not in str(exc_info.value)
@@ -583,7 +583,7 @@ class TestRolloutMCPConfig:
                 agent._run_openclaw(
                     "first",
                     None,
-                    mcp_servers={
+                    openclaw_mcp_servers={
                         "first": {
                             "url": "http://resources/mcp",
                             "transport": "streamable-http",
@@ -594,7 +594,7 @@ class TestRolloutMCPConfig:
                 agent._run_openclaw(
                     "second",
                     None,
-                    mcp_servers={
+                    openclaw_mcp_servers={
                         "second": {
                             "url": "http://resources/mcp",
                             "transport": "streamable-http",
@@ -631,7 +631,7 @@ class TestRolloutMCPConfig:
                     agent._run_openclaw(
                         "solve",
                         None,
-                        mcp_servers={
+                        openclaw_mcp_servers={
                             "workplace_assistant": {
                                 "url": "http://resources/mcp",
                                 "transport": "streamable-http",
@@ -702,7 +702,7 @@ class TestObservability:
             patch.object(agent, "_workspace_root", return_value=work_dir),
             patch.object(agent, "_run_exec", AsyncMock(side_effect=[(0, "", ""), (0, stdout, "")])),
         ):
-            output, _, _ = asyncio.run(agent._run_openclaw("solve", None, observation_collector=collector))
+            output, _, _, _ = asyncio.run(agent._run_openclaw("solve", None, observation_collector=collector))
 
         assert output[0].content[0].text == "done"
         assert collector.call_args.args[0] == "session-1"
@@ -723,11 +723,11 @@ class TestObservability:
                 [],
                 [],
             )
-            return [], {"input_tokens": 0, "output_tokens": 0}, "model"
+            return [], {"input_tokens": 0, "output_tokens": 0}, "model", {}
 
         body = NeMoGymResponseCreateParamsNonStreaming(input="solve")
         with patch.object(agent, "_run_openclaw", run_openclaw):
-            episode = asyncio.run(agent._create_episode(body, rollout_id="1-2"))
+            episode, _ = asyncio.run(agent._create_episode(body, rollout_id="1-2"))
 
         assert episode.response.output[0].content[0].text == ""
         [invocation] = _invocations(episode.observations)
@@ -743,11 +743,11 @@ class TestObservability:
         )
 
         async def run_openclaw(*args, **kwargs):
-            return [output], {"input_tokens": 1, "output_tokens": 1}, "model"
+            return [output], {"input_tokens": 1, "output_tokens": 1}, "model", {}
 
         body = NeMoGymResponseCreateParamsNonStreaming(input="solve")
         with patch.object(agent, "_run_openclaw", run_openclaw):
-            episode = asyncio.run(agent._create_episode(body, rollout_id="1-2"))
+            episode, _ = asyncio.run(agent._create_episode(body, rollout_id="1-2"))
 
         [invocation] = _invocations(episode.observations)
         assert invocation.conversation == [
@@ -766,10 +766,10 @@ class TestObservability:
                 [],
                 [ObservationGap(code="subagent_hierarchy_unavailable", detail="root_session_not_found")],
             )
-            return [], {"input_tokens": 0, "output_tokens": 0}, "model"
+            return [], {"input_tokens": 0, "output_tokens": 0}, "model", {}
 
         with patch.object(agent, "_run_openclaw", run_openclaw):
-            episode = asyncio.run(
+            episode, _ = asyncio.run(
                 agent._create_episode(
                     NeMoGymResponseCreateParamsNonStreaming(input="solve"),
                     rollout_id="1-2",
@@ -807,10 +807,10 @@ class TestObservability:
 
         async def run_openclaw(*args, observation_collector=None, **kwargs):
             observation_collector("session-1", events, [("root", None, events)], [])
-            return [scored_output], {"input_tokens": 1, "output_tokens": 1}, "model"
+            return [scored_output], {"input_tokens": 1, "output_tokens": 1}, "model", {}
 
         with patch.object(agent, "_run_openclaw", run_openclaw):
-            episode = asyncio.run(
+            episode, _ = asyncio.run(
                 agent._create_episode(
                     NeMoGymResponseCreateParamsNonStreaming(input="solve"),
                     rollout_id="1-2",
@@ -841,11 +841,10 @@ class TestObservability:
         async def run_openclaw(
             *args,
             observation_collector=None,
-            provenance_collector=None,
-            mcp_servers=None,
+            openclaw_mcp_servers=None,
             **kwargs,
         ):
-            assert mcp_servers == {
+            assert openclaw_mcp_servers == {
                 "workplace_assistant": {
                     "url": "http://resources:8080/mcp",
                     "transport": "streamable-http",
@@ -853,15 +852,17 @@ class TestObservability:
                 }
             }
             observation_collector("session-1", parse_openclaw_session_events(session), [], [])
-            provenance_collector(
+            return (
+                parse_openclaw_session(session),
+                {"input_tokens": 1, "output_tokens": 1},
+                "model",
                 {
                     "call_mcp": {
                         "server_name": "workplace_assistant",
                         "tool_name": "email_reply_email",
                     }
-                }
+                },
             )
-            return parse_openclaw_session(session), {"input_tokens": 1, "output_tokens": 1}, "model"
 
         async def post(server_name, url_path, json=None, cookies=None, **kwargs):
             if url_path == "/seed_session":
@@ -918,6 +919,7 @@ class TestObservability:
                 ],
                 {"input_tokens": 1, "output_tokens": 1},
                 "model",
+                {},
             )
 
         body = NeMoGymResponseCreateParamsNonStreaming(input="solve")
@@ -930,7 +932,7 @@ class TestObservability:
                 side_effect=RuntimeError("observer failed"),
             ),
         ):
-            episode = asyncio.run(agent._create_episode(body, rollout_id="1-2"))
+            episode, _ = asyncio.run(agent._create_episode(body, rollout_id="1-2"))
 
         assert episode.response.output == baseline.output
         assert episode.response.usage == baseline.usage
