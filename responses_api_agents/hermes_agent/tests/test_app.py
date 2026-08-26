@@ -377,7 +377,7 @@ class TestManagedSubprocessIsolation:
         homes: list[Path] = []
         workdirs: list[Path] = []
         configs: list[dict] = []
-        request_flags: list[bool] = []
+        request_mcp_metadata: list[dict] = []
         all_started = asyncio.Event()
         max_active = 0
 
@@ -413,7 +413,14 @@ class TestManagedSubprocessIsolation:
             assert Path(args[2]).is_file()
             assert Path(args[3]).parent == workdir
             configs.append(yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8")))
-            request_flags.append(json.loads(Path(args[2]).read_text(encoding="utf-8"))["mcp_enabled"])
+            request_payload = json.loads(Path(args[2]).read_text(encoding="utf-8"))
+            request_mcp_metadata.append(
+                {
+                    "enabled": request_payload["mcp_enabled"],
+                    "server_name": request_payload["mcp_server_name"],
+                    "tool_names": request_payload["mcp_expected_tool_names"],
+                }
+            )
             process = FakeProcess(Path(args[3]))
             processes.append(process)
             homes.append(home)
@@ -436,6 +443,7 @@ class TestManagedSubprocessIsolation:
                                 "headers": {"X-NeMo-Gym-Session-Token": f"token-{index}"},
                             }
                         },
+                        mcp_expected_tool_names=["mcp__workplace__email_reply_email"],
                     )
                     for index in range(3)
                 )
@@ -451,7 +459,17 @@ class TestManagedSubprocessIsolation:
         assert all(process.returncode == 0 for process in processes)
         assert all(not home.exists() for home in homes)
         assert all(not workdir.exists() for workdir in workdirs)
-        assert request_flags == [True, True, True]
+        assert (
+            request_mcp_metadata
+            == [
+                {
+                    "enabled": True,
+                    "server_name": "workplace",
+                    "tool_names": ["mcp__workplace__email_reply_email"],
+                }
+            ]
+            * 3
+        )
         assert {config["mcp_servers"]["workplace"]["headers"]["X-NeMo-Gym-Session-Token"] for config in configs} == {
             "token-0",
             "token-1",
@@ -738,12 +756,43 @@ class TestMaxTokens:
 
 
 class TestManagedRunner:
+    def test_mcp_preflight_returns_registered_toolset(self, monkeypatch) -> None:
+        monkeypatch.setattr(runner, "_discover_mcp_tools", lambda: None)
+        monkeypatch.setattr(runner, "_mcp_server_status", lambda _server_name: "connected")
+        monkeypatch.setattr(
+            runner,
+            "_mcp_toolset_names",
+            lambda _toolset_name: {
+                "mcp__workplace__email_reply_email",
+                "mcp__workplace__calendar_delete_event",
+            },
+        )
+
+        toolset = runner._prepare_mcp_tools(
+            "workplace",
+            ["mcp__workplace__email_reply_email", "mcp__workplace__calendar_delete_event"],
+        )
+
+        assert toolset == "mcp-workplace"
+
+    @pytest.mark.parametrize("status", ["failed", "configured", "missing"])
+    def test_mcp_preflight_fails_closed_when_expected_tools_are_unavailable(self, monkeypatch, status) -> None:
+        monkeypatch.setattr(runner, "_discover_mcp_tools", lambda: None)
+        monkeypatch.setattr(runner, "_mcp_server_status", lambda _server_name: status)
+        monkeypatch.setattr(runner, "_mcp_toolset_names", lambda _toolset_name: set())
+
+        with pytest.raises(
+            RuntimeError,
+            match=r"status=.*registered_tools=0; missing 1 expected tools",
+        ):
+            runner._prepare_mcp_tools("workplace", ["mcp__workplace__email_reply_email"])
+
     def test_uses_upstream_constructor_contract(self, monkeypatch) -> None:
         seen: dict = {}
 
         class _StubAIAgent:
             def __init__(self, **kwargs) -> None:
-                assert seen["mcp_prepared"] is True
+                assert seen["mcp_prepared"] == ("workplace", ["mcp__workplace__email_reply_email"])
                 seen.update(kwargs)
                 seen["agent"] = self
 
@@ -757,7 +806,11 @@ class TestManagedRunner:
             def close(self) -> None:
                 seen["closed"] = True
 
-        monkeypatch.setattr(runner, "_prepare_mcp_tools", lambda: seen.__setitem__("mcp_prepared", True))
+        def prepare_mcp_tools(server_name, expected_tool_names):
+            seen["mcp_prepared"] = (server_name, expected_tool_names)
+            return "mcp-workplace"
+
+        monkeypatch.setattr(runner, "_prepare_mcp_tools", prepare_mcp_tools)
         monkeypatch.setattr(runner, "_load_ai_agent", lambda: _StubAIAgent)
         result, observations = runner.run(
             {
@@ -774,6 +827,8 @@ class TestManagedRunner:
                 "history": [{"role": "user", "content": "earlier"}],
                 "capture_observations": True,
                 "mcp_enabled": True,
+                "mcp_server_name": "workplace",
+                "mcp_expected_tool_names": ["mcp__workplace__email_reply_email"],
             }
         )
 
@@ -800,7 +855,9 @@ class TestManagedRunner:
         root = next(record for record in bundle.records if record.kind == "agent_invocation")
         assert root.conversation[-1].content[0].text == "ok"
         assert seen["closed"] is True
-        assert seen["mcp_prepared"] is True
+        assert seen["mcp_prepared"] == ("workplace", ["mcp__workplace__email_reply_email"])
+        assert seen["enabled_toolsets"] == ["mcp-workplace"]
+        assert seen["disabled_toolsets"] is None
         assert "use_streaming" not in seen
         assert "insert_reasoning" not in seen
         assert "persist_session" not in seen

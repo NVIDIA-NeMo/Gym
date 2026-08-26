@@ -59,7 +59,7 @@ from nemo_gym.rollout_observability import (
     ObservationGap,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
-from responses_api_agents.hermes_agent.mcp import hermes_mcp_wire_name
+from responses_api_agents.hermes_agent.mcp_names import hermes_mcp_wire_name
 from responses_api_agents.hermes_agent.observability import build_hermes_observations
 from responses_api_agents.hermes_agent.setup_hermes import ensure_hermes
 from responses_api_agents.hermes_agent.trajectory import project_hermes_response_messages
@@ -279,6 +279,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         payload: dict[str, Any],
         *,
         hermes_mcp_servers: Optional[dict[str, Any]] = None,
+        mcp_expected_tool_names: Optional[list[str]] = None,
     ) -> tuple[dict[str, Any], AgentObservationBundle | None]:
         with tempfile.TemporaryDirectory(prefix="nemo_gym_hermes_") as temp_dir_str:
             temp_dir = Path(temp_dir_str)
@@ -288,6 +289,15 @@ class HermesAgent(SimpleResponsesAPIAgent):
             request_path = temp_dir / "request.json"
             response_path = temp_dir / "response.json"
             request_payload = payload | {"mcp_enabled": bool(hermes_mcp_servers)}
+            if hermes_mcp_servers:
+                if len(hermes_mcp_servers) != 1:
+                    raise ValueError("Hermes supports exactly one rollout-scoped Gym MCP server")
+                request_payload.update(
+                    {
+                        "mcp_server_name": next(iter(hermes_mcp_servers)),
+                        "mcp_expected_tool_names": mcp_expected_tool_names or [],
+                    }
+                )
             request_path.write_text(json.dumps(request_payload), encoding="utf-8")
 
             env = os.environ.copy()
@@ -390,6 +400,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             result, observations = await self._run_hermes_subprocess(
                 run_payload,
                 hermes_mcp_servers=hermes_mcp_servers,
+                mcp_expected_tool_names=sorted(mcp_tool_aliases or {}),
             )
         else:
             result, observations = await self._run_hermes_subprocess(run_payload)
