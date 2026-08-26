@@ -419,7 +419,7 @@ def test_provider_e2e_matrix_selects_config_model_and_secret_by_name() -> None:
     assert "E2E_MODEL" in script
     assert "MODEL_API_KEY" in script
     assert "--model-api-key" not in script
-    assert "resources_servers/example_single_tool_call/data/example.jsonl" in script
+    assert "tests/e2e/inference_provider_smoke.jsonl" in script
     assert "--max-output-tokens 4096" in script
 
     env_config = (REPO_ROOT / "tests" / "e2e" / "inference_provider_env.yaml").read_text()

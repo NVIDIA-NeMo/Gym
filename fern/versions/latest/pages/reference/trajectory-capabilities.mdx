@@ -62,6 +62,7 @@ For C1, C2, and C4, `V` evaluates the correlated Gym Model Server path; direct-p
 | `non_executing_simple_agent` | V | V | X | V | X | X | X |
 | `openclaw_agent` | V | V | X | O | V | V | V |
 | `opencode_agent` | V | V | X | V | V | V | V |
+| `opencode_sandboxed_agent` | V | V | X | V | V | V | V |
 | `osworld_agent` | O | O | X | O | X | X | X |
 | `pi_agent` | V | V | X | V | V | V | V |
 | `proof_refinement_agent` | V | V | X | V | X | X | X |
@@ -70,7 +71,8 @@ For C1, C2, and C4, `V` evaluates the correlated Gym Model Server path; direct-p
 | `simple_agent` | V | V | O | V | O | X | V |
 | `speed_bench_agent` | V | V | X | V | X | X | X |
 | `stirrup_agent` | O | O | X | O | X | X | X |
-| `swe_agents` | X | X | X | X | X | X | X |
+| `swe_agents` / OpenCode (legacy) | V | V | X | V | X | X | V |
+| `swe_agents` / OpenHands (legacy) | X | X | X | O | X | X | V |
 | `tau2` | V | V | X | V | X | X | X |
 | `tool_simulation_agent` | V | V | X | V | X | X | X |
 | `toolsandbox_agent` | V | V | X | V | X | X | X |
@@ -81,4 +83,8 @@ CVDP Simple path, Finance and Remote aggregate usage, LabBench image redaction, 
 omitted raised failures in Simple-derived agents, and Stirrup calls outside its policy path. The matrix reports producer output,
 not schema capacity.
 OpenClaw coverage includes its standalone resource-server path and the PinchBench sandbox benchmark path.
+OpenCode coverage includes both the standalone producer and the decoupled `opencode_sandboxed_agent` path. The decoupled
+path composes agent observations with verifier-sandbox evidence returned by its resources server. Legacy OpenHands retains
+one cumulative root conversation, so its model-visible history remains partial; its pinned fork does not route model calls
+through a rollout-prefixed Gym Model Server endpoint.
 C7 requires standardized agent-side trajectory evidence; model HTTP capture alone does not satisfy it.
