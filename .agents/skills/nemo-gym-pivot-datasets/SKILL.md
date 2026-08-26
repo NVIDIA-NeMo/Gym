@@ -84,10 +84,13 @@ to borrow from rather than canonical commands to run unchanged:
 - `chat_messages_to_pivot_dataset_reference.py`: chat-completion messages to pivot rows.
 - `conversational_messages_to_pivot_dataset_reference.py`: conversational message trajectories to pivot rows with reasoning/provenance handling.
 - `tool_messages_to_pivot_dataset_reference.py`: message/tool-use style rows to pivot rows.
+- `responses_output_to_pivot_dataset_reference.py`: Gym rollout artifacts whose trajectory is a flat
+  list of Responses API output items. Start here — it is self-contained and runnable, and it is the
+  only one that has to reconstruct model calls, so it demonstrates segmentation, parallel batch
+  labels, reasoning placement and `reference_output` together.
 
-All four predate `function_call_batch` and drop multi-call turns. They remain useful as examples of
-source-shape handling, but their expected-action logic is no longer the contract — see
-[references/row-contract.md](references/row-contract.md).
+The four message-list converters were copied from real pipelines; two of them import modules that do
+not exist in this repository and cannot be run as written.
 
 ## Pivot Selection
 

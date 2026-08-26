@@ -22,9 +22,9 @@ The output format targets the
 ``single_step_tool_use_with_argument_comparison`` Nemo Gym environment. Each
 assistant tool turn becomes one row: the prefix becomes
 ``responses_create_params.input`` and the assistant tool action becomes
-``expected_action``. Multi-tool assistant turns are skipped: this script predates
-``function_call_batch``. A current converter labels such a turn as a single
-``function_call_batch`` row instead -- see ``references/row-contract.md``.
+``expected_action``: a single call becomes a ``function_call`` and a parallel set becomes one
+``function_call_batch``. Chat-only assistant turns are skipped by this converter -- it exports tool
+turns only.
 """
 
 from __future__ import annotations
@@ -221,10 +221,13 @@ def _expected_action(message: dict[str, Any]) -> dict[str, Any] | None:
             }
         )
 
+    # One call is a plain `function_call`; several emitted in the same response are one
+    # `function_call_batch`. A one-element batch is never emitted -- the response side normalizes a
+    # lone call and so can never produce that shape.
     if len(expected_calls) == 1:
         return expected_calls[0]
 
-    return None
+    return {"type": "function_call_batch", "calls": expected_calls}
 
 
 def _assistant_index_by_message(messages: list[dict[str, Any]]) -> dict[int, int]:
@@ -348,24 +351,6 @@ def _make_pivot_row(
     }
 
 
-def _make_skip_record(source_row: dict[str, Any], trajectory_id: int, message_index: int) -> dict[str, Any]:
-    messages = source_row["messages"]
-    target_message = messages[message_index]
-    assistant_indices = _assistant_index_by_message(messages)
-    tool_calls = _message_tool_calls(target_message)
-    return {
-        "trajectory_id": trajectory_id,
-        "uuid": source_row.get("uuid"),
-        "source_message_index": message_index,
-        "source_assistant_index": assistant_indices[message_index],
-        "reason": "multi_tool_target",
-        "tool_call_count": len(tool_calls),
-        "tool_names": [tool_call["function"]["name"] for tool_call in tool_calls],
-        "tool_calls": tool_calls,
-        "metadata": deepcopy(source_row.get("metadata")),
-    }
-
-
 def _iter_jsonl(path: Path):
     with path.open() as f:
         for line_number, line in enumerate(f, start=1):
@@ -417,12 +402,7 @@ def _write_metrics(
     metrics_path: Path, info_path: Path, metrics: Counter, elapsed: float, args: argparse.Namespace
 ) -> None:
     total_pivots = metrics["pivot_rows_written"]
-    total_candidates = (
-        total_pivots
-        + metrics["skipped_multi_tool_targets"]
-        + metrics["skipped_single_tool_targets"]
-        + metrics["malformed_expected_actions"]
-    )
+    total_candidates = total_pivots + metrics["skipped_single_tool_targets"] + metrics["malformed_expected_actions"]
     tool_distribution = {
         str(key[1]): count
         for key, count in metrics.items()
@@ -472,15 +452,17 @@ def _write_metrics(
     summary_rows = [
         ["input", args.in_path],
         ["output", args.out_path],
-        ["skipped_multi_tool_output", args.skipped_multi_tool_path],
         ["config_output", args.config_out_path],
         ["agent_ref", args.agent_ref],
         ["source_trajectories_seen", metrics["source_trajectories_seen"]],
         ["assistant_turn_candidates", total_candidates],
         ["pivot_rows_written", metrics["pivot_rows_written"]],
         ["single_call_rows", _count_pct(metrics["expected_action_type", "function_call"], total_pivots)],
+        [
+            "parallel_call_rows",
+            _count_pct(metrics["expected_action_type", "function_call_batch"], total_pivots),
+        ],
         ["skipped_single_tool_targets", _count_pct(metrics["skipped_single_tool_targets"], total_candidates)],
-        ["skipped_multi_tool_targets", _count_pct(metrics["skipped_multi_tool_targets"], total_candidates)],
         ["malformed_expected_actions", _count_pct(metrics["malformed_expected_actions"], total_candidates)],
         ["pivots_with_target_content", _count_pct(metrics["pivots_with_target_content"], total_pivots)],
         ["pivots_with_target_reasoning", _count_pct(metrics["pivots_with_target_reasoning"], total_pivots)],
@@ -614,12 +596,11 @@ def convert(args: argparse.Namespace) -> Counter:
     start = time.time()
     args.out_path.parent.mkdir(parents=True, exist_ok=True)
     args.config_out_path.parent.mkdir(parents=True, exist_ok=True)
-    args.skipped_multi_tool_path.parent.mkdir(parents=True, exist_ok=True)
 
     agent_ref = {"type": "responses_api_agents", "name": args.agent_ref}
     metrics: Counter = Counter()
 
-    with args.out_path.open("w") as out_f, args.skipped_multi_tool_path.open("w") as skipped_f:
+    with args.out_path.open("w") as out_f:
         for trajectory_id, (_, source_row) in enumerate(_iter_jsonl(args.in_path)):
             metrics["source_trajectories_seen"] += 1
             messages = source_row.get("messages") or []
@@ -632,10 +613,8 @@ def convert(args: argparse.Namespace) -> Counter:
 
                 tool_calls = _message_tool_calls(message)
                 if len(tool_calls) > 1:
-                    skipped_f.write(json.dumps(_make_skip_record(source_row, trajectory_id, message_index)) + "\n")
-                    metrics["skipped_multi_tool_targets"] += 1
-                    metrics["skipped_multi_tool_count", len(tool_calls)] += 1
-                    continue
+                    metrics["parallel_tool_call_targets"] += 1
+                    metrics["batch_size", len(tool_calls)] += 1
                 if len(tool_calls) == 0:
                     metrics["skipped_no_tool_targets"] += 1
                     continue
@@ -683,7 +662,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--config-out-path", type=Path)
     parser.add_argument("--metrics-path", type=Path)
     parser.add_argument("--info-path", type=Path)
-    parser.add_argument("--skipped-multi-tool-path", type=Path)
     parser.add_argument("--limit", type=int, default=-1, help="Maximum pivot rows to write")
     parser.add_argument(
         "--validate", action="store_true", help="Validate output rows against Gym models after writing"
@@ -697,9 +675,6 @@ def _parse_args() -> argparse.Namespace:
     )
     args.metrics_path = args.metrics_path or args.out_path.with_suffix(".metrics.json")
     args.info_path = args.info_path or args.out_path.with_suffix(".info.md")
-    args.skipped_multi_tool_path = args.skipped_multi_tool_path or args.out_path.with_suffix(
-        ".skipped_multi_tool.jsonl"
-    )
     return args
 
 
@@ -713,14 +688,13 @@ def main() -> None:
 
     metrics = convert(args)
     print(f"Wrote pivot rows: {args.out_path}")
-    print(f"Wrote skipped multi-tool audit: {args.skipped_multi_tool_path}")
     print(f"Wrote metrics: {args.metrics_path}")
     print(f"Wrote report: {args.info_path}")
     print(f"Wrote config: {args.config_out_path}")
     print(f"Source trajectories: {metrics['source_trajectories_seen']}")
     print(f"Pivot rows: {metrics['pivot_rows_written']}")
     print(f"Single-call rows: {metrics['expected_action_type', 'function_call']}")
-    print(f"Skipped multi-tool targets: {metrics['skipped_multi_tool_targets']}")
+    print(f"Parallel-call rows: {metrics['expected_action_type', 'function_call_batch']}")
 
     if args.validate:
         validation_metrics = validate_output(args.out_path, args.gym_repo, args.agent_ref)
