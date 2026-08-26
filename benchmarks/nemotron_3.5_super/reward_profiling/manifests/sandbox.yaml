@@ -74,7 +74,7 @@ entries:
       - resources_servers/ns_tools/configs/ns_tools.yaml
       - resources_servers/math_with_judge/configs/math_with_judge.yaml
     data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/ultra_v3_sets/260501_ultra_v3_set/math_tir/math_tir_260501.jsonl
-    owner: jkyi
+    owner: ???
 
   - label: stem_mcqa_tools_ultra_0
     agent: ns_tools_simple_agent
@@ -83,7 +83,7 @@ entries:
       - resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml
       - resources_servers/mcqa/configs/mcqa.yaml
     data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/science_rl_rima/subsampled/stem0417_tools_mcq_converted_subsampled_20k.jsonl
-    owner: jkyi
+    owner: ???
 
   - label: stem_openqa_tools_ultra_0
     agent: ns_tools_simple_agent
@@ -92,11 +92,11 @@ entries:
       - resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml
       - resources_servers/mcqa/configs/mcqa.yaml
     data: /lustre/fsw/portfolios/llmservice/users/jiaqiz/data/gym/science_rl_rima/subsampled/openq-hard-moderate-tools.jsonl
-    owner: jiaqiz
+    owner: ???
 
   - label: lean
     agent: math_formal_lean_refinement_agent
     configs:
       - resources_servers/math_formal_lean/configs/math_formal_lean_multi_turn.yaml
     data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/lean/nemotron_math_proofs_10k_with_pass_rate_1000.jsonl
-    owner: jiaqiz
+    owner: igitman

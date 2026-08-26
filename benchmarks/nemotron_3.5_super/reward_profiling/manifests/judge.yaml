@@ -107,39 +107,39 @@ entries:
     configs:
       - resources_servers/math_with_judge/configs/math_with_judge.yaml
     data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/ultra_v3_sets/260501_ultra_v3_set/math_cot/math_cot_260501.jsonl
-    owner: jkyi
+    owner: igitman
 
   - label: long_context
     agent: lc_judge_simple_agent
     configs:
       - resources_servers/equivalence_llm_judge/configs/lc_judge.yaml
     data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/long_context/0123_chengping_qwenlong_v3b_profiled.jsonl
-    owner: jiaqiz
+    owner: fjia
 
   - label: multichallenge
     agent: multichallenge_simple_agent
     configs:
       - resources_servers/multichallenge/configs/multichallenge.yaml
     data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/multichallenge/vanilla_and_advanced_reward_profiled.jsonl
-    owner: jiaqiz
+    owner: ???
 
   - label: stem_openqa_ultra_0
     agent: equivalence_llm_judge_simple_agent
     configs:
       - resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml
     data: /lustre/fsw/portfolios/llmservice/users/jiaqiz/data/gym/science_rl_rima/subsampled/openq-hard-moderate-cot.jsonl
-    owner: jiaqiz
+    owner: ???
 
   - label: abstention
     agent: abstention_simple_agent
     configs:
       - resources_servers/abstention/configs/abstention.yaml
     data: /lustre/fsw/portfolios/llmservice/users/jiaqiz/data/gym/abstention/all4_combined_train.jsonl
-    owner: jiaqiz
+    owner: ???
 
   - label: inverse_if
     agent: inverse_if_simple_agent
     configs:
       - resources_servers/inverse_if/configs/inverse_if.yaml
     data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/ultra_v3_sets/260501_ultra_v3_set/inverse_if/inverse_if.jsonl
-    owner: jkyi
+    owner: ???
