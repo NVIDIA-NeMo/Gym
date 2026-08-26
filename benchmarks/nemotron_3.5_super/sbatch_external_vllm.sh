@@ -253,6 +253,13 @@ EOF
 # --segment > 0 otherwise the engine will hang on the second or third engine step.
 submit_dir=$(pwd -P)
 gym_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
+# A caller that exports the connection sends it as arguments; a checkout that
+# keeps one in env.yaml is read from there, as before.
+if [[ -n "$OPENSANDBOX_DOMAIN" ]]; then
+    cleanup_connection=(--domain "$OPENSANDBOX_DOMAIN" --api-key "$OPENSANDBOX_API_KEY" --protocol "$OPENSANDBOX_PROTOCOL")
+else
+    cleanup_connection=(--connection-config "$gym_root/env.yaml")
+fi
 cleanup_user=${NEMO_GYM_USER:-$USER}
 main_job_id=$(
     NEMO_GYM_USER="$cleanup_user" \
@@ -290,9 +297,7 @@ if (( should_run_eval )); then
             --job-name="gym-cleanup-$main_job_id" \
             --output="$submit_dir/slurm-logs/%j-gym-cleanup-$main_job_id.log" \
             "$gym_root/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py" \
-            --domain "$OPENSANDBOX_DOMAIN" \
-            --api-key "$OPENSANDBOX_API_KEY" \
-            --protocol "$OPENSANDBOX_PROTOCOL" \
+            "${cleanup_connection[@]}" \
             --run-id "$main_job_id" \
             --user "$cleanup_user" \
             --reap

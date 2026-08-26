@@ -873,3 +873,25 @@ def test_slurm_launcher_resolves_the_checkout_from_its_own_location(tmp_path: Pa
     assert cleanup_call[cleanup_call.index("--domain") + 1] == "sandbox.example"
     assert cleanup_call[cleanup_call.index("--api-key") + 1] == TEST_ACCESS_KEY
     assert cleanup_call[cleanup_call.index("--protocol") + 1] == "http"
+
+
+def test_slurm_launcher_falls_back_to_the_checkout_env_yaml(tmp_path: Path) -> None:
+    """No exported connection, so the checkout's own env.yaml is used."""
+    calls_path, env = install_sbatch_stub(tmp_path)
+    env.pop("OPENSANDBOX_DOMAIN", None)
+    env.pop("OPENSANDBOX_API_KEY", None)
+
+    result = subprocess.run(
+        ["bash", str(SBATCH_SCRIPT), "--config", "benchmark.yaml"],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    _main_call, cleanup_call = read_sbatch_calls(calls_path)
+    repo_root = SBATCH_SCRIPT.resolve().parents[2]
+    assert cleanup_call[cleanup_call.index("--connection-config") + 1] == f"{repo_root}/env.yaml"
+    assert "--domain" not in cleanup_call
+    assert "--api-key" not in cleanup_call
