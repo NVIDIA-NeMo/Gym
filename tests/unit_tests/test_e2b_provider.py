@@ -351,6 +351,12 @@ async def test_real_sdk_user_agent_and_call_shapes() -> None:
         allow_internet_access=True,
     )
     inspect.signature(e2b.AsyncSandbox.connect).bind("sbx-existing", request_timeout=30)
+    inspect.signature(e2b.AsyncSandbox.kill).bind(
+        object(),
+        **dict.fromkeys(_API_PARAM_KEYS),
+        request_timeout=30,
+    )
+    inspect.signature(e2b.AsyncSandbox.is_running).bind(object(), request_timeout=30)
     inspect.signature(e2b.AsyncTemplate.exists).bind("base")
     inspect.signature(e2b.AsyncTemplate.build).bind(
         object(),
