@@ -22,12 +22,13 @@ from asyncio import Future, Semaphore
 from collections import Counter, defaultdict
 from contextlib import nullcontext
 from datetime import timedelta
-from itertools import repeat
+from itertools import islice, repeat
 from pathlib import Path
 from time import time
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
+import ray
 from omegaconf import OmegaConf
 from pydantic import BaseModel, Field, field_validator, model_validator
 from tqdm.asyncio import tqdm
@@ -71,6 +72,7 @@ from nemo_gym.rollout_observability import (
     TrajectoryToolCall,
     TrajectoryTurn,
 )
+from nemo_gym.server_utils import initialize_ray
 
 
 _failures_path_for = failures_path_for  # Backwards-compatible alias
@@ -574,6 +576,30 @@ def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
 
 
 class RolloutCollectionHelper(BaseModel):
+    def _read_jsonl_file_using_ray(self, _input_path: Path, range_iterator) -> List[Dict]:
+        @ray.remote
+        def _load_batch(batch: List):
+            results = []
+            for line_no, (row_idx, row_str) in batch:
+                results.append((row_idx, row_str, loads_jsonl_line(row_str, _input_path, line_no)))
+            return results
+
+        def batched(iterable, size):
+            iterator = iter(iterable)
+
+            while batch := list(islice(iterator, size)):
+                yield batch
+
+        initialize_ray()
+
+        with open(_input_path) as input_file:
+            rows_iterator: List[str] = list(tqdm(input_file, desc="Reading rows"))
+        rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
+        batches = list(batched(rows_iterator, 10_000))
+        refs = [_load_batch.remote(batch) for batch in batches]
+        raw_rows = [row for batch in ray.get(refs) for row in batch]
+        return raw_rows
+
     def _preprocess_rows_from_config(self, config: RolloutCollectionConfig) -> List[Dict]:
         range_iterator = repeat(0)
         if config.limit:
@@ -631,17 +657,16 @@ class RolloutCollectionHelper(BaseModel):
             raise ConfigPathNotFoundError(
                 f"Input file not found: '{config.input_jsonl_fpath}' (--input). Check the path is spelled correctly."
             )
-
-        def _load_single(d):
-            (line_no, (row_idx, row_str)) = d
-            return (row_idx, row_str, loads_jsonl_line(row_str, _input_path, line_no))
-
-        from concurrent.futures import ThreadPoolExecutor
-
-        with open(_input_path) as input_file, ThreadPoolExecutor(max_workers=16) as pool:
-            rows_iterator: Iterator[str] = tqdm(input_file, desc="Reading rows")
-            rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
-            raw_rows = list(pool.map(_load_single, enumerate(rows_iterator, 1)))
+        if True:
+            raw_rows = self._read_jsonl_file_using_ray(_input_path, range_iterator)
+        else:
+            with open(_input_path) as input_file:
+                rows_iterator: Iterator[str] = tqdm(input_file, desc="Reading rows")
+                rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
+                raw_rows = [
+                    (row_idx, row_str, loads_jsonl_line(row_str, _input_path, line_no))
+                    for line_no, (row_idx, row_str) in enumerate(rows_iterator, 1)
+                ]
 
         # Validate and apply prompt config before per-row processing
         if prompt_cfg is not None:
