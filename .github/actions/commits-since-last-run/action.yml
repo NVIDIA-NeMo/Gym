@@ -13,12 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-name: Find PR authors since last run
+name: Find commits since last run
 description: >-
-  Finds internal (non-external) authors of PRs merged to the current ref
-  since the last completed run of the given workflow. Never fails: if the
-  previous run is still in progress, or lookup fails for any reason, the
-  authors-line output is simply empty.
+  Lists commits on the current ref since the last completed run of the
+  given workflow. Never fails: if the previous run is still in progress,
+  or lookup fails for any reason, the commits-line output is simply empty.
 
 inputs:
   workflow-file:
@@ -29,14 +28,14 @@ inputs:
     required: true
 
 outputs:
-  authors-line:
-    description: Space-separated "@login" mentions of internal PR authors, or empty
-    value: ${{ steps.find.outputs.authors_line }}
+  commits-line:
+    description: Newline-separated "`sha` subject" lines, or empty
+    value: ${{ steps.find.outputs.commits_line }}
 
 runs:
   using: composite
   steps:
-    - name: Find authors since last run
+    - name: Find commits since last run
       id: find
       shell: bash
       env:
@@ -47,51 +46,32 @@ runs:
         CUR_SHA: ${{ github.sha }}
       run: |
         set +e
-        AUTHORS_LINE=""
+        COMMITS_LINE=""
 
         RUNS_JSON=$(gh api "repos/$REPO/actions/workflows/$WORKFLOW_FILE/runs?per_page=10" 2>/dev/null)
         PREV_RUN_JSON=$(echo "$RUNS_JSON" | jq -c --argjson cur "$CURRENT_RUN_ID" \
           '[.workflow_runs[]? | select(.id != $cur) | select(.event == "schedule" or .event == "workflow_dispatch")] | sort_by(.created_at) | reverse | .[0]' 2>/dev/null)
 
         if [[ -z "$PREV_RUN_JSON" || "$PREV_RUN_JSON" == "null" ]]; then
-          echo "No previous scheduled/workflow_dispatch run found; skipping author attribution."
+          echo "No previous scheduled/workflow_dispatch run found; skipping commit list."
         else
           PREV_STATUS=$(echo "$PREV_RUN_JSON" | jq -r '.status' 2>/dev/null)
           if [[ "$PREV_STATUS" != "completed" ]]; then
-            echo "Previous run is still '$PREV_STATUS'; skipping author attribution."
+            echo "Previous run is still '$PREV_STATUS'; skipping commit list."
           else
             PREV_SHA=$(echo "$PREV_RUN_JSON" | jq -r '.head_sha' 2>/dev/null)
             if [[ -z "$PREV_SHA" || "$PREV_SHA" == "null" || "$PREV_SHA" == "$CUR_SHA" ]]; then
-              echo "No new commits since the previous run; skipping author attribution."
+              echo "No new commits since the previous run."
             else
-              COMMITS=$(gh api "repos/$REPO/compare/$PREV_SHA...$CUR_SHA" --jq '.commits[]?.sha' 2>/dev/null)
-              AUTHORS=""
-              for sha in $COMMITS; do
-                PR_INFO=$(gh api "repos/$REPO/commits/$sha/pulls" --jq '.[0] | {login: .user.login, assoc: .author_association}' 2>/dev/null)
-                [[ -z "$PR_INFO" || "$PR_INFO" == "null" ]] && continue
-
-                LOGIN=$(echo "$PR_INFO" | jq -r '.login' 2>/dev/null)
-                ASSOC=$(echo "$PR_INFO" | jq -r '.assoc' 2>/dev/null)
-                [[ -z "$LOGIN" || "$LOGIN" == "null" ]] && continue
-
-                case "$ASSOC" in
-                  OWNER|MEMBER|COLLABORATOR)
-                    if [[ ",$AUTHORS," != *",$LOGIN,"* ]]; then
-                      AUTHORS="${AUTHORS:+$AUTHORS,}$LOGIN"
-                    fi
-                    ;;
-                  *)
-                    echo "Skipping external author: $LOGIN (association: $ASSOC)"
-                    ;;
-                esac
-              done
-
-              if [[ -n "$AUTHORS" ]]; then
-                AUTHORS_LINE=$(echo "$AUTHORS" | tr ',' '\n' | sed 's/^/@/' | paste -sd ' ' -)
-              fi
+              COMMITS_LINE=$(gh api "repos/$REPO/compare/$PREV_SHA...$CUR_SHA" --jq \
+                '[.commits[]? | "`" + .sha[0:7] + "` " + (.commit.message | split("\n")[0])] | join("\n")' 2>/dev/null)
             fi
           fi
         fi
 
-        echo "authors_line=$AUTHORS_LINE" >> "$GITHUB_OUTPUT"
+        {
+          echo "commits_line<<COMMITS_EOF"
+          echo "$COMMITS_LINE"
+          echo "COMMITS_EOF"
+        } >> "$GITHUB_OUTPUT"
         exit 0

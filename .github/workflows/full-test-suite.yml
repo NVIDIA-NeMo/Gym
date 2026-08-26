@@ -287,10 +287,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - name: Find PR authors since last run
-        id: authors
+      - name: Find commits since last run
+        id: commits
         continue-on-error: true
-        uses: ./.github/actions/pr-authors-since-last-run
+        uses: ./.github/actions/commits-since-last-run
         with:
           workflow-file: full-test-suite.yml
           github-token: ${{ github.token }}
@@ -299,11 +299,11 @@ jobs:
         id: message
         shell: bash -e -u -o pipefail {0}
         env:
-          AUTHORS_LINE: ${{ steps.authors.outputs.authors-line }}
+          COMMITS_LINE: ${{ steps.commits.outputs.commits-line }}
         run: |
-          AUTHORS_SECTION=""
-          if [[ -n "$AUTHORS_LINE" ]]; then
-            AUTHORS_SECTION=$'\n'"• Possible authors since last run: $AUTHORS_LINE"
+          COMMITS_SECTION=""
+          if [[ -n "$COMMITS_LINE" ]]; then
+            COMMITS_SECTION=$'\n'"• Commits since last run:"$'\n'"$COMMITS_LINE"
           fi
 
           {
@@ -312,7 +312,7 @@ jobs:
             echo ""
             echo "• Repository: ${{ github.repository }}"
             echo "• Commit: \`${{ github.sha }}\`"
-            echo "$AUTHORS_SECTION"
+            echo "$COMMITS_SECTION"
             echo "• Workflow: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>"
             echo "TEXT_EOF"
           } >> "$GITHUB_OUTPUT"
