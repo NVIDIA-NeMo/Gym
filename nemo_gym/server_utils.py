@@ -55,6 +55,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from nemo_gym import WORKING_DIR
 from nemo_gym.config_types import (
     ROLLOUT_PATH_PREFIX,
+    TOKEN_CAPTURE_PATH_SEGMENT,
     BaseRunServerInstanceConfig,
     BaseServerConfig,
 )
@@ -205,7 +206,11 @@ DISCONNECTED_CLIENT_OS_HELP_TEXT = """We've run into this issue in two different
 
 
 async def request(
-    method: str, url: str, _internal: bool = False, **kwargs: Unpack[_RequestOptions]
+    method: str,
+    url: str,
+    _internal: bool = False,
+    _max_connection_retries: Optional[int] = None,
+    **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     # Faster JSON dumps than the default aiohttp json
     if kwargs.get("json"):
@@ -231,6 +236,10 @@ async def request(
                     flush=True,
                 )
 
+            # Retrying forever is wrong if the endpoint is expected to sometimes die and move.
+            if _max_connection_retries is not None and retries >= _max_connection_retries:
+                raise
+
             await asyncio.sleep(0.5)
         except ClientOSError:
             global _NUM_CLIENT_OS_ERROR
@@ -242,6 +251,9 @@ async def request(
                     f"Hit {_NUM_CLIENT_OS_ERROR} global `ClientOSError` while querying {url}.\n{DISCONNECTED_CLIENT_OS_HELP_TEXT}",
                     flush=True,
                 )
+
+            if _max_connection_retries is not None and retries >= _max_connection_retries:
+                raise
 
             await asyncio.sleep(0.5)
         except Exception as e:
@@ -833,16 +845,19 @@ def get_server_url(server_name: str) -> str:
     return f"http://{model_server_config['host']}:{model_server_config['port']}"
 
 
-def rollout_path_prefix(rollout_id: Optional[str]) -> str:
+def rollout_path_prefix(rollout_id: Optional[str], *, token_capture: bool = False) -> str:
     """Return the leading model-server path prefix for a rollout, if available."""
-    return f"/{ROLLOUT_PATH_PREFIX}/{rollout_id}" if rollout_id else ""
+    if not rollout_id:
+        return ""
+    capture_segment = f"/{TOKEN_CAPTURE_PATH_SEGMENT}" if token_capture else ""
+    return f"/{ROLLOUT_PATH_PREFIX}/{rollout_id}{capture_segment}"
 
 
-def apply_rollout_prefix(base_url: str, rollout_id: Optional[str]) -> str:
+def apply_rollout_prefix(base_url: str, rollout_id: Optional[str], *, token_capture: bool = False) -> str:
     """Append a rollout prefix to a model-server root URL."""
     if not rollout_id:
         return base_url
-    return base_url.rstrip("/") + rollout_path_prefix(rollout_id)
+    return base_url.rstrip("/") + rollout_path_prefix(rollout_id, token_capture=token_capture)
 
 
 def setup_server_client(head_server_config: Optional[BaseServerConfig] = None) -> ServerClient:  # pragma: no cover

@@ -82,14 +82,12 @@ from openai.types.responses.response_create_params import (
 from openai.types.responses.response_function_call_output_item_list_param import (
     ResponseFunctionCallOutputItemListParam,
 )
+from openai.types.responses.response_input_content_param import ResponseInputContentParam
 from openai.types.responses.response_input_item import (
     ComputerCallOutput,
     LocalShellCallOutput,
     McpApprovalResponse,
     ResponseCustomToolCallOutput,
-)
-from openai.types.responses.response_input_param import (
-    ResponseInputMessageContentListParam,
 )
 from openai.types.responses.response_output_item import (
     ImageGenerationCall,
@@ -148,14 +146,14 @@ class TokenIDLogProbTypedDictMixin(TypedDict):
     routed_experts: NotRequired[RoutedExperts]
 
 
-_REQUIRED_TOKEN_METADATA_FIELDS = frozenset(
+REQUIRED_TOKEN_METADATA_FIELDS = frozenset(
     {
         "prompt_token_ids",
         "generation_token_ids",
         "generation_log_probs",
     }
 )
-_TOKEN_METADATA_FIELDS = _REQUIRED_TOKEN_METADATA_FIELDS | {"routed_experts"}
+TOKEN_METADATA_FIELDS = REQUIRED_TOKEN_METADATA_FIELDS | {"routed_experts"}
 
 
 def _validate_atomic_token_metadata(value: Any) -> Any:
@@ -163,11 +161,11 @@ def _validate_atomic_token_metadata(value: Any) -> Any:
     if not isinstance(value, dict):
         return value
 
-    present_fields = _TOKEN_METADATA_FIELDS.intersection(value)
+    present_fields = TOKEN_METADATA_FIELDS.intersection(value)
     if not present_fields:
         return value
 
-    missing_fields = _REQUIRED_TOKEN_METADATA_FIELDS.difference(present_fields)
+    missing_fields = REQUIRED_TOKEN_METADATA_FIELDS.difference(present_fields)
     if missing_fields:
         missing = ", ".join(sorted(missing_fields))
         raise ValueError(f"Token metadata must include all required fields; missing: {missing}")
@@ -224,14 +222,46 @@ class NeMoGymResponseOutputMessage(BaseModel):
     type: Literal["message"] = "message"
 
 
+class NeMoGymInputVideoPart(TypedDict, total=False):
+    """Video content accepted by the Responses-compatible Gym API."""
+
+    type: Required[Literal["input_video"]]
+    video_url: Union[str, Dict[str, Any]]
+    video: Union[str, Dict[str, Any]]
+
+
+def _validate_input_video_part(value: Any) -> Any:
+    """Require one non-empty source without changing the TypedDict representation."""
+
+    if not isinstance(value, dict) or value.get("type") != "input_video":
+        return value
+
+    source_keys = [key for key in ("video_url", "video") if key in value]
+    if len(source_keys) != 1:
+        raise ValueError("input_video requires exactly one of video_url or video")
+
+    source = value[source_keys[0]]
+    url = source.get("url") if isinstance(source, dict) else source
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError(f"input_video.{source_keys[0]} must contain a non-empty URL")
+    return value
+
+
+NeMoGymResponseInputContentPart: TypeAlias = Annotated[
+    Union[ResponseInputContentParam, NeMoGymInputVideoPart],
+    BeforeValidator(_validate_input_video_part),
+]
+NeMoGymResponseInputContentList: TypeAlias = List[NeMoGymResponseInputContentPart]
+
+
 class NeMoGymEasyInputMessage(BaseModel):
-    content: Union[str, ResponseInputMessageContentListParam]
+    content: Union[str, NeMoGymResponseInputContentList]
     role: Literal["user", "assistant", "system", "developer"]
     type: Literal["message"] = "message"
 
 
 class NeMoGymMessage(BaseModel):
-    content: ResponseInputMessageContentListParam
+    content: NeMoGymResponseInputContentList
     role: Literal["user", "system", "developer"]
     status: Literal["in_progress", "completed", "incomplete"] = "completed"
     type: Literal["message"] = "message"
@@ -513,11 +543,11 @@ NeMoGymResponseOutputItem = Annotated[
 
 
 class NeMoGymResponseInputTokensDetails(ResponseInputTokensDetails):
-    pass
+    cached_tokens: Optional[int]
 
 
 class NeMoGymResponseOutputTokensDetails(ResponseOutputTokensDetails):
-    pass
+    reasoning_tokens: Optional[int]
 
 
 class NeMoGymResponseUsage(ResponseUsage):
@@ -535,12 +565,25 @@ class NeMoGymResponseUsage(ResponseUsage):
         )
         for usage in usages:
             final_usage.input_tokens += usage.input_tokens
-            final_usage.input_tokens_details.cached_tokens += usage.input_tokens_details.cached_tokens
+            final_usage.input_tokens_details.cached_tokens = _add_optional_token_counts(
+                final_usage.input_tokens_details.cached_tokens,
+                usage.input_tokens_details.cached_tokens,
+            )
             final_usage.output_tokens += usage.output_tokens
-            final_usage.output_tokens_details.reasoning_tokens += usage.output_tokens_details.reasoning_tokens
+            final_usage.output_tokens_details.reasoning_tokens = _add_optional_token_counts(
+                final_usage.output_tokens_details.reasoning_tokens,
+                usage.output_tokens_details.reasoning_tokens,
+            )
             final_usage.total_tokens += usage.total_tokens
 
         return final_usage
+
+
+def _add_optional_token_counts(left: Optional[int], right: Optional[int]) -> Optional[int]:
+    """Add reported token counts without turning an unknown count into a measurement."""
+    if left is None or right is None:
+        return None
+    return left + right
 
 
 def accumulate_response_usage(
@@ -557,9 +600,15 @@ def accumulate_response_usage(
     result.output_tokens += additional.output_tokens
     result.total_tokens += additional.total_tokens
     if result.input_tokens_details is not None and additional.input_tokens_details is not None:
-        result.input_tokens_details.cached_tokens += additional.input_tokens_details.cached_tokens
+        result.input_tokens_details.cached_tokens = _add_optional_token_counts(
+            result.input_tokens_details.cached_tokens,
+            additional.input_tokens_details.cached_tokens,
+        )
     if result.output_tokens_details is not None and additional.output_tokens_details is not None:
-        result.output_tokens_details.reasoning_tokens += additional.output_tokens_details.reasoning_tokens
+        result.output_tokens_details.reasoning_tokens = _add_optional_token_counts(
+            result.output_tokens_details.reasoning_tokens,
+            additional.output_tokens_details.reasoning_tokens,
+        )
     return result
 
 
@@ -659,11 +708,17 @@ class NeMoGymChatCompletionContentPartFileParam(ChatCompletionContentPartFilePar
     pass
 
 
+class NeMoGymChatCompletionContentPartVideoUrlParam(TypedDict, total=False):
+    video_url: Required[Union[str, Dict[str, Any]]]
+    type: Required[Literal["video_url"]]
+
+
 NeMoGymChatCompletionContentPartParam = Union[
     NeMoGymChatCompletionContentPartTextParam,
     NeMoGymChatCompletionContentPartImageParam,
     NeMoGymChatCompletionContentPartInputAudioParam,
     NeMoGymChatCompletionContentPartFileParam,
+    NeMoGymChatCompletionContentPartVideoUrlParam,
 ]
 
 
@@ -800,6 +855,14 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         description="Set this to true if this particular client is only used to call internal NeMo Gym servers.",
     )
 
+    max_connection_retries: Optional[int] = Field(
+        default=None,
+        description=(
+            "How many connection-error retries per request; None retries forever. "
+            "Allows callers that can resolve a moved endpoint to avoid stalling forever."
+        ),
+    )
+
     default_headers: Dict[str, str] = Field(
         default_factory=dict,
         description="Extra headers to include in every request.",
@@ -812,6 +875,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                 "Authorization": f"Bearer {self.api_key}",
             },
             "_internal": self.internal,
+            "_max_connection_retries": self.max_connection_retries,
         }
         return await self._request_with_retry(**request_kwargs)
 
