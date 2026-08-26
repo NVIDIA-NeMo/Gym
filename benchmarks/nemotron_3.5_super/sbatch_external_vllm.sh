@@ -6,9 +6,6 @@ set -euo pipefail
 NUM_PREFILL_NODES=$NUM_PREFILL_NODES
 NUM_DECODE_NODES=$NUM_DECODE_NODES
 MODEL=$MODEL
-# The name vLLM serves under and the eval reports. Defaults to $MODEL, which is
-# a container path, so a caller that mounts every checkpoint at the same path
-# can still say which one it ran.
 MODEL_NAME="${MODEL_NAME:-$MODEL}"
 CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
