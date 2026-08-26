@@ -32,6 +32,7 @@ from nemo_gym.base_resources_server import BaseRunRequest
 from nemo_gym.config_types import (
     AGENT_REF_KEY,
     BaseNeMoGymCLIConfig,
+    BenchmarkDatasetConfig,
     DatasetConfig,
     DatasetType,
     DownloadJsonlDatasetGitlabConfig,
@@ -49,6 +50,12 @@ from nemo_gym.hf_utils import (
     download_hf_dataset_as_jsonl,
 )
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
+from nemo_gym.task_data import (
+    TaskDataSchemaError,
+    TaskDataValidator,
+    find_server_dir,
+    load_task_data_schema,
+)
 
 
 class TrainDataProcessorConfig(BaseNeMoGymCLIConfig):
@@ -80,6 +87,15 @@ class TrainDataProcessorConfig(BaseNeMoGymCLIConfig):
     )
     overwrite_metrics_conflicts: bool = Field(
         default=False, description="Whether or not to overwrite metrics conflicts."
+    )
+    task_data_validation: Literal["off", "warn", "error"] = Field(
+        default="warn",
+        description=(
+            "Validate each dataset row against the owning resources server's task_data.py schema "
+            "during collation. 'warn' (default) prints a per-file report, 'error' fails collation "
+            "on schema violations, 'off' skips validation. Servers without a task_data.py are "
+            "always skipped."
+        ),
     )
 
     @property
@@ -725,10 +741,68 @@ This could be due to a change in how metrics are calculated, leading to outdated
     # Collate samples
     ########################################
 
+    @staticmethod
+    def _owning_resources_server_impl(
+        c: ServerInstanceConfig, server_instance_configs: List[ServerInstanceConfig]
+    ) -> Optional[str]:
+        """The resources-server implementation (directory) that owns a declaring instance's data.
+
+        Datasets declared by a resources server belong to its own implementation; datasets
+        declared by an agent belong to the resources server the agent references. Self-contained
+        agents (no resources_server reference) return None here; the validator lookup then falls
+        back to the agent's own directory.
+        """
+        if c.SERVER_TYPE == "resources_servers":
+            return next(iter(c.resources_servers))
+        if c.SERVER_TYPE != "responses_api_agents":
+            return None
+        inner = c.get_inner_run_server_config()
+        ref = getattr(inner, "resources_server", None)
+        rs_name = ref.get("name") if isinstance(ref, (dict, DictConfig)) else getattr(ref, "name", None)
+        if not isinstance(rs_name, str):
+            return None
+        for other in server_instance_configs:
+            if other.SERVER_TYPE == "resources_servers" and other.name == rs_name:
+                return next(iter(other.resources_servers))
+        return None
+
+    @classmethod
+    def _task_data_validator_for(
+        cls,
+        c: ServerInstanceConfig,
+        d: Union[DatasetConfig, BenchmarkDatasetConfig],
+        server_instance_configs: List[ServerInstanceConfig],
+    ) -> Optional[TaskDataValidator]:
+        impl_key = cls._owning_resources_server_impl(c, server_instance_configs)
+        base_folder = "resources_servers"
+        if impl_key is None:
+            # No resources server owns this data. A self-contained agent (one that declares no
+            # resources_server reference at all) may own a schema itself, under
+            # responses_api_agents/<implementation>/task_data.py. An agent whose reference is
+            # dangling is skipped: its schema home is the (missing) resources server.
+            if c.SERVER_TYPE != "responses_api_agents":
+                return None
+            if getattr(c.get_inner_run_server_config(), "resources_server", None) is not None:
+                return None
+            impl_key = next(iter(c.responses_api_agents))
+            base_folder = "responses_api_agents"
+        server_dir = find_server_dir(impl_key, base_folder=base_folder)
+        if server_dir is None:
+            return None
+        try:
+            adapter = load_task_data_schema(server_dir)
+        except TaskDataSchemaError as e:
+            warnings.warn(f"Skipping task_data validation for {impl_key}: {e}", stacklevel=2)
+            return None
+        if adapter is None:
+            return None
+        return TaskDataValidator(server_name=impl_key, adapter=adapter, dataset_fpath=str(d.jsonl_fpath))
+
     def _collate_samples_single_type(
         self,
         type: DatasetType,
         server_instance_configs: List[ServerInstanceConfig],
+        task_data_validation: str = "warn",
     ) -> List[Path]:
         paths_to_collate = []
         used_prepare_paths: set[Path] = set()
@@ -768,8 +842,11 @@ This could be due to a change in how metrics are calculated, leading to outdated
                 # for this dataset comes from the declaration, and passing the stale field
                 # through would leak the old coupling into the clean format.
                 legacy_agent_ref_rows = 0
+                validator = None
+                if task_data_validation != "off":
+                    validator = self._task_data_validator_for(c, d, server_instance_configs)
                 with open(prepare_path, "w") as target:
-                    for line in self._iter_dataset_lines(d):
+                    for row_index, line in enumerate(self._iter_dataset_lines(d)):
                         row = json.loads(line)
 
                         if prompt_cfg:
@@ -779,7 +856,15 @@ This could be due to a change in how metrics are calculated, leading to outdated
                         if row.pop(AGENT_REF_KEY, None) is not None:
                             legacy_agent_ref_rows += 1
                         row[TASK_SOURCE_KEY_NAME] = c.name
+                        if validator is not None:
+                            validator.validate_row(row_index, row)
                         target.write(f"{json.dumps(row)}\n")
+
+                if validator is not None and (not validator.report.clean or validator.report.unknown_keys):
+                    summary = validator.report.summary()
+                    if task_data_validation == "error" and not validator.report.clean:
+                        raise ValueError(summary)
+                    print(f"[task_data validation]\n{summary}")
 
                 if legacy_agent_ref_rows:
                     warnings.warn(
@@ -836,6 +921,7 @@ This could be due to a change in how metrics are calculated, leading to outdated
             paths_to_collate = self._collate_samples_single_type(
                 type=type,
                 server_instance_configs=server_instance_configs,
+                task_data_validation=config.task_data_validation,
             )
             collated_fpath = parent / f"{type}.jsonl"
             with open(collated_fpath, "wb") as outfile:

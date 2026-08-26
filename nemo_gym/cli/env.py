@@ -1570,3 +1570,38 @@ def pip_list():  # pragma: no cover
     proc = run_command(command, dir_path)
     return_code = proc.wait()
     exit(return_code)
+
+
+class SchemaConfig(RunConfig):
+    """
+    Print a resources server's task-data schema as JSON Schema.
+
+    Examples:
+
+    ```bash
+    gym env schema --resources-server example_multi_step
+    ```
+    """
+
+
+@exit_cleanly_on_config_error
+def show_schema():  # pragma: no cover
+    """Print the selected server's ``TaskData`` schema (see ``nemo_gym/task_data.py``)."""
+    from nemo_gym.task_data import TaskDataSchemaError, load_task_data_schema
+
+    global_config_dict = get_global_config_dict()
+    config = SchemaConfig.model_validate(global_config_dict)
+
+    dir_path = _resolve_server_dir(Path(config.entrypoint))
+    try:
+        adapter = load_task_data_schema(dir_path)
+    except TaskDataSchemaError as e:
+        print(str(e))
+        exit(1)
+    if adapter is None:
+        print(
+            f"{config.entrypoint} does not ship a task_data.py schema yet. "
+            "Add one exporting `TaskData` (see nemo_gym/task_data.py for the protocol)."
+        )
+        exit(1)
+    print(json.dumps(adapter.json_schema(), indent=2))
