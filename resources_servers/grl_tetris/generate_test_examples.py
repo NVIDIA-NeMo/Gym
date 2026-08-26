@@ -54,10 +54,6 @@ def generate_tetris_example(game_id: int, seed: int, dim_board: List[int], box_t
                 },
             ],
         },
-        "agent_ref": {
-            "type": "responses_api_agents",
-            "name": "grl_tetris_gymnasium_agent",
-        },
     }
 
 
