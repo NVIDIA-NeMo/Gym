@@ -20,7 +20,7 @@ on:
       - main
       - "pull-request/[0-9]+"
   schedule:
-    - cron: "0 9 * * *"
+    - cron: "0 */4 * * *"
   workflow_dispatch:
     inputs:
       send_notification:

@@ -15,11 +15,8 @@
 name: Full test suite
 
 on:
-  push:
-    branches:
-      - main
   schedule:
-    - cron: "0 9 * * *"
+    - cron: "0 */4 * * *"
   workflow_dispatch:
     inputs:
       send_notification:
