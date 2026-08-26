@@ -92,17 +92,6 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
         return app
 
-    def _capture_correlation_enabled(self) -> bool:
-        """Return whether this agent needs rollout correlation.
-
-        Evaluation uses ``/ng-rollout/<id>/...`` for every agent.
-        Training capture uses ``/ng-rollout/<id>/training-token-capture/...``.
-        Training capture requires ``token_id_capture.enabled``.
-        It also requires the static agent flag or run-level ``all_agents``.
-        Missing global configuration disables correlation.
-        """
-        return self._model_call_capture_enabled() or self._token_id_capture_enabled()
-
     def _model_call_capture_enabled(self) -> bool:
         """Whether evaluation model-call observability is enabled."""
         global_config = getattr(self.server_client, "global_config_dict", None)
@@ -123,13 +112,12 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         )
 
     def rollout_id_from_run(self, body: Any) -> Optional[str]:
-        """Return the capture id for a run request.
+        """Return the correlation id for a run request.
 
-        Return ``None`` when capture is disabled.
         Return ``None`` when the body has no usable identity.
+        Observability and training-token capture consume this identity.
+        Neither feature controls whether the identity exists.
         """
-        if not self._capture_correlation_enabled():
-            return None
         return maybe_rollout_id_from_run_body(body)
 
     def url_path_for_run(self, url_path: str, body: Any) -> str:

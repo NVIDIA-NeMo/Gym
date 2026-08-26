@@ -838,7 +838,7 @@ def _make_base_agent(global_config, *, token_id_capture=False):
     return _Agent(config=config, server_client=server_client)
 
 
-def test_base_agent_url_path_for_run_gates_on_observability_and_indices():
+def test_base_agent_url_path_for_run_requires_only_rollout_indices():
     body = {TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 1}
 
     enabled = _make_base_agent({"observability_enabled": True})
@@ -849,11 +849,11 @@ def test_base_agent_url_path_for_run_gates_on_observability_and_indices():
     assert enabled.base_url_for_run("http://h:1", {}) == "http://h:1"
 
     disabled = _make_base_agent({"observability_enabled": False})
-    assert disabled.rollout_id_from_run(body) is None
-    assert disabled.url_path_for_run("/v1/responses", body) == "/v1/responses"
-    assert disabled.base_url_for_run("http://h:1", body) == "http://h:1"
+    assert disabled.rollout_id_from_run(body) == "3-1"
+    assert disabled.url_path_for_run("/v1/responses", body) == "/ng-rollout/3-1/v1/responses"
+    assert disabled.base_url_for_run("http://h:1", body) == "http://h:1/ng-rollout/3-1"
 
-    assert _make_base_agent(MagicMock()).url_path_for_run("/v1/responses", body) == "/v1/responses"
+    assert _make_base_agent(MagicMock()).url_path_for_run("/v1/responses", body) == "/ng-rollout/3-1/v1/responses"
 
 
 def test_base_agent_propagates_explicit_token_capture_intent():

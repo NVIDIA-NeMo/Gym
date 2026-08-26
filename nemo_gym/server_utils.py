@@ -63,7 +63,6 @@ from nemo_gym.global_config import (
     DRY_RUN_KEY_NAME,
     HEAD_SERVER_KEY_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
-    OBSERVABILITY_ENABLED_KEY_NAME,
     RAY_HEAD_NODE_ADDRESS_KEY_NAME,
     UVICORN_TIMEOUT_WORKER_HEALTHCHECK,
     GlobalConfigDictParser,
@@ -349,10 +348,9 @@ class ServerClient(BaseModel):
                 json_obj = json_obj.model_dump(exclude_unset=True)
                 kwargs["json"] = json_obj
 
-        observability_enabled = self.global_config_dict.get(OBSERVABILITY_ENABLED_KEY_NAME, False)
         server_entry = self.global_config_dict.get(server_name)
         rollout_id = current_rollout_id()
-        if observability_enabled and server_entry is not None and "resources_servers" in server_entry:
+        if server_entry is not None and "resources_servers" in server_entry:
             if url_path == "/verify":
                 rollout_id = rollout_id or maybe_rollout_id_from_run_body(json_obj)
             if rollout_id is not None and not url_path.startswith(f"/{ROLLOUT_PATH_PREFIX}/"):
@@ -360,7 +358,6 @@ class ServerClient(BaseModel):
 
         if (
             rollout_id is not None
-            and observability_enabled
             and server_entry is not None
             and "responses_api_models" in server_entry
             and url_path.partition("?")[0] in {"/v1/responses", "/v1/chat/completions", "/v1/messages"}
