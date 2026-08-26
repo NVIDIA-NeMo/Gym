@@ -567,3 +567,61 @@ def test_container_config_includes_overlay_declared_servers(tmp_path):
     )
     cfg = container_config([manifest])
     assert cfg["judge_model"]["responses_api_models"]["openai_model"]["entrypoint"] == "app.py"
+
+
+def _write_manifest_file(tmp_path, name, doc):
+    path = tmp_path / name
+    path.write_text(yaml.safe_dump(doc))
+    return path
+
+
+def test_includes_merges_entries_configs_and_overlay(tmp_path):
+    """One manifest composes the lane manifests; the design is one deployment, one input."""
+    data = tmp_path / "d.jsonl"
+    data.write_text('{"agent_ref": "a", "x": 1}\n')
+    _write_manifest_file(tmp_path, "child_a.yaml", {
+        "nickname": "a", "defaults": {"num_repeats": 4},
+        "extra_configs": ["shared.yaml"],
+        "config_overlay": {"srv_a": {"k": 1}},
+        "entries": [{"label": "ea", "agent": "a", "configs": ["ca.yaml"], "data": str(data)}],
+    })
+    _write_manifest_file(tmp_path, "child_b.yaml", {
+        "nickname": "b", "defaults": {"num_repeats": 8},
+        "extra_configs": ["shared.yaml", "b_only.yaml"],
+        "config_overlay": {"srv_b": {"k": 2}},
+        "entries": [{"label": "eb", "agent": "b", "configs": ["cb.yaml"], "data": str(data)}],
+    })
+    parent = _write_manifest_file(tmp_path, "all.yaml", {
+        "nickname": "combined", "includes": ["child_a.yaml", "child_b.yaml"],
+    })
+    m = load_manifest(parent)
+
+    assert [e.label for e in m.entries] == ["ea", "eb"]
+    assert m.nickname == "combined"
+    assert m.config_overlay == {"srv_a": {"k": 1}, "srv_b": {"k": 2}}
+    # shared.yaml appears in both children but must not be duplicated
+    assert m.config_paths().count("shared.yaml") == 1
+    # each child's own default travels with its entries rather than being inherited
+    assert {e.label: e.num_repeats for e in m.entries} == {"ea": 4, "eb": 8}
+
+
+def test_includes_rejects_self_reference(tmp_path):
+    parent = _write_manifest_file(tmp_path, "loop.yaml", {
+        "nickname": "loop", "includes": ["loop.yaml"], "entries": [],
+    })
+    with pytest.raises(SweepValidationError, match="includes itself"):
+        load_manifest(parent)
+
+
+def test_own_overlay_wins_over_included(tmp_path):
+    data = tmp_path / "d.jsonl"
+    data.write_text('{"agent_ref": "a", "x": 1}\n')
+    _write_manifest_file(tmp_path, "child.yaml", {
+        "nickname": "c", "config_overlay": {"srv": {"cap": 64}},
+        "entries": [{"label": "e", "agent": "a", "configs": ["c.yaml"], "data": str(data)}],
+    })
+    parent = _write_manifest_file(tmp_path, "all.yaml", {
+        "nickname": "combined", "includes": ["child.yaml"],
+        "config_overlay": {"srv": {"cap": 8192}},
+    })
+    assert load_manifest(parent).config_overlay == {"srv": {"cap": 8192}}

@@ -91,6 +91,11 @@ class SweepManifest(BaseModel):
     # plus optional judge and sandbox bindings. Entry configs declare agents and verifiers; they
     # do not declare the policy, so without at least a model-server config here the composed
     # config fails with "references responses_api_models/'policy_model', which is not defined".
+    # Other manifests to absorb, as paths relative to this file. Their entries, extra_configs and
+    # config_overlay are merged in listed order, and this manifest's own values win. Lets the lane
+    # manifests stay runnable on their own while one combined manifest drives a whole sweep --
+    # which is the point, since the design is one Gym deployment over one concatenated input.
+    includes: List[str] = Field(default_factory=list)
     extra_configs: List[str] = Field(default_factory=list)
     # Ordinary Gym config, verbatim -- exactly what you would put in a standalone Gym yaml, just
     # written here instead of in a file. Nothing in this repo interprets it; the keys are spliced
@@ -159,6 +164,35 @@ def load_manifest(path: str | Path) -> SweepManifest:
         raw = yaml.safe_load(handle)
     if not isinstance(raw, dict):
         raise SweepValidationError(f"Manifest must be a mapping, got {type(raw).__name__}: {path}")
+
+    includes = raw.pop("includes", []) or []
+    if includes:
+        merged_entries: List[Dict[str, Any]] = []
+        merged_extra: List[str] = []
+        merged_overlay: Dict[str, Any] = {}
+        for include in includes:
+            child_path = (path.parent / include).resolve()
+            if child_path == path.resolve():
+                raise SweepValidationError(f"Manifest includes itself: {path}")
+            child = load_manifest(child_path)
+            # num_repeats is resolved per entry here rather than inherited, because the child's
+            # defaults do not travel with its entries -- without this an entry silently picks up
+            # the including manifest's default instead of its own.
+            for entry in child.entries:
+                row = entry.model_dump(exclude_none=True)
+                row.setdefault("num_repeats", child.defaults.num_repeats)
+                merged_entries.append(row)
+            merged_extra.extend(child.extra_configs)
+            merged_overlay.update(child.config_overlay)
+        merged_extra.extend(raw.get("extra_configs", []) or [])
+        merged_overlay.update(raw.get("config_overlay", {}) or {})
+        seen: Dict[str, None] = {}
+        for config in merged_extra:
+            seen.setdefault(config, None)
+        raw["entries"] = merged_entries + (raw.get("entries", []) or [])
+        raw["extra_configs"] = list(seen)
+        raw["config_overlay"] = merged_overlay
+
     return SweepManifest.model_validate(raw)
 
 
