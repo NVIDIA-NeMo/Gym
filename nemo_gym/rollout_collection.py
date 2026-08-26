@@ -631,7 +631,7 @@ class RolloutCollectionHelper(BaseModel):
             raise ConfigPathNotFoundError(
                 f"Input file not found: '{config.input_jsonl_fpath}' (--input). Check the path is spelled correctly."
             )
-        with open(_input_path, buffering=1024 * 1024) as input_file:
+        with open(_input_path) as input_file:
             rows_iterator: Iterator[str] = tqdm(input_file, desc="Reading rows")
             rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
             raw_rows = [
