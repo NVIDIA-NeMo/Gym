@@ -3,17 +3,22 @@
 Reward-profiles the RL training blend by running the policy over every training dataset and
 summarizing per-task reward with `gym eval profile`.
 
-`manifests/no_judge_no_sandbox.yaml` covers the **26 no-judge, no-sandbox environments** (623,006 rows). The 10
-environments that need an LLM judge or a sandbox are intentionally excluded; they are tracked
-separately because they need extra infrastructure.
+`manifests/super35.yaml` is the whole sweep: **36 environments, 726,121 rows**, run as one Gym
+deployment over one concatenated input. Rows carry their own `agent_ref` and rollout collection
+dispatches per row, so judge-scored, sandbox-backed and plain environments coexist in one job.
+
+Two of those groups need infrastructure the third does not. The judge entries interpolate
+`${nv_inference_api_key}` from `env.yaml`, and the sandbox entries (`ns_tools`,
+`math_formal_lean`) need `SANDBOX_CONTAINER` set -- without it they fail per rollout rather than
+at startup, so watch the launcher's `/health` gate rather than the rollout count.
 
 The sweep machinery itself is generic and lives in `nemo_gym/sweep/`. Only these manifests are
 Nemotron-specific.
 
 ```
-manifests/         input: what to profile. Hand-edited.
+manifests/       input: what to profile. Hand-edited.
 outputs/         everything a run produces: sweeps/<nickname>/ and slurm-logs/. Gitignored.
-scripts/           launchers.
+scripts/         launchers.
 ```
 
 ## Why one job instead of one job per environment
@@ -29,7 +34,7 @@ deployment composed from the union of their configs.
 R=benchmarks/nemotron_3.5_super/reward_profiling
 
 # 1. validate + expand repeats in parallel. Once per (manifest, checkpoint).
-MANIFEST=$R/manifests/no_judge_no_sandbox.yaml \
+MANIFEST=$R/manifests/super35.yaml \
 bash $R/scripts/prepare_sweep.sh
 
 # 2. one job: vLLM endpoint + Gym sweep driver + reward profile
