@@ -282,6 +282,30 @@ class CallRecord(_DigestWireModel):
         return self
 
 
+class PendingCallRecord(_WireModel):
+    """Token-free reference to a call whose MInf ledger payload is not staged yet."""
+
+    model_call_id: Identifier
+    parent_call_id: Identifier | None = None
+    mode: CaptureMode
+    prev_len: NonNegativeInt
+    delta_len: NonNegativeInt
+    cum_len: NonNegativeInt
+    ledger_request_uid: Identifier
+    logical_request_id: Identifier | None = None
+    admitted_at: StrictFloat | None = None
+
+    @model_validator(mode="after")
+    def _validate_lengths(self) -> Self:
+        if self.delta_len == 0 or self.cum_len != self.prev_len + self.delta_len:
+            raise ValueError("pending capture lengths must describe a non-empty contiguous delta")
+        if self.parent_call_id is None and (self.prev_len != 0 or self.mode != "text"):
+            raise ValueError("a pending root call must use text mode with prev_len == 0")
+        if self.parent_call_id is not None and (self.prev_len == 0 or self.mode != "token_in"):
+            raise ValueError("a pending child call must use token_in mode with prev_len > 0")
+        return self
+
+
 class ManifestFailure(_WireModel):
     """One poison row in a rollout's capture ledger."""
 
@@ -294,6 +318,7 @@ class RolloutManifest(_WireModel):
 
     rollout_id: Identifier
     records: list[CallRecord] = Field(default_factory=list)
+    pending_records: list[PendingCallRecord] = Field(default_factory=list)
     failures: list[ManifestFailure] = Field(default_factory=list)
 
 

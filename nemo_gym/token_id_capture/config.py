@@ -69,7 +69,7 @@ import os
 from collections.abc import Mapping
 from importlib import import_module
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -116,6 +116,10 @@ class TokenIdCaptureSettings(BaseModel):
     # per-rollout capture ledger. Serving workers coordinate only through
     # that store — there is no separate gate state.
     external_staging: bool = False
+    # ``worker`` is the existing vLLM path: the serving worker stages before
+    # returning. ``megatron_ledger`` records a request UID now and lets the
+    # framework batch-stage from MInf's in-memory ledger at rollout end.
+    external_staging_backend: Literal["worker", "megatron_ledger"] = "worker"
     # Store only the environment variable name in config/telemetry. The
     # manifest-route bearer itself is resolved inside the serving process.
     control_auth_token_env: str = Field(
@@ -153,6 +157,8 @@ class TokenIdCaptureConfig(BaseModel):
                 "token_id_capture.external_staging requires rebuild_response=false because the "
                 "framework owns staged-record finalization"
             )
+        if block.external_staging_backend != "worker" and not block.external_staging:
+            raise ValueError("token_id_capture.external_staging_backend requires external_staging=true")
         if not block.enabled:
             # Keep inactive settings for templated configurations.
             # A run may toggle only ``enabled``.

@@ -142,6 +142,19 @@ def mark_external_staging_committed(*, rollout_id: str, model_call_id: str) -> N
     context.committed = True
 
 
+def mark_external_ledger_capture_recorded(*, rollout_id: str, model_call_id: str) -> None:
+    """Mark the current call as referenced by the framework-owned MInf flush.
+
+    Unlike ``mark_external_staging_committed``, this acknowledgement does not
+    claim the tokens are durable yet. It says the request UID and lineage were
+    recorded successfully, so rollout-end batch staging can make them durable.
+    """
+    mark_external_staging_committed(
+        rollout_id=rollout_id,
+        model_call_id=model_call_id,
+    )
+
+
 def reset_token_sink(token: Token) -> None:
     _CAPTURE_CONTEXT.reset(token)
 

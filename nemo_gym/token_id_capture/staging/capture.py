@@ -79,8 +79,19 @@ class RolloutTokenCapture:
     def adapter(self) -> CaptureAdapter | None:
         return self._adapter
 
-    def begin_call(self, admission: CaptureAdmission, *, stream: bool = False) -> ActiveCall:
-        """Admit a typed gate contract and stamp its generation weight version."""
+    def begin_call(
+        self,
+        admission: CaptureAdmission,
+        *,
+        stream: bool = False,
+        weight_version: int | None = None,
+    ) -> ActiveCall:
+        """Admit a typed gate contract and stamp its generation weight version.
+
+        ``weight_version`` is supplied when a deferred engine ledger owns the
+        authoritative per-call epoch. Immediate worker capture leaves it unset
+        and reads the serving worker's current version provider instead.
+        """
         if not isinstance(admission, CaptureAdmission):
             raise TypeError("admission must be a CaptureAdmission")
         if stream:
@@ -88,9 +99,10 @@ class RolloutTokenCapture:
                 f"rollout {admission.rollout_id} call {admission.model_call_id}: "
                 "token capture does not support streaming responses"
             )
-        weight_version = self._weight_version_fn()
+        if weight_version is None:
+            weight_version = self._weight_version_fn()
         if type(weight_version) is not int or weight_version < 0:
-            raise CaptureError(f"weight_version_fn must return a non-negative int, got {weight_version!r}")
+            raise CaptureError(f"weight_version must be a non-negative int, got {weight_version!r}")
         return ActiveCall(admission=admission, weight_version=weight_version)
 
     def complete_call(

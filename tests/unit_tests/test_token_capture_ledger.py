@@ -102,6 +102,32 @@ async def test_ledger_row_round_trips_token_free_manifest(store):
 
 
 @pytest.mark.asyncio
+async def test_megatron_pending_row_round_trips_token_free_manifest(store):
+    await store.record(
+        "r1",
+        "c1",
+        [USER_1],
+        [ASSISTANT_1],
+        TOKENS_1,
+        compute_digest(TOKENS_1),
+        parent_call_id=None,
+        prev_len=0,
+        delta_len=len(TOKENS_1),
+        cum_len=len(TOKENS_1),
+        mode="text",
+        logical_request_id="lr-c1",
+        admitted_at=1_755_600_000.25,
+        ledger_request_uid="minf-uid-1",
+    )
+    manifest = RolloutManifest.model_validate(await store.manifest("r1"))
+    assert manifest.records == []
+    (pending,) = manifest.pending_records
+    assert pending.model_call_id == "c1"
+    assert pending.ledger_request_uid == "minf-uid-1"
+    assert "cumulative_token_ids" not in manifest.model_dump()["pending_records"][0]
+
+
+@pytest.mark.asyncio
 async def test_legacy_row_without_admitted_at_still_validates(store):
     custody = _custody("c1")
     custody.pop("admitted_at")

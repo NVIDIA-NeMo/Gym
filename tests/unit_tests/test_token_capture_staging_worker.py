@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from nemo_gym.token_id_capture.adapters.megatron import MegatronCaptureAdapter
 from nemo_gym.token_id_capture.adapters.vllm import (
     VLLMCaptureAdapter,
     extract_generation_token_info,
@@ -164,6 +165,12 @@ def test_weight_version_is_stamped_at_admission() -> None:
     assert (first.weight_version, second.weight_version) == (3, 9)
 
 
+def test_deferred_capture_uses_explicit_ledger_weight_version() -> None:
+    capture, _ = _capture(weight_version=1)
+    call = capture.begin_call(_root(), weight_version=9)
+    assert call.weight_version == 9
+
+
 @pytest.mark.parametrize("bad_version", [-1, 1.5, True])
 def test_weight_version_must_be_a_non_negative_int(bad_version: Any) -> None:
     capture, _ = _capture()
@@ -295,6 +302,46 @@ def test_vllm_extraction_failure_returns_poisoned_coords() -> None:
     )
     assert coords.disposition == "capture_failed"
     assert sink.events == []
+
+
+def test_megatron_adapter_records_http_uid_and_exact_lineage() -> None:
+    adapter = MegatronCaptureAdapter()
+    pending = adapter.pending_capture(
+        {
+            "id": "minf-17",
+            "choices": [
+                {
+                    "message": {
+                        "prompt_token_ids": [10, 11, 12, 20],
+                        "generation_token_ids": [21, 22],
+                    }
+                }
+            ],
+        },
+        _child(),
+    )
+    assert pending.request_uid == "minf-17"
+    assert pending.token_ids_delta == (20, 21, 22)
+    assert pending.cumulative_token_ids == (10, 11, 12, 20, 21, 22)
+
+
+def test_megatron_adapter_extracts_ledger_payload_and_epoch() -> None:
+    adapter = MegatronCaptureAdapter()
+    payload = {
+        "prompt_token_ids": [1, 2],
+        "generated_token_ids": [3],
+        "generated_log_probs": [-0.25],
+        "policy_epoch": [[0, 8]],
+    }
+    assert adapter.extract_prompt_ids(payload) == [1, 2]
+    assert adapter.extract_generation(payload) == ([3], [-0.25])
+    assert adapter.extract_weight_version(payload) == 8
+
+
+def test_megatron_adapter_rejects_calls_spanning_weight_versions() -> None:
+    adapter = MegatronCaptureAdapter()
+    with pytest.raises(ValueError, match="multiple policy epochs"):
+        adapter.extract_weight_version({"policy_epoch": [[0, 8], [4, 9]]})
 
 
 def test_install_capture_uses_the_worker_host_seam() -> None:

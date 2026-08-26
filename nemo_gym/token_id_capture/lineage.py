@@ -83,6 +83,17 @@ _CUSTODY_FIELDS = (
     "fingerprint_version",
 )
 
+_PENDING_FIELDS = (
+    "parent_call_id",
+    "ledger_request_uid",
+    "prev_len",
+    "delta_len",
+    "cum_len",
+    "mode",
+    "logical_request_id",
+    "admitted_at",
+)
+
 
 def _custody_columns(
     parent_call_id: str | None,
@@ -129,6 +140,31 @@ def _custody_columns(
     }
 
 
+def _pending_columns(
+    parent_call_id: str | None,
+    ledger_request_uid: str | None,
+    prev_len: int | None,
+    delta_len: int | None,
+    cum_len: int | None,
+    mode: str | None,
+    logical_request_id: str | None,
+    admitted_at: float | None,
+) -> dict:
+    """Return deferred MInf-ledger columns, or no columns for a normal row."""
+    if ledger_request_uid is None:
+        return {}
+    return {
+        "parent_call_id": parent_call_id,
+        "ledger_request_uid": ledger_request_uid,
+        "prev_len": prev_len,
+        "delta_len": delta_len,
+        "cum_len": cum_len,
+        "mode": mode,
+        "logical_request_id": logical_request_id,
+        "admitted_at": admitted_at,
+    }
+
+
 def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
     """Build the token-free ``RolloutManifest`` payload from ledger rows.
 
@@ -140,10 +176,12 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
     from nemo_gym.token_id_capture.staging.records import (
         CallRecord,
         ManifestFailure,
+        PendingCallRecord,
         RolloutManifest,
     )
 
     records = []
+    pending_records = []
     failures = []
     for row in rows:
         if row.get("failure_reason") is not None:
@@ -187,7 +225,26 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
                     fingerprint_version=int(row.get("fingerprint_version") or 0),
                 )
             )
-    manifest = RolloutManifest(rollout_id=rollout_id, records=records, failures=failures)
+        elif row.get("ledger_request_uid") is not None:
+            pending_records.append(
+                PendingCallRecord(
+                    model_call_id=str(row["model_call_id"]),
+                    parent_call_id=row.get("parent_call_id"),
+                    prev_len=int(row["prev_len"]),
+                    delta_len=int(row["delta_len"]),
+                    cum_len=int(row["cum_len"]),
+                    mode=str(row["mode"]),
+                    ledger_request_uid=str(row["ledger_request_uid"]),
+                    logical_request_id=row.get("logical_request_id"),
+                    admitted_at=row.get("admitted_at"),
+                )
+            )
+    manifest = RolloutManifest(
+        rollout_id=rollout_id,
+        records=records,
+        pending_records=pending_records,
+        failures=failures,
+    )
     return manifest.model_dump(mode="json")
 
 
@@ -549,6 +606,7 @@ class InMemoryLineageStore:
         output_fingerprint: str | None = None,
         continuation_fingerprint: str | None = None,
         fingerprint_version: int = 0,
+        ledger_request_uid: str | None = None,
     ) -> None:
         # Custody rows are token-free (mirrors FileLineageStore): the chain
         # hash covers continuity, so the index keeps tokens only for
@@ -584,9 +642,22 @@ class InMemoryLineageStore:
             continuation_fingerprint,
             fingerprint_version,
         )
-        if custody:
+        pending = _pending_columns(
+            parent_call_id,
+            ledger_request_uid,
+            prev_len,
+            delta_len,
+            cum_len,
+            mode,
+            logical_request_id,
+            admitted_at,
+        )
+        if custody and pending:
+            raise ValueError("a lineage row cannot be both staged and pending")
+        capture_columns = custody or pending
+        if capture_columns:
             rows = self._ledgers.setdefault(rollout_id, [])
-            row = {"model_call_id": model_call_id, **custody}
+            row = {"model_call_id": model_call_id, **capture_columns}
             if not any(existing == row for existing in rows):
                 rows.append(row)
 
@@ -746,6 +817,7 @@ class FileLineageStore:
         output_fingerprint: str | None = None,
         continuation_fingerprint: str | None = None,
         fingerprint_version: int = 0,
+        ledger_request_uid: str | None = None,
     ) -> None:
         custody = _custody_columns(
             parent_call_id,
@@ -767,6 +839,18 @@ class FileLineageStore:
             continuation_fingerprint,
             fingerprint_version,
         )
+        pending = _pending_columns(
+            parent_call_id,
+            ledger_request_uid,
+            prev_len,
+            delta_len,
+            cum_len,
+            mode,
+            logical_request_id,
+            admitted_at,
+        )
+        if custody and pending:
+            raise ValueError("a lineage row cannot be both staged and pending")
         await asyncio.to_thread(
             self._record,
             rollout_id,
@@ -775,7 +859,7 @@ class FileLineageStore:
             response_items,
             cumulative_token_ids,
             digest,
-            custody,
+            custody or pending,
         )
 
     def _record(

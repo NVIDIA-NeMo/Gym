@@ -57,8 +57,10 @@ from nemo_gym.token_id_capture import (
     NG_CAPTURE_FIELD,
     NG_COMMIT_COORDS_FIELD,
     current_capture_context,
+    mark_external_ledger_capture_recorded,
     mark_external_staging_committed,
 )
+from nemo_gym.token_id_capture.adapters.megatron import MegatronCaptureAdapter
 from nemo_gym.token_id_capture.config import token_id_capture_config
 from nemo_gym.token_id_capture.lineage import (
     LINEAGE_FINGERPRINT_VERSION,
@@ -277,6 +279,8 @@ class VLLMModel(SimpleResponsesAPIModel):
         "required_prefix_token_ids",
     )
     _external_capture_enabled: bool = PrivateAttr(default=False)
+    _external_capture_backend: str = PrivateAttr(default="worker")
+    _megatron_capture_adapter: MegatronCaptureAdapter = PrivateAttr(default_factory=MegatronCaptureAdapter)
 
     def get_converter(self) -> "VLLMConverter":
         """Return the converter used for Responses API <-> Chat Completions mapping.
@@ -319,6 +323,8 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._external_capture_enabled = bool(
             capture_config is not None and capture_config.token_id_capture.external_staging
         )
+        if capture_config is not None:
+            self._external_capture_backend = capture_config.token_id_capture.external_staging_backend
         if self._external_capture_enabled:
             if self.config.use_completions_api:
                 raise ValueError("token_id_capture.external_staging does not support use_completions_api=true")
@@ -675,6 +681,15 @@ class VLLMModel(SimpleResponsesAPIModel):
         admission = context.capture_admission
         if admission is None:
             return body_dict
+        if self._external_capture_backend == "megatron_ledger":
+            body_dict.update(
+                logprobs=True,
+                top_logprobs=0,
+                return_tokenized_data=True,
+            )
+            if admission.mode == "token_in":
+                self._megatron_capture_adapter.enter_prefix(body_dict, list(admission.required_prefix_token_ids))
+            return body_dict
         body_dict[NG_CAPTURE_FIELD] = admission.model_dump(mode="json")
         body_dict.update(
             logprobs=True,
@@ -968,6 +983,9 @@ class VLLMModel(SimpleResponsesAPIModel):
         row (which is what makes the call resolvable) is written only after
         the coordinates arrive.
         """
+        if self._external_capture_backend == "megatron_ledger":
+            await self._finalize_megatron_ledger_capture(payload)
+            return
         context = current_capture_context()
         if context is None or not context.external_staging or context.lineage_store is None:
             return
@@ -1073,6 +1091,60 @@ class VLLMModel(SimpleResponsesAPIModel):
             except Exception:
                 LOG.exception(
                     "Could not poison rollout %s call %s after a failed acknowledgement",
+                    context.rollout_id,
+                    context.model_call_id,
+                )
+        finally:
+            self._strip_capture_transport_fields(payload)
+
+    async def _finalize_megatron_ledger_capture(self, payload: Dict[str, Any]) -> None:
+        """Record an MInf request UID and exact lineage for rollout-end staging."""
+        context = current_capture_context()
+        if context is None or not context.external_staging or context.lineage_store is None:
+            return
+        admission = context.capture_admission
+        if admission is None:
+            self._strip_capture_transport_fields(payload)
+            return
+        try:
+            pending = self._megatron_capture_adapter.pending_capture(payload, admission)
+            response_items, _ = strip_token_fields(response_to_output_items(payload))
+            cumulative = list(pending.cumulative_token_ids)
+            await context.lineage_store.record(
+                context.rollout_id,
+                context.model_call_id,
+                list(context.request_items or []),
+                response_items,
+                cumulative,
+                compute_digest(cumulative),
+                parent_call_id=admission.parent_call_id,
+                prev_len=admission.prev_len,
+                delta_len=pending.delta_len,
+                cum_len=pending.cum_len,
+                mode=admission.mode,
+                logical_request_id=context.logical_request_id or (str(payload["id"]) if payload.get("id") else None),
+                admitted_at=context.admitted_at,
+                ledger_request_uid=pending.request_uid,
+            )
+            mark_external_ledger_capture_recorded(
+                rollout_id=context.rollout_id,
+                model_call_id=context.model_call_id,
+            )
+        except Exception:
+            LOG.exception(
+                "Megatron ledger capture failed for rollout %s call %s",
+                context.rollout_id,
+                context.model_call_id,
+            )
+            try:
+                await context.lineage_store.record_failure(
+                    context.rollout_id,
+                    context.model_call_id,
+                    "invalid_megatron_ledger_reference",
+                )
+            except Exception:
+                LOG.exception(
+                    "Could not poison rollout %s call %s after a failed MInf reference",
                     context.rollout_id,
                     context.model_call_id,
                 )
