@@ -19,6 +19,8 @@ on:
     branches:
       - main
       - "pull-request/[0-9]+"
+  schedule:
+    - cron: "0 9 * * *"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
@@ -71,10 +73,10 @@ jobs:
   container_build:
     name: Build Gym container
     needs: [pre-flight, classify_changes, unit_tests]
-    # Temporarily disabled: the nemo-ci-aws-gpu-x2 self-hosted runner pool is
-    # queuing indefinitely and blocking PRs. Re-enable once the pool backlog
-    # is resolved.
-    if: false
+    # Nightly only: this job runs on the internal nemo-ci-aws-gpu-x2 runner
+    # pool, which is shared with NeMo-RL's H100 CI traffic and was queuing
+    # indefinitely on every PR push. Run it on the nightly schedule instead.
+    if: github.event_name == 'schedule'
     runs-on: ${{ needs.pre-flight.outputs.runner_prefix }}
     environment: ${{ contains(needs.pre-flight.outputs.registry, 'azure') && 'nemo-ci' || '' }}
     outputs:
@@ -133,9 +135,8 @@ jobs:
   gpu_e2e_tests:
     name: ${{ matrix.name }}
     needs: [pre-flight, classify_changes, unit_tests, container_build]
-    # Temporarily disabled: depends on container_build, which is disabled
-    # while the nemo-ci-aws-gpu-x2 runner pool backlog is resolved.
-    if: false
+    # Nightly only, same reasoning as container_build above.
+    if: github.event_name == 'schedule'
     strategy:
       fail-fast: false
       matrix:
@@ -175,7 +176,9 @@ jobs:
   provider_e2e_tests:
     name: ${{ matrix.provider }}-e2e
     needs: [classify_changes, unit_tests]
-    if: needs.classify_changes.outputs.docs_only != 'true'
+    # Nightly only: exercises a live external inference provider (Fireworks).
+    # Run nightly instead of on every PR push.
+    if: github.event_name == 'schedule'
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -237,9 +240,9 @@ jobs:
           echo "Classify changes: $CLASSIFY_RESULT"
           echo "Docs only: $DOCS_ONLY"
           echo "Unit tests: $UNIT_TEST_RESULT"
-          echo "Container build: $CONTAINER_BUILD_RESULT (not gating - temporarily disabled)"
-          echo "GPU E2E tests: $GPU_E2E_TEST_RESULT (not gating - temporarily disabled)"
-          echo "Provider E2E tests: $PROVIDER_E2E_TEST_RESULT (not gating)"
+          echo "Container build: $CONTAINER_BUILD_RESULT (not gating - nightly only)"
+          echo "GPU E2E tests: $GPU_E2E_TEST_RESULT (not gating - nightly only)"
+          echo "Provider E2E tests: $PROVIDER_E2E_TEST_RESULT (not gating - nightly only)"
 
           if [[ "$PREFLIGHT_RESULT" != "success" ]]; then
             echo "Pre-flight did not succeed."
