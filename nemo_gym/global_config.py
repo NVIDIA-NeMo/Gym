@@ -29,14 +29,11 @@ from typing import ClassVar, List, Optional, Tuple, Type
 
 import hydra
 import rich
-import wandb
-import wandb.util
 from omegaconf import MISSING, DictConfig, ListConfig, OmegaConf, open_dict
 from omegaconf.errors import InterpolationResolutionError
 from openai import __version__ as openai_version
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from ray import __version__ as ray_version
-from wandb import Run
 
 from nemo_gym import CACHE_DIR, RESULTS_DIR, WORKING_DIR, _resolve_under_cwd_or_install, component_search_roots
 from nemo_gym.config_types import (
@@ -50,11 +47,12 @@ from nemo_gym.config_types import (
     NoServerInstancesError,
     ServerInstanceConfig,
     ServerRefNotFoundError,
-    WANDBConfig,
     is_almost_server,
     is_server_ref,
     maybe_get_server_instance_config,
 )
+from nemo_gym.exporters import setup_exporters
+from nemo_gym.secret_utils import recursively_hide_secrets
 
 
 _GLOBAL_CONFIG_DICT = None
@@ -81,6 +79,8 @@ MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME = "model_endpoint_readiness_timeout_se
 ALLOW_OPENAI_VERSION_SKEW_KEY_NAME = "allow_openai_version_skew"
 UV_CACHE_DIR_KEY_NAME = "uv_cache_dir"
 UV_VENV_DIR_KEY_NAME = "uv_venv_dir"
+RESULTS_DIR_KEY_NAME = "results_dir"
+CACHE_DIR_KEY_NAME = "cache_dir"
 INHERIT_FROM_KEY_NAME = "_inherit_from"
 COPY_KEY_NAME = "_copy"
 DELETE_KEY_KEY_NAME = "_delete_key"
@@ -95,7 +95,12 @@ JSON_OUTPUT_KEY_NAME = "json"
 QUERY_KEY_NAME = "query"
 OBSERVABILITY_ENABLED_KEY_NAME = "observability_enabled"
 MODEL_CALL_CAPTURE_DIR_KEY_NAME = "model_call_capture_dir"
+# Run-wide training-token capture settings.
+# See ``nemo_gym/token_id_capture/config.py``.
+TOKEN_ID_CAPTURE_BLOCK = "token_id_capture"
 COMPONENT_NAME_KEY_NAME = "component_name"
+SKIP_VERIFICATION_KEY_NAME = "skip_verification"
+SKIP_VERIFICATION_REWARD_KEY_NAME = "skip_verification_reward"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -117,6 +122,8 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     ALLOW_OPENAI_VERSION_SKEW_KEY_NAME,
     UV_CACHE_DIR_KEY_NAME,
     UV_VENV_DIR_KEY_NAME,
+    RESULTS_DIR_KEY_NAME,
+    CACHE_DIR_KEY_NAME,
     INHERIT_FROM_KEY_NAME,
     COPY_KEY_NAME,
     NEMO_GYM_LOG_DIR_KEY_NAME,
@@ -125,7 +132,10 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     QUERY_KEY_NAME,
     OBSERVABILITY_ENABLED_KEY_NAME,
     MODEL_CALL_CAPTURE_DIR_KEY_NAME,
+    TOKEN_ID_CAPTURE_BLOCK,
     COMPONENT_NAME_KEY_NAME,
+    SKIP_VERIFICATION_KEY_NAME,
+    SKIP_VERIFICATION_REWARD_KEY_NAME,
 ]
 
 # Data keys
@@ -134,6 +144,10 @@ ROLLOUT_INDEX_KEY_NAME = "_ng_rollout_index"
 # Resume re-dispatch attempt counter (0 on the first attempt); distinguishes retries of the same
 # (task, rollout) so their captured model calls stay separable.
 ATTEMPT_INDEX_KEY_NAME = "_ng_attempt_index"
+# An explicit capture id replaces the task and rollout derivation.
+# Set it when dispatches reuse task and rollout indices.
+# Otherwise two dispatches would share one capture key.
+ROLLOUT_ID_KEY_NAME = "_ng_rollout_id"
 # One physical /run execution. Unlike trajectory_identity.rollout_id, this is
 # deliberately fresh when a logical rollout is re-executed after an ambiguous
 # transport failure.
@@ -153,16 +167,6 @@ POLICY_MODEL_NAME_KEY_NAME = "policy_model_name"
 POLICY_MODEL_KEY_NAME = "policy_model"
 
 DEFAULT_HEAD_SERVER_PORT = 11000
-
-
-# W&B
-# Increase row limit since some of our rollouts are pretty hefty
-wandb.util.VALUE_BYTES_LIMIT = 10_000_000
-_WANDB_RUN: Optional[Run] = None
-
-
-def get_wandb_run() -> Optional[Run]:
-    return _WANDB_RUN
 
 
 # HuggingFace
@@ -311,14 +315,30 @@ class GlobalConfigDictParser(BaseModel):
 
     def load_extra_config_paths(self, config_paths: List[str]) -> Tuple[List[str], List[DictConfig]]:
         """
-        Returns the new total config_paths and the extra configs
+        Returns the new total config_paths and the extra configs, ordered for merging.
+
+        Two rules decide precedence:
+
+        - A config named in another config's ``config_paths`` is *inner*. The config
+          that pulled it in overrides it, however deep the nesting goes.
+        - Configs listed together are siblings, in the order they were listed. A later
+          sibling overrides an earlier one, and so does everything it pulled in.
+
+        The returned configs are ordered so that a left-to-right ``OmegaConf.merge``
+        produces both rules: the include tree flattened so that a config follows
+        everything it pulled in, with each subtree kept contiguous.
         """
         config_paths = config_paths.copy()
+        # The entries the caller passed; everything appended below was pulled in by one
+        # of them, directly or transitively.
+        root_count = len(config_paths)
+        # Entries pulled in by each entry, parallel to config_paths, in listed order.
+        children: List[List[int]] = [[] for _ in config_paths]
 
         extra_configs: List[DictConfig] = []
         duplicate_config_paths: List[str] = []
         # Just a careful note here that we explicitly mutate config_paths as it is being appended to
-        for config_path in config_paths:
+        for index, config_path in enumerate(config_paths):
             original_entry = config_path
             config_path = Path(config_path)
             # Search NEMO_GYM_EXTRA_ROOTS, cwd, then the install root (see _resolve_under_cwd_or_install).
@@ -341,6 +361,8 @@ Check the path is spelled correctly and is relative to your working directory, a
             for new_config_path in extra_config.get(CONFIG_PATHS_KEY_NAME) or []:
                 if new_config_path not in config_paths:
                     config_paths.append(new_config_path)
+                    children.append([])
+                    children[index].append(len(config_paths) - 1)
                 else:
                     duplicate_config_paths.append(new_config_path)
             extra_configs.append(extra_config)
@@ -351,6 +373,21 @@ Check the path is spelled correctly and is relative to your working directory, a
 In cases like these, you may want to consider using the `inherit_from` OmegaConf directive e.g. '++my_specific_server=${{inherit_from:generic_server}}' and then overriding config parameters in `my_specific_server`.
 Duplicate config paths:
 {duplicate_config_paths_str}""")
+
+        # Flatten the include tree so that every config merges after -- and therefore
+        # overrides -- the ones it pulled in, and each subtree stays contiguous in
+        # listed order, so a later sibling and its own includes override an earlier
+        # sibling's. Iterative post-order, since include chains can nest arbitrarily.
+        merge_order: List[int] = []
+        pending: List[Tuple[int, bool]] = [(root, False) for root in reversed(range(root_count))]
+        while pending:
+            index, children_visited = pending.pop()
+            if children_visited:
+                merge_order.append(index)
+                continue
+            pending.append((index, True))
+            pending.extend((child, False) for child in reversed(children[index]))
+        extra_configs = [extra_configs[i] for i in merge_order]
 
         return config_paths, extra_configs
 
@@ -393,6 +430,8 @@ Duplicate config paths:
         port_range_low: int,
         port_range_high: int,
         initial_disallowed_ports: Optional[List[int]] = None,
+        skip_verification: Optional[bool] = None,
+        skip_verification_reward: Optional[float] = None,
         probe_ports: bool = True,
     ) -> List[int]:
         server_refs = [c.get_server_ref() for c in server_instance_configs]
@@ -441,6 +480,15 @@ Duplicate config paths:
                 else:
                     # Port already exists, add it to the disallowed list.
                     disallowed_ports.append(run_server_config_dict["port"])
+
+                if server_instance_config.SERVER_TYPE == "responses_api_agents":
+                    if skip_verification is not None and SKIP_VERIFICATION_KEY_NAME not in run_server_config_dict:
+                        run_server_config_dict[SKIP_VERIFICATION_KEY_NAME] = skip_verification
+                    if (
+                        skip_verification_reward is not None
+                        and SKIP_VERIFICATION_REWARD_KEY_NAME not in run_server_config_dict
+                    ):
+                        run_server_config_dict[SKIP_VERIFICATION_REWARD_KEY_NAME] = skip_verification_reward
 
         return disallowed_ports
 
@@ -492,25 +540,6 @@ Provide each value via a CLI override, in env.yaml, or in a config you pass via 
 For example, on the command line:
 {override_examples}"""
         )
-
-    def _recursively_hide_secrets(self, dict_config: DictConfig) -> None:
-        with open_dict(dict_config):
-            self._recursively_hide_secrets_helper(dict_config)
-
-    def _recursively_hide_secrets_helper(self, dict_config: DictConfig) -> None:
-        for k, v in list(dict_config.items()):
-            if isinstance(v, (DictConfig, dict)):
-                self._recursively_hide_secrets_helper(v)
-            elif isinstance(v, (ListConfig, list)):
-                if "token" in k or "key" in k:
-                    dict_config[k] = ["****"] * len(v)
-                else:
-                    for inner_v in v:
-                        if isinstance(inner_v, (DictConfig, dict)):
-                            self._recursively_hide_secrets_helper(inner_v)
-            else:
-                if "token" in k or "key" in k:
-                    dict_config[k] = "****"
 
     def _recursively_swap_keys(self, dict_config: DictConfig) -> None:
         frozen_dict_config = deepcopy(dict_config)
@@ -658,10 +687,9 @@ Pass each config with --config (it builds the list for you), e.g.:
   gym env start --config resources_servers/<env>/configs/<env>.yaml"""
             ) from e
 
+        # Returned in merge order: a config follows everything it pulled in, so it
+        # overrides them; siblings in listed order, so a later one overrides earlier.
         config_paths, extra_configs = self.load_extra_config_paths(config_paths)
-
-        # Reverse here so the "inner" configs (appended to the list) are ovreridden by the outer configs.
-        extra_configs.reverse()
 
         # Dot env overrides previous configs
         extra_configs.append(dotenv_extra_config)
@@ -717,7 +745,7 @@ Pass each config with --config (it builds the list for you), e.g.:
             error_on_almost_servers = global_config_dict.get("error_on_almost_servers", True)
             if error_on_almost_servers:
                 config_dict_to_log = deepcopy(global_config_dict)
-                self._recursively_hide_secrets(config_dict_to_log)
+                recursively_hide_secrets(config_dict_to_log)
                 config_to_log_yaml = OmegaConf.to_yaml(config_dict_to_log)
 
                 error_msg = f"""Found {len(almost_servers)} almost-server(s) with validation errors. Fix the issues above or set error_on_almost_servers=false to bypass this error.
@@ -751,6 +779,8 @@ Found global config dict yaml:
             initial_disallowed_ports=initial_disallowed_ports,
             port_range_low=port_range_low,
             port_range_high=port_range_high,
+            skip_verification=global_config_dict.get(SKIP_VERIFICATION_KEY_NAME),
+            skip_verification_reward=global_config_dict.get(SKIP_VERIFICATION_REWARD_KEY_NAME),
             probe_ports=not parse_config.offline,
         )
 
@@ -815,35 +845,42 @@ Found global config dict yaml:
             # a connection. Generous because vLLM can take minutes to load weights; 0 skips it.
             global_config_dict.setdefault(MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME, 600)
 
+            # Artifact roots. `results_dir` is where servers write run artifacts;
+            # `cache_dir` is where they keep reusable setup trees (clones, venvs,
+            # toolchains). Overridable independently, so a run can point results at
+            # a shared filesystem while caches stay on fast local (or baked
+            # container) storage. Normalized to absolute here: children resolve
+            # relative paths against their own cwd, which differs per process.
+            for dir_key_name, dir_default in (
+                (RESULTS_DIR_KEY_NAME, RESULTS_DIR),
+                (CACHE_DIR_KEY_NAME, CACHE_DIR),
+            ):
+                dir_value = global_config_dict.setdefault(dir_key_name, str(dir_default))
+                if not isinstance(dir_value, str) or not dir_value:
+                    raise ConfigError(f"{dir_key_name} must be a non-empty path string, got {dir_value!r}.")
+                global_config_dict[dir_key_name] = str(Path(dir_value).expanduser().resolve())
+
             # UV related configuration
-            # UV caching directory overrides to local folders.
-            global_config_dict.setdefault(UV_CACHE_DIR_KEY_NAME, str(CACHE_DIR / "uv"))
+            # UV caching directory overrides to local folders, under the cache root.
+            global_config_dict.setdefault(
+                UV_CACHE_DIR_KEY_NAME, str(Path(global_config_dict[CACHE_DIR_KEY_NAME]) / "uv")
+            )
             # Runtime subprocesses inherit the configured cache directory.
             if not parse_config.offline:
                 environ["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
             # By default, build the directories in their individual folders using the root repository
             # e.g. WORKING_DIR/responses_api_models/my_server
+            # Deliberately anchored at WORKING_DIR rather than the cache root: venv
+            # trees don't relocate safely once built, and the key is independently
+            # overridable for deployments that want them elsewhere.
             global_config_dict.setdefault(UV_VENV_DIR_KEY_NAME, str(WORKING_DIR))
 
         if parse_config.hide_secrets:  # pragma: no cover
-            self._recursively_hide_secrets(global_config_dict)
+            recursively_hide_secrets(global_config_dict)
 
-        # Set up W&B and log config. This must happen at the very last step.
-        wandb_config = WANDBConfig.model_validate(global_config_dict)
-        if wandb_config.is_available and not parse_config.offline:  # pragma: no cover
-            environ["WANDB_API_KEY"] = wandb_config.wandb_api_key
-
-            global _WANDB_RUN
-            _WANDB_RUN = wandb.init(
-                project=wandb_config.wandb_project,
-                name=wandb_config.wandb_name,
-                dir=str(RESULTS_DIR / "wandb"),
-            )
-
-            # Log params
-            config_dict_to_log = deepcopy(global_config_dict)
-            self._recursively_hide_secrets(config_dict_to_log)
-            _WANDB_RUN.config.update(OmegaConf.to_container(config_dict_to_log))
+        # Set up exporters and log config. This must happen at the very last step.
+        if not parse_config.offline:  # pragma: no cover
+            setup_exporters(global_config_dict)
 
         return global_config_dict
 
@@ -884,6 +921,30 @@ Found global config dict yaml:
         return almost_servers
 
 
+def maybe_get_global_config_dict() -> Optional[DictConfig]:
+    """The global config dict when this process already has one; never triggers a CLI parse.
+
+    Returns the cached dict, or the one the parent injected via
+    NEMO_GYM_CONFIG_DICT (caching it), or None in a bare process. Library code
+    that only wants to *consult* the config should use this instead of
+    `get_global_config_dict`, which falls through to a full CLI/hydra parse.
+    """
+    global _GLOBAL_CONFIG_DICT
+    if _GLOBAL_CONFIG_DICT is not None:
+        return _GLOBAL_CONFIG_DICT
+
+    nemo_gym_config_dict_str_from_env = getenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME)
+    if nemo_gym_config_dict_str_from_env:
+        global_config_dict = OmegaConf.create(nemo_gym_config_dict_str_from_env)
+
+        _GLOBAL_CONFIG_DICT = global_config_dict
+
+        _apply_verbosity(global_config_dict)
+        return global_config_dict
+
+    return None
+
+
 def get_global_config_dict(
     global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
     global_config_dict_parser_cls: Type[GlobalConfigDictParser] = GlobalConfigDictParser,
@@ -905,18 +966,9 @@ def get_global_config_dict(
 
     If this function is run by a child server of the main proc, that child will have been spun up with an environment variable with key NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME. The config dict will be read directly off this variable, cached, and returned with no additional validation.
     """
-    global _GLOBAL_CONFIG_DICT
-    if _GLOBAL_CONFIG_DICT is not None:
-        return _GLOBAL_CONFIG_DICT
-
-    nemo_gym_config_dict_str_from_env = getenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME)
-    if nemo_gym_config_dict_str_from_env:
-        global_config_dict = OmegaConf.create(nemo_gym_config_dict_str_from_env)
-
-        _GLOBAL_CONFIG_DICT = global_config_dict
-
-        _apply_verbosity(global_config_dict)
-        return global_config_dict
+    existing_global_config_dict = maybe_get_global_config_dict()
+    if existing_global_config_dict is not None:
+        return existing_global_config_dict
 
     set_global_config_dict(
         global_config_dict_parser_config=global_config_dict_parser_config,

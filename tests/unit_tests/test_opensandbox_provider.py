@@ -201,6 +201,19 @@ async def test_direct_create_passes_platform_to_sdk_create(
         os="linux",
         arch="amd64",
     )
+    assert "network_policy" not in FakeSandbox.created_kwargs
+
+
+async def test_direct_create_passes_network_policy_to_sdk_create(fake_opensandbox_sdk: None) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+    policy = {
+        "defaultAction": "deny",
+        "egress": [{"action": "allow", "target": "pypi.org"}],
+    }
+
+    await provider.create(SandboxSpec(image="image:tag", provider_options={"network_policy": policy}))
+
+    assert FakeSandbox.created_kwargs["network_policy"].model_dump(by_alias=True, exclude_none=True) == policy
 
 
 async def test_direct_create_passes_resource_requests_to_sdk_create(
@@ -470,6 +483,7 @@ def test_provider_options_from_mapping() -> None:
     parsed = options_cls.from_mapping(
         {
             "image_auth": {"username": "user", "password": TEST_REGISTRY_PASSWORD},
+            "network_policy": {"defaultAction": "allow", "egress": []},
             "platform": {"os": "linux", "arch": "amd64"},
             "snapshot_id": "snap-1",
             "volumes": [{"name": "workspace"}],
@@ -478,6 +492,7 @@ def test_provider_options_from_mapping() -> None:
         }
     )
     assert parsed.image_auth == {"username": "user", "password": TEST_REGISTRY_PASSWORD}
+    assert parsed.network_policy == {"defaultAction": "allow", "egress": []}
     assert parsed.platform == {"os": "linux", "arch": "amd64"}
     assert parsed.snapshot_id == "snap-1"
     assert parsed.volumes == ({"name": "workspace"},)
@@ -492,6 +507,8 @@ def test_provider_options_from_mapping() -> None:
         options_cls.from_mapping({"platform": "linux/amd64"})
     with pytest.raises(TypeError, match="'image_auth' must be a mapping"):
         options_cls.from_mapping({"image_auth": "not-a-mapping"})
+    with pytest.raises(TypeError, match="'network_policy' must be a mapping"):
+        options_cls.from_mapping({"network_policy": "allow"})
     with pytest.raises(TypeError, match="'snapshot_id' must be a string"):
         options_cls.from_mapping({"snapshot_id": 123})
     with pytest.raises(TypeError, match="'volumes' must be a list of mappings"):
@@ -794,6 +811,65 @@ async def test_exec_background_polls_status_and_logs(monkeypatch: pytest.MonkeyP
     assert raw.commands.run_calls[0][1].kwargs["background"] is True
     assert raw.commands.status_calls == ["exec-42", "exec-42"]
     assert raw.commands.log_calls == ["exec-42"]
+
+
+@pytest.mark.asyncio
+async def test_exec_background_reports_oom_status_after_502(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Backend502Error(Exception):
+        status_code = 502
+
+    class FakeCommands:
+        async def run(self, command: str, *, opts: Any) -> Any:
+            return SimpleNamespace(id="exec-oom")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            raise Backend502Error("Get command status failed: HTTP 502")
+
+    class FakeRaw:
+        def __init__(self) -> None:
+            self.commands = FakeCommands()
+            self.statuses = [
+                SimpleNamespace(state="Running", reason=None, message=None),
+                SimpleNamespace(
+                    state="Failed",
+                    reason="FAILED",
+                    message="container sandbox terminated with OOMKilled (exit code 137); " + "x" * 1000,
+                ),
+            ]
+            self.info_calls = 0
+
+        async def get_info(self) -> Any:
+            status = self.statuses[min(self.info_calls, len(self.statuses) - 1)]
+            self.info_calls += 1
+            return SimpleNamespace(status=status)
+
+    monkeypatch.setattr(
+        opensandbox_provider, "_require_opensandbox_sdk", lambda: (object, object, dict, object, object)
+    )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 5},
+        probe={"command": None},
+        operations={"background_exec": True, "retries": 0},
+    )
+    raw = FakeRaw()
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-oom", provider_name="opensandbox", raw=raw)
+
+    with pytest.raises(opensandbox_provider.SandboxBackendUnreachableError) as exc_info:
+        await provider.exec(handle, "allocate memory", timeout_s=30)
+
+    message = str(exc_info.value)
+    assert "OOM-killed" in message
+    assert "SandboxResources.memory_mib" not in message
+    assert "reason='FAILED'" in message
+    assert len(message) < 800
+    assert isinstance(exc_info.value.__cause__, Backend502Error)
+    assert raw.info_calls == 2
+
+    raw.statuses = [SimpleNamespace(state="Failed", reason="FAILED", message="sandbox node was drained")]
+    raw.info_calls = 0
+    with pytest.raises(Backend502Error, match="Get command status failed"):
+        await provider.exec(handle, "retry after non-OOM failure", timeout_s=30)
 
 
 @pytest.mark.parametrize(
@@ -1494,6 +1570,9 @@ async def test_exec_persistent_502_raises_typed_backend_unreachable(
     class FakeRaw:
         def __init__(self) -> None:
             self.commands = FakeCommands()
+
+        async def get_info(self) -> Any:
+            raise ConnectionError("status API unavailable")
 
     monkeypatch.setattr(
         opensandbox_provider,

@@ -4600,7 +4600,12 @@ class TestCompletionsBackendChatTemplateRender:
         assert "<|user|>hi" in captured["kwargs"]["prompt"]
 
 
-def _make_top_logprobs_model(return_token_id_information: bool) -> VLLMModel:
+def _make_top_logprobs_model(
+    return_token_id_information: bool,
+    *,
+    extra_body: dict[str, Any] | None = None,
+    request_prompt_and_generation_token_ids: bool = False,
+) -> VLLMModel:
     """A VLLMModel with the minimum config needed to exercise top_logprobs handling."""
     config = VLLMModelConfig(
         host="0.0.0.0",
@@ -4611,8 +4616,10 @@ def _make_top_logprobs_model(return_token_id_information: bool) -> VLLMModel:
         api_key="dummy_key",  # pragma: allowlist secret
         model="dummy_model",
         return_token_id_information=return_token_id_information,
+        request_prompt_and_generation_token_ids=request_prompt_and_generation_token_ids,
         uses_reasoning_parser=False,
         uses_interleaved_reasoning=False,
+        extra_body=extra_body,
     )
     return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
 
@@ -4637,6 +4644,7 @@ class TestTopLogprobsHandling:
         assert result["top_logprobs"] == 0
         assert result["logprobs"] is True
         assert result["return_tokens_as_token_ids"] is True
+        assert "return_token_ids" not in result
 
         # Inbound non-zero value must also be overridden, not inherited.
         result = model._preprocess_chat_completion_create_params(
@@ -4644,6 +4652,32 @@ class TestTopLogprobsHandling:
             {"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}], "top_logprobs": 5},
         )
         assert result["top_logprobs"] == 0
+
+    def test_capture_path_can_request_prompt_and_generation_token_ids(self) -> None:
+        model = _make_top_logprobs_model(
+            return_token_id_information=True,
+            request_prompt_and_generation_token_ids=True,
+        )
+
+        result = model._preprocess_chat_completion_create_params(
+            MagicMock(),
+            {"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert result["return_token_ids"] is True
+
+    def test_capture_path_rejects_multiple_choices(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True)
+
+        with raises(ValueError, match="requires n=1"):
+            model._preprocess_chat_completion_create_params(
+                MagicMock(),
+                {
+                    "model": "dummy_model",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "n": 2,
+                },
+            )
 
     def test_noncapture_path_strips_null_top_logprobs(self) -> None:
         """On the non-capture path a null top_logprobs is dropped (letting vLLM apply its
@@ -4681,25 +4715,33 @@ class TestTopLogprobsHandling:
         assert "top_logprobs" not in result
 
     def _capture_chat_completion_dict(
-        self, logprobs: Union[dict, None], message_extra: Union[dict, None] = None
+        self,
+        logprobs: Union[dict, None],
+        message_extra: Union[dict, None] = None,
+        choice_extra: Union[dict, None] = None,
+        response_extra: Union[dict, None] = None,
     ) -> dict:
         message = {"role": "assistant", "content": "hi", "tool_calls": None}
         if message_extra:
             message.update(message_extra)
-        return {
+        choice = {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": message,
+            "logprobs": logprobs,
+        }
+        if choice_extra:
+            choice.update(choice_extra)
+        response = {
             "id": "chtcmpl",
             "object": "chat.completion",
             "created": FIXED_TIME,
             "model": "dummy_model",
-            "choices": [
-                {
-                    "index": 0,
-                    "finish_reason": "stop",
-                    "message": message,
-                    "logprobs": logprobs,
-                }
-            ],
+            "choices": [choice],
         }
+        if response_extra:
+            response.update(response_extra)
+        return response
 
     def test_capture_path_succeeds_with_inbound_null_top_logprobs(self) -> None:
         """End-to-end regression: a request with top_logprobs=null no longer empties capture;
@@ -4742,6 +4784,190 @@ class TestTopLogprobsHandling:
         assert message["generation_token_ids"] == [123, 456]
         assert message["generation_log_probs"] == [-0.1, -0.2]
         assert message["prompt_token_ids"] == [10, 20, 30]
+
+    def test_capture_path_prefers_vllm_response_token_ids(self) -> None:
+        model = _make_top_logprobs_model(
+            return_token_id_information=True,
+            request_prompt_and_generation_token_ids=True,
+        )
+        app = model.setup_webserver()
+
+        async def mock_create_chat_completion(**kwargs):
+            assert kwargs["return_token_ids"] is True
+            return self._capture_chat_completion_dict(
+                logprobs={
+                    "content": [
+                        {"token": "token_id:123", "logprob": -0.1, "bytes": None, "top_logprobs": []},
+                        {"token": "token_id:456", "logprob": -0.2, "bytes": None, "top_logprobs": []},
+                    ]
+                },
+                choice_extra={"token_ids": [123, 456]},
+                response_extra={"prompt_token_ids": [10, 20, 30]},
+            )
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        mock_client.create_tokenize = AsyncMock(
+            side_effect=AssertionError("create_tokenize must not be called when inline IDs are present")
+        )
+        model._clients = [mock_client]
+
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 200
+        mock_client.create_tokenize.assert_not_awaited()
+        data = response.json()
+        message = data["choices"][0]["message"]
+        assert message["prompt_token_ids"] == [10, 20, 30]
+        assert message["generation_token_ids"] == [123, 456]
+        assert message["generation_log_probs"] == [-0.1, -0.2]
+        assert "prompt_token_ids" not in data
+        assert "token_ids" not in data["choices"][0]
+
+    def test_capture_path_accepts_framework_message_bundle(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        app = model.setup_webserver()
+        token_bundle = {
+            "prompt_token_ids": [10, 20],
+            "generation_token_ids": [123],
+            "generation_log_probs": [-0.1],
+        }
+
+        async def mock_create_chat_completion(**kwargs):
+            return self._capture_chat_completion_dict(
+                logprobs=None,
+                message_extra=token_bundle,
+                choice_extra={"token_ids": [123]},
+                response_extra={"prompt_token_ids": [10, 20]},
+            )
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        mock_client.create_tokenize = AsyncMock(
+            side_effect=AssertionError("create_tokenize must not be called for a framework token bundle")
+        )
+        model._clients = [mock_client]
+
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 200
+        message = response.json()["choices"][0]["message"]
+        for field, value in token_bundle.items():
+            assert message[field] == value
+        mock_client.create_tokenize.assert_not_awaited()
+
+    def test_capture_path_rejects_disagreeing_duplicate_ids(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        app = model.setup_webserver()
+
+        async def mock_create_chat_completion(**kwargs):
+            return self._capture_chat_completion_dict(
+                logprobs=None,
+                message_extra={
+                    "prompt_token_ids": [10, 20],
+                    "generation_token_ids": [123],
+                    "generation_log_probs": [-0.1],
+                },
+                choice_extra={"token_ids": [999]},
+                response_extra={"prompt_token_ids": [10, 20]},
+            )
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        model._clients = [mock_client]
+
+        with raises(RuntimeError, match="disagrees with vLLM response token IDs"):
+            TestClient(app).post(
+                "/v1/chat/completions",
+                json={"messages": [{"role": "user", "content": "hi"}]},
+            )
+
+    def test_capture_path_forwards_prompt_affecting_fields_to_tokenize(self) -> None:
+        model = _make_top_logprobs_model(
+            return_token_id_information=True,
+            extra_body={
+                "mm_processor_kwargs": {"fps": 2},
+                "required_prefix_token_ids": [1, 2, 3],
+            },
+        )
+        app = model.setup_webserver()
+
+        async def mock_create_chat_completion(**kwargs):
+            return self._capture_chat_completion_dict(
+                logprobs={
+                    "content": [
+                        {"token": "token_id:123", "logprob": -0.1, "bytes": None, "top_logprobs": []},
+                    ]
+                }
+            )
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        mock_client.create_tokenize = AsyncMock(return_value={"tokens": [10, 20]})
+        model._clients = [mock_client]
+
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 200
+        mock_client.create_tokenize.assert_awaited_once_with(
+            model="dummy_model",
+            messages=[{"role": "user", "content": "hi"}],
+            mm_processor_kwargs={"fps": 2},
+            required_prefix_token_ids=[1, 2, 3],
+        )
+
+    def test_capture_path_rejects_partial_message_bundle(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        app = model.setup_webserver()
+
+        async def mock_create_chat_completion(**kwargs):
+            return self._capture_chat_completion_dict(
+                logprobs=None,
+                message_extra={"prompt_token_ids": [10, 20]},
+            )
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        model._clients = [mock_client]
+
+        with raises(RuntimeError, match="partial token metadata"):
+            TestClient(app).post(
+                "/v1/chat/completions",
+                json={"messages": [{"role": "user", "content": "hi"}]},
+            )
+
+    def test_capture_path_rejects_mismatched_generation_lengths(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        app = model.setup_webserver()
+
+        async def mock_create_chat_completion(**kwargs):
+            return self._capture_chat_completion_dict(
+                logprobs=None,
+                message_extra={
+                    "prompt_token_ids": [10, 20],
+                    "generation_token_ids": [123, 456],
+                    "generation_log_probs": [-0.1],
+                },
+            )
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        model._clients = [mock_client]
+
+        with raises(RuntimeError, match="mismatched generation token IDs"):
+            TestClient(app).post(
+                "/v1/chat/completions",
+                json={"messages": [{"role": "user", "content": "hi"}]},
+            )
 
     def test_capture_path_preserves_routed_experts(self) -> None:
         model = _make_top_logprobs_model(return_token_id_information=True)
@@ -4837,3 +5063,159 @@ class TestTopLogprobsHandling:
             )
         # The tokenize endpoint must not be reached once the contract check fails.
         mock_client.create_tokenize.assert_not_called()
+
+
+class TestSamplingOverrides:
+    """Forcing the sampling params on every request.
+
+    An external harness picks its own temperature and top_p. On-policy RL requires
+    generation to match the distribution the policy is optimized under, so the
+    server overrides whatever the client sent rather than trusting it.
+    """
+
+    @staticmethod
+    def _server(overrides: dict[str, object] | None, **kwargs: object) -> VLLMModel:
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            base_url="http://api.openai.com/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            entrypoint="",
+            name="",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            sampling_overrides=overrides,
+            **kwargs,
+        )
+        return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+
+    def test_overrides_replace_what_the_client_sent(self) -> None:
+        server = self._server({"temperature": 1.0, "top_p": 1.0})
+        out = server._preprocess_chat_completion_create_params(
+            MagicMock(), {"messages": [{"role": "user", "content": "hi"}], "temperature": 0.2, "top_p": 0.5}
+        )
+        assert out["temperature"] == 1.0
+        assert out["top_p"] == 1.0
+
+    def test_overrides_apply_even_when_the_client_sent_nothing(self) -> None:
+        server = self._server({"temperature": 1.0})
+        out = server._preprocess_chat_completion_create_params(
+            MagicMock(), {"messages": [{"role": "user", "content": "hi"}]}
+        )
+        assert out["temperature"] == 1.0
+
+    def test_unset_leaves_the_request_alone(self) -> None:
+        server = self._server(None)
+        out = server._preprocess_chat_completion_create_params(
+            MagicMock(), {"messages": [{"role": "user", "content": "hi"}], "temperature": 0.2}
+        )
+        assert out["temperature"] == 0.2
+
+    def test_overrides_reach_the_completions_api_path(self) -> None:
+        """``use_completions_api`` skips chat preprocessing entirely.
+
+        ``chat_completions`` branches into ``_chat_completions_via_completions_api`` before
+        ``_preprocess_chat_completion_create_params`` runs, so a pin applied only there would be
+        silently inert on the path base-model training uses.
+        """
+        server = self._server({"temperature": 1.0, "top_p": 1.0, "top_k": -1}, use_completions_api=True)
+        out = server._build_completion_body_from_chat_body(
+            {"messages": [{"role": "user", "content": "hi"}], "temperature": 0.2, "top_p": 0.5, "top_k": 50},
+            "hi",
+        )
+        assert out["temperature"] == 1.0
+        assert out["top_p"] == 1.0
+        # No first-class /v1/completions field; the body is forwarded as raw JSON so it still lands.
+        assert out["top_k"] == -1
+
+    def test_overrides_win_over_extra_body_on_the_completions_path(self) -> None:
+        """``extra_body`` merges under the request body; the pin is applied after both."""
+        server = self._server(
+            {"temperature": 1.0},
+            use_completions_api=True,
+            extra_body={"temperature": 0.7, "min_p": 0.05},
+        )
+        out = server._build_completion_body_from_chat_body({"messages": [], "temperature": 0.2}, "hi")
+        assert out["temperature"] == 1.0
+        assert out["min_p"] == 0.05
+
+    def test_overrides_reach_the_responses_native_path(self) -> None:
+        server = self._server({"temperature": 1.0}, is_responses_native=True)
+        body = {"model": "dummy_model", "temperature": 0.2}
+        assert server._apply_sampling_overrides(body)["temperature"] == 1.0
+
+
+class TestEndpointFile:
+    def _make_server(self, tmp_path, **overrides) -> VLLMModel:
+        params = dict(
+            host="0.0.0.0",
+            port=8081,
+            base_url="http://placeholder:8712/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            entrypoint="",
+            name="safety_judge_model",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            endpoint_file=str(tmp_path / "endpoint.txt"),
+        )
+        params.update(overrides)
+        return VLLMModel(config=VLLMModelConfig(**params), server_client=MagicMock(spec=ServerClient))
+
+    def test_publish_rebinds_clients_and_clears_sessions(self, tmp_path) -> None:
+        (tmp_path / "endpoint.txt").write_text("http://new-host:8712/v1\n")
+        server = self._make_server(tmp_path, endpoint_check_interval_s=3600.0)
+        server._session_id_to_client["session-on-old-host"] = server._clients[0]
+
+        server._maybe_rebind_endpoint()
+
+        assert server.config.base_url == ["http://new-host:8712/v1"]
+        assert [client.base_url for client in server._clients] == ["http://new-host:8712/v1"]
+        # endpoint_file-backed clients are retry-bounded so in-flight calls
+        # against a dead host fail fast and re-enter through the rebound
+        # client; sessions re-resolve onto the new host.
+        assert server._clients[0].max_connection_retries == 8
+        assert not server._session_id_to_client
+        # Within endpoint_check_interval_s the filesystem is left alone, so a
+        # fresh publish is only seen once the window is over.
+        (tmp_path / "endpoint.txt").write_text("http://newer-host:8712/v1\n")
+        server._maybe_rebind_endpoint()
+        assert server.config.base_url == ["http://new-host:8712/v1"]
+        server._endpoint_last_check_at = None  # window over: the next call re-checks
+        server._maybe_rebind_endpoint()
+        assert server.config.base_url == ["http://newer-host:8712/v1"]
+        # Static base_url clients keep today's retry-forever behavior.
+        assert self._make_server(tmp_path, endpoint_file=None)._clients[0].max_connection_retries is None
+
+    def test_unpublished_endpoint_grace_lifecycle(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+        endpoint_file = tmp_path / "endpoint.txt"
+        server = self._make_server(tmp_path)  # grace defaults to 300s
+        now = 1000.0
+        monkeypatch.setattr("responses_api_models.vllm_model.app.monotonic", lambda: now)
+
+        server._maybe_rebind_endpoint()  # absent: the clock starts, last known-good client kept
+        assert server.config.base_url == ["http://placeholder:8712/v1"]
+        now = 1100.0
+        endpoint_file.write_text("")  # empty is as unpublished as missing: no clock reset
+        server._maybe_rebind_endpoint()
+        now = 1301.0  # past the grace COUNTED FROM 1000, proving the empty write reset nothing
+        with raises(RuntimeError, match="no longer published"):
+            server._maybe_rebind_endpoint()
+
+        endpoint_file.write_text("http://placeholder:8712/v1\n")  # republish on the SAME host
+        now = 1301.5  # within the check window: the publish is not seen yet, the raise stays loud
+        with raises(RuntimeError, match="no longer published"):
+            server._maybe_rebind_endpoint()
+        now = 1311.5  # next window: heals with no rebind needed
+        server._maybe_rebind_endpoint()
+        assert server._endpoint_missing_since is None
+
+        now = 1400.0
+        endpoint_file.unlink()
+        server._maybe_rebind_endpoint()  # a fresh absence starts a fresh clock
+        now = 1650.0
+        server._maybe_rebind_endpoint()  # 250s in: within grace, so the republish reset the clock
+        now = 1701.0
+        with raises(RuntimeError, match="no longer published"):
+            server._maybe_rebind_endpoint()

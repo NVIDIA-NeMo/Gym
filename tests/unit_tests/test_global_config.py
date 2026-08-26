@@ -23,7 +23,7 @@ from pytest import LogCaptureFixture, MonkeyPatch, mark, raises
 
 import nemo_gym.global_config
 import nemo_gym.server_utils
-from nemo_gym import CACHE_DIR, NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, WORKING_DIR
+from nemo_gym import CACHE_DIR, NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, RESULTS_DIR, WORKING_DIR
 from nemo_gym.config_types import (
     AlmostServerError,
     ConfigError,
@@ -45,6 +45,7 @@ from nemo_gym.global_config import (
     get_first_server_config_dict,
     get_global_config_dict,
 )
+from nemo_gym.secret_utils import recursively_hide_secrets
 from nemo_gym.server_utils import (
     DictConfig,
 )
@@ -73,8 +74,10 @@ class TestGlobalConfig:
             "dry_run": False,
             "model_endpoint_readiness_timeout_seconds": 600,
             "allow_openai_version_skew": False,
-            "uv_cache_dir": str(CACHE_DIR / "uv"),
+            "uv_cache_dir": str(CACHE_DIR.expanduser().resolve() / "uv"),
             "uv_venv_dir": str(WORKING_DIR),
+            "results_dir": str(RESULTS_DIR.expanduser().resolve()),
+            "cache_dir": str(CACHE_DIR.expanduser().resolve()),
         }
 
     def test_get_global_config_dict_sanity(self, monkeypatch: MonkeyPatch) -> None:
@@ -108,10 +111,10 @@ class TestGlobalConfig:
         monkeypatch.delenv("UV_CACHE_DIR", raising=False)
         probe = MagicMock(side_effect=AssertionError("offline resolution must not probe sockets"))
         hostname = MagicMock(side_effect=AssertionError("offline resolution must not resolve hostnames"))
-        wandb_init = MagicMock(side_effect=AssertionError("offline resolution must not initialize W&B"))
+        setup_exporters = MagicMock(side_effect=AssertionError("offline resolution must not start exporters"))
         monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", probe)
         monkeypatch.setattr(nemo_gym.global_config, "gethostbyname", hostname)
-        monkeypatch.setattr(nemo_gym.global_config.wandb, "init", wandb_init)
+        monkeypatch.setattr(nemo_gym.global_config, "setup_exporters", setup_exporters)
         monkeypatch.setattr(WANDBConfig, "is_available", PropertyMock(return_value=True))
 
         config = GlobalConfigDictParser().parse(
@@ -132,7 +135,7 @@ class TestGlobalConfig:
         assert config.worker.resources_servers.example.host == "127.0.0.1"
         probe.assert_not_called()
         hostname.assert_not_called()
-        wandb_init.assert_not_called()
+        setup_exporters.assert_not_called()
         assert "UV_CACHE_DIR" not in nemo_gym.global_config.environ
 
     def _mock_parse_environment(self, monkeypatch: MonkeyPatch, config_dict: "DictConfig") -> None:
@@ -193,6 +196,37 @@ class TestGlobalConfig:
         self._mock_parse_environment(monkeypatch, DictConfig({"allow_openai_version_skew": "false"}))
 
         with raises(ConfigError, match="must be a boolean"):
+            get_global_config_dict()
+
+    def test_get_global_config_dict_artifact_dir_overrides(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+        self._mock_parse_environment(
+            monkeypatch, DictConfig({"results_dir": "/shared/results", "cache_dir": "/local/cache"})
+        )
+
+        global_config_dict = get_global_config_dict()
+        assert global_config_dict["results_dir"] == "/shared/results"
+        assert global_config_dict["cache_dir"] == "/local/cache"
+        # uv_cache_dir defaults under the (overridden) cache root.
+        assert global_config_dict["uv_cache_dir"] == str(Path("/local/cache") / "uv")
+
+    def test_get_global_config_dict_artifact_dir_normalization(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+        self._mock_parse_environment(
+            monkeypatch, DictConfig({"results_dir": "relative/results", "cache_dir": "~/gym-cache"})
+        )
+
+        global_config_dict = get_global_config_dict()
+        # Children resolve relative paths against their own cwd; the parser
+        # must hand them an absolute path.
+        assert global_config_dict["results_dir"] == str((Path.cwd() / "relative/results").resolve())
+        assert global_config_dict["cache_dir"] == str((Path.home() / "gym-cache").resolve())
+
+    def test_get_global_config_dict_artifact_dir_rejects_non_string(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+        self._mock_parse_environment(monkeypatch, DictConfig({"results_dir": 123}))
+
+        with raises(ConfigError, match="results_dir must be a non-empty path string"):
             get_global_config_dict()
 
     def test_get_global_config_dict_global_exists(self, monkeypatch: MonkeyPatch) -> None:
@@ -355,6 +389,196 @@ b: 2
             == global_config_dict
         )
 
+    def _mock_config_paths_env(self, monkeypatch: MonkeyPatch, config_paths: list[str]) -> None:
+        """Scaffolding shared by the sibling-ordering tests: stub .env.yaml, hydra and
+        the loader so only the config_paths merge order is under test."""
+        # Clear any lingering env vars.
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        # Explicitly handle any local .env.yaml files. Either read or don't read.
+        exists_mock = MagicMock()
+        exists_mock.return_value = True
+        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+
+        # Override the hydra main wrapper call. At runtime, this will use sys.argv.
+        hydra_main_mock = MagicMock()
+
+        def hydra_main_wrapper(fn):
+            config_dict = DictConfig({"config_paths": config_paths})
+            return lambda: fn(config_dict)
+
+        hydra_main_mock.return_value = hydra_main_wrapper
+        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+
+        # Override OmegaConf.load to avoid file reads.
+        omegaconf_load_mock = MagicMock()
+        original_load = OmegaConf.load
+        omegaconf_load_mock.side_effect = lambda path: (DictConfig({}) if "env" in str(path) else original_load(path))
+        monkeypatch.setattr(nemo_gym.server_utils.OmegaConf, "load", omegaconf_load_mock)
+
+    def test_get_global_config_dict_config_paths_later_sibling_wins(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Two configs passed by the caller, neither referencing the other: the later
+        entry overrides the earlier one, which is how an override config is layered on
+        top of a base config."""
+        self._mock_versions_for_testing(monkeypatch)
+
+        (tmp_path / "base.yaml").write_text("""a: base
+b: base
+        """)
+        (tmp_path / "override.yaml").write_text("""a: override
+        """)
+
+        self._mock_config_paths_env(monkeypatch, [f"{tmp_path}/base.yaml", f"{tmp_path}/override.yaml"])
+
+        global_config_dict = get_global_config_dict()
+        assert (
+            self._default_global_config_dict_values
+            | {
+                "config_paths": [f"{tmp_path}/base.yaml", f"{tmp_path}/override.yaml"],
+                "a": "override",
+                "b": "base",
+            }
+            == global_config_dict
+        )
+
+    def test_get_global_config_dict_config_paths_outer_beats_inner_across_siblings(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Nesting and sibling order applied together. ``override.yaml`` is listed after
+        ``base.yaml`` so it wins on ``a``; ``base.yaml`` pulls in ``inner.yaml``, so it
+        wins on ``b`` despite ``inner.yaml`` being merged as part of the same list."""
+        self._mock_versions_for_testing(monkeypatch)
+
+        (tmp_path / "base.yaml").write_text(f"""\
+config_paths:
+- {tmp_path}/inner.yaml
+
+a: base
+b: base
+        """)
+        (tmp_path / "inner.yaml").write_text("""b: inner
+c: inner
+        """)
+        (tmp_path / "override.yaml").write_text("""a: override
+        """)
+
+        self._mock_config_paths_env(monkeypatch, [f"{tmp_path}/base.yaml", f"{tmp_path}/override.yaml"])
+
+        global_config_dict = get_global_config_dict()
+        assert (
+            self._default_global_config_dict_values
+            | {
+                "config_paths": [
+                    f"{tmp_path}/base.yaml",
+                    f"{tmp_path}/override.yaml",
+                    f"{tmp_path}/inner.yaml",
+                ],
+                "a": "override",
+                "b": "base",
+                "c": "inner",
+            }
+            == global_config_dict
+        )
+
+    def test_get_global_config_dict_config_paths_outer_beats_inner_two_levels_deep(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Precedence follows nesting depth rather than position, at every level:
+        outer overrides middle, which overrides inner."""
+        self._mock_versions_for_testing(monkeypatch)
+
+        (tmp_path / "outer.yaml").write_text(f"""\
+config_paths:
+- {tmp_path}/middle.yaml
+
+a: outer
+        """)
+        (tmp_path / "middle.yaml").write_text(f"""\
+config_paths:
+- {tmp_path}/inner.yaml
+
+a: middle
+b: middle
+        """)
+        (tmp_path / "inner.yaml").write_text("""a: inner
+b: inner
+c: inner
+        """)
+
+        self._mock_config_paths_env(monkeypatch, [f"{tmp_path}/outer.yaml"])
+
+        global_config_dict = get_global_config_dict()
+        assert (
+            self._default_global_config_dict_values
+            | {
+                "config_paths": [
+                    f"{tmp_path}/outer.yaml",
+                    f"{tmp_path}/middle.yaml",
+                    f"{tmp_path}/inner.yaml",
+                ],
+                "a": "outer",
+                "b": "middle",
+                "c": "inner",
+            }
+            == global_config_dict
+        )
+
+    def test_get_global_config_dict_config_paths_later_sibling_subtree_wins_at_uneven_depth(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Sibling order covers everything a sibling pulled in, whatever depth it sits
+        at. ``first.yaml`` nests one level and ``second.yaml`` two, and the key both of
+        their innermost configs set resolves to the later sibling's."""
+        self._mock_versions_for_testing(monkeypatch)
+
+        (tmp_path / "first.yaml").write_text(f"""\
+config_paths:
+- {tmp_path}/first_inner.yaml
+
+first: first
+        """)
+        (tmp_path / "first_inner.yaml").write_text("""first: first_inner
+contested: first_inner
+        """)
+        (tmp_path / "second.yaml").write_text(f"""\
+config_paths:
+- {tmp_path}/second_middle.yaml
+
+second: second
+        """)
+        (tmp_path / "second_middle.yaml").write_text(f"""\
+config_paths:
+- {tmp_path}/second_inner.yaml
+
+second: second_middle
+        """)
+        (tmp_path / "second_inner.yaml").write_text("""second: second_inner
+contested: second_inner
+        """)
+
+        self._mock_config_paths_env(monkeypatch, [f"{tmp_path}/first.yaml", f"{tmp_path}/second.yaml"])
+
+        global_config_dict = get_global_config_dict()
+        assert (
+            self._default_global_config_dict_values
+            | {
+                "config_paths": [
+                    f"{tmp_path}/first.yaml",
+                    f"{tmp_path}/second.yaml",
+                    f"{tmp_path}/first_inner.yaml",
+                    f"{tmp_path}/second_middle.yaml",
+                    f"{tmp_path}/second_inner.yaml",
+                ],
+                "first": "first",
+                "second": "second",
+                "contested": "second_inner",
+            }
+            == global_config_dict
+        )
+
     def test_get_global_config_dict_server_host_port_defaults(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_versions_for_testing(monkeypatch)
 
@@ -400,6 +624,59 @@ b: 2
             }
             == global_config_dict
         )
+
+    def test_get_global_config_dict_skip_verification_defaults_for_agents(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+
+        find_open_port_mock = MagicMock()
+        find_open_port_mock.side_effect = [12345, 12346, 12347]
+        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock)
+
+        parser = GlobalConfigDictParser()
+        global_config_dict = parser.parse_no_environment(
+            DictConfig(
+                {
+                    "skip_verification": True,
+                    "skip_verification_reward": -1.5,
+                    "agent_name": {
+                        "responses_api_agents": {
+                            "agent_type": {
+                                "entrypoint": "app.py",
+                            }
+                        }
+                    },
+                    "explicit_agent_name": {
+                        "responses_api_agents": {
+                            "agent_type": {
+                                "entrypoint": "app.py",
+                                "skip_verification": False,
+                                "skip_verification_reward": 0.25,
+                            }
+                        }
+                    },
+                    "resources_name": {
+                        "resources_servers": {
+                            "resources_type": {
+                                "entrypoint": "app.py",
+                                "domain": "other",
+                            }
+                        }
+                    },
+                }
+            )
+        )
+
+        agent_config = global_config_dict["agent_name"]["responses_api_agents"]["agent_type"]
+        assert agent_config["skip_verification"] is True
+        assert agent_config["skip_verification_reward"] == -1.5
+
+        explicit_agent_config = global_config_dict["explicit_agent_name"]["responses_api_agents"]["agent_type"]
+        assert explicit_agent_config["skip_verification"] is False
+        assert explicit_agent_config["skip_verification_reward"] == 0.25
+
+        resources_config = global_config_dict["resources_name"]["resources_servers"]["resources_type"]
+        assert "skip_verification" not in resources_config
+        assert "skip_verification_reward" not in resources_config
 
     def test_get_global_config_dict_server_refs_sanity(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_versions_for_testing(monkeypatch)
@@ -1165,7 +1442,7 @@ b: 2
                 "not": "not",
             }
         )
-        GlobalConfigDictParser()._recursively_hide_secrets(dict_config)
+        recursively_hide_secrets(dict_config)
         assert OmegaConf.to_container(dict_config) == {
             "dict": {"key": "****", "not": "not"},
             "list": [{"key": "****", "not": "not"}],
@@ -1562,6 +1839,25 @@ class TestConfigLoadErrors:
         parser = GlobalConfigDictParser()
         config = DictConfig({"my_server": {"resources_servers": {"x": {"entrypoint": "app.py", "domain": "other"}}}})
         parser.raise_on_no_server_instances(config)
+
+    def test_all_repo_configs_load_without_duplicate_keys(self) -> None:
+        # OmegaConf.load (the loader `gym env start` actually uses) rejects duplicate YAML keys,
+        # but a plain PyYAML parse silently allows them (last-writer-wins). A repeated key like a
+        # second `datasets:` block can land unnoticed and only surface at runtime. Sweep every real
+        # config in the repo so this fails fast in CI instead.
+        repo_root = Path(__file__).resolve().parents[2]
+        config_dirs = ("responses_api_agents", "resources_servers", "nemo_gym/sandbox/providers")
+        config_paths = [p for d in config_dirs for p in (repo_root / d).rglob("*.yaml")]
+        assert config_paths, "no config files discovered -- sweep dirs may have moved"
+
+        failures = []
+        for path in config_paths:
+            try:
+                OmegaConf.load(path)
+            except Exception as e:
+                failures.append(f"{path.relative_to(repo_root)}: {e}")
+
+        assert not failures, "malformed config(s) found:\n" + "\n".join(failures)
 
 
 class TestOpenAIVersionMatchesNemoGymConstraint:

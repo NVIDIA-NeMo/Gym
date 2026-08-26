@@ -43,6 +43,7 @@ from nemo_gym.sandbox.providers.utils import coerce_config as _coerce_config
 
 LOGGER = logging.getLogger(__name__)
 logging.getLogger("opensandbox").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 class OpenSandboxCreateError(SandboxCreateError):
@@ -60,9 +61,8 @@ class OpenSandboxCreateVerificationError(SandboxCreateVerificationError):
 class SandboxBackendUnreachableError(RuntimeError):
     """Raised when the server proxy cannot open a TCP connection to a sandbox's exec daemon.
 
-    The proxy's 502 is a connect failure, so the submitted command never
-    started. Persistent 502s mean the backend is gone (e.g. the container was
-    OOM-killed and sandbox pods never restart); retrying cannot revive it.
+    A submission 502 means the command never started. A status or log polling
+    502 can mean the backend died while the command was running.
     """
 
 
@@ -338,6 +338,12 @@ def _to_platform_spec(platform: dict[str, Any]) -> Any:
     return PlatformSpec(**platform)
 
 
+def _to_network_policy(network_policy: Mapping[str, Any]) -> Any:
+    from opensandbox.models.sandboxes import NetworkPolicy
+
+    return NetworkPolicy.model_validate(network_policy)
+
+
 def _to_volumes(volumes: list[Mapping[str, Any]]) -> list[Any]:
     _, _, _, _, Volume = _require_opensandbox_sdk()
     return [Volume(**dict(volume)) for volume in volumes]
@@ -525,11 +531,12 @@ class OpenSandboxOperationConfig:
 class OpenSandboxProviderOptions:
     """Recognized per-sandbox create options read from ``SandboxSpec.provider_options``.
 
-    ``image_auth``, ``platform``, and ``volumes`` entries are passed through to the
+    ``image_auth``, ``network_policy``, ``platform``, and ``volumes`` entries are passed through to the
     OpenSandbox SDK, so their inner fields are validated by the SDK rather than here.
     """
 
     image_auth: Mapping[str, Any] | None = None
+    network_policy: Mapping[str, Any] | None = None
     platform: Mapping[str, Any] | None = None
     snapshot_id: str | None = None
     volumes: tuple[Mapping[str, Any], ...] = ()
@@ -560,6 +567,9 @@ class OpenSandboxProviderOptions:
         image_auth = options.get("image_auth")
         if image_auth is not None and not isinstance(image_auth, Mapping):
             raise TypeError("OpenSandbox provider option 'image_auth' must be a mapping")
+        network_policy = options.get("network_policy")
+        if network_policy is not None and not isinstance(network_policy, Mapping):
+            raise TypeError("OpenSandbox provider option 'network_policy' must be a mapping")
         snapshot_id = options.get("snapshot_id")
         if snapshot_id is not None and not isinstance(snapshot_id, str):
             raise TypeError("OpenSandbox provider option 'snapshot_id' must be a string")
@@ -578,6 +588,7 @@ class OpenSandboxProviderOptions:
 
         return cls(
             image_auth=dict(image_auth) if image_auth is not None else None,
+            network_policy=dict(network_policy) if network_policy is not None else None,
             platform=dict(platform) if platform is not None else None,
             snapshot_id=snapshot_id,
             volumes=tuple(dict(volume) for volume in volumes),
@@ -1051,6 +1062,8 @@ class OpenSandboxProvider:
             kwargs["entrypoint"] = spec.entrypoint
         if options.platform is not None:
             kwargs["platform"] = _to_platform_spec(options.platform)
+        if options.network_policy is not None:
+            kwargs["network_policy"] = _to_network_policy(options.network_policy)
         if options.volumes:
             kwargs["volumes"] = _to_volumes(list(options.volumes))
         if self._create.skip_health_check:
@@ -1236,16 +1249,50 @@ class OpenSandboxProvider:
         # Backstop for wedges the inner deadlines miss. Background exec polls, so
         # sdk_timeout_s bounds a single request rather than the command: without
         # timeout_s there is nothing to cap against.
-        if sdk_timeout_s is None or (self._operations.background_exec and timeout_s is None):
-            return await _dispatch()
-        hard_cap_s = 2.0 * float(sdk_timeout_s) + 30.0
         try:
-            return await asyncio.wait_for(_dispatch(), timeout=hard_cap_s)
-        except asyncio.TimeoutError as e:
-            raise TimeoutError(
-                f"OpenSandbox exec exceeded hard cap of {hard_cap_s:g}s; the command wedged "
-                f"(sandbox_id={handle.sandbox_id!r})"
-            ) from e
+            if sdk_timeout_s is None or (self._operations.background_exec and timeout_s is None):
+                return await _dispatch()
+            hard_cap_s = 2.0 * float(sdk_timeout_s) + 30.0
+            try:
+                return await asyncio.wait_for(_dispatch(), timeout=hard_cap_s)
+            except asyncio.TimeoutError as e:
+                raise TimeoutError(
+                    f"OpenSandbox exec exceeded hard cap of {hard_cap_s:g}s; the command wedged "
+                    f"(sandbox_id={handle.sandbox_id!r})"
+                ) from e
+        except Exception as error:
+            if not isinstance(error, SandboxBackendUnreachableError) and _exception_status_code(error) != 502:
+                raise
+
+            get_info = getattr(handle.raw, "get_info", None)
+            if get_info is not None:
+                deadline = asyncio.get_running_loop().time() + 5.0
+                while (remaining_s := deadline - asyncio.get_running_loop().time()) > 0:
+                    try:
+                        info = await self._await_sdk_call(
+                            get_info(),
+                            operation="get_info after exec 502",
+                            sandbox_id=handle.sandbox_id,
+                            timeout_s=min(2.0, remaining_s),
+                        )
+                    except Exception:
+                        break
+                    raw_status = getattr(info, "status", None)
+                    state = getattr(raw_status, "state", None)
+                    reason = getattr(raw_status, "reason", None)
+                    message = getattr(raw_status, "message", None)
+                    status_text = f"{reason} {message}"
+                    if re.search(r"\boom[\s_-]*killed\b|\bout of memory\b", status_text, re.IGNORECASE):
+                        message = str(message or "")[:500]
+                        raise SandboxBackendUnreachableError(
+                            "Sandbox was OOM-killed. "
+                            f"OpenSandbox status: state={state!r}, reason={reason!r}, message={message!r}; "
+                            f"sandbox_id={handle.sandbox_id!r}"
+                        ) from error
+                    if message and _to_sandbox_status(state) in {SandboxStatus.ERROR, SandboxStatus.STOPPED}:
+                        break
+                    await asyncio.sleep(min(0.5, max(0.0, deadline - asyncio.get_running_loop().time())))
+            raise
 
     async def _exec_background(
         self,

@@ -19,18 +19,19 @@ import logging
 import os
 import warnings
 from asyncio import Future, Semaphore
-from collections import Counter
+from collections import Counter, defaultdict
 from contextlib import nullcontext
 from copy import deepcopy
+from datetime import timedelta
 from itertools import repeat
 from pathlib import Path
+from time import time
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
 from omegaconf import OmegaConf
 from pydantic import BaseModel, Field, field_validator, model_validator
 from tqdm.asyncio import tqdm
-from wandb import Table
 
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
@@ -39,22 +40,30 @@ from nemo_gym.base_responses_api_model import (
     merge_model_call_capture_into_record,
     model_call_capture_dirs_from_config,
 )
-from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig, ConfigError, ConfigPathNotFoundError
+from nemo_gym.config_types import (
+    BaseNeMoGymCLIConfig,
+    BaseServerConfig,
+    ConfigError,
+    ConfigPathNotFoundError,
+    UploadRolloutsConfigMixin,
+)
+from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
     EXECUTION_ID_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
+    ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     get_global_config_dict,
-    get_wandb_run,
 )
 from nemo_gym.path_utils import failures_path_for
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.rollout_correlation import (
     maybe_legacy_rollout_id_from_run_body,
+    maybe_rollout_id_from_run_body,
     new_execution_id,
 )
 from nemo_gym.rollout_observability import (
@@ -80,6 +89,20 @@ from nemo_gym.server_utils import (
     setup_server_client as setup_server_client_utils,
 )
 from nemo_gym.skills import SkillsConfig, load_skill_directory
+from nemo_gym.token_id_capture import (
+    TokenCaptureStore,
+    TokenIdCaptureConfig,
+    clear_token_captures_for_rollouts,
+    installed_token_source,
+    token_id_capture_dirs_from_config,
+)
+from nemo_gym.token_id_capture.config import token_id_capture_enabled_for_agent
+from nemo_gym.token_id_capture.delivery import (
+    MASK_SAMPLE_KEY,
+    capture_build_can_retire,
+    finalize_rollout_token_capture,
+    retire_rollout_token_capture,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -315,8 +338,8 @@ def _strip_capture_payloads(result: dict[str, Any]) -> None:
                 call.pop(key, None)
 
 
-def _rollout_for_wandb(result: dict[str, Any]) -> dict[str, Any]:
-    """Return a W&B view without the complete trajectory or raw capture payloads."""
+def _rollout_for_export(result: dict[str, Any]) -> dict[str, Any]:
+    """Return an exporter view without the complete trajectory or raw capture payloads."""
     sanitized = dict(result)
     sanitized.pop(NG_TRAJECTORY_KEY, None)
     sanitized.pop("ng_model_call_capture", None)
@@ -389,7 +412,7 @@ def _get_max_rollout_attempts() -> int:
         return _DEFAULT_MAX_ROLLOUT_ATTEMPTS
 
 
-class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
+class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
     num_samples_in_parallel: Optional[int] = Field(
         default=None, description="Limit the number of concurrent samples running at once."
@@ -397,10 +420,6 @@ class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
     responses_create_params: Dict[str, Any] = Field(
         default_factory=dict,
         description="Overrides for the responses_create_params e.g. temperature, max_output_tokens, etc.",
-    )
-    upload_rollouts_to_wandb: bool = Field(
-        default=True,
-        description="Upload the rollouts to W&B. Sometimes this should be off because the rollouts are massive. Default: True",
     )
     disable_aggregation: bool = Field(
         default=False,
@@ -437,6 +456,21 @@ class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
 
     split: Union[Literal["train"], Literal["validation"], Literal["benchmark"]]
     reuse_existing_data_preparation: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_input_jsonl_fpath(cls, data):
+        # This config has no input_jsonl_fpath field, so pydantic would silently drop it and
+        # e2e collection would overwrite it with the prepared split path — the user's file
+        # would be ignored without any indication.
+        if isinstance(data, dict) and "input_jsonl_fpath" in data:
+            raise ConfigError(
+                "`input_jsonl_fpath` (-i/--input) is not supported when serving end-to-end: the input is "
+                "always the prepared dataset for the requested split. Either add --no-serve to collect "
+                "rollouts from your own input file against already-running servers, or drop -i/--input "
+                "to use the prepared data."
+            )
+        return data
 
 
 class RolloutCollectionConfig(SharedRolloutCollectionConfig):
@@ -758,6 +792,7 @@ class RolloutCollectionHelper(BaseModel):
 
     async def run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
+        failures_fpath = failures_path_for(output_fpath)
 
         # Create the output directory up front: every artifact this run writes (materialized inputs,
         # rollouts, failures sidecar, aggregate metrics) is derived from output_fpath and keeps its
@@ -788,7 +823,6 @@ class RolloutCollectionHelper(BaseModel):
 
             rows: List[Dict] = []
             results: List[Dict] = []
-            result_strs: List[List[str]] = []
             persisted_rows: List[Dict] = []
             persisted_results: List[Dict] = []
 
@@ -800,26 +834,70 @@ class RolloutCollectionHelper(BaseModel):
                     f.write(orjson.dumps(row) + b"\n")
 
             output_fpath.unlink(missing_ok=True)
+            failures_fpath.unlink(missing_ok=True)
 
         semaphore = nullcontext()
         if config.num_samples_in_parallel:
             print(f"Querying with {config.num_samples_in_parallel} concurrent requests")
             semaphore = Semaphore(config.num_samples_in_parallel)
 
-        failures_fpath = failures_path_for(output_fpath)
-
         # Resolve capture dirs once so each rollout's captured model calls can be folded
         # into its record below (uniform across agents; no-op when capture is off / dirs absent).
-        capture_dirs = model_call_capture_dirs_from_config(get_global_config_dict())
+        global_config = get_global_config_dict()
+        capture_dirs = model_call_capture_dirs_from_config(global_config)
+        # Resolve the training-token store directory once.
+        # Training capture is independent of evaluation capture.
+        # An empty result disables training-token capture.
+        token_capture_dirs = token_id_capture_dirs_from_config(global_config)
+        # The finalizer reads and freezes records through this source.
+        # The source is absent when capture or response rebuilding is disabled.
+        # A framework-owned transport may rebuild through its own source.
+        # The sink still records captures when Gym does not rebuild.
+        # Reruns still clear deterministic rollout ids before dispatch.
+        token_source = None
+        owned_token_source = None
+        token_capture_config = TokenIdCaptureConfig.model_validate(global_config)
+        if token_capture_config.enabled and token_capture_config.token_id_capture.rebuild_response:
+            token_source = installed_token_source()
+            if token_source is None and token_capture_dirs:
+                token_source = TokenCaptureStore(token_capture_dirs[0])
+            if isinstance(token_source, TokenCaptureStore):
+                owned_token_source = token_source
 
         # Clear only rows about to be dispatched, after resume has assigned retry suffixes. This also
         # removes a kill-shaped attempt's partial capture when its rollout-attempt id is reused.
         if capture_dirs:
             print("Clearing existing model-call captures for rollouts being dispatched")
             clear_model_call_captures_for_rollouts(input_rows, capture_dirs)
+        token_capture_rows = [
+            row
+            for row in input_rows
+            if token_id_capture_enabled_for_agent(global_config, (row.get(AGENT_REF_KEY_NAME) or {}).get("name"))
+        ]
+        if token_capture_config.token_id_capture.rebuild_response and token_capture_rows and token_source is None:
+            raise ValueError(
+                "Token capture response rebuilding requires a TokenSource in the rollout-collector process. "
+                "Call install_token_source before starting collection or configure token_id_capture.dir."
+            )
+        if token_capture_dirs and token_capture_rows:
+            # Token stores append under deterministic rollout ids.
+            # Clear stale records to avoid merging different attempts.
+            print("Clearing existing token captures for rollouts being dispatched")
+            clear_token_captures_for_rollouts(token_capture_rows, token_capture_dirs)
 
-        pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
+        # Stop a run that produces mostly masked captures.
+        finalized_count = 0
+        masked_count = 0
+        mask_reasons: Counter = Counter()
+        warned_malformed_rollout_id = False
+
+        # Intermediate status printing
+        pcts_to_print = list(range(1, 100)) + [99.5]
+        agent_name_to_metrics = defaultdict(Counter)
+        agent_name_to_counts = defaultdict(int)
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
+        start_time = time()
+
         results_file = output_fpath.open("ab")
         failures_file = failures_fpath.open("ab")
         for future in self.run_examples(input_rows, semaphore=semaphore):
@@ -832,6 +910,10 @@ class RolloutCollectionHelper(BaseModel):
                 result[SKILLS_REF_KEY_NAME] = row[SKILLS_REF_KEY_NAME]
             if ATTEMPT_INDEX_KEY_NAME in row:
                 result[ATTEMPT_INDEX_KEY_NAME] = row[ATTEMPT_INDEX_KEY_NAME]
+            if ROLLOUT_ID_KEY_NAME in row:
+                # Capture readback recomputes the id from the finished record.
+                # Preserve an explicit id on the result just like the indices.
+                result[ROLLOUT_ID_KEY_NAME] = row[ROLLOUT_ID_KEY_NAME]
             if EXECUTION_ID_KEY_NAME in row:
                 result[EXECUTION_ID_KEY_NAME] = row[EXECUTION_ID_KEY_NAME]
 
@@ -846,6 +928,43 @@ class RolloutCollectionHelper(BaseModel):
 
             if "ng_model_call_capture" in result or "ng_agent_observations" in result or NG_TRAJECTORY_KEY in result:
                 _attach_trajectory_record(row, result)
+
+            # Freeze and rebuild tokens only for participating agents.
+            # This step does not retire the frozen snapshot.
+            # It leaves harness output and reward unchanged.
+            # Direct callers of run_examples finalize each record themselves.
+            token_capture_build = None
+            if token_id_capture_enabled_for_agent(
+                global_config,
+                (row.get(AGENT_REF_KEY_NAME) or {}).get("name"),
+            ):
+                token_capture_build = await finalize_rollout_token_capture(result, token_source)
+                if token_capture_build is not None:
+                    finalized_count += 1
+                    if token_capture_build.get(MASK_SAMPLE_KEY):
+                        masked_count += 1
+                        # Aggregate available reasons for the abort message.
+                        build_metrics = token_capture_build.get("metrics") or {}
+                        if build_metrics.get("capture_incomplete"):
+                            mask_reasons["capture_incomplete"] += 1
+                        if build_metrics.get("unresolved_parent_calls"):
+                            mask_reasons["unresolved_parent_calls"] += 1
+                        build_error = token_capture_build.get("error") or build_metrics.get("error")
+                        if build_error:
+                            mask_reasons[str(build_error)] += 1
+                    settings = token_capture_config.token_id_capture
+                    if (
+                        settings.max_mask_fraction is not None
+                        and finalized_count >= settings.mask_fraction_min_samples
+                        and masked_count / finalized_count > settings.max_mask_fraction
+                    ):
+                        raise RuntimeError(
+                            f"{masked_count}/{finalized_count} finalized rollouts "
+                            f"({masked_count / finalized_count:.1%}) are masked, exceeding "
+                            f"token_id_capture.max_mask_fraction={settings.max_mask_fraction}. "
+                            f"Mask reasons: {dict(mask_reasons)}. Aborting instead of collecting "
+                            "mostly token-less data."
+                        )
 
             no_persist = bool(result.get(NG_NO_PERSIST_KEY))
             failure_class = result.get(NG_FAILURE_CLASS_KEY)
@@ -876,30 +995,75 @@ class RolloutCollectionHelper(BaseModel):
                 results_file.flush()
                 persisted_rows.append(row)
                 persisted_results.append(result)
+                try:
+                    rollout_id = maybe_rollout_id_from_run_body(result)
+                except (TypeError, ValueError) as error:
+                    # Preserve capture evidence when the rollout id is invalid.
+                    rollout_id = None
+                    if not warned_malformed_rollout_id:
+                        warned_malformed_rollout_id = True
+                        warnings.warn(
+                            f"a result carries a malformed rollout id ({error}); "
+                            "its token capture will not be retired.",
+                            stacklevel=2,
+                        )
+                if rollout_id is not None and capture_build_can_retire(token_capture_build):
+                    os.fsync(results_file.fileno())
+                    await retire_rollout_token_capture(rollout_id, token_source, token_capture_build)
 
             counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
             if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
                 counts_left.pop(row[AGENT_REF_KEY_NAME]["name"])
+
+            agent_name = result["agent_ref"]["name"]
+            metrics = agent_name_to_metrics[agent_name]
+            metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float)) and not k.startswith("_")})
+            agent_name_to_counts[agent_name] += 1
 
             current_pct = 100 * len(results) / len(input_rows)
             if pcts_to_print and current_pct >= pcts_to_print[0]:
                 while pcts_to_print and current_pct >= pcts_to_print[0]:
                     pcts_to_print.pop(0)
 
-                top_left = counts_left.most_common(5)  # Fix to top 3 for now.
-                if top_left:
-                    top_left_str = "\n".join(f"{i + 1}. {k}: {v}" for i, (k, v) in enumerate(top_left))
-                    # Use tqdm.write here so we can print properly with tqdm being used.
-                    tqdm.write(f"Examples left:\n{top_left_str}")
+                time_taken_s = time() - start_time
+                time_taken = timedelta(seconds=int(time_taken_s))
+                rollouts_per_min = len(results) / (time_taken_s / 60)
+                print_str = f"Finished {len(results)} / {len(input_rows)} rollouts ({int(current_pct)}%) in {time_taken} ({rollouts_per_min:.2f} rollouts/min). "
+
+                top_left = counts_left.most_common()
+                top_left_str = "\n".join(f"{i + 1}. {k}: {v}" for i, (k, v) in enumerate(top_left))
+                print_str += f"""Examples left:
+{top_left_str}
+"""
+                for agent_name in sorted(agent_name_to_metrics):
+                    metrics = agent_name_to_metrics[agent_name]
+                    agent_total_samples = counts_left[agent_name] + agent_name_to_counts[agent_name]
+                    agent_sample_pct = 100 * agent_name_to_counts[agent_name] / agent_total_samples
+                    avg_metrics = {k: v / agent_name_to_counts[agent_name] for k, v in metrics.items()}
+                    print_str += f"""Found {agent_name_to_counts[agent_name]} / {agent_total_samples} ({agent_sample_pct:.2f}%) rollouts for `{agent_name}`.
+{json.dumps(avg_metrics, indent=4)}
+"""
+                # Use tqdm.write here so we can print properly with tqdm being used.
+                tqdm.write(print_str)
+
+                if get_exporters():
+                    step_metrics = {
+                        f"progress/{agent_name}/reward": round(
+                            100 * metrics["reward"] / agent_name_to_counts[agent_name], 2
+                        )
+                        for agent_name, metrics in agent_name_to_metrics.items()
+                    }
+
+                    export_metrics(step_metrics, step=int(current_pct))
 
         results_file.close()
         failures_file.close()
+        if owned_token_source is not None:
+            await owned_token_source.close()
 
-        if config.upload_rollouts_to_wandb and (wandb_run := get_wandb_run()):  # pragma: no cover
-            print("Uploading rollouts to W&B. This may take a few minutes if your data is large.")
-            result_strs = [[orjson.dumps(_rollout_for_wandb(result))] for result in results]
-            wandb_run.log({"Rollouts": Table(data=result_strs, columns=["Rollout"])})
-        del result_strs
+        if config.upload_rollouts and get_exporters():  # pragma: no cover
+            print("Uploading rollouts. This may take a few minutes if your data is large.")
+            export_rollouts([_rollout_for_export(result) for result in results])
 
         print("Sorting results to ensure consistent ordering")
         rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
@@ -1020,8 +1184,7 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
                 }
             )
 
-        if get_wandb_run():  # pragma: no cover
-            get_wandb_run().log(metrics_to_log)
+        export_metrics(metrics_to_log)
 
         # Write single file with all agents
         metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")

@@ -25,6 +25,7 @@ from nemo_gym.config_types import ROLLOUT_PATH_PREFIX
 from nemo_gym.global_config import (
     ATTEMPT_INDEX_KEY_NAME,
     EXECUTION_ID_KEY_NAME,
+    ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
@@ -32,6 +33,12 @@ from nemo_gym.global_config import (
 
 _EXECUTION_ID: ContextVar[Optional[str]] = ContextVar("nemo_gym_execution_id", default=None)
 _CORRELATION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+# A capture id is a path segment in ``/ng-rollout/<id>/...``.
+# Restrict it to characters that survive a path round trip.
+# Exclude leading dots because stores also use the id as a filename component.
+# Middleware uses the same pattern.
+ROLLOUT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 def new_execution_id() -> str:
@@ -61,16 +68,29 @@ def _field(body: BaseModel | Mapping[str, Any], key: str) -> Any:
 def maybe_legacy_rollout_id_from_run_body(
     body: BaseModel | Mapping[str, Any] | None,
 ) -> Optional[str]:
-    """Return the pre-execution-ID task/rollout capture key."""
+    """Return the logical capture key used before physical execution IDs.
+
+    An explicit ``_ng_rollout_id`` takes precedence over task/rollout
+    indices. Re-dispatch attempts append ``-a{n}`` in either case.
+    """
     if not isinstance(body, (BaseModel, Mapping)):
         return None
 
-    task = _field(body, TASK_INDEX_KEY_NAME)
-    rollout = _field(body, ROLLOUT_INDEX_KEY_NAME)
-    if task is None or rollout is None:
-        return None
+    explicit = _field(body, ROLLOUT_ID_KEY_NAME)
+    if explicit is not None:
+        if not isinstance(explicit, str) or ROLLOUT_ID_PATTERN.fullmatch(explicit) is None:
+            raise ValueError(
+                f"{ROLLOUT_ID_KEY_NAME} must be a string of letters, digits, dots, dashes or "
+                f"underscores starting with a letter or digit; got {explicit!r}"
+            )
+        rollout_id = explicit
+    else:
+        task = _field(body, TASK_INDEX_KEY_NAME)
+        rollout = _field(body, ROLLOUT_INDEX_KEY_NAME)
+        if task is None or rollout is None:
+            return None
+        rollout_id = f"{task}-{rollout}"
 
-    rollout_id = f"{task}-{rollout}"
     attempt = _field(body, ATTEMPT_INDEX_KEY_NAME)
     if attempt is not None and int(attempt) > 0:
         rollout_id = f"{rollout_id}-a{int(attempt)}"
@@ -136,8 +156,10 @@ def rollout_context(rollout_id: Optional[str]) -> Iterator[None]:
 class RolloutContextMiddleware:
     """Strip a rollout prefix and expose it to downstream Gym calls for this request."""
 
+    # Match the same id characters as ``ROLLOUT_ID_PATTERN``.
+    # Anchor the id between the prefix and the remaining path.
     _PREFIX = re.compile(
-        rf"^/{re.escape(ROLLOUT_PATH_PREFIX)}/(?P<rollout_id>[A-Za-z0-9][A-Za-z0-9._-]*)(?P<rest>/.*)$"
+        rf"^/{re.escape(ROLLOUT_PATH_PREFIX)}/(?P<rollout_id>{ROLLOUT_ID_PATTERN.pattern.strip('^$')})(?P<rest>/.*)$"
     )
 
     def __init__(self, app: Any) -> None:

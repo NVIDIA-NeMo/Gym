@@ -249,10 +249,11 @@ def test_rollout_id_does_not_serialize_run_body() -> None:
     assert maybe_rollout_id_from_run_body(body) == "4-2"
 
 
-def test_execution_id_is_explicit_bounded_and_wins_over_legacy_indices() -> None:
+def test_execution_id_is_explicit_bounded_and_wins_over_logical_capture_ids() -> None:
     execution_id = new_execution_id()
     body = {
         "_ng_execution_id": execution_id,
+        "_ng_rollout_id": "logical-step7-task4-rollout2",
         "_ng_task_index": 4,
         "_ng_rollout_index": 2,
     }
@@ -262,6 +263,10 @@ def test_execution_id_is_explicit_bounded_and_wins_over_legacy_indices() -> None
     with execution_context(execution_id):
         assert current_execution_id() == execution_id
     assert current_execution_id() is None
+
+    legacy_body = {key: value for key, value in body.items() if key != "_ng_execution_id"}
+    assert maybe_execution_id_from_run_body(legacy_body) == "logical-step7-task4-rollout2"
+    assert maybe_rollout_id_from_run_body(legacy_body) == "logical-step7-task4-rollout2"
 
     with pytest.raises(ValueError, match="_ng_execution_id"):
         maybe_execution_id_from_run_body({**body, "_ng_execution_id": "contains/a/path"})
