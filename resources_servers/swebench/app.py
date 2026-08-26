@@ -135,6 +135,7 @@ class DockerContainer(BaseModel):
             )
         except Exception as exc:
             self._sandbox_error_type = self._sandbox_error_type or type(exc).__name__
+            print(f"Failed to exec in SWE Bench for {self.instance_id}", format_exc(), file=sys.stderr)
             raise
         if res.error_type is not None:
             self._sandbox_error_type = self._sandbox_error_type or res.error_type
@@ -172,6 +173,9 @@ class DockerContainer(BaseModel):
             test_output = ""
         except Exception as exc:
             self._sandbox_error_type = type(exc).__name__
+            print(
+                f"Failed to exec_run_with_timeout in SWE Bench for {self.instance_id}", format_exc(), file=sys.stderr
+            )
             raise
 
         return (test_output, timed_out, time() - start_time)
@@ -185,6 +189,11 @@ class DockerContainer(BaseModel):
             await self._inner_container.upload(local_path=src, remote_path=str(dest))
         except Exception as exc:
             self._sandbox_error_type = self._sandbox_error_type or type(exc).__name__
+            print(
+                f"Failed to upload to verification sandbox in SWE Bench for {self.instance_id}",
+                format_exc(),
+                file=sys.stderr,
+            )
             raise
 
     async def cleanup(self) -> None:
@@ -393,7 +402,7 @@ Stderr:
         return SWEBenchVerifyResponse(
             **body.model_dump(),
             # run_instance returns "completed"; the response field is "evaluation_completed".
-            evaluation_completed=res["completed"],
+            evaluation_completed=res["completed"] and mock_container._sandbox_error_type is None,
             resolved=res["resolved"],
             reward=int(res["resolved"]),
             eval_sandbox_start_time_taken=eval_sandbox_start_time_taken,
