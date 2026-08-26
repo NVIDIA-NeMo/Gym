@@ -395,6 +395,11 @@ def _build_ng_perf(result: dict[str, Any], *, rollout_latency_ms: Optional[float
 
     Token fields are summed only over model calls owned by a reasoning-turn ``AgentInvocation``,
     excluding compaction calls -- mixing in compaction overhead would skew the token efficiency signal.
+
+    ``num_turns`` counts reasoning turns, where explicit ``TrajectoryTurn`` records are preferred;
+    harnesses that don't emit them fall back to the invocation-owned model call count (one assistant
+    response per turn, and the same call set the token sums cover), then to the invocation count as a
+    lower bound when no call references resolved.
     """
     raw_trajectory = result.get(NG_TRAJECTORY_KEY)
     if not isinstance(raw_trajectory, dict):
@@ -430,8 +435,9 @@ def _build_ng_perf(result: dict[str, Any], *, rollout_latency_ms: Optional[float
         ]
         return sum(values) if values else None
 
+    num_turns = len(trajectory.turns) or len(owned_calls) or len(trajectory.invocations)
     ng_perf: dict[str, Any] = {
-        "num_turns": len(trajectory.invocations),
+        "num_turns": num_turns,
         "num_tool_calls": num_tool_calls,
     }
     for ng_perf_key, token_stats_attr in (

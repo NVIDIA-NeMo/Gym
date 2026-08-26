@@ -460,11 +460,43 @@ class TestRolloutCollection:
 
         ng_perf = _build_ng_perf(result, rollout_latency_ms=None)
 
-        # Both invocations are still real, distinct turns -- the dedup applies only to token
-        # attribution, not to num_turns, which must still count both.
-        assert ng_perf["num_turns"] == 2
+        # One physical model call means one reasoning turn: with no explicit TrajectoryTurn
+        # records, num_turns falls back to the deduplicated owned-call count, so the shared
+        # call contributes a single turn and a single token attribution.
+        assert ng_perf["num_turns"] == 1
         assert ng_perf["prompt_tokens"] == 100
         assert ng_perf["completion_tokens"] == 10
+
+    def test_build_ng_perf_counts_explicit_turns_over_invocations(self) -> None:
+        # simple_agent-style trajectory: the whole multi-turn loop runs under a single "root"
+        # invocation with one TrajectoryTurn per step. num_turns must count the turns (3), not
+        # the invocations (1) -- otherwise tokens-per-turn degenerates into total tokens.
+        result = {
+            NG_TRAJECTORY_KEY: {
+                "task_id": "t",
+                "rollout_id": "t-0",
+                "invocations": [{"invocation_id": "root", "model_calls": [{"model_call_id": "call-1"}]}],
+                "turns": [
+                    {
+                        "invocation_id": "root",
+                        "task_id": "t",
+                        "rollout_id": "t-0",
+                        "turn_no": turn_no,
+                        "timestamp": 1.0,
+                        "step_count": 0,
+                    }
+                    for turn_no in (1, 2, 3)
+                ],
+                "model_calls": [
+                    {"model_call_id": "call-1", "token_stats": {"prompt_tokens": 100, "completion_tokens": 30}},
+                ],
+            }
+        }
+
+        ng_perf = _build_ng_perf(result, rollout_latency_ms=None)
+
+        assert ng_perf["num_turns"] == 3
+        assert ng_perf["completion_tokens"] == 30
 
     def test_attach_ng_perf_absent_when_observability_disabled(self) -> None:
         result = {
