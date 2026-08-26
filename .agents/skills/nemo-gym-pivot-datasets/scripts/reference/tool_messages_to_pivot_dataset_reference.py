@@ -545,7 +545,12 @@ def _write_config(config_path: Path, out_path: Path, agent_ref: str) -> None:
 
 
 def _iter_expected_calls(expected_action: dict[str, Any]) -> list[dict[str, Any]]:
-    return [expected_action]
+    """Flatten an action into the calls it expects, so single and parallel labels share one path."""
+    if expected_action.get("type") == "function_call":
+        return [expected_action]
+    if expected_action.get("type") == "function_call_batch":
+        return expected_action.get("calls") or []
+    return []
 
 
 def validate_output(path: Path, gym_repo: Path, agent_ref: str) -> Counter:
@@ -589,7 +594,7 @@ def validate_output(path: Path, gym_repo: Path, agent_ref: str) -> Counter:
         expected_action_adapter.validate_python(row["expected_action"])
 
         expected_action = row["expected_action"]
-        if expected_action["type"] != "function_call":
+        if expected_action["type"] not in ("function_call", "function_call_batch", "message"):
             raise ValueError(f"Line {line_number} has unexpected action type: {expected_action['type']}")
 
         tools = responses_create_params.get("tools") or []
