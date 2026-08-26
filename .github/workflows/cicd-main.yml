@@ -236,6 +236,7 @@ jobs:
       - name: Check test results
         shell: bash -e -u -o pipefail {0}
         env:
+          EVENT_NAME: ${{ github.event_name }}
           CLASSIFY_RESULT: ${{ needs.classify_changes.result }}
           DOCS_ONLY: ${{ needs.classify_changes.outputs.docs_only }}
           PREFLIGHT_RESULT: ${{ needs.pre-flight.result }}
@@ -244,13 +245,14 @@ jobs:
           GPU_E2E_TEST_RESULT: ${{ needs.gpu_e2e_tests.result }}
           PROVIDER_E2E_TEST_RESULT: ${{ needs.provider_e2e_tests.result }}
         run: |
+          echo "Event: $EVENT_NAME"
           echo "Pre-flight: $PREFLIGHT_RESULT"
           echo "Classify changes: $CLASSIFY_RESULT"
           echo "Docs only: $DOCS_ONLY"
           echo "Unit tests: $UNIT_TEST_RESULT"
-          echo "Container build: $CONTAINER_BUILD_RESULT (not gating - nightly only)"
-          echo "GPU E2E tests: $GPU_E2E_TEST_RESULT (not gating - nightly only)"
-          echo "Provider E2E tests: $PROVIDER_E2E_TEST_RESULT (not gating - nightly only)"
+          echo "Container build: $CONTAINER_BUILD_RESULT"
+          echo "GPU E2E tests: $GPU_E2E_TEST_RESULT"
+          echo "Provider E2E tests: $PROVIDER_E2E_TEST_RESULT"
 
           if [[ "$PREFLIGHT_RESULT" != "success" ]]; then
             echo "Pre-flight did not succeed."
@@ -272,54 +274,35 @@ jobs:
             exit 1
           fi
 
-          if [[ "$UNIT_TEST_RESULT" == "success" ]]; then
-            echo "All required test jobs completed successfully."
-            exit 0
+          if [[ "$UNIT_TEST_RESULT" != "success" ]]; then
+            echo "One or more required test jobs did not succeed."
+            exit 1
           fi
 
-          echo "One or more required test jobs did not succeed."
-          exit 1
-
-  Nightly_Gate:
-    name: Nightly Gate
-    runs-on: ubuntu-latest
-    needs: [container_build, gpu_e2e_tests, provider_e2e_tests]
-    if: >-
-      ${{
-        always() && !cancelled() &&
-        (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
-      }}
-    steps:
-      - name: Check nightly job results
-        shell: bash -e -u -o pipefail {0}
-        env:
-          CONTAINER_BUILD_RESULT: ${{ needs.container_build.result }}
-          GPU_E2E_TEST_RESULT: ${{ needs.gpu_e2e_tests.result }}
-          PROVIDER_E2E_TEST_RESULT: ${{ needs.provider_e2e_tests.result }}
-        run: |
-          echo "Container build: $CONTAINER_BUILD_RESULT"
-          echo "GPU E2E tests: $GPU_E2E_TEST_RESULT"
-          echo "Provider E2E tests: $PROVIDER_E2E_TEST_RESULT"
-
-          if [[ "$CONTAINER_BUILD_RESULT" == "success" && \
-                "$GPU_E2E_TEST_RESULT" == "success" && \
-                "$PROVIDER_E2E_TEST_RESULT" == "success" ]]; then
-            echo "All nightly jobs completed successfully."
-            exit 0
+          # container_build, gpu_e2e_tests, and provider_e2e_tests only run on
+          # schedule/workflow_dispatch (nightly); only gate on them then.
+          if [[ "$EVENT_NAME" == "schedule" || "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ "$CONTAINER_BUILD_RESULT" != "success" || \
+                  "$GPU_E2E_TEST_RESULT" != "success" || \
+                  "$PROVIDER_E2E_TEST_RESULT" != "success" ]]; then
+              echo "One or more nightly jobs did not succeed."
+              exit 1
+            fi
           fi
 
-          echo "One or more nightly jobs did not succeed."
-          exit 1
+          echo "All required test jobs completed successfully."
+          exit 0
 
   notify-nightly-failure:
     name: Notify nightly failure
     runs-on: ubuntu-latest
-    needs: [container_build, gpu_e2e_tests, provider_e2e_tests, Nightly_Gate]
+    needs: [container_build, gpu_e2e_tests, provider_e2e_tests, Nemo_CICD_Test]
     environment: main
     if: >-
       ${{
         always() && !cancelled() &&
-        needs.Nightly_Gate.result == 'failure' &&
+        (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+        needs.Nemo_CICD_Test.result == 'failure' &&
         (github.event_name != 'workflow_dispatch' || inputs.send_notification)
       }}
     steps:
