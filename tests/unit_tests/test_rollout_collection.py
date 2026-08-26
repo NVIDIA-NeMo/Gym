@@ -1890,3 +1890,42 @@ class TestRolloutAggregationHelper:
         # though output_jsonl_fpath is used to derive the metrics path.
         assert not output_fpath.exists()
         assert (tmp_path / "rollouts_aggregate_metrics.json").exists()
+
+
+class TestReferenceMissingIsTerminal:
+    """A missing reference deliverable can never be fixed by retrying.
+
+    ``reference_missing`` marks a (task, reference) pair the judge cannot score
+    because the reference model has no deliverable for that task. Retrying
+    re-runs the eval model against a file that still does not exist, so the row
+    is terminal -- which lets the stage's partial_completion fractions treat it
+    as an ordinary omission instead of leaving it pending forever.
+    """
+
+    def test_reference_missing_is_terminal(self) -> None:
+        from nemo_gym.rollout_collection import (
+            NG_FAILURE_CLASS_KEY,
+            REFERENCE_MISSING_FAILURE_CLASS,
+            _is_terminal_failure,
+        )
+
+        assert _is_terminal_failure({NG_FAILURE_CLASS_KEY: REFERENCE_MISSING_FAILURE_CLASS}) is True
+
+    def test_timeout_stays_retryable(self) -> None:
+        from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, _is_terminal_failure
+
+        assert _is_terminal_failure({NG_FAILURE_CLASS_KEY: "timeout_exceeded"}) is False
+
+    def test_reference_missing_row_is_not_a_success(self) -> None:
+        """The whole point: it must not reach the success set, where the
+        non-final-stage coverage gate would reject it before any threshold."""
+        from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, REFERENCE_MISSING_FAILURE_CLASS
+        from resources_servers.gdpval.multistage_orchestrator import _is_success_row
+
+        row = {
+            "task_id": "t1",
+            "reward": 0.0,
+            "judge_response": {"error": "reference_missing"},
+            NG_FAILURE_CLASS_KEY: REFERENCE_MISSING_FAILURE_CLASS,
+        }
+        assert _is_success_row(row) is False
