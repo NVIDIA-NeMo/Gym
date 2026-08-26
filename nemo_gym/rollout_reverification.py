@@ -251,6 +251,26 @@ def _build_agent_to_resources_server_mapping(
     return _agent_to_rs_mapping_from_resources_only_config(global_config_dict)
 
 
+def _selected_atif_agent_to_resources_server_mapping(
+    global_config_dict: Union[Dict[str, Any], "DictConfig"],
+    payloads: List[Dict[str, Any]],
+) -> Dict[str, str]:
+    """Resolve only the resource servers selected by this ATIF batch."""
+
+    configured_mapping = _build_agent_to_resources_server_mapping(global_config_dict)
+    selected_mapping: Dict[str, str] = {}
+    for row in payloads:
+        agent_ref = row.get(AGENT_REF_KEY_NAME)
+        agent_name = agent_ref.get("name") if isinstance(agent_ref, dict) else None
+        if not isinstance(agent_name, str) or not agent_name:
+            raise ConfigError("ATIF reverification requires every materialized input to identify an agent.")
+        try:
+            selected_mapping[agent_name] = configured_mapping[agent_name]
+        except KeyError as exc:
+            raise ConfigError(f"reverify: agent {agent_name!r} has no resources server mapping.") from exc
+    return selected_mapping
+
+
 def _resources_server_exposes_tools_over_mcp(
     global_config_dict: Union[Dict[str, Any], "DictConfig"],
     resources_server_name: str,
@@ -296,16 +316,14 @@ def _guard_atif_tool_identity(payloads: List[Dict[str, Any]]) -> None:
     """
 
     server_client = setup_server_client()
-    agent_to_rs = _build_agent_to_resources_server_mapping(server_client.global_config_dict)
+    agent_to_rs = _selected_atif_agent_to_resources_server_mapping(
+        server_client.global_config_dict,
+        payloads,
+    )
     for row in payloads:
         agent_ref = row.get(AGENT_REF_KEY_NAME)
-        agent_name = agent_ref.get("name") if isinstance(agent_ref, dict) else None
-        if not isinstance(agent_name, str) or not agent_name:
-            raise ConfigError("ATIF reverification requires every materialized input to identify an agent.")
-        try:
-            resources_server_name = agent_to_rs[agent_name]
-        except KeyError as exc:
-            raise ConfigError(f"reverify: agent {agent_name!r} has no resources server mapping.") from exc
+        agent_name = agent_ref["name"]
+        resources_server_name = agent_to_rs[agent_name]
         if _response_has_function_calls(row) and _resources_server_exposes_tools_over_mcp(
             server_client.global_config_dict, resources_server_name
         ):
@@ -702,6 +720,22 @@ async def _guard_reverify_mode(config: RolloutReverificationConfig) -> Optional[
     )
 
 
+async def _guard_atif_reverify_mode(payloads: List[Dict[str, Any]]) -> None:
+    """Require STATELESS only for resource servers selected by this ATIF batch."""
+
+    server_client = setup_server_client()
+    selected_mapping = _selected_atif_agent_to_resources_server_mapping(
+        server_client.global_config_dict,
+        payloads,
+    )
+    non_stateless_rs = await _check_reverify_mode(server_client, selected_mapping)
+    if non_stateless_rs:
+        raise ConfigError(
+            f"ATIF reverification requires stateless verifiers; resource server(s) {non_stateless_rs} "
+            "reported reverify_mode=UNSUPPORTED or UNKNOWN."
+        )
+
+
 # ---------------------------------------------------------------------------
 # Function used to compute the aggregate metrics after the reverification process
 # Very similar to the rollout collection code, but we need to send the request to
@@ -843,12 +877,13 @@ def _load_reverified_results(output_fpath: Path) -> Tuple[List[Dict], List[Dict]
 
 class RolloutReverificationHelper(BaseModel):
     async def run_from_config(self, config: RolloutReverificationConfig) -> List[Dict]:
-        force_warning = await _guard_reverify_mode(config)
-        if force_warning:
-            print(force_warning)
-            output_name_prefix = "unsafe_"
-        else:
-            output_name_prefix = ""
+        force_warning: Optional[str] = None
+        output_name_prefix = ""
+        if config.input_format != "atif":
+            force_warning = await _guard_reverify_mode(config)
+            if force_warning:
+                print(force_warning)
+                output_name_prefix = "unsafe_"
 
         materialized_inputs_jsonl_fpath = _resolve_under_cwd_or_install(config.materialized_inputs_jsonl_fpath)
         if config.input_format == "atif":
@@ -859,6 +894,7 @@ class RolloutReverificationHelper(BaseModel):
                 atif_manifest_jsonl_fpath,
                 config.limit,
             )
+            await _guard_atif_reverify_mode(payloads_to_reverify)
             _guard_atif_tool_identity(payloads_to_reverify)
             output_fpaths = _prepare_output_fpaths(
                 output_name_prefix,

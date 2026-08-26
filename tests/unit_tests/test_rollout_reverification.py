@@ -47,6 +47,7 @@ from nemo_gym.rollout_reverification import (
     _check_reverify_mode,
     _drop_cache_from_payloads,
     _get_rs_names,
+    _guard_atif_reverify_mode,
     _guard_atif_tool_identity,
     _guard_reverify_mode,
     _is_judge_failure,
@@ -367,6 +368,50 @@ class TestAtifToolIdentityGuard:
 
         _guard_atif_tool_identity([self._tool_payload()])
 
+    async def test_reverify_mode_checks_only_the_selected_resources_server(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config = self._config(exposes_tools_over_mcp=False)
+        config["unrelated-agent"] = {
+            "responses_api_agents": {"fixture": {"resources_server": {"name": "unrelated-rs"}}},
+        }
+        config["unrelated-rs"] = {"resources_servers": {"unrelated": {}}}
+        client = MagicMock()
+        client.global_config_dict = config
+        responses = {
+            "fixture-rs": ReverifyMode.STATELESS,
+            "unrelated-rs": ReverifyMode.UNSUPPORTED,
+        }
+
+        async def get(*, server_name: str, url_path: str) -> ReverifyMode:
+            assert url_path == "/reverify_mode"
+            return responses[server_name]
+
+        client.get = get
+        monkeypatch.setattr("nemo_gym.rollout_reverification.setup_server_client", lambda: client)
+        monkeypatch.setattr("nemo_gym.rollout_reverification.raise_for_status", AsyncMock())
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification.get_response_json",
+            AsyncMock(side_effect=lambda response: response),
+        )
+
+        await _guard_atif_reverify_mode([self._tool_payload()])
+
+    async def test_selected_nonstateless_resources_server_is_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        config = self._config(exposes_tools_over_mcp=False)
+        client = MagicMock()
+        client.global_config_dict = config
+        client.get = AsyncMock(return_value=ReverifyMode.UNSUPPORTED)
+        monkeypatch.setattr("nemo_gym.rollout_reverification.setup_server_client", lambda: client)
+        monkeypatch.setattr("nemo_gym.rollout_reverification.raise_for_status", AsyncMock())
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification.get_response_json",
+            AsyncMock(side_effect=lambda response: response),
+        )
+
+        with pytest.raises(ConfigError, match="ATIF reverification requires stateless verifiers"):
+            await _guard_atif_reverify_mode([self._tool_payload()])
+
     def test_only_the_selected_resources_server_controls_the_guard(self, monkeypatch: pytest.MonkeyPatch) -> None:
         config = self._config(exposes_tools_over_mcp=False)
         config["unrelated-mcp-rs"] = {
@@ -416,7 +461,7 @@ class TestAtifToolIdentityGuard:
 
     async def test_run_rejects_before_preparing_output_paths(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._patch_client(monkeypatch, self._config(exposes_tools_over_mcp=True))
-        monkeypatch.setattr("nemo_gym.rollout_reverification._guard_reverify_mode", AsyncMock(return_value=None))
+        monkeypatch.setattr("nemo_gym.rollout_reverification._guard_atif_reverify_mode", AsyncMock(return_value=None))
         monkeypatch.setattr(
             "nemo_gym.rollout_reverification._resolve_under_cwd_or_install",
             lambda value: Path(value),
@@ -445,7 +490,7 @@ class TestAtifToolIdentityGuard:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         self._patch_client(monkeypatch, self._config(exposes_tools_over_mcp=False))
-        monkeypatch.setattr("nemo_gym.rollout_reverification._guard_reverify_mode", AsyncMock(return_value=None))
+        monkeypatch.setattr("nemo_gym.rollout_reverification._guard_atif_reverify_mode", AsyncMock(return_value=None))
         monkeypatch.setattr(
             "nemo_gym.rollout_reverification._resolve_under_cwd_or_install",
             lambda value: Path(value),
@@ -1930,10 +1975,10 @@ class TestRolloutReverificationRunFromConfig:
 
     # ------------------------------------------------------------------ tests
 
-    async def test_atif_manifest_runs_through_stateless_verify_and_persists_provenance(
+    async def test_atif_manifest_uses_only_its_selected_stateless_verifier_and_persists_provenance(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """Exercise the public ATIF mode from manifest loading through persisted reward output."""
+        """Exercise public ATIF mode while an unrelated configured verifier is unsupported."""
 
         fixture = Path(__file__).parent / "fixtures" / "relay_atif_v1_7_responses_tool_trajectory.json"
         materialized = tmp_path / "inputs.jsonl"
@@ -1969,9 +2014,25 @@ class TestRolloutReverificationRunFromConfig:
         verify_response = object()
         mock_client = MagicMock()
         mock_client.global_config_dict = {
+            "codex-relay-fixture": {
+                "responses_api_agents": {"fixture": {"resources_server": {"name": "fixture-rs"}}},
+            },
             "fixture-rs": {"resources_servers": {"fixture": {}}},
+            "unrelated-agent": {
+                "responses_api_agents": {"fixture": {"resources_server": {"name": "unrelated-rs"}}},
+            },
+            "unrelated-rs": {"resources_servers": {"unrelated": {}}},
         }
-        mock_client.get = AsyncMock(return_value=reverify_mode_response)
+        queried_reverify_modes: list[str] = []
+
+        async def capture_reverify_mode(*, server_name: str, url_path: str) -> object:
+            assert url_path == "/reverify_mode"
+            queried_reverify_modes.append(server_name)
+            if server_name == "fixture-rs":
+                return reverify_mode_response
+            pytest.fail("run_from_config must not query an unrelated unsupported resources server")
+
+        mock_client.get = capture_reverify_mode
         posted_rows: list[dict] = []
 
         async def capture_verify(server_name: str, url_path: str, json: dict) -> object:
@@ -2004,6 +2065,7 @@ class TestRolloutReverificationRunFromConfig:
         returned = await RolloutReverificationHelper().run_from_config(config)
 
         assert len(posted_rows) == 1
+        assert queried_reverify_modes == ["fixture-rs"]
         assert ATIF_PROVENANCE_KEY not in posted_rows[0]
         correlated_items = [item for item in posted_rows[0]["response"]["output"] if "call_id" in item]
         assert [item["call_id"] for item in correlated_items] == [
