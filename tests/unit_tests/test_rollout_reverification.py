@@ -446,6 +446,30 @@ class TestBuildVerifyPayload:
 
         assert set(result.keys()) == {"task", "response"}
 
+    def test_preserves_mcp_tool_call_provenance_for_reverification(self) -> None:
+        provenance = {
+            "call_1": {
+                "server_name": "workplace_assistant",
+                "tool_name": "email_reply_email",
+            }
+        }
+        pair = InputRolloutPair(
+            input={"task": "q1"},
+            rollout={
+                "response": {"output": "x"},
+                "mcp_tool_call_provenance": provenance,
+                "reward": 1.0,
+            },
+        )
+
+        result = _build_verify_payload(pair)
+
+        assert result == {
+            "task": "q1",
+            "response": {"output": "x"},
+            "mcp_tool_call_provenance": provenance,
+        }
+
 
 # ---------------------------------------------------------------------------
 # Judge-failure recovery helpers (--judge-failed-only)

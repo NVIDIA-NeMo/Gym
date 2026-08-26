@@ -93,6 +93,7 @@ from nemo_gym.base_resources_server import (
     _MCP_TOKEN_SALT,
     NEMO_GYM_MCP_METADATA_KEY,
     NEMO_GYM_MCP_SESSION_TOKEN_HEADER,
+    NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY,
     RESERVED_MCP_TOOL_NAMES,
     MCPServerMetadata,
 )
@@ -618,11 +619,16 @@ def _wrap_seed_session(app: FastAPI, mint_metadata: Callable[[Request, dict], di
 
 
 def _wrap_verify(app: FastAPI, server: Any) -> None:
-    """Wrap the app's current /verify endpoint so MCP-namespaced tool-call names are normalized for
-    scoring only. Verification runs against a deep copy with bare names; the reward response's
-    echoed names are restored to what the model emitted (matched by call_id), so persisted rollout
-    artifacts keep transport provenance. Wrapping whatever handler the route holds at install time
-    covers servers that strip and re-register /verify with their own handler.
+    """Give verification a canonical MCP tool name without rewriting the stored trajectory.
+
+    New agent adapters provide authoritative ``(server_name, tool_name)`` provenance keyed by
+    ``call_id``. A present mapping is complete, so calls absent from it are built-in/non-MCP calls
+    and remain unchanged. ``None`` denotes an older trajectory and enables the narrow Claude Code
+    string fallback. Verification runs against a deep copy; the response restores emitted names so
+    replay and training retain the harness-facing representation.
+
+    Wrapping whatever handler the route holds at install time covers servers that strip and
+    re-register /verify with their own handler.
     """
     idx, route = _take_route(app, "/verify", "its tool-call names are normalized for scoring")
     endpoint = route.endpoint
@@ -654,19 +660,38 @@ def _wrap_verify(app: FastAPI, server: Any) -> None:
             return await result if inspect.isawaitable(result) else result
         key, container = located
 
-        emitted = {item.call_id: item.name for item in _function_calls(container)}
+        calls = _function_calls(container)
+        emitted: dict[str, list[str]] = {}
+        for item in calls:
+            emitted.setdefault(item.call_id, []).append(item.name)
+
         normalized = container.model_copy(deep=True)
+        provenance = getattr(normalized, NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY, None)
+        resources_server_name = server.config.name or type(server).__name__
         for item in _function_calls(normalized):
-            item.name = server.normalize_tool_name(item.name)
+            if provenance is None:
+                item.name = server.normalize_tool_name(item.name)
+                continue
+            # Duplicate IDs make a sidecar lookup ambiguous. Fail closed instead of canonicalizing
+            # either call under provenance that cannot identify one unique emitted action.
+            if len(emitted.get(item.call_id, [])) != 1:
+                continue
+            identity = provenance.get(item.call_id)
+            if identity is not None and identity.server_name == resources_server_name:
+                item.name = identity.tool_name
         kwargs[key] = normalized
 
         result = endpoint(**kwargs)
         if inspect.isawaitable(result):
             result = await result
 
+        restored_counts: dict[str, int] = {}
         for item in _function_calls(result):
-            if item.call_id in emitted:
-                item.name = emitted[item.call_id]
+            index = restored_counts.get(item.call_id, 0)
+            emitted_names = emitted.get(item.call_id, [])
+            if index < len(emitted_names):
+                item.name = emitted_names[index]
+                restored_counts[item.call_id] = index + 1
         return result
 
     _swap_route(app, idx, "/verify", verify_normalized)
@@ -678,7 +703,13 @@ def _wrap_verify(app: FastAPI, server: Any) -> None:
 # ==================================================================================================
 
 
-def _mint_session_metadata(server: Any, serializer: URLSafeSerializer, request: Request, seed_body: dict) -> dict:
+def _mint_session_metadata(
+    server: Any,
+    serializer: URLSafeSerializer,
+    exposed_tool_names: tuple[str, ...],
+    request: Request,
+    seed_body: dict,
+) -> dict:
     """Mint the session token embedded in a /seed_session response (see ``_wrap_seed_session``).
 
     Assigns the rollout its session id, asks the server for any per-session tool narrowing, and
@@ -691,11 +722,13 @@ def _mint_session_metadata(server: Any, serializer: URLSafeSerializer, request: 
     # A raising hook propagates and fails the seed request — no token is minted past a broken hook.
     session_allowed = server.mcp_allowed_tools_for_session(seed_body)
     payload = {"sid": session_id, "tools": session_allowed}
+    allowed = None if session_allowed is None else frozenset(session_allowed)
     return MCPServerMetadata(
         server_name=server.config.name or type(server).__name__,
         url_path=MCP_URL_PATH,
         transport="http",
         headers={NEMO_GYM_MCP_SESSION_TOKEN_HEADER: serializer.dumps(payload)},
+        tool_names=[name for name in exposed_tool_names if allowed is None or name in allowed],
     ).model_dump()
 
 
@@ -763,7 +796,7 @@ def install_auto_exposure(server: Any, app: FastAPI) -> dict[str, MCPTool]:
     serializer = URLSafeSerializer(secret, salt=_MCP_TOKEN_SALT)
     tools = harvest_tools(app, server)
 
-    mint_metadata = functools.partial(_mint_session_metadata, server, serializer)
+    mint_metadata = functools.partial(_mint_session_metadata, server, serializer, tuple(tools))
     _wrap_seed_session(app, mint_metadata)
     _wrap_verify(app, server)
 

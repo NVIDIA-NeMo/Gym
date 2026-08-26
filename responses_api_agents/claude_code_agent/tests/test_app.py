@@ -25,6 +25,7 @@ import yaml
 from fastapi import Request
 
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME
+from nemo_gym.mcp import parse_rollout_mcp_server
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -618,23 +619,11 @@ class TestRunClaudeCode:
 class TestRolloutMCPConfig:
     def test_no_metadata_preserves_static_config(self, tmp_path: Path) -> None:
         agent = _make_agent(mcp_config="/path/to/static.json")
-        assert agent._write_rollout_mcp_config({}, tmp_path) is None
+        assert agent._write_rollout_mcp_config(None, tmp_path) is None
 
     def test_writes_rollout_mcp_config_with_session_header(self, tmp_path: Path) -> None:
-        agent = _make_agent(resources_server=ResourcesServerRef(type="resources_servers", name="example_mcp_weather"))
-        agent.server_client.global_config_dict = {
-            "example_mcp_weather": {
-                "resources_servers": {
-                    "example_mcp_weather": {
-                        "host": "127.0.0.1",
-                        "port": 8123,
-                    }
-                }
-            }
-        }
-        agent.server_client._build_server_base_url.side_effect = lambda cfg: f"http://{cfg['host']}:{cfg['port']}"
-
-        config_path = agent._write_rollout_mcp_config(
+        agent = _make_agent()
+        server = parse_rollout_mcp_server(
             {
                 "mcp": {
                     "server_name": "example_mcp_weather",
@@ -642,8 +631,10 @@ class TestRolloutMCPConfig:
                     "headers": {"X-NeMo-Gym-Session-Token": "secret-token"},
                 }
             },
-            tmp_path,
+            resources_server_name="example_mcp_weather",
+            resources_server_base_url="http://127.0.0.1:8123",
         )
+        config_path = agent._write_rollout_mcp_config(server, tmp_path)
 
         assert config_path is not None
         config = json.loads(Path(config_path).read_text())
@@ -659,19 +650,7 @@ class TestRolloutMCPConfig:
             mcp_config=str(static_config),
             resources_server=ResourcesServerRef(type="resources_servers", name="example_mcp_weather"),
         )
-        agent.server_client.global_config_dict = {
-            "example_mcp_weather": {
-                "resources_servers": {
-                    "example_mcp_weather": {
-                        "host": "127.0.0.1",
-                        "port": 8123,
-                    }
-                }
-            }
-        }
-        agent.server_client._build_server_base_url.side_effect = lambda cfg: f"http://{cfg['host']}:{cfg['port']}"
-
-        config_path = agent._write_rollout_mcp_config(
+        server = parse_rollout_mcp_server(
             {
                 "mcp": {
                     "server_name": "dynamic",
@@ -679,8 +658,10 @@ class TestRolloutMCPConfig:
                     "headers": {"X-NeMo-Gym-Session-Token": "tok"},
                 }
             },
-            tmp_path / "run",
+            resources_server_name="example_mcp_weather",
+            resources_server_base_url="http://127.0.0.1:8123",
         )
+        config_path = agent._write_rollout_mcp_config(server, tmp_path / "run")
 
         config = json.loads(Path(config_path).read_text())
         assert "static" in config["mcpServers"]
@@ -708,30 +689,67 @@ class TestRolloutMCPConfig:
                             "server_name": "example_mcp_weather",
                             "url_path": "/mcp",
                             "headers": {"X-NeMo-Gym-Session-Token": "tok"},
+                            "tool_names": ["get_weather"],
                         }
                     },
                     cookies={"session": "abc"},
                 )
             if url_path == "/verify":
+                captured["verify_json"] = json
                 return FakeAioHTTPResponse(json | {"reward": 1.0})
             raise AssertionError(f"unexpected post: {server_name} {url_path}")
 
         captured: dict = {}
 
-        async def fake_run_claude_code(instruction, system_prompt=None, mcp_config=None, **kwargs):
+        async def fake_run_claude_code(
+            instruction,
+            system_prompt=None,
+            mcp_config=None,
+            **kwargs,
+        ):
             captured["instruction"] = instruction
             captured["mcp_config"] = mcp_config
             captured["config_exists_during_run"] = Path(mcp_config).is_file()
             captured["config"] = json.loads(Path(mcp_config).read_text())
-            return (
-                _output(
+            stdout = "\n".join(
+                [
+                    _event(
+                        "assistant",
+                        message={
+                            "content": [
+                                {
+                                    "type": "tool_use",
+                                    "id": "call-weather",
+                                    "name": "mcp__example_mcp_weather__get_weather",
+                                    "input": {"city": "Paris"},
+                                }
+                            ]
+                        },
+                    ),
+                    _event(
+                        "user",
+                        message={
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": "call-weather",
+                                    "content": "sunny and 72 F",
+                                }
+                            ]
+                        },
+                    ),
                     _event(
                         "assistant",
                         message={"content": [{"type": "text", "text": "The weather in Paris is sunny and 72 F."}]},
-                    )
-                ),
+                    ),
+                ]
+            )
+            output_items, metadata = parse_stream_json(stdout)
+            metadata["status"] = "completed"
+            return (
+                output_items,
                 "claude-sonnet-4-6",
-                {"status": "completed"},
+                metadata,
             )
 
         agent.server_client.post.side_effect = fake_post
@@ -751,6 +769,12 @@ class TestRolloutMCPConfig:
         server = captured["config"]["mcpServers"]["example_mcp_weather"]
         assert server["url"] == "http://127.0.0.1:8123/mcp"
         assert server["headers"]["X-NeMo-Gym-Session-Token"] == "tok"
+        assert captured["verify_json"]["mcp_tool_call_provenance"] == {
+            "call-weather": {
+                "server_name": "example_mcp_weather",
+                "tool_name": "get_weather",
+            }
+        }
         assert not Path(captured["mcp_config"]).exists()
 
     def test_run_threads_session_cookie_seed_to_verify(self, tmp_path: Path) -> None:
