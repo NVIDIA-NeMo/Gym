@@ -28,6 +28,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseFunctionToolCallForTraining,
 )
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig
+from responses_api_agents.nooa_agent.gym_llm import PolicyCallBudgetExceeded
 from responses_api_agents.nooa_agent.runner import EmbeddedNOOARunner, NOOARunRequest
 
 
@@ -52,6 +53,12 @@ class FakeAgent:
     async def analyze(self, text: str, customer_id: str) -> str:
         weather = await self.gym_tools.get_weather(city=customer_id)
         return f"{text}: {weather['weather']}"
+
+
+class BudgetExhaustedAgent(FakeAgent):
+    async def analyze(self, text: str, customer_id: str) -> str:
+        await self.gym_tools.get_weather(city=customer_id)
+        raise PolicyCallBudgetExceeded("NOOA policy call budget exhausted after 1 calls")
 
 
 class FakeEventManager:
@@ -178,6 +185,27 @@ async def test_constructs_a_fresh_agent_for_every_rollout() -> None:
     assert FakeAgent.instances == 2
     assert first.agent is not second.agent
     assert first.resource_cookies is not second.resource_cookies
+
+
+@pytest.mark.asyncio
+async def test_policy_budget_exhaustion_returns_partial_execution() -> None:
+    runner, _ = make_runner()
+    runner._agent_class = BudgetExhaustedAgent
+
+    result = await runner.run(
+        NOOARunRequest(
+            row=row("Paris"),
+            rollout_id="budget-exhausted",
+            task_id="task",
+            model_url_path="/budget-exhausted/v1/responses",
+        )
+    )
+
+    assert result.return_value is None
+    assert result.termination_reason == "policy_budget_exceeded"
+    assert "exhausted after 1 calls" in result.termination_error
+    assert result.tool_executions[0].name == "get_weather"
+    assert [event.kind for event in result.timeline] == ["tool"]
 
 
 @pytest.mark.asyncio
