@@ -12,4 +12,3 @@ hotpotqa_closedbook_simple_agent:
         prompt_config: benchmarks/hotpotqa_closedbook/prompts/default.yaml
         prepare_script: benchmarks/hotpotqa_closedbook/prepare.py
         license: CC BY-SA 4.0
-        agent: hotpotqa_closedbook_simple_agent

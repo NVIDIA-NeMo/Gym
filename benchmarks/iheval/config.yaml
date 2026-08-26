@@ -20,4 +20,3 @@ iheval_benchmark_simple_agent:
         # keeps the pre-built input untouched (see train_data_utils collate path).
         prompt_config:
         license: Apache 2.0
-        agent: iheval_benchmark_simple_agent

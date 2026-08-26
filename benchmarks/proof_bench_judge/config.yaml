@@ -13,7 +13,6 @@ proof_bench_judge_math_proof_judgement_resources_server:
         prompt_config: benchmarks/prompts/judge/math-proof-judge.yaml
         prepare_script: benchmarks/proof_bench_judge/prepare.py
         license: Apache 2.0
-        agent: proof_bench_judge_math_proof_judgement_simple_agent
 
 proof_bench_judge_math_proof_judgement_simple_agent:
   _inherit_from: math_proof_judgement_simple_agent

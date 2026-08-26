@@ -16,7 +16,6 @@ legal_agent_bench_benchmark_resources_server:
         prompt_config:
         prepare_script: benchmarks/legal_agent_bench/prepare.py
         num_repeats: 1
-        agent: legal_agent_bench_benchmark_harbor_agent
 legal_agent_bench_benchmark_harbor_agent:
   _inherit_from: legal_agent_bench_harbor_agent
   responses_api_agents:

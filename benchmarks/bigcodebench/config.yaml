@@ -18,4 +18,3 @@ bigcodebench_benchmark_simple_agent:
         prompt_config: benchmarks/prompts/eval/bigcodebench/codegen.yaml
         prepare_script: benchmarks/bigcodebench/prepare.py
         license: Apache 2.0
-        agent: bigcodebench_benchmark_simple_agent

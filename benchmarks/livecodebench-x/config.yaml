@@ -12,4 +12,3 @@ config_paths:
         prompt_config: benchmarks/prompts/generic/default.yaml
         prepare_script: benchmarks/livecodebench-x/prepare.py
         license: CC-BY-4.0
-        agent: "livecodebench-x_code_gen_simple_agent"

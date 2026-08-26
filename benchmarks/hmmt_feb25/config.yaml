@@ -19,7 +19,6 @@ hmmt_feb25_math_with_judge_resources_server:
         prompt_config: benchmarks/prompts/generic/math.yaml
         prepare_script: benchmarks/hmmt_feb25/prepare.py
         num_repeats: 4
-        agent: hmmt_feb25_math_with_judge_simple_agent
 hmmt_feb25_math_with_judge_simple_agent:
   _inherit_from: math_with_judge_simple_agent
   responses_api_agents:

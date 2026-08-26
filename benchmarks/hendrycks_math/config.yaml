@@ -14,7 +14,6 @@ hendrycks_math_math_with_judge_resources_server:
         jsonl_fpath: benchmarks/hendrycks_math/data/hendrycks_math_benchmark.jsonl
         prompt_config: benchmarks/prompts/generic/math.yaml
         prepare_script: benchmarks/hendrycks_math/prepare.py
-        agent: hendrycks_math_math_with_judge_simple_agent
 hendrycks_math_math_with_judge_simple_agent:
   _inherit_from: math_with_judge_simple_agent
   responses_api_agents:

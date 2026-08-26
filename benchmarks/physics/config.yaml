@@ -13,4 +13,3 @@ physics_physics_judge_simple_agent:
         prompt_config: benchmarks/physics/prompts/default.yaml
         prepare_script: benchmarks/physics/prepare.py
         license: Apache 2.0
-        agent: physics_physics_judge_simple_agent

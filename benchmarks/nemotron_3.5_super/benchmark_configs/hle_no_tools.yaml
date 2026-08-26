@@ -99,7 +99,6 @@ hle_benchmark_equivalence_llm_judge_resources_server:
         prompt_config: benchmarks/hle/prompts/default.yaml
         prepare_script: benchmarks/hle/prepare.py
         num_repeats: 1
-        agent: hle_benchmark_equivalence_llm_judge_simple_agent
 hle_benchmark_equivalence_llm_judge_simple_agent:
   responses_api_agents:
     simple_agent:

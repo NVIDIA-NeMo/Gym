@@ -14,7 +14,6 @@ hmmt_nov25_math_with_judge_resources_server:
         jsonl_fpath: benchmarks/hmmt_nov25/data/hmmt_nov25_benchmark.jsonl
         prompt_config: benchmarks/prompts/generic/math.yaml
         prepare_script: benchmarks/hmmt_nov25/prepare.py
-        agent: hmmt_nov25_math_with_judge_simple_agent
 hmmt_nov25_math_with_judge_simple_agent:
   _inherit_from: math_with_judge_simple_agent
   responses_api_agents:

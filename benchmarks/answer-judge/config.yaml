@@ -13,7 +13,6 @@ answer_judge_math_proof_judgement_resources_server:
         prompt_config: benchmarks/prompts/judge/math.yaml
         prepare_script: benchmarks/answer-judge/prepare.py
         num_repeats: 1
-        agent: answer_judge_math_proof_judgement_simple_agent
 
 answer_judge_math_proof_judgement_simple_agent:
   _inherit_from: math_proof_judgement_simple_agent

@@ -12,4 +12,3 @@ longbench_v2_mcqa_simple_agent:
         prompt_config: benchmarks/longbench_v2/prompts/default.yaml
         prepare_script: benchmarks/longbench_v2/prepare.py
         license: Apache 2.0
-        agent: longbench_v2_mcqa_simple_agent

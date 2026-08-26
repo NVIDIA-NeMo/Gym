@@ -14,7 +14,6 @@ longmt_wmt24pp_resources_server:
         prepare_script: benchmarks/longmt_wmt24pp/prepare.py
         num_repeats: 5
         license: Creative Commons Attribution-ShareAlike 4.0 International
-        agent: longmt_wmt24pp_agent
 longmt_wmt24pp_agent:
   _inherit_from: longmt_wmt24pp_simple_agent
   responses_api_agents:

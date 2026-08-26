@@ -12,4 +12,3 @@ longmemeval_benchmark_simple_agent:
         prepare_script: benchmarks/longmemeval/prepare.py
         prompt_config:
         license: MIT
-        agent: longmemeval_benchmark_simple_agent

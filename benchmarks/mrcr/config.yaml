@@ -22,7 +22,6 @@ mrcr_benchmark_resources_server:
         # `type: train`/`validation`. To actually get N rollouts per task,
         # pass `--num-repeats N` on the `gym eval run --no-serve` CLI.
         num_repeats: 4
-        agent: mrcr_benchmark_simple_agent
 mrcr_benchmark_simple_agent:
   _inherit_from: mrcr_simple_agent
   responses_api_agents:

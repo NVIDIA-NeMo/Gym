@@ -43,7 +43,6 @@ browsecomp_benchmark_resources_server:
         prompt_config:
         prepare_script: benchmarks/browsecomp/prepare.py
         num_repeats: 1
-        agent: browsecomp_benchmark_agent
 browsecomp_benchmark_agent:
   responses_api_agents:
     browsecomp_agent:

@@ -20,7 +20,6 @@ birdbench_bird_sql_resources_server:
         prompt_config: benchmarks/birdbench/prompts/default.yaml
         prepare_script: benchmarks/birdbench/prepare.py
         num_repeats: 16
-        agent: birdbench_bird_sql_simple_agent
 birdbench_bird_sql_simple_agent:
   _inherit_from: bird_sql_simple_agent
   responses_api_agents:

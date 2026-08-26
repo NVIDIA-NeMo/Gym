@@ -13,7 +13,6 @@ speed_bench_throughput_2k_resources_server:
         prompt_config:
         prepare_script: benchmarks/speed-bench/prepare_throughput_2k.py
         license: NVIDIA Evaluation Dataset License Agreement
-        agent: speed_bench_throughput_2k_simple_agent
 speed_bench_throughput_2k_simple_agent:
   _inherit_from: speed_bench_simple_agent
   responses_api_agents:

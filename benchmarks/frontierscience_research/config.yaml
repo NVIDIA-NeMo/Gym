@@ -22,7 +22,6 @@ frontierscience_research_frontierscience_judge_resources_server:
         prompt_config: benchmarks/prompts/generic/default.yaml
         prepare_script: benchmarks/frontierscience_research/prepare.py
         license: Apache 2.0
-        agent: frontierscience_research_frontierscience_judge_simple_agent
 frontierscience_research_frontierscience_judge_simple_agent:
   _inherit_from: frontierscience_judge_simple_agent
   responses_api_agents:

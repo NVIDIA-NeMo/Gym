@@ -14,7 +14,6 @@ aime26_math_with_judge_resources_server:
         jsonl_fpath: benchmarks/aime26/data/aime26_benchmark.jsonl
         prompt_config: benchmarks/prompts/generic/math.yaml
         prepare_script: benchmarks/aime26/prepare.py
-        agent: aime26_math_with_judge_simple_agent
 aime26_math_with_judge_simple_agent:
   _inherit_from: math_with_judge_simple_agent
   responses_api_agents:

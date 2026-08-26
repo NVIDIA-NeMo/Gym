@@ -14,7 +14,6 @@ ruler_pretrain_resources_server:
         prompt_config:
         prepare_script: benchmarks/ruler/prepare_utils.py
         num_repeats: 1
-        agent: ruler_pretrain_simple_agent
 ruler_pretrain_simple_agent:
   _inherit_from: ruler_simple_agent
   responses_api_agents:

@@ -101,7 +101,6 @@ gdpval_resources_server:
         prompt_config:
         prepare_script: benchmarks/gdpval/prepare.py
         num_repeats: 1
-        agent: gdpval_stirrup_agent
 gdpval_stirrup_agent:
   responses_api_agents:
     stirrup_agent:

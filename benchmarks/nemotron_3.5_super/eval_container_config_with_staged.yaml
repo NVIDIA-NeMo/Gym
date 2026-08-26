@@ -12,7 +12,6 @@ opencode_sandboxed_agent_swebench_verified:
         prepare_script: benchmarks/swebench/verified/prepare.py
         num_repeats: 3
 
-        agent: opencode_sandboxed_agent_swebench_verified
 opencode_sandboxed_agent_swebench_multilingual:
   responses_api_agents:
     opencode_sandboxed_agent:
@@ -23,7 +22,6 @@ opencode_sandboxed_agent_swebench_multilingual:
         prepare_script: benchmarks/swebench/multilingual/prepare.py
         num_repeats: 3
 
-        agent: opencode_sandboxed_agent_swebench_multilingual
 opencode_sandboxed_agent_deepswe:
   responses_api_agents:
     opencode_sandboxed_agent:
@@ -34,7 +32,6 @@ opencode_sandboxed_agent_deepswe:
         prepare_script: benchmarks/deepswe/prepare.py
         num_repeats: 5
 
-        agent: opencode_sandboxed_agent_deepswe
 opencode_sandboxed_agent_terminal_bench_2_1:
   responses_api_agents:
     opencode_sandboxed_agent:

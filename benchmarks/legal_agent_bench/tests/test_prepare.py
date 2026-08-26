@@ -138,7 +138,8 @@ def test_benchmark_config_is_isolated_and_resolves_shared_cache_paths() -> None:
     assert agent.harbor_agent_kwargs.skills_dir == resource.harness_skills_dir
     assert agent.harbor_agent_kwargs.max_turns == 60
     # The benchmark dataset is declared on the resources server (dataset-decoupling); the
-    # harness is bound via the dataset's `agent:` pin rather than by declaring the dataset.
+    # harness resolves through the unique agent -> resources server edge, no `agent:` pin needed.
     assert len(resource.datasets) == 1
     assert resource.datasets[0].type == "benchmark"
-    assert resource.datasets[0].agent == "legal_agent_bench_benchmark_harbor_agent"
+    assert resource.datasets[0].get("agent") is None
+    assert agent.resources_server.name == "legal_agent_bench_benchmark_resources_server"
