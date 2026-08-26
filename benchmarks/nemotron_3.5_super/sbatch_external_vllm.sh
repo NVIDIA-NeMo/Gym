@@ -11,6 +11,7 @@ CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
 VLLM_CONFIG=$VLLM_CONFIG
 SLURM_COMMENT="${SLURM_COMMENT:-}"
+NEMO_GYM_REPO_ROOT="${NEMO_GYM_REPO_ROOT:-$(pwd -P)}"
 
 should_run_eval=$(( $# > 0 ))
 if (( should_run_eval )); then
@@ -284,14 +285,15 @@ if (( should_run_eval )); then
             --time=00:30:00 \
             --job-name="gym-cleanup-$main_job_id" \
             --output="$submit_dir/slurm-logs/%j-gym-cleanup-$main_job_id.log" \
-            "$submit_dir/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py" \
-            --connection-config "$submit_dir/env.yaml" \
+            "$NEMO_GYM_REPO_ROOT/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py" \
             --run-id "$main_job_id" \
             --user "$cleanup_user" \
             --reap
     ); then
-        echo "Failed to submit cleanup job for batch job $main_job_id; the batch job is still active" >&2
-        exit 1
+        echo "Submitted batch job $main_job_id"
+        echo "Failed to submit the sandbox-cleanup job for batch job $main_job_id;" \
+            "it is running and its sandboxes will need reaping by hand" >&2
+        exit 0
     fi
     cleanup_job_id=${cleanup_job_id%%;*}
 fi

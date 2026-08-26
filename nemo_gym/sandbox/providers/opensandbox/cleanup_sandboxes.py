@@ -6,6 +6,7 @@
 
 import argparse
 import asyncio
+import os
 import re
 import sys
 import urllib.parse
@@ -16,6 +17,9 @@ import aiohttp
 import yaml
 
 
+DOMAIN_ENV_VAR = "OPENSANDBOX_DOMAIN"
+API_KEY_ENV_VAR = "OPENSANDBOX_API_KEY"
+PROTOCOL_ENV_VAR = "OPENSANDBOX_PROTOCOL"
 RUN_METADATA_KEY = "nemo-gym.nvidia.com/run"
 USER_METADATA_KEY = "nemo-gym.nvidia.com/user"
 REQUEST_TIMEOUT_SECONDS = 30
@@ -137,10 +141,27 @@ async def cleanup_sandboxes(
         return 1
 
 
+def connection_from_environment() -> tuple[str, str, str]:
+    """The connection a caller exports rather than writes to a file."""
+    domain = os.environ.get(DOMAIN_ENV_VAR, "").strip()
+    access_key = os.environ.get(API_KEY_ENV_VAR, "").strip()
+    protocol = os.environ.get(PROTOCOL_ENV_VAR, "").strip() or "http"
+    for name, value in ((DOMAIN_ENV_VAR, domain), (API_KEY_ENV_VAR, access_key)):
+        if not value:
+            raise ValueError(f"{name} must be set when --connection-config is omitted")
+    if protocol not in {"http", "https"}:
+        raise ValueError(f"{PROTOCOL_ENV_VAR} must be http or https")
+    return domain, access_key, protocol
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--connection-config", required=True, help="YAML file containing sandbox.opensandbox.connection."
+        "--connection-config",
+        help=(
+            "YAML file containing sandbox.opensandbox.connection. Omit it to read the connection from "
+            f"{DOMAIN_ENV_VAR}, {API_KEY_ENV_VAR} and {PROTOCOL_ENV_VAR} instead."
+        ),
     )
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--user", required=True)
@@ -152,6 +173,18 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(f"--{name} must not be empty")
 
     try:
+        if args.connection_config is None:
+            domain, access_key, protocol = connection_from_environment()
+            return asyncio.run(
+                cleanup_sandboxes(
+                    domain=domain,
+                    protocol=protocol,
+                    access_key=access_key,
+                    run_id=args.run_id,
+                    user=args.user,
+                    reap=args.reap,
+                )
+            )
         with open(args.connection_config, encoding="utf-8") as config_file:
             config = yaml.safe_load(config_file)
         if not isinstance(config, Mapping):
