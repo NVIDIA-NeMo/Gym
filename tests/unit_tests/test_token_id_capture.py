@@ -710,6 +710,67 @@ def test_uncorrelated_call_captures_nothing(tmp_path):
     assert list(tmp_path.glob("*.tokens.jsonl")) == []
 
 
+def test_model_discovery_does_not_mark_capture_incomplete(tmp_path):
+    client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
+    response = client.get("/ng-rollout/models-roll0/training-token-capture/v1/models")
+
+    assert response.status_code in {200, 404, 405}
+    assert TokenCaptureStore(tmp_path).freeze_now("models-roll0").incomplete is False
+
+
+@pytest.mark.parametrize("path", ["/api/tags", "/v1/props", "/version", "/api/show"])
+def test_failed_unknown_probe_does_not_mark_capture_incomplete(tmp_path, path):
+    client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
+    response = client.post(
+        f"/ng-rollout/probe-roll0/training-token-capture{path}",
+        json={},
+    )
+
+    assert response.status_code in {404, 405}
+    assert TokenCaptureStore(tmp_path).freeze_now("probe-roll0").incomplete is False
+
+
+def test_successful_unknown_capture_path_fails_closed(tmp_path):
+    app = _server(_both_enabled(tmp_path)).setup_webserver()
+
+    @app.post("/v1/unsupported-generation")
+    async def unsupported_generation():
+        return {"output": "generated"}
+
+    client = TestClient(app)
+    response = client.post(
+        "/ng-rollout/unknown-roll0/training-token-capture/v1/unsupported-generation",
+        json={"input": "hi"},
+    )
+
+    assert response.status_code == 200
+    assert TokenCaptureStore(tmp_path).freeze_now("unknown-roll0").incomplete is True
+
+
+def test_model_server_can_declare_successful_non_generating_route(tmp_path):
+    class MetadataModel(_CapturingModel):
+        non_generating_model_routes = frozenset({("POST", "/v1/custom-metadata")})
+
+    server = MetadataModel(
+        config=BaseResponsesAPIModelConfig(host="0.0.0.0", port=8099, entrypoint="", name="srv"),
+        server_client=MagicMock(spec=ServerClient, global_config_dict=_both_enabled(tmp_path)),
+    )
+    app = server.setup_webserver()
+
+    @app.post("/v1/custom-metadata")
+    async def custom_metadata():
+        return {"capabilities": ["tools"]}
+
+    client = TestClient(app)
+    response = client.post(
+        "/ng-rollout/declared-roll0/training-token-capture/v1/custom-metadata",
+        json={},
+    )
+
+    assert response.status_code == 200
+    assert TokenCaptureStore(tmp_path).freeze_now("declared-roll0").incomplete is False
+
+
 def test_package_is_dependency_free_leaf():
     """Keep token capture independent of Gym's server stack.
 
