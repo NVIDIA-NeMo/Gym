@@ -21,6 +21,7 @@ import warnings
 from asyncio import Future, Semaphore
 from collections import Counter, defaultdict
 from contextlib import nullcontext
+from copy import deepcopy
 from datetime import timedelta
 from itertools import repeat
 from pathlib import Path
@@ -692,23 +693,19 @@ class RolloutCollectionHelper(BaseModel):
                 continue
 
             for _ in range(row_num_repeats):
-                repeated_row = row.copy()
+                row = deepcopy(row)
 
                 # Resolve rollout index
-                repeated_row[ROLLOUT_INDEX_KEY_NAME] = task_idx_to_rollout_idx[row[TASK_INDEX_KEY_NAME]]
+                row[ROLLOUT_INDEX_KEY_NAME] = task_idx_to_rollout_idx[row[TASK_INDEX_KEY_NAME]]
                 task_idx_to_rollout_idx[row[TASK_INDEX_KEY_NAME]] += 1
 
                 if config.num_repeats_add_seed:
-                    repeated_row[RESPONSES_CREATE_PARAMS_KEY_NAME] = repeated_row[
-                        RESPONSES_CREATE_PARAMS_KEY_NAME
-                    ].copy()
-
-                    metadata = repeated_row[RESPONSES_CREATE_PARAMS_KEY_NAME].setdefault("metadata", {})
+                    metadata = row[RESPONSES_CREATE_PARAMS_KEY_NAME].setdefault("metadata", {})
                     extra_body = json.loads(metadata.get("extra_body", "{}"))
-                    extra_body["seed"] = repeated_row[ROLLOUT_INDEX_KEY_NAME]
+                    extra_body["seed"] = row[ROLLOUT_INDEX_KEY_NAME]
                     metadata["extra_body"] = json.dumps(extra_body)
 
-                rows.append(repeated_row)
+                rows.append(row)
 
         if row_idxs_missing_agent_ref:
             raise ValueError(
