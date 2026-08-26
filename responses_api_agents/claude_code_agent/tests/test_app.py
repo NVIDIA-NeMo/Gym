@@ -25,6 +25,7 @@ import yaml
 from fastapi import Request
 
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME
+from nemo_gym.mcp import parse_rollout_mcp_server
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -42,7 +43,6 @@ from responses_api_agents.claude_code_agent.app import (
     ResourcesServerRef,
     _extract_instruction,
     _invocation_outcome,
-    claude_mcp_tool_aliases,
     parse_stream_json,
 )
 from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations
@@ -617,48 +617,13 @@ class TestRunClaudeCode:
 
 
 class TestRolloutMCPConfig:
-    def test_builds_exact_alias_map_from_seed_metadata(self) -> None:
-        aliases = claude_mcp_tool_aliases(
-            {
-                "mcp": {
-                    "server_name": "example_mcp_weather",
-                    "tool_names": ["get_weather", "forecast__daily"],
-                }
-            }
-        )
-        assert aliases == {
-            "mcp__example_mcp_weather__get_weather": {
-                "server_name": "example_mcp_weather",
-                "tool_name": "get_weather",
-            },
-            "mcp__example_mcp_weather__forecast__daily": {
-                "server_name": "example_mcp_weather",
-                "tool_name": "forecast__daily",
-            },
-        }
-
-    def test_missing_seed_tool_names_cannot_build_authoritative_alias_map(self) -> None:
-        assert claude_mcp_tool_aliases({"mcp": {"server_name": "example_mcp_weather"}}) is None
-
     def test_no_metadata_preserves_static_config(self, tmp_path: Path) -> None:
         agent = _make_agent(mcp_config="/path/to/static.json")
-        assert agent._write_rollout_mcp_config({}, tmp_path) is None
+        assert agent._write_rollout_mcp_config(None, tmp_path) is None
 
     def test_writes_rollout_mcp_config_with_session_header(self, tmp_path: Path) -> None:
-        agent = _make_agent(resources_server=ResourcesServerRef(type="resources_servers", name="example_mcp_weather"))
-        agent.server_client.global_config_dict = {
-            "example_mcp_weather": {
-                "resources_servers": {
-                    "example_mcp_weather": {
-                        "host": "127.0.0.1",
-                        "port": 8123,
-                    }
-                }
-            }
-        }
-        agent.server_client._build_server_base_url.side_effect = lambda cfg: f"http://{cfg['host']}:{cfg['port']}"
-
-        config_path = agent._write_rollout_mcp_config(
+        agent = _make_agent()
+        server = parse_rollout_mcp_server(
             {
                 "mcp": {
                     "server_name": "example_mcp_weather",
@@ -666,8 +631,10 @@ class TestRolloutMCPConfig:
                     "headers": {"X-NeMo-Gym-Session-Token": "secret-token"},
                 }
             },
-            tmp_path,
+            resources_server_name="example_mcp_weather",
+            resources_server_base_url="http://127.0.0.1:8123",
         )
+        config_path = agent._write_rollout_mcp_config(server, tmp_path)
 
         assert config_path is not None
         config = json.loads(Path(config_path).read_text())
@@ -683,19 +650,7 @@ class TestRolloutMCPConfig:
             mcp_config=str(static_config),
             resources_server=ResourcesServerRef(type="resources_servers", name="example_mcp_weather"),
         )
-        agent.server_client.global_config_dict = {
-            "example_mcp_weather": {
-                "resources_servers": {
-                    "example_mcp_weather": {
-                        "host": "127.0.0.1",
-                        "port": 8123,
-                    }
-                }
-            }
-        }
-        agent.server_client._build_server_base_url.side_effect = lambda cfg: f"http://{cfg['host']}:{cfg['port']}"
-
-        config_path = agent._write_rollout_mcp_config(
+        server = parse_rollout_mcp_server(
             {
                 "mcp": {
                     "server_name": "dynamic",
@@ -703,8 +658,10 @@ class TestRolloutMCPConfig:
                     "headers": {"X-NeMo-Gym-Session-Token": "tok"},
                 }
             },
-            tmp_path / "run",
+            resources_server_name="example_mcp_weather",
+            resources_server_base_url="http://127.0.0.1:8123",
         )
+        config_path = agent._write_rollout_mcp_config(server, tmp_path / "run")
 
         config = json.loads(Path(config_path).read_text())
         assert "static" in config["mcpServers"]
@@ -748,12 +705,10 @@ class TestRolloutMCPConfig:
             instruction,
             system_prompt=None,
             mcp_config=None,
-            mcp_tool_aliases=None,
             **kwargs,
         ):
             captured["instruction"] = instruction
             captured["mcp_config"] = mcp_config
-            captured["mcp_tool_aliases"] = mcp_tool_aliases
             captured["config_exists_during_run"] = Path(mcp_config).is_file()
             captured["config"] = json.loads(Path(mcp_config).read_text())
             stdout = "\n".join(
@@ -789,7 +744,7 @@ class TestRolloutMCPConfig:
                     ),
                 ]
             )
-            output_items, metadata = parse_stream_json(stdout, mcp_tool_aliases=mcp_tool_aliases)
+            output_items, metadata = parse_stream_json(stdout)
             metadata["status"] = "completed"
             return (
                 output_items,
@@ -811,12 +766,6 @@ class TestRolloutMCPConfig:
         assert result.reward == 1.0
         assert captured["instruction"] == "use the weather tool"
         assert captured["config_exists_during_run"] is True
-        assert captured["mcp_tool_aliases"] == {
-            "mcp__example_mcp_weather__get_weather": {
-                "server_name": "example_mcp_weather",
-                "tool_name": "get_weather",
-            }
-        }
         server = captured["config"]["mcpServers"]["example_mcp_weather"]
         assert server["url"] == "http://127.0.0.1:8123/mcp"
         assert server["headers"]["X-NeMo-Gym-Session-Token"] == "tok"

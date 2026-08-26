@@ -32,14 +32,22 @@ from fastapi import Request
 from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.base_resources_server import (
-    NEMO_GYM_MCP_METADATA_KEY,
     NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY,
     BaseRunRequest,
     BaseVerifyResponse,
+    MCPToolCallProvenance,
 )
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME, get_first_server_config_dict
+from nemo_gym.mcp import (
+    AgentExecutionResult,
+    RolloutMCPServer,
+    build_mcp_tool_aliases,
+    parse_rollout_mcp_server,
+    provenance_from_response_aliases,
+    resources_server_base_url,
+)
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -76,32 +84,11 @@ def _extract_thinking(content: list[Any]) -> str:
     return "\n".join(p for p in parts if p)
 
 
-def claude_mcp_tool_aliases(seed_response_json: dict[str, Any]) -> Optional[dict[str, dict[str, str]]]:
-    """Build the exact Claude alias map for the rollout-specific Gym MCP server."""
-    metadata = seed_response_json.get(NEMO_GYM_MCP_METADATA_KEY)
-    if not isinstance(metadata, dict):
-        return None
-
-    server_name = metadata.get("server_name")
-    tool_names = metadata.get("tool_names")
-    if not isinstance(server_name, str) or not server_name or not isinstance(tool_names, list):
-        return None
-
-    aliases: dict[str, dict[str, str]] = {}
-    for tool_name in tool_names:
-        if not isinstance(tool_name, str) or not tool_name:
-            continue
-        aliases[f"mcp__{server_name}__{tool_name}"] = {
-            "server_name": server_name,
-            "tool_name": tool_name,
-        }
-    return aliases
+def _claude_mcp_wire_name(server_name: str, tool_name: str) -> str:
+    return f"mcp__{server_name}__{tool_name}"
 
 
-def parse_stream_json(
-    stdout: str,
-    mcp_tool_aliases: Optional[dict[str, dict[str, str]]] = None,
-) -> tuple[list[Any], dict]:
+def parse_stream_json(stdout: str) -> tuple[list[Any], dict]:
     """Convert claude -p --output-format=stream-json stdout into (output_items, usage)."""
     raw_events: list[dict] = []
     for line in stdout.splitlines():
@@ -122,7 +109,6 @@ def parse_stream_json(
     result_metadata: dict[str, Any] = {}
     compacting_sessions: set[str] = set()
     compaction_attempts: list[dict[str, str]] = []
-    mcp_tool_call_provenance: dict[str, dict[str, str]] = {}
 
     for event in raw_events:
         etype = event.get("type")
@@ -191,10 +177,6 @@ def parse_stream_json(
                 tool_id = block.get("tool_use_id", "")
                 call_info = pending_calls.pop(tool_id, None)
                 if call_info:
-                    if mcp_tool_aliases is not None:
-                        identity = mcp_tool_aliases.get(call_info["name"])
-                        if identity is not None:
-                            mcp_tool_call_provenance[tool_id] = identity
                     output_items.append(
                         NeMoGymResponseFunctionToolCall(
                             arguments=call_info["arguments"],
@@ -240,8 +222,6 @@ def parse_stream_json(
         metadata["num_turns"] = num_turns
     if compaction_attempts:
         metadata["compaction_attempts"] = compaction_attempts
-    if mcp_tool_aliases is not None:
-        metadata[NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY] = mcp_tool_call_provenance
     metadata.update(result_metadata)
     return output_items, metadata
 
@@ -469,7 +449,6 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         instruction: str,
         system_prompt: Optional[str] = None,
         mcp_config: Optional[str] = None,
-        mcp_tool_aliases: Optional[dict[str, dict[str, str]]] = None,
         skills_path: Optional[str] = None,
         rollout_id: Optional[str] = None,
         observation_collector: Optional[Callable[[Path, dict[str, Any]], None]] = None,
@@ -532,10 +511,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                         proc.kill()
                 stdout, _ = await communication
                 LOG.warning("claude-code timed out after %ds", self.config.timeout)
-                _, run_metadata = parse_stream_json(
-                    stdout.decode(errors="replace"),
-                    mcp_tool_aliases=mcp_tool_aliases,
-                )
+                _, run_metadata = parse_stream_json(stdout.decode(errors="replace"))
                 run_metadata.update(
                     status="incomplete",
                     error_type="timeout",
@@ -554,7 +530,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
 
             stdout_text = stdout.decode(errors="replace")
             LOG.debug("claude-code stdout (%d chars): %s", len(stdout), stdout_text[:2000])
-            output_items, run_metadata = parse_stream_json(stdout_text, mcp_tool_aliases=mcp_tool_aliases)
+            output_items, run_metadata = parse_stream_json(stdout_text)
             run_metadata.setdefault("duration_ms", (monotonic() - process_started_at) * 1000)
             status, error_type = _invocation_outcome(run_metadata, proc.returncode)
             run_metadata["status"] = status
@@ -570,13 +546,6 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                     LOG.exception("failed to collect Claude Code observations")
                 finally:
                     shutil.rmtree(claude_config_dir, ignore_errors=True)
-
-    def _resources_server_base_url(self) -> str:
-        cfg = get_first_server_config_dict(
-            self.server_client.global_config_dict,
-            self.config.resources_server.name,
-        )
-        return self.server_client._build_server_base_url(cfg)
 
     def _load_static_mcp_config(self) -> dict[str, Any]:
         if not self.config.mcp_config:
@@ -598,33 +567,25 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             self._static_mcp_config = self._load_static_mcp_config()
         return self._static_mcp_config
 
-    def _write_rollout_mcp_config(self, seed_response_json: dict[str, Any], output_dir: Path) -> Optional[str]:
-        metadata = seed_response_json.get(NEMO_GYM_MCP_METADATA_KEY)
-        if not isinstance(metadata, dict):
+    def _write_rollout_mcp_config(
+        self,
+        server: RolloutMCPServer | None,
+        output_dir: Path,
+    ) -> Optional[str]:
+        if server is None:
             return None
 
-        server_name = metadata.get("server_name") or self.config.resources_server.name
-        url_path = str(metadata.get("url_path") or "/mcp")
-        url = f"{self._resources_server_base_url().rstrip('/')}/{url_path.lstrip('/')}"
-
         entry: dict[str, Any] = {
-            "type": metadata.get("transport") or "http",
-            "url": url,
+            "type": server.transport,
+            "url": server.url,
         }
-        headers = metadata.get("headers")
-        if isinstance(headers, dict) and headers:
-            entry["headers"] = {str(key): str(value) for key, value in headers.items()}
-        else:
-            LOG.warning(
-                "MCP seed metadata for %r has no headers; the tool endpoint will be called without a "
-                "session token and will reject the calls.",
-                server_name,
-            )
+        if server.headers:
+            entry["headers"] = server.headers
 
         # Start from a copy of the (cached) static config and add the per-rollout Gym entry. If a static
         # mcp_config server already uses this name, the per-rollout Gym entry takes precedence over it.
         config = copy.deepcopy(self._get_static_mcp_config())
-        config.setdefault("mcpServers", {})[str(server_name)] = entry
+        config.setdefault("mcpServers", {})[server.server_name] = entry
 
         output_dir.mkdir(parents=True, exist_ok=True)
         config_path = output_dir / "gym_mcp_config.json"
@@ -635,12 +596,11 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         self,
         body: NeMoGymResponseCreateParamsNonStreaming,
         mcp_config: Optional[str] = None,
-        mcp_tool_aliases: Optional[dict[str, dict[str, str]]] = None,
+        mcp_tool_aliases: Optional[dict[str, MCPToolCallProvenance]] = None,
         skills_path: Optional[str] = None,
         rollout_id: Optional[str] = None,
         observation_collector: Optional[Callable[[Path, dict[str, Any]], None]] = None,
-        provenance_collector: Optional[Callable[[dict[str, dict[str, str]]], None]] = None,
-    ) -> NeMoGymResponse:
+    ) -> AgentExecutionResult:
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
@@ -653,14 +613,10 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             user_message,
             system_prompt=system_prompt,
             mcp_config=mcp_config,
-            mcp_tool_aliases=mcp_tool_aliases,
             skills_path=skills_path,
             rollout_id=rollout_id,
             observation_collector=observation_collector,
         )
-        if provenance_collector is not None:
-            provenance_collector(dict(run_metadata.get(NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY, {})))
-
         if not any(
             getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
             for item in output_items
@@ -679,7 +635,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         input_tokens = run_metadata.get("input_tokens", 0)
         output_tokens = run_metadata.get("output_tokens", 0)
 
-        return NeMoGymResponse(
+        response = NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
             model=model_name,
@@ -696,23 +652,27 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 total_tokens=input_tokens + output_tokens,
             ),
         )
+        provenance = (
+            provenance_from_response_aliases(response, mcp_tool_aliases) if mcp_tool_aliases is not None else None
+        )
+        return AgentExecutionResult(response=response, mcp_tool_call_provenance=provenance)
 
     async def responses(
         self,
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        return await self._create_response(body, rollout_id=request.path_params.get("rollout_id"))
+        result = await self._create_response(body, rollout_id=request.path_params.get("rollout_id"))
+        return result.response
 
     async def _create_episode(
         self,
         body: NeMoGymResponseCreateParamsNonStreaming,
         *,
         mcp_config: Optional[str] = None,
-        mcp_tool_aliases: Optional[dict[str, dict[str, str]]] = None,
+        mcp_tool_aliases: Optional[dict[str, MCPToolCallProvenance]] = None,
         skills_path: Optional[str] = None,
         rollout_id: Optional[str] = None,
-        provenance_collector: Optional[Callable[[dict[str, dict[str, str]]], None]] = None,
     ) -> AgentEpisode:
         observations: Optional[AgentObservationBundle] = None
 
@@ -736,14 +696,13 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                     gaps=[ObservationGap(code="observation_parse_failed")],
                 )
 
-        response = await self._create_response(
+        result = await self._create_response(
             body,
             mcp_config=mcp_config,
             mcp_tool_aliases=mcp_tool_aliases,
             skills_path=skills_path,
             rollout_id=rollout_id,
             observation_collector=collect,
-            provenance_collector=provenance_collector,
         )
         if observations is None:
             observations = AgentObservationBundle(
@@ -751,7 +710,11 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 gaps=[ObservationGap(code="agent_transcript_unavailable")],
             )
         observations.gaps.append(ObservationGap(code="no_sandbox_runtime"))
-        return AgentEpisode(response=response, observations=observations)
+        return AgentEpisode(
+            response=result.response,
+            observations=observations,
+            mcp_tool_call_provenance=result.mcp_tool_call_provenance,
+        )
 
     async def run(self, request: Request, body: ClaudeCodeAgentRunRequest) -> ClaudeCodeAgentVerifyResponse:
         async with self.sem:
@@ -773,17 +736,20 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             # in-process, so no metadata side-channel is needed (unlike the schema-forbidden HTTP path).
             skills_path = ((body.model_extra or {}).get(SKILLS_REF_KEY_NAME) or {}).get("path")
             rollout_id = self.rollout_id_from_run(body)
-            mcp_tool_aliases = claude_mcp_tool_aliases(seed_resp_json)
-            mcp_tool_call_provenance: Optional[dict[str, dict[str, str]]] = (
-                {} if mcp_tool_aliases is not None else None
+            mcp_server = parse_rollout_mcp_server(
+                seed_resp_json,
+                resources_server_name=self.config.resources_server.name,
+                resources_server_base_url=lambda: resources_server_base_url(
+                    self.server_client, self.config.resources_server.name
+                ),
+                logger=LOG,
+            )
+            mcp_tool_aliases = (
+                build_mcp_tool_aliases(mcp_server, wire_name=_claude_mcp_wire_name) if mcp_server is not None else None
             )
 
-            def collect_provenance(value: dict[str, dict[str, str]]) -> None:
-                if mcp_tool_call_provenance is not None:
-                    mcp_tool_call_provenance.update(value)
-
             with tempfile.TemporaryDirectory(prefix="nemo_gym_claude_mcp_") as mcp_config_dir:
-                mcp_config = self._write_rollout_mcp_config(seed_resp_json, Path(mcp_config_dir))
+                mcp_config = self._write_rollout_mcp_config(mcp_server, Path(mcp_config_dir))
                 if rollout_id is not None:
                     episode = await self._create_episode(
                         body.responses_create_params,
@@ -791,23 +757,26 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                         mcp_tool_aliases=mcp_tool_aliases,
                         skills_path=skills_path,
                         rollout_id=rollout_id,
-                        provenance_collector=collect_provenance,
                     )
                     agent_resp, observations = episode.response, episode.observations
+                    mcp_tool_call_provenance = episode.mcp_tool_call_provenance
                 else:
-                    agent_resp = await self._create_response(
+                    execution = await self._create_response(
                         body.responses_create_params,
                         mcp_config=mcp_config,
                         mcp_tool_aliases=mcp_tool_aliases,
                         skills_path=skills_path,
-                        provenance_collector=collect_provenance,
                     )
+                    agent_resp = execution.response
+                    mcp_tool_call_provenance = execution.mcp_tool_call_provenance
                     observations = None
                 agent_resp_json = agent_resp.model_dump(mode="json")
 
             verify_body = body.model_dump() | {"response": agent_resp_json}
             if mcp_tool_call_provenance is not None:
-                verify_body[NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY] = mcp_tool_call_provenance
+                verify_body[NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY] = {
+                    call_id: identity.model_dump(mode="json") for call_id, identity in mcp_tool_call_provenance.items()
+                }
             verify_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/verify",
