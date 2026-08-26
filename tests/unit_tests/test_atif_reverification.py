@@ -2141,8 +2141,36 @@ def test_multiple_agent_model_names_are_rejected_instead_of_collapsed() -> None:
     data["steps"][1]["model_name"] = "model-a"
     data["steps"][2]["model_name"] = "model-b"
 
-    with pytest.raises(AtifProjectionError, match="multiple explicit model names"):
+    with pytest.raises(AtifProjectionError, match="multiple model names"):
         atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+
+
+def test_root_model_default_and_step_override_are_rejected_instead_of_collapsed() -> None:
+    data = _trajectory_data()
+    data["steps"][2]["model_name"] = "model-b"
+
+    with pytest.raises(AtifProjectionError, match="multiple model names"):
+        atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+
+
+def test_known_and_unknown_agent_model_names_are_rejected_instead_of_collapsed() -> None:
+    data = _trajectory_data()
+    data["agent"]["model_name"] = None
+    data["steps"][1]["model_name"] = "model-a"
+
+    with pytest.raises(AtifProjectionError, match="known and unknown model identity"):
+        atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+
+
+def test_uniform_step_model_names_are_preserved_without_a_root_default() -> None:
+    data = _trajectory_data()
+    data["agent"]["model_name"] = None
+    data["steps"][1]["model_name"] = "model-a"
+    data["steps"][2]["model_name"] = "model-a"
+
+    response = atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+
+    assert response.model == "model-a"
 
 
 def test_multiple_outputs_for_one_tool_call_are_rejected() -> None:

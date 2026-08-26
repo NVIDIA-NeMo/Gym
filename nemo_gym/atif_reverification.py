@@ -1368,14 +1368,18 @@ def _created_at(agent_steps: list[Any]) -> float:
 
 
 def _model_name(trajectory: AtifTrajectoryV1_7) -> str:
-    model_names = {step.model_name for step in trajectory.steps if step.source == "agent" and step.model_name}
-    if len(model_names) > 1:
+    agent_steps = [step for step in trajectory.steps if step.source == "agent"]
+    resolved_model_names = [step.model_name or trajectory.agent.model_name for step in agent_steps]
+    known_model_names = {model_name for model_name in resolved_model_names if model_name is not None}
+    if len(known_model_names) > 1:
         raise AtifProjectionError(
-            "ATIF agent steps contain multiple explicit model names and cannot be represented by one verifier response"
+            "ATIF agent steps resolve to multiple model names and cannot be represented by one verifier response"
         )
-    if model_names:
-        return next(iter(model_names))
-    return trajectory.agent.model_name or "unknown"
+    if known_model_names and any(model_name is None for model_name in resolved_model_names):
+        raise AtifProjectionError(
+            "ATIF agent steps mix known and unknown model identity and cannot be represented by one verifier response"
+        )
+    return next(iter(known_model_names)) if known_model_names else "unknown"
 
 
 def _usage(trajectory: AtifTrajectoryV1_7) -> NeMoGymResponseUsage | None:
