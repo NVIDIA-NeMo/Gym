@@ -18,6 +18,7 @@ from asyncio import Future
 from collections import Counter
 from copy import deepcopy
 from pathlib import Path
+from threading import get_ident
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
@@ -1743,6 +1744,8 @@ class TestDisableAggregationAndCallerTaskIndex:
         # Rollouts file written (proves the rollout phase ran); aggregator file absent.
         assert output_jsonl_fpath.exists()
         assert not (tmp_path / "output_aggregate_metrics.json").exists()
+        assert not (tmp_path / "quality_summary.json").exists()
+        assert not (tmp_path / "rollout_verdicts.jsonl").exists()
 
     def test_preprocess_honors_caller_task_index(self, tmp_path: Path) -> None:
         """A row arriving with `_ng_task_index` pre-set is used verbatim — the
@@ -1887,6 +1890,53 @@ class TestRolloutAggregationHelper:
         # though output_jsonl_fpath is used to derive the metrics path.
         assert not output_fpath.exists()
         assert (tmp_path / "rollouts_aggregate_metrics.json").exists()
+
+    async def test_health_failure_does_not_fail_aggregation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        shard = tmp_path / "shard.jsonl"
+        shard.write_text(
+            json.dumps(
+                {
+                    AGENT_REF_KEY_NAME: {"name": "a"},
+                    TASK_INDEX_KEY_NAME: 0,
+                    ROLLOUT_INDEX_KEY_NAME: 0,
+                    "response": {"usage": {}},
+                    "reward": 0.5,
+                }
+            )
+            + "\n"
+        )
+        output_fpath = tmp_path / "rollouts.jsonl"
+
+        async def fake_call(self, results, rows, output_fpath):
+            metrics_path = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
+            metrics_path.write_text("[]")
+            return metrics_path
+
+        caller_thread = get_ident()
+        health_thread = None
+
+        def broken_health_check(*args, **kwargs):
+            nonlocal health_thread
+            health_thread = get_ident()
+            raise RuntimeError("health failed")
+
+        monkeypatch.setattr(RolloutCollectionHelper, "_call_aggregate_metrics", fake_call)
+        monkeypatch.setattr("nemo_gym.rollout_health.run_health_checks", broken_health_check)
+        config = RolloutAggregationConfig(
+            input_glob=str(shard),
+            output_jsonl_fpath=str(output_fpath),
+            merge_shards=True,
+        )
+
+        metrics_path = await RolloutAggregationHelper().run_from_config(config)
+
+        assert metrics_path.exists()
+        assert output_fpath.exists()
+        assert health_thread is not None
+        assert health_thread != caller_thread
+        assert "Rollout health checks failed after aggregation" in caplog.text
 
 
 class TestTokenCaptureRetention:

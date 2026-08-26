@@ -400,6 +400,12 @@ def _get_max_rollout_attempts() -> int:
         return _DEFAULT_MAX_ROLLOUT_ATTEMPTS
 
 
+def _normalize_health_check_ignored_checks(value) -> List[str]:
+    from nemo_gym.rollout_health import normalize_ignored_checks
+
+    return list(normalize_ignored_checks(value))
+
+
 class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
     num_samples_in_parallel: Optional[int] = Field(
@@ -417,6 +423,25 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
             "afterward by `gym eval aggregate`."
         ),
     )
+    disable_health_check: bool = Field(
+        default=False,
+        description="Skip post-aggregation rollout quality verification and report writing.",
+    )
+    health_check_workers: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Number of rollout-health worker processes (defaults to min(cpus, 8)).",
+    )
+    health_check_ignored_checks: List[str] = Field(
+        default_factory=list,
+        description="Health-check IDs to exclude from execution and verdict derivation.",
+    )
+
+    @field_validator("health_check_ignored_checks", mode="before")
+    @classmethod
+    def _validate_health_check_ignored_checks(cls, value):
+        return _normalize_health_check_ignored_checks(value)
+
     rollout_collection_driver: Optional[str] = Field(
         default=None,
         description=(
@@ -1058,6 +1083,23 @@ Fully materialized inputs: {config.materialized_jsonl_fpath}
 Rollouts: {output_fpath}
 Aggregate metrics: {aggregate_metrics_fpath}""")
 
+        if not config.disable_aggregation and not config.disable_health_check:
+            from nemo_gym.rollout_health import format_health_report, run_health_checks
+
+            try:
+                health_result = await asyncio.to_thread(
+                    run_health_checks,
+                    output_fpath,
+                    workers=config.health_check_workers,
+                    ignored_checks=config.health_check_ignored_checks,
+                )
+            except Exception:
+                logger.exception(
+                    "Rollout health checks failed after collection; rollout artifacts are still available."
+                )
+            else:
+                print(format_health_report(health_result))
+
         return results
 
     async def _call_aggregate_metrics(
@@ -1239,6 +1281,24 @@ class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
         default=True,
         description="Concatenate the matched shard JSONLs into output_jsonl_fpath alongside the metrics file.",
     )
+    disable_health_check: bool = Field(
+        default=False,
+        description="Skip post-aggregation rollout quality verification and report writing.",
+    )
+    health_check_workers: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Number of rollout-health worker processes (defaults to min(cpus, 8)).",
+    )
+    health_check_ignored_checks: List[str] = Field(
+        default_factory=list,
+        description="Health-check IDs to exclude from execution and verdict derivation.",
+    )
+
+    @field_validator("health_check_ignored_checks", mode="before")
+    @classmethod
+    def _validate_health_check_ignored_checks(cls, value):
+        return _normalize_health_check_ignored_checks(value)
 
 
 def loads_jsonl_line(raw, fpath, line_no: int):
@@ -1302,6 +1362,24 @@ class RolloutAggregationHelper(BaseModel):
         print(f"""Finished rollout aggregation! View results at:
 Merged rollouts: {output_fpath if config.merge_shards else "<not merged>"}
 Aggregate metrics: {aggregate_metrics_fpath}""")
+
+        if not config.disable_health_check:
+            from nemo_gym.rollout_health import format_health_report, run_health_checks
+
+            try:
+                health_result = await asyncio.to_thread(
+                    run_health_checks,
+                    output_fpath if config.merge_shards else [Path(path) for path in input_paths],
+                    output_dir=output_fpath.parent,
+                    workers=config.health_check_workers,
+                    ignored_checks=config.health_check_ignored_checks,
+                )
+            except Exception:
+                logger.exception(
+                    "Rollout health checks failed after aggregation; aggregate artifacts are still available."
+                )
+            else:
+                print(format_health_report(health_result))
 
         return aggregate_metrics_fpath
 
