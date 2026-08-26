@@ -131,6 +131,7 @@ class GymResponsesLLM(UnifiedLLM):
         model_server_name: str,
         model_url_path: str,
         max_steps: int,
+        request_collector: list[NeMoGymResponseCreateParamsNonStreaming],
         response_collector: list[NeMoGymResponse],
         cookies: dict[str, str],
         timeline: list[TraceEvent] | None = None,
@@ -143,6 +144,7 @@ class GymResponsesLLM(UnifiedLLM):
         self._model_server_name = model_server_name
         self._model_url_path = model_url_path
         self._max_steps = max_steps
+        self._request_collector = request_collector
         self._response_collector = response_collector
         self._cookies = cookies
         self._timeline = timeline
@@ -203,6 +205,7 @@ class GymResponsesLLM(UnifiedLLM):
                 request[destination] = value
 
         body = NeMoGymResponseCreateParamsNonStreaming.model_validate(request)
+        self._request_collector.append(body.model_copy(deep=True))
         http_response = await self._server_client.post(
             server_name=self._model_server_name,
             url_path=self._model_url_path,
