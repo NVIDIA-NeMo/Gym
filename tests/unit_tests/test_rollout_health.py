@@ -15,6 +15,7 @@ import nemo_gym.cli.main as cli_main
 import nemo_gym.health.checks as health_checks
 import nemo_gym.rollout_collection as rollout_collection
 import nemo_gym.rollout_health as health
+from nemo_gym.base_responses_api_model import build_model_call_record
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 from nemo_gym.rollout_health import CHECK_REGISTRY, run_health_checks
 from nemo_gym.rollout_observability import TrajectoryRecord
@@ -583,6 +584,65 @@ def test_bound_call_without_token_counts_is_a_model_call_finding(tmp_path: Path)
     assert findings[0].detail == {"missing": ["completion_tokens"]}
 
 
+def test_current_producer_response_reference_binds_to_captured_call_id(tmp_path: Path) -> None:
+    model_ref = {"type": "responses_api_models", "name": "openai_model"}
+    row = {"_ng_task_index": 0, "_ng_rollout_index": 0}
+    response = {
+        "output": [{"type": "message", "role": "assistant", "content": "ok"}],
+        "usage": {"input_tokens": 3, "output_tokens": 2},
+    }
+    result = {
+        "response": response,
+        "ng_trajectory": {
+            "task_id": "0",
+            "rollout_id": "0-0",
+            "turns": [
+                {
+                    "invocation_id": "root",
+                    "task_id": "0",
+                    "rollout_id": "0-0",
+                    "turn_no": 1,
+                    "timestamp": 1.0,
+                    "answer": "ok",
+                    "step_count": 1,
+                    "model_calls": [{"model_ref": model_ref, "response_id": "resp-1"}],
+                }
+            ],
+        },
+        "ng_model_call_capture": {
+            "calls": [
+                {
+                    "model_call_id": "capture-uuid",
+                    "model_ref": model_ref,
+                    "response_id": "resp-1",
+                    "status_code": 200,
+                    "response_status": "completed",
+                    "finish_reason": "stop",
+                    "tokens_in": 3,
+                    "tokens_out": 2,
+                    "response": {"output_text": "ok"},
+                }
+            ]
+        },
+    }
+    trajectory = rollout_collection._build_trajectory_record(row, result)
+    rollout_path = tmp_path / "rollouts.jsonl"
+    rollout_path.write_bytes(
+        orjson.dumps(
+            {**row, "response": response, "ng_trajectory": trajectory.model_dump(mode="json")},
+            option=orjson.OPT_APPEND_NEWLINE,
+        )
+    )
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    assert trajectory.turns[0].model_calls[0].model_call_id is None
+    assert trajectory.model_calls[0].model_call_id == "capture-uuid"
+    assert digest.verdict == "healthy"
+    assert digest.findings == []
+    assert digest.unobserved == []
+
+
 def test_correspondence_reports_only_explicit_canonical_contradictions(tmp_path: Path) -> None:
     model_ref = {"type": "responses_api_models", "name": "model"}
     record = _record(
@@ -601,8 +661,8 @@ def test_correspondence_reports_only_explicit_canonical_contradictions(tmp_path:
                 record,
                 [
                     _call(model_call_id="failed", response_id="failed-response", status_code=500),
-                    _call(model_call_id=None, model_ref=model_ref, response_id="duplicate-response"),
-                    _call(model_call_id=None, model_ref=model_ref, response_id="duplicate-response"),
+                    _call(model_call_id="duplicate-1", model_ref=model_ref, response_id="duplicate-response"),
+                    _call(model_call_id="duplicate-2", model_ref=model_ref, response_id="duplicate-response"),
                 ],
             )
         ],
@@ -624,7 +684,7 @@ def test_correspondence_reports_only_explicit_canonical_contradictions(tmp_path:
         "rollout_token_count_mismatch",
         "model_call_runaway_generation",
     } <= set(result.rollouts[0].unobserved)
-    assert result.summary["run"]["stats"]["duplicated_calls"] == {"replayed": 1, "rollouts": 1}
+    assert result.summary["run"]["stats"]["duplicated_calls"] == {"replayed": 0, "rollouts": 0}
     assert health_checks._call_identity({"response_id": "loose"}) == "response::loose"
     assert health_checks._call_identity({}) is None
 
@@ -759,6 +819,62 @@ def test_zero_token_call_is_flagged_and_nonempty_length_response_is_exempt(tmp_p
     assert "model_call_runaway_generation" not in checks
     assert health_checks._response_has_content("malformed") is False
     assert health_checks._response_has_content({"content": "visible"}) is True
+
+
+@pytest.mark.parametrize(
+    ("response", "expected_reason"),
+    [
+        (
+            {
+                "id": "r1",
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "output": [],
+                "usage": {"input_tokens": 3, "output_tokens": 2},
+            },
+            "max_output_tokens",
+        ),
+        (
+            {
+                "id": "r1",
+                "choices": [{"finish_reason": "length", "message": {"content": ""}}],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 2},
+            },
+            "length",
+        ),
+        (
+            {
+                "id": "r1",
+                "stop_reason": "max_tokens",
+                "content": [],
+                "usage": {"input_tokens": 3, "output_tokens": 2},
+            },
+            "max_tokens",
+        ),
+    ],
+)
+def test_current_capture_length_limit_reasons_trigger_runaway_generation(
+    tmp_path: Path, response: dict, expected_reason: str
+) -> None:
+    call = build_model_call_record(
+        {
+            "model_call_id": "c1",
+            "model_ref": {"type": "responses_api_models", "name": "openai_model"},
+            "status_code": 200,
+            "response": response,
+        },
+        call_index=0,
+    ).model_dump(mode="json")
+    rollout_path = _write_fixture(
+        tmp_path,
+        [(_record(0, 0, usage={"input_tokens": 3, "output_tokens": 2}), [call])],
+    )
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+    [finding] = [item for item in digest.findings if item.check == "model_call_runaway_generation"]
+
+    assert call["finish_reason"] == expected_reason
+    assert finding.detail == {"finish_reason": expected_reason}
 
 
 def test_malformed_records_and_check_failures_become_findings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

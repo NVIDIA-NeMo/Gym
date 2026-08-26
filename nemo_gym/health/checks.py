@@ -208,6 +208,8 @@ _REFERENCE_CONTRADICTION_GAPS = {
     "model_call_reference_conflict": "conflicting_call_ownership",
 }
 
+_LENGTH_LIMIT_FINISH_REASONS = frozenset({"length", "max_output_tokens", "max_tokens"})
+
 
 def _item_has_tool_call(item: Any) -> bool:
     if isinstance(item, (list, tuple)):
@@ -254,7 +256,7 @@ def _agent_steps(trajectory: dict[str, Any]) -> list[_AgentStep]:
             _AgentStep(
                 locator={"turn": turn.get("turn_no", position)},
                 has_message=_nonempty(turn.get("answer")) or _nonempty(turn.get("reasoning_content")),
-                has_tool_calls=_item_has_tool_call(turn.get("answer")) or _item_has_tool_call(turn.get("tool_calls")),
+                has_tool_calls=_item_has_tool_call(turn.get("answer")),
                 model_call_refs=refs,
             )
         )
@@ -312,28 +314,48 @@ def _call_identity(call: dict[str, Any]) -> str | None:
     return None
 
 
-def _canonical_model_call_references(trajectory: dict[str, Any]) -> tuple[str, ...]:
+def _canonical_model_call_references(trajectory: dict[str, Any]) -> tuple[tuple[str, dict[str, Any]], ...]:
     """Return explicit model-call references from canonical TrajectoryTurn records only."""
     return tuple(
-        reference
+        (reference, raw_reference)
         for turn in trajectory.get("turns") or []
         for raw_reference in turn.get("model_calls") or []
-        if (reference := _call_ref_key(raw_reference)) is not None
+        if isinstance(raw_reference, dict) and (reference := _call_ref_key(raw_reference)) is not None
     )
 
 
 def _bind_policy_calls(trajectory: dict[str, Any], calls: list[dict[str, Any]]) -> _CallBindings:
-    references = _canonical_model_call_references(trajectory)
-    calls_by_identity: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    reference_items = _canonical_model_call_references(trajectory)
+    references = tuple(reference for reference, _ in reference_items)
+    calls_by_call_id: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    calls_by_response: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
     for call in calls:
-        if identity := _call_identity(call):
-            calls_by_identity[identity].append(call)
+        if call.get("model_call_id"):
+            calls_by_call_id[str(call["model_call_id"])].append(call)
+        model_ref = call.get("model_ref")
+        response_id = call.get("response_id")
+        if isinstance(model_ref, dict) and response_id:
+            calls_by_response[(str(model_ref.get("type")), str(model_ref.get("name")), str(response_id))].append(call)
 
     matched_calls: list[dict[str, Any]] = []
     missing_references: list[str] = []
     duplicated_references: list[tuple[str, int]] = []
-    for reference in dict.fromkeys(references):
-        matches = calls_by_identity.get(reference, [])
+    unique_references = dict(reference_items)
+    for reference, raw_reference in unique_references.items():
+        model_call_id = raw_reference.get("model_call_id")
+        model_ref = raw_reference.get("model_ref")
+        response_id = raw_reference.get("response_id")
+        if model_call_id:
+            matches = [
+                call
+                for call in calls_by_call_id.get(str(model_call_id), [])
+                if (model_ref is None or model_ref == call.get("model_ref"))
+                and (response_id is None or response_id == call.get("response_id"))
+            ]
+        else:
+            assert isinstance(model_ref, dict) and response_id
+            response_key = (str(model_ref.get("type")), str(model_ref.get("name")), str(response_id))
+            matches = calls_by_response.get(response_key, [])
         if not matches:
             missing_references.append(reference)
         elif len(matches) > 1:
@@ -533,10 +555,11 @@ def _model_call_runaway_generation(bindings: _CallBindings, subject: dict[str, i
             "model_call_runaway_generation",
             subject,
             locator=_call_locator(call, position),
-            finish_reason="length",
+            finish_reason=call.get("finish_reason"),
         )
         for position, call in enumerate(bindings.matched_calls)
-        if call.get("finish_reason") == "length" and not _response_has_content(call.get("response"))
+        if call.get("finish_reason") in _LENGTH_LIMIT_FINISH_REASONS
+        and not _response_has_content(call.get("response"))
     ]
 
 
