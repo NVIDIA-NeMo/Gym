@@ -51,3 +51,62 @@ def test_visit_agent_datasets_retains_legacy_huggingface_fallback() -> None:
     assert metadata.types == ["train"]
     assert metadata.license == "Apache 2.0"
     assert metadata.huggingface_repo_id == "nvidia/legacy-dataset"
+
+
+def test_visit_agent_datasets_reads_resources_server_datasets() -> None:
+    metadata = visit_agent_datasets(
+        {
+            "test_rs": {
+                "resources_servers": {
+                    "my_server": {
+                        "datasets": [
+                            {"name": "train", "type": "train", "license": "Apache 2.0"},
+                            {"name": "validation", "type": "validation"},
+                        ]
+                    }
+                }
+            }
+        }
+    )
+
+    assert metadata.types == ["train", "validation"]
+    assert metadata.license == "Apache 2.0"
+
+
+def test_visit_agent_datasets_ignores_harbor_fallback_when_datasets_declared() -> None:
+    metadata = visit_agent_datasets(
+        {
+            "test_rs": {
+                "resources_servers": {
+                    "my_server": {
+                        "datasets": [{"name": "validation", "type": "validation"}],
+                    }
+                }
+            },
+            "test_agent": {
+                "responses_api_agents": {
+                    "harbor_agent": {
+                        "harbor_datasets": {"my_bench": {}},
+                    }
+                }
+            },
+        }
+    )
+
+    assert metadata.types == ["validation"]
+
+
+def test_visit_agent_datasets_harbor_fallback_without_datasets() -> None:
+    metadata = visit_agent_datasets(
+        {
+            "test_agent": {
+                "responses_api_agents": {
+                    "harbor_agent": {
+                        "harbor_datasets": {"my_bench": {}},
+                    }
+                }
+            }
+        }
+    )
+
+    assert metadata.types == ["train"]
