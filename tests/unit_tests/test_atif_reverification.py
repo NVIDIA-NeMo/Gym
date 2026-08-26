@@ -1111,6 +1111,49 @@ def test_non_object_raw_provider_evidence_is_not_silently_ignored(llm_response: 
         atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
 
 
+@pytest.mark.parametrize(
+    "outer_failure",
+    [
+        {"status": "failed"},
+        {"error": {"message": "provider failed"}},
+        {"incomplete_details": {"reason": "max_output_tokens"}},
+    ],
+)
+def test_outer_relay_envelope_cannot_hide_failure_in_a_completed_raw_response(
+    outer_failure: dict[str, Any],
+) -> None:
+    data = json.loads(_RESPONSES_FIXTURE_PATH.read_text())
+    final_step = data["steps"][-1]
+    completed_raw_response = final_step["extra"]["llm_response"]
+    final_step["extra"]["llm_response"] = outer_failure | {"raw_response": completed_raw_response}
+
+    with pytest.raises(AtifProjectionError, match="non-completed provider|failed or incomplete provider"):
+        atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("actions", [{"type": "hidden_action"}]),
+        ("content", "hidden output"),
+    ],
+)
+def test_outer_relay_envelope_cannot_hide_output_in_a_completed_raw_response(
+    field_name: str,
+    value: Any,
+) -> None:
+    data = json.loads(_RESPONSES_FIXTURE_PATH.read_text())
+    final_step = data["steps"][-1]
+    completed_raw_response = final_step["extra"]["llm_response"]
+    final_step["extra"]["llm_response"] = {
+        "raw_response": completed_raw_response,
+        field_name: value,
+    }
+
+    with pytest.raises(AtifProjectionError, match=rf"unsupported output field '{field_name}'"):
+        atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+
+
 def test_raw_responses_tool_calls_must_match_canonical_atif() -> None:
     data = _trajectory_data()
     data["steps"][1]["extra"] = {

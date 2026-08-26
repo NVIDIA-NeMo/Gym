@@ -695,18 +695,21 @@ def _reject_known_incomplete_or_failed_step(step: Any) -> None:
     llm_response = step.extra.get("llm_response")
     if not isinstance(llm_response, Mapping):
         return
-    provider_response = llm_response.get("raw_response")
-    if not isinstance(provider_response, Mapping):
-        provider_response = llm_response
-    response_status = provider_response.get("status")
-    if response_status is not None and (
-        not isinstance(response_status, str) or response_status.lower() != "completed"
-    ):
-        raise AtifProjectionError(
-            f"step {step.step_id} has non-completed provider response status {response_status!r}"
-        )
-    if provider_response.get("error") is not None or provider_response.get("incomplete_details") is not None:
-        raise AtifProjectionError(f"step {step.step_id} contains a failed or incomplete provider response")
+    response_layers = [llm_response]
+    raw_response = llm_response.get("raw_response")
+    if isinstance(raw_response, Mapping):
+        response_layers.append(raw_response)
+    for response_layer in response_layers:
+        response_status = response_layer.get("status")
+        if response_status is not None and (
+            not isinstance(response_status, str) or response_status.lower() != "completed"
+        ):
+            raise AtifProjectionError(
+                f"step {step.step_id} has non-completed provider response status {response_status!r}"
+            )
+        if response_layer.get("error") is not None or response_layer.get("incomplete_details") is not None:
+            raise AtifProjectionError(f"step {step.step_id} contains a failed or incomplete provider response")
+    provider_response = response_layers[-1]
 
     choices = provider_response.get("choices")
     if isinstance(choices, list):
@@ -819,6 +822,11 @@ def _reject_unprojected_provider_outputs(step: Any) -> None:
 
     provider_response = llm_response.get("raw_response")
     if isinstance(provider_response, Mapping):
+        for field_name in ("actions", "content"):
+            if llm_response.get(field_name) is not None:
+                raise AtifProjectionError(
+                    f"step {step.step_id} Relay response envelope contains unsupported output field {field_name!r}"
+                )
         llm_response = provider_response
 
     output = llm_response.get("output")
