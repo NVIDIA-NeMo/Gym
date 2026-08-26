@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import collections
+import itertools
 import json
 
 import pytest
@@ -374,7 +375,12 @@ def test_materialize_writes_observed_counts_report(tmp_path):
     doc = json.loads(report.report_fpath.read_text())
     assert doc["total_source_rows"] == 5
     assert doc["total_materialized_rows"] == 15
-    assert doc["entries"]["one"] == {"source_rows": 5, "materialized_rows": 15, "num_repeats": 3}
+    assert doc["entries"]["one"] == {
+        "source_rows": 5,
+        "materialized_rows": 15,
+        "num_repeats": 3,
+        "task_index_range": [0, 4],
+    }
     assert doc["materialized_bytes"] == report.materialized_fpath.stat().st_size
 
 
@@ -390,3 +396,94 @@ def test_owner_is_optional_and_round_trips(tmp_path):
     by_label = {e.label: e for e in manifest.entries}
     assert by_label["owned"].owner == "jiaqiz"
     assert by_label["unowned"].owner is None
+
+
+def test_streaming_shuffle_is_seeded_and_lossless():
+    from nemo_gym.sweep.shuffle import streaming_shuffle
+
+    rows = [f"{i}\n".encode() for i in range(500)]
+    a = list(streaming_shuffle(iter(rows), seed=1, buffer_rows=32))
+    b = list(streaming_shuffle(iter(rows), seed=1, buffer_rows=32))
+    c = list(streaming_shuffle(iter(rows), seed=2, buffer_rows=32))
+    assert a == b  # same seed reproduces
+    assert a != c  # different seed reorders
+    assert sorted(a) == sorted(rows)  # nothing lost or duplicated
+    assert a != rows  # actually reordered
+
+
+def test_materialize_shuffle_preserves_identity_and_ranges(tmp_path):
+    """Shuffling changes dispatch order only; resume keys and provenance must not move."""
+    from nemo_gym.sweep.materialize import materialize
+
+    _write_config(tmp_path, "a.yaml", "agent_a")
+    _write_config(tmp_path, "b.yaml", "agent_b")
+    _write_data(tmp_path, "x.jsonl", "agent_a", rows=40)
+    _write_data(tmp_path, "y.jsonl", "agent_b", rows=20)
+    spec = [
+        {"label": "one", "agent": "agent_a", "configs": ["a.yaml"], "data": str(tmp_path / "x.jsonl")},
+        {"label": "two", "agent": "agent_b", "configs": ["b.yaml"], "data": str(tmp_path / "y.jsonl")},
+    ]
+    plain = materialize(_manifest(tmp_path, spec, defaults={"num_repeats": 2}), tmp_path / "p")
+    shuf = materialize(_manifest(tmp_path, spec, defaults={"num_repeats": 2}), tmp_path / "s", shuffle_seed=1)
+
+    def keyed(report):
+        return {
+            (r["_ng_task_index"], r["_ng_rollout_index"]): r["agent_ref"]["name"]
+            for r in map(json.loads, report.materialized_fpath.read_text().splitlines())
+        }
+
+    assert keyed(plain) == keyed(shuf)  # identical resume keys
+    assert plain.materialized_fpath.read_text() != shuf.materialized_fpath.read_text()  # different order
+    assert plain.task_index_ranges == shuf.task_index_ranges == {"one": (0, 39), "two": (40, 59)}
+
+    doc = json.loads(shuf.report_fpath.read_text())
+    assert doc["shuffle_seed"] == 1
+    assert doc["entries"]["two"]["task_index_range"] == [40, 59]
+
+
+def test_task_index_range_maps_a_rollout_back_to_its_entry(tmp_path):
+    from nemo_gym.sweep.materialize import materialize
+
+    _write_config(tmp_path, "a.yaml", "agent_a")
+    _write_data(tmp_path, "x.jsonl", "agent_a", rows=5)
+    _write_data(tmp_path, "y.jsonl", "agent_a", rows=5)
+    # two entries sharing one agent: agent_ref alone cannot separate them, the range table can
+    manifest = _manifest(
+        tmp_path,
+        [
+            {"label": "first", "agent": "agent_a", "configs": ["a.yaml"], "data": str(tmp_path / "x.jsonl")},
+            {"label": "second", "agent": "agent_a", "configs": ["a.yaml"], "data": str(tmp_path / "y.jsonl")},
+        ],
+    )
+    report = materialize(manifest, tmp_path / "out")
+    assert report.task_index_ranges == {"first": (0, 4), "second": (5, 9)}
+
+    def entry_of(task_index):
+        return next(label for label, (lo, hi) in report.task_index_ranges.items() if lo <= task_index <= hi)
+
+    assert entry_of(0) == "first" and entry_of(4) == "first"
+    assert entry_of(5) == "second" and entry_of(9) == "second"
+
+
+def test_materialize_defaults_to_manifest_order(tmp_path):
+    """Grouped layout is the default: it is what lets vLLM prefix caching hit."""
+    from nemo_gym.sweep.materialize import materialize
+
+    _write_config(tmp_path, "a.yaml", "agent_a")
+    _write_config(tmp_path, "b.yaml", "agent_b")
+    _write_data(tmp_path, "x.jsonl", "agent_a", rows=10)
+    _write_data(tmp_path, "y.jsonl", "agent_b", rows=10)
+    manifest = _manifest(
+        tmp_path,
+        [
+            {"label": "one", "agent": "agent_a", "configs": ["a.yaml"], "data": str(tmp_path / "x.jsonl")},
+            {"label": "two", "agent": "agent_b", "configs": ["b.yaml"], "data": str(tmp_path / "y.jsonl")},
+        ],
+    )
+    report = materialize(manifest, tmp_path / "out")
+    lines = report.materialized_fpath.read_text().splitlines()
+    names = [json.loads(line)["agent_ref"]["name"] for line in lines]
+    # exactly two contiguous runs: every agent_a row, then every agent_b row
+    blocks = [k for k, _ in itertools.groupby(names)]
+    assert blocks == ["agent_a", "agent_b"]
+    assert report.shuffle_seed == 0

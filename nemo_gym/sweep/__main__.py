@@ -65,6 +65,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     mat.add_argument("--limit-per-entry", type=int, default=None, help="Take at most N source rows per entry.")
     mat.add_argument("--overwrite", action="store_true", help="Replace an existing materialized file.")
+    mat.add_argument(
+        "--shuffle",
+        type=int,
+        default=0,
+        metavar="SEED",
+        help="Seed for the dispatch-order shuffle; 0 (the default) keeps manifest order. "
+        "Manifest order groups each entry contiguously, so the in-flight window shares system "
+        "prompts and tool definitions and vLLM prefix caching hits. Shuffling spreads that window "
+        "across every environment and thrashes the cache. Enable it when a partial run needs to be "
+        "representative of the whole blend. Task identity is assigned before shuffling either way, "
+        "so this never changes resume keys.",
+    )
     mat.add_argument("--skip-validate", action="store_true", help="Materialize without validating first.")
 
     args = parser.parse_args(argv)
@@ -94,6 +106,7 @@ def main(argv: list[str] | None = None) -> int:
                 jobs=args.jobs,
                 limit_per_entry=args.limit_per_entry,
                 overwrite=args.overwrite,
+                shuffle_seed=args.shuffle,
             )
             print(f"\nwrote {mreport.materialized_fpath}")
             print(f"  {mreport.total_source_rows:,} source rows -> {mreport.total_materialized_rows:,} materialized")

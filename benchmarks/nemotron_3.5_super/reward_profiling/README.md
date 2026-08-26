@@ -33,13 +33,19 @@ MANIFEST=$R/manifests/no_judge_no_sandbox.yaml \
 OUT_DIR=$R/manifests_output \
 bash $R/scripts/prepare_sweep.sh
 
-# 2. bring up a vLLM endpoint (see ../sbatch_external_vllm.sh), then:
-VLLM_JOBID=<jobid> \
+# 2. one job: vLLM endpoint + Gym sweep driver + reward profile
+MODEL=<checkpoint-path> \
+VLLM_CONFIG=benchmarks/nemotron_3.5_super/vllm_configs/nemotron_3.5_super.sh \
 SWEEP_DIR=$R/manifests_output/<nickname> \
-POLICY_MODEL_NAME=<checkpoint-path> \
+NUM_PREFILL_NODES=1 NUM_DECODE_NODES=2 \
+SBATCH_ACCOUNT=<account> SBATCH_PARTITION=batch SBATCH_GRES=gpu:4 \
 CONTAINER=<reward-profiling sqsh> \
-bash $R/scripts/run_rollouts.sh
+MOUNTS=/lustre:/lustre \
+bash $R/scripts/sbatch_reward_profiling.sh
 ```
+
+`run_rollouts.sh` does the same collection against an **already-running** vLLM job
+(`VLLM_JOBID=<jobid>`), which is the faster loop when iterating against a warm endpoint.
 
 `prepare_sweep.sh` validates the manifest, then materializes it. Validation fails loudly if a
 dataset's `agent_ref` disagrees with the agent its paired config declares, which is what stops a

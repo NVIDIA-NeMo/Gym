@@ -37,6 +37,7 @@ from typing import Dict, List, Optional, Tuple
 import orjson
 
 from nemo_gym.sweep.manifest import AGENT_REF_KEY, SweepManifest, SweepValidationError
+from nemo_gym.sweep.shuffle import DEFAULT_BUFFER_ROWS, streaming_shuffle
 
 
 TASK_INDEX_KEY = "_ng_task_index"
@@ -61,6 +62,12 @@ class MaterializeReport:
     rows_per_entry: Dict[str, int]
     materialized_per_entry: Dict[str, int]
     num_repeats_per_entry: Dict[str, int]
+    # label -> [first task index, last task index inclusive]. Rollout results carry only
+    # (_ng_task_index, _ng_rollout_index, agent_ref), so this table is how a rollout is traced
+    # back to the entry and dataset it came from -- especially when several entries share an agent.
+    task_index_ranges: Dict[str, Tuple[int, int]]
+    nickname: str = ""
+    shuffle_seed: int = 0
 
     @property
     def total_source_rows(self) -> int:
@@ -75,6 +82,8 @@ class MaterializeReport:
             "materialized_fpath": str(self.materialized_fpath),
             "output_fpath": str(self.output_fpath),
             "materialized_bytes": self.materialized_fpath.stat().st_size if self.materialized_fpath.exists() else None,
+            "nickname": self.nickname,
+            "shuffle_seed": self.shuffle_seed,
             "total_source_rows": self.total_source_rows,
             "total_materialized_rows": self.total_materialized_rows,
             "entries": {
@@ -82,6 +91,7 @@ class MaterializeReport:
                     "source_rows": self.rows_per_entry[label],
                     "materialized_rows": self.materialized_per_entry[label],
                     "num_repeats": self.num_repeats_per_entry[label],
+                    "task_index_range": list(self.task_index_ranges[label]),
                 }
                 for label in self.rows_per_entry
             },
@@ -137,6 +147,8 @@ def materialize(
     jobs: Optional[int] = None,
     limit_per_entry: Optional[int] = None,
     overwrite: bool = False,
+    shuffle_seed: int = 0,
+    shuffle_buffer_rows: int = DEFAULT_BUFFER_ROWS,
 ) -> MaterializeReport:
     out_dir = Path(out_dir) / manifest.nickname
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -191,11 +203,20 @@ def materialize(
             materialized_per_entry[label] = written
             print(f"  {label:28} {src_rows:8,} -> {written:9,}", flush=True)
 
-    print("concatenating parts in manifest order...", flush=True)
-    with open(materialized_fpath, "wb") as sink:
+    def _parts_in_order():
         for _, _, part_path, *_ in tasks:
             with open(part_path, "rb") as part:
-                shutil.copyfileobj(part, sink, length=16 * 1024 * 1024)
+                yield from part
+
+    if shuffle_seed > 0:
+        # Task identity was already fixed above, so reordering here changes only dispatch order.
+        print(f"concatenating with seeded shuffle (seed={shuffle_seed})...", flush=True)
+        stream = streaming_shuffle(_parts_in_order(), shuffle_seed, shuffle_buffer_rows)
+    else:
+        print("concatenating parts in manifest order (shuffle disabled)...", flush=True)
+        stream = _parts_in_order()
+    with open(materialized_fpath, "wb") as sink:
+        sink.writelines(stream)
     shutil.rmtree(parts_dir)
 
     # An empty rollouts file is the second half of the resume gate.
@@ -205,6 +226,11 @@ def materialize(
         materialized_fpath=materialized_fpath,
         output_fpath=output_fpath,
         report_fpath=out_dir / REPORT_NAME,
+        task_index_ranges={
+            entry.label: (offsets[i], offsets[i] + counts[i] - 1) for i, entry in enumerate(manifest.entries)
+        },
+        nickname=manifest.nickname,
+        shuffle_seed=shuffle_seed,
         rows_per_entry=rows_per_entry,
         materialized_per_entry=materialized_per_entry,
         num_repeats_per_entry=repeats_by_entry,
