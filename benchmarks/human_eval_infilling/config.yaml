@@ -15,7 +15,6 @@ human_eval_infilling_resources_server:
         prompt_config: benchmarks/human_eval_infilling/prompts/default.yaml
         prepare_script: benchmarks/human_eval_infilling/prepare.py
         license: MIT
-        agent: human_eval_infilling_simple_agent
 human_eval_infilling_simple_agent:
   _inherit_from: code_fim_simple_agent
   responses_api_agents:

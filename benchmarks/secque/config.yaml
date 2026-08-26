@@ -40,7 +40,6 @@ secque_judge_resources_server:
         prepare_script: benchmarks/secque/prepare.py
         num_repeats: 1
         license: MIT
-        agent: secque_simple_agent
 secque_simple_agent:
   _inherit_from: equivalence_llm_judge_simple_agent
   responses_api_agents:

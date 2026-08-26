@@ -14,7 +14,6 @@ toolsandbox_benchmark_resources_server:
         prompt_config:
         prepare_script: benchmarks/toolsandbox/prepare.py
         num_repeats: 1
-        agent: toolsandbox_benchmark_agent
 toolsandbox_benchmark_agent:
   _inherit_from: toolsandbox_agent
   responses_api_agents:

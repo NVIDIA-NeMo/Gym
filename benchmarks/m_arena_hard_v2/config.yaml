@@ -24,7 +24,6 @@ m_arena_hard_v2_arena_judge_resources_server:
         # it on the CLI as `+num_repeats=N` — see run_m_arena_hard_v2_gym.py
         # in the migration recipe directory.
         license: Apache 2.0
-        agent: m_arena_hard_v2_arena_judge_simple_agent
 m_arena_hard_v2_arena_judge_simple_agent:
   _inherit_from: arena_judge_simple_agent
   responses_api_agents:

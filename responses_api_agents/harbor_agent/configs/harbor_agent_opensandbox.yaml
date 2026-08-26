@@ -39,7 +39,6 @@ harbor_agent:
         prepare_script: responses_api_agents/harbor_agent/prepare_terminal_bench_2_1.py
         prompt_config:
 
-        agent: harbor_agent
       harbor_agent_name:
       harbor_agent_import_path: "responses_api_agents.harbor_agent.custom_agents.terminus_2_nemo_gym:Terminus2NemoGym"
       harbor_agent_kwargs:

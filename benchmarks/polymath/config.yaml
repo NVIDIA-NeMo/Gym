@@ -13,7 +13,6 @@ polymath_benchmark_resources_server:
         jsonl_fpath: benchmarks/polymath/data/polymath_benchmark.jsonl
         prompt_config: benchmarks/prompts/generic/default.yaml
         prepare_script: benchmarks/polymath/prepare.py
-        agent: polymath_benchmark_simple_agent
 polymath_benchmark_simple_agent:
   _inherit_from: polymath_simple_agent
   responses_api_agents:

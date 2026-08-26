@@ -17,7 +17,6 @@ critpt_benchmark_resources_server:
         prepare_script: benchmarks/critpt/prepare.py
         num_repeats: 5
         license: Apache 2.0
-        agent: critpt_benchmark_agent
 critpt_benchmark_agent:
   _inherit_from: critpt_agent
   responses_api_agents:

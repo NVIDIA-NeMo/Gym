@@ -25,7 +25,6 @@ litmus_tier12_resources_server:
         prepare_script: benchmarks/litmus-bench/prepare_tier12.py
         num_repeats: 1
         license: CC-BY-4.0
-        agent: litmus_tier12_agent
 litmus_tier12_agent:
   _inherit_from: litmus_agent_agent
   responses_api_agents:

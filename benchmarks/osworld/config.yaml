@@ -39,4 +39,3 @@ osworld_simple_agent:
         prompt_config:
         prepare_script: benchmarks/osworld/prepare.py
         license: Apache 2.0
-        agent: osworld_simple_agent

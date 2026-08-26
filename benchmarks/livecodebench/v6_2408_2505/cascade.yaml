@@ -15,7 +15,6 @@ livecodebench_v6_cascade_code_gen_resources_server:
         prompt_config: benchmarks/livecodebench/prompts/cascade.yaml
         prepare_script: benchmarks/livecodebench/v6_2408_2505/prepare_cascade.py
         num_repeats: 3
-        agent: livecodebench_v6_cascade_code_gen_simple_agent
 livecodebench_v6_cascade_code_gen_simple_agent:
   _inherit_from: code_gen_simple_agent
   responses_api_agents:

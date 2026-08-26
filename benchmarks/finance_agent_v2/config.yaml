@@ -37,7 +37,6 @@ finance_agent_v2_benchmark_resources_server:
         # from. BenchmarkDatasetConfig does not validate this field, but it is
         # the only place the dataset's provenance is recorded.
         license: MIT
-        agent: finance_agent_v2_benchmark_agent
 finance_agent_v2_benchmark_agent:
   _inherit_from: finance_agent_v2
   responses_api_agents:

@@ -18,4 +18,3 @@ adme_tier5_direct_agent:
         prompt_config:
         prepare_script: benchmarks/litmus-bench/prepare_adme_tier5.py
         num_repeats: 5
-        agent: adme_tier5_direct_agent

@@ -15,7 +15,6 @@ xstest_benchmark_resources_server:
         prompt_config:
         prepare_script: benchmarks/xstest/prepare.py
         num_repeats: 4
-        agent: xstest_benchmark_simple_agent
 xstest_benchmark_simple_agent:
   _inherit_from: xstest_simple_agent
   responses_api_agents:

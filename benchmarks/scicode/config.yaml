@@ -18,7 +18,6 @@ scicode_benchmark_resources_server:
         prompt_config:
         num_repeats: 8
         license: Apache 2.0
-        agent: scicode_benchmark_agent
 scicode_benchmark_agent:
   _inherit_from: scicode_agent
   responses_api_agents:

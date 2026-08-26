@@ -15,7 +15,6 @@ spider2_lite_benchmark_resources_server:
         prompt_config:
         prepare_script: benchmarks/spider2_lite/prepare.py
         num_repeats: 16
-        agent: spider2_lite_benchmark_simple_agent
 spider2_lite_benchmark_simple_agent:
   _inherit_from: spider2_lite_simple_agent
   responses_api_agents:

@@ -14,7 +14,6 @@ gsm8k_math_with_judge_resources_server:
         jsonl_fpath: benchmarks/gsm8k/data/gsm8k_benchmark.jsonl
         prompt_config: benchmarks/prompts/generic/math.yaml
         prepare_script: benchmarks/gsm8k/prepare.py
-        agent: gsm8k_math_with_judge_simple_agent
 gsm8k_math_with_judge_simple_agent:
   _inherit_from: math_with_judge_simple_agent
   responses_api_agents:

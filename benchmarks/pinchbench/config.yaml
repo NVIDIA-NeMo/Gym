@@ -32,4 +32,3 @@ pinchbench_benchmark_agent:
         prepare_script: benchmarks/pinchbench/prepare.py
         num_repeats: 10
         license: MIT
-        agent: pinchbench_benchmark_agent

@@ -16,7 +16,6 @@ omniscience_omniscience_resources_server:
         prompt_config: benchmarks/omniscience/prompts/generation.yaml
         prepare_script: benchmarks/omniscience/prepare.py
         num_repeats: 8
-        agent: omniscience_omniscience_simple_agent
 omniscience_omniscience_simple_agent:
   _inherit_from: omniscience_simple_agent
   responses_api_agents:

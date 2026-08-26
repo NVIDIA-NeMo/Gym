@@ -40,7 +40,6 @@ financebench_judge_resources_server:
         prepare_script: benchmarks/financebench/prepare.py
         num_repeats: 1
         license: Creative Commons Attribution-NonCommercial 4.0 International
-        agent: financebench_simple_agent
 financebench_simple_agent:
   _inherit_from: equivalence_llm_judge_simple_agent
   responses_api_agents:

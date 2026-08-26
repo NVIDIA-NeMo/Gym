@@ -14,7 +14,6 @@ musan_asr_with_pc_resources_server:
         prompt_config: benchmarks/musan/prompts/default.yaml
         prepare_script: benchmarks/musan/prepare.py
         license: Attribution 4.0 International
-        agent: musan_asr_with_pc_simple_agent
 musan_asr_with_pc_simple_agent:
   _inherit_from: asr_with_pc_simple_agent
   responses_api_agents:

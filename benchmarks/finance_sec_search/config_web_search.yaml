@@ -17,7 +17,6 @@ finance_sec_search_web_search_benchmark_resources_server:
         prompt_config:
         prepare_script: benchmarks/finance_sec_search/prepare_web_search.py
         num_repeats: 1
-        agent: finance_sec_search_web_search_benchmark_agent
 finance_sec_search_web_search_benchmark_agent:
   _inherit_from: finance_agent
   responses_api_agents:

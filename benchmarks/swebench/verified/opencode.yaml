@@ -17,7 +17,6 @@ opencode_swebench_verified_resources_server:
         jsonl_fpath: benchmarks/swebench/data/swebench_verified_benchmark.jsonl
         prepare_script: benchmarks/swebench/verified/prepare.py
         num_repeats: 3
-        agent: opencode_sandboxed_agent_swebench_verified
 opencode_sandboxed_agent_swebench_verified:
   _inherit_from: opencode_sandboxed_agent
   responses_api_agents:

@@ -13,7 +13,6 @@ opencode_swebench_multilingual_resources_server:
         jsonl_fpath: benchmarks/swebench/data/swebench_multilingual_benchmark.jsonl
         prepare_script: benchmarks/swebench/multilingual/prepare.py
         num_repeats: 3
-        agent: opencode_sandboxed_agent_swebench_multilingual
 opencode_sandboxed_agent_swebench_multilingual:
   _inherit_from: opencode_sandboxed_agent
   responses_api_agents:

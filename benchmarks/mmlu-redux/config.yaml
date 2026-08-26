@@ -15,7 +15,6 @@ config_paths:
         prompt_config: benchmarks/prompts/generic/general-boxed.yaml
         prepare_script: benchmarks/mmlu-redux/prepare.py
         num_repeats: 1
-        agent: "mmlu-redux_mcqa_simple_agent"
 "mmlu-redux_mcqa_simple_agent":
   _inherit_from: mcqa_simple_agent
   responses_api_agents:

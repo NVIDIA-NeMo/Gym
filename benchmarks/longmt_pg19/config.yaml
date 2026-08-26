@@ -14,7 +14,6 @@ longmt_pg19_resources_server:
         prepare_script: benchmarks/longmt_pg19/prepare.py
         num_repeats: 5
         license: Apache 2.0
-        agent: longmt_pg19_agent
 longmt_pg19_agent:
   _inherit_from: longmt_pg19_simple_agent
   responses_api_agents:

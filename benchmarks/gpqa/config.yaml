@@ -17,7 +17,6 @@ gpqa_mcqa_resources_server:
         prompt_config: benchmarks/prompts/eval/aai/mcq-4choices.yaml
         prepare_script: benchmarks/gpqa/prepare.py
         num_repeats: 8
-        agent: gpqa_mcqa_simple_agent
 gpqa_mcqa_simple_agent:
   _inherit_from: mcqa_simple_agent
   responses_api_agents:

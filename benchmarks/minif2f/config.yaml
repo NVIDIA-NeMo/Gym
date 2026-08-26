@@ -15,7 +15,6 @@ minif2f_math_formal_lean_resources_server:
         prompt_config: benchmarks/prompts/lean4/formal-proof-deepseek-prover-v2.yaml
         prepare_script: benchmarks/minif2f/prepare.py
         num_repeats: 32
-        agent: minif2f_math_formal_lean_simple_agent
 minif2f_math_formal_lean_simple_agent:
   _inherit_from: math_formal_lean_simple_agent
   responses_api_agents:

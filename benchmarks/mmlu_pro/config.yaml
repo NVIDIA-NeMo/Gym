@@ -17,7 +17,6 @@ mmlu_pro_mcqa_resources_server:
         prompt_config: benchmarks/prompts/eval/aai/mcq-10choices.yaml
         prepare_script: benchmarks/mmlu_pro/prepare.py
         num_repeats: 1
-        agent: mmlu_pro_mcqa_simple_agent
 mmlu_pro_mcqa_simple_agent:
   _inherit_from: mcqa_simple_agent
   responses_api_agents:

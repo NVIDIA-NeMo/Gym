@@ -15,7 +15,6 @@ bunsenbench_chemistry_mcq_resources_server:
         prepare_script: benchmarks/bunsenbench_chemistry_mcq/prepare.py
         license: TBD
         num_repeats: 8
-        agent: bunsenbench_chemistry_mcq_benchmark_simple_agent
 bunsenbench_chemistry_mcq_benchmark_simple_agent:
   _inherit_from: bunsenbench_chemistry_mcq_simple_agent
   responses_api_agents:

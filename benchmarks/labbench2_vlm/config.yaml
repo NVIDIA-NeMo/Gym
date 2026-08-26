@@ -18,7 +18,6 @@ labbench2_vlm_benchmark_resources_server:
         prompt_config:
         prepare_script: benchmarks/labbench2_vlm/prepare.py
         num_repeats: 3
-        agent: labbench2_vlm_benchmark_simple_agent
 labbench2_vlm_benchmark_simple_agent:
   _inherit_from: labbench2_vlm_simple_agent
   responses_api_agents:

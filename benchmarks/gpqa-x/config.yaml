@@ -17,7 +17,6 @@ config_paths:
         prompt_config: benchmarks/prompts/generic/default.yaml
         prepare_script: benchmarks/gpqa-x/prepare.py
         num_repeats: 8
-        agent: "gpqa-x_mcqa_simple_agent"
 "gpqa-x_mcqa_simple_agent":
   _inherit_from: mcqa_simple_agent
   responses_api_agents:

@@ -14,7 +14,6 @@ mbpp_evalplus_resources_server:
         prompt_config: benchmarks/mbpp/prompts/default.yaml
         prepare_script: benchmarks/mbpp/prepare.py
         license: MIT
-        agent: mbpp_evalplus_simple_agent
 mbpp_evalplus_simple_agent:
   _inherit_from: evalplus_simple_agent
   responses_api_agents:
