@@ -1,5 +1,5 @@
 config_paths:
-  - responses_api_agents/kilocode_agent/configs/kilocode_agent.yaml
+- responses_api_agents/kilocode_agent/configs/kilocode_agent.yaml
 
 math_with_judge:
   resources_servers:
@@ -15,18 +15,6 @@ math_with_judge:
       description: KiloCode agent harness on DAPO-Math-17k with math-verify
       value: Evaluate math reasoning in the KiloCode agent harness
 
-kilocode_math_agent:
-  _inherit_from: kilocode_agent
-  responses_api_agents:
-    kilocode_agent:
-      resources_server:
-        type: resources_servers
-        name: math_with_judge
-      system_prompt: |
-        You are a precise math assistant with a bash tool. Run Python to calculate or verify numeric results when helpful.
-        Put the final answer, and only the final answer, inside \boxed{}.
-      context_window: 131072
-      max_output_tokens: 65536
       datasets:
       - name: example
         type: example
@@ -39,3 +27,15 @@ kilocode_math_agent:
           version: 0.0.1
           artifact_fpath: dapo17k_train.jsonl
         license: Apache 2.0
+kilocode_math_agent:
+  _inherit_from: kilocode_agent
+  responses_api_agents:
+    kilocode_agent:
+      resources_server:
+        type: resources_servers
+        name: math_with_judge
+      system_prompt: |
+        You are a precise math assistant with a bash tool. Run Python to calculate or verify numeric results when helpful.
+        Put the final answer, and only the final answer, inside \boxed{}.
+      context_window: 131072
+      max_output_tokens: 65536

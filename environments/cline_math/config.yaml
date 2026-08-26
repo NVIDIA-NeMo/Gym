@@ -1,5 +1,5 @@
 config_paths:
-  - responses_api_agents/cline_agent/configs/cline_agent.yaml
+- responses_api_agents/cline_agent/configs/cline_agent.yaml
 
 math_with_judge:
   resources_servers:
@@ -15,16 +15,6 @@ math_with_judge:
       description: Cline agent harness on DAPO-Math-17k with math-verify
       value: Evaluate math reasoning in the Cline agent harness
 
-cline_math_agent:
-  _inherit_from: cline_agent
-  responses_api_agents:
-    cline_agent:
-      resources_server:
-        type: resources_servers
-        name: math_with_judge
-      system_prompt: |
-        You are a precise math assistant with a shell tool. Run Python to calculate or verify numeric results when helpful.
-        Put the final answer, and only the final answer, inside \boxed{}.
       datasets:
       - name: example
         type: example
@@ -37,3 +27,13 @@ cline_math_agent:
           version: 0.0.1
           artifact_fpath: dapo17k_train.jsonl
         license: Apache 2.0
+cline_math_agent:
+  _inherit_from: cline_agent
+  responses_api_agents:
+    cline_agent:
+      resources_server:
+        type: resources_servers
+        name: math_with_judge
+      system_prompt: |
+        You are a precise math assistant with a shell tool. Run Python to calculate or verify numeric results when helpful.
+        Put the final answer, and only the final answer, inside \boxed{}.

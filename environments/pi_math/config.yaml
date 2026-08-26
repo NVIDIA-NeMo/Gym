@@ -12,6 +12,18 @@ math_with_judge:
       description: Pi agent harness on DAPO-Math-17k with math-verify
       value: Evaluate math reasoning in the Pi agent harness
 
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: environments/pi_math/data/example.jsonl
+      - name: train
+        type: train
+        jsonl_fpath: environments/pi_math/data/dapo17k_train.jsonl
+        gitlab_identifier:
+          dataset_name: dapo17k
+          version: 0.0.1
+          artifact_fpath: dapo17k_train.jsonl
+        license: Apache 2.0
 pi_math_agent:
   responses_api_agents:
     pi_agent:
@@ -39,15 +51,3 @@ pi_math_agent:
             models:
             - id: nvidia/qwen/qwen3-5-397b-a17b
               reasoning: false
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: environments/pi_math/data/example.jsonl
-      - name: train
-        type: train
-        jsonl_fpath: environments/pi_math/data/dapo17k_train.jsonl
-        gitlab_identifier:
-          dataset_name: dapo17k
-          version: 0.0.1
-          artifact_fpath: dapo17k_train.jsonl
-        license: Apache 2.0

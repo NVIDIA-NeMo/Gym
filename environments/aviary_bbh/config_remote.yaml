@@ -9,6 +9,10 @@ bbh_aviary_resources_server:
       api_key:
       - insert server api key
       verified: false
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: environments/aviary_bbh/data/example.jsonl
 bbh_aviary_agent:
   responses_api_agents:
     aviary_agent:
@@ -22,7 +26,3 @@ bbh_aviary_agent:
         type: responses_api_models
         name: policy_model
       max_total_sequence_length: 32768
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: environments/aviary_bbh/data/example.jsonl
