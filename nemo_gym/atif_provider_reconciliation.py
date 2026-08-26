@@ -652,6 +652,9 @@ def _validate_chat_output(response: dict[str, Any], step: AtifStep, *, path: str
             raise _path_error(call_path, "expected a function tool call object")
         if raw_call.get("type") not in (None, "function"):
             raise _path_error(f"{call_path}.type", "expected 'function'")
+        declared_index = raw_call.get("index")
+        if declared_index is not None and (type(declared_index) is not int or declared_index != index):
+            raise _path_error(f"{call_path}.index", f"expected {index} when present")
         tool_calls.append(
             _provider_tool_call(
                 call_id=raw_call.get("id"),

@@ -1310,6 +1310,30 @@ def test_strict_export_accepts_provider_native_terminal_evidence_that_matches_pr
     assert trajectory.steps[step_index].extra["nemo_gym"]["model_call"]["response"] == response
 
 
+@pytest.mark.parametrize(
+    ("dialect", "response", "message"),
+    [
+        ("chat", {"choices": [{"finish_reason": "vendor_truncated"}]}, "does not prove a completed response"),
+        ("messages", {"stop_reason": "vendor_truncated"}, "does not prove a completed response"),
+    ],
+)
+def test_strict_export_rejects_unknown_provider_native_termination(
+    dialect: str,
+    response: dict[str, Any],
+    message: str,
+) -> None:
+    rollout = _canonical_rollout()
+    model_call = rollout["ng_trajectory"]["model_calls"][1]
+    model_call["response"] = response
+    metadata = model_call["response_metadata"]
+    metadata["dialect"] = dialect
+    metadata["response_status"] = None
+    metadata["finish_reason"] = "vendor_truncated"
+
+    with pytest.raises(AtifExportError, match=message):
+        gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
+
+
 @pytest.mark.parametrize("dialect", ("responses", "chat", "messages"))
 @pytest.mark.parametrize("tool_step", (False, True))
 def test_strict_export_accepts_provider_output_that_matches_canonical_atif(
@@ -2165,7 +2189,13 @@ def test_strict_export_preserves_arbitrary_size_json_integers() -> None:
 
 @pytest.mark.parametrize(
     "arguments",
-    ['{"value": 1, "value": 2}', '{"value": Infinity}', '{"value": 1e400}', '{"value": 1e-999}'],
+    [
+        '{"value": 1, "value": 2}',
+        '{"value": Infinity}',
+        '{"value": 1e400}',
+        '{"value": 1e-999}',
+        '{"value": 0.12345678901234567890123456789}',
+    ],
 )
 def test_strict_export_rejects_nonstandard_or_ambiguous_tool_argument_json(arguments: str) -> None:
     rollout = _canonical_rollout()
@@ -2333,6 +2363,28 @@ def test_export_rejects_nonzero_json_numbers_that_underflow_to_zero(tmp_path: Pa
     rollout = _canonical_rollout()
     rollout["ng_trajectory"]["model_calls"][0]["request"]["tiny"] = "UNDERFLOW_SENTINEL"
     encoded = json.dumps(rollout).replace('"UNDERFLOW_SENTINEL"', "1e-99999999999999999999")
+    source.write_text(f"{encoded}\n", encoding="utf-8")
+    output = tmp_path / "atif"
+
+    with pytest.raises(AtifExportError, match=r"line 1: invalid JSON"):
+        export_rollouts_to_atif(
+            ExportAtifConfig(
+                rollouts_jsonl_fpath=source,
+                output_dirpath=output,
+                session_id="evaluation-42",
+                agent_version="2.3.1",
+            )
+        )
+
+    assert not output.exists()
+    assert list(tmp_path.glob(".atif.tmp-*")) == []
+
+
+def test_export_rejects_json_numbers_that_would_lose_precision(tmp_path: Path) -> None:
+    source = tmp_path / "rollouts.jsonl"
+    rollout = _canonical_rollout()
+    rollout["ng_trajectory"]["model_calls"][0]["request"]["precise"] = "PRECISION_SENTINEL"
+    encoded = json.dumps(rollout).replace('"PRECISION_SENTINEL"', "0.12345678901234567890123456789")
     source.write_text(f"{encoded}\n", encoding="utf-8")
     output = tmp_path / "atif"
 

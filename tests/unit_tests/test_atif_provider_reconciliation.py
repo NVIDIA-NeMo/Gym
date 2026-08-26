@@ -447,6 +447,14 @@ def test_reconcile_rejects_malformed_chat_tool_calls(tool_call: Any, message: st
     _assert_rejected("chat", response, message, step=_tool_step())
 
 
+@pytest.mark.parametrize("declared_index", [True, 0.0, "0", 1])
+def test_reconcile_rejects_inconsistent_chat_tool_call_index(declared_index: Any) -> None:
+    response = _response("chat", tool_step=True)
+    response["choices"][0]["message"]["tool_calls"][0]["index"] = declared_index
+
+    _assert_rejected("chat", response, "expected 0 when present", step=_tool_step())
+
+
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [

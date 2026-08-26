@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import math
+from decimal import Decimal
 from typing import Any
 
 
@@ -24,6 +25,9 @@ def strict_json_loads(value: str | bytes) -> Any:
             significand = number.lower().split("e", 1)[0]
             if any(character in "123456789" for character in significand):
                 raise ValueError(f"JSON number {number!r} underflows the finite float range")
+            return parsed
+        if Decimal(number) != Decimal(str(parsed)):
+            raise ValueError(f"JSON number {number!r} cannot be represented without precision loss")
         return parsed
 
     def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

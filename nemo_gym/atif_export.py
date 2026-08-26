@@ -784,6 +784,21 @@ def _apply_turns(trajectory: TrajectoryRecord, groups: list[_AgentGroup]) -> Non
         normalized_finish_reason = finish_reason.strip().lower() if finish_reason is not None else None
         if normalized_finish_reason in _KNOWN_INCOMPLETE_FINISH_REASONS:
             raise _path_error(path, f"finish reason {finish_reason!r} indicates an incomplete model response")
+        dialect = call.response_metadata.dialect
+        if call.response is not None and dialect == "chat":
+            allowed_chat_reasons = {"tool_calls", "function_call"} if group.step.tool_calls else {"stop"}
+            if normalized_finish_reason not in allowed_chat_reasons:
+                raise _path_error(
+                    path,
+                    f"Chat finish reason {finish_reason!r} does not prove a completed response",
+                )
+        if call.response is not None and dialect == "messages":
+            allowed_messages_reasons = {"tool_use"} if group.step.tool_calls else {"end_turn", "stop_sequence"}
+            if normalized_finish_reason not in allowed_messages_reasons:
+                raise _path_error(
+                    path,
+                    f"Messages stop reason {finish_reason!r} does not prove a completed response",
+                )
         if group.step.tool_calls and normalized_finish_reason in {"stop", "end_turn", "stop_sequence"}:
             raise _path_error(path, f"finish reason {finish_reason!r} contradicts the captured tool calls")
         if not group.step.tool_calls and normalized_finish_reason in {"tool_calls", "tool_use", "function_call"}:
