@@ -536,7 +536,7 @@ class TestConditionRecord:
             "schema_version = 1\n"
             "[llm_clients.up]\n"
             'api_key_env = "K"\n'
-            'api_key = "sk-inline-secret"\n'
+            'api_key = "sk-inline-secret"\n'  # pragma: allowlist secret
             "[llm_clients.up.extra_headers]\n"
             'Authorization = "Bearer header-secret"\n'
             'X-Team = "routing"\n'
@@ -833,7 +833,7 @@ schema_version = 1
 [llm_clients.upstream]
 format = "openai_chat"
 base_url = "http://127.0.0.1:{httpd.server_address[1]}/v1"
-api_key_env = "SWITCHYARD_TEST_API_KEY"
+api_key_env = "SWITCHYARD_TEST_API_KEY" # pragma: allowlist secret
 
 [targets.policy]
 id = "upstream/model"
@@ -909,7 +909,7 @@ schema_version = 1
 [llm_clients.upstream]
 format = "openai_chat"
 base_url = "http://127.0.0.1:9/v1"
-api_key_env = "SWITCHYARD_TEST_API_KEY"
+api_key_env = "SWITCHYARD_TEST_API_KEY" # pragma: allowlist secret
 
 [targets.policy]
 id = "upstream/model"
@@ -1057,7 +1057,7 @@ schema_version = 1
 [llm_clients.upstream]
 format = "openai_chat"
 base_url = "http://127.0.0.1:{upstream}/v1"
-api_key_env = "SWITCHYARD_TEST_API_KEY"
+api_key_env = "SWITCHYARD_TEST_API_KEY" # pragma: allowlist secret
 
 [targets.policy]
 id = "upstream/model"
