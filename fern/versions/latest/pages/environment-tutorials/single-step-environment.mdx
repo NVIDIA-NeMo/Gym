@@ -383,7 +383,7 @@ async def test_verify_with_tool_call(server):
 async def test_verify_without_tool_call(server):
     """Reward 0.0 when the model answered without using the tool."""
     request = make_verify_request([
-        {"role": "assistant", "id": "",
+        {"type": "message", "role": "assistant", "status": "completed", "id": "",
          "content": [{"type": "output_text", "annotations": [], "text": "It's cold."}]},
     ])
     response = await server.verify(request)

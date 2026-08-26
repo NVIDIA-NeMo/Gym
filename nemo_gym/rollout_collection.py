@@ -52,6 +52,7 @@ from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
+    ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
@@ -84,6 +85,20 @@ from nemo_gym.server_utils import (
     setup_server_client as setup_server_client_utils,
 )
 from nemo_gym.skills import SkillsConfig, load_skill_directory
+from nemo_gym.token_id_capture import (
+    TokenCaptureStore,
+    TokenIdCaptureConfig,
+    clear_token_captures_for_rollouts,
+    installed_token_source,
+    token_id_capture_dirs_from_config,
+)
+from nemo_gym.token_id_capture.config import token_id_capture_enabled_for_agent
+from nemo_gym.token_id_capture.delivery import (
+    MASK_SAMPLE_KEY,
+    capture_build_can_retire,
+    finalize_rollout_token_capture,
+    retire_rollout_token_capture,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -385,6 +400,12 @@ def _get_max_rollout_attempts() -> int:
         return _DEFAULT_MAX_ROLLOUT_ATTEMPTS
 
 
+def _normalize_health_check_ignored_checks(value) -> List[str]:
+    from nemo_gym.rollout_health import normalize_ignored_checks
+
+    return list(normalize_ignored_checks(value))
+
+
 class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
     num_samples_in_parallel: Optional[int] = Field(
@@ -402,6 +423,25 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
             "afterward by `gym eval aggregate`."
         ),
     )
+    disable_health_check: bool = Field(
+        default=False,
+        description="Skip post-aggregation rollout quality verification and report writing.",
+    )
+    health_check_workers: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Number of rollout-health worker processes (defaults to min(cpus, 8)).",
+    )
+    health_check_ignored_checks: List[str] = Field(
+        default_factory=list,
+        description="Health-check IDs to exclude from execution and verdict derivation.",
+    )
+
+    @field_validator("health_check_ignored_checks", mode="before")
+    @classmethod
+    def _validate_health_check_ignored_checks(cls, value):
+        return _normalize_health_check_ignored_checks(value)
+
     rollout_collection_driver: Optional[str] = Field(
         default=None,
         description=(
@@ -429,6 +469,21 @@ class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
 
     split: Union[Literal["train"], Literal["validation"], Literal["benchmark"]]
     reuse_existing_data_preparation: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_input_jsonl_fpath(cls, data):
+        # This config has no input_jsonl_fpath field, so pydantic would silently drop it and
+        # e2e collection would overwrite it with the prepared split path — the user's file
+        # would be ignored without any indication.
+        if isinstance(data, dict) and "input_jsonl_fpath" in data:
+            raise ConfigError(
+                "`input_jsonl_fpath` (-i/--input) is not supported when serving end-to-end: the input is "
+                "always the prepared dataset for the requested split. Either add --no-serve to collect "
+                "rollouts from your own input file against already-running servers, or drop -i/--input "
+                "to use the prepared data."
+            )
+        return data
 
 
 class RolloutCollectionConfig(SharedRolloutCollectionConfig):
@@ -738,6 +793,7 @@ class RolloutCollectionHelper(BaseModel):
 
     async def run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
+        failures_fpath = failures_path_for(output_fpath)
 
         # Create the output directory up front: every artifact this run writes (materialized inputs,
         # rollouts, failures sidecar, aggregate metrics) is derived from output_fpath and keeps its
@@ -779,23 +835,62 @@ class RolloutCollectionHelper(BaseModel):
                     f.write(orjson.dumps(row) + b"\n")
 
             output_fpath.unlink(missing_ok=True)
+            failures_fpath.unlink(missing_ok=True)
 
         semaphore = nullcontext()
         if config.num_samples_in_parallel:
             print(f"Querying with {config.num_samples_in_parallel} concurrent requests")
             semaphore = Semaphore(config.num_samples_in_parallel)
 
-        failures_fpath = failures_path_for(output_fpath)
-
         # Resolve capture dirs once so each rollout's captured model calls can be folded
         # into its record below (uniform across agents; no-op when capture is off / dirs absent).
-        capture_dirs = model_call_capture_dirs_from_config(get_global_config_dict())
+        global_config = get_global_config_dict()
+        capture_dirs = model_call_capture_dirs_from_config(global_config)
+        # Resolve the training-token store directory once.
+        # Training capture is independent of evaluation capture.
+        # An empty result disables training-token capture.
+        token_capture_dirs = token_id_capture_dirs_from_config(global_config)
+        # The finalizer reads and freezes records through this source.
+        # The source is absent when capture or response rebuilding is disabled.
+        # A framework-owned transport may rebuild through its own source.
+        # The sink still records captures when Gym does not rebuild.
+        # Reruns still clear deterministic rollout ids before dispatch.
+        token_source = None
+        owned_token_source = None
+        token_capture_config = TokenIdCaptureConfig.model_validate(global_config)
+        if token_capture_config.enabled and token_capture_config.token_id_capture.rebuild_response:
+            token_source = installed_token_source()
+            if token_source is None and token_capture_dirs:
+                token_source = TokenCaptureStore(token_capture_dirs[0])
+            if isinstance(token_source, TokenCaptureStore):
+                owned_token_source = token_source
 
         # Clear only rows about to be dispatched, after resume has assigned retry suffixes. This also
         # removes a kill-shaped attempt's partial capture when its rollout-attempt id is reused.
         if capture_dirs:
             print("Clearing existing model-call captures for rollouts being dispatched")
             clear_model_call_captures_for_rollouts(input_rows, capture_dirs)
+        token_capture_rows = [
+            row
+            for row in input_rows
+            if token_id_capture_enabled_for_agent(global_config, (row.get(AGENT_REF_KEY_NAME) or {}).get("name"))
+        ]
+        if token_capture_config.token_id_capture.rebuild_response and token_capture_rows and token_source is None:
+            raise ValueError(
+                "Token capture response rebuilding requires a TokenSource in the rollout-collector process. "
+                "Call install_token_source before starting collection or configure token_id_capture.dir."
+            )
+        if token_capture_dirs and token_capture_rows:
+            # Token stores append under deterministic rollout ids.
+            # Clear stale records to avoid merging different attempts.
+            print("Clearing existing token captures for rollouts being dispatched")
+            clear_token_captures_for_rollouts(token_capture_rows, token_capture_dirs)
+
+        # Stop a run that produces mostly masked captures.
+        finalized_count = 0
+        masked_count = 0
+        mask_reasons: Counter = Counter()
+        warned_malformed_rollout_id = False
 
         # Intermediate status printing
         pcts_to_print = list(range(1, 100)) + [99.5]
@@ -816,6 +911,10 @@ class RolloutCollectionHelper(BaseModel):
                 result[SKILLS_REF_KEY_NAME] = row[SKILLS_REF_KEY_NAME]
             if ATTEMPT_INDEX_KEY_NAME in row:
                 result[ATTEMPT_INDEX_KEY_NAME] = row[ATTEMPT_INDEX_KEY_NAME]
+            if ROLLOUT_ID_KEY_NAME in row:
+                # Capture readback recomputes the id from the finished record.
+                # Preserve an explicit id on the result just like the indices.
+                result[ROLLOUT_ID_KEY_NAME] = row[ROLLOUT_ID_KEY_NAME]
 
             # Fold this rollout's captured model calls into its record (uniform across agents; no-op
             # when capture is off). Never alters the harness output/reward already in `result`.
@@ -828,6 +927,43 @@ class RolloutCollectionHelper(BaseModel):
 
             if "ng_model_call_capture" in result or "ng_agent_observations" in result or NG_TRAJECTORY_KEY in result:
                 _attach_trajectory_record(row, result)
+
+            # Freeze and rebuild tokens only for participating agents.
+            # This step does not retire the frozen snapshot.
+            # It leaves harness output and reward unchanged.
+            # Direct callers of run_examples finalize each record themselves.
+            token_capture_build = None
+            if token_id_capture_enabled_for_agent(
+                global_config,
+                (row.get(AGENT_REF_KEY_NAME) or {}).get("name"),
+            ):
+                token_capture_build = await finalize_rollout_token_capture(result, token_source)
+                if token_capture_build is not None:
+                    finalized_count += 1
+                    if token_capture_build.get(MASK_SAMPLE_KEY):
+                        masked_count += 1
+                        # Aggregate available reasons for the abort message.
+                        build_metrics = token_capture_build.get("metrics") or {}
+                        if build_metrics.get("capture_incomplete"):
+                            mask_reasons["capture_incomplete"] += 1
+                        if build_metrics.get("unresolved_parent_calls"):
+                            mask_reasons["unresolved_parent_calls"] += 1
+                        build_error = token_capture_build.get("error") or build_metrics.get("error")
+                        if build_error:
+                            mask_reasons[str(build_error)] += 1
+                    settings = token_capture_config.token_id_capture
+                    if (
+                        settings.max_mask_fraction is not None
+                        and finalized_count >= settings.mask_fraction_min_samples
+                        and masked_count / finalized_count > settings.max_mask_fraction
+                    ):
+                        raise RuntimeError(
+                            f"{masked_count}/{finalized_count} finalized rollouts "
+                            f"({masked_count / finalized_count:.1%}) are masked, exceeding "
+                            f"token_id_capture.max_mask_fraction={settings.max_mask_fraction}. "
+                            f"Mask reasons: {dict(mask_reasons)}. Aborting instead of collecting "
+                            "mostly token-less data."
+                        )
 
             no_persist = bool(result.get(NG_NO_PERSIST_KEY))
             failure_class = result.get(NG_FAILURE_CLASS_KEY)
@@ -851,6 +987,21 @@ class RolloutCollectionHelper(BaseModel):
                 results_file.flush()
                 persisted_rows.append(row)
                 persisted_results.append(result)
+                try:
+                    rollout_id = maybe_rollout_id_from_run_body(result)
+                except (TypeError, ValueError) as error:
+                    # Preserve capture evidence when the rollout id is invalid.
+                    rollout_id = None
+                    if not warned_malformed_rollout_id:
+                        warned_malformed_rollout_id = True
+                        warnings.warn(
+                            f"a result carries a malformed rollout id ({error}); "
+                            "its token capture will not be retired.",
+                            stacklevel=2,
+                        )
+                if rollout_id is not None and capture_build_can_retire(token_capture_build):
+                    os.fsync(results_file.fileno())
+                    await retire_rollout_token_capture(rollout_id, token_source, token_capture_build)
 
             counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
             if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
@@ -863,7 +1014,8 @@ class RolloutCollectionHelper(BaseModel):
 
             current_pct = 100 * len(results) / len(input_rows)
             if pcts_to_print and current_pct >= pcts_to_print[0]:
-                pcts_to_print.pop(0)
+                while pcts_to_print and current_pct >= pcts_to_print[0]:
+                    pcts_to_print.pop(0)
 
                 time_taken_s = time() - start_time
                 time_taken = timedelta(seconds=int(time_taken_s))
@@ -886,8 +1038,20 @@ class RolloutCollectionHelper(BaseModel):
                 # Use tqdm.write here so we can print properly with tqdm being used.
                 tqdm.write(print_str)
 
+                if get_exporters():
+                    step_metrics = {
+                        f"progress/{agent_name}/reward": round(
+                            100 * metrics["reward"] / agent_name_to_counts[agent_name], 2
+                        )
+                        for agent_name, metrics in agent_name_to_metrics.items()
+                    }
+
+                    export_metrics(step_metrics, step=int(current_pct))
+
         results_file.close()
         failures_file.close()
+        if owned_token_source is not None:
+            await owned_token_source.close()
 
         if config.upload_rollouts and get_exporters():  # pragma: no cover
             print("Uploading rollouts. This may take a few minutes if your data is large.")
@@ -918,6 +1082,23 @@ class RolloutCollectionHelper(BaseModel):
 Fully materialized inputs: {config.materialized_jsonl_fpath}
 Rollouts: {output_fpath}
 Aggregate metrics: {aggregate_metrics_fpath}""")
+
+        if not config.disable_aggregation and not config.disable_health_check:
+            from nemo_gym.rollout_health import format_health_report, run_health_checks
+
+            try:
+                health_result = await asyncio.to_thread(
+                    run_health_checks,
+                    output_fpath,
+                    workers=config.health_check_workers,
+                    ignored_checks=config.health_check_ignored_checks,
+                )
+            except Exception:
+                logger.exception(
+                    "Rollout health checks failed after collection; rollout artifacts are still available."
+                )
+            else:
+                print(format_health_report(health_result))
 
         return results
 
@@ -1100,6 +1281,24 @@ class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
         default=True,
         description="Concatenate the matched shard JSONLs into output_jsonl_fpath alongside the metrics file.",
     )
+    disable_health_check: bool = Field(
+        default=False,
+        description="Skip post-aggregation rollout quality verification and report writing.",
+    )
+    health_check_workers: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Number of rollout-health worker processes (defaults to min(cpus, 8)).",
+    )
+    health_check_ignored_checks: List[str] = Field(
+        default_factory=list,
+        description="Health-check IDs to exclude from execution and verdict derivation.",
+    )
+
+    @field_validator("health_check_ignored_checks", mode="before")
+    @classmethod
+    def _validate_health_check_ignored_checks(cls, value):
+        return _normalize_health_check_ignored_checks(value)
 
 
 def loads_jsonl_line(raw, fpath, line_no: int):
@@ -1163,6 +1362,24 @@ class RolloutAggregationHelper(BaseModel):
         print(f"""Finished rollout aggregation! View results at:
 Merged rollouts: {output_fpath if config.merge_shards else "<not merged>"}
 Aggregate metrics: {aggregate_metrics_fpath}""")
+
+        if not config.disable_health_check:
+            from nemo_gym.rollout_health import format_health_report, run_health_checks
+
+            try:
+                health_result = await asyncio.to_thread(
+                    run_health_checks,
+                    output_fpath if config.merge_shards else [Path(path) for path in input_paths],
+                    output_dir=output_fpath.parent,
+                    workers=config.health_check_workers,
+                    ignored_checks=config.health_check_ignored_checks,
+                )
+            except Exception:
+                logger.exception(
+                    "Rollout health checks failed after aggregation; aggregate artifacts are still available."
+                )
+            else:
+                print(format_health_report(health_result))
 
         return aggregate_metrics_fpath
 
