@@ -11,6 +11,20 @@ CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
 VLLM_CONFIG=$VLLM_CONFIG
 SLURM_COMMENT="${SLURM_COMMENT:-}"
+OPENSANDBOX_DOMAIN="${OPENSANDBOX_DOMAIN:-}"
+OPENSANDBOX_API_KEY="${OPENSANDBOX_API_KEY:-}"
+OPENSANDBOX_PROTOCOL="${OPENSANDBOX_PROTOCOL:-http}"
+
+# The checkout this script ships in; a caller running a copy of it names its own.
+gym_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
+if [[ "${1:-}" == "--gym-root" ]]; then
+    if [[ -z "${2:-}" ]]; then
+        echo "--gym-root needs a path" >&2
+        exit 2
+    fi
+    gym_root=$2
+    shift 2
+fi
 
 should_run_eval=$(( $# > 0 ))
 if (( should_run_eval )); then
@@ -249,6 +263,12 @@ EOF
 
 # --segment > 0 otherwise the engine will hang on the second or third engine step.
 submit_dir=$(pwd -P)
+# An exported connection is sent as arguments; otherwise env.yaml is read.
+if [[ -n "$OPENSANDBOX_DOMAIN" ]]; then
+    cleanup_connection=(--domain "$OPENSANDBOX_DOMAIN" --api-key "$OPENSANDBOX_API_KEY" --protocol "$OPENSANDBOX_PROTOCOL")
+else
+    cleanup_connection=(--connection-config "$gym_root/env.yaml")
+fi
 cleanup_user=${NEMO_GYM_USER:-$USER}
 main_job_id=$(
     NEMO_GYM_USER="$cleanup_user" \
@@ -277,6 +297,7 @@ if (( should_run_eval )); then
             --partition=cpu \
             --qos=cpu-short \
             --gres=none \
+            --gpus-per-node=0 \
             --nodes=1 \
             --ntasks=1 \
             --cpus-per-task=1 \
@@ -284,14 +305,16 @@ if (( should_run_eval )); then
             --time=00:30:00 \
             --job-name="gym-cleanup-$main_job_id" \
             --output="$submit_dir/slurm-logs/%j-gym-cleanup-$main_job_id.log" \
-            "$submit_dir/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py" \
-            --connection-config "$submit_dir/env.yaml" \
+            "$gym_root/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py" \
+            "${cleanup_connection[@]}" \
             --run-id "$main_job_id" \
             --user "$cleanup_user" \
             --reap
     ); then
-        echo "Failed to submit cleanup job for batch job $main_job_id; the batch job is still active" >&2
-        exit 1
+        echo "Submitted batch job $main_job_id"
+        echo "Failed to submit the sandbox-cleanup job for batch job $main_job_id;" \
+            "it is running and its sandboxes will need reaping by hand" >&2
+        exit 0
     fi
     cleanup_job_id=${cleanup_job_id%%;*}
 fi
