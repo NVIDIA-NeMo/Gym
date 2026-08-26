@@ -404,6 +404,76 @@ class TestRunVibenchScript:
         assert signals == [signal.SIGTERM]
 
 
+class TestPlanFailureIsolation:
+    """A bad plan must be a zeroed plan, never a 500 that loses the whole rollout."""
+
+    @pytest.mark.asyncio
+    async def test_truncated_scorecard_zeroes_only_that_plan(self, tmp_path, monkeypatch):
+        server = make_server(tmp_path)
+        plan = tmp_path / "prds" / "notes" / "tests" / "mvp" / "test1.txt"
+        plan.parent.mkdir(parents=True, exist_ok=True)
+        plan.write_text("<step>x</step>")
+        work = tmp_path / "work"
+
+        async def fake_run(cmd, timeout_s=None):
+            out = work / "test1"
+            if "run-seed.py" in " ".join(cmd):
+                (out / "seed" / "seeding").mkdir(parents=True, exist_ok=True)
+            else:
+                (out / "evaluation-finished.json").write_text('{"score": 30, "full_po')
+            return 0, ""
+
+        monkeypatch.setattr(server, "_run_vibench_script", fake_run)
+
+        r = await server._grade_one_test_plan(tmp_path / "app", "prds/notes/tests/mvp/test1.txt", work, None)
+
+        assert r.normalized_score == 0.0
+        assert r.seeding_failed is False
+        assert "JSONDecodeError" in (r.error or "")
+
+    @pytest.mark.asyncio
+    async def test_unreadable_plan_file_zeroes_only_that_plan(self, tmp_path, monkeypatch):
+        server = make_server(tmp_path)
+
+        r = await server._grade_one_test_plan(
+            tmp_path / "app", "prds/notes/tests/mvp/missing.txt", tmp_path / "work", None
+        )
+
+        assert r.normalized_score == 0.0
+        assert r.error
+
+    @pytest.mark.asyncio
+    async def test_one_plan_raising_does_not_lose_the_others(self, tmp_path, monkeypatch):
+        """gather(return_exceptions=True): a raised plan is zeroed, siblings keep their scores."""
+        server = make_server(tmp_path)
+        _stub_extraction(server, monkeypatch)
+        calls = {"n": 0}
+
+        async def flaky(app_dir, test_plan_rel, work_dir, test_assets_dir):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("grading exploded")
+            return PlanResult(
+                test_plan=Path(test_plan_rel).stem,
+                score=10,
+                full_points=10,
+                normalized_score=1.0,
+                steps_total=1,
+                steps_passed=1,
+                seeding_failed=False,
+                duration_s=1.0,
+            )
+
+        monkeypatch.setattr(server, "_grade_one_test_plan", flaky)
+
+        response = await server.verify(_FakeRequest(), make_verify_request())
+
+        assert response.test_plans_total == 2
+        # One exploded, one scored 1.0 -> the surviving plan is not lost.
+        assert response.reward == pytest.approx(0.5)
+        assert any("grading exploded" in (r.error or "") for r in response.results)
+
+
 class TestBuildContract:
     """The grading stack invokes ViBench's two scripts; package.json is not the contract."""
 

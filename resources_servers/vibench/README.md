@@ -83,8 +83,9 @@ for feature artifacts, but `seed_session` only ever hands the agent a PRD — th
 yet to stage an existing codebase into the build sandbox, which a feature task starts from.
 
 `feature-ri` — building a feature on top of the reference implementation — is a follow-up
- `feature-mvp` (`featureN-on_mvp`) is harder: it starts from the
-model's own MVP output and so depends on a prior rollout's artifact.
+rather than a blocked one: the starting tree already exists, it just needs staging into the
+sandbox the way the PRD already is. `feature-mvp` (`featureN-on_mvp`) is harder, because it
+starts from the model's own MVP output and so depends on a prior rollout's artifact.
 
 ## Run
 

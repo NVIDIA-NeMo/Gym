@@ -182,6 +182,43 @@ class TestBuildSandbox:
         assert sandbox.uploads == [(str(assets / "data.csv"), "/app/assets/data.csv")]
 
     @pytest.mark.asyncio
+    async def test_failed_asset_upload_stops_the_started_sandbox(self, tmp_path, monkeypatch):
+        """Past start() a container exists; the caller only registers cleanup once this
+        returns, so a raise here would leak it until TTL."""
+        agent = make_agent(tmp_path)
+        sandbox = _FakeSandbox()
+
+        async def boom(local, remote):
+            raise RuntimeError("upload failed")
+
+        sandbox.upload = boom
+
+        class _Async:
+            def __init__(self, provider, spec):
+                pass
+
+            async def start(self):
+                return None
+
+            def __getattr__(self, item):
+                return getattr(sandbox, item)
+
+        monkeypatch.setattr("responses_api_agents.vibench_agent.app.create_provider", lambda c: MagicMock())
+        monkeypatch.setattr("responses_api_agents.vibench_agent.app.resolve_provider_config", lambda *a: {})
+        monkeypatch.setattr("responses_api_agents.vibench_agent.app.resolve_provider_metadata", lambda *a: {})
+        monkeypatch.setattr("responses_api_agents.vibench_agent.app.get_global_config_dict", lambda: {})
+        monkeypatch.setattr("responses_api_agents.vibench_agent.app.AsyncSandbox", _Async)
+
+        assets = tmp_path / "assets"
+        assets.mkdir()
+        (assets / "data.csv").write_text("a,b")
+
+        with pytest.raises(RuntimeError, match="upload failed"):
+            await agent._create_build_sandbox("PRD", [str(assets)])
+
+        assert sandbox.stopped is True, "sandbox leaked after a failed upload"
+
+    @pytest.mark.asyncio
     async def test_absent_asset_dir_is_skipped(self, tmp_path, monkeypatch):
         agent = make_agent(tmp_path)
         sandbox = _FakeSandbox()

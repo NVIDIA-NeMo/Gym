@@ -10,7 +10,8 @@ vibench_resources_server:
       value: Eval whether a model can ship a working web app from a spec, judged through the running UI rather than the diff.
 
       # Absolute path to a ViBench checkout. Grading shells into
-      # _harness/runner/scripts/run-seed-then-evaluate.py inside it.
+      # _harness/runner/scripts/run-seed.py then run-evaluate-post-seeding.py inside it.
+      # (Not run-seed-then-evaluate.py -- see the comment above SEED_SCRIPT in app.py.)
       vibench_repo_root: ${oc.env:VIBENCH_REPO_ROOT}
 
       # Shared with the agent: it writes built-app tarballs here, this server unpacks them.

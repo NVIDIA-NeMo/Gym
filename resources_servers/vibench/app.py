@@ -370,8 +370,10 @@ class VibenchResourcesServer(SimpleResourcesServer):
             return
         with suppress(ProcessLookupError, PermissionError, OSError):
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        # Bounded: an unkillable process (uninterruptible I/O) must not hang the rollout
+        # after we have already given up on it.
         with suppress(Exception):
-            await proc.wait()
+            await asyncio.wait_for(proc.wait(), timeout=self.config.cleanup_grace_s)
 
     async def _grade_one_test_plan(
         self,
