@@ -359,7 +359,7 @@ class TestRolloutCollection:
 
         mock_server_client = MagicMock()
         mock_server_client.post = AsyncMock(return_value=response)
-        mock_server_client.global_config_dict = OmegaConf.create({"my_agent": {}})
+        mock_server_client.global_config_dict = OmegaConf.create({"my_agent": {"responses_api_agents": {"impl": {}}}})
 
         monkeypatch.setattr(
             nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
@@ -2323,16 +2323,29 @@ class TestValidateAgentNames:
     def _rows(self, *names):
         return [{"agent_ref": {"name": n}} for n in names]
 
+    def _cfg(self, **entries):
+        return OmegaConf.create(
+            {name: {"responses_api_agents": {"impl": {}}} for name in entries.get("agents", [])}
+            | entries.get("extra", {})
+        )
+
     def test_all_known_passes(self) -> None:
-        cfg = OmegaConf.create({"agent_a": {}, "agent_b": {}})
+        cfg = self._cfg(agents=["agent_a", "agent_b"])
         RolloutCollectionHelper._validate_agent_names(self._rows("agent_a", "agent_b"), cfg)
 
     def test_unknown_agent_raises_with_suggestion(self) -> None:
-        cfg = OmegaConf.create({"math_with_judge_simple_agent": {}})
+        cfg = self._cfg(agents=["math_with_judge_simple_agent"])
         with pytest.raises(ValueError, match="did you mean 'math_with_judge_simple_agent'"):
             RolloutCollectionHelper._validate_agent_names(self._rows("math_with_judge_simple_agnet"), cfg)
 
     def test_unknown_agent_without_close_match_raises(self) -> None:
-        cfg = OmegaConf.create({"a": {}})
+        cfg = self._cfg(agents=["a"])
         with pytest.raises(ValueError, match="not present in the running config"):
             RolloutCollectionHelper._validate_agent_names(self._rows("zzz_completely_unrelated"), cfg)
+
+    def test_non_agent_instance_raises(self) -> None:
+        """Routing to an existing but non-agent instance (e.g. agent_map to an RS name) must fail
+        pre-dispatch: /run only exists on agent servers."""
+        cfg = self._cfg(agents=["math_agent"], extra={"math_rs": {"resources_servers": {"impl": {}}}})
+        with pytest.raises(ValueError, match="exists but is not an agent instance"):
+            RolloutCollectionHelper._validate_agent_names(self._rows("math_rs"), cfg)
