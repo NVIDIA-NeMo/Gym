@@ -74,11 +74,12 @@ def _extract_request_input(body_input: Any) -> tuple[Any, Optional[str]]:
         role = getattr(item, "role", None) or (item.get("role") if isinstance(item, dict) else None)
         content = getattr(item, "content", None) or (item.get("content") if isinstance(item, dict) else None)
         text = _content_text(content)
-        if role in {"system", "developer"} and text:
-            instruction_parts.append(text)
-        elif isinstance(role, str):
-            message = item.model_dump(mode="json", exclude_none=True) if hasattr(item, "model_dump") else dict(item)
-            messages.append(message)
+        if role in {"system", "developer"}:
+            if text:
+                instruction_parts.append(text)
+            continue
+        message = item.model_dump(mode="json", exclude_none=True) if hasattr(item, "model_dump") else dict(item)
+        messages.append(message)
 
     if len(messages) == 1 and messages[0].get("role") == "user":
         request_input: Any = _content_text(messages[0].get("content"))
@@ -288,6 +289,7 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
                 base_dir=workspace,
                 request=RunRequest(
                     input=request_input,
+                    request_id=rollout_id or f"request-{uuid4().hex}",
                     context={"nemo_gym_rollout_id": rollout_id} if rollout_id else {},
                 ),
             )

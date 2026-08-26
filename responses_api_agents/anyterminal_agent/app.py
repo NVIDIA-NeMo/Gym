@@ -530,8 +530,19 @@ class RunTerminalAgent(BaseModel):
             user="root",
             env=self._agent_env(cfg),
         )
+        (cfg.persistent_dir / "agent_result.json").write_text(
+            json.dumps(
+                {
+                    "return_code": result.return_code,
+                    "error_type": result.error_type,
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                }
+            )
+        )
         if result.return_code != 0:
-            print(f"[{cfg.task_name}] agent exit {result.return_code}: {(result.stderr or '')[-2000:]}", flush=True)
+            detail = result.stderr or result.stdout or ""
+            print(f"[{cfg.task_name}] agent exit {result.return_code}: {detail[-2000:]}", flush=True)
         return time.time() - t0, result.error_type == "timeout"
 
     async def _stage_tests(self, cfg: AnyTerminalInstanceConfig) -> None:
@@ -688,7 +699,7 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
             sentinel = agent_deps_dir / ".installed"
             if not agent_deps_archive.exists() or agent_deps_archive.stat().st_mtime < sentinel.stat().st_mtime:
                 temporary = agent_deps_archive.with_suffix(".tmp")
-                with tarfile.open(temporary, "w:gz") as archive:
+                with tarfile.open(temporary, "w:gz", compresslevel=1) as archive:
                     archive.add(agent_deps_dir, arcname=".")
                 temporary.replace(agent_deps_archive)
         results_dir = workspace / "results"
@@ -767,7 +778,7 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
             config_overrides["tb_eval_timeout"] = int(float(problem_info["verifier_timeout_sec"]))
 
         server_config = self._server.model_dump()
-        if rollout_id and server_config["model_server_url"]:
+        if not self.config.sandbox_model_base_url and rollout_id and server_config["model_server_url"]:
             server_config["model_server_url"] = apply_rollout_prefix(server_config["model_server_url"], rollout_id)
 
         params = AnyTerminalInstanceConfig(

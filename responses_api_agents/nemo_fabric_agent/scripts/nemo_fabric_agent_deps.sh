@@ -16,13 +16,8 @@ source "${PORTABLE_PYTHON_SH:-$SCRIPT_DIR/_portable_python.sh}"
 install_portable_python
 install_nemo_gym_deps
 
-FABRIC_SPEC="${NEMO_FABRIC_SPEC:-nemo-fabric[mini-swe-agent]==0.2.0rc3}"
-FABRIC_RUNTIME_SPEC="${NEMO_FABRIC_RUNTIME_SPEC:-nemo-fabric-runtime==0.2.0rc3}"
-"$DEPS_DIR/bin/python3" -m pip install \
-    "$FABRIC_SPEC" \
-    "$FABRIC_RUNTIME_SPEC" \
-    "nemo-fabric-adapter-contract==0.2.0rc3" \
-    "nemo-fabric-adapters-common==0.2.0rc3" \
-    "nemo-fabric-adapters-mini-swe-agent==0.2.0rc3"
-"$DEPS_DIR/bin/python3" -m pip install "openai==${OPENAI_VERSION:-2.7.2}"
-"$DEPS_DIR/bin/python3" -c "from nemo_fabric import Fabric, FabricConfig; print('nemo-fabric OK')"
+FABRIC_SPEC="${NEMO_FABRIC_SPEC:-nemo-fabric[mini-swe-agent]==0.2.0}"
+install_python_packages "$FABRIC_SPEC" "openai==${OPENAI_VERSION:-2.7.2}"
+if portable_python_can_run; then
+    "$DEPS_DIR/bin/python3" -c "from nemo_fabric import Fabric, FabricConfig; print('nemo-fabric OK')"
+fi

@@ -10,7 +10,14 @@ from nemo_fabric import Fabric
 from omegaconf import OmegaConf
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import SKILLS_REF_KEY_NAME, GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.global_config import (
+    OBSERVABILITY_ENABLED_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    SKILLS_REF_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+    GlobalConfigDictParser,
+    GlobalConfigDictParserConfig,
+)
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.nemo_fabric_agent.app import (
@@ -93,6 +100,21 @@ def test_extract_request_input_keeps_multiturn_messages_structured() -> None:
     request_input, instructions = _extract_request_input(body.input)
     assert [message["role"] for message in request_input] == ["user", "user"]
     assert instructions == "system\n\ndeveloper"
+
+
+def test_extract_request_input_preserves_function_call_replay() -> None:
+    body = NeMoGymResponseCreateParamsNonStreaming.model_validate(
+        {
+            "input": [
+                {"type": "function_call", "call_id": "call-1", "name": "lookup", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "call-1", "output": "result"},
+            ]
+        }
+    )
+
+    request_input, instructions = _extract_request_input(body.input)
+    assert [item["type"] for item in request_input] == ["function_call", "function_call_output"]
+    assert instructions is None
 
 
 def test_content_and_response_normalizers_handle_generic_values() -> None:
@@ -309,6 +331,7 @@ def test_run_preserves_fabric_result_and_verifies(
     agent.server_client.global_config_dict = {
         "resources": {"resources_servers": {"resources": {"host": "127.0.0.1", "port": 9001}}},
         "policy_model": {"responses_api_models": {"policy_model": {"host": "127.0.0.1", "port": 9002}}},
+        OBSERVABILITY_ENABLED_KEY_NAME: True,
     }
     agent.server_client._build_server_base_url.side_effect = lambda config: f"http://{config['host']}:{config['port']}"
 
@@ -333,6 +356,8 @@ def test_run_preserves_fabric_result_and_verifies(
         {
             "responses_create_params": {"input": "question"},
             SKILLS_REF_KEY_NAME: None,
+            TASK_INDEX_KEY_NAME: 3,
+            ROLLOUT_INDEX_KEY_NAME: 7,
         }
     )
     request = MagicMock()
@@ -354,6 +379,9 @@ def test_run_preserves_fabric_result_and_verifies(
     assert result.response.usage.input_tokens == 3
     assert result.response.usage.output_tokens == 4
     called_config = fabric.run.call_args.args[0].to_mapping()
+    called_request = fabric.run.call_args.kwargs["request"]
+    assert called_request.request_id == "3-7"
+    assert called_request.context == {"nemo_gym_rollout_id": "3-7"}
     dynamic = called_config["mcp"]["servers"]["resources"]
     assert dynamic["transport"] == "streamable-http"
     assert dynamic["custom_headers"] == {"X-NeMo-Gym-Session-Token": "token"}

@@ -1,5 +1,5 @@
 config_paths:
-  - responses_api_agents/nemo_fabric_agent/configs/nemo_fabric_deepagents.yaml
+  - responses_api_agents/nemo_fabric_agent/configs/nemo_fabric_agent.yaml
 
 math_with_judge:
   resources_servers:
@@ -16,11 +16,14 @@ math_with_judge:
       value: Evaluate mathematical reasoning with DeepAgents.
 
 nemo_fabric_deepagents_math_agent:
-  _inherit_from: nemo_fabric_deepagents
+  _inherit_from: nemo_fabric_agent
   responses_api_agents:
     nemo_fabric_agent:
+      adapter_id: nvidia.fabric.langchain.deepagents
       resources_server:
         name: math_with_judge
+      harness_settings: {}
+      fabric_config: {}
       timeout: 1800
       system_prompt: |
         You are a precise math assistant. Use Python when it helps and put only the final answer in \boxed{}.

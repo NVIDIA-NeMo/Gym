@@ -1,5 +1,5 @@
 config_paths:
-  - responses_api_agents/nemo_fabric_agent/configs/nemo_fabric_hermes.yaml
+  - responses_api_agents/nemo_fabric_agent/configs/nemo_fabric_agent.yaml
 
 reasoning_gym:
   resources_servers:
@@ -11,14 +11,27 @@ reasoning_gym:
       value: Evaluate reasoning tasks with Hermes Agent.
 
 nemo_fabric_hermes_reasoning_gym_agent:
-  _inherit_from: nemo_fabric_hermes
+  _inherit_from: nemo_fabric_agent
   responses_api_agents:
     nemo_fabric_agent:
+      adapter_id: nvidia.fabric.hermes
+      model_provider: openai
       resources_server:
         name: reasoning_gym
       timeout: 1800
       system_prompt: |
         Solve the problem carefully and return only the answer in the exact format requested.
+      harness_settings:
+        reasoning_config:
+          enabled: true
+          effort: medium
+        max_tokens: 16000
+        terminal_timeout: 30
+      fabric_config:
+        runtime:
+          max_turns: 30
+        tools:
+          enabled: [terminal, file, code_execution, skills, todo]
       datasets:
         - name: example
           type: example
