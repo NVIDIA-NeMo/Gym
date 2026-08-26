@@ -19,6 +19,7 @@ from http.cookies import SimpleCookie
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import aiohttp
 import pytest
 from fastapi import HTTPException, Response
 
@@ -87,8 +88,20 @@ def body(**extras: object) -> NOOAAgentRunRequest:
     )
 
 
-def request(cookie: str = "incoming") -> SimpleNamespace:
-    return SimpleNamespace(cookies={"session": cookie})
+def request(
+    cookie: str = "incoming",
+    *,
+    rollout_id: str | None = None,
+    token_capture: bool = False,
+) -> SimpleNamespace:
+    prefix = f"/ng-rollout/{rollout_id}" if rollout_id is not None else ""
+    if token_capture:
+        prefix += "/training-token-capture"
+    return SimpleNamespace(
+        cookies={"session": cookie},
+        path_params={"rollout_id": rollout_id} if rollout_id is not None else {},
+        url=SimpleNamespace(path=f"{prefix}/v1/responses"),
+    )
 
 
 def runner_result(run_request: object) -> NOOARunResult:
@@ -177,7 +190,22 @@ async def test_direct_responses_reports_missing_top_level_mapping() -> None:
 
 
 @pytest.mark.asyncio
-async def test_model_failure_becomes_rollout_failure_sentinel() -> None:
+async def test_direct_responses_preserves_inbound_rollout_prefix() -> None:
+    agent, _ = make_agent()
+
+    await agent.responses(
+        request(rollout_id="direct-rollout", token_capture=True),
+        Response(),
+        body().responses_create_params,
+    )
+
+    run_request = agent.runner.run.await_args.args[0]
+    assert run_request.rollout_id == "direct-rollout"
+    assert run_request.model_url_path == "/ng-rollout/direct-rollout/training-token-capture/v1/responses"
+
+
+@pytest.mark.asyncio
+async def test_unexpected_harness_failure_remains_legitimate() -> None:
     agent, _ = make_agent()
     agent.runner.run = AsyncMock(side_effect=RuntimeError("model unavailable"))
 
@@ -186,6 +214,46 @@ async def test_model_failure_becomes_rollout_failure_sentinel() -> None:
     assert result.reward == 0
     assert result.model_extra[NG_FAILURE_CLASS_KEY] == "legitimate"
     assert "model unavailable" in result.model_extra["error"]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        TimeoutError("downstream timeout"),
+        aiohttp.ClientConnectionError("connection reset"),
+        aiohttp.ClientResponseError(
+            request_info=MagicMock(real_url="http://resources/verify"),
+            history=(),
+            status=503,
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_downstream_infrastructure_failure_is_transient(error: Exception) -> None:
+    client = server_client()
+    object.__setattr__(client, "post", AsyncMock(side_effect=error))
+    agent = NOOAAgent(config=config(), server_client=client)
+    agent.runner = MagicMock()
+    agent.runner.run = AsyncMock()
+
+    result = await agent.run(request(), Response(), body())
+
+    assert result.reward == 0
+    assert result.model_extra[NG_FAILURE_CLASS_KEY] == "transient"
+    assert NG_TERMINAL_KEY not in result.model_extra
+    agent.runner.run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mid_episode_downstream_timeout_is_not_the_episode_budget() -> None:
+    agent, _ = make_agent()
+    agent.runner.run = AsyncMock(side_effect=TimeoutError("NOOA queue read timed out"))
+
+    result = await agent.run(request(), Response(), body())
+
+    assert result.model_extra[NG_FAILURE_CLASS_KEY] == "transient"
+    assert NG_TERMINAL_KEY not in result.model_extra
+    assert "queue read timed out" in result.model_extra["error"]
 
 
 @pytest.mark.asyncio
@@ -212,6 +280,28 @@ async def test_policy_budget_exhaustion_is_verified_and_counted() -> None:
 
 
 @pytest.mark.asyncio
+async def test_invalid_policy_output_is_verified_and_counted() -> None:
+    agent, client = make_agent(verify_reward=0.0)
+
+    def invalid_output(run_request: object) -> NOOARunResult:
+        result = runner_result(run_request)
+        result.return_value = None
+        result.termination_reason = "invalid_policy_output"
+        result.termination_error = "Gym model returned invalid Answer JSON"
+        return result
+
+    agent.runner.run = AsyncMock(side_effect=invalid_output)
+
+    result = await agent.run(request(), Response(), body())
+
+    assert result.reward == 0.0
+    assert NG_FAILURE_CLASS_KEY not in result.model_extra
+    assert result.model_extra[NOOA_TERMINATION_REASON_KEY] == "invalid_policy_output"
+    assert result.ng_agent_observations.gaps[0].code == "invalid_policy_output"
+    assert [call.kwargs["url_path"] for call in client.post.await_args_list] == ["/seed_session", "/verify"]
+
+
+@pytest.mark.asyncio
 async def test_whole_run_timeout_is_terminal() -> None:
     agent, _ = make_agent()
     agent.config.run_timeout_secs = 0.001
@@ -226,6 +316,25 @@ async def test_whole_run_timeout_is_terminal() -> None:
 
     assert result.model_extra[NG_FAILURE_CLASS_KEY] == "timeout_exceeded"
     assert result.model_extra[NG_TERMINAL_KEY] is True
+
+
+@pytest.mark.asyncio
+async def test_slow_verification_is_outside_episode_timeout_budget() -> None:
+    agent, client = make_agent()
+    agent.config.run_timeout_secs = 0.001
+    responses = client.post.side_effect
+
+    async def delayed_verify(*args: object, **kwargs: object) -> FakeHTTPResponse:
+        if kwargs["url_path"] == "/verify":
+            await asyncio.sleep(0.01)
+        return next(responses)
+
+    object.__setattr__(client, "post", AsyncMock(side_effect=delayed_verify))
+
+    result = await agent.run(request(), Response(), body())
+
+    assert result.reward == 1.0
+    assert NG_FAILURE_CLASS_KEY not in result.model_extra
 
 
 @pytest.mark.asyncio

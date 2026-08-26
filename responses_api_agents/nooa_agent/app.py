@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from typing import Any
 from uuid import uuid4
 
@@ -41,6 +42,33 @@ from responses_api_agents.nooa_agent.runner import EmbeddedNOOARunner, NOOARunRe
 
 NOOA_TERMINATION_REASON_KEY = "nooa_termination_reason"
 NOOA_TERMINATION_ERROR_KEY = "nooa_termination_error"
+
+
+class _TransientInfrastructureError(RuntimeError):
+    """Marks a retryable failure from a downstream service."""
+
+
+class _EpisodeTimeoutExceeded(TimeoutError):
+    """Marks expiration of the configured NOOA episode budget."""
+
+
+def _is_transient_infrastructure_error(error: BaseException) -> bool:
+    """Apply Stirrup's retry policy to downstream HTTP and connection failures."""
+
+    try:
+        import aiohttp
+
+        if isinstance(error, aiohttp.ClientResponseError):
+            return 500 <= error.status < 600
+        if isinstance(error, aiohttp.ClientConnectionError):
+            return True
+    except ImportError:  # pragma: no cover - aiohttp is a core dependency
+        pass
+    if isinstance(error, (TimeoutError, ConnectionError)):
+        return True
+    if error.__cause__ is not None and _is_transient_infrastructure_error(error.__cause__):
+        return True
+    return error.__context__ is not None and _is_transient_infrastructure_error(error.__context__)
 
 
 class NOOAAgentRunRequest(BaseRunRequest):
@@ -96,16 +124,18 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         self,
         body: NOOAAgentRunRequest,
         *,
+        model_url_path: str,
         model_cookies: dict[str, str],
         resource_cookies: dict[str, str],
+        rollout_id: str | None = None,
     ) -> tuple[NeMoGymResponse, AgentObservationBundle, NOOARunResult]:
-        rollout_id = maybe_rollout_id_from_run_body(body) or uuid4().hex
+        rollout_id = rollout_id or maybe_rollout_id_from_run_body(body) or uuid4().hex
         result = await self.runner.run(
             NOOARunRequest(
                 row=body,
                 rollout_id=rollout_id,
                 task_id=_task_id(body),
-                model_url_path=self.url_path_for_run("/v1/responses", body),
+                model_url_path=model_url_path,
                 model_cookies=model_cookies,
                 resource_cookies=resource_cookies,
             )
@@ -120,6 +150,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
             model_ref=self.config.model_server,
             termination_reason=result.termination_reason,
             termination_error=result.termination_error,
+            observation_gaps=result.observation_gaps,
         )
         return response, observations, result
 
@@ -131,12 +162,16 @@ class NOOAAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         run_body = NOOAAgentRunRequest(responses_create_params=body)
         cookies = dict(request.cookies)
+        path_params = getattr(request, "path_params", None)
+        rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
         try:
             async with self.sem, asyncio.timeout(self.config.run_timeout_secs):
                 projected, _, run_result = await self._episode(
                     run_body,
+                    model_url_path=self.url_path_for_request("/v1/responses", request),
                     model_cookies=dict(cookies),
                     resource_cookies=dict(cookies),
+                    rollout_id=rollout_id if isinstance(rollout_id, str) else None,
                 )
         except ValueError as error:
             raise HTTPException(
@@ -155,12 +190,19 @@ class NOOAAgent(SimpleResponsesAPIAgent):
     ) -> NOOAAgentVerifyResponse:
         record = body.model_dump()
         try:
-            async with self.sem, asyncio.timeout(self.config.run_timeout_secs):
+            async with self.sem:
                 result = await self._run_once(request, body, record)
-        except TimeoutError:
+        except _TransientInfrastructureError as error:
+            cause = error.__cause__ or error
             result = self._failure_response(
                 record,
-                f"/run exceeded run_timeout_secs={self.config.run_timeout_secs}s",
+                f"{type(cause).__name__}: {cause}",
+                failure_class="transient",
+            )
+        except _EpisodeTimeoutExceeded:
+            result = self._failure_response(
+                record,
+                f"NOOA episode exceeded run_timeout_secs={self.config.run_timeout_secs}s",
                 failure_class="timeout_exceeded",
                 terminal=True,
             )
@@ -181,6 +223,21 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         body: NOOAAgentRunRequest,
         record: dict[str, Any],
     ) -> NOOAAgentVerifyResponse:
+        try:
+            return await self._run_once_unclassified(request, body, record)
+        except _EpisodeTimeoutExceeded:
+            raise
+        except Exception as error:
+            if _is_transient_infrastructure_error(error):
+                raise _TransientInfrastructureError(str(error)) from error
+            raise
+
+    async def _run_once_unclassified(
+        self,
+        request: Request,
+        body: NOOAAgentRunRequest,
+        record: dict[str, Any],
+    ) -> NOOAAgentVerifyResponse:
         resource_cookies = dict(request.cookies)
         seed = await self.server_client.post(
             server_name=self.config.resources_server.name,
@@ -191,11 +248,18 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         await raise_for_status(seed)
         _merge_cookies(resource_cookies, seed)
 
-        projected, observations, run_result = await self._episode(
-            body,
-            model_cookies=dict(request.cookies),
-            resource_cookies=resource_cookies,
-        )
+        try:
+            async with asyncio.timeout(self.config.run_timeout_secs) as episode_timeout:
+                projected, observations, run_result = await self._episode(
+                    body,
+                    model_url_path=self.url_path_for_run("/v1/responses", body),
+                    model_cookies=dict(request.cookies),
+                    resource_cookies=resource_cookies,
+                )
+        except TimeoutError as error:
+            if not episode_timeout.expired():
+                raise
+            raise _EpisodeTimeoutExceeded from error
         response_json = projected.model_dump(mode="json")
         if self.config.skip_verification:
             result: dict[str, Any] = record | {

@@ -28,7 +28,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseFunctionToolCallForTraining,
 )
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig
-from responses_api_agents.nooa_agent.gym_llm import PolicyCallBudgetExceeded
+from responses_api_agents.nooa_agent.gym_llm import InvalidPolicyOutputError, PolicyCallBudgetExceeded
 from responses_api_agents.nooa_agent.runner import EmbeddedNOOARunner, NOOARunRequest
 
 
@@ -59,6 +59,11 @@ class BudgetExhaustedAgent(FakeAgent):
     async def analyze(self, text: str, customer_id: str) -> str:
         await self.gym_tools.get_weather(city=customer_id)
         raise PolicyCallBudgetExceeded("NOOA policy call budget exhausted after 1 calls")
+
+
+class InvalidOutputAgent(FakeAgent):
+    async def analyze(self, text: str, customer_id: str) -> str:
+        raise InvalidPolicyOutputError("Gym model returned invalid Answer JSON")
 
 
 class FakeEventManager:
@@ -206,6 +211,25 @@ async def test_policy_budget_exhaustion_returns_partial_execution() -> None:
     assert "exhausted after 1 calls" in result.termination_error
     assert result.tool_executions[0].name == "get_weather"
     assert [event.kind for event in result.timeline] == ["tool"]
+
+
+@pytest.mark.asyncio
+async def test_invalid_policy_output_returns_counted_termination() -> None:
+    runner, _ = make_runner()
+    runner._agent_class = InvalidOutputAgent
+
+    result = await runner.run(
+        NOOARunRequest(
+            row=row("Paris"),
+            rollout_id="invalid-output",
+            task_id="task",
+            model_url_path="/invalid-output/v1/responses",
+        )
+    )
+
+    assert result.return_value is None
+    assert result.termination_reason == "invalid_policy_output"
+    assert "invalid Answer JSON" in result.termination_error
 
 
 @pytest.mark.asyncio

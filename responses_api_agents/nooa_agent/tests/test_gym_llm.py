@@ -27,7 +27,12 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
 )
-from responses_api_agents.nooa_agent.gym_llm import GymResponsesLLM, PolicyCallBudgetExceeded
+from nemo_gym.rollout_observability import ObservationGap
+from responses_api_agents.nooa_agent.gym_llm import (
+    GymResponsesLLM,
+    InvalidPolicyOutputError,
+    PolicyCallBudgetExceeded,
+)
 
 
 class FakeContent:
@@ -73,7 +78,12 @@ def model_response(*outputs: object, response_id: str = "resp-1") -> dict:
     ).model_dump(mode="json")
 
 
-def make_llm(payload: dict, *, max_steps: int = 2) -> tuple[GymResponsesLLM, MagicMock, list[NeMoGymResponse]]:
+def make_llm(
+    payload: dict,
+    *,
+    max_steps: int = 2,
+    observation_gaps: list[ObservationGap] | None = None,
+) -> tuple[GymResponsesLLM, MagicMock, list[NeMoGymResponse]]:
     server_client = MagicMock()
     server_client.post = AsyncMock(return_value=FakeHTTPResponse(payload))
     collected: list[NeMoGymResponse] = []
@@ -84,6 +94,7 @@ def make_llm(payload: dict, *, max_steps: int = 2) -> tuple[GymResponsesLLM, Mag
         max_steps=max_steps,
         response_collector=collected,
         cookies={},
+        observation_gaps=observation_gaps,
     )
     return llm, server_client, collected
 
@@ -139,6 +150,58 @@ async def test_preserves_function_call_token_metadata() -> None:
     assert result.assistant_message["_batch"][0]["generation_token_ids"] == [11, 12]
 
 
+@pytest.mark.parametrize(
+    "normalized_content",
+    [
+        "Cold",
+        [{"type": "text", "text": "Cold"}],
+        [{"type": "input_text", "text": "Cold"}],
+    ],
+)
+@pytest.mark.asyncio
+async def test_restores_message_token_metadata_from_normalized_content(normalized_content: object) -> None:
+    output = NeMoGymResponseOutputMessageForTraining(
+        id="msg-1",
+        content=[NeMoGymResponseOutputText(annotations=[], text="Cold")],
+        prompt_token_ids=[1, 2],
+        generation_token_ids=[3],
+        generation_log_probs=[-0.2],
+    )
+    gaps: list[ObservationGap] = []
+    llm, client, _ = make_llm(model_response(output), observation_gaps=gaps)
+
+    await llm.acall([{"role": "user", "content": "Weather?"}])
+    await llm.acall([{"role": "assistant", "content": normalized_content}])
+
+    restored = client.post.await_args_list[1].kwargs["json"].input[0]
+    assert restored.id == "msg-1"
+    assert restored.prompt_token_ids == [1, 2]
+    assert restored.generation_token_ids == [3]
+    assert restored.generation_log_probs == [-0.2]
+    assert gaps == []
+
+
+@pytest.mark.asyncio
+async def test_records_gap_when_prior_message_token_metadata_cannot_be_restored() -> None:
+    output = NeMoGymResponseOutputMessageForTraining(
+        id="msg-1",
+        content=[NeMoGymResponseOutputText(annotations=[], text="Cold")],
+        prompt_token_ids=[1, 2],
+        generation_token_ids=[3],
+        generation_log_probs=[-0.2],
+    )
+    gaps: list[ObservationGap] = []
+    llm, client, _ = make_llm(model_response(output), observation_gaps=gaps)
+
+    await llm.acall([{"role": "user", "content": "Weather?"}])
+    await llm.acall([{"role": "assistant", "content": "Rewritten: Cold"}])
+
+    unrestored = client.post.await_args_list[1].kwargs["json"].input[0]
+    assert not hasattr(unrestored, "generation_token_ids")
+    assert [gap.code for gap in gaps] == ["prior_output_metadata_unrestored"]
+    assert "generated tokens may be masked" in gaps[0].detail
+
+
 @pytest.mark.asyncio
 async def test_structured_output_schema_and_parsing() -> None:
     output = NeMoGymResponseOutputMessageForTraining(
@@ -154,6 +217,23 @@ async def test_structured_output_schema_and_parsing() -> None:
 
     assert result.content == StructuredAnswer(verdict="positive")
     assert client.post.await_args.kwargs["json"].text["format"]["name"] == "StructuredAnswer"
+
+
+@pytest.mark.asyncio
+async def test_invalid_structured_output_is_identified_as_policy_output() -> None:
+    output = NeMoGymResponseOutputMessageForTraining(
+        id="msg-1",
+        content=[NeMoGymResponseOutputText(annotations=[], text="not JSON")],
+        prompt_token_ids=[1],
+        generation_token_ids=[2],
+        generation_log_probs=[-0.1],
+    )
+    llm, _, collected = make_llm(model_response(output))
+
+    with pytest.raises(InvalidPolicyOutputError, match="invalid StructuredAnswer JSON"):
+        await llm.acall([{"role": "user", "content": "Classify"}], output_model=StructuredAnswer)
+
+    assert collected[0].output[0].generation_token_ids == [2]
 
 
 @pytest.mark.asyncio

@@ -91,6 +91,7 @@ def project_nooa_result(
     model_ref: ModelServerRef,
     termination_reason: str | None = None,
     termination_error: str | None = None,
+    observation_gaps: list[ObservationGap] | None = None,
 ) -> tuple[NeMoGymResponse, AgentObservationBundle]:
     """Project embedded execution into Responses output and normalized observations."""
 
@@ -120,7 +121,7 @@ def project_nooa_result(
                 ]
             )
 
-    gaps: list[ObservationGap] = []
+    gaps = list(observation_gaps or [])
     if termination_reason is not None:
         gaps.append(
             ObservationGap(
