@@ -202,13 +202,38 @@ class TestRolloutMCPServers:
                 "created_at": 1,
                 "model": "model",
                 "object": "response",
-                "output": [],
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call-1",
+                        "name": "mcp__example_mcp_weather__get_weather",
+                        "arguments": '{"city":"Seattle"}',
+                    }
+                ],
                 "parallel_tool_calls": True,
                 "tool_choice": "auto",
                 "tools": [],
             }
         )
-        create_response = AsyncMock(return_value=response)
+
+        async def create_response(*args, mcp_tool_aliases=None, provenance_collector=None, **kwargs):
+            assert mcp_tool_aliases == {
+                "mcp__example_mcp_weather__get_weather": {
+                    "server_name": "example_mcp_weather",
+                    "tool_name": "get_weather",
+                }
+            }
+            provenance_collector(
+                {
+                    "call-1": {
+                        "server_name": "example_mcp_weather",
+                        "tool_name": "get_weather",
+                    }
+                }
+            )
+            return response
+
+        create_response = AsyncMock(side_effect=create_response)
         monkeypatch.setattr(agent, "_create_response", create_response)
         captured: dict = {}
 
@@ -221,6 +246,7 @@ class TestRolloutMCPServers:
                             "url_path": "/mcp",
                             "transport": "http",
                             "headers": {"X-NeMo-Gym-Session-Token": "rollout-token"},
+                            "tool_names": ["get_weather"],
                         }
                     },
                     {"session": "rollout-cookie"},
@@ -245,6 +271,18 @@ class TestRolloutMCPServers:
             }
         }
         assert captured["verify_cookies"] == {"session": "rollout-cookie"}
+        assert agent.server_client.post.await_args_list[-1].kwargs["json"]["mcp_tool_call_provenance"] == {
+            "call-1": {
+                "server_name": "example_mcp_weather",
+                "tool_name": "get_weather",
+            }
+        }
+        assert result.mcp_tool_call_provenance == {
+            "call-1": {
+                "server_name": "example_mcp_weather",
+                "tool_name": "get_weather",
+            }
+        }
 
 
 class _FakeProcess:
@@ -592,6 +630,69 @@ class TestResponsesConversion:
         assert response.output[0].name == "terminal"
         assert response.output[1].output == "/workspace"
         assert response.output[2].content[0].text == "done"
+
+    def test_collects_structured_mcp_provenance_from_projected_response(self, monkeypatch) -> None:
+        import nemo_gym.base_responses_api_agent as base_agent
+
+        monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _gc, _name: {"host": "h", "port": 1})
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {}
+        server_client._build_server_base_url = lambda _cfg: "http://h:1"
+        agent = HermesAgent(config=_config(), server_client=server_client)
+
+        async def run_runtime(payload, *, mcp_servers=None):
+            return (
+                {
+                    "messages": [
+                        {"role": "user", "content": payload["user_message"]},
+                        {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "mcp-call",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "tool_call",
+                                        "arguments": (
+                                            '{"name":"mcp__workplace__reply","arguments":{"body":"Thanks"}}'
+                                        ),
+                                    },
+                                }
+                            ],
+                        },
+                        {"role": "tool", "tool_call_id": "mcp-call", "content": "ok"},
+                        {"role": "assistant", "content": "done"},
+                    ]
+                },
+                None,
+            )
+
+        monkeypatch.setattr(agent, "_run_hermes_subprocess", run_runtime)
+        captured: dict[str, dict[str, str]] = {}
+        body = NeMoGymResponseCreateParamsNonStreaming.model_validate({"input": "reply"})
+
+        response = asyncio.run(
+            agent._create_response(
+                body,
+                mcp_servers={"workplace": {"url": "http://resources/mcp"}},
+                mcp_tool_aliases={
+                    "mcp__workplace__reply": {
+                        "server_name": "workplace",
+                        "tool_name": "reply",
+                    }
+                },
+                provenance_collector=captured.update,
+            )
+        )
+
+        assert response.output[0].name == "mcp__workplace__reply"
+        assert captured == {
+            "mcp-call": {
+                "server_name": "workplace",
+                "tool_name": "reply",
+            }
+        }
 
 
 class TestRolloutCorrelation:

@@ -100,6 +100,11 @@ Resources-server MCP tools coexist with Hermes's built-in toolsets (terminal, fi
 Hermes exposes each MCP tool to the model as `mcp__<server>__<tool>`. Resources servers that do not return MCP metadata
 retain the verifier-only behavior.
 
+When the seed metadata advertises the server's tool names, the agent also records each executed MCP call's raw
+`server_name` and `tool_name` in `mcp_tool_call_provenance`, keyed by the Responses API `call_id`. Verification and
+reverification can therefore use the canonical identity without parsing Hermes's model-facing alias. Built-in tools
+and MCP calls from other servers are not attributed to the rollout resources server.
+
 ## Configuration example
 
 ```yaml
