@@ -22,6 +22,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import yaml
 
+from nemo_gym.base_resources_server import MCPToolCallProvenance
+from nemo_gym.mcp import AgentExecutionResult, parse_rollout_mcp_server
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -39,6 +41,14 @@ from responses_api_agents.hermes_agent.app import (
 )
 from responses_api_agents.hermes_agent.observability import build_hermes_observations
 from responses_api_agents.hermes_agent.setup_hermes import HERMES_COMMIT, HERMES_RELEASE, HERMES_VERSION
+
+
+def _parse_mcp_seed(seed: dict):
+    return parse_rollout_mcp_server(
+        seed,
+        resources_server_name="example_mcp_weather",
+        resources_server_base_url="http://127.0.0.1:8123",
+    )
 
 
 class _FakeResponse:
@@ -125,20 +135,22 @@ class TestRolloutMCPServers:
 
     def test_no_metadata_preserves_verifier_only_behavior(self) -> None:
         agent = self._agent_with_resources_server()
-        assert agent._hermes_mcp_servers_from_seed({}) is None
+        assert agent._hermes_mcp_servers(None) is None
         assert "mcp_servers" not in yaml.safe_load(agent._build_config())
 
     def test_builds_streamable_http_entry_with_session_header(self) -> None:
         agent = self._agent_with_resources_server()
-        servers = agent._hermes_mcp_servers_from_seed(
-            {
-                "mcp": {
-                    "server_name": "example_mcp_weather",
-                    "url_path": "/mcp",
-                    "transport": "http",
-                    "headers": {"X-NeMo-Gym-Session-Token": "secret-token"},
+        servers = agent._hermes_mcp_servers(
+            _parse_mcp_seed(
+                {
+                    "mcp": {
+                        "server_name": "example_mcp_weather",
+                        "url_path": "/mcp",
+                        "transport": "http",
+                        "headers": {"X-NeMo-Gym-Session-Token": "secret-token"},
+                    }
                 }
-            }
+            )
         )
 
         assert servers == {
@@ -152,18 +164,20 @@ class TestRolloutMCPServers:
     def test_rejects_non_http_transport(self) -> None:
         agent = self._agent_with_resources_server()
         with pytest.raises(ValueError, match="not supported"):
-            agent._hermes_mcp_servers_from_seed({"mcp": {"transport": "stdio"}})
+            agent._hermes_mcp_servers(_parse_mcp_seed({"mcp": {"transport": "stdio"}}))
 
     def test_preserves_sse_transport(self) -> None:
         agent = self._agent_with_resources_server()
-        servers = agent._hermes_mcp_servers_from_seed(
-            {
-                "mcp": {
-                    "server_name": "example_mcp_weather",
-                    "transport": "sse",
-                    "headers": {"X-NeMo-Gym-Session-Token": "token"},
+        servers = agent._hermes_mcp_servers(
+            _parse_mcp_seed(
+                {
+                    "mcp": {
+                        "server_name": "example_mcp_weather",
+                        "transport": "sse",
+                        "headers": {"X-NeMo-Gym-Session-Token": "token"},
+                    }
                 }
-            }
+            )
         )
 
         assert servers["example_mcp_weather"]["transport"] == "sse"
@@ -179,16 +193,13 @@ class TestRolloutMCPServers:
         ],
     )
     def test_rejects_malformed_metadata(self, metadata) -> None:
-        agent = self._agent_with_resources_server()
         with pytest.raises(ValueError):
-            agent._hermes_mcp_servers_from_seed({"mcp": metadata})
+            _parse_mcp_seed({"mcp": metadata})
 
     def test_rejects_malformed_headers_without_exposing_token(self, caplog) -> None:
         secret = "do-not-log-this-token"  # pragma: allowlist secret
-        agent = self._agent_with_resources_server()
-
         with pytest.raises(ValueError) as exc_info:
-            agent._hermes_mcp_servers_from_seed({"mcp": {"headers": {"Authorization": {"token": secret}}}})
+            _parse_mcp_seed({"mcp": {"headers": {"Authorization": {"token": secret}}}})
 
         assert "scalar values" in str(exc_info.value)
         assert secret not in str(exc_info.value)
@@ -216,7 +227,17 @@ class TestRolloutMCPServers:
             }
         )
 
-        create_response = AsyncMock(return_value=response)
+        create_response = AsyncMock(
+            return_value=AgentExecutionResult(
+                response=response,
+                mcp_tool_call_provenance={
+                    "call-1": MCPToolCallProvenance(
+                        server_name="example_mcp_weather",
+                        tool_name="get_weather",
+                    )
+                },
+            )
+        )
         monkeypatch.setattr(agent, "_create_response", create_response)
         captured: dict = {}
 
@@ -604,7 +625,7 @@ class TestResponsesConversion:
             }
         )
 
-        response = asyncio.run(agent._create_response(body))
+        response = asyncio.run(agent._create_response(body)).response
 
         assert seen["user_message"] == "where am I?"
         assert [message["role"] for message in seen["history"]] == ["user", "assistant", "tool"]
