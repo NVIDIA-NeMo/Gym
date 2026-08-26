@@ -57,6 +57,10 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       docs_only: ${{ steps.changes.outputs.docs_only }}
+      # Single source of truth for "is this a periodic/on-demand run" -
+      # referenced by container_build/gpu_e2e_tests/provider_e2e_tests,
+      # Nemo_CICD_Test, and notify-failure instead of each re-deriving it.
+      is_nightly: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -91,7 +95,7 @@ jobs:
     # docs-only latest commit, so that's tolerated too.
     if: >-
       ${{
-        (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+        needs.classify_changes.outputs.is_nightly == 'true' &&
         needs.pre-flight.result == 'success' &&
         needs.classify_changes.result == 'success' &&
         (needs.unit_tests.result == 'success' || needs.unit_tests.result == 'skipped')
@@ -160,7 +164,7 @@ jobs:
     # the push itself failed.
     if: >-
       ${{
-        (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+        needs.classify_changes.outputs.is_nightly == 'true' &&
         needs.pre-flight.result == 'success' &&
         needs.classify_changes.result == 'success' &&
         (needs.unit_tests.result == 'success' || needs.unit_tests.result == 'skipped') &&
@@ -211,7 +215,7 @@ jobs:
     # container_build dependency), so only those two are checked here.
     if: >-
       ${{
-        (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+        needs.classify_changes.outputs.is_nightly == 'true' &&
         needs.classify_changes.result == 'success' &&
         (needs.unit_tests.result == 'success' || needs.unit_tests.result == 'skipped')
       }}
@@ -265,6 +269,7 @@ jobs:
         shell: bash -e -u -o pipefail {0}
         env:
           EVENT_NAME: ${{ github.event_name }}
+          IS_NIGHTLY: ${{ needs.classify_changes.outputs.is_nightly }}
           CLASSIFY_RESULT: ${{ needs.classify_changes.result }}
           DOCS_ONLY: ${{ needs.classify_changes.outputs.docs_only }}
           PREFLIGHT_RESULT: ${{ needs.pre-flight.result }}
@@ -292,7 +297,7 @@ jobs:
             exit 1
           fi
 
-          if [[ "$EVENT_NAME" == "schedule" || "$EVENT_NAME" == "workflow_dispatch" ]]; then
+          if [[ "$IS_NIGHTLY" == "true" ]]; then
             # Nightly/manual runs always fall through to the nightly-job gate
             # below, regardless of docs_only classification - unit_tests may
             # legitimately be skipped if the latest commit happens to be
@@ -335,12 +340,12 @@ jobs:
   notify-failure:
     name: Notify test failure
     runs-on: ubuntu-latest
-    needs: [container_build, gpu_e2e_tests, provider_e2e_tests, Nemo_CICD_Test]
+    needs: [classify_changes, container_build, gpu_e2e_tests, provider_e2e_tests, Nemo_CICD_Test]
     environment: main
     if: >-
       ${{
         always() && !cancelled() &&
-        (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+        needs.classify_changes.outputs.is_nightly == 'true' &&
         needs.Nemo_CICD_Test.result == 'failure' &&
         (github.event_name != 'workflow_dispatch' || inputs.send_notification)
       }}

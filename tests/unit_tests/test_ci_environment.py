@@ -263,7 +263,7 @@ def test_cicd_summary_accepts_only_expected_docs_only_skips() -> None:
     assert '"$PREFLIGHT_RESULT" != "success"' in workflow
     assert '"$CLASSIFY_RESULT" != "success"' in workflow
     assert '"$DOCS_ONLY" == "true"' in workflow
-    assert '"$EVENT_NAME" == "schedule" || "$EVENT_NAME" == "workflow_dispatch"' in workflow
+    assert '"$IS_NIGHTLY" == "true"' in workflow
     assert "PROVIDER_E2E_TEST_RESULT: ${{ needs.provider_e2e_tests.result }}" in workflow
     assert '"$UNIT_TEST_RESULT" != "success" && "$UNIT_TEST_RESULT" != "skipped"' in workflow
 
@@ -332,7 +332,8 @@ _ALL_SUCCESS_RESULTS = {
 def test_nemo_cicd_test_gate_matches_event_and_job_results(
     event_name: str, overrides: dict[str, str], expect_success: bool
 ) -> None:
-    env = {"EVENT_NAME": event_name, **_ALL_SUCCESS_RESULTS, **overrides}
+    is_nightly = "true" if event_name in ("schedule", "workflow_dispatch") else "false"
+    env = {"EVENT_NAME": event_name, "IS_NIGHTLY": is_nightly, **_ALL_SUCCESS_RESULTS, **overrides}
 
     result = _run_step("Nemo_CICD_Test", "Check test results", env)
 
@@ -344,7 +345,14 @@ def test_cicd_nightly_jobs_require_upstream_success() -> None:
 
     # A job's own `if:` replaces (not ANDs with) the implicit success()-of-
     # needs check, so container_build/gpu_e2e_tests/provider_e2e_tests must
-    # explicitly check needs.*.result themselves.
+    # explicitly check needs.*.result themselves. `is_nightly` is a single
+    # source of truth on classify_changes, referenced by all four downstream
+    # jobs (container_build, gpu_e2e_tests, provider_e2e_tests, notify-failure)
+    # instead of each re-deriving github.event_name == 'schedule' || ... .
+    assert workflow.count("needs.classify_changes.outputs.is_nightly == 'true'") == 4
+    assert "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'" not in workflow.replace(
+        "is_nightly: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}", ""
+    )
     assert "needs.pre-flight.result == 'success' &&" in workflow
     assert workflow.count("needs.classify_changes.result == 'success' &&") == 3
     assert (
