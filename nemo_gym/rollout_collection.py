@@ -831,7 +831,7 @@ class RolloutCollectionHelper(BaseModel):
             # Returned rows are sorted by (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
 
             with config.materialized_jsonl_fpath.open("wb") as f:
-                for row in input_rows:
+                for row in tqdm(input_rows, desc="Writing materialized rows"):
                     f.write(orjson.dumps(row) + b"\n")
 
             output_fpath.unlink(missing_ok=True)
