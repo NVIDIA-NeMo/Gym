@@ -30,6 +30,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ModelCallRef, SandboxObservation
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.swe_agents.app import (
     ActiveContainerCommand,
@@ -44,6 +45,7 @@ from responses_api_agents.swe_agents.app import (
     SweBenchDatasetProcessor,
     SWEBenchMetrics,
     SweBenchMultilingualDatasetProcessor,
+    SWEBenchRunRequest,
     SWEBenchVerifyResponse,
     SWEBenchWrapper,
     SWEBenchWrapperConfig,
@@ -57,6 +59,7 @@ from responses_api_agents.swe_agents.app import (
     runner_ray_remote,
     update_and_read_metrics,
 )
+from responses_api_agents.swe_agents.observability import OBSERVATIONS_FILENAME, sandbox_observations_from_metrics
 
 
 SWE_AGENTS_DIR = Path(__file__).resolve().parent.parent
@@ -343,6 +346,12 @@ class TestSWEBenchWrapperInstanceConfig:
             assert config.resolved_agent_cls == "CodeActAgent"
             assert config.resolved_diversify_tool_names is False
             assert config.resolved_camel_case_tool_names is False
+            serialized = config.model_dump()
+            assert "rollout_id" not in serialized
+            assert serialized["token_id_capture_enabled"] is False
+
+            restored = SWEBenchWrapperInstanceConfig.model_validate(serialized)
+            assert restored.token_id_capture_enabled is False
 
 
 class TestSWEBenchMetrics:
@@ -359,6 +368,34 @@ class TestSWEBenchMetrics:
         assert metrics.resolved is True
         assert metrics.ray_queue_time == 1.5
 
+    def test_maps_explicit_sandbox_metrics_without_inferring_cpu_or_oom(self) -> None:
+        observations = sandbox_observations_from_metrics(
+            SWEBenchMetrics(
+                openhands_run_time=12.5,
+                agent_peak_rss_mb=2048,
+                final_eval_time=3.0,
+                eval_timed_out=True,
+            )
+        )
+
+        assert [(item.role, item.outcome) for item in observations] == [
+            ("agent", "unknown"),
+            ("verifier", "timeout"),
+        ]
+        assert observations[0].wall_time_s == 12.5
+        assert observations[0].peak_memory_mib == 2048
+        assert observations[0].sandbox_id is None
+        assert observations[0].cpu_time_s is None
+        assert observations[0].resource_usage_source == "proc_tree_watchdog"
+        assert observations[1].wall_time_s == 3.0
+        assert observations[1].peak_memory_mib is None
+
+    def test_explicit_oom_takes_precedence_over_timeout(self) -> None:
+        [observation] = sandbox_observations_from_metrics(SWEBenchMetrics(agent_timed_out=True, oom_killed=True))
+
+        assert observation.role == "agent"
+        assert observation.outcome == "oom"
+
 
 class TestSWEBenchVerifyResponse:
     def test_fields_exist(self) -> None:
@@ -367,6 +404,11 @@ class TestSWEBenchVerifyResponse:
         assert "patch_exists" in fields
         assert "instance_config" in fields
         assert "subagent_trajectories" in fields
+
+    def test_optional_observations_are_excluded_when_disabled(self) -> None:
+        response = SWEBenchVerifyResponse.model_construct(ng_agent_observations=None)
+
+        assert "ng_agent_observations" not in response.model_dump()
 
 
 ########################################
@@ -1218,6 +1260,33 @@ class TestOpenCodeHarnessProcessor:
             assert "--max-turns" not in script  # max_turns is positional
             assert str(config.agent_max_turns) in script
 
+    @pytest.mark.parametrize(
+        ("rollout_id", "token_id_capture_enabled", "expected_base_url"),
+        [
+            (None, False, "http://test-host:12345"),
+            ("7-2", False, "http://test-host:12345/ng-rollout/7-2"),
+            ("7-2", True, "http://test-host:12345/ng-rollout/7-2/training-token-capture"),
+        ],
+        ids=("disabled", "observability", "token-capture"),
+    )
+    def test_get_run_command_routes_each_capture_state(
+        self,
+        _stub_model_server_lookup,
+        rollout_id: str | None,
+        token_id_capture_enabled: bool,
+        expected_base_url: str,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._opencode_config(
+                tmpdir,
+                rollout_id=rollout_id,
+                token_id_capture_enabled=token_id_capture_enabled,
+            )
+            OpenCodeHarnessProcessor(config=config).get_run_command()
+
+            script = self._read_agent_script(config)
+            assert f"NEMO_GYM_MODEL_SERVER_BASE_URL={expected_base_url}" in script
+
     def test_get_run_command_subagents_disabled_by_default(self, _stub_model_server_lookup) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = self._opencode_config(tmpdir)
@@ -1341,13 +1410,24 @@ class TestExtractInstanceDict:
 ########################################
 
 
-def _write_completion(path: Path, *, session_id, parent_session_id, turn, content_text="hello"):
+def _write_completion(
+    path: Path,
+    *,
+    session_id,
+    parent_session_id,
+    turn,
+    content_text="hello",
+    response_id=None,
+):
     path.parent.mkdir(parents=True, exist_ok=True)
+    response = {"choices": [{"message": {"role": "assistant", "content": content_text}}]}
+    if response_id is not None:
+        response["id"] = response_id
     path.write_text(
         json.dumps(
             {
                 "messages": [{"role": "user", "content": "Fix bug"}],
-                "response": {"choices": [{"message": {"role": "assistant", "content": content_text}}]},
+                "response": response,
                 "provider_specific_fields": {"prompt_token_ids": [1, 2, 3]},
                 "kwargs": {"tools": [{"name": "edit"}]},
                 "session_id": session_id,
@@ -1363,7 +1443,7 @@ class TestOpencodeMultiSessionCopy:
     """`_openhands_dir_copy_from_host` must keep latest-per-session, not just one
     global latest, when the opencode bench writes session-tagged JSONs."""
 
-    def _agent(self, tmpdir) -> RunOpenHandsAgent:
+    def _agent(self, tmpdir, **overrides) -> RunOpenHandsAgent:
         opencode_setup_dir = Path(tmpdir) / "opencode_setup"
         opencode_setup_dir.mkdir(parents=True, exist_ok=True)
         cfg = _make_instance_config(
@@ -1372,6 +1452,7 @@ class TestOpencodeMultiSessionCopy:
             opencode_setup_dir=opencode_setup_dir,
             agent_framework_repo="https://example.invalid/opencode.git",
             agent_framework_commit="deadbeef",
+            **overrides,
         )
         return RunOpenHandsAgent(config=cfg)
 
@@ -1447,6 +1528,86 @@ class TestOpencodeMultiSessionCopy:
 
             copied = sorted((traj_root / "llm_completions" / inst).glob("*.json"))
             assert [p.name for p in copied] == ["new.json"]
+            assert not (agent.config.persistent_dir / "agent_observations.json").exists()
+
+    def test_observation_failure_does_not_break_existing_copy_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            agent = self._agent(tmpdir, rollout_id="7-2")
+            eval_dir = self._eval_dir(agent)
+            inst = agent.config.instance_id
+            comp_root = eval_dir / inst / "bench_run" / "llm_completions" / inst
+            artifact = comp_root / "turn.json"
+            _write_completion(
+                artifact,
+                session_id="main",
+                parent_session_id=None,
+                turn=0,
+                response_id="resp-0",
+            )
+
+            with patch.object(swe_app, "build_swe_observations", side_effect=ValueError("invalid artifact")):
+                agent._openhands_dir_copy_from_host(output_file_path=None)
+
+            copied = agent.config.trajectories_root / "llm_completions" / inst / artifact.name
+            assert copied.is_file()
+            bundle = AgentObservationBundle.model_validate_json(
+                (agent.config.persistent_dir / "agent_observations.json").read_text()
+            )
+            assert [gap.code for gap in bundle.gaps] == ["observation_parse_failed"]
+
+    def test_persists_all_response_ids_before_source_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            agent = self._agent(tmpdir, rollout_id="7-2")
+            eval_dir = self._eval_dir(agent)
+            inst = agent.config.instance_id
+            comp_root = eval_dir / inst / "bench_run" / "llm_completions" / inst
+            _write_completion(
+                comp_root / "turn-0.json",
+                session_id="main",
+                parent_session_id=None,
+                turn=0,
+                response_id="resp-0",
+            )
+            _write_completion(
+                comp_root / "turn-1.json",
+                session_id="main",
+                parent_session_id=None,
+                turn=1,
+                response_id="resp-1",
+            )
+
+            agent._openhands_dir_copy_from_host(output_file_path=None)
+
+            assert not eval_dir.exists()
+            bundle = AgentObservationBundle.model_validate_json(
+                (agent.config.persistent_dir / "agent_observations.json").read_text()
+            )
+            [invocation] = [record for record in bundle.records if isinstance(record, AgentInvocation)]
+            assert [ref.response_id for ref in invocation.model_calls] == ["resp-0", "resp-1"]
+
+    def test_token_capture_only_builds_observation_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            agent = self._agent(tmpdir, rollout_id="7-2", token_id_capture_enabled=True)
+            eval_dir = self._eval_dir(agent)
+            inst = agent.config.instance_id
+            comp_root = eval_dir / inst / "bench_run" / "llm_completions" / inst
+            artifact = comp_root / "turn.json"
+            _write_completion(
+                artifact,
+                session_id="main",
+                parent_session_id=None,
+                turn=0,
+                response_id="resp-0",
+            )
+
+            agent._openhands_dir_copy_from_host(output_file_path=None)
+
+            assert (agent.config.trajectories_root / "llm_completions" / inst / artifact.name).is_file()
+            bundle = AgentObservationBundle.model_validate_json(
+                (agent.config.persistent_dir / "agent_observations.json").read_text()
+            )
+            [invocation] = [record for record in bundle.records if isinstance(record, AgentInvocation)]
+            assert [ref.response_id for ref in invocation.model_calls] == ["resp-0"]
 
 
 class TestGetOpenhandsTrajectoryFromCompletions:
@@ -2516,11 +2677,123 @@ class TestSWEBenchWrapperResponses:
                 with pytest.raises(RuntimeError, match="test error"):
                     await wrapper.responses(body)
 
+    @pytest.mark.parametrize(
+        ("rollout_id", "token_id_capture_enabled", "expects_observations"),
+        [
+            (None, False, False),
+            ("7-2", True, True),
+        ],
+        ids=("direct", "token-capture-only"),
+    )
+    @pytest.mark.asyncio
+    async def test_inner_responses_gates_observations_on_rollout_id(
+        self,
+        monkeypatch,
+        rollout_id: str | None,
+        token_id_capture_enabled: bool,
+        expects_observations: bool,
+    ) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        runner = MagicMock()
+        runner.remote = AsyncMock(return_value=None)
+        monkeypatch.setattr(swe_app, "runner_ray_remote", runner)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            params = _make_instance_config(
+                tmpdir,
+                rollout_id=rollout_id,
+                token_id_capture_enabled=token_id_capture_enabled,
+            )
+            params.metrics_fpath.write_text(json.dumps({"openhands_run_time": 1.0}))
+            observations = AgentObservationBundle(
+                source="swe_openhands",
+                records=[
+                    AgentInvocation(
+                        invocation_id="root",
+                        model_calls=[
+                            ModelCallRef(
+                                model_ref=params.model_server,
+                                response_id="resp-openhands-0",
+                            )
+                        ],
+                    )
+                ],
+            )
+            (params.persistent_dir / OBSERVATIONS_FILENAME).write_text(observations.model_dump_json())
+            monkeypatch.setattr(
+                SWEBenchWrapper,
+                "get_openhands_trajectory_from_completions",
+                MagicMock(return_value=([], [], 0)),
+            )
+
+            response = await wrapper._inner_responses(params, MagicMock())
+            serialized = response.metadata or {}
+
+            assert ("agent_observations" in serialized) is expects_observations
+            if expects_observations:
+                bundle = AgentObservationBundle.model_validate_json(serialized["agent_observations"])
+                [invocation] = [record for record in bundle.records if isinstance(record, AgentInvocation)]
+                assert [ref.response_id for ref in invocation.model_calls] == ["resp-openhands-0"]
+                assert "model_call_capture_correlation_unavailable" in {gap.code for gap in bundle.gaps}
+                [sandbox] = [record for record in bundle.records if isinstance(record, SandboxObservation)]
+                assert sandbox.role == "agent"
+                assert sandbox.sandbox_id is None
+                assert ("sandbox_identity_unavailable", "agent") in {(gap.code, gap.detail) for gap in bundle.gaps}
+
+    @pytest.mark.asyncio
+    async def test_inner_responses_invalid_sandbox_metrics_fail_open(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        monkeypatch.setattr(swe_app, "runner_ray_remote", MagicMock(remote=AsyncMock(return_value=None)))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            params = _make_instance_config(tmpdir, rollout_id="7-2")
+            params.metrics_fpath.write_text(json.dumps({"openhands_run_time": -1}))
+            monkeypatch.setattr(
+                SWEBenchWrapper,
+                "get_openhands_trajectory_from_completions",
+                MagicMock(return_value=([], [], 0)),
+            )
+
+            response = await wrapper._inner_responses(params, MagicMock())
+
+        bundle = AgentObservationBundle.model_validate_json(response.metadata["agent_observations"])
+        assert not any(isinstance(record, SandboxObservation) for record in bundle.records)
+        assert [gap.code for gap in bundle.gaps if gap.code.startswith("sandbox_")] == [
+            "sandbox_observation_unavailable"
+        ]
+
 
 class TestSWEBenchWrapperRun:
+    @pytest.mark.parametrize(
+        ("model_call_capture_enabled", "token_id_capture_enabled", "expected_rollout_id"),
+        [
+            (False, False, None),
+            (True, False, "7-2-a1"),
+            (False, True, "7-2-a1"),
+            (True, True, "7-2-a1"),
+        ],
+        ids=("disabled", "observability-only", "token-capture-only", "both"),
+    )
     @pytest.mark.asyncio
-    async def test_run_resolved(self, monkeypatch) -> None:
+    async def test_run_resolved_routes_each_capture_state(
+        self,
+        monkeypatch,
+        model_call_capture_enabled: bool,
+        token_id_capture_enabled: bool,
+        expected_rollout_id: str | None,
+    ) -> None:
         wrapper = _create_wrapper(monkeypatch)
+        wrapper.server_client.global_config_dict = {
+            "observability_enabled": model_call_capture_enabled,
+            "token_id_capture": {
+                "enabled": token_id_capture_enabled,
+                "all_agents": token_id_capture_enabled,
+            },
+        }
+        observations = AgentObservationBundle(
+            source="swe_opencode",
+            records=[AgentInvocation(invocation_id="main")],
+        )
 
         mock_response = NeMoGymResponse(
             id="swebench-test",
@@ -2535,13 +2808,14 @@ class TestSWEBenchWrapperRun:
                 "input": "[]",
                 "metrics": json.dumps({"resolved": True, "patch_exists": True}),
                 "instance_config": _make_instance_config(tempfile.mkdtemp()).model_dump_json(),
+                "agent_observations": observations.model_dump_json(),
             },
         )
 
-        with patch.object(SWEBenchWrapper, "responses", new_callable=AsyncMock, return_value=mock_response):
-            from nemo_gym.base_resources_server import BaseRunRequest
-
-            body = BaseRunRequest(
+        with patch.object(
+            SWEBenchWrapper, "_responses", new_callable=AsyncMock, return_value=mock_response
+        ) as responses_mock:
+            body = SWEBenchRunRequest(
                 responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
                     model="test-model",
                     input=[],
@@ -2553,12 +2827,20 @@ class TestSWEBenchWrapperRun:
                         "split": "test",
                         "instance_dict": "{}",
                     },
-                )
+                ),
+                _ng_task_index=7,
+                _ng_rollout_index=2,
+                _ng_attempt_index=1,
             )
 
             result = await wrapper.run(body)
             assert isinstance(result, SWEBenchVerifyResponse)
             assert result.reward == 1.0
+            assert result.ng_agent_observations == (observations if expected_rollout_id is not None else None)
+            assert responses_mock.await_args.args[1] == expected_rollout_id
+            assert responses_mock.await_args.kwargs == {
+                "token_id_capture_enabled": token_id_capture_enabled,
+            }
 
     @pytest.mark.asyncio
     async def test_run_not_resolved(self, monkeypatch) -> None:
@@ -2580,10 +2862,8 @@ class TestSWEBenchWrapperRun:
             },
         )
 
-        with patch.object(SWEBenchWrapper, "responses", new_callable=AsyncMock, return_value=mock_response):
-            from nemo_gym.base_resources_server import BaseRunRequest
-
-            body = BaseRunRequest(
+        with patch.object(SWEBenchWrapper, "_responses", new_callable=AsyncMock, return_value=mock_response):
+            body = SWEBenchRunRequest(
                 responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
                     model="test-model",
                     input=[],
