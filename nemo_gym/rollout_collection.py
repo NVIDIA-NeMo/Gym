@@ -587,7 +587,7 @@ class RolloutCollectionHelper(BaseModel):
 
         start_time = time()
         refs = [_load_batch.remote(batch) for batch in batched(lines_range_iter, 10_000)]
-        res = [row for batch in ray.get(refs) for row in batch]
+        res = [row for batch in tqdm(ray.get(refs), desc="Loading JSON batches", total=len(refs)) for row in batch]
         print(f"Loading {len(res)} JSON rows took {time() - start_time:.2f}s!")
         return res
 
