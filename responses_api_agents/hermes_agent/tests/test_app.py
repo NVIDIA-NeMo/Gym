@@ -172,6 +172,74 @@ class TestSigtermHandler:
             loop.close()
 
 
+class TestManagedSubprocessIsolation:
+    def test_concurrent_rollouts_use_distinct_homes_and_clean_up(self, monkeypatch) -> None:
+        agent = HermesAgent(config=_config(concurrency=3), server_client=MagicMock(spec=ServerClient))
+        monkeypatch.setattr(agent, "_ensure_sigterm_handler", lambda: None)
+
+        processes = []
+        homes: list[Path] = []
+        workdirs: list[Path] = []
+        all_started = asyncio.Event()
+        max_active = 0
+
+        class FakeProcess:
+            returncode = None
+
+            def __init__(self, response_path: Path) -> None:
+                self.response_path = response_path
+
+            async def communicate(self):
+                nonlocal max_active
+                max_active = max(max_active, len(agent.active_processes))
+                if len(processes) == 3:
+                    all_started.set()
+                await all_started.wait()
+                self.response_path.write_text(
+                    json.dumps(
+                        {
+                            "result": {"messages": [{"role": "assistant", "content": "ok"}]},
+                            "observations": None,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                self.returncode = 0
+                return b"", b""
+
+        async def create_process(*args, **kwargs):
+            home = Path(kwargs["env"]["HERMES_HOME"])
+            workdir = Path(kwargs["cwd"])
+            assert home.is_dir()
+            assert home.parent == workdir
+            assert Path(args[2]).is_file()
+            assert Path(args[3]).parent == workdir
+            process = FakeProcess(Path(args[3]))
+            processes.append(process)
+            homes.append(home)
+            workdirs.append(workdir)
+            return process
+
+        monkeypatch.setattr(
+            "responses_api_agents.hermes_agent.app.asyncio.create_subprocess_exec",
+            create_process,
+        )
+
+        async def run_concurrently():
+            return await asyncio.gather(*(agent._run_hermes_subprocess({"rollout": index}) for index in range(3)))
+
+        results = asyncio.run(run_concurrently())
+
+        assert len(results) == 3
+        assert max_active == 3
+        assert len(set(homes)) == 3
+        assert len(set(workdirs)) == 3
+        assert agent.active_processes == set()
+        assert all(process.returncode == 0 for process in processes)
+        assert all(not home.exists() for home in homes)
+        assert all(not workdir.exists() for workdir in workdirs)
+
+
 class TestSplitChatMessages:
     def test_user_only(self) -> None:
         items = [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
