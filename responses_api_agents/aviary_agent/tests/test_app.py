@@ -619,6 +619,7 @@ class TestApp:
                                 "type": "function_call",
                                 "id": None,
                                 "status": None,
+                                "namespace": None,
                             }
                         ],
                         "env_id": env_id,

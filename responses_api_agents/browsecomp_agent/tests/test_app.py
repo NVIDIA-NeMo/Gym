@@ -384,7 +384,7 @@ class TestApp:
         assert json.loads(lines[0])["reset_steps"] == [2]
         assert len(lines) == 1 + len(body.input) + len(result.output)
 
-    # ---- _last_message_text (bc_frankie last-message retry parity) ----
+    # ---- _last_message_text (the reference harness last-message retry parity) ----
 
     def test_last_message_text_returns_final_answer(self) -> None:
         resp = NeMoGymResponse.model_validate(_make_model_response([_make_msg("Exact Answer: Paris")]))
@@ -420,7 +420,7 @@ class TestApp:
         assert BrowsecompAgent._last_message_text(resp) == "Exact Answer: Paris"
 
     def test_last_message_text_skips_empty_message(self) -> None:
-        """An empty-content trailing message is skipped (mirrors bc_frankie's truthy-content check)."""
+        """An empty-content trailing message is skipped (mirrors the reference harness's truthy-content check)."""
         resp = NeMoGymResponse.model_validate(
             _make_model_response([_make_msg("real answer", msg_id="m1"), _make_msg("", msg_id="m2")])
         )
