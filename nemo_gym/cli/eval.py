@@ -423,18 +423,40 @@ def aggregate_rollouts():  # pragma: no cover
     asyncio.run(rah.run_from_config(config))
 
 
+def _merge_atif_export_cli_values(
+    config: dict[str, Any] | DictConfig,
+    cli_values: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve ordinary config, then apply exact explicit CLI values."""
+
+    merged: dict[str, Any] = {}
+    for field_name in (
+        "format",
+        "rollouts_jsonl_fpath",
+        "output_dirpath",
+        "session_id",
+        "agent_version",
+    ):
+        if field_name in cli_values:
+            merged[field_name] = cli_values[field_name]
+        elif field_name in config:
+            merged[field_name] = (
+                OmegaConf.select(config, field_name) if isinstance(config, DictConfig) else config[field_name]
+            )
+    return merged
+
+
 @exit_cleanly_on_config_error
-def export_rollouts_as_atif():  # pragma: no cover
+def export_rollouts_as_atif(cli_values: dict[str, Any] | None = None):  # pragma: no cover
     from nemo_gym.atif_export import ExportAtifConfig, export_rollouts_to_atif
 
-    config = ExportAtifConfig.model_validate(
-        get_global_config_dict(
-            global_config_dict_parser_config=GlobalConfigDictParserConfig(
-                initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
-                offline=True,
-            )
+    global_config_dict = get_global_config_dict(
+        global_config_dict_parser_config=GlobalConfigDictParserConfig(
+            initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+            offline=True,
         )
     )
+    config = ExportAtifConfig.model_validate(_merge_atif_export_cli_values(global_config_dict, cli_values or {}))
     result = export_rollouts_to_atif(config)
     print(f"Exported {result.trajectory_count} ATIF trajectory file(s) to {result.output_dirpath}")
     print(f"Manifest: {result.manifest_fpath}")

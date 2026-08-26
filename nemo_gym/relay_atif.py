@@ -23,6 +23,7 @@ extension points.
 
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from typing import Any, Literal
 
@@ -30,7 +31,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 class _RelayAtifModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
 
 
 class AtifImageSource(_RelayAtifModel):
@@ -90,21 +91,43 @@ class AtifObservation(_RelayAtifModel):
 
 
 class AtifStepMetrics(_RelayAtifModel):
-    prompt_tokens: int | None = None
-    completion_tokens: int | None = None
-    cached_tokens: int | None = None
-    cost_usd: float | None = None
+    prompt_tokens: int | None = Field(default=None, ge=0, strict=True)
+    completion_tokens: int | None = Field(default=None, ge=0, strict=True)
+    cached_tokens: int | None = Field(default=None, ge=0, strict=True)
+    cost_usd: float | None = Field(default=None, ge=0, strict=True)
     prompt_token_ids: list[int] | None = None
     completion_token_ids: list[int] | None = None
     logprobs: list[float] | None = None
     extra: dict[str, Any] | None = None
 
+    @field_validator("prompt_token_ids", "completion_token_ids", mode="before")
+    @classmethod
+    def validate_token_id_types(cls, value: Any) -> Any:
+        if value is None:
+            return value
+        if not isinstance(value, list) or any(
+            isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in value
+        ):
+            raise ValueError("token IDs must be non-negative JSON integer arrays")
+        return value
+
+    @field_validator("logprobs", mode="before")
+    @classmethod
+    def validate_logprob_types(cls, value: Any) -> Any:
+        if value is None:
+            return value
+        if not isinstance(value, list) or any(
+            isinstance(item, bool) or not isinstance(item, (int, float)) or not math.isfinite(item) for item in value
+        ):
+            raise ValueError("log probabilities must be finite JSON number arrays")
+        return value
+
 
 class AtifFinalMetrics(_RelayAtifModel):
-    total_prompt_tokens: int | None = None
-    total_completion_tokens: int | None = None
-    total_cached_tokens: int | None = None
-    total_cost_usd: float | None = None
+    total_prompt_tokens: int | None = Field(default=None, ge=0, strict=True)
+    total_completion_tokens: int | None = Field(default=None, ge=0, strict=True)
+    total_cached_tokens: int | None = Field(default=None, ge=0, strict=True)
+    total_cost_usd: float | None = Field(default=None, ge=0, strict=True)
     total_steps: int | None = Field(default=None, ge=0)
     extra: dict[str, Any] | None = None
 

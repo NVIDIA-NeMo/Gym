@@ -99,6 +99,19 @@ def _value_flag(
     )
 
 
+def _raw_value_flag(
+    name: str,
+    flag_help: str,
+    *,
+    choices: tuple[str, ...] | None = None,
+) -> Flag:
+    """Register a value for a callable command target without translating it to Hydra."""
+    dest = name.replace("-", "_")
+    return Flag(
+        register=lambda p: p.add_argument(f"--{name}", dest=dest, choices=choices, help=flag_help),
+    )
+
+
 def _bool_flag(name: str, hydra_key: str, flag_help: str) -> Flag:
     """A `--name` store_true flag that maps to the Hydra override `+<hydra_key>=true` when set."""
     dest = name.replace("-", "_")
@@ -450,6 +463,35 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
 def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
     target = "nemo_gym.cli.eval:collect_rollouts" if args.no_serve else "nemo_gym.cli.eval:e2e_rollout_collection"
     dispatch(target, overrides)
+
+
+def _eval_export(args: argparse.Namespace, overrides: list[str]) -> None:
+    from nemo_gym.cli.eval import export_rollouts_as_atif
+
+    # Keep explicit argparse values out of Hydra so paths and identities remain
+    # exact strings. Ordinary config and raw overrides are still parsed first;
+    # explicit flags are applied afterward at their expected higher precedence.
+    cli_values = {
+        field_name: value
+        for field_name, value in {
+            "format": args.format,
+            "rollouts_jsonl_fpath": args.rollouts,
+            "output_dirpath": args.output_dir,
+            "session_id": args.session_id,
+            "agent_version": args.agent_version,
+        }.items()
+        if value is not None
+    }
+    # Shadow an explicitly supplied field with a safe value while the normal
+    # config loader runs. This prevents a lower-precedence interpolation in the
+    # same field from failing before the exact argparse value is applied.
+    explicit_fields = set(cli_values)
+    remaining_overrides = [
+        override for override in overrides if override.lstrip("+").split("=", 1)[0] not in explicit_fields
+    ]
+    shadow_overrides = [f"+{field_name}=__nemo_gym_explicit_cli_value__" for field_name in cli_values]
+    sys.argv = [sys.argv[0], *shadow_overrides, *remaining_overrides]
+    export_rollouts_as_atif(cli_values)
 
 
 def _has_override(overrides: list[str], key: str) -> bool:
@@ -814,16 +856,14 @@ COMMANDS = {
         ),
     ),
     "eval export": Command(
-        target="nemo_gym.cli.eval:export_rollouts_as_atif",
+        target=_eval_export,
         summary="Export supported Gym trajectories as ATIF.",
         flags=(
-            _value_flag("format", "format", "Output trajectory format.", choices=("atif",)),
-            _value_flag("rollouts", "rollouts_jsonl_fpath", "Gym rollouts JSONL to export."),
-            _value_flag("output-dir", "output_dirpath", "New directory for exported trajectories."),
-            _value_flag("session-id", "session_id", "Stable identifier for the source evaluation run.", quote=True),
-            _value_flag(
-                "agent-version", "agent_version", "Version of the agent that produced the rollouts.", quote=True
-            ),
+            _raw_value_flag("format", "Output trajectory format.", choices=("atif",)),
+            _raw_value_flag("rollouts", "Gym rollouts JSONL to export."),
+            _raw_value_flag("output-dir", "New directory for exported trajectories."),
+            _raw_value_flag("session-id", "Stable identifier for the source evaluation run."),
+            _raw_value_flag("agent-version", "Version of the agent that produced the rollouts."),
         ),
     ),
     "eval reverify": Command(
