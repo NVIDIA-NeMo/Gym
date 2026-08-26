@@ -542,9 +542,11 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         default=1,
         description=(
             "How many times to repeat each example. Either an int (applied to every row) or a "
-            "dict keyed by agent_ref.name (e.g. {simple_agent: 32, swe_agent: 1}). In dict form, "
-            "every agent that appears in the input rows must have an entry, unless a special "
-            '"_default" key is provided as a fallback. Useful for mean@k.'
+            "dict keyed by the dispatched agent name or by the row's own routing key (its "
+            "agent_ref.name or task_source as written in the data, before any agent_map/fan_out "
+            "re-route); the dispatched agent wins when both have entries. In dict form, every row "
+            "must match an entry, unless a special '_default' key is provided as a fallback. "
+            "Useful for mean@k."
         ),
     )
     num_repeats_add_seed: bool = Field(
@@ -597,6 +599,22 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
                 raise ValueError(f"num_repeats dict values must be >= 1, got {bad}")
         return self
 
+    @model_validator(mode="after")
+    def _validate_fan_out(self) -> "RolloutCollectionConfig":
+        for key, agents in (self.fan_out or {}).items():
+            if not agents:
+                raise ValueError(
+                    f"fan_out[{key!r}] is an empty list, which would silently drop every matching row "
+                    "(zero rollouts collected). Remove the key, or list at least one agent."
+                )
+            duplicates = sorted({a for a in agents if list(agents).count(a) > 1})
+            if duplicates:
+                raise ValueError(
+                    f"fan_out[{key!r}] lists the same agent more than once: {duplicates}. Each listed "
+                    "agent already runs every matching row; use num_repeats for repetition."
+                )
+        return self
+
     @property
     def materialized_jsonl_fpath(self) -> Path:
         output_fpath = Path(self.output_jsonl_fpath)
@@ -620,6 +638,74 @@ class RolloutCollectionHelper(BaseModel):
             range_iterator = range(config.limit)
             print(f"Limiting the number of rows to {config.limit}")
 
+        # Load prompt config if specified
+        prompt_cfg = None
+        if config.prompt_config:
+            prompt_cfg = load_prompt_config(config.prompt_config)
+            print(f"Using prompt config: {config.prompt_config}")
+
+        # Search NEMO_GYM_EXTRA_ROOTS, cwd, then the install root.
+        _input_path = _resolve_under_cwd_or_install(config.input_jsonl_fpath)
+        if not _input_path.exists():
+            raise ConfigPathNotFoundError(
+                f"Input file not found: '{config.input_jsonl_fpath}' (--input). Check the path is spelled correctly."
+            )
+        with open(_input_path) as input_file:
+            rows_iterator: Iterator[str] = tqdm(input_file, desc="Reading rows")
+            rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
+            raw_rows = [
+                (row_idx, row_str, loads_jsonl_line(row_str, _input_path, line_no))
+                for line_no, (row_idx, row_str) in enumerate(rows_iterator, 1)
+            ]
+
+        # Validate and apply prompt config before per-row processing
+        if prompt_cfg is not None:
+            validate_prompt_compatibility([row for _, _, row in raw_rows], prompt_cfg)
+            raw_rows = [(idx, s, apply_prompt_to_row(row, prompt_cfg)) for idx, s, row in raw_rows]
+
+        return RolloutCollectionHelper._preprocess_raw_rows(raw_rows, config)
+
+    def preprocess_examples(
+        self,
+        examples: List[Dict],
+        *,
+        agent_map: Optional[Dict[str, str]] = None,
+        fan_out: Optional[Dict[str, List[str]]] = None,
+        num_repeats: Union[int, Dict[str, int]] = 1,
+        num_repeats_add_seed: bool = False,
+        global_config_dict: Optional[DictConfig] = None,
+    ) -> List[Dict]:
+        """Apply run-level routing and repetition to caller-held rows.
+
+        Public entry point for direct ``run_examples`` callers (e.g. trainer integrations that
+        drive dispatch themselves): ``run_examples`` resolves task_sources and validates agent
+        names, but ``agent_map``, ``fan_out`` and ``num_repeats`` are applied only during
+        preprocessing. Call this first, then pass the returned rows to ``run_examples``.
+
+        Pass ``global_config_dict`` (the merged config) to also resolve task_source-only rows to
+        their agents here; leave it None to defer that to ``run_examples``, which does it against
+        the head server's config. Input rows are not mutated; the expanded, stamped copies are
+        returned.
+        """
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath="<in-memory>",
+            output_jsonl_fpath="<in-memory>",
+            agent_map=agent_map,
+            fan_out=fan_out,
+            num_repeats=num_repeats,
+            num_repeats_add_seed=num_repeats_add_seed,
+        )
+        raw_rows = [
+            (idx, orjson.dumps(row, option=orjson.OPT_SORT_KEYS).decode(), deepcopy(row))
+            for idx, row in enumerate(examples)
+        ]
+        rows = self._preprocess_raw_rows(raw_rows, config)
+        if global_config_dict is not None:
+            self.resolve_task_sources(rows, global_config_dict)
+        return rows
+
+    @staticmethod
+    def _preprocess_raw_rows(raw_rows: List[Tuple[int, str, Dict]], config: RolloutCollectionConfig) -> List[Dict]:
         if config.num_repeats_add_seed:
             print(
                 "Adding unique `seed` values to each input via metadata.extra_body (only honored by vLLM model servers)"
@@ -648,12 +734,6 @@ class RolloutCollectionHelper(BaseModel):
             print(f"Per-agent num_repeats: {dict(config.num_repeats)}")
         agents_seen: set[str] = set()
 
-        # Load prompt config if specified
-        prompt_cfg = None
-        if config.prompt_config:
-            prompt_cfg = load_prompt_config(config.prompt_config)
-            print(f"Using prompt config: {config.prompt_config}")
-
         # Resolve skills once for the whole run (hash is content-derived, computed at startup).
         skills_ref_dict = None
         if config.skills:
@@ -664,25 +744,6 @@ class RolloutCollectionHelper(BaseModel):
                 f"(hash={skills_ref.hash}, {len(skills_ref.skills)} skill(s): "
                 f"{', '.join(s.name for s in skills_ref.skills)})"
             )
-
-        # Search NEMO_GYM_EXTRA_ROOTS, cwd, then the install root.
-        _input_path = _resolve_under_cwd_or_install(config.input_jsonl_fpath)
-        if not _input_path.exists():
-            raise ConfigPathNotFoundError(
-                f"Input file not found: '{config.input_jsonl_fpath}' (--input). Check the path is spelled correctly."
-            )
-        with open(_input_path) as input_file:
-            rows_iterator: Iterator[str] = tqdm(input_file, desc="Reading rows")
-            rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
-            raw_rows = [
-                (row_idx, row_str, loads_jsonl_line(row_str, _input_path, line_no))
-                for line_no, (row_idx, row_str) in enumerate(rows_iterator, 1)
-            ]
-
-        # Validate and apply prompt config before per-row processing
-        if prompt_cfg is not None:
-            validate_prompt_compatibility([row for _, _, row in raw_rows], prompt_cfg)
-            raw_rows = [(idx, s, apply_prompt_to_row(row, prompt_cfg)) for idx, s, row in raw_rows]
 
         # For gym eval profile to match rollouts to tasks
         row_to_task_idx: Dict[str, int] = dict()
@@ -748,19 +809,21 @@ class RolloutCollectionHelper(BaseModel):
 
             base_row = row
             for target in targets:
-                # num_repeats keys match what routing keys match: the target agent when known,
-                # else the row's routing basis (its task_source). Dict-form misses batch into
-                # one consolidated raise after the loop.
-                repeats_key = target if target is not None else basis
-                agents_seen.add(repeats_key)
+                # num_repeats keys match either side of a re-route: the dispatched agent (the
+                # fan-out/agent_map target) or the row's original routing key (its agent_ref.name
+                # or task_source as written in the data). The dispatched agent wins when both have
+                # entries, so `agent_map={source: agent}` composes with `num_repeats={source: k}`.
+                # Dict-form misses batch into one consolidated raise after the loop.
+                repeat_keys = [k for k in dict.fromkeys((target, basis)) if k is not None]
+                agents_seen.update(repeat_keys)
                 if fixed_num_repeats is not None:
                     row_num_repeats = fixed_num_repeats
-                elif repeats_key in per_agent_repeats:
-                    row_num_repeats = per_agent_repeats[repeats_key]
+                elif (matched := next((k for k in repeat_keys if k in per_agent_repeats), None)) is not None:
+                    row_num_repeats = per_agent_repeats[matched]
                 elif default_repeats is not None:
                     row_num_repeats = default_repeats
                 else:
-                    agents_missing_from_num_repeats.add(repeats_key)
+                    agents_missing_from_num_repeats.add(" / ".join(repeat_keys))
                     continue
 
                 for _ in range(row_num_repeats):
@@ -798,8 +861,8 @@ class RolloutCollectionHelper(BaseModel):
 
         if agents_missing_from_num_repeats:
             raise ValueError(
-                f"num_repeats dict has no entry for agents {sorted(agents_missing_from_num_repeats)} "
-                f"and no '_default' fallback. Listed agents: {sorted(per_agent_repeats)}"
+                f"num_repeats dict has no entry for routing keys {sorted(agents_missing_from_num_repeats)} "
+                f"and no '_default' fallback. Listed keys: {sorted(per_agent_repeats)}"
             )
 
         unknown_agents = set(per_agent_repeats) - agents_seen
@@ -1424,6 +1487,10 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
     ) -> Iterator[Future]:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
+
+        Rows are dispatched as given: task_sources are resolved and agent names validated here,
+        but run-level knobs (``agent_map``, ``fan_out``, ``num_repeats``) are NOT applied — call
+        ``preprocess_examples`` first if you need them.
         """
         server_client = self.setup_server_client(head_server_config)
         self.resolve_task_sources(examples, server_client.global_config_dict)

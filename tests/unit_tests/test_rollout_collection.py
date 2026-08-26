@@ -2627,3 +2627,122 @@ class TestTaskSourcePreprocess:
         [materialized] = [orjson.loads(line) for line in config.materialized_jsonl_fpath.read_bytes().splitlines()]
         assert materialized["agent_ref"] == {"name": "math_agent"}
         assert materialized["task_source"] == "math_rs"
+
+
+class TestFanOutValidation:
+    """fan_out misconfiguration must fail loudly at config time, not drop rows silently."""
+
+    def _config(self, tmp_path, **kwargs):
+        return RolloutCollectionConfig(
+            input_jsonl_fpath=str(tmp_path / "in.jsonl"), output_jsonl_fpath=str(tmp_path / "out.jsonl"), **kwargs
+        )
+
+    def test_empty_target_list_rejected(self, tmp_path) -> None:
+        with pytest.raises(ValueError, match="empty list"):
+            self._config(tmp_path, fan_out={"math": []})
+
+    def test_duplicate_targets_rejected(self, tmp_path) -> None:
+        with pytest.raises(ValueError, match="more than once.*agent_a"):
+            self._config(tmp_path, fan_out={"math": ["agent_a", "agent_a", "agent_b"]})
+
+
+class TestNumRepeatsKeyPrecedence:
+    """num_repeats keys match the dispatched agent OR the row's original routing key; the
+    dispatched agent wins on conflict. Pins the documented agent_map+num_repeats combination."""
+
+    def _write_rows(self, tmp_path, rows):
+        fpath = tmp_path / "input.jsonl"
+        fpath.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        return fpath
+
+    def _config(self, tmp_path, fpath, **kwargs):
+        return RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath), output_jsonl_fpath=str(tmp_path / "out.jsonl"), **kwargs
+        )
+
+    def _ts_row(self, task_source="math"):
+        return {"responses_create_params": {"input": [{"role": "user", "content": "q"}]}, "task_source": task_source}
+
+    def test_agent_map_composes_with_source_keyed_num_repeats(self, tmp_path) -> None:
+        """agent_map={math: math_agent} + num_repeats={math: 3}: rows route to math_agent AND
+        repeat 3 times via their original routing key."""
+        fpath = self._write_rows(tmp_path, [self._ts_row("math")])
+        config = self._config(tmp_path, fpath, agent_map={"math": "math_agent"}, num_repeats={"math": 3})
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert len(rows) == 3
+        assert all(r["agent_ref"]["name"] == "math_agent" for r in rows)
+
+    def test_target_keyed_num_repeats_still_matches(self, tmp_path) -> None:
+        fpath = self._write_rows(tmp_path, [self._ts_row("math")])
+        config = self._config(tmp_path, fpath, agent_map={"math": "math_agent"}, num_repeats={"math_agent": 2})
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert len(rows) == 2
+
+    def test_dispatched_agent_wins_over_routing_key(self, tmp_path) -> None:
+        fpath = self._write_rows(tmp_path, [self._ts_row("math")])
+        config = self._config(
+            tmp_path, fpath, agent_map={"math": "math_agent"}, num_repeats={"math": 5, "math_agent": 2}
+        )
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert len(rows) == 2
+
+    def test_fan_out_composes_with_source_keyed_num_repeats(self, tmp_path) -> None:
+        """fan_out={math: [a, b]} + num_repeats={math: 2}: each fanned copy repeats 2 times."""
+        fpath = self._write_rows(tmp_path, [self._ts_row("math")])
+        config = self._config(tmp_path, fpath, fan_out={"math": ["agent_a", "agent_b"]}, num_repeats={"math": 2})
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert len(rows) == 4
+        by_agent = Counter(r["agent_ref"]["name"] for r in rows)
+        assert by_agent == {"agent_a": 2, "agent_b": 2}
+
+    def test_source_keyed_entry_does_not_trigger_typo_warning(self, tmp_path) -> None:
+        fpath = self._write_rows(tmp_path, [self._ts_row("math")])
+        config = self._config(tmp_path, fpath, agent_map={"math": "math_agent"}, num_repeats={"math": 3})
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+    def test_missing_key_error_names_both_candidates(self, tmp_path) -> None:
+        fpath = self._write_rows(tmp_path, [self._ts_row("math")])
+        config = self._config(tmp_path, fpath, agent_map={"math": "math_agent"}, num_repeats={"other": 1})
+        with pytest.raises(ValueError, match="math_agent / math"):
+            RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+
+class TestPreprocessExamples:
+    """Public preprocessing entry point for direct run_examples callers (e.g. NeMo RL): applies
+    agent_map/fan_out/num_repeats to caller-held rows without touching the filesystem."""
+
+    def _ts_row(self, task_source="math"):
+        return {"responses_create_params": {"input": [{"role": "user", "content": "q"}]}, "task_source": task_source}
+
+    def test_applies_all_knobs(self) -> None:
+        examples = [self._ts_row("math"), self._ts_row("other")]
+        rows = RolloutCollectionHelper().preprocess_examples(
+            examples,
+            agent_map={"other": "other_agent"},
+            fan_out={"math": ["agent_a", "agent_b"]},
+            num_repeats={"math": 2, "_default": 1},
+        )
+        by_agent = Counter(r["agent_ref"]["name"] for r in rows)
+        assert by_agent == {"agent_a": 2, "agent_b": 2, "other_agent": 1}
+        # Rollout indexes enumerate copies within each task.
+        assert sorted(r["_ng_rollout_index"] for r in rows if r["_ng_task_index"] == 0) == [0, 1, 2, 3]
+
+    def test_does_not_mutate_inputs(self) -> None:
+        examples = [self._ts_row("math")]
+        snapshot = json.dumps(examples, sort_keys=True)
+        RolloutCollectionHelper().preprocess_examples(examples, num_repeats=3)
+        assert json.dumps(examples, sort_keys=True) == snapshot
+
+    def test_resolves_task_sources_when_config_given(self) -> None:
+        cfg = OmegaConf.create(_RESOLVER_CONFIG)
+        rows = RolloutCollectionHelper().preprocess_examples(
+            [self._ts_row("math_rs")], global_config_dict=cfg, num_repeats=2
+        )
+        assert len(rows) == 2
+        assert all(r["agent_ref"]["name"] == "math_agent" for r in rows)
+
+    def test_validates_knobs_like_the_cli(self) -> None:
+        with pytest.raises(ValueError, match="empty list"):
+            RolloutCollectionHelper().preprocess_examples([self._ts_row()], fan_out={"math": []})
