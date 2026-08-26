@@ -446,6 +446,7 @@ class NemotronV3NanoOmniAgent:
         model: str,
         max_steps: int,
         max_image_history_length: int = 3,
+        max_live_images: int | None = None,
         platform: str = "ubuntu",
         max_tokens: int = 16384,
         top_p: float | None = 0.95,
@@ -481,11 +482,19 @@ class NemotronV3NanoOmniAgent:
         self.observation_type = observation_type
         self.coordinate_type = coordinate_type
         self.screen_size = screen_size
-        self.max_image_history_length = max(1, max_image_history_length)
+        self.max_image_history_length = max(1, int(max_image_history_length))
+        self.max_live_images = self.max_image_history_length if max_live_images is None else int(max_live_images)
+        if self.max_live_images < self.max_image_history_length:
+            raise ValueError("max_live_images must be greater than or equal to max_image_history_length")
         self.max_steps = max_steps
         self.client_password = client_password
         self.thinking = thinking
         self.parse_retries = max(1, parse_retries)
+        removed_options = sorted(option for option in ("training_mode", "training_turn_strategy") if option in _kwargs)
+        if removed_options:
+            raise ValueError(
+                "OSWorld no longer accepts training-specific agent switches: " + ", ".join(removed_options)
+            )
         self.parse_error_feedback = bool(parse_error_feedback)
         self.parse_retry_temperature = (
             None if parse_retry_temperature is None else max(0.0, float(parse_retry_temperature))
@@ -508,6 +517,14 @@ class NemotronV3NanoOmniAgent:
         self.observations: List[Dict[str, Any]] = []
         self.actions: List[str] = []
         self.cots: List[Dict[str, Any]] = []
+        self.compacted_before = 0
+        self.snapshot_window: Dict[str, Any] = {
+            "prompt_snapshot_count": 0,
+            "snapshot_window_start": 0,
+            "snapshot_compaction_triggered": False,
+            "snapshot_window_min": self.max_image_history_length,
+            "snapshot_window_max": self.max_live_images,
+        }
 
     def call_llm(self, payload: Dict[str, Any], _model: str | None = None) -> Any:
         """Injected by ``client.run_osworld_task`` before the first prediction."""
@@ -584,8 +601,29 @@ class NemotronV3NanoOmniAgent:
     def _messages(self, instruction: str, obs: Dict[str, Any]) -> List[Dict[str, Any]]:
         messages: List[Dict[str, Any]] = [{"role": "system", "content": self.system_prompt}]
         instruction_prompt = INSTRUCTION_TEMPLATE.format(instruction=instruction)
-        image_history = min(len(self.actions), self.max_image_history_length - 1)
-        image_window_start = len(self.actions) - image_history
+        action_count = len(self.actions)
+        image_window_start = max(0, min(self.compacted_before, action_count))
+        live_images = (action_count + 1) - image_window_start
+        compacted = False
+        if live_images > self.max_live_images:
+            # Keep history append-only between compaction boundaries. Once the
+            # high-water mark is crossed, fold the old prefix into text and
+            # retain the configured low-water number of snapshots.
+            self.compacted_before = max(
+                0,
+                (action_count + 1) - self.max_image_history_length,
+            )
+            image_window_start = max(0, min(self.compacted_before, action_count))
+            compacted = True
+
+        image_history = action_count - image_window_start
+        self.snapshot_window = {
+            "prompt_snapshot_count": image_history + 1,
+            "snapshot_window_start": image_window_start,
+            "snapshot_compaction_triggered": compacted,
+            "snapshot_window_min": self.max_image_history_length,
+            "snapshot_window_max": self.max_live_images,
+        }
 
         text_history = ""
         if image_window_start > 0:
@@ -653,10 +691,12 @@ class NemotronV3NanoOmniAgent:
         request_messages = messages
         repeated_action_warning = bool(self._repeated_action_guidance())
         last_error = "No response"
-        parsed_info: Dict[str, Any] = {}
+        model_calls: List[Dict[str, Any]] = []
+        parsed_info: Dict[str, Any] = {"model_calls": model_calls}
 
         for attempt in range(self.parse_retries):
             response: Any = None
+            attempt_actions: List[str] = []
             step_number = len(self.actions) + 1
             parse_attempt = attempt + 1
             call_log_context = self._log_event_context(step=step_number, parse_attempt=parse_attempt)
@@ -665,6 +705,7 @@ class NemotronV3NanoOmniAgent:
                     "parse_feedback_injected": request_messages is not messages,
                     "pre_done_checklist_injected": self.pre_done_checklist,
                     "repeated_action_warning_injected": repeated_action_warning,
+                    **self.snapshot_window,
                 }
             )
             retry_temperature = (
@@ -681,20 +722,35 @@ class NemotronV3NanoOmniAgent:
             }
             if self.top_p is not None:
                 payload["top_p"] = self.top_p
+            model_call_record: Dict[str, Any] = {
+                "parse_attempt": parse_attempt,
+                "prompt_messages": _jsonable(request_messages),
+                "response": None,
+                "accepted": False,
+                "parse_error": None,
+                "parsed_actions": [],
+                **self.snapshot_window,
+            }
             try:
                 response = self.call_llm(payload, self.model)
+                model_call_record["response"] = _jsonable(response)
                 content, _reasoning = _response_parts(response)
                 if not content:
                     raise ValueError("model response has no content")
-                low_level, actions, parsed_info = parse_nemotron_response(
+                low_level, actions, response_info = parse_nemotron_response(
                     response,
                     screen_size=self.screen_size,
                     coordinate_type=self.coordinate_type,
                     thinking=self.thinking,
                 )
+                attempt_actions = list(actions)
+                parsed_info.update(response_info)
                 if low_level.startswith("<Error>"):
                     raise ValueError(low_level)
                 _validate_python_actions(actions)
+                model_call_record["accepted"] = True
+                model_call_record["parsed_actions"] = attempt_actions
+                model_calls.append(model_call_record)
                 if os.environ.get("OSWORLD_MODEL_IO_LOG", "").strip():
                     _append_agent_io(
                         {
@@ -715,6 +771,9 @@ class NemotronV3NanoOmniAgent:
                 break
             except Exception as exc:  # noqa: BLE001 - malformed model output is retryable.
                 last_error = str(exc)
+                model_call_record["parse_error"] = last_error
+                model_call_record["parsed_actions"] = attempt_actions
+                model_calls.append(model_call_record)
                 will_retry = attempt + 1 < self.parse_retries
                 feedback_next = self.parse_error_feedback and will_retry
                 if os.environ.get("OSWORLD_MODEL_IO_LOG", "").strip():
@@ -750,7 +809,9 @@ class NemotronV3NanoOmniAgent:
         actions = [self._scale_windows_scroll(action) for action in actions]
         self.observations.append(obs)
         self.actions.append(low_level)
-        self.cots.append(parsed_info)
+        # The returned evidence may contain several full prompts and images.
+        # Keep only parser semantics in the agent's rolling text history.
+        self.cots.append({key: value for key, value in parsed_info.items() if key != "model_calls"})
 
         if len(self.actions) >= self.max_steps and not any(action in {"DONE", "FAIL"} for action in actions):
             parsed_info["code"] = "FAIL"

@@ -404,6 +404,22 @@ async def test_direct_endpoint_never_receives_management_api_key() -> None:
     assert resolved.headers == {}
 
 
+async def test_endpoint_requires_sdk_get_endpoint() -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        operations={"retries": 0},
+        probe={"command": None},
+    )
+    with pytest.raises(NotImplementedError, match="opensandbox>=0.1.15"):
+        await provider.endpoint(
+            opensandbox_provider.SandboxHandle(
+                sandbox_id="sandbox-1",
+                provider_name="opensandbox",
+                raw=object(),
+            ),
+            5000,
+        )
+
+
 def test_provider_validation_and_retry_helpers() -> None:
     with pytest.raises(ValueError, match="image_pull_policy"):
         opensandbox_provider.validate_image_pull_policy("Sometimes")

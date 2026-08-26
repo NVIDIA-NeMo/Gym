@@ -1,0 +1,54 @@
+# Keep this server's resolver independent from any enclosing checkout. In the
+# complete training image Gym is a member of /opt/nemo-rl's uv workspace, whose
+# trainer dependencies are intentionally incompatible with this CPU agent venv.
+# setup_command.py passes this file explicitly via --config-file because
+# --project has no effect in the `uv pip` interface.
+required-version = ">=0.11.25"
+constraint-dependencies = [
+    "grpcio>=1.81.0rc1",
+]
+
+# Mirror Gym's public resolver policy because an explicit config file does not
+# inherit the checkout's [tool.uv] table. The OSWorld opt-in installer uses
+# --no-config to add the runtime packages deliberately after env prefetch, but
+# still reads uv-torch-backend.txt so its torchvision wheel matches torch.
+override-dependencies = [
+    "spacy>=3.8.13",
+    "opencv-python-headless; sys_platform == 'never'",
+    "torchvision; sys_platform == 'never'",
+    "torchaudio; sys_platform == 'never'",
+    "pycountry; sys_platform == 'never'",
+]
+exclude-dependencies = [
+    "fasttext-wheel",
+    "alembic",
+    "blinker",
+    "cryptography",
+    "flask",
+    "flask-cors",
+    "graphene",
+    "graphql-core",
+    "graphql-relay",
+    "gunicorn",
+    "huey",
+    "prettytable",
+    "skops",
+    "sqlalchemy",
+    "wcwidth",
+    "werkzeug",
+    "waitress",
+    "diskcache",
+
+    # The pinned OSWorld package declares every cloud VM provisioning SDK as
+    # an unconditional dependency. This server supports direct Docker and Gym
+    # Sandbox (Docker/OpenSandbox) lifecycle instead; those paths never import
+    # the Azure, Aliyun, or Volcengine providers. Avoid resolving their large,
+    # generated SDK trees into each managed agent venv.
+    "azure-identity",
+    "azure-mgmt-compute",
+    "azure-mgmt-network",
+    "alibabacloud-ecs20140526",
+    "alibabacloud-tea-openapi",
+    "alibabacloud-tea-util",
+    "volcengine-python-sdk",
+]

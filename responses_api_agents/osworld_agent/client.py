@@ -26,6 +26,7 @@ import inspect
 import json
 import logging
 import os
+import random
 import re
 import sys
 import time
@@ -48,9 +49,68 @@ SANDBOX_POINTER_DESKTOP_ENV_CLASS = "responses_api_agents.osworld_agent.sandbox_
 # Sentinel actions OSWorld recognises in step().
 _TERMINAL_ACTIONS = {"DONE", "FAIL"}
 
+_IDLE_INHIBITOR_OK = "OSWORLD_IDLE_INHIBITOR_OK"
+_IDLE_INHIBITOR_SCRIPT = rf"""
+set -eu
+
+runtime_dir="${{XDG_RUNTIME_DIR:-/run/user/$(id -u)}}"
+bus_path="$runtime_dir/bus"
+test -S "$bus_path" || {{ echo "user DBus socket not found: $bus_path" >&2; exit 20; }}
+export XDG_RUNTIME_DIR="$runtime_dir"
+export DBUS_SESSION_BUS_ADDRESS="unix:path=$bus_path"
+
+command -v gnome-session-inhibit >/dev/null 2>&1 || {{
+    echo "gnome-session-inhibit is unavailable" >&2
+    exit 21
+}}
+command -v gdbus >/dev/null 2>&1 || {{ echo "gdbus is unavailable" >&2; exit 22; }}
+
+log_path=/tmp/nemo-gym-osworld-idle-inhibitor.log
+pid_path=/tmp/nemo-gym-osworld-idle-inhibitor.pid
+nohup gnome-session-inhibit \
+    --app-id org.nvidia.nemo-gym.osworld \
+    --reason "OSWorld rollout in progress" \
+    --inhibit idle \
+    --inhibit-only >"$log_path" 2>&1 &
+inhibitor_pid=$!
+printf '%s\n' "$inhibitor_pid" >"$pid_path"
+
+attempt=0
+while [ "$attempt" -lt 20 ]; do
+    kill -0 "$inhibitor_pid" 2>/dev/null || {{
+        cat "$log_path" >&2 || true
+        echo "idle inhibitor exited before registration" >&2
+        exit 23
+    }}
+    if inhibited="$(gdbus call --session \
+        --dest org.gnome.SessionManager \
+        --object-path /org/gnome/SessionManager \
+        --method org.gnome.SessionManager.IsInhibited 8 2>/dev/null)"; then
+        case "$inhibited" in
+            *true*) echo "{_IDLE_INHIBITOR_OK}"; exit 0 ;;
+        esac
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.1
+done
+
+kill "$inhibitor_pid" 2>/dev/null || true
+cat "$log_path" >&2 || true
+echo "idle inhibitor did not register with GNOME SessionManager" >&2
+exit 24
+"""
+
 
 class _EvaluatorScoreZero(BaseException):
     """Control signal for declarative evaluator setup that proves a zero score."""
+
+
+class _PointerRetryDeadline(BaseException):
+    """Exit Pointer's nested retry loops at the Gym rollout boundary."""
+
+    def __init__(self, message: str, *, task_deadline: bool = False) -> None:
+        super().__init__(message)
+        self.task_deadline = task_deadline
 
 
 @dataclass
@@ -61,6 +121,8 @@ class StepRecord:
     reward: float
     done: bool
     info: Dict[str, Any] = field(default_factory=dict)
+    state: Dict[str, Any] = field(default_factory=dict)
+    next_state: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -164,6 +226,30 @@ def _merge_consecutive_pyautogui_actions(actions: List[Any]) -> List[Any]:
     if pending:
         merged.append("\n".join(pending))
     return merged
+
+
+def _install_guest_idle_inhibitor(setup_controller: Any, logger: logging.Logger) -> None:
+    """Prevent idle locking without changing benchmark-visible GNOME settings."""
+
+    execute_setup = getattr(setup_controller, "_execute_setup", None)
+    if not callable(execute_setup):
+        raise RuntimeError("OSWorld setup controller cannot install the idle inhibitor")
+
+    result = execute_setup(
+        ["/bin/bash", "-c", _IDLE_INHIBITOR_SCRIPT],
+        expected_returncodes=[0],
+    )
+    if not isinstance(result, Mapping):
+        raise RuntimeError(f"idle inhibitor returned an invalid response: {result!r}")
+
+    output = str(result.get("output") or "").strip()
+    error_output = str(result.get("error") or "").strip()
+    returncode = result.get("returncode")
+    if returncode != 0 or _IDLE_INHIBITOR_OK not in output.splitlines():
+        detail = error_output or output or "no guest output"
+        raise RuntimeError(f"idle inhibitor failed (returncode={returncode!r}): {detail}")
+
+    logger.info("Guest idle inhibitor registered")
 
 
 def _model_response_content(response: Any) -> str:
@@ -282,11 +368,13 @@ def _stage_setup_cache(task_config: Dict[str, Any], cache_dir: str, setup_cache_
 
 
 def _patch_setup_execute_contract() -> None:
-    """Support optional return-code policies used by newer OSWorld tasks.
+    """Enforce setup return codes and retry transient guest package locks.
 
-    The pinned upstream method remains untouched for existing tasks. The
-    compatibility path runs only when a task explicitly supplies
-    ``expected_returncodes`` or ``on_nonzero``.
+    Older OSWorld setup code labels any HTTP-200 response as successful even
+    when the guest command returns non-zero.  That can silently continue after
+    ``apt install jq`` failed and later misclassify an environment failure as
+    an agent failure.  Default to return code zero, while retaining explicit
+    policies used by newer tasks.
     """
 
     try:
@@ -317,10 +405,26 @@ def _patch_setup_execute_contract() -> None:
         expected_returncodes: List[int] | int | None = None,
         on_nonzero: str | None = None,
     ) -> Any:
-        if expected_returncodes is None and on_nonzero is None:
-            return current(self, command, stdout=stdout, stderr=stderr, shell=shell, until=until)
         if not command:
             raise RuntimeError("Empty setup command")
+        explicit_returncode_policy = (
+            expected_returncodes is not None or on_nonzero is not None or bool(until and "returncode" in until)
+        )
+        if getattr(self, "_nemo_gym_evaluator_phase", False) and not explicit_returncode_policy:
+            # Upstream OSWorld evaluator postconfig frequently transforms
+            # agent-created artifacts before the result getter runs. A
+            # missing artifact is a task score of zero, not an environment
+            # failure. Preserve upstream best-effort command semantics here;
+            # task initialization remains strict, and newer tasks can opt in
+            # to an explicit evaluator return-code policy.
+            return current(
+                self,
+                command,
+                stdout=stdout,
+                stderr=stderr,
+                shell=shell,
+                until=until,
+            )
         if expected_returncodes is None:
             expected_returncodes = [int(until["returncode"])] if until and "returncode" in until else [0]
         elif isinstance(expected_returncodes, int):
@@ -348,6 +452,14 @@ def _patch_setup_execute_contract() -> None:
         headers = {"Content-Type": "application/json"}
         until = until or {}
         failures = 0
+        package_lock_retries = 0
+        package_lock_markers = (
+            "Could not get lock /var/lib/apt/lists/lock",
+            "Could not get lock /var/lib/dpkg/lock",
+            "Could not get lock /var/lib/dpkg/lock-frontend",
+            "Unable to acquire the dpkg frontend lock",
+            "is another process using it?",
+        )
 
         while True:
             result = None
@@ -379,7 +491,23 @@ def _patch_setup_execute_contract() -> None:
 
             returncode = int(result["returncode"])
             command_text = " ".join(rendered_command) if isinstance(rendered_command, list) else rendered_command
+            if self.client_password:
+                # The rendered payload must contain the password for sudo -S,
+                # but diagnostics and raised errors are durable artifacts.
+                # Preserve the task placeholder there instead of leaking the
+                # guest credential.
+                command_text = command_text.replace(self.client_password, "{CLIENT_PASSWORD}")
             if returncode not in allowed:
+                command_output = f"{result.get('output', '')}\n{result.get('error', '')}"
+                if any(marker in command_output for marker in package_lock_markers) and package_lock_retries < 30:
+                    package_lock_retries += 1
+                    LOG.warning(
+                        "Guest package manager lock blocked setup command; retrying %d/30: %s",
+                        package_lock_retries,
+                        command_text,
+                    )
+                    time.sleep(2)
+                    continue
                 if on_nonzero == "score_zero" and returncode not in {126, 127}:
                     raise _EvaluatorScoreZero(
                         f"evaluator command established score zero with return code {returncode}: {command_text}"
@@ -399,6 +527,78 @@ def _patch_setup_execute_contract() -> None:
 
     execute_setup._nemo_gym_returncode_contract = True  # type: ignore[attr-defined]
     controller_class._execute_setup = execute_setup
+
+
+def _patch_chrome_setup_cdp_lifecycle() -> None:
+    """Backport tab setup lifecycle fixes when the installed OSWorld lacks them."""
+
+    try:
+        from desktop_env.controllers import setup as setup_module  # type: ignore
+    except Exception:  # noqa: BLE001 - OSWorld is optional outside the runtime.
+        return
+
+    controller_class = setup_module.SetupController
+    open_tabs = controller_class._chrome_open_tabs_setup
+    close_tabs = controller_class._chrome_close_tabs_setup
+    if callable(getattr(setup_module, "_connect_chrome_over_cdp", None)) or (
+        getattr(open_tabs, "_nemo_gym_cdp_lifecycle", False) and getattr(close_tabs, "_nemo_gym_cdp_lifecycle", False)
+    ):
+        return
+
+    def connect_with_retry(playwright: Any, remote_debugging_url: str) -> Any:
+        for attempt in range(15):
+            try:
+                return playwright.chromium.connect_over_cdp(remote_debugging_url, timeout=30_000)
+            except Exception as exc:  # noqa: BLE001 - preserve upstream retry behavior.
+                if attempt == 14:
+                    raise
+                setup_module.logger.error("CDP connection attempt %d failed: %s", attempt + 1, exc)
+                setup_module.time.sleep(5)
+
+    def open_tabs_setup(self: Any, urls_to_open: List[str]) -> None:
+        remote_debugging_url = f"http://{self.vm_ip}:{self.chromium_port}"
+        setup_module.logger.info("Connect to Chrome @: %s", remote_debugging_url)
+
+        with setup_module.sync_playwright() as playwright:
+            browser = connect_with_retry(playwright, remote_debugging_url)
+            if not browser:
+                return
+            try:
+                setup_module.logger.info("Opening %s...", urls_to_open)
+                context = browser.contexts[0]
+                for index, url in enumerate(urls_to_open):
+                    page = context.new_page()
+                    try:
+                        page.goto(url, timeout=60000, wait_until="commit")
+                    except Exception:  # noqa: BLE001 - a slow site must not abort task setup.
+                        setup_module.logger.warning("Opening %s exceeds time limit", url)
+                    if index == 0:
+                        context.pages[0].close()
+            finally:
+                browser.close()
+
+    def close_tabs_setup(self: Any, urls_to_close: List[str]) -> None:
+        setup_module.time.sleep(5)
+        remote_debugging_url = f"http://{self.vm_ip}:{self.chromium_port}"
+
+        with setup_module.sync_playwright() as playwright:
+            browser = connect_with_retry(playwright, remote_debugging_url)
+            if not browser:
+                return
+            try:
+                context = browser.contexts[0]
+                for url in urls_to_close:
+                    for page in context.pages:
+                        if setup_module.compare_urls(page.url, url):
+                            page.close()
+                            break
+            finally:
+                browser.close()
+
+    open_tabs_setup._nemo_gym_cdp_lifecycle = True  # type: ignore[attr-defined]
+    close_tabs_setup._nemo_gym_cdp_lifecycle = True  # type: ignore[attr-defined]
+    controller_class._chrome_open_tabs_setup = open_tabs_setup
+    controller_class._chrome_close_tabs_setup = close_tabs_setup
 
 
 def _configure_docker_port_lock_timeout(timeout: float) -> None:
@@ -740,6 +940,71 @@ def _pointer_anthropic_client_options(base_url: str, api_key: Optional[str] = No
     }
 
 
+def _pointer_budget_retry(
+    role: str,
+    deadline_monotonic: float,
+    call_timeout: float = 120.0,
+) -> Callable[[Any, Callable[[Any], Any]], Any]:
+    """Retry structured InferenceHub budget responses within rollout bounds."""
+
+    def retry(request: Any, call_next: Callable[[Any], Any]) -> Any:
+        if str(request.url).split("?", 1)[0] != "/v1/messages":
+            return call_next(request)
+
+        started = None
+        attempt = 0
+        while True:
+            now = time.monotonic()
+            if now >= deadline_monotonic:
+                raise _PointerRetryDeadline(
+                    f"[{role}] Provider request skipped after task deadline.",
+                    task_deadline=True,
+                )
+            if started is not None and now >= started + 900.0:
+                raise _PointerRetryDeadline(f"[{role}] Provider quota retry window exhausted.")
+
+            bounded_request = request
+            copy_request = getattr(request, "copy", None)
+            if callable(copy_request):
+                bounded_request = copy_request(timeout=min(call_timeout, deadline_monotonic - now))
+            response = call_next(bounded_request)
+            if response.status_code not in {400, 429}:
+                return response
+            try:
+                body = response.json()
+            except Exception:  # noqa: BLE001 - let the SDK handle malformed errors.
+                return response
+            detail = body.get("error") if isinstance(body, Mapping) else None
+            if response.status_code == 400 and isinstance(detail, Mapping):
+                code = str(detail.get("code", "")).lower()
+                message = str(detail.get("message", "")).lower()
+                if code == "content_length_limit" or "content length exceeded" in message:
+                    response.http_response.status_code = 413
+                    return response
+            if not isinstance(detail, Mapping) or detail.get("type") != "budget_exceeded":
+                return response
+
+            response.close()
+            now = time.monotonic()
+            started = now if started is None else started
+            stop = min(deadline_monotonic, started + 900.0)
+            if now >= stop:
+                task_deadline = deadline_monotonic <= started + 900.0
+                reason = (
+                    "Provider request stopped at task deadline."
+                    if task_deadline
+                    else "Provider quota retry window exhausted."
+                )
+                raise _PointerRetryDeadline(f"[{role}] {reason}", task_deadline=task_deadline)
+            cap = min(300.0, 60.0 * (2**attempt))
+            delay = min(cap * (0.5 + random.random() / 2.0), stop - now)
+            LOG.warning("Pointer %s provider budget pause; retrying in %.1fs", role, delay)
+            time.sleep(max(0.0, min(delay, stop - time.monotonic())))
+            attempt += 1
+
+    return retry
+
+
 @dataclass
 class _PointerModelIOContext:
     """Task-scoped destination and identity for Pointer's direct model calls."""
@@ -918,7 +1183,7 @@ class _PointerMessagesProxy:
             LOG.exception("Failed to serialize Pointer model request for call %s", call_id)
         try:
             response = self._target.create(*args, **kwargs)
-        except Exception as exc:
+        except (Exception, _PointerRetryDeadline) as exc:
             finished_ns = time.time_ns()
             try:
                 _append_pointer_io_event(
@@ -1028,7 +1293,7 @@ def _pointer_model_io_context(
     )
 
 
-def _patch_pointer_anthropic_client(base_url: str) -> None:
+def _patch_pointer_anthropic_client(base_url: str, *, deadline_monotonic: float) -> None:
     """Make Pointer's Anthropic SDK client honor the configured base URL."""
 
     if not base_url:
@@ -1052,7 +1317,17 @@ def _patch_pointer_anthropic_client(base_url: str) -> None:
         if provider == pointer_utils.APIProvider.ANTHROPIC:
             from anthropic import Anthropic  # noqa: PLC0415
 
-            client = Anthropic(**_pointer_anthropic_client_options(base_url, self.api_key))
+            client_options = _pointer_anthropic_client_options(base_url, self.api_key)
+            client = Anthropic(
+                **client_options,
+                middleware=(
+                    _pointer_budget_retry(
+                        str(getattr(self, "name", "pointer")),
+                        deadline_monotonic,
+                        float(client_options["timeout"]),
+                    ),
+                ),
+            )
             context = _POINTER_MODEL_IO_CONTEXT.get()
             if context is None:
                 return client
@@ -1459,6 +1734,12 @@ def _evaluate_osworld_env(
     """
 
     evaluate = env.evaluate
+    setup_controller = getattr(env, "setup_controller", None)
+    evaluator_phase_attribute = "_nemo_gym_evaluator_phase"
+    had_evaluator_phase = bool(setup_controller is not None and hasattr(setup_controller, evaluator_phase_attribute))
+    original_evaluator_phase = getattr(setup_controller, evaluator_phase_attribute) if had_evaluator_phase else None
+    if setup_controller is not None:
+        setattr(setup_controller, evaluator_phase_attribute, True)
     original_cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
     easyocr_module: Optional[Any] = None
     original_easyocr_reader: Optional[Any] = None
@@ -1489,6 +1770,15 @@ def _evaluate_osworld_env(
             eval_logger.info("OSWorld evaluator setup established score zero: %s", exc)
             return 0.0
     finally:
+        if setup_controller is not None:
+            if had_evaluator_phase:
+                setattr(
+                    setup_controller,
+                    evaluator_phase_attribute,
+                    original_evaluator_phase,
+                )
+            else:
+                delattr(setup_controller, evaluator_phase_attribute)
         if disable_gpu:
             if easyocr_module is not None and original_easyocr_reader is not None:
                 easyocr_module.Reader = original_easyocr_reader
@@ -1509,7 +1799,13 @@ def run_osworld_task(
     require_a11y_tree: bool = False,
     client_password: str = "password",
     enable_proxy: bool = False,
+    allow_direct_proxy_tasks: bool = True,
     proxy_config_file: Optional[str] = None,
+    resources_server_url: str = "",
+    resources_server_auth_token: str = "",
+    resources_request_timeout: float = 900.0,
+    resources_connect_timeout: float = 10.0,
+    resources_request_retries: int = 3,
     sandbox_provider_config: Optional[Dict[str, Any]] = None,
     sandbox_spec: Optional[Dict[str, Any]] = None,
     vm_path: Optional[str] = None,
@@ -1525,7 +1821,7 @@ def run_osworld_task(
     setup_cache_dir: Optional[str] = None,
     mem_limit_mb: int = 0,
     step_timeout: int = 60,  # advisory; per-action subprocess timeout (provider-dependent)
-    task_timeout: int = 1800,  # wall-clock cap on the whole rollout
+    task_timeout: int = 1800,  # cooperative deadline checked between steps and by Pointer model calls
     docker_port_lock_timeout: float = 300.0,
     runner_name: str = "gym_pyautogui",
     action_space: Optional[str] = None,
@@ -1569,12 +1865,27 @@ def run_osworld_task(
         requires_proxy = task_requires_proxy(task_config)
     except ValueError as exc:
         return proxy_precondition_failure("proxy_configuration_error", f"ProxyConfigurationError: {exc}")
+    use_remote_resources = bool(resources_server_url.strip())
     use_gym_sandbox = sandbox_provider_config is not None
+    if use_remote_resources and use_gym_sandbox:
+        raise ValueError("resources_server and sandbox_provider are mutually exclusive OSWorld backends")
     if vm_path and sandbox_vm_path and os.path.realpath(vm_path) != os.path.realpath(sandbox_vm_path):
         raise ValueError("vm_path and deprecated sandbox_vm_path refer to different qcow2 files")
     effective_vm_path = vm_path or sandbox_vm_path
+    if use_remote_resources and effective_vm_path:
+        raise ValueError("vm_path is only valid for local OSWorld providers")
     proxy_info = None
-    if requires_proxy and enable_proxy:
+    if requires_proxy and not enable_proxy and not allow_direct_proxy_tasks:
+        return proxy_precondition_failure(
+            "proxy_required_but_disabled",
+            "ProxyRequiredButDisabled: task requires a proxy, but proxy support is disabled",
+        )
+    if requires_proxy and not enable_proxy and allow_direct_proxy_tasks and use_remote_resources:
+        return proxy_precondition_failure(
+            "proxy_configuration_error",
+            "ProxyConfigurationError: direct proxy task mode is not supported by the remote Resources Server",
+        )
+    if requires_proxy and enable_proxy and not use_remote_resources:
         try:
             proxy_info = inspect_proxy_config_file(proxy_config_file)
         except ValueError as exc:
@@ -1608,7 +1919,11 @@ def run_osworld_task(
         agent_class_path=agent_class_path,
         agent_kwargs=agent_kwargs,
     )
-    if use_gym_sandbox:
+    if use_remote_resources:
+        from responses_api_agents.osworld_agent.remote_environment import RemoteDesktopEnv
+
+        env_cls = RemoteDesktopEnv
+    elif use_gym_sandbox:
         sandbox_env_class = {
             "desktop_env.desktop_env.DesktopEnv": SANDBOX_DESKTOP_ENV_CLASS,
             "desktop_env.desktop_env_pointer.DesktopEnv": SANDBOX_POINTER_DESKTOP_ENV_CLASS,
@@ -1621,9 +1936,11 @@ def run_osworld_task(
         env_cls = load_attr(sandbox_env_class or runner_spec.env_class_path)
     else:
         env_cls = load_attr(runner_spec.env_class_path)
-    _patch_setup_execute_contract()
-    if provider_name == "docker" and not use_gym_sandbox:
-        _configure_docker_port_lock_timeout(docker_port_lock_timeout)
+    if not use_remote_resources:
+        _patch_setup_execute_contract()
+        _patch_chrome_setup_cdp_lifecycle()
+        if provider_name == "docker" and not use_gym_sandbox:
+            _configure_docker_port_lock_timeout(docker_port_lock_timeout)
     instruction = task_config.get("instruction", "")
     event_context = dict(log_context or {})
     event_context.update(
@@ -1636,8 +1953,9 @@ def run_osworld_task(
         }
     )
     event_context = {key: value for key, value in event_context.items() if value is not None and value != ""}
-    _patch_extension_name_aliases()
-    _patch_pdf_image_evaluator_cleanup()
+    if not use_remote_resources:
+        _patch_extension_name_aliases()
+        _patch_pdf_image_evaluator_cleanup()
 
     env: Optional[Any] = None
     steps: List[StepRecord] = []
@@ -1663,7 +1981,11 @@ def run_osworld_task(
             "observation_type": runner_spec.observation_type,
             "provider_name": provider_name,
             "container_image": container_image,
-            "execution_backend": "gym_sandbox" if use_gym_sandbox else "osworld_provider",
+            "execution_backend": (
+                "gym_sandbox"
+                if use_gym_sandbox
+                else ("resources_server" if use_remote_resources else "osworld_provider")
+            ),
             "sandbox_provider": (next(iter(sandbox_provider_config)) if sandbox_provider_config else None),
             "sandbox_image": (sandbox_spec or {}).get("image") if use_gym_sandbox else None,
             "headless": headless,
@@ -1679,9 +2001,11 @@ def run_osworld_task(
             "reward_mode": reward_mode,
             "proxy_required": requires_proxy,
             "proxy_enabled": enable_proxy,
+            "allow_direct_proxy_tasks": allow_direct_proxy_tasks,
             "proxy_config_file": proxy_info.path if proxy_info is not None else None,
             "proxy_config_sha256": proxy_info.sha256 if proxy_info is not None else None,
             "proxy_config_entry_count": proxy_info.entry_count if proxy_info is not None else 0,
+            "resources_server_url": resources_server_url or None,
         },
     )
     task_logger = task_artifacts.task_logger if task_artifacts is not None else LOG
@@ -1714,7 +2038,17 @@ def run_osworld_task(
             "cache_dir": cache_dir,
             "enable_proxy": enable_proxy,
         }
-        if use_gym_sandbox:
+        if use_remote_resources:
+            env_kwargs.update(
+                {
+                    "resources_server_url": resources_server_url,
+                    "auth_token": resources_server_auth_token,
+                    "request_timeout": resources_request_timeout,
+                    "connect_timeout": resources_connect_timeout,
+                    "request_retries": resources_request_retries,
+                }
+            )
+        elif use_gym_sandbox:
             effective_sandbox_spec = dict(sandbox_spec or {})
             sandbox_provider_name = str(next(iter(sandbox_provider_config or {}), "")).lower().strip()
             if sandbox_provider_name == "docker":
@@ -1728,18 +2062,20 @@ def run_osworld_task(
                     "sandbox_ready_poll_s": sandbox_ready_poll_s,
                 }
             )
-        if effective_vm_path:
+        if not use_remote_resources and effective_vm_path:
             env_kwargs["path_to_vm"] = effective_vm_path
         env = env_cls(
             **env_kwargs,
         )
-        linked_cache_files = _stage_setup_cache(task_config, cache_dir, setup_cache_dir)
+        linked_cache_files = 0 if use_remote_resources else _stage_setup_cache(task_config, cache_dir, setup_cache_dir)
         if linked_cache_files:
             LOG.info(
                 "Linked %d pre-staged setup cache entries for task %s", linked_cache_files, _safe_task_id(task_config)
             )
         rollout_phase = "environment_reset"
         env.reset(task_config=task_config)
+        if use_gym_sandbox and runner_spec.kind == "pointer_agent":
+            _install_guest_idle_inhibitor(env.setup_controller, task_logger)
         rollout_phase = "rollout"
         native_agent = None
         pointer_agent = None
@@ -1916,7 +2252,10 @@ def run_osworld_task(
             agent_cls = load_attr(runner_spec.agent_class_path)
             _sync_pointer_config(policy_model_name)
             _patch_pointer_optional_parallel_tools(disable_parallel_tools)
-            _patch_pointer_anthropic_client(anthropic_base_url)
+            _patch_pointer_anthropic_client(
+                anthropic_base_url,
+                deadline_monotonic=task_start + task_timeout,
+            )
             pointer_agent = agent_cls(
                 env=env,
                 screen_size=screen_size,
@@ -2034,6 +2373,7 @@ def run_osworld_task(
                 )
                 break
             _current_step[0] = step_idx + 1
+            step_state = _observation_identity(obs)
             obs_entry = {
                 "screenshot_b64": _b64(obs.get("screenshot")),
                 "accessibility_tree": obs.get("accessibility_tree"),
@@ -2065,10 +2405,22 @@ def run_osworld_task(
                     model_text = model_fn(system_prompt, instruction, history_window + [obs_entry])
                     model_text = strip_thinking(model_text or "")
                     actions = parse_actions(model_text)
-            except Exception as exc:  # noqa: BLE001 — record + abort, don't crash the VM.
+            except (Exception, _PointerRetryDeadline) as exc:  # noqa: BLE001 — record + abort, don't crash the VM.
+                if isinstance(exc, _PointerRetryDeadline) and exc.task_deadline:
+                    timed_out = True
                 error = f"agent/model call failed at step {step_idx}: {exc}"
                 task_logger.exception("Agent/model call failed at step %d", step_idx)
-                steps.append(StepRecord(step=step_idx, model_text="", actions=[], reward=0.0, done=False))
+                steps.append(
+                    StepRecord(
+                        step=step_idx,
+                        model_text="",
+                        actions=[],
+                        reward=0.0,
+                        done=False,
+                        state=step_state,
+                        next_state=_observation_identity(obs),
+                    )
+                )
                 screenshot_file = _save_task_screenshot(task_artifacts, step_idx + 1, obs)
                 _append_task_trajectory(
                     task_artifacts,
@@ -2099,6 +2451,8 @@ def run_osworld_task(
                         reward=0.0,
                         done=False,
                         info={"agent": agent_step_info} if agent_step_info else {},
+                        state=step_state,
+                        next_state=_observation_identity(obs),
                     )
                 )
                 obs_history.append(obs_entry)
@@ -2153,6 +2507,8 @@ def run_osworld_task(
                     reward=step_reward,
                     done=step_done,
                     info=step_info,
+                    state=step_state,
+                    next_state=_observation_identity(obs),
                 )
             )
             obs_history.append(obs_entry)
@@ -2225,6 +2581,10 @@ def run_osworld_task(
             except Exception:  # noqa: BLE001 - usage logging should not fail the rollout.
                 LOG.exception("PointerAgent.log_usage() failed")
 
+    except _PointerRetryDeadline as exc:
+        timed_out = exc.task_deadline
+        error = f"{type(exc).__name__}: {exc}"
+        task_logger.exception("Pointer provider retry stopped outside an agent step")
     except _EvaluatorScoreZero as exc:
         setup_score_zero = True
         finished = True

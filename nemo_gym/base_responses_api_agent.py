@@ -37,7 +37,10 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body, rollout_context
+from nemo_gym.rollout_correlation import (
+    execution_context,
+    maybe_execution_id_from_run_body,
+)
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
     BaseServer,
@@ -84,7 +87,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             body = kwargs.get("body")
             if body is None:
                 body = next((arg for arg in args if isinstance(arg, BaseRunRequest)), None)
-            with rollout_context(self.rollout_id_from_run(body)):
+            with execution_context(self.execution_id_from_run(body)):
                 return await run(*args, **kwargs)
 
         app.post("/run")(run_with_rollout_context)
@@ -122,15 +125,19 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             getattr(getattr(self, "config", None), "token_id_capture", False)
         )
 
-    def rollout_id_from_run(self, body: Any) -> Optional[str]:
-        """Return the capture id for a run request.
+    def execution_id_from_run(self, body: Any) -> Optional[str]:
+        """Physical-execution capture ID for a run request.
 
-        Return ``None`` when capture is disabled.
-        Return ``None`` when the body has no usable identity.
+        New dispatches carry ``_ng_execution_id``. Legacy callers fall back to
+        task/rollout indices. None disables the correlation prefix.
         """
         if not self._capture_correlation_enabled():
             return None
-        return maybe_rollout_id_from_run_body(body)
+        return maybe_execution_id_from_run_body(body)
+
+    def rollout_id_from_run(self, body: Any) -> Optional[str]:
+        """Compatibility alias for :meth:`execution_id_from_run`."""
+        return self.execution_id_from_run(body)
 
     def url_path_for_run(self, url_path: str, body: Any) -> str:
         """Apply this run's capture path to a downstream URL path.
@@ -140,7 +147,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         Calls without a rollout id remain unchanged.
         """
         return (
-            f"{rollout_path_prefix(self.rollout_id_from_run(body), token_capture=self._token_id_capture_enabled())}"
+            f"{rollout_path_prefix(self.execution_id_from_run(body), token_capture=self._token_id_capture_enabled())}"
             f"{url_path}"
         )
 
@@ -151,7 +158,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         """
         return apply_rollout_prefix(
             base_url,
-            self.rollout_id_from_run(body),
+            self.execution_id_from_run(body),
             token_capture=self._token_id_capture_enabled(),
         )
 

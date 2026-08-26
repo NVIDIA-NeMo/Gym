@@ -1,0 +1,12 @@
+# OSWorld's legacy google-generativeai path selects google-api-core[grpc].
+# grpcio-status 1.81+ requires protobuf 6+, while google-generativeai still
+# requires protobuf <6. Put the known-compatible pair in the override policy,
+# not only requirements.txt, so it also replaces transitive resolver edges.
+grpcio-status==1.71.2
+protobuf==5.29.6
+
+# The pinned OSWorld archive still declares numpy<2. Python 3.13 has no
+# compatible NumPy 1.x wheel, while this managed agent is qualified on the
+# same NumPy 2.4 runtime used by the parent workspace. Override the transitive
+# archive edge as well as declaring the direct requirement.
+numpy>=2.1,<2.5

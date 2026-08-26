@@ -148,6 +148,14 @@ ATTEMPT_INDEX_KEY_NAME = "_ng_attempt_index"
 # Set it when dispatches reuse task and rollout indices.
 # Otherwise two dispatches would share one capture key.
 ROLLOUT_ID_KEY_NAME = "_ng_rollout_id"
+# One physical /run execution. Unlike trajectory_identity.rollout_id, this is
+# deliberately fresh when a logical rollout is re-executed after an ambiguous
+# transport failure.
+EXECUTION_ID_KEY_NAME = "_ng_execution_id"
+# Sandbox providers receive this metadata verbatim. Keep one namespaced key so
+# OpenSandbox/Kubernetes metadata and Docker labels describe the same physical
+# execution without provider-specific translation.
+EXECUTION_ID_SANDBOX_METADATA_KEY = "nemo-gym.execution-id"
 RESPONSES_CREATE_PARAMS_KEY_NAME = "responses_create_params"
 RESPONSE_KEY_NAME = "response"
 AGENT_REF_KEY_NAME = "agent_ref"
