@@ -270,6 +270,8 @@ def test_legacy_response_output_groups_agent_items_into_turns(tmp_path: Path) ->
     record = _record(0, 0)
     record.pop("ng_trajectory")
     record["response"]["output"] = [
+        {"type": "function_call", "call_id": "tool-0", "name": "tool", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "tool-0", "output": "done"},
         {"type": "reasoning", "summary": [{"type": "summary_text", "text": "thinking"}]},
         {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": ""}]},
         {"type": "function_call", "call_id": "tool-1", "name": "tool", "arguments": "{}"},
@@ -284,7 +286,7 @@ def test_legacy_response_output_groups_agent_items_into_turns(tmp_path: Path) ->
 
     hollow = [finding for finding in digest.findings if finding.check == "agent_turn_hollow"]
     assert len(hollow) == 1
-    assert hollow[0].locator == {"turn": 1}
+    assert hollow[0].locator == {"turn": 2}
     assert hollow[0].detail["evidence_source"] == "response.output"
     assert "rollout_missing_agent_turns" not in {finding.check for finding in digest.findings}
     assert digest.legacy_evidence == dict.fromkeys(LEGACY_TURN_CHECKS, "response.output")

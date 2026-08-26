@@ -61,11 +61,15 @@ def response_output_trajectory(record: dict[str, Any]) -> dict[str, Any] | None:
     def flush() -> None:
         nonlocal has_message, has_tool_calls, has_agent_content
         if has_agent_content:
+            answer: list[dict[str, Any]] = []
+            if has_message:
+                answer.append({"type": "message", "content": "legacy message content"})
+            if has_tool_calls:
+                answer.append({"type": "tool_call"})
             turns.append(
                 {
                     "turn_no": len(turns),
-                    "answer": "legacy message content" if has_message else None,
-                    "tool_calls": [{"type": "tool_call"}] if has_tool_calls else [],
+                    "answer": answer,
                     "model_calls": [],
                 }
             )
