@@ -587,34 +587,41 @@ class VibenchResourcesServer(SimpleResourcesServer):
             grading_time_s=grading_time_s,
         )
 
-    def compute_metrics(self, verify_responses: List[Dict[str, Any]]) -> Dict[str, float]:
+    def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
         """Report where rollouts fail, not just what they scored.
 
         A mean reward alone cannot distinguish "the model wrote a weak app" from "the app
-        never built" or "grading could not seed it" -- and those need completely different
-        responses. Every zero in this environment has one of three causes, so they are
-        surfaced separately.
+        never built" or "grading could not seed it", and those need completely different
+        responses. Every zero in this environment has one of those causes.
+
+        ``tasks`` arrives grouped by task -- tasks[i] is the list of rollouts for task i --
+        per AggregateMetricsMixin, so it is flattened before counting.
         """
-        if not verify_responses:
+        rollouts = [r for task in tasks for r in task]
+        if not rollouts:
             return {}
-        n = len(verify_responses)
-        rewards = [float(r.get("reward", 0) or 0) for r in verify_responses]
-        plans = sum(int(r.get("test_plans_total", 0) or 0) for r in verify_responses)
-        graded = sum(int(r.get("test_plans_graded", 0) or 0) for r in verify_responses)
+        n = len(rollouts)
+        rewards = [float(r.get("reward", 0) or 0) for r in rollouts]
+        plans = sum(int(r.get("test_plans_total", 0) or 0) for r in rollouts)
+        graded = sum(int(r.get("test_plans_graded", 0) or 0) for r in rollouts)
         return {
             "mean_reward": sum(rewards) / n,
             "perfect_rate": sum(1 for x in rewards if x >= 1.0) / n,
             "zero_rate": sum(1 for x in rewards if x <= 0.0) / n,
-            "build_failure_rate": sum(1 for r in verify_responses if r.get("build_failed")) / n,
-            "mean_seeding_failure_rate": sum(float(r.get("seeding_failure_rate", 0) or 0) for r in verify_responses)
-            / n,
+            "build_failure_rate": sum(1 for r in rollouts if r.get("build_failed")) / n,
+            "mean_seeding_failure_rate": sum(float(r.get("seeding_failure_rate", 0) or 0) for r in rollouts) / n,
             # The share of plans that produced a scorecard at all: the health check that
             # separates a working verifier from a broken one.
             "plans_graded_rate": (graded / plans) if plans else 0.0,
         }
 
-    def get_key_metrics(self) -> List[str]:
-        return ["mean_reward", "plans_graded_rate", "build_failure_rate"]
+    def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
+        """Headline metrics: the score, plus whether grading actually happened."""
+        headline = ["mean_reward", "plans_graded_rate", "build_failure_rate"]
+        selected = {k: agent_metrics[k] for k in headline if k in agent_metrics}
+        # Keep the framework default (mean/*) so nothing standard disappears.
+        selected.update({k: v for k, v in agent_metrics.items() if k.startswith("mean/")})
+        return selected
 
 
 if __name__ == "__main__":

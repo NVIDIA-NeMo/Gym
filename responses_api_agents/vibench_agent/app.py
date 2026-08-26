@@ -41,8 +41,9 @@ from typing import Any, Dict, Optional
 from urllib.parse import urlparse, urlunparse
 from uuid import uuid4
 
-from fastapi import Request
+from fastapi import Body, Request
 
+from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
@@ -284,6 +285,22 @@ class VibenchAgent(OpenCodeSandboxedAgent):
         response_dict: Dict[str, Any] = await get_response_json(verify_response)
         response_dict |= self._sandbox_id_to_run_result.pop(session_id, {})
         return OpenCodeSandboxedAgentVerifyResponse.model_validate(response_dict)
+
+    async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
+        """Proxy aggregate_metrics to the resources server.
+
+        Rollout collection POSTs /aggregate_metrics to the *agent*, and the parent does not
+        forward it. Without this the resources server's compute_metrics never runs, so
+        build_failure_rate, mean_seeding_failure_rate and plans_graded_rate silently never
+        appear -- the metrics that say whether grading happened at all.
+        """
+        response = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/aggregate_metrics",
+            json=body,
+        )
+        await raise_for_status(response)
+        return AggregateMetrics.model_validate(await get_response_json(response))
 
 
 if __name__ == "__main__":

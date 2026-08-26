@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import inspect
 import json
 import signal
 import tarfile
@@ -263,33 +264,43 @@ class TestRedaction:
 
 
 class TestAggregateMetrics:
+    """Signatures must match AggregateMetricsMixin: compute_metrics receives rollouts
+    grouped by task, get_key_metrics receives agent_metrics and returns a dict."""
+
     def test_separates_the_three_causes_of_a_zero(self, tmp_path):
         server = make_server(tmp_path)
-        responses = [
-            {
-                "reward": 1.0,
-                "test_plans_total": 3,
-                "test_plans_graded": 3,
-                "build_failed": False,
-                "seeding_failure_rate": 0.0,
-            },
-            {
-                "reward": 0.0,
-                "test_plans_total": 3,
-                "test_plans_graded": 0,
-                "build_failed": True,
-                "seeding_failure_rate": 0.0,
-            },
-            {
-                "reward": 0.5,
-                "test_plans_total": 4,
-                "test_plans_graded": 4,
-                "build_failed": False,
-                "seeding_failure_rate": 0.25,
-            },
+        # Grouped by task, as compute_aggregate_metrics passes it.
+        tasks = [
+            [
+                {
+                    "reward": 1.0,
+                    "test_plans_total": 3,
+                    "test_plans_graded": 3,
+                    "build_failed": False,
+                    "seeding_failure_rate": 0.0,
+                }
+            ],
+            [
+                {
+                    "reward": 0.0,
+                    "test_plans_total": 3,
+                    "test_plans_graded": 0,
+                    "build_failed": True,
+                    "seeding_failure_rate": 0.0,
+                }
+            ],
+            [
+                {
+                    "reward": 0.5,
+                    "test_plans_total": 4,
+                    "test_plans_graded": 4,
+                    "build_failed": False,
+                    "seeding_failure_rate": 0.25,
+                }
+            ],
         ]
 
-        m = server.compute_metrics(responses)
+        m = server.compute_metrics(tasks)
 
         assert m["mean_reward"] == pytest.approx(0.5)
         assert m["perfect_rate"] == pytest.approx(1 / 3)
@@ -297,12 +308,55 @@ class TestAggregateMetrics:
         assert m["build_failure_rate"] == pytest.approx(1 / 3)
         assert m["plans_graded_rate"] == pytest.approx(7 / 10)
 
+    def test_multiple_rollouts_per_task_are_flattened(self, tmp_path):
+        """num_repeats > 1 puts several rollouts in one task group."""
+        server = make_server(tmp_path)
+        tasks = [
+            [
+                {"reward": 1.0, "test_plans_total": 1, "test_plans_graded": 1},
+                {"reward": 0.0, "test_plans_total": 1, "test_plans_graded": 1},
+            ]
+        ]
+
+        m = server.compute_metrics(tasks)
+
+        assert m["mean_reward"] == pytest.approx(0.5)
+        assert m["perfect_rate"] == pytest.approx(0.5)
+
     def test_empty_input_is_not_a_division_error(self, tmp_path):
         assert make_server(tmp_path).compute_metrics([]) == {}
+        assert make_server(tmp_path).compute_metrics([[]]) == {}
 
-    def test_key_metrics_surface_verifier_health(self, tmp_path):
-        # plans_graded_rate is what tells a reader the verifier ran at all.
-        assert "plans_graded_rate" in make_server(tmp_path).get_key_metrics()
+    def test_key_metrics_takes_agent_metrics_and_returns_a_dict(self, tmp_path):
+        server = make_server(tmp_path)
+        agent_metrics = {
+            "mean_reward": 0.5,
+            "plans_graded_rate": 0.9,
+            "build_failure_rate": 0.1,
+            "mean/foo": 1.0,
+            "unrelated": 2.0,
+        }
+
+        selected = server.get_key_metrics(agent_metrics)
+
+        assert isinstance(selected, dict)
+        assert selected["plans_graded_rate"] == 0.9
+        assert selected["mean/foo"] == 1.0, "the framework default (mean/*) must survive"
+        assert "unrelated" not in selected
+
+    def test_key_metrics_tolerates_absent_keys(self, tmp_path):
+        assert make_server(tmp_path).get_key_metrics({}) == {}
+
+    def test_signatures_match_the_framework_contract(self, tmp_path):
+        """The bug this replaces was a signature mismatch that unit tests missed because they
+        called these the way the code expected, not the way the framework does."""
+        from nemo_gym.reward_profile import AggregateMetricsMixin
+
+        server = make_server(tmp_path)
+        for name in ("compute_metrics", "get_key_metrics"):
+            mine = inspect.signature(getattr(server, name))
+            base = inspect.signature(getattr(AggregateMetricsMixin, name))
+            assert list(mine.parameters) == [q for q in base.parameters if q != "self"], name
 
 
 class TestRunVibenchScript:

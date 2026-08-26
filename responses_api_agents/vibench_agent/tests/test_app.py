@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -242,6 +243,37 @@ class TestBuildSandbox:
         await agent._create_build_sandbox("PRD", [str(tmp_path / "missing")])
 
         assert sandbox.uploads == []
+
+
+class TestAggregateMetricsProxy:
+    @pytest.mark.asyncio
+    async def test_forwards_to_the_resources_server(self, tmp_path):
+        """Rollout collection POSTs /aggregate_metrics to the agent; without this proxy the
+        resources server's failure-breakdown metrics never run."""
+        agent = make_agent(tmp_path)
+        posted = {}
+
+        class _Resp:
+            ok = True
+            status = 200
+
+            async def read(self):
+                return json.dumps({"agent_metrics": {"mean_reward": 0.5}}).encode()
+
+        async def fake_post(server_name, url_path, json, **kwargs):
+            posted["server"] = server_name
+            posted["path"] = url_path
+            return _Resp()
+
+        agent.server_client.post = fake_post
+
+        from nemo_gym.config_types import AggregateMetricsRequest
+
+        result = await agent.aggregate_metrics(AggregateMetricsRequest(verify_responses=[]))
+
+        assert result.agent_metrics == {"mean_reward": 0.5}
+        assert posted["server"] == "vibench_resources_server"
+        assert posted["path"] == "/aggregate_metrics"
 
 
 class TestSandboxModelUrl:
