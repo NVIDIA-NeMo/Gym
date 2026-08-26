@@ -34,7 +34,7 @@ from nemo_gym.base_responses_api_model import (
     make_capture_store,
     read_model_call_records,
 )
-from nemo_gym.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymResponse,
@@ -516,25 +516,26 @@ def test_per_rollout_prefix_strips_for_non_observed_paths_too(tmp_path):
     assert CaptureStore(tmp_path).read("abc") == []  # non-observed path -> routed, not captured
 
 
-def test_maybe_rollout_id_from_run_body_reads_canonical_indices():
-    """The shared accessor agents use to derive the rollout id from a /run request body."""
+def test_get_rollout_id_from_run_body_reads_the_explicit_id():
+    """The shared accessor reads the rollout id without serializing the request."""
     from pydantic import BaseModel, ConfigDict
 
-    from nemo_gym.base_responses_api_model import maybe_rollout_id_from_run_body
-    from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+    from nemo_gym.base_responses_api_model import get_rollout_id_from_run_body
 
-    mapping = MappingProxyType({TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 1})
-    assert maybe_rollout_id_from_run_body(mapping) == "3-1"
-    assert maybe_rollout_id_from_run_body({TASK_INDEX_KEY_NAME: 3}) is None  # partial -> None
-    assert maybe_rollout_id_from_run_body({}) is None
-    assert maybe_rollout_id_from_run_body(None) is None
+    rollout_id = "123e4567-e89b-42d3-a456-426614174000"
+    mapping = MappingProxyType({"_ng_rollout_id": rollout_id})
+    assert get_rollout_id_from_run_body(mapping) == rollout_id
+    with pytest.raises(ValueError, match="required"):
+        get_rollout_id_from_run_body({})
+    with pytest.raises(ValueError, match="required"):
+        get_rollout_id_from_run_body(None)
 
     # The shape agents actually receive: a run-request model with extra="allow".
     class _Body(BaseModel):
         model_config = ConfigDict(extra="allow")
 
-    body = _Body.model_validate({TASK_INDEX_KEY_NAME: 5, ROLLOUT_INDEX_KEY_NAME: 2})
-    assert maybe_rollout_id_from_run_body(body) == "5-2"
+    body = _Body.model_validate({"_ng_rollout_id": rollout_id})
+    assert get_rollout_id_from_run_body(body) == rollout_id
 
 
 # --- error classification ---
@@ -838,40 +839,53 @@ def _make_base_agent(global_config, *, token_id_capture=False):
     return _Agent(config=config, server_client=server_client)
 
 
-def test_base_agent_url_path_for_run_requires_only_rollout_indices():
-    body = {TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 1}
+def test_base_agent_url_path_for_run_uses_the_explicit_rollout_id():
+    rollout_id = "123e4567-e89b-42d3-a456-426614174000"
+    body = {"_ng_rollout_id": rollout_id}
 
     enabled = _make_base_agent({"observability_enabled": True})
-    assert enabled.rollout_id_from_run(body) == "3-1"
-    assert enabled.url_path_for_run("/v1/responses", body) == "/ng-rollout/3-1/v1/responses"
-    assert enabled.base_url_for_run("http://h:1", body) == "http://h:1/ng-rollout/3-1"
-    assert enabled.url_path_for_run("/v1/responses", {}) == "/v1/responses"
-    assert enabled.base_url_for_run("http://h:1", {}) == "http://h:1"
+    assert enabled.rollout_id_from_run(body) == rollout_id
+    assert enabled.url_path_for_run("/v1/responses", body) == f"/ng-rollout/{rollout_id}/v1/responses"
+    assert enabled.base_url_for_run("http://h:1", body) == f"http://h:1/ng-rollout/{rollout_id}"
+    with pytest.raises(ValueError, match="_ng_rollout_id is required"):
+        enabled.url_path_for_run("/v1/responses", {})
+    with pytest.raises(ValueError, match="_ng_rollout_id is required"):
+        enabled.base_url_for_run("http://h:1", {})
 
     disabled = _make_base_agent({"observability_enabled": False})
-    assert disabled.rollout_id_from_run(body) == "3-1"
-    assert disabled.url_path_for_run("/v1/responses", body) == "/ng-rollout/3-1/v1/responses"
-    assert disabled.base_url_for_run("http://h:1", body) == "http://h:1/ng-rollout/3-1"
+    assert disabled.rollout_id_from_run(body) == rollout_id
+    assert disabled.url_path_for_run("/v1/responses", body) == f"/ng-rollout/{rollout_id}/v1/responses"
+    assert disabled.base_url_for_run("http://h:1", body) == f"http://h:1/ng-rollout/{rollout_id}"
 
-    assert _make_base_agent(MagicMock()).url_path_for_run("/v1/responses", body) == "/ng-rollout/3-1/v1/responses"
+    assert (
+        _make_base_agent(MagicMock()).url_path_for_run("/v1/responses", body)
+        == f"/ng-rollout/{rollout_id}/v1/responses"
+    )
 
 
 def test_base_agent_propagates_explicit_token_capture_intent():
-    body = {TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 1}
+    rollout_id = "123e4567-e89b-42d3-a456-426614174000"
+    body = {"_ng_rollout_id": rollout_id}
     global_config = {
         "observability_enabled": True,
         "token_id_capture": {"enabled": True},
     }
     opted_in = _make_base_agent(global_config, token_id_capture=True)
-    assert opted_in.url_path_for_run("/v1/responses", body) == "/ng-rollout/3-1/training-token-capture/v1/responses"
-    assert opted_in.base_url_for_run("http://h:1", body) == "http://h:1/ng-rollout/3-1/training-token-capture"
+    assert (
+        opted_in.url_path_for_run("/v1/responses", body)
+        == f"/ng-rollout/{rollout_id}/training-token-capture/v1/responses"
+    )
+    assert (
+        opted_in.base_url_for_run("http://h:1", body) == f"http://h:1/ng-rollout/{rollout_id}/training-token-capture"
+    )
 
     opted_out = _make_base_agent(global_config, token_id_capture=False)
-    assert opted_out.url_path_for_run("/v1/responses", body) == "/ng-rollout/3-1/v1/responses"
+    assert opted_out.url_path_for_run("/v1/responses", body) == f"/ng-rollout/{rollout_id}/v1/responses"
 
 
 def test_base_agent_all_agents_overrides_the_agent_opt_in():
-    body = {TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 1}
+    rollout_id = "123e4567-e89b-42d3-a456-426614174000"
+    body = {"_ng_rollout_id": rollout_id}
     global_config = {
         "token_id_capture": {
             "enabled": True,
@@ -880,7 +894,10 @@ def test_base_agent_all_agents_overrides_the_agent_opt_in():
     }
     agent = _make_base_agent(global_config, token_id_capture=False)
 
-    assert agent.url_path_for_run("/v1/responses", body) == ("/ng-rollout/3-1/training-token-capture/v1/responses")
+    assert (
+        agent.url_path_for_run("/v1/responses", body)
+        == f"/ng-rollout/{rollout_id}/training-token-capture/v1/responses"
+    )
 
 
 def test_base_agent_url_path_for_request_propagates_inbound_prefix():
@@ -1125,56 +1142,57 @@ def test_reconstruct_streamed_response_best_effort_none():
     assert _reconstruct_streamed_response(ping, "responses") is None
 
 
-def test_maybe_rollout_id_from_run_body_attempt_suffix():
-    from nemo_gym.base_responses_api_model import maybe_rollout_id_from_run_body
+def test_get_rollout_id_from_run_body_requires_an_explicit_id():
+    from nemo_gym.base_responses_api_model import get_rollout_id_from_run_body
 
     base = {"_ng_task_index": 3, "_ng_rollout_index": 2}
-    assert maybe_rollout_id_from_run_body(base) == "3-2"  # no attempt -> bare key
-    assert maybe_rollout_id_from_run_body({**base, "_ng_attempt_index": 0}) == "3-2"  # first attempt -> bare
-    assert maybe_rollout_id_from_run_body({**base, "_ng_attempt_index": 1}) == "3-2-a1"
-    assert maybe_rollout_id_from_run_body({**base, "_ng_attempt_index": "2"}) == "3-2-a2"  # coerced
-    assert maybe_rollout_id_from_run_body({"_ng_rollout_index": 2}) is None  # missing task -> None
-    with pytest.raises(ValueError):
-        maybe_rollout_id_from_run_body({**base, "_ng_attempt_index": "invalid"})
+    with pytest.raises(ValueError, match="_ng_rollout_id is required"):
+        get_rollout_id_from_run_body(base)
+    with pytest.raises(ValueError, match="_ng_rollout_id is required"):
+        get_rollout_id_from_run_body({**base, "_ng_attempt_index": 1})
 
 
-def test_maybe_rollout_id_from_run_body_prefers_an_explicit_id():
-    from nemo_gym.base_responses_api_model import maybe_rollout_id_from_run_body
+def test_get_rollout_id_from_run_body_returns_the_explicit_uuid():
+    from nemo_gym.base_responses_api_model import get_rollout_id_from_run_body
 
+    rollout_id = "123e4567-e89b-42d3-a456-426614174000"
     base = {"_ng_task_index": 3, "_ng_rollout_index": 2}
-    # Restarted index numbering derives the same id twice.
-    # An explicit id keeps the dispatches separate.
-    assert maybe_rollout_id_from_run_body({**base, "_ng_rollout_id": "s7-3-2"}) == "s7-3-2"
-    # A retry of an explicitly keyed rollout still gets a distinct key.
-    # Otherwise retry calls would append to the first attempt.
-    assert maybe_rollout_id_from_run_body({"_ng_rollout_id": "s7-3-2", "_ng_attempt_index": 1}) == "s7-3-2-a1"
-    # The explicit id requires no indices.
-    assert maybe_rollout_id_from_run_body({"_ng_rollout_id": "abc"}) == "abc"
+    assert get_rollout_id_from_run_body({**base, "_ng_rollout_id": rollout_id}) == rollout_id
+    # Infrastructure retries keep the logical rollout identity.
+    assert get_rollout_id_from_run_body({"_ng_rollout_id": rollout_id, "_ng_attempt_index": 1}) == rollout_id
+    assert get_rollout_id_from_run_body({"_ng_rollout_id": rollout_id}) == rollout_id
 
 
-@pytest.mark.parametrize("bad", [".hidden", "has/slash", "has space", "", 7, None])
-def test_maybe_rollout_id_from_run_body_refuses_an_unusable_explicit_id(bad):
-    from nemo_gym.base_responses_api_model import maybe_rollout_id_from_run_body
+@pytest.mark.parametrize(
+    "bad",
+    [
+        ".hidden",
+        "has/slash",
+        "step7.0-0",
+        "123E4567-E89B-42D3-A456-426614174000",
+        "123e4567-e89b-12d3-a456-426614174000",
+        "",
+        7,
+        None,
+    ],
+)
+def test_get_rollout_id_from_run_body_refuses_an_unusable_explicit_id(bad):
+    from nemo_gym.base_responses_api_model import get_rollout_id_from_run_body
 
     body = {"_ng_task_index": 3, "_ng_rollout_index": 2, "_ng_rollout_id": bad}
-    if bad is None:
-        # Absent and null both mean "no explicit id", so the derivation still runs.
-        assert maybe_rollout_id_from_run_body(body) == "3-2"
-        return
-    # Reject ids that cannot survive the path round trip.
-    # Sanitizing would create a key the caller cannot look up.
     with pytest.raises(ValueError):
-        maybe_rollout_id_from_run_body(body)
+        get_rollout_id_from_run_body(body)
 
 
 def test_explicit_rollout_ids_round_trip_through_the_path_prefix():
-    from nemo_gym.base_responses_api_model import maybe_rollout_id_from_run_body
+    from nemo_gym.base_responses_api_model import get_rollout_id_from_run_body
     from nemo_gym.rollout_correlation import RolloutContextMiddleware
 
-    # The id becomes a path segment.
-    # Middleware must return every accepted id unchanged.
-    for candidate in ["s7-3-2", "step7.task3", "a", "A_b-1.2"]:
-        rollout_id = maybe_rollout_id_from_run_body({"_ng_rollout_id": candidate})
+    for candidate in [
+        "123e4567-e89b-42d3-a456-426614174000",
+        "67e55044-10b1-426f-9247-bb680e5fe0c8",
+    ]:
+        rollout_id = get_rollout_id_from_run_body({"_ng_rollout_id": candidate})
         match = RolloutContextMiddleware._PREFIX.match(f"/ng-rollout/{rollout_id}/v1/responses")
         assert match is not None and match.group("rollout_id") == candidate
         assert match.group("rest") == "/v1/responses"
@@ -1211,11 +1229,13 @@ def test_merge_capture_attaches_metrics_without_raw_payloads(tmp_path):
     )
     exchange["request_raw"] = "malformed request"
     exchange["response_raw"] = "malformed response"
-    store.record("0-0", exchange)
+    rollout_id = "123e4567-e89b-42d3-a456-426614174000"
+    store.record(rollout_id, exchange)
 
     record = {
         "_ng_task_index": 0,
         "_ng_rollout_index": 0,
+        "_ng_rollout_id": rollout_id,
         "reward": 1.0,
         "response": {"harness": "A"},
         "ng_agent_observations": {
@@ -1239,7 +1259,7 @@ def test_merge_capture_attaches_metrics_without_raw_payloads(tmp_path):
 
     capture = record["ng_model_call_capture"]
     assert set(capture) == {"rollout_id", "metrics", "calls"}
-    assert capture["rollout_id"] == "0-0"
+    assert capture["rollout_id"] == rollout_id
     assert capture["metrics"]["num_calls"] == 1
     attached_call = capture["calls"][0]
     assert attached_call["model_call_id"] == "call-A"
@@ -1255,7 +1275,7 @@ def test_merge_capture_attaches_metrics_without_raw_payloads(tmp_path):
     assert joined_ref["model_call_id"] == "call-A"
     assert record["ng_agent_observations"]["gaps"] == []
 
-    with_payloads = {"_ng_task_index": 0, "_ng_rollout_index": 0}
+    with_payloads = {"_ng_task_index": 0, "_ng_rollout_index": 0, "_ng_rollout_id": rollout_id}
     merge_model_call_capture_into_record(with_payloads, [tmp_path], include_payloads=True)
     attached_call = with_payloads["ng_model_call_capture"]["calls"][0]
     assert attached_call["request"] == exchange["request"]
@@ -1267,9 +1287,11 @@ def test_merge_capture_attaches_metrics_without_raw_payloads(tmp_path):
 def test_merge_capture_reports_missing_capture(tmp_path):
     from nemo_gym.base_responses_api_model import CaptureStore, merge_model_call_capture_into_record
 
+    rollout_id = "123e4567-e89b-42d3-a456-426614174000"
     rec = {
         "_ng_task_index": 9,
         "_ng_rollout_index": 9,
+        "_ng_rollout_id": rollout_id,
         "reward": 1.0,
         "ng_agent_observations": {
             "source": "test",
@@ -1283,7 +1305,7 @@ def test_merge_capture_reports_missing_capture(tmp_path):
             "gaps": [{"code": "model_call_ownership_unavailable"}],
         },
     }
-    merge_model_call_capture_into_record(rec, [tmp_path])  # no capture file for 9-9
+    merge_model_call_capture_into_record(rec, [tmp_path])
     assert rec["ng_model_call_capture"]["calls"] == []
     assert [gap["code"] for gap in rec["ng_model_call_capture"]["gaps"]] == ["model_call_capture_no_records"]
     assert {gap["code"] for gap in rec["ng_agent_observations"]["gaps"]} == {
@@ -1291,8 +1313,9 @@ def test_merge_capture_reports_missing_capture(tmp_path):
         "model_call_reference_unmatched",
     }
 
-    CaptureStore(tmp_path).path_for("8-8").touch()
-    empty = {"_ng_task_index": 8, "_ng_rollout_index": 8}
+    other_rollout_id = "67e55044-10b1-426f-9247-bb680e5fe0c8"
+    CaptureStore(tmp_path).path_for(other_rollout_id).touch()
+    empty = {"_ng_task_index": 8, "_ng_rollout_index": 8, "_ng_rollout_id": other_rollout_id}
     merge_model_call_capture_into_record(empty, [tmp_path])
     assert [gap["code"] for gap in empty["ng_model_call_capture"]["gaps"]] == ["model_call_capture_no_records"]
 
@@ -1300,11 +1323,12 @@ def test_merge_capture_reports_missing_capture(tmp_path):
 def test_merge_capture_preserves_valid_records_around_malformed_data(tmp_path):
     from nemo_gym.base_responses_api_model import merge_model_call_capture_into_record
 
+    rollout_id = "123e4567-e89b-42d3-a456-426614174000"
     store = CaptureStore(tmp_path)
     first = _capture_exchange("responses", "A", {}, {"id": "resp-A"})
     third = _capture_exchange("responses", "B", {}, {"id": "resp-B"})
-    store.path_for("9-8").write_bytes(orjson.dumps(first) + b"\n{not-json}\n" + orjson.dumps(third) + b"\n")
-    record = {"_ng_task_index": 9, "_ng_rollout_index": 8}
+    store.path_for(rollout_id).write_bytes(orjson.dumps(first) + b"\n{not-json}\n" + orjson.dumps(third) + b"\n")
+    record = {"_ng_task_index": 9, "_ng_rollout_index": 8, "_ng_rollout_id": rollout_id}
 
     merge_model_call_capture_into_record(record, [tmp_path])
 
@@ -1321,10 +1345,11 @@ def test_merge_capture_preserves_valid_records_around_malformed_data(tmp_path):
 def test_merge_capture_reports_partial_write_loss(tmp_path):
     from nemo_gym.base_responses_api_model import CaptureStore, merge_model_call_capture_into_record
 
+    rollout_id = "123e4567-e89b-42d3-a456-426614174000"
     store = CaptureStore(tmp_path)
-    store.record("4-2", _capture_exchange("responses", "A", {}, {"id": "resp-A"}))
-    store.mark_incomplete("4-2")
-    record = {"_ng_task_index": 4, "_ng_rollout_index": 2}
+    store.record(rollout_id, _capture_exchange("responses", "A", {}, {"id": "resp-A"}))
+    store.mark_incomplete(rollout_id)
+    record = {"_ng_task_index": 4, "_ng_rollout_index": 2, "_ng_rollout_id": rollout_id}
 
     merge_model_call_capture_into_record(record, [tmp_path])
 
@@ -1336,17 +1361,19 @@ def test_clear_model_call_captures_for_rollouts_run_scoping(tmp_path, monkeypatc
     import nemo_gym.base_responses_api_model as obs
     from nemo_gym.base_responses_api_model import clear_model_call_captures_for_rollouts
 
+    rollout_id = "123e4567-e89b-42d3-a456-426614174000"
+    other_rollout_id = "67e55044-10b1-426f-9247-bb680e5fe0c8"
     store = CaptureStore(tmp_path)
-    store.record("0-0", {"dialect": "chat", "request": {}, "response": {}})
-    store.record("1-0", {"dialect": "chat", "request": {}, "response": {}})
-    store.mark_incomplete("0-0")
-    assert store.read("0-0") and store.read("1-0")
+    store.record(rollout_id, {"dialect": "chat", "request": {}, "response": {}})
+    store.record(other_rollout_id, {"dialect": "chat", "request": {}, "response": {}})
+    store.mark_incomplete(rollout_id)
+    assert store.read(rollout_id) and store.read(other_rollout_id)
 
-    # Clears only the rollout ids about to be (re)run; rows without indices are skipped, others stay.
-    clear_model_call_captures_for_rollouts([{"_ng_task_index": 0, "_ng_rollout_index": 0}, {"no": "id"}], [tmp_path])
-    assert store.read("0-0") == [] and not store.is_incomplete("0-0") and store.read("1-0")
-    clear_model_call_captures_for_rollouts([{"_ng_task_index": 1, "_ng_rollout_index": 0}], [])  # no dirs -> no-op
-    assert store.read("1-0")
+    # Clear only rollout ids about to be dispatched.
+    clear_model_call_captures_for_rollouts([{"_ng_rollout_id": rollout_id}], [tmp_path])
+    assert store.read(rollout_id) == [] and not store.is_incomplete(rollout_id) and store.read(other_rollout_id)
+    clear_model_call_captures_for_rollouts([{"_ng_rollout_id": other_rollout_id}], [])
+    assert store.read(other_rollout_id)
 
     # A stale-capture cleanup failure must be visible rather than mixing old and new calls.
     def _boom(_directory):
@@ -1354,7 +1381,7 @@ def test_clear_model_call_captures_for_rollouts_run_scoping(tmp_path, monkeypatc
 
     monkeypatch.setattr(obs, "CaptureStore", _boom)
     with pytest.raises(OSError, match="cannot open"):
-        clear_model_call_captures_for_rollouts([{"_ng_task_index": 1, "_ng_rollout_index": 0}], [tmp_path])
+        clear_model_call_captures_for_rollouts([{"_ng_rollout_id": other_rollout_id}], [tmp_path])
 
 
 def test_aggregate_model_call_records_sums_and_counts():

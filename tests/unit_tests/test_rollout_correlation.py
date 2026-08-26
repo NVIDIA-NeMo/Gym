@@ -38,7 +38,7 @@ from nemo_gym.base_responses_api_model import (
     merge_model_call_capture_into_record,
 )
 from nemo_gym.config_types import BaseServerConfig
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+from nemo_gym.rollout_correlation import get_rollout_id_from_run_body
 from nemo_gym.server_utils import ServerClient, get_response_json
 
 
@@ -147,6 +147,7 @@ class _Response:
 
 @pytest.mark.asyncio
 async def test_verify_correlates_policy_and_judge_calls_and_preserves_raw_capture(tmp_path, monkeypatch) -> None:
+    rollout_id = "123e4567-e89b-42d3-a456-426614174000"
     capture_dir = tmp_path / "captures"
     config = OmegaConf.create(
         {
@@ -201,26 +202,29 @@ async def test_verify_correlates_policy_and_judge_calls_and_preserves_raw_captur
         json={
             "_ng_task_index": 4,
             "_ng_rollout_index": 2,
+            "_ng_rollout_id": rollout_id,
             "responses_create_params": {"input": "solve"},
         },
     )
     assert orjson.loads(await verify.read())["reward"] == 1.0
 
     store = CaptureStore(capture_dir)
-    capture_path = store.path_for("4-2")
+    capture_path = store.path_for(rollout_id)
     assert capture_path.is_file()
-    exchanges = store.read("4-2")
+    exchanges = store.read(rollout_id)
     assert [exchange["model_ref"]["name"] for exchange in exchanges] == ["policy", "tool_model", "judge"]
     assert all(exchange.get("request") is not None or exchange.get("request_raw") for exchange in exchanges)
     assert all(exchange.get("response") is not None or exchange.get("response_raw") for exchange in exchanges)
 
-    rollout = {"_ng_task_index": 4, "_ng_rollout_index": 2}
+    rollout = {"_ng_task_index": 4, "_ng_rollout_index": 2, "_ng_rollout_id": rollout_id}
     merge_model_call_capture_into_record(rollout, [capture_dir])
     assert capture_path.is_file()
     assert len(capture_path.read_bytes()) > 0
 
 
 def test_rollout_id_does_not_serialize_run_body() -> None:
+    rollout_id = "123e4567-e89b-42d3-a456-426614174000"
+
     class UndumpableRunRequest(_AgentRunRequest):
         def model_dump(self, *args, **kwargs):
             raise AssertionError("run body must not be serialized")
@@ -229,8 +233,23 @@ def test_rollout_id_does_not_serialize_run_body() -> None:
         {
             "_ng_task_index": 4,
             "_ng_rollout_index": 2,
+            "_ng_rollout_id": rollout_id,
             "responses_create_params": {"input": "solve"},
         }
     )
 
-    assert maybe_rollout_id_from_run_body(body) == "4-2"
+    assert get_rollout_id_from_run_body(body) == rollout_id
+
+
+def test_rollout_id_validation_is_cached() -> None:
+    from nemo_gym.rollout_correlation import _validate_rollout_id
+
+    rollout_id = "123e4567-e89b-42d3-a456-426614174000"
+    _validate_rollout_id.cache_clear()
+
+    assert get_rollout_id_from_run_body({"_ng_rollout_id": rollout_id}) == rollout_id
+    assert get_rollout_id_from_run_body({"_ng_rollout_id": rollout_id}) == rollout_id
+
+    cache_info = _validate_rollout_id.cache_info()
+    assert cache_info.misses == 1
+    assert cache_info.hits == 1

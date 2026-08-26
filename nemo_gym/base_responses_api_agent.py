@@ -37,7 +37,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body, rollout_context
+from nemo_gym.rollout_correlation import get_rollout_id_from_run_body, rollout_context
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
     BaseServer,
@@ -111,21 +111,21 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             getattr(getattr(self, "config", None), "token_id_capture", False)
         )
 
-    def rollout_id_from_run(self, body: Any) -> Optional[str]:
-        """Return the correlation id for a run request.
+    def rollout_id_from_run(self, body: Any) -> str:
+        """Return the validated correlation id for a run request.
 
-        Return ``None`` when the body has no usable identity.
+        Every run request must carry a canonical UUIDv4 rollout id.
         Observability and training-token capture consume this identity.
         Neither feature controls whether the identity exists.
         """
-        return maybe_rollout_id_from_run_body(body)
+        return get_rollout_id_from_run_body(body)
 
     def url_path_for_run(self, url_path: str, body: Any) -> str:
         """Apply this run's capture path to a downstream URL path.
 
         Evaluation uses ``/ng-rollout/<id>/...``.
         Training capture uses ``/ng-rollout/<id>/training-token-capture/...``.
-        Calls without a rollout id remain unchanged.
+        A missing or malformed rollout id raises before making the call.
         """
         return (
             f"{rollout_path_prefix(self.rollout_id_from_run(body), token_capture=self._token_id_capture_enabled())}"

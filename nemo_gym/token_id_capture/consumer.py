@@ -72,23 +72,22 @@ def token_id_capture_dirs_from_config(global_config_dict) -> list[Path]:
 def clear_token_captures_for_rollouts(records: list, token_capture_dirs: list[Path]) -> None:
     """Remove stale token records for rollouts about to be dispatched.
 
-    Rollout IDs are deterministic.
+    Rollout UUIDs are stable across infrastructure retries.
     ``TokenCaptureStore.append`` uses append mode.
-    A reused ID would append records to a previous attempt.
-    The builder could then combine two attempts.
+    A reused UUID would append records to stale capture data.
+    The builder could then combine two executions.
     The caller passes only rows ready for dispatch.
-    Retry suffixes must already be assigned.
+    Every row must carry its validated rollout UUID.
     """
     if not token_capture_dirs:
         return
-    from nemo_gym.base_responses_api_model import maybe_rollout_id_from_run_body
+    from nemo_gym.base_responses_api_model import get_rollout_id_from_run_body
 
     for directory in token_capture_dirs:
         store = TokenCaptureStore(directory)
         for record in records:
-            rollout_id = maybe_rollout_id_from_run_body(record)
-            if rollout_id:
-                store.delete(rollout_id)
+            rollout_id = get_rollout_id_from_run_body(record)
+            store.delete(rollout_id)
 
 
 def _assemble(

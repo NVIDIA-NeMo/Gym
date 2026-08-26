@@ -87,26 +87,28 @@ class TestBaseResponsesAPIAgent:
 
     def test_rollout_identity_applies_without_capture(self) -> None:
         # Rollout correlation is independent of observability and token capture.
-        body = {"_ng_task_index": 0, "_ng_rollout_index": 0}
-        assert self._agent({}).rollout_id_from_run(body) == "0-0"
-        assert self._agent({"observability_enabled": True}).rollout_id_from_run(body) == "0-0"
-        assert self._agent({}).url_path_for_run("/v1/responses", body) == "/ng-rollout/0-0/v1/responses"
+        rollout_id = "123e4567-e89b-42d3-a456-426614174000"
+        body = {"_ng_rollout_id": rollout_id}
+        assert self._agent({}).rollout_id_from_run(body) == rollout_id
+        assert self._agent({"observability_enabled": True}).rollout_id_from_run(body) == rollout_id
+        assert self._agent({}).url_path_for_run("/v1/responses", body) == f"/ng-rollout/{rollout_id}/v1/responses"
 
     def test_token_capture_prefix_is_scoped_to_participating_agents(self) -> None:
         # Training-token capture requires both run-level enablement and agent opt-in.
         # Correlated calls preserve ``/ng-rollout/<id>/training-token-capture``.
         # Native agents carry token ids inline and do not opt in.
-        body = {"_ng_task_index": 0, "_ng_rollout_index": 0}
+        rollout_id = "123e4567-e89b-42d3-a456-426614174000"
+        body = {"_ng_rollout_id": rollout_id}
         gc = {"token_id_capture": {"enabled": True}}
         nonparticipant = self._agent(gc, token_id_capture=False)
         participant = self._agent(gc, token_id_capture=True)
-        assert nonparticipant.url_path_for_run("/v1/responses", body) == "/ng-rollout/0-0/v1/responses"
+        assert nonparticipant.url_path_for_run("/v1/responses", body) == f"/ng-rollout/{rollout_id}/v1/responses"
         assert (
             participant.url_path_for_run("/v1/responses", body)
-            == "/ng-rollout/0-0/training-token-capture/v1/responses"
+            == f"/ng-rollout/{rollout_id}/training-token-capture/v1/responses"
         )
         # Agent opt-in alone does not enable capture.
         assert (
             self._agent({}, token_id_capture=True).url_path_for_run("/v1/responses", body)
-            == "/ng-rollout/0-0/v1/responses"
+            == f"/ng-rollout/{rollout_id}/v1/responses"
         )

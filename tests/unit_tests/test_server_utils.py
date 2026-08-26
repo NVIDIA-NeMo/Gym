@@ -208,13 +208,14 @@ class TestServerUtils:
         request_mock = AsyncMock(return_value="response")
         monkeypatch.setattr(nemo_gym.server_utils, "request", request_mock)
 
+        rollout_id = "123e4567-e89b-42d3-a456-426614174000"
         await server_client.post(
             server_name="resource",
             url_path="/verify",
-            json={"_ng_rollout_id": "rollout-8"},
+            json={"_ng_rollout_id": rollout_id},
         )
 
-        assert request_mock.await_args.kwargs["url"] == "http://resource:2/ng-rollout/rollout-8/verify"
+        assert request_mock.await_args.kwargs["url"] == f"http://resource:2/ng-rollout/{rollout_id}/verify"
 
     def test_BaseServer_load_config_from_global_config(self, monkeypatch: MonkeyPatch) -> None:
         # Clear any lingering env vars.
