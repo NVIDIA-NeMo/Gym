@@ -413,6 +413,12 @@ class TestApp:
         assert resp.reward == 0.0
         assert resp.verify_mode == "comparison"
         assert resp.judge_response == {"error": "reference_missing"}
+        # Stamped as a terminal failure, not returned as a zero-reward success:
+        # a success row carrying no battle evidence is rejected outright by the
+        # non-final-stage coverage gate, which no policy setting can relax.
+        dumped = resp.model_dump()
+        assert dumped["_ng_failure_class"] == "reference_missing"
+        assert dumped["_ng_failure_terminal"] is True
 
     @pytest.mark.asyncio
     async def test_verify_comparison_iterates_all_ref_repeats(self, tmp_path) -> None:
@@ -1065,6 +1071,9 @@ class TestMultiReference:
 
         assert resp.reward == 0.0
         assert resp.judge_response == {"error": "reference_missing"}
+        dumped = resp.model_dump()
+        assert dumped["_ng_failure_class"] == "reference_missing"
+        assert dumped["_ng_failure_terminal"] is True
 
     @staticmethod
     def _two_ref_server_and_body(tmp_path):

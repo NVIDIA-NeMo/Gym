@@ -41,7 +41,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Set, Tuple
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -50,6 +50,11 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
+from nemo_gym.rollout_collection import (
+    NG_FAILURE_CLASS_KEY,
+    NG_TERMINAL_KEY,
+    REFERENCE_MISSING_FAILURE_CLASS,
+)
 from nemo_gym.server_utils import get_server_url
 from resources_servers.gdpval.judge_panel import (
     ResolvedJudge,
@@ -311,6 +316,12 @@ class GDPValVerifyRequest(BaseVerifyRequest):
 
 
 class GDPValVerifyResponse(GDPValVerifyRequest, BaseVerifyResponse):
+    # Underscore-prefixed harness keys (``_ng_failure_class``,
+    # ``_ng_failure_terminal``) cannot be declared as pydantic fields, and the
+    # default ``extra="ignore"`` drops them silently -- a verify response that
+    # tried to stamp a failure class was serialised without it.
+    model_config = ConfigDict(extra="allow")
+
     verify_mode: Literal["rubric", "comparison"] = "rubric"
     judge_response: Optional[Dict[str, Any]] = None
     invalid_judge_response: Optional[bool] = None
@@ -667,11 +678,24 @@ class GDPValResourcesServer(SimpleResourcesServer):
 
         if not ref_dirs_by_id:
             print(f"[gdpval] no reference deliverable for task {body.task_id}", flush=True)
+            # Not a model outcome: no reference deliverable exists, so no battle
+            # can be scored. Stamped as a terminal failure rather than returned
+            # as a zero-reward success -- a success row carrying no battle
+            # evidence is rejected outright by the non-final-stage coverage gate
+            # (_partial_stage_outcome), which no partial_completion setting can
+            # relax, so one missing reference file used to kill the whole run.
+            # Terminal because retrying cannot make the file appear; as an
+            # omission it is then governed by the stage's partial_completion
+            # fractions like any other unusable row.
             return GDPValVerifyResponse(
                 **body.model_dump(),
                 reward=0.0,
                 verify_mode="comparison",
                 judge_response={"error": "reference_missing"},
+                **{
+                    NG_FAILURE_CLASS_KEY: REFERENCE_MISSING_FAILURE_CLASS,
+                    NG_TERMINAL_KEY: True,
+                },
             )
 
         if eval_task_dir is None or not task_attempted(str(eval_task_dir)):

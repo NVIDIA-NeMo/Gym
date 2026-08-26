@@ -98,6 +98,9 @@ from nemo_gym.skills import SkillsConfig, load_skill_directory
 NG_FAILURE_CLASS_KEY = "_ng_failure_class"
 NG_NO_PERSIST_KEY = "_ng_no_persist"
 NG_TERMINAL_KEY = "_ng_failure_terminal"
+# The reference model has no deliverable for this task, so no battle can be
+# scored. An infrastructure gap, not a model outcome.
+REFERENCE_MISSING_FAILURE_CLASS = "reference_missing"
 
 _DEFAULT_MAX_ROLLOUT_ATTEMPTS = 3
 
@@ -266,11 +269,17 @@ def _is_terminal_failure(record: Dict[str, Any]) -> bool:
     timeout reflects the load/remaining walltime of that attempt, so it remains
     retryable (up to the normal max-attempt cap). A skipped sample is unusable
     regardless of which agent version wrote the sidecar and stays terminal.
+    ``reference_missing`` is terminal for the same reason a skip is: the
+    reference deliverable does not exist on disk, so no number of attempts
+    changes the outcome.
     """
     failure_class = record.get(NG_FAILURE_CLASS_KEY)
     if failure_class == "timeout_exceeded":
         return False
     if failure_class == "skipped":
+        return True
+    if failure_class == REFERENCE_MISSING_FAILURE_CLASS:
+        # Retrying cannot make a missing reference deliverable appear.
         return True
     return bool(record.get(NG_TERMINAL_KEY))
 
