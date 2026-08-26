@@ -187,26 +187,15 @@ srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 \
     ' bash bash -lc "\$vllm_command" &
 server_step=\$!
 
-cleanup_job() {
+cleanup_server() {
     job_status=\$?
     trap - EXIT INT TERM
     set +e
-    if (( $should_run_eval )); then
-        echo "Starting OpenSandbox cleanup"
-        python3 "\$SLURM_SUBMIT_DIR/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py" \
-            --connection-config "\$SLURM_SUBMIT_DIR/env.yaml" \
-            --run-id "\$SLURM_JOB_ID" \
-            --user "\${NEMO_GYM_USER:-\$SLURM_JOB_USER}" \
-            --reap
-        cleanup_status=\$?
-        if (( cleanup_status != 0 )); then
-            echo "OpenSandbox cleanup failed with status \$cleanup_status" >&2
-        fi
-    fi
     kill "\$server_step" 2>/dev/null || true
+    wait "\$server_step" 2>/dev/null || true
     exit "\$job_status"
 }
-trap cleanup_job EXIT
+trap cleanup_server EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
@@ -258,16 +247,55 @@ EOF
 )
 
 # --segment > 0 otherwise the engine will hang on the second or third engine step.
-vllm_command="$pd_command" \
-eval_command="$eval_command" \
-batch_command="$batch_command" \
-sbatch \
-    --nodes=$NUM_NODES \
-    --time=04:00:00 \
-    --job-name=gym-$EXPERIMENT_NAME-$USER \
-    --output=slurm-logs/%j-%x.log \
-    --ntasks-per-node=1 \
-    --comment="$SLURM_COMMENT" \
-    --exclusive \
-    --segment=$NUM_NODES \
-    --wrap 'exec bash -lc "$batch_command"'
+submit_dir=$(pwd -P)
+cleanup_user=${NEMO_GYM_USER:-$USER}
+main_job_id=$(
+    NEMO_GYM_USER="$cleanup_user" \
+    vllm_command="$pd_command" \
+    eval_command="$eval_command" \
+    batch_command="$batch_command" \
+    sbatch \
+        --parsable \
+        --nodes=$NUM_NODES \
+        --time=04:00:00 \
+        --job-name=gym-$EXPERIMENT_NAME-$USER \
+        --output=slurm-logs/%j-%x.log \
+        --ntasks-per-node=1 \
+        --comment="$SLURM_COMMENT" \
+        --exclusive \
+        --segment=$NUM_NODES \
+        --wrap 'exec bash -lc "$batch_command"'
+)
+main_job_id=${main_job_id%%;*}
+
+if (( should_run_eval )); then
+    if ! cleanup_job_id=$(
+        sbatch \
+            --parsable \
+            --dependency=afterany:"$main_job_id" \
+            --partition=cpu \
+            --qos=cpu-short \
+            --gres=none \
+            --nodes=1 \
+            --ntasks=1 \
+            --cpus-per-task=1 \
+            --mem=256M \
+            --time=00:30:00 \
+            --job-name="gym-cleanup-$main_job_id" \
+            --output="$submit_dir/slurm-logs/%j-gym-cleanup-$main_job_id.log" \
+            "$submit_dir/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py" \
+            --connection-config "$submit_dir/env.yaml" \
+            --run-id "$main_job_id" \
+            --user "$cleanup_user" \
+            --reap
+    ); then
+        echo "Failed to submit cleanup job for batch job $main_job_id; the batch job is still active" >&2
+        exit 1
+    fi
+    cleanup_job_id=${cleanup_job_id%%;*}
+fi
+
+echo "Submitted batch job $main_job_id"
+if (( should_run_eval )); then
+    echo "Submitted cleanup job $cleanup_job_id for batch job $main_job_id"
+fi

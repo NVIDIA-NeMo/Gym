@@ -131,6 +131,8 @@ async def cleanup_sandboxes(
             if failures == len(matches):
                 break
             matches = await list_matches()
+        if not matches:
+            return 0
         print(f"{len(matches)} OpenSandbox sandbox(es) were not reaped", file=sys.stderr)
         return 1
 

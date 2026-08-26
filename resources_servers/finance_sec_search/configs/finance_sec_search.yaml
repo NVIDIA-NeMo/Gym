@@ -7,12 +7,21 @@ finance_sec_search_resources_server:
       verified: false
       description: SEC EDGAR filing search for financial analysis questions
       value: Enable LLMs to search and analyze SEC filings
-      cache_dir: null  # defaults to ~/.cache/nemo_gym/finance_sec_search/ if not set
-      use_cache: false  # keep false for eval to fetch fresh filings, set to true for training to reuse cached filings
+      cache_dir: ${oc.select:cache_dir,null}  # defaults to ~/.cache/nemo_gym/finance_sec_search/ if not set
+      use_cache: ${oc.select:use_cache,false}  # keep false for eval to fetch fresh filings, set to true for training to reuse cached filings
+      # Read-only corpus of pre-fetched filings, tried before sec.gov on a cache miss.
+      sec_dump_path: ${oc.select:sec_dump_path,null}
+      # Latest filing date any date-filtered tool will return. Must match the
+      # cutoff the dataset's prompts were written against.
+      max_end_date: ${oc.select:max_end_date,null}
       # Wrapped in oc.select (Gym convention, cf. labbench2_vlm) so the env resolves
       # standalone (`gym env start` / `+dry_run`); override via env / NVFlow overlay.
       # null default => web search disabled unless a key is supplied.
       tavily_api_key: ${oc.select:tavily_api_key,null}
+      local_edgar_index_path: ${oc.select:local_edgar_index_path,null}
+      local_edgar_metrics_dir: ${oc.select:local_edgar_metrics_dir,null}
+      # null => use the sidecar sitting beside the index if one is present.
+      local_edgar_metadata_path: ${oc.select:local_edgar_metadata_path,null}
       retrieval_model_server:
         type: responses_api_models
         name: policy_model
