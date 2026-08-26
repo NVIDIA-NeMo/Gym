@@ -7,20 +7,49 @@
 set -euo pipefail
 
 # Input arguments and validation
-NUM_PREFILL_NODES=$NUM_PREFILL_NODES
-NUM_DECODE_NODES=$NUM_DECODE_NODES
+# Required:
+#   MODEL        served checkpoint path (also used as policy_model_name)
+#   CONTAINER    reward-profiling sqsh (built by ../../build_eval_container.sh with SKIP_PREPARE=1)
+#   SWEEP_DIR    <out-dir>/<nickname> written by prepare_sweep.sh
+#
+# Optional, with defaults below. SBATCH_ACCOUNT / SBATCH_PARTITION / SBATCH_QOS / SBATCH_GRES are
+# read by sbatch itself.
+#
+# Sandbox lane: set SANDBOX_CONTAINER to run nemo-skills sandboxes alongside. Its nginx spans every
+# node and hashes on X-Session-ID, so stateful Python sessions stay pinned to one worker.
+for _required in MODEL CONTAINER SWEEP_DIR; do
+    if [[ -z "${!_required:-}" ]]; then
+        echo "ERROR: $_required is required. See the header of $0 for the full argument list." >&2
+        exit 2
+    fi
+done
+
 MODEL=$MODEL
 CONTAINER=$CONTAINER
-MOUNTS=$MOUNTS
-VLLM_CONFIG=$VLLM_CONFIG
-# Written by prepare_sweep.sh: sweep_config.yaml + rollouts_materialized_inputs.jsonl.
 SWEEP_DIR=$SWEEP_DIR
-NUM_SAMPLES_IN_PARALLEL=${NUM_SAMPLES_IN_PARALLEL:-512}
-SLURM_COMMENT="${SLURM_COMMENT:-}"
 
-# Unlike the benchmark launcher there is no serve-only mode: a reward-profiling job always runs
-# the sweep. EXPERIMENT_NAME only names the job and its slurm log.
+# One prefill node feeds several decode nodes; decode is the throughput-limiting side. P4D12 is the
+# largest configuration tested, and 16 nodes still fits inside one 18-node NVL72 rack, which
+# --segment requires.
+NUM_PREFILL_NODES=${NUM_PREFILL_NODES:-1}
+NUM_DECODE_NODES=${NUM_DECODE_NODES:-2}
+
+VLLM_CONFIG=${VLLM_CONFIG:-benchmarks/nemotron_3.5_super/vllm_configs/nemotron_3.5_super.sh}
+MOUNTS=${MOUNTS:-/lustre:/lustre}
+
+# Scale concurrency with decode capacity: each decode engine schedules up to max_num_seqs
+# sequences (512 in vllm_configs/nemotron_3.5_super.sh), so this saturates the engines instead of
+# leaving them idle. A measured run at 128 against D2 sat at 12.5% of capacity, with the client
+# semaphore rather than the GPUs as the limit. Stays under the 16k per-host aiohttp connector cap
+# set below until roughly D32. Lower it if the driver process becomes the bottleneck.
+MAX_NUM_SEQS_PER_DECODE_ENGINE=${MAX_NUM_SEQS_PER_DECODE_ENGINE:-512}
+NUM_SAMPLES_IN_PARALLEL=${NUM_SAMPLES_IN_PARALLEL:-$((MAX_NUM_SEQS_PER_DECODE_ENGINE * NUM_DECODE_NODES))}
+
+# Names the job and its slurm log only; there is no serve-only mode here.
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-reward-profiling}"
+
+WALLTIME=${WALLTIME:-04:00:00}
+SLURM_COMMENT="${SLURM_COMMENT:-}"
 
 # Fixed vLLM Port configurations
 PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT=5600
@@ -228,7 +257,7 @@ eval_command="$eval_command" \
 batch_command="$batch_command" \
 sbatch \
     --nodes=$NUM_NODES \
-    --time=04:00:00 \
+    --time=$WALLTIME \
     --job-name=gym-$EXPERIMENT_NAME-$USER \
     --output=slurm-logs/%j-%x.log \
     --ntasks-per-node=1 \

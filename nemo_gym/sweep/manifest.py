@@ -103,10 +103,16 @@ class SweepManifest(BaseModel):
 
     def config_paths(self) -> List[str]:
         """Union of every entry's configs, de-duplicated, first-seen order preserved."""
-        seen: Dict[str, None] = {config: None for config in self.extra_configs}
+        seen: Dict[str, None] = {}
         for entry in self.entries:
             for config in entry.configs:
                 seen.setdefault(config, None)
+        # Sweep-wide configs go last so they win the merge: several environments ship pointing their
+        # judge at policy_model (the model grading itself), and rebinding that is the whole point of
+        # a judges config.
+        for config in self.extra_configs:
+            seen.pop(config, None)
+            seen[config] = None
         return list(seen)
 
     def num_repeats(self) -> Dict[str, int]:
@@ -190,16 +196,23 @@ def validate_manifest(
     warnings: List[str] = []
 
     for entry in manifest.entries:
+        # An entry may list several configs: one declares the agent, the rest declare supporting
+        # servers it dispatches to (ns_tools names its verifiers this way). So the agent has to be
+        # declared by at least one of them, not by every one.
+        declared: set[str] = set()
+        found_all_configs = True
         for config in entry.configs:
             config_path = config if Path(config).is_absolute() else repo_root / config
             if not Path(config_path).is_file():
                 errors.append(f"[{entry.label}] config not found: {config}")
+                found_all_configs = False
                 continue
-            if entry.agent not in _declared_top_level_keys(Path(config_path)):
-                errors.append(
-                    f"[{entry.label}] agent '{entry.agent}' is not declared by {config}. "
-                    f"Point the entry at the config that defines it, or fix the agent name."
-                )
+            declared |= _declared_top_level_keys(Path(config_path))
+        if found_all_configs and entry.agent not in declared:
+            errors.append(
+                f"[{entry.label}] agent '{entry.agent}' is not declared by any of its configs "
+                f"({', '.join(entry.configs)}). Add the config that defines it, or fix the agent name."
+            )
 
         if not check_data:
             continue

@@ -1,0 +1,59 @@
+# Reward-profiling sweep: environments scored by an LLM judge.
+#
+# Judge bindings live in configs/judges_remote.yaml. Each binds a distinct top-level key, so one
+# file covers every entry here without collisions. Swap it for a local-vLLM variant to self-host.
+#
+# Provenance: data_gym/ultra_v3_sets/260603_ultra_v3_set_final.
+
+nickname: super35_judge
+
+defaults:
+  num_repeats: 8
+
+extra_configs:
+  - responses_api_models/vllm_model/configs/vllm_model.yaml
+  - benchmarks/nemotron_3.5_super/reward_profiling/configs/judges_remote.yaml
+
+entries:
+
+  - label: math_cot
+    agent: math_with_judge_simple_agent
+    configs:
+      - resources_servers/math_with_judge/configs/math_with_judge.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/ultra_v3_sets/260501_ultra_v3_set/math_cot/math_cot_260501.jsonl
+    owner: jkyi
+
+  - label: long_context
+    agent: lc_judge_simple_agent
+    configs:
+      - resources_servers/equivalence_llm_judge/configs/lc_judge.yaml
+    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/long_context/0123_chengping_qwenlong_v3b_profiled.jsonl
+    owner: jiaqiz
+
+  - label: multichallenge
+    agent: multichallenge_simple_agent
+    configs:
+      - resources_servers/multichallenge/configs/multichallenge.yaml
+    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/multichallenge/vanilla_and_advanced_reward_profiled.jsonl
+    owner: jiaqiz
+
+  - label: stem_openqa_ultra_0
+    agent: equivalence_llm_judge_simple_agent
+    configs:
+      - resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/jiaqiz/data/gym/science_rl_rima/subsampled/openq-hard-moderate-cot.jsonl
+    owner: jiaqiz
+
+  - label: abstention
+    agent: abstention_simple_agent
+    configs:
+      - resources_servers/abstention/configs/abstention.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/jiaqiz/data/gym/abstention/all4_combined_train.jsonl
+    owner: jiaqiz
+
+  - label: inverse_if
+    agent: inverse_if_simple_agent
+    configs:
+      - resources_servers/inverse_if/configs/inverse_if.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/ultra_v3_sets/260501_ultra_v3_set/inverse_if/inverse_if.jsonl
+    owner: jkyi

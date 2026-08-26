@@ -487,3 +487,34 @@ def test_materialize_defaults_to_manifest_order(tmp_path):
     blocks = [k for k, _ in itertools.groupby(names)]
     assert blocks == ["agent_a", "agent_b"]
     assert report.shuffle_seed == 0
+
+
+def test_agent_may_be_declared_by_any_one_of_several_configs(tmp_path):
+    """Supporting configs (verifiers a dispatching agent calls) need not declare the agent."""
+    _write_config(tmp_path, "agent.yaml", "agent_a")
+    _write_config(tmp_path, "verifier.yaml", "some_verifier")
+    _write_data(tmp_path, "x.jsonl", "agent_a")
+    manifest = _manifest(
+        tmp_path,
+        [
+            {
+                "label": "one",
+                "agent": "agent_a",
+                "configs": ["agent.yaml", "verifier.yaml"],
+                "data": str(tmp_path / "x.jsonl"),
+            }
+        ],
+    )
+    assert validate_manifest(manifest, repo_root=tmp_path) == []
+
+
+def test_agent_declared_by_no_config_is_still_an_error(tmp_path):
+    _write_config(tmp_path, "a.yaml", "other_agent")
+    _write_config(tmp_path, "b.yaml", "another_agent")
+    _write_data(tmp_path, "x.jsonl", "agent_a")
+    manifest = _manifest(
+        tmp_path,
+        [{"label": "one", "agent": "agent_a", "configs": ["a.yaml", "b.yaml"], "data": str(tmp_path / "x.jsonl")}],
+    )
+    with pytest.raises(SweepValidationError, match="is not declared by any of its configs"):
+        validate_manifest(manifest, repo_root=tmp_path)
