@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import hashlib
 import importlib.util
 import json
@@ -24,11 +25,13 @@ from contextlib import asynccontextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import MagicMock
 
+import aiohttp
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
+import nemo_gym.server_utils as server_utils
 import responses_api_models.switchyard_model.app as app_module
 from nemo_gym.server_utils import ServerClient
 from responses_api_models.switchyard_model.app import (
@@ -75,6 +78,42 @@ def _install_fake_switchyard(monkeypatch: MonkeyPatch, server_cls: type) -> None
     package.server = module
     monkeypatch.setitem(sys.modules, "switchyard_rust", package)
     monkeypatch.setitem(sys.modules, "switchyard_rust.server", module)
+
+
+def _install_fake_stats_endpoint(
+    monkeypatch: MonkeyPatch, payload: dict | None = None, error: Exception | None = None
+) -> list:
+    """Stand in for nemo_gym.server_utils.request on the stats path; return the recorded calls.
+
+    Unit tests must not touch Gym's real aiohttp singleton: it parses the process's CLI args the
+    first time it is built, which under pytest is a SystemExit, and it binds to whichever event
+    loop builds it. The fake keeps the calls observable -- (method, url, kwargs) tuples -- so a
+    test can assert what would have gone on the wire.
+    """
+    calls: list = []
+    payload = payload if payload is not None else {"total_requests": 1, "models": {}}
+
+    class _FakeStatsResponse:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        def raise_for_status(self):
+            pass
+
+        async def json(self):
+            return payload
+
+    async def fake_request(method: str, url: str, **kwargs):
+        calls.append((method, url, kwargs))
+        if error is not None:
+            raise error
+        return _FakeStatsResponse()
+
+    monkeypatch.setattr(app_module, "request", fake_request)
+    return calls
 
 
 def _response_data() -> dict:
@@ -154,6 +193,44 @@ class TestConfig:
             switchyard_base_url="http://127.0.0.1:4000/v1",
         )
         assert config.launches_proxy is False
+
+    def test_hosting_rejects_multiple_workers(self) -> None:
+        """Each worker process would host its own proxy -- split affinity, split stats."""
+        with pytest.raises(ValueError, match="num_workers"):
+            SwitchyardModelConfig(
+                host="0.0.0.0",
+                port=8081,
+                entrypoint="",
+                name="sy",
+                switchyard_model="policy-model",
+                deployment="/tmp/routes.toml",
+                num_workers=2,
+            )
+
+    def test_attaching_allows_multiple_workers(self) -> None:
+        """All workers share the one external proxy, so parallelism is coherent here."""
+        config = SwitchyardModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            entrypoint="",
+            name="sy",
+            switchyard_model="policy-model",
+            switchyard_base_url="http://127.0.0.1:4000/v1",
+            num_workers=2,
+        )
+        assert config.launches_proxy is False
+
+    def test_max_concurrent_requests_must_be_positive(self) -> None:
+        with pytest.raises(ValueError, match="greater than 0"):
+            SwitchyardModelConfig(
+                host="0.0.0.0",
+                port=8081,
+                entrypoint="",
+                name="sy",
+                switchyard_model="policy-model",
+                switchyard_base_url="http://127.0.0.1:4000/v1",
+                max_concurrent_requests=0,
+            )
 
 
 class TestRolloutSessionMiddleware:
@@ -455,7 +532,15 @@ class TestConditionRecord:
         _install_fake_switchyard(monkeypatch, _FakeNativeServer)
         deployment = tmp_path / "routes.toml"
         deployment.write_text(
-            'schema_version = 1\n[llm_clients.up]\napi_key_env = "K"\napi_key = "sk-inline-secret"\n'
+            "schema_version = 1\n"
+            "[llm_clients.up]\n"
+            'api_key_env = "K"\n'
+            'api_key = "sk-inline-secret"\n'
+            "[llm_clients.up.extra_headers]\n"
+            'Authorization = "Bearer header-secret"\n'
+            'X-Team = "routing"\n'
+            "[targets.t]\n"
+            'mirrors = [{ extra_headers = { Authorization = "Bearer list-secret" } }]\n'
         )
         config = {
             "host": "0.0.0.0",
@@ -474,6 +559,7 @@ class TestConditionRecord:
         )
 
     def test_hosted_manifest_records_the_condition(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        _install_fake_stats_endpoint(monkeypatch)
         server = self._launch_server(monkeypatch, tmp_path)
 
         with TestClient(server.setup_webserver()):
@@ -484,11 +570,29 @@ class TestConditionRecord:
         assert manifest["proxy_root_url"] == "http://127.0.0.1:4123"
         deployment_bytes = (tmp_path / "routes.toml").read_bytes()
         assert manifest["deployment_sha256"] == hashlib.sha256(deployment_bytes).hexdigest()
-        # The archive keeps env-var references but never an inline credential.
+        # The archive keeps env-var references but never an inline credential -- neither an
+        # api_key literal nor any extra_headers value, which providers receive verbatim.
         assert 'api_key_env = "K"' in manifest["deployment_toml"]
         assert "sk-inline-secret" not in manifest["deployment_toml"]
+        assert "Bearer header-secret" not in manifest["deployment_toml"]
+        assert "routing" not in manifest["deployment_toml"]
+        assert "Bearer list-secret" not in manifest["deployment_toml"]
+
+    def test_unparseable_deployment_is_hashed_but_not_archived(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        """A file that does not parse cannot be searched for secrets, so only its hash is kept."""
+        _install_fake_stats_endpoint(monkeypatch)
+        server = self._launch_server(monkeypatch, tmp_path)
+        deployment = tmp_path / "routes.toml"
+        deployment.write_text("this is [not TOML")
+
+        with TestClient(server.setup_webserver()):
+            manifest = json.loads((tmp_path / "condition" / "switchyard-condition.json").read_text())
+
+        assert manifest["deployment_sha256"] == hashlib.sha256(deployment.read_bytes()).hexdigest()
+        assert manifest["deployment_toml"] is None
 
     def test_attached_manifest_records_the_proxy(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        _install_fake_stats_endpoint(monkeypatch)
         server = self._launch_server(
             monkeypatch,
             tmp_path,
@@ -503,8 +607,29 @@ class TestConditionRecord:
         assert manifest["proxy_root_url"] == "http://127.0.0.1:4000"
         assert manifest["deployment_sha256"] is None
         assert manifest["deployment_toml"] is None
+        # The local wheel never served a request in attach mode, so its version says nothing
+        # about the proxy; identity is the caller's to supply.
+        assert manifest["nemo_switchyard_version"] is None
+        assert manifest["proxy_provenance"] is None
+
+    def test_attached_manifest_carries_caller_provenance(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        _install_fake_stats_endpoint(monkeypatch)
+        provenance = {"switchyard_commit": "1fc9ab8", "deployment_sha256": "abc123"}
+        server = self._launch_server(
+            monkeypatch,
+            tmp_path,
+            deployment=None,
+            switchyard_base_url="http://127.0.0.1:4000/v1",
+            proxy_provenance=provenance,
+        )
+
+        with TestClient(server.setup_webserver()):
+            manifest = json.loads((tmp_path / "condition" / "switchyard-condition.json").read_text())
+
+        assert manifest["proxy_provenance"] == provenance
 
     def test_no_condition_dir_writes_nothing(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        _install_fake_stats_endpoint(monkeypatch)
         server = self._launch_server(monkeypatch, tmp_path, condition_dir=None)
 
         with TestClient(server.setup_webserver()):
@@ -512,8 +637,49 @@ class TestConditionRecord:
 
         assert not (tmp_path / "condition").exists()
 
+    def test_stats_snapshot_authenticates_as_the_configured_caller(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        """A proxy that requires auth serves model calls and would 401 an anonymous stats read."""
+        calls = _install_fake_stats_endpoint(monkeypatch, payload={"total_requests": 7})
+        server = self._launch_server(
+            monkeypatch,
+            tmp_path,
+            switchyard_api_key="stats-key",  # pragma: allowlist secret
+            default_headers={"x-org": "nv"},
+        )
+
+        with TestClient(server.setup_webserver()):
+            pass
+
+        (call,) = calls
+        method, url, kwargs = call
+        assert (method, url) == ("GET", "http://127.0.0.1:4123/v1/stats")
+        assert kwargs["headers"] == {"x-org": "nv", "Authorization": "Bearer stats-key"}
+        snapshot = json.loads((tmp_path / "condition" / "switchyard-stats.json").read_text())
+        assert snapshot["mode"] == "hosted"
+        assert snapshot["scope"] == "this run (proxy hosted for exactly this run)"
+        assert snapshot["stats"] == {"total_requests": 7}
+
+    def test_attached_stats_snapshot_is_labeled_an_aggregate(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        """A shared proxy counts every run it has served; the file must say so, not imply run scope."""
+        _install_fake_stats_endpoint(monkeypatch, payload={"total_requests": 900})
+        server = self._launch_server(
+            monkeypatch,
+            tmp_path,
+            deployment=None,
+            switchyard_base_url="http://127.0.0.1:4000/v1",
+        )
+
+        with TestClient(server.setup_webserver()):
+            pass
+
+        snapshot = json.loads((tmp_path / "condition" / "switchyard-stats.json").read_text())
+        assert snapshot["mode"] == "attached"
+        assert snapshot["scope"] == "proxy-lifetime aggregate"
+        assert snapshot["stats"] == {"total_requests": 900}
+
     def test_unreachable_stats_endpoint_does_not_fail_shutdown(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
-        """The fake proxy's port answers nothing; shutdown must shrug, not raise."""
+        """A proxy that answers nothing must cost a warning at shutdown, not a raise."""
+        _install_fake_stats_endpoint(monkeypatch, error=aiohttp.ClientError("connection refused"))
         server = self._launch_server(monkeypatch, tmp_path)
 
         with TestClient(server.setup_webserver()):
@@ -523,6 +689,7 @@ class TestConditionRecord:
 
     def test_unwritable_condition_dir_does_not_fail_startup(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
         """Provenance is worth a warning, not an outage: a bad dir must not stop serving."""
+        _install_fake_stats_endpoint(monkeypatch)
         blocker = tmp_path / "not-a-dir"
         blocker.write_text("a file where the condition dir should be")
         server = self._launch_server(monkeypatch, tmp_path, condition_dir=str(blocker))
@@ -535,6 +702,7 @@ class TestConditionRecord:
 
     def test_missing_distribution_yields_null_version(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
         """A source checkout without dist metadata still gets a manifest, with version null."""
+        _install_fake_stats_endpoint(monkeypatch)
 
         def not_installed(name):
             raise app_module.importlib.metadata.PackageNotFoundError(name)
@@ -549,12 +717,80 @@ class TestConditionRecord:
 
     def test_stats_snapshot_needs_a_proxy_to_ask(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
         """Before hosting starts there is no proxy URL; the snapshot must no-op, not guess."""
+        _install_fake_stats_endpoint(monkeypatch)
         server = self._launch_server(monkeypatch, tmp_path)
 
         assert server.proxy_root_url() is None
-        server.snapshot_proxy_stats()
+        asyncio.run(server.snapshot_proxy_stats())
 
         assert not (tmp_path / "condition").exists()
+
+
+class TestRolloutCorrelationCheck:
+    """forward_session_id only works when requests arrive with the /ng-rollout prefix.
+
+    Agents add that prefix only when observability or token capture is enabled, so a run without
+    either silently loses the documented correlation. Startup makes that explicit: an error when
+    the user asked for forwarding, a warning when it is merely the default.
+    """
+
+    def _server(self, global_config: object, **overrides) -> SwitchyardModel:
+        config = SwitchyardModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            entrypoint="",
+            name="test_switchyard_model",
+            switchyard_model="policy-model",
+            switchyard_base_url="http://127.0.0.1:4000/v1",
+            **overrides,
+        )
+        return SwitchyardModel(
+            config=config, server_client=MagicMock(spec=ServerClient, global_config_dict=global_config)
+        )
+
+    def test_explicit_forwarding_without_capture_fails_startup(self) -> None:
+        server = self._server({}, forward_session_id=True)
+
+        with pytest.raises(RuntimeError, match="observability_enabled"):
+            with TestClient(server.setup_webserver()):
+                pass  # pragma: no cover - startup raises before the body runs
+
+    def test_default_forwarding_without_capture_warns(self, caplog) -> None:
+        server = self._server({})
+
+        with TestClient(server.setup_webserver()):
+            pass
+
+        assert "no session id will reach Switchyard" in caplog.text
+
+    def test_observability_enables_correlation_silently(self, caplog) -> None:
+        server = self._server({"observability_enabled": True}, forward_session_id=True)
+
+        server.check_rollout_correlation()
+
+        assert "no session id will reach Switchyard" not in caplog.text
+
+    def test_token_capture_enables_correlation_silently(self, caplog) -> None:
+        server = self._server({"token_id_capture": {"enabled": True}}, forward_session_id=True)
+
+        server.check_rollout_correlation()
+
+        assert "no session id will reach Switchyard" not in caplog.text
+
+    def test_forwarding_disabled_needs_no_capture(self, caplog) -> None:
+        server = self._server({}, forward_session_id=False)
+
+        server.check_rollout_correlation()
+
+        assert "no session id will reach Switchyard" not in caplog.text
+
+    def test_unknown_global_config_is_left_alone(self, caplog) -> None:
+        """Without a config dict to consult there is nothing to validate against."""
+        server = self._server(None, forward_session_id=True)
+
+        server.check_rollout_correlation()
+
+        assert "no session id will reach Switchyard" not in caplog.text
 
 
 @pytest.mark.skipif(
@@ -562,13 +798,16 @@ class TestConditionRecord:
     reason="nemo-switchyard is not installed",
 )
 class TestConditionRecordIntegration:
-    """Real wheel, real traffic, no Gym client: the record survives the proxy's shutdown.
+    """Real wheel, real traffic: the record survives the proxy's shutdown.
 
-    Requests go to the proxy directly over urllib so this test never touches Gym's
-    process-singleton aiohttp client, which other classes bind to their own event loop.
+    Model calls go to the proxy directly over urllib, but the stats snapshot rides Gym's real
+    shared aiohttp path -- which binds the process-singleton client to this test's event loop, so
+    the singleton is torn down afterwards for the classes that bind their own.
     """
 
     def test_manifest_and_stats_written_across_a_run(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+        # A present config dict keeps the aiohttp client stack from booting Hydra mid-request.
+        monkeypatch.setenv("NEMO_GYM_CONFIG_DICT", "test_switchyard_model: {}\n")
         monkeypatch.setenv("SWITCHYARD_TEST_API_KEY", "stub-upstream-key")  # pragma: allowlist secret
         _StubUpstream.requests = []
         httpd = ThreadingHTTPServer(("127.0.0.1", 0), _StubUpstream)
@@ -625,13 +864,20 @@ target = "policy"
         finally:
             httpd.shutdown()
             thread.join(timeout=5)
+            # The snapshot built the process-singleton aiohttp client on this test's loop; leaving
+            # it behind would break later classes that bind it to theirs.
+            try:
+                server_utils.global_aiohttp_client_exit()
+            except Exception:
+                server_utils._GLOBAL_AIOHTTP_CLIENT = None
 
         manifest = json.loads((tmp_path / "condition" / "switchyard-condition.json").read_text())
         assert manifest["route"] == "policy-model"
         assert manifest["nemo_switchyard_version"] == "0.2.0"
 
-        stats = json.loads((tmp_path / "condition" / "switchyard-stats.json").read_text())
-        assert "upstream/model" in json.dumps(stats)
+        snapshot = json.loads((tmp_path / "condition" / "switchyard-stats.json").read_text())
+        assert snapshot["mode"] == "hosted"
+        assert "upstream/model" in json.dumps(snapshot["stats"])
 
 
 @pytest.mark.skipif(

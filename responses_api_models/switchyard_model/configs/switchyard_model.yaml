@@ -50,6 +50,11 @@ policy_model:
       # snapshot at shutdown. Use one directory per run; null disables.
       condition_dir: ${oc.env:SWITCHYARD_CONDITION_DIR,null}
 
+      # Identity of an attached proxy, copied verbatim into the condition manifest -- Gym cannot
+      # see what an external proxy runs, so its operator says (e.g. switchyard_commit, the
+      # deployment's hash). Ignored when hosting.
+      proxy_provenance: {}
+
       extra_body: {}
       default_headers: {}
       max_concurrent_requests: null
