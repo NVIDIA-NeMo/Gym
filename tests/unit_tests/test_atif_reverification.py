@@ -2136,6 +2136,15 @@ def test_duplicate_tool_call_id_across_steps_is_rejected() -> None:
         atif_trajectory_to_response(trajectory)
 
 
+def test_multiple_agent_model_names_are_rejected_instead_of_collapsed() -> None:
+    data = _trajectory_data()
+    data["steps"][1]["model_name"] = "model-a"
+    data["steps"][2]["model_name"] = "model-b"
+
+    with pytest.raises(AtifProjectionError, match="multiple explicit model names"):
+        atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+
+
 def test_multiple_outputs_for_one_tool_call_are_rejected() -> None:
     data = _trajectory_data()
     data["steps"][1]["observation"]["results"].append({"source_call_id": "call-b", "content": "second result"})

@@ -1368,9 +1368,13 @@ def _created_at(agent_steps: list[Any]) -> float:
 
 
 def _model_name(trajectory: AtifTrajectoryV1_7) -> str:
-    for step in reversed(trajectory.steps):
-        if step.source == "agent" and step.model_name:
-            return step.model_name
+    model_names = {step.model_name for step in trajectory.steps if step.source == "agent" and step.model_name}
+    if len(model_names) > 1:
+        raise AtifProjectionError(
+            "ATIF agent steps contain multiple explicit model names and cannot be represented by one verifier response"
+        )
+    if model_names:
+        return next(iter(model_names))
     return trajectory.agent.model_name or "unknown"
 
 
