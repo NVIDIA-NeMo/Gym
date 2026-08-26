@@ -12,9 +12,10 @@ ray.init()
 def decode_batch(batch):
     results = []
 
-    for line_no, (row_idx, row_str) in tqdm(batch):
+    for line_no, (row_idx, row_str) in batch:
         results.append((line_no, row_idx, orjson.loads(row_str)))
 
+    print("Finished")
     return results
 
 
