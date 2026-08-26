@@ -9,7 +9,7 @@
 # OUT_DIR defaults to outputs/sweeps; the sweep dir is OUT_DIR/<nickname>, and that is what
 # SWEEP_DIR must point at when running sbatch_reward_profiling.sh.
 #
-#   MANIFEST=benchmarks/nemotron_3.5_super/reward_profiling/manifests/super35.yaml \
+#   MANIFEST=benchmarks/nemotron_3.5_super/reward_profiling/manifests/nemotron_3_ultra.yaml \
 #   bash benchmarks/nemotron_3.5_super/reward_profiling/scripts/prepare_sweep.sh
 set -euo pipefail
 

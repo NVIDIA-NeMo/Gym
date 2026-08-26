@@ -3,7 +3,7 @@
 Reward-profiles the RL training blend by running the policy over every training dataset and
 summarizing per-task reward with `gym eval profile`.
 
-`manifests/super35.yaml` is the whole sweep: **36 environments, 726,121 rows**, run as one Gym
+`manifests/nemotron_3_ultra.yaml` is the whole sweep: **36 environments, 726,121 rows**, run as one Gym
 deployment over one concatenated input. Rows carry their own `agent_ref` and rollout collection
 dispatches per row, so judge-scored, sandbox-backed and plain environments coexist in one job.
 
@@ -34,7 +34,7 @@ deployment composed from the union of their configs.
 R=benchmarks/nemotron_3.5_super/reward_profiling
 
 # 1. validate + expand repeats in parallel. Once per (manifest, checkpoint).
-MANIFEST=$R/manifests/super35.yaml \
+MANIFEST=$R/manifests/nemotron_3_ultra.yaml \
 bash $R/scripts/prepare_sweep.sh
 
 # 2. one job: vLLM endpoint + Gym sweep driver + reward profile
