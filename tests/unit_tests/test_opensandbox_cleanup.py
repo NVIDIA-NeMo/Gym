@@ -773,9 +773,7 @@ def test_slurm_batch_command_preserves_status_and_stops_server(
 def test_cli_reads_the_connection_from_the_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A caller running from a directory it does not own cannot drop an
-    env.yaml there: Gym merges that file over every config the run names, and
-    it would carry the access key into that directory's permissions."""
+    """The launcher passes no --connection-config, so this is the only route."""
     calls = []
 
     async def record_cleanup(**kwargs: object) -> int:
@@ -829,19 +827,3 @@ def test_slurm_launcher_reads_the_checkout_from_the_environment(tmp_path: Path) 
     _main_call, cleanup_call = read_sbatch_calls(calls_path)
     assert "/elsewhere/Gym/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py" in cleanup_call
     assert "--connection-config" not in cleanup_call
-
-
-def test_slurm_launcher_passes_an_explicit_connection_config(tmp_path: Path) -> None:
-    calls_path, env = install_sbatch_stub(tmp_path)
-    env["NEMO_GYM_CONNECTION_CONFIG"] = "/private/connection.yaml"
-    result = subprocess.run(
-        ["bash", str(SBATCH_SCRIPT), "--config", "benchmark.yaml"],
-        check=False,
-        capture_output=True,
-        env=env,
-        text=True,
-    )
-
-    assert result.returncode == 0, result.stderr
-    _main_call, cleanup_call = read_sbatch_calls(calls_path)
-    assert cleanup_call[cleanup_call.index("--connection-config") + 1] == "/private/connection.yaml"
