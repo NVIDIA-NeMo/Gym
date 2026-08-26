@@ -631,20 +631,14 @@ class RolloutCollectionHelper(BaseModel):
             raise ConfigPathNotFoundError(
                 f"Input file not found: '{config.input_jsonl_fpath}' (--input). Check the path is spelled correctly."
             )
-        from pyarrow.json import read_json
 
-        rows = read_json(_input_path).to_pylist()
-        raw_rows = [
-            (row_idx, orjson.dumps(row), row)
-            for _, (row_idx, row) in enumerate(tqdm(zip(range_iterator, rows), desc="Preparing read input rows"), 1)
-        ]
-        # with open(_input_path) as input_file:
-        #     rows_iterator: Iterator[str] = tqdm(input_file, desc="Reading rows")
-        #     rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
-        #     raw_rows = [
-        #         (row_idx, row_str, loads_jsonl_line(row_str, _input_path, line_no))
-        #         for line_no, (row_idx, row_str) in enumerate(rows_iterator, 1)
-        #     ]
+        with open(_input_path) as input_file:
+            rows_iterator: Iterator[str] = tqdm(input_file, desc="Reading rows")
+            rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
+            raw_rows = [
+                (row_idx, row_str, loads_jsonl_line(row_str, _input_path, line_no))
+                for line_no, (row_idx, row_str) in enumerate(rows_iterator, 1)
+            ]
 
         # Validate and apply prompt config before per-row processing
         if prompt_cfg is not None:
