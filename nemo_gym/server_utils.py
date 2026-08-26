@@ -49,7 +49,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from multidict import CIMultiDict
 from omegaconf import DictConfig, OmegaConf, open_dict
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 from requests.exceptions import ConnectionError
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -63,6 +63,7 @@ from nemo_gym.config_types import (
 from nemo_gym.global_config import (
     DRY_RUN_KEY_NAME,
     HEAD_SERVER_KEY_NAME,
+    NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     OBSERVABILITY_ENABLED_KEY_NAME,
     RAY_HEAD_NODE_ADDRESS_KEY_NAME,
@@ -326,6 +327,9 @@ class ServerClient(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
+    # Resolved base URLs, cached by server name.
+    _server_base_urls: dict[str, str] = PrivateAttr(default_factory=dict)
+
     @classmethod
     def load_head_server_config(cls) -> BaseServerConfig:
         global_config_dict = get_global_config_dict()
@@ -335,8 +339,19 @@ class ServerClient(BaseModel):
 
     @classmethod
     def load_from_global_config(cls, head_server_config: Optional[BaseServerConfig] = None) -> "ServerClient":
+        """Build a client from the fully resolved global config.
+
+        Gym-launched server processes reuse the config injected by their parent.
+        Other processes fetch the config from the head server.
+        """
         if head_server_config is None:
             head_server_config = cls.load_head_server_config()
+
+        if _has_injected_global_config_env():
+            return cls(
+                head_server_config=head_server_config,
+                global_config_dict=get_global_config_dict(),
+            )
 
         # It's critical we use requests here instead of the global httpx client since a FastAPI server may be run downstream of this function call.
         head_server_url = f"http://{head_server_config.host}:{head_server_config.port}"
@@ -354,14 +369,10 @@ class ServerClient(BaseModel):
 
         return cls(head_server_config=head_server_config, global_config_dict=global_config_dict)
 
-    def _build_server_base_url(self, server_config_dict: OmegaConf) -> str:
-        return f"http://{server_config_dict.host}:{server_config_dict.port}"
-
     async def request(
         self, server_name: str, url_path: str, method: str, **kwargs: Unpack[_RequestOptions]
     ) -> ClientResponse:
-        server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
-        base_url = self._build_server_base_url(server_config_dict)
+        base_url = self._resolve_base_url(server_name)
 
         json_obj = kwargs.get("json")
         if "json" in kwargs:
@@ -448,6 +459,22 @@ class ServerClient(BaseModel):
             return "timeout"
         except Exception:
             return "unknown_error"
+
+    def _resolve_base_url(self, server_name: str) -> str:
+        cached = self._server_base_urls.get(server_name)
+        if cached is not None:
+            return cached
+        server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
+        base_url = self._build_server_base_url(server_config_dict)
+        self._server_base_urls[server_name] = base_url
+        return base_url
+
+    def _build_server_base_url(self, server_config_dict: OmegaConf) -> str:
+        return f"http://{server_config_dict.host}:{server_config_dict.port}"
+
+
+def _has_injected_global_config_env() -> bool:
+    return getenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME) is not None
 
 
 SESSION_ID_KEY = "session_id"
@@ -799,6 +826,8 @@ Full body: {json.dumps(exc.body, indent=4)}
 class HeadServer(BaseServer):
     config: BaseServerConfig
     _server_instances: List[dict] = []
+    # Serialized global config returned to clients.
+    _cached_yaml: Optional[str] = None
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
@@ -814,6 +843,10 @@ class HeadServer(BaseServer):
 
     def set_server_instances(self, instances: List) -> None:
         self._server_instances = instances
+
+    def invalidate_global_config_dict_yaml_cache(self) -> None:
+        """Clear the serialized global config cache."""
+        self._cached_yaml = None
 
     @classmethod
     def run_webserver(cls) -> Tuple[uvicorn.Server, Thread, "HeadServer"]:  # pragma: no cover
@@ -835,7 +868,9 @@ class HeadServer(BaseServer):
         return uvicorn_server, thread, server
 
     async def global_config_dict_yaml(self) -> str:
-        return OmegaConf.to_yaml(get_global_config_dict())
+        if self._cached_yaml is None:
+            self._cached_yaml = OmegaConf.to_yaml(get_global_config_dict())
+        return self._cached_yaml
 
 
 class ServerInstanceDisplayConfig(BaseModel):
