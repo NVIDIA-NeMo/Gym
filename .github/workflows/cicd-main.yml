@@ -84,7 +84,18 @@ jobs:
     # pool, which is shared with NeMo-RL's H100 CI traffic and was queuing
     # indefinitely on every PR push. Run it on the nightly schedule, or
     # on-demand via workflow_dispatch, instead.
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    #
+    # A job's own `if:` replaces (not ANDs with) the implicit success()-of-
+    # needs check, so pre-flight/classify_changes/unit_tests success must be
+    # checked explicitly here - unit_tests may legitimately be "skipped" on a
+    # docs-only latest commit, so that's tolerated too.
+    if: >-
+      ${{
+        (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+        needs.pre-flight.result == 'success' &&
+        needs.classify_changes.result == 'success' &&
+        (needs.unit_tests.result == 'success' || needs.unit_tests.result == 'skipped')
+      }}
     runs-on: ${{ needs.pre-flight.outputs.runner_prefix }}
     environment: ${{ contains(needs.pre-flight.outputs.registry, 'azure') && 'nemo-ci' || '' }}
     outputs:
@@ -143,8 +154,18 @@ jobs:
   gpu_e2e_tests:
     name: ${{ matrix.name }}
     needs: [pre-flight, classify_changes, unit_tests, container_build]
-    # Nightly only, same reasoning as container_build above.
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # Nightly only, same reasoning as container_build above. Also requires
+    # container_build to have actually succeeded - its `image` output is set
+    # before the "Build and push" step runs, so it can be non-empty even if
+    # the push itself failed.
+    if: >-
+      ${{
+        (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+        needs.pre-flight.result == 'success' &&
+        needs.classify_changes.result == 'success' &&
+        (needs.unit_tests.result == 'success' || needs.unit_tests.result == 'skipped') &&
+        needs.container_build.result == 'success'
+      }}
     strategy:
       fail-fast: false
       matrix:
@@ -185,8 +206,15 @@ jobs:
     name: ${{ matrix.provider }}-e2e
     needs: [classify_changes, unit_tests]
     # Nightly only: exercises a live external inference provider (Fireworks).
-    # Run nightly, or on-demand via workflow_dispatch, instead of on every PR push.
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # Run nightly, or on-demand via workflow_dispatch, instead of on every PR
+    # push. Only needs [classify_changes, unit_tests] (no pre-flight/
+    # container_build dependency), so only those two are checked here.
+    if: >-
+      ${{
+        (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+        needs.classify_changes.result == 'success' &&
+        (needs.unit_tests.result == 'success' || needs.unit_tests.result == 'skipped')
+      }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -304,8 +332,8 @@ jobs:
           echo "All required test jobs completed successfully."
           exit 0
 
-  notify-nightly-failure:
-    name: Notify nightly failure
+  notify-failure:
+    name: Notify test failure
     runs-on: ubuntu-latest
     needs: [container_build, gpu_e2e_tests, provider_e2e_tests, Nemo_CICD_Test]
     environment: main
@@ -317,12 +345,29 @@ jobs:
         (github.event_name != 'workflow_dispatch' || inputs.send_notification)
       }}
     steps:
+      # workflow_dispatch can be run against any ref via the Actions UI, so
+      # only alert the shared Gym channel for runs against main or a release
+      # branch (rMAJOR.MINOR.PATCH) - not ad-hoc feature-branch dispatches.
+      - name: Check ref is main or a release branch
+        id: ref_check
+        shell: bash
+        env:
+          REF: ${{ github.ref_name }}
+        run: |
+          if [[ "$REF" == "main" || "$REF" =~ ^r[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "allowed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "allowed=false" >> "$GITHUB_OUTPUT"
+            echo "Ref '$REF' is not main or a release branch; suppressing Slack alert."
+          fi
+
       - name: Notify Gym alerts channel
+        if: steps.ref_check.outputs.allowed == 'true'
         uses: NVIDIA-NeMo/FW-CI-templates/.github/actions/send-slack-alert@cf5acebace78c7c339bc1f804357a991336f1c4d # v1.8.10
         with:
           webhook: ${{ secrets.SLACK_TEAM_CHANNEL_WEBHOOK }}
           message: |
-            :rotating_light: Nightly Gym CI failed on main branch
+            :rotating_light: Nightly Gym CI failed on ${{ github.ref_name }}
 
             • Repository: ${{ github.repository }}
             • Commit: `${{ github.sha }}`

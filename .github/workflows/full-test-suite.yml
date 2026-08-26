@@ -284,12 +284,29 @@ jobs:
         (github.event_name != 'workflow_dispatch' || inputs.send_notification)
       }}
     steps:
+      # workflow_dispatch can be run against any ref via the Actions UI, so
+      # only alert the shared Gym channel for runs against main or a release
+      # branch (rMAJOR.MINOR.PATCH) - not ad-hoc feature-branch dispatches.
+      - name: Check ref is main or a release branch
+        id: ref_check
+        shell: bash
+        env:
+          REF: ${{ github.ref_name }}
+        run: |
+          if [[ "$REF" == "main" || "$REF" =~ ^r[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "allowed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "allowed=false" >> "$GITHUB_OUTPUT"
+            echo "Ref '$REF' is not main or a release branch; suppressing Slack alert."
+          fi
+
       - name: Notify Gym alerts channel
+        if: steps.ref_check.outputs.allowed == 'true'
         uses: NVIDIA-NeMo/FW-CI-templates/.github/actions/send-slack-alert@cf5acebace78c7c339bc1f804357a991336f1c4d # v1.8.10
         with:
           webhook: ${{ secrets.SLACK_TEAM_CHANNEL_WEBHOOK }}
           message: |
-            :rotating_light: Full test suite failed on main branch
+            :rotating_light: Full test suite failed on ${{ github.ref_name }}
 
             • Repository: ${{ github.repository }}
             • Commit: `${{ github.sha }}`

@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -198,8 +199,13 @@ def test_cicd_main_wires_preflight_cpu_and_gpu_workflows() -> None:
     assert "      - main\n" in workflow
     assert '      - "pull-request/[0-9]+"\n' in workflow
     assert "deploy-release" not in workflow
-    assert "schedule:" not in workflow
-    assert "workflow_dispatch:" not in workflow
+    # container_build/gpu_e2e_tests/provider_e2e_tests run on a periodic
+    # schedule (or on-demand via workflow_dispatch) instead of on every PR
+    # push, since they compete for the shared, contention-prone
+    # nemo-ci-aws-gpu-x2 runner pool.
+    assert '    - cron: "0 */4 * * *"' in workflow
+    assert "  workflow_dispatch:" in workflow
+    assert "      send_notification:" in workflow
     assert "  contents: read\n" in workflow
     assert "  pull-requests: read\n" in workflow
     assert "id-token:" not in workflow
@@ -210,12 +216,12 @@ def test_cicd_main_wires_preflight_cpu_and_gpu_workflows() -> None:
     assert "base-ref: ${{ needs.pre-flight.outputs.base_ref }}" in workflow
     assert "needs: [pre-flight, classify_changes, unit_tests]" in workflow
     assert "needs: [pre-flight, classify_changes, unit_tests, container_build]" in workflow
-    # container_build and gpu_e2e_tests are temporarily disabled (if: false) while the
-    # nemo-ci-aws-gpu-x2 runner pool backlog is resolved, so only unit_tests and
-    # provider_e2e_tests still carry the docs-only condition.
-    assert workflow.count("if: needs.classify_changes.outputs.docs_only != 'true'") == 2
-    assert workflow.count("if: false") == 2
-    assert workflow.count("Temporarily disabled") == 2
+    # Only unit_tests still uses the plain docs-only gate; container_build/
+    # gpu_e2e_tests/provider_e2e_tests are schedule/workflow_dispatch-gated
+    # instead (checked in test_cicd_nightly_jobs_require_upstream_success).
+    assert workflow.count("if: needs.classify_changes.outputs.docs_only != 'true'") == 1
+    assert "if: false" not in workflow
+    assert "Temporarily disabled" not in workflow
     assert "needs.pre-flight.outputs.docs_only" not in workflow
     assert "runs-on: ${{ needs.pre-flight.outputs.runner_prefix }}" in workflow
     assert "matrix:" in workflow
@@ -257,16 +263,130 @@ def test_cicd_summary_accepts_only_expected_docs_only_skips() -> None:
     assert '"$PREFLIGHT_RESULT" != "success"' in workflow
     assert '"$CLASSIFY_RESULT" != "success"' in workflow
     assert '"$DOCS_ONLY" == "true"' in workflow
-    # Container build and GPU e2e are echoed but not gating while temporarily disabled.
-    assert 'echo "Container build: $CONTAINER_BUILD_RESULT (not gating - temporarily disabled)"' in workflow
-    assert 'echo "GPU E2E tests: $GPU_E2E_TEST_RESULT (not gating - temporarily disabled)"' in workflow
-    assert '"$CONTAINER_BUILD_RESULT" == "skipped"' not in workflow
-    assert '"$CONTAINER_BUILD_RESULT" == "success"' not in workflow
-    assert '"$UNIT_TEST_RESULT" == "success"' in workflow
+    assert '"$EVENT_NAME" == "schedule" || "$EVENT_NAME" == "workflow_dispatch"' in workflow
     assert "PROVIDER_E2E_TEST_RESULT: ${{ needs.provider_e2e_tests.result }}" in workflow
-    assert 'echo "Provider E2E tests: $PROVIDER_E2E_TEST_RESULT (not gating)"' in workflow
-    assert '"$PROVIDER_E2E_TEST_RESULT" == "skipped"' not in workflow
-    assert '"$PROVIDER_E2E_TEST_RESULT" == "success"' not in workflow
+    assert '"$UNIT_TEST_RESULT" != "success" && "$UNIT_TEST_RESULT" != "skipped"' in workflow
+
+
+def _cicd_main_jobs() -> dict:
+    return yaml.safe_load(CICD_MAIN_WORKFLOW.read_text())["jobs"]
+
+
+def _run_step(job_name: str, step_name: str, env_overrides: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    steps = _cicd_main_jobs()[job_name]["steps"]
+    (script,) = (step["run"] for step in steps if step.get("name") == step_name)
+    env = os.environ.copy()
+    env.update(env_overrides)
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env)
+
+
+_ALL_SUCCESS_RESULTS = {
+    "PREFLIGHT_RESULT": "success",
+    "CLASSIFY_RESULT": "success",
+    "DOCS_ONLY": "false",
+    "UNIT_TEST_RESULT": "success",
+    "CONTAINER_BUILD_RESULT": "success",
+    "GPU_E2E_TEST_RESULT": "success",
+    "PROVIDER_E2E_TEST_RESULT": "success",
+}
+
+
+@pytest.mark.parametrize(
+    ("event_name", "overrides", "expect_success"),
+    [
+        # PR/push events never gate on the nightly-only jobs.
+        ("pull_request", {}, True),
+        ("pull_request", {"CONTAINER_BUILD_RESULT": "failure"}, True),
+        ("pull_request", {"UNIT_TEST_RESULT": "failure"}, False),
+        (
+            "pull_request",
+            {"DOCS_ONLY": "true", "UNIT_TEST_RESULT": "skipped"},
+            True,
+        ),
+        (
+            "pull_request",
+            {"DOCS_ONLY": "true", "UNIT_TEST_RESULT": "success"},
+            False,
+        ),
+        # Nightly/manual runs: docs_only no longer short-circuits the
+        # nightly-job check (the bug fixed in this PR).
+        ("schedule", {}, True),
+        ("schedule", {"CONTAINER_BUILD_RESULT": "failure"}, False),
+        ("schedule", {"GPU_E2E_TEST_RESULT": "failure"}, False),
+        ("schedule", {"PROVIDER_E2E_TEST_RESULT": "failure"}, False),
+        (
+            "schedule",
+            {"DOCS_ONLY": "true", "UNIT_TEST_RESULT": "skipped", "CONTAINER_BUILD_RESULT": "failure"},
+            False,
+        ),
+        (
+            "schedule",
+            {"DOCS_ONLY": "true", "UNIT_TEST_RESULT": "skipped"},
+            True,
+        ),
+        ("schedule", {"UNIT_TEST_RESULT": "failure"}, False),
+        ("workflow_dispatch", {"CONTAINER_BUILD_RESULT": "failure"}, False),
+        ("workflow_dispatch", {}, True),
+    ],
+)
+def test_nemo_cicd_test_gate_matches_event_and_job_results(
+    event_name: str, overrides: dict[str, str], expect_success: bool
+) -> None:
+    env = {"EVENT_NAME": event_name, **_ALL_SUCCESS_RESULTS, **overrides}
+
+    result = _run_step("Nemo_CICD_Test", "Check test results", env)
+
+    assert (result.returncode == 0) == expect_success, result.stdout + result.stderr
+
+
+def test_cicd_nightly_jobs_require_upstream_success() -> None:
+    workflow = CICD_MAIN_WORKFLOW.read_text()
+
+    # A job's own `if:` replaces (not ANDs with) the implicit success()-of-
+    # needs check, so container_build/gpu_e2e_tests/provider_e2e_tests must
+    # explicitly check needs.*.result themselves.
+    assert "needs.pre-flight.result == 'success' &&" in workflow
+    assert workflow.count("needs.classify_changes.result == 'success' &&") == 3
+    assert (
+        "(needs.unit_tests.result == 'success' || needs.unit_tests.result == 'skipped')" in workflow
+    )
+    assert "needs.container_build.result == 'success'" in workflow
+
+
+@pytest.mark.parametrize(
+    ("ref", "allowed"),
+    [
+        ("main", "true"),
+        ("r0.5.1", "true"),
+        ("r0.5.10", "true"),
+        ("r1.0.0", "true"),
+        ("feature-branch", "false"),
+        ("gym-nightly-heavy-ci", "false"),
+        ("r0.5", "false"),
+    ],
+)
+def test_notify_failure_ref_check_allows_only_main_and_release_branches(
+    ref: str, allowed: str, tmp_path: Path
+) -> None:
+    for workflow_file in (CICD_MAIN_WORKFLOW, FULL_TEST_WORKFLOW):
+        jobs = yaml.safe_load(workflow_file.read_text())["jobs"]
+        steps = jobs["notify-failure"]["steps"]
+        (script,) = (step["run"] for step in steps if step.get("name") == "Check ref is main or a release branch")
+
+        output_path = tmp_path / f"github_output_{workflow_file.stem}_{ref}"
+        output_path.write_text("")
+        result = subprocess.run(
+            ["bash", "-c", script],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "REF": ref, "GITHUB_OUTPUT": str(output_path)},
+        )
+
+        assert f"allowed={allowed}" in output_path.read_text(), (
+            workflow_file,
+            result.stdout,
+            result.stderr,
+        )
 
 
 def test_shared_change_classifier_matches_gym_docs_and_server_paths() -> None:
