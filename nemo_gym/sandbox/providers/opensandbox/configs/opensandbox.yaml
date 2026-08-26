@@ -70,6 +70,11 @@ sandbox:
       # e.g. on SWE Bench Verified 500 samples with 3 repeats = 1500 concurrent samples, we would do polling every `background_poll_interval_s` seconds
       background_poll_initial_s: 1.0
       background_poll_interval_s: 30.0
+      # Per-request budget for status polls, which are small idempotent GETs:
+      # without their own short budget, each poll against an unreachable
+      # sandbox hangs for the full connection request_timeout_s (tuned for
+      # long submits) per retry. null falls back to that shared budget.
+      status_poll_timeout_s: 10.0
     # Job attribution merged into every sandbox's metadata. OpenSandbox propagates
     # metadata as Kubernetes labels on the sandbox resources, so sandboxes are
     # attributable both via the OpenSandbox list API and at the cluster level, e.g.
