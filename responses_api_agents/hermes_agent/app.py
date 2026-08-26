@@ -309,14 +309,14 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
         def _patched_build_api_kwargs(api_messages):
             kw = _original_build_api_kwargs(api_messages)
-            if not self.config.chat_template_kwargs_enabled:
-                return kw
-
             # hermes-agent 569b912 dropped the use_streaming constructor flag; without it the agent
             # emits stream=true, but gym's model server only accepts non-streaming requests
             # (NonStreaming schema -> HTTP 422 "stream: Input should be False"). Force it off here,
             # which is what the no-stream-consumer / quiet_mode path already expects.
             kw["stream"] = False
+            if not self.config.chat_template_kwargs_enabled:
+                return kw
+
             ctk = kw.setdefault("extra_body", {}).setdefault("chat_template_kwargs", {})
             ctk.setdefault("enable_thinking", True)
             ctk["truncate_history_thinking"] = False
