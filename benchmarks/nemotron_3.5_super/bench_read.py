@@ -15,7 +15,6 @@ def decode_batch(batch):
     for line_no, (row_idx, row_str) in batch:
         results.append((line_no, row_idx, orjson.loads(row_str)))
 
-    print("Finished")
     return results
 
 
@@ -37,5 +36,8 @@ with open(
 
 print("Starting json load")
 refs = [decode_batch.remote(batch) for batch in batches]
-records = [record for batch in ray.get(refs) for record in batch]
+
+records = []
+for batch_result in tqdm(ray.util.as_completed(refs), desc="Loading batches"):
+    records.extend(ray.get(batch_result))
 print(f"Finished json loading {len(records)} rows")
