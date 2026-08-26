@@ -29,6 +29,15 @@ genrm_compare_resources_server:
       # When > 1, verify() buffers by task/prompt identity and returns relative rewards when a cohort is full.
       # Ensure rollout data has this many rows per prompt (e.g. num_repeats in rollout collection).
       num_rollouts_per_prompt: 16
+
+      # Optional absolute timeout measured from the first /verify arrival. Keep this
+      # disabled for long tool rollouts; disconnected callers are still reclaimed.
+      cohort_collection_timeout_s: null
+
+      # Retain compact rewards/digests for idempotent late retries. The cache is also
+      # bounded, so disabling the TTL does not make terminal state unbounded.
+      cohort_result_ttl_s: 21600
+      max_terminal_cohorts: 4096
       
       # Generation params for GenRM calls
       genrm_responses_create_params:

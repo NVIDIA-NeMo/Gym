@@ -142,6 +142,8 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
 
 # Data keys
 TASK_INDEX_KEY_NAME = "_ng_task_index"
+GROUP_ID_KEY_NAME = "_ng_group_id"
+GROUP_ATTEMPT_KEY_NAME = "_ng_group_attempt"
 ROLLOUT_INDEX_KEY_NAME = "_ng_rollout_index"
 # Resume re-dispatch attempt counter (0 on the first attempt); distinguishes retries of the same
 # (task, rollout) so their captured model calls stay separable.

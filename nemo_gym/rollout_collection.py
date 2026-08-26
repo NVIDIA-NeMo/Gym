@@ -52,6 +52,8 @@ from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
+    GROUP_ATTEMPT_KEY_NAME,
+    GROUP_ID_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
@@ -1499,7 +1501,19 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
                             flush=True,
                         )
                     raise
-                return row, await get_response_json(res)
+                result = await get_response_json(res)
+                # Recovery identity belongs to the dispatched row. Echo it at
+                # the shared transport boundary so callers can reject stale
+                # completions even when an agent omits arbitrary request extras.
+                for key in (
+                    TASK_INDEX_KEY_NAME,
+                    GROUP_ID_KEY_NAME,
+                    GROUP_ATTEMPT_KEY_NAME,
+                    ROLLOUT_INDEX_KEY_NAME,
+                ):
+                    if key in row:
+                        result[key] = row[key]
+                return row, result
 
         return tqdm.as_completed(
             map(_post_subroutine, examples),

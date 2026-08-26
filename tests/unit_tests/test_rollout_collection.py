@@ -30,7 +30,13 @@ import nemo_gym.rollout_collection
 import nemo_gym.token_id_capture.delivery
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
-from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.global_config import (
+    AGENT_REF_KEY_NAME,
+    GROUP_ATTEMPT_KEY_NAME,
+    GROUP_ID_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+)
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.rollout_collection import (
@@ -339,6 +345,58 @@ class TestRolloutCollection:
         for malformed_result in malformed:
             sanitized = _rollout_for_export(malformed_result)
             assert b"secret" not in orjson.dumps(sanitized)
+
+    async def test_run_examples_stamps_dispatched_recovery_identity(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        row = {
+            AGENT_REF_KEY_NAME: {"name": "my_agent"},
+            TASK_INDEX_KEY_NAME: 7,
+            GROUP_ID_KEY_NAME: "group-7",
+            GROUP_ATTEMPT_KEY_NAME: 2,
+            ROLLOUT_INDEX_KEY_NAME: 3,
+            "responses_create_params": {"input": "question"},
+        }
+        response = MagicMock()
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(return_value=response)
+        mock_server_client.global_config_dict = OmegaConf.create(
+            {"my_agent": {"responses_api_agents": {"impl": {}}}}
+        )
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "setup_server_client_utils",
+            lambda *args, **kwargs: mock_server_client,
+        )
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock(return_value=None))
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "get_response_json",
+            AsyncMock(
+                return_value={
+                    "reward": 1.0,
+                    GROUP_ID_KEY_NAME: "untrusted-agent-value",
+                    GROUP_ATTEMPT_KEY_NAME: 99,
+                    ROLLOUT_INDEX_KEY_NAME: 15,
+                }
+            ),
+        )
+
+        returned_row, result = await next(RolloutCollectionHelper().run_examples([row]))
+
+        assert returned_row is row
+        assert {
+            key: result[key]
+            for key in (
+                TASK_INDEX_KEY_NAME,
+                GROUP_ID_KEY_NAME,
+                GROUP_ATTEMPT_KEY_NAME,
+                ROLLOUT_INDEX_KEY_NAME,
+            )
+        } == {
+            TASK_INDEX_KEY_NAME: 7,
+            GROUP_ID_KEY_NAME: "group-7",
+            GROUP_ATTEMPT_KEY_NAME: 2,
+            ROLLOUT_INDEX_KEY_NAME: 3,
+        }
 
     @pytest.mark.parametrize("request_debug_enabled", [True, False])
     async def test_run_examples_logs_failed_run_when_request_debug_enabled(
