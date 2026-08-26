@@ -4,8 +4,6 @@ description: "Verify that evaluation rollouts contain complete, internally consi
 position: 5
 ---
 
-# Rollout Health Checks
-
 Rollout health checks verify the integrity and observability of completed evaluation artifacts. They detect unreadable records,
 missing agent activity, failed or incomplete policy-model calls, inconsistent token counts, and failures repeated across every
 attempt at a task.
@@ -23,7 +21,7 @@ metrics, model servers, or agent behavior. It writes two additional report files
 
 ## When health checks run
 
-`gym eval run` runs health verification after rollout collection and aggregate-metrics computation. `gym eval aggregate` runs it
+`gym eval run` runs health checks after rollout collection and aggregate-metrics computation. `gym eval aggregate` runs health checks
 after aggregating the selected shards. Both commands print a short report:
 
 ```text
@@ -40,7 +38,7 @@ To check an existing run directly, use:
 gym eval health-check results/my-run
 ```
 
-The standalone command reads `results/my-run/rollouts.jsonl` by default and does not search for another JSONL file. Select a
+The standalone command reads `results/my-run/rollouts.jsonl` by default. Select a
 different file explicitly when the rollout filename is nonstandard:
 
 ```bash
@@ -61,7 +59,7 @@ model-call evidence, explicit model-call references, and observation gaps produc
 [trajectory capability matrix](/main/reference/trajectory-capabilities) for producer coverage and
 [model-call capture](/main/model-server/model-call-capture) for collection configuration.
 
-The health runner does not reopen raw model-call capture files, inspect `ng_model_call_capture`, or reconstruct turns from an
+The health checks runner does not reopen raw model-call capture files, inspect `ng_model_call_capture`, or reconstruct turns from an
 agent-specific response. A custom rollout driver receives the same behavior as a built-in driver: checks run when it writes a
 valid `ng_trajectory`, and checks that need missing evidence are unobserved.
 
@@ -97,16 +95,16 @@ Check IDs identify both the evidence being evaluated and the condition detected.
 | `check_execution_error` | Rollout | Another health check raises an unexpected exception while evaluating the record. The failed check is also marked unobserved, and remaining checks continue. |
 | `record_unreadable` | Rollout | A non-empty JSONL line is not a JSON object, or its `ng_trajectory` cannot be parsed as a `TrajectoryRecord`. |
 | `rollout_duplicate_identity` | Rollout | More than one input record has the same `_ng_task_index` and `_ng_rollout_index`. Every duplicated record receives the finding. |
-| `rollout_missing_agent_turns` | Rollout | Agent turns are observable, but none contains answer or reasoning content, a tool call, or a model-call reference. |
-| `agent_turn_hollow` | Agent turn | An observable `TrajectoryTurn` contains neither non-empty answer or reasoning content nor a tool call. |
+| `rollout_missing_agent_turns` | Rollout | Agent turns are observable, but no turn contains any of the following: (1) non-empty answer or reasoning content, (2) a tool call, or (3) a model-call reference. |
+| `rollout_token_count_mismatch` | Rollout | Both top-level rollout token totals and a complete set of bound policy-model-call token counts are available, but the prompt-token total or completion-token total differs from the corresponding call-level sum. |
+| `agent_turn_hollow` | Agent turn | An observable `TrajectoryTurn` does not contain any of the following: (1) non-empty answer content, (2) non-empty reasoning content, or (3) a tool call. |
 | `trajectory_capture_mismatch` | Trajectory and model calls | An explicit turn-to-model-call reference resolves to zero or multiple model calls, or `ng_trajectory.gaps` records an unmatched, ambiguous, or conflicting reference. |
-| `model_call_missing_token_counts` | Policy-model call | An exactly bound policy-model call is missing its prompt-token count or completion-token count. Zero is a present count. |
-| `model_call_zero_completion_tokens` | Policy-model call | An exactly bound policy-model call reports zero completion tokens. |
 | `model_call_failed` | Policy-model call | An exactly bound policy-model call has an HTTP error status, an error category, or response status `failed`, `error`, or `cancelled`. |
+| `model_call_missing_token_counts` | Policy-model call | On an exactly bound policy-model call, `token_stats.prompt_tokens` or `token_stats.completion_tokens` is omitted or set to `null`. A value of zero counts as present. |
 | `model_call_runaway_generation` | Policy-model call | An exactly bound policy-model call ended with `finish_reason: length` and its saved response contains no answer or reasoning content. |
-| `rollout_token_count_mismatch` | Rollout | Complete top-level rollout prompt and completion totals differ from the sums of a complete set of bound policy-model calls. |
+| `model_call_zero_completion_tokens` | Policy-model call | An exactly bound policy-model call reports zero completion tokens. |
 | `task_consistently_unhealthy` | Task | At least two repeats are computable and every computable repeat is unhealthy. Unobserved repeats do not prevent the flag. |
-| `task_no_successful_model_calls` | Task | Every repeat has complete policy-model-call bindings and none contains a successful bound call. |
+| `task_no_successful_model_calls` | Task | Every repeat has at least one policy-model-call reference, every reference resolves to exactly one captured call, and none of the matched calls completed successfully. |
 
 ### What counts as agent activity
 
@@ -131,9 +129,11 @@ It does not match calls by list position, timestamp, model name, or payload simi
 becomes a bound policy-model call. Unreferenced model calls are not assigned to the policy model because they can belong to an
 auxiliary model.
 
-The conservative binding rule avoids attributing a judge or user-simulator failure to the evaluated model. Its trade-off is
-coverage: when a trajectory producer does not write explicit references, binding-dependent checks are unobserved even if the
-trajectory contains an unowned list of model calls.
+<Note>
+  The conservative binding rule avoids attributing a judge or user-simulator failure to the evaluated model. Its trade-off is
+  coverage: when a trajectory producer does not write explicit references, binding-dependent checks are unobserved even if the
+  trajectory contains an unowned list of model calls.
+</Note>
 
 ### Length-limited responses
 
@@ -142,10 +142,11 @@ non-empty text, content, output text, answer, encrypted reasoning content, reaso
 Chat Completions, and Messages-style responses. If any supported content is present, a length-limited response is not classified
 as an empty runaway generation.
 
-## Missing evidence and observation gaps
+## How health checks interpret existing observation gaps
 
-`ng_trajectory.gaps` records evidence that the observability layer could not collect, normalize, or correlate exactly. A gap is
-not automatically a health finding. Health uses the gap code according to the evidence required by each check:
+During rollout collection, Gym's observability layer writes an `ObservationGap` to `ng_trajectory.gaps` when it cannot collect,
+normalize, or correlate evidence exactly. The health runner does not create these gaps. It maps each persisted gap code to health
+behavior according to the evidence required by a check. A recorded gap is not automatically a health finding:
 
 | Observation gap | Health behavior |
 | --- | --- |
