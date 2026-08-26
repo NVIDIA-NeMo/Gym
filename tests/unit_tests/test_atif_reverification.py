@@ -49,9 +49,11 @@ from resources_servers.mcqa.app import MCQAResourcesServer, MCQAResourcesServerC
 
 
 _FIXTURE_PATH = Path(__file__).parent / "fixtures" / "relay_atif_v1_7_tool_trajectory.json"
-_FIXTURE_SHA256 = "84fa0a1eeaa6520c5bcb870dfcb49c066602c639982265cc43624410ed4465da"
+_FIXTURE_SHA256 = "431aae09e1a1a3cfd478c44f730d0432c0052eb06fe387d4d90aec4bacf4b660"  # pragma: allowlist secret
 _RESPONSES_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "relay_atif_v1_7_responses_tool_trajectory.json"
-_RESPONSES_FIXTURE_SHA256 = "fa25ccc019cbecca9aae49aeefb4e2ed2676909dfc1ca9dd854a25ee44832cf9"
+_RESPONSES_FIXTURE_SHA256 = (
+    "8d9c3c2d21c4ef0a8d9488eac560b1fdfaa532712b8a4fc628023a94d0bab825"  # pragma: allowlist secret
+)
 
 
 def _trajectory_data() -> dict[str, Any]:
@@ -168,7 +170,7 @@ def test_current_relay_fixture_builds_a_valid_gym_verify_request() -> None:
     assert loaded.trajectory.agent.version == "0.9.0"
     assert loaded.trajectory.agent.extra == {
         "fixture": "gym-400",
-        "relay_revision": "39885b04174be74a7c8fe7aad55686722e815dc8",
+        "relay_revision": "2222222222222222222222222222222222222222",
     }
     assert materialized == original
     assert payload[TASK_INDEX_KEY_NAME] == 7

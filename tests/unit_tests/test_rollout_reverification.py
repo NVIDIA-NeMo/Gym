@@ -66,6 +66,14 @@ from nemo_gym.rollout_reverification import (
 )
 
 
+_TOOL_TRAJECTORY_SHA256 = (
+    "431aae09e1a1a3cfd478c44f730d0432c0052eb06fe387d4d90aec4bacf4b660"  # pragma: allowlist secret
+)
+_RESPONSES_TRAJECTORY_SHA256 = (
+    "8d9c3c2d21c4ef0a8d9488eac560b1fdfaa532712b8a4fc628023a94d0bab825"  # pragma: allowlist secret
+)
+
+
 class TestRolloutReverificationConfig:
     """Field-level validation on RolloutReverificationConfig."""
 
@@ -1123,7 +1131,7 @@ class TestPrepareAtifPayloads:
         assert payload[ATIF_PROVENANCE_KEY] == {
             "trajectory_id": "gym-atif-spike-session",
             "session_id": "gym-atif-spike-session",
-            "source_sha256": "84fa0a1eeaa6520c5bcb870dfcb49c066602c639982265cc43624410ed4465da",
+            "source_sha256": _TOOL_TRAJECTORY_SHA256,
             "schema_version": "ATIF-v1.7",
             "projection_status": "complete",
         }
@@ -1951,7 +1959,7 @@ class TestRolloutReverificationRunFromConfig:
                     "trajectory_path": str(fixture),
                     TASK_INDEX_KEY_NAME: 0,
                     ROLLOUT_INDEX_KEY_NAME: 0,
-                    "expected_sha256": "fa25ccc019cbecca9aae49aeefb4e2ed2676909dfc1ca9dd854a25ee44832cf9",
+                    "expected_sha256": _RESPONSES_TRAJECTORY_SHA256,
                 }
             )
             + b"\n"
@@ -2008,7 +2016,7 @@ class TestRolloutReverificationRunFromConfig:
         assert returned[0][ATIF_PROVENANCE_KEY] == {
             "trajectory_id": "relay-887-live-trajectory",
             "session_id": "relay-887-live-session",
-            "source_sha256": "fa25ccc019cbecca9aae49aeefb4e2ed2676909dfc1ca9dd854a25ee44832cf9",
+            "source_sha256": _RESPONSES_TRAJECTORY_SHA256,
             "schema_version": "ATIF-v1.7",
             "projection_status": "complete",
         }

@@ -134,10 +134,10 @@
     "total_steps": 3
   },
   "extra": {
-    "relay_revision": "b464b331e679b58259fe2300b14ac4e333b6a7b9",
-    "relay_binary_sha256": "db7d5d5ed8962f8a7b12dfb4a426f5e2fb47201d95b256ceb085ae7b55de035e",
-    "raw_atif_sha256": "30b79d328394f530453a45cbcd23c1d999ac02cae02f93b36f76da9512adcfe1",
-    "relay_qualification": "built from merged release/0.8 revision b464b331e679b58259fe2300b14ac4e333b6a7b9 on 2026-08-25; no published 0.8 artifact containing that revision existed at qualification time",
+    "relay_revision": "3333333333333333333333333333333333333333",
+    "relay_binary_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "raw_atif_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+    "relay_qualification": "built from a merged release/0.8 revision on 2026-08-25; no published 0.8 artifact containing that revision existed at qualification time",
     "provider": "NVIDIA OpenAI-compatible Responses endpoint",
     "fixture_transform": "Sanitized and minimized derivative of the recorded raw ATIF; prompt, reasoning, trajectory/session IDs, and nonessential metadata were rewritten or removed, while provider function-item and semantic call correlation IDs are unchanged"
   }
