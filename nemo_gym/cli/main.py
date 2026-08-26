@@ -468,9 +468,10 @@ def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
 def _eval_export(args: argparse.Namespace, overrides: list[str]) -> None:
     from nemo_gym.cli.eval import export_rollouts_as_atif
 
-    # Keep explicit argparse values out of Hydra so paths and identities remain
-    # exact strings. Ordinary config and raw overrides are still parsed first;
-    # explicit flags are applied afterward at their expected higher precedence.
+    expected_overrides = ["+verbose=true"] if args.verbose else []
+    if overrides != expected_overrides:
+        args._parser.error("export does not accept Hydra overrides")
+
     cli_values = {
         field_name: value
         for field_name, value in {
@@ -482,15 +483,6 @@ def _eval_export(args: argparse.Namespace, overrides: list[str]) -> None:
         }.items()
         if value is not None
     }
-    # Shadow an explicitly supplied field with a safe value while the normal
-    # config loader runs. This prevents a lower-precedence interpolation in the
-    # same field from failing before the exact argparse value is applied.
-    explicit_fields = set(cli_values)
-    remaining_overrides = [
-        override for override in overrides if override.lstrip("+").split("=", 1)[0] not in explicit_fields
-    ]
-    shadow_overrides = [f"+{field_name}=__nemo_gym_explicit_cli_value__" for field_name in cli_values]
-    sys.argv = [sys.argv[0], *shadow_overrides, *remaining_overrides]
     export_rollouts_as_atif(cli_values)
 
 

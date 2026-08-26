@@ -22,14 +22,12 @@ from typing import Any
 
 import pytest
 from hydra.core.override_parser.overrides_parser import OverridesParser
-from omegaconf import OmegaConf
 from pytest import MonkeyPatch
 
 import nemo_gym.cli.eval as cli_eval
 import nemo_gym.cli.main as cli_main
 import nemo_gym.global_config as gc
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, WORKING_DIR
-from nemo_gym.cli.eval import _merge_atif_export_cli_values
 from nemo_gym.cli.main import main
 from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
 
@@ -264,7 +262,7 @@ class TestEvalRunFlags:
 
 class TestEvalExportFlags:
     @staticmethod
-    def _run(monkeypatch: MonkeyPatch, argv: list[str]) -> tuple[dict, list[str]]:
+    def _run(monkeypatch: MonkeyPatch, argv: list[str]) -> dict[str, Any]:
         captured: dict[str, Any] = {}
 
         def fake_export(cli_values: dict[str, Any]) -> None:
@@ -273,10 +271,10 @@ class TestEvalExportFlags:
         monkeypatch.setattr(cli_eval, "export_rollouts_as_atif", fake_export)
         monkeypatch.setattr(sys, "argv", ["gym", *argv])
         main()
-        return captured, sys.argv[1:]
+        return captured
 
     def test_flags_map_to_atif_export_config(self, monkeypatch: MonkeyPatch) -> None:
-        cli_values, overrides = self._run(
+        cli_values = self._run(
             monkeypatch,
             [
                 "eval",
@@ -301,16 +299,9 @@ class TestEvalExportFlags:
             "session_id": "evaluation-42",
             "agent_version": "2.3.1",
         }
-        assert set(overrides) == {
-            "+format=__nemo_gym_explicit_cli_value__",
-            "+rollouts_jsonl_fpath=__nemo_gym_explicit_cli_value__",
-            "+output_dirpath=__nemo_gym_explicit_cli_value__",
-            "+session_id=__nemo_gym_explicit_cli_value__",
-            "+agent_version=__nemo_gym_explicit_cli_value__",
-        }
 
     def test_scalar_like_identity_values_remain_strings(self, monkeypatch: MonkeyPatch) -> None:
-        cli_values, _ = self._run(
+        cli_values = self._run(
             monkeypatch,
             ["eval", "export", "--session-id", "123", "--agent-version", "1.0"],
         )
@@ -333,7 +324,7 @@ class TestEvalExportFlags:
         session_id: str,
         agent_version: str,
     ) -> None:
-        cli_values, _ = self._run(
+        cli_values = self._run(
             monkeypatch,
             ["eval", "export", "--session-id", session_id, "--agent-version", agent_version],
         )
@@ -341,54 +332,18 @@ class TestEvalExportFlags:
         assert cli_values["session_id"] == session_id
         assert cli_values["agent_version"] == agent_version
 
-    def test_identity_flag_takes_precedence_over_direct_hydra_override(self, monkeypatch: MonkeyPatch) -> None:
-        cli_values, overrides = self._run(
-            monkeypatch,
-            ["eval", "export", "--session-id", "from-flag", "+session_id=from-override"],
-        )
+    def test_hydra_overrides_are_rejected(self, monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+        monkeypatch.setattr(sys, "argv", ["gym", "eval", "export", "+session_id=from-override"])
 
-        config = OmegaConf.create({"session_id": "from-override"})
-        merged = _merge_atif_export_cli_values(config, cli_values)
-        assert merged["session_id"] == "from-flag"
-        assert overrides == ["+session_id=__nemo_gym_explicit_cli_value__"]
+        with pytest.raises(SystemExit, match="2"):
+            main()
 
-    def test_export_config_ignores_unrelated_invalid_interpolation(self) -> None:
-        config = OmegaConf.create(
-            {
-                "rollouts_jsonl_fpath": "rollouts.jsonl",
-                "output_dirpath": "atif",
-                "session_id": "evaluation-42",
-                "agent_version": "2.3.1",
-                "unused": "${missing.value}",
-            }
-        )
+        assert "export does not accept Hydra overrides" in capsys.readouterr().err
 
-        merged = _merge_atif_export_cli_values(config, {})
+    def test_verbose_flag_is_accepted(self, monkeypatch: MonkeyPatch) -> None:
+        cli_values = self._run(monkeypatch, ["eval", "export", "--verbose"])
 
-        assert merged == {
-            "rollouts_jsonl_fpath": "rollouts.jsonl",
-            "output_dirpath": "atif",
-            "session_id": "evaluation-42",
-            "agent_version": "2.3.1",
-        }
-
-    def test_explicit_flag_skips_invalid_interpolation_in_overridden_field(self) -> None:
-        config = OmegaConf.create(
-            {
-                "session_id": "${missing.value}",
-                "agent_version": "${missing.version}",
-            }
-        )
-
-        merged = _merge_atif_export_cli_values(
-            config,
-            {"session_id": "${literal.session}", "agent_version": "${literal.version}"},
-        )
-
-        assert merged == {
-            "session_id": "${literal.session}",
-            "agent_version": "${literal.version}",
-        }
+        assert cli_values == {}
 
     @pytest.mark.parametrize(
         ("flag_name", "field_name", "value"),
@@ -404,7 +359,7 @@ class TestEvalExportFlags:
         field_name: str,
         value: str,
     ) -> None:
-        cli_values, _ = self._run(monkeypatch, ["eval", "export", f"--{flag_name}", value])
+        cli_values = self._run(monkeypatch, ["eval", "export", f"--{flag_name}", value])
 
         assert cli_values[field_name] == value
 
