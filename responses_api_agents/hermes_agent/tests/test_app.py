@@ -277,7 +277,7 @@ class TestRolloutMCPServers:
                 "tool_name": "get_weather",
             }
         }
-        assert result.mcp_tool_call_provenance == {
+        assert result.model_dump(mode="json")["mcp_tool_call_provenance"] == {
             "call-1": {
                 "server_name": "example_mcp_weather",
                 "tool_name": "get_weather",
