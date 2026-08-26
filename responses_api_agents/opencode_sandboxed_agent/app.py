@@ -751,8 +751,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # diff`, which would sweep this transcript into the patch.
         export_remote_fpath = f"/tmp/opencode_{export_fname}"
         try:
+            session_env = {"XDG_DATA_HOME": remote_data_home} if remote_data_home is not None else None
             session_list_result = await sandbox.exec(
-                command="export PATH=$HOME/.opencode/bin:$PATH && opencode session list --format json"
+                command="export PATH=$HOME/.opencode/bin:$PATH && opencode session list --format json",
+                env=session_env,
             )
             if session_list_result.return_code != 0:
                 raise RuntimeError(
@@ -761,11 +763,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 )
             session_id = _extract_opencode_session_id(session_list_result.stdout or "")
             export_result = await sandbox.exec(
-                command=f"""export PATH=$HOME/.opencode/bin:$PATH \
-            && (command -v jq >/dev/null 2>&1 || (apt-get update && apt-get install -y --no-install-recommends jq)) \
-            && session_id=$(opencode session list --format json | jq -r '.[0].id') \
-            && opencode export $session_id > {export_fname}""",
-                env={"XDG_DATA_HOME": remote_data_home} if remote_data_home is not None else None,
+                command=(
+                    "export PATH=$HOME/.opencode/bin:$PATH"
+                    f" && opencode export {quote(session_id)} > {quote(export_remote_fpath)}"
+                ),
+                env=session_env,
             )
         except Exception:
             export_result = None
