@@ -231,7 +231,12 @@ def materialize(
     # to read.
     config_fpath = out_dir / CONFIG_NAME
     with open(config_fpath, "w") as handle:
-        yaml.safe_dump({"config_paths": manifest.config_paths()}, handle, default_flow_style=False, sort_keys=False)
+        yaml.safe_dump(
+            {"config_paths": manifest.config_paths(), **manifest.config_overlay},
+            handle,
+            default_flow_style=False,
+            sort_keys=False,
+        )
 
     report = MaterializeReport(
         materialized_fpath=materialized_fpath,

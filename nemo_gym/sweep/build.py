@@ -129,7 +129,12 @@ def build_sweep(
     report.num_repeats = manifest.num_repeats()
 
     with open(config_yaml, "w") as handle:
-        yaml.safe_dump({"config_paths": report.config_paths}, handle, default_flow_style=False, sort_keys=False)
+        yaml.safe_dump(
+            {"config_paths": report.config_paths, **manifest.config_overlay},
+            handle,
+            default_flow_style=False,
+            sort_keys=False,
+        )
     with open(report_json, "w") as handle:
         json.dump(report.to_dict(), handle, indent=2)
 
@@ -164,3 +169,31 @@ def run_command(
             f"    ++policy_model_name={policy_model_name}",
         ]
     )
+
+
+# Placeholders so the composed config resolves with no endpoint and no secrets. env.yaml, when
+# present, overrides them; without it a container build still validates.
+CONTAINER_PLACEHOLDERS = {
+    "policy_base_url": "dummy",
+    "policy_api_key": "dummy",  # pragma: allowlist secret
+    "policy_model_name": "dummy",
+    "nv_inference_api_key": "dummy",  # pragma: allowlist secret
+}
+
+
+def container_config(manifests: List["SweepManifest"]) -> Dict:
+    """Union every manifest's config_paths, for baking one venv per server implementation.
+
+    The container is built once and serves every lane, so it must cover every server any lane
+    might start. Deriving that from the manifests keeps it from drifting out of sync with them.
+    """
+    seen: Dict[str, None] = {}
+    overlay: Dict = {}
+    for manifest in manifests:
+        for config in manifest.config_paths():
+            seen.setdefault(config, None)
+        # Overlays declare servers too -- the judge lane's model server exists only there. Omitting
+        # them bakes no venv for it, and a server with no baked venv installs at runtime and hangs
+        # the lane behind connection retries rather than failing.
+        overlay.update(manifest.config_overlay)
+    return {"config_paths": list(seen), **overlay, **CONTAINER_PLACEHOLDERS}

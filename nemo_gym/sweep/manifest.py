@@ -92,6 +92,22 @@ class SweepManifest(BaseModel):
     # do not declare the policy, so without at least a model-server config here the composed
     # config fails with "references responses_api_models/'policy_model', which is not defined".
     extra_configs: List[str] = Field(default_factory=list)
+    # Ordinary Gym config, verbatim -- exactly what you would put in a standalone Gym yaml, just
+    # written here instead of in a file. Nothing in this repo interprets it; the keys are spliced
+    # unchanged into the emitted sweep_config.yaml alongside config_paths.
+    #
+    # That splice is what makes it an *overlay*. Per global_config.load_extra_config_paths: "A
+    # config named in another config's config_paths is *inner*. The config that pulled it in
+    # overrides it, however deep the nesting goes." sweep_config.yaml is the outer config, so its
+    # own top-level keys -- these -- win over every file in config_paths. Same precedence a
+    # sweep-wide extra_config gets, without the file.
+    #
+    # Use it for deployment bindings that belong to this sweep rather than to a shared file: which
+    # judge each resources server talks to, say. Prefer it over an extra_config for anything the
+    # container will not have on disk. The container is built from a Gym ref and does not contain
+    # this repo, so a repo-relative extra_config path fails to resolve inside it, whereas
+    # sweep_config.yaml lives in SWEEP_DIR and is always mounted.
+    config_overlay: Dict[str, Any] = Field(default_factory=dict)
     entries: List[SweepEntry] = Field(min_length=1)
 
     @model_validator(mode="after")

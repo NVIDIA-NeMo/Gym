@@ -23,7 +23,7 @@ import json
 import pytest
 import yaml
 
-from nemo_gym.sweep.build import build_sweep
+from nemo_gym.sweep.build import build_sweep, container_config
 from nemo_gym.sweep.manifest import SweepValidationError, load_manifest, validate_manifest
 
 
@@ -45,8 +45,10 @@ def _write_data(tmp_path, name, agent, rows=3, missing_ref=False):
     return path
 
 
-def _manifest(tmp_path, entries, defaults=None):
+def _manifest(tmp_path, entries, defaults=None, config_overlay=None):
     doc = {"nickname": "testrun", "defaults": defaults or {"num_repeats": 8}, "entries": entries}
+    if config_overlay is not None:
+        doc["config_overlay"] = config_overlay
     path = tmp_path / "manifest.yaml"
     path.write_text(yaml.safe_dump(doc))
     return load_manifest(path)
@@ -536,3 +538,32 @@ def test_materialize_writes_a_self_contained_sweep_dir(tmp_path):
     # everything gym env start / gym eval run --resume needs, in one directory
     names = {p.name for p in report.config_fpath.parent.iterdir()}
     assert {"sweep_config.yaml", "rollouts_materialized_inputs.jsonl", "rollouts.jsonl"} <= names
+
+
+def test_config_overlay_is_emitted_into_sweep_config(tmp_path):
+    """The overlay has to reach the emitted config, or judge bindings never apply."""
+    data = tmp_path / "d.jsonl"
+    data.write_text('{"agent_ref": "a", "x": 1}\n')
+    manifest = _manifest(
+        tmp_path,
+        [{"label": "e", "agent": "a", "configs": ["c.yaml"], "data": str(data)}],
+        config_overlay={"judge_model": {"responses_api_models": {"openai_model": {"entrypoint": "app.py"}}}},
+    )
+    out = tmp_path / "out"
+    build_sweep(manifest, out)
+    emitted = yaml.safe_load((out / manifest.nickname / "sweep_config.yaml").read_text())
+    assert emitted["judge_model"]["responses_api_models"]["openai_model"]["entrypoint"] == "app.py"
+    assert emitted["config_paths"] == ["c.yaml"]
+
+
+def test_container_config_includes_overlay_declared_servers(tmp_path):
+    """A server declared only in an overlay still needs its venv baked."""
+    data = tmp_path / "d.jsonl"
+    data.write_text('{"agent_ref": "a", "x": 1}\n')
+    manifest = _manifest(
+        tmp_path,
+        [{"label": "e", "agent": "a", "configs": ["c.yaml"], "data": str(data)}],
+        config_overlay={"judge_model": {"responses_api_models": {"openai_model": {"entrypoint": "app.py"}}}},
+    )
+    cfg = container_config([manifest])
+    assert cfg["judge_model"]["responses_api_models"]["openai_model"]["entrypoint"] == "app.py"

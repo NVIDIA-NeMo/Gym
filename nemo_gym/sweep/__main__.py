@@ -19,7 +19,9 @@ from __future__ import annotations
 import argparse
 import sys
 
-from nemo_gym.sweep.build import build_sweep, run_command
+import yaml
+
+from nemo_gym.sweep.build import build_sweep, container_config, run_command
 from nemo_gym.sweep.manifest import DEFAULT_SAMPLE_ROWS, SweepValidationError, load_manifest, validate_manifest
 from nemo_gym.sweep.materialize import materialize
 
@@ -79,9 +81,25 @@ def main(argv: list[str] | None = None) -> int:
     )
     mat.add_argument("--skip-validate", action="store_true", help="Materialize without validating first.")
 
+    cc = sub.add_parser(
+        "container-config",
+        help="Union several manifests' config_paths into one config for building a container.",
+    )
+    cc.add_argument("manifests", nargs="+", help="Manifest YAMLs to union.")
+    cc.add_argument("-o", "--output", required=True, help="Where to write the container config.")
+
     args = parser.parse_args(argv)
 
     try:
+        if args.command == "container-config":
+            manifests = [load_manifest(m) for m in args.manifests]
+            doc = container_config(manifests)
+            with open(args.output, "w") as handle:
+                yaml.safe_dump(doc, handle, default_flow_style=False, sort_keys=False)
+            print(f"wrote {args.output}: {len(doc['config_paths'])} config paths "
+                  f"from {len(manifests)} manifest(s)")
+            return 0
+
         manifest = load_manifest(args.manifest)
         if args.command == "validate":
             warnings = validate_manifest(

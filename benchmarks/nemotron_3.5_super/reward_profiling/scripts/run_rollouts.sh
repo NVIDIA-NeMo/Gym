@@ -20,7 +20,7 @@ CONCURRENCY=${CONCURRENCY:-128}
 ROUTER_PORT=${ROUTER_PORT:-8000}
 MOUNTS=${MOUNTS:-/lustre:/lustre}
 # Secrets reach Gym through env.yaml, which it auto-loads from its working directory. The judge
-# lane needs it: judges_remote.yaml interpolates ${nv_inference_api_key}, which env.yaml resolves
+# lane needs it: the judge config_overlay interpolates ${nv_inference_api_key}, which env.yaml resolves
 # from the shell. Without the mount the config fails to parse rather than failing at judge time.
 ENV_YAML=${ENV_YAML:-$PWD/env.yaml}
 if [[ -f "$ENV_YAML" ]]; then
