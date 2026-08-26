@@ -11,7 +11,6 @@ ray.init()
 
 @ray.remote
 def decode_batch(batch):
-    print(f"hit at {time():.2f}")
     results = []
 
     for line_no, (row_idx, row_str) in batch:
@@ -35,7 +34,7 @@ with open(
     buffering=1024 * 1024,
 ) as file:
     rows = ((line_no, (line_no, line)) for line_no, line in enumerate(tqdm(file, desc="Reading file")))
-    batches = list(batched(rows, 10_000))
+    batches = list(batched(rows, 1))
 
 print("Starting json load")
 refs = [decode_batch.remote(batch) for batch in batches]
