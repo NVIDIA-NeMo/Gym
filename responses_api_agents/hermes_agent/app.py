@@ -196,7 +196,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         except (NotImplementedError, OSError):
             pass  # not supported on this platform (e.g. Windows, non-main thread)
 
-    def _build_config(self, mcp_servers: Optional[dict[str, Any]] = None) -> str:
+    def _build_config(self, hermes_mcp_servers: Optional[dict[str, Any]] = None) -> str:
         import yaml
 
         config: dict[str, Any] = {
@@ -223,8 +223,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 "enabled": self.config.checkpoints_enabled,
             },
         }
-        if mcp_servers:
-            config["mcp_servers"] = mcp_servers
+        if hermes_mcp_servers:
+            config["mcp_servers"] = hermes_mcp_servers
         return yaml.dump(config, default_flow_style=False)
 
     def model_post_init(self, __context: Any) -> None:
@@ -256,7 +256,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         )
         return self.server_client._build_server_base_url(config)
 
-    def _rollout_mcp_servers(self, seed_response_json: dict[str, Any]) -> Optional[dict[str, Any]]:
+    def _hermes_mcp_servers_from_seed(self, seed_response_json: dict[str, Any]) -> Optional[dict[str, Any]]:
         """Build the per-rollout Hermes MCP config from resources-server metadata."""
         if NEMO_GYM_MCP_METADATA_KEY not in seed_response_json:
             return None
@@ -279,51 +279,45 @@ class HermesAgent(SimpleResponsesAPIAgent):
         if not isinstance(url_path, str):
             raise ValueError("MCP seed metadata url_path must be a string")
 
-        entry: dict[str, Any] = {
+        server_config: dict[str, Any] = {
             "url": f"{self._resources_server_base_url().rstrip('/')}/{url_path.lstrip('/')}",
         }
         if transport == "sse":
-            entry["transport"] = "sse"
+            server_config["transport"] = "sse"
 
         headers = metadata.get("headers")
-        if headers is None:
+        if headers is not None and not isinstance(headers, dict):
+            raise ValueError("MCP seed metadata headers must be an object")
+        normalized_headers: dict[str, str] = {}
+        if isinstance(headers, dict):
+            for key, value in headers.items():
+                if not isinstance(key, str) or not isinstance(value, (str, int, float, bool)):
+                    raise ValueError("MCP seed metadata headers must contain scalar values")
+                normalized_headers[key] = str(value)
+        if normalized_headers:
+            server_config["headers"] = normalized_headers
+        else:
             LOG.warning(
                 "MCP seed metadata for %r has no headers; the tool endpoint will be called without a "
                 "session token and will reject the calls.",
                 server_name,
             )
-        elif not isinstance(headers, dict):
-            raise ValueError("MCP seed metadata headers must be an object")
-        else:
-            normalized_headers: dict[str, str] = {}
-            for key, value in headers.items():
-                if not isinstance(key, str) or not isinstance(value, (str, int, float, bool)):
-                    raise ValueError("MCP seed metadata headers must contain scalar values")
-                normalized_headers[key] = str(value)
-            if normalized_headers:
-                entry["headers"] = normalized_headers
-            else:
-                LOG.warning(
-                    "MCP seed metadata for %r has no headers; the tool endpoint will be called without a "
-                    "session token and will reject the calls.",
-                    server_name,
-                )
-        return {server_name: entry}
+        return {server_name: server_config}
 
     async def _run_hermes_subprocess(
         self,
         payload: dict[str, Any],
         *,
-        mcp_servers: Optional[dict[str, Any]] = None,
+        hermes_mcp_servers: Optional[dict[str, Any]] = None,
     ) -> tuple[dict[str, Any], AgentObservationBundle | None]:
         with tempfile.TemporaryDirectory(prefix="nemo_gym_hermes_") as temp_dir_str:
             temp_dir = Path(temp_dir_str)
             hermes_home = temp_dir / "home"
             hermes_home.mkdir()
-            (hermes_home / "config.yaml").write_text(self._build_config(mcp_servers), encoding="utf-8")
+            (hermes_home / "config.yaml").write_text(self._build_config(hermes_mcp_servers), encoding="utf-8")
             request_path = temp_dir / "request.json"
             response_path = temp_dir / "response.json"
-            request_payload = payload | {"mcp_enabled": bool(mcp_servers)}
+            request_payload = payload | {"mcp_enabled": bool(hermes_mcp_servers)}
             request_path.write_text(json.dumps(request_payload), encoding="utf-8")
 
             env = os.environ.copy()
@@ -399,9 +393,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         *,
         rollout_id: Optional[str] = None,
         observation_collector: Optional[Callable[[AgentObservationBundle], None]] = None,
-        mcp_servers: Optional[dict[str, Any]] = None,
-        mcp_tool_aliases: Optional[dict[str, dict[str, str]]] = None,
-        provenance_collector: Optional[Callable[[dict[str, dict[str, str]]], None]] = None,
+        hermes_mcp_servers: Optional[dict[str, Any]] = None,
     ) -> NeMoGymResponse:
         chat_params = _RESPONSES_CONVERTER.responses_to_chat_completion_create_params(body)
         user_message, history, input_system = _split_chat_messages(chat_params.messages)
@@ -423,8 +415,11 @@ class HermesAgent(SimpleResponsesAPIAgent):
             "request_overrides": self._request_overrides(),
             "capture_observations": observation_collector is not None,
         }
-        if mcp_servers:
-            result, observations = await self._run_hermes_subprocess(run_payload, mcp_servers=mcp_servers)
+        if hermes_mcp_servers:
+            result, observations = await self._run_hermes_subprocess(
+                run_payload,
+                hermes_mcp_servers=hermes_mcp_servers,
+            )
         else:
             result, observations = await self._run_hermes_subprocess(run_payload)
         if observation_collector is not None:
@@ -440,10 +435,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 LOG.exception("failed to return Hermes observations")
 
         # AIAgent omits the system message from returned messages.
-        response = _result_to_response(body, result, model_name=model_name, n_input=len(history) + 1)
-        if provenance_collector is not None and mcp_tool_aliases is not None:
-            provenance_collector(response_mcp_tool_call_provenance(response, mcp_tool_aliases))
-        return response
+        return _result_to_response(body, result, model_name=model_name, n_input=len(history) + 1)
 
     async def responses(
         self,
@@ -464,9 +456,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         body: NeMoGymResponseCreateParamsNonStreaming,
         *,
         rollout_id: str,
-        mcp_servers: Optional[dict[str, Any]] = None,
-        mcp_tool_aliases: Optional[dict[str, dict[str, str]]] = None,
-        provenance_collector: Optional[Callable[[dict[str, dict[str, str]]], None]] = None,
+        hermes_mcp_servers: Optional[dict[str, Any]] = None,
     ) -> AgentEpisode:
         observations: Optional[AgentObservationBundle] = None
 
@@ -478,9 +468,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             body,
             rollout_id=rollout_id,
             observation_collector=collect,
-            mcp_servers=mcp_servers,
-            mcp_tool_aliases=mcp_tool_aliases,
-            provenance_collector=provenance_collector,
+            hermes_mcp_servers=hermes_mcp_servers,
         )
         if observations is None:
             observations = AgentObservationBundle(
@@ -516,35 +504,24 @@ class HermesAgent(SimpleResponsesAPIAgent):
             await raise_for_status(seed_resp)
             cookies = seed_resp.cookies
             seed_resp_json = await get_response_json(seed_resp)
-            mcp_servers = self._rollout_mcp_servers(seed_resp_json)
+            hermes_mcp_servers = self._hermes_mcp_servers_from_seed(seed_resp_json)
             mcp_tool_aliases = hermes_mcp_tool_aliases(seed_resp_json)
-            mcp_tool_call_provenance: Optional[dict[str, dict[str, str]]] = (
-                {} if mcp_tool_aliases is not None else None
-            )
-
-            def collect_provenance(value: dict[str, dict[str, str]]) -> None:
-                if mcp_tool_call_provenance is not None:
-                    mcp_tool_call_provenance.update(value)
 
             rollout_id = self.rollout_id_from_run(body)
             observations = None
-            if mcp_servers:
+            if hermes_mcp_servers:
                 if rollout_id is not None:
                     episode = await self._create_episode(
                         body.responses_create_params,
                         rollout_id=rollout_id,
-                        mcp_servers=mcp_servers,
-                        mcp_tool_aliases=mcp_tool_aliases,
-                        provenance_collector=collect_provenance,
+                        hermes_mcp_servers=hermes_mcp_servers,
                     )
                     agent_resp_json = episode.response.model_dump(mode="json")
                     observations = episode.observations
                 else:
                     response = await self._create_response(
                         body.responses_create_params,
-                        mcp_servers=mcp_servers,
-                        mcp_tool_aliases=mcp_tool_aliases,
-                        provenance_collector=collect_provenance,
+                        hermes_mcp_servers=hermes_mcp_servers,
                     )
                     agent_resp_json = response.model_dump(mode="json")
             else:
@@ -566,6 +543,10 @@ class HermesAgent(SimpleResponsesAPIAgent):
                     else None
                 )
 
+            gym_resp = NeMoGymResponse.model_validate(agent_resp_json)
+            mcp_tool_call_provenance = (
+                response_mcp_tool_call_provenance(gym_resp, mcp_tool_aliases) if mcp_tool_aliases is not None else None
+            )
             verify_body = body.model_dump() | {"response": agent_resp_json}
             if mcp_tool_call_provenance is not None:
                 verify_body[_MCP_TOOL_CALL_PROVENANCE_KEY] = mcp_tool_call_provenance
@@ -578,7 +559,6 @@ class HermesAgent(SimpleResponsesAPIAgent):
             await raise_for_status(verify_resp)
             verify_json = await get_response_json(verify_resp)
 
-            gym_resp = NeMoGymResponse.model_validate(agent_resp_json)
             turns = sum(
                 1
                 for item in gym_resp.output
