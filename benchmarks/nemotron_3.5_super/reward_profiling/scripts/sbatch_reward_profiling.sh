@@ -15,8 +15,15 @@ set -euo pipefail
 # Optional, with defaults below. SBATCH_ACCOUNT / SBATCH_PARTITION / SBATCH_QOS / SBATCH_GRES are
 # read by sbatch itself.
 #
-# Sandbox lane: set SANDBOX_CONTAINER to run nemo-skills sandboxes alongside. Its nginx spans every
-# node and hashes on X-Session-ID, so stateful Python sessions stay pinned to one worker.
+# Sandbox lane: set SANDBOX_CONTAINER to a nemo-skills sandbox sqsh to run one alongside. Required
+# by ns_tools and math_formal_lean, which read NEMO_SKILLS_SANDBOX_HOST/PORT and otherwise fall
+# back to 127.0.0.1:6000, where nothing listens -- the lane then fails with a bare 500 per rollout.
+#
+# The image runs nginx over N uWSGI workers on ONE node, hashing X-Session-ID so a stateful IPython
+# session stays pinned to one worker. It does not span nodes, and NEMO_SKILLS_SANDBOX_HOST takes a
+# single host, so sandbox capacity is currently one node's worth. Scaling past that needs a
+# balancer in front of several sandbox nodes; measured at 483 rollouts/hr on 32 workers, and the
+# sandbox lane is ~42% of total sweep cost, so this is the first thing to grow.
 for _required in MODEL CONTAINER SWEEP_DIR; do
     if [[ -z "${!_required:-}" ]]; then
         echo "ERROR: $_required is required. See the header of $0 for the full argument list." >&2
@@ -36,6 +43,17 @@ NUM_DECODE_NODES=${NUM_DECODE_NODES:-2}
 
 VLLM_CONFIG=${VLLM_CONFIG:-benchmarks/nemotron_3.5_super/vllm_configs/nemotron_3.5_super.sh}
 MOUNTS=${MOUNTS:-/lustre:/lustre}
+
+# Sandbox sidecar. Empty disables it, which is correct for the no-judge and judge lanes.
+SANDBOX_CONTAINER=${SANDBOX_CONTAINER:-}
+SANDBOX_PORT=${SANDBOX_PORT:-6000}
+# One worker per core starves the driver, which shares the node. 32 was measured; raise it when the
+# sandbox gets a node to itself.
+SANDBOX_WORKERS=${SANDBOX_WORKERS:-32}
+if [[ -n "$SANDBOX_CONTAINER" && ! -f "$SANDBOX_CONTAINER" ]]; then
+    echo "ERROR: SANDBOX_CONTAINER=$SANDBOX_CONTAINER does not exist." >&2
+    exit 2
+fi
 
 # Secrets reach Gym through env.yaml, which it auto-loads from its working directory. The judge
 # lane needs it: the judge config_overlay interpolates ${nv_inference_api_key}, which env.yaml resolves
@@ -221,6 +239,43 @@ trap cleanup_server EXIT INT TERM
         EVAL_NODE=\${nodes[1]}
     else
         EVAL_NODE=\${nodes[0]}
+    fi
+
+    # Sandbox sidecar on the eval node, so ns_tools reaches it over loopback. Started before the
+    # driver and waited on: if the driver starts first it burns rollouts against a dead port.
+    if [[ -n "$SANDBOX_CONTAINER" ]]; then
+        echo "starting sandbox on \$EVAL_NODE (${SANDBOX_WORKERS} workers, port ${SANDBOX_PORT})"
+        srun --overlap --nodes=1 --ntasks=1 --nodelist="\$EVAL_NODE" --gpus=0 \
+            --cpus-per-task=${SANDBOX_WORKERS} \
+            --container-image=$SANDBOX_CONTAINER \
+            --container-mounts=$MOUNTS \
+            --no-container-mount-home \
+            bash -lc 'export UWSGI_PROCESSES=${SANDBOX_WORKERS} NUM_WORKERS=${SANDBOX_WORKERS} \
+                      LISTEN_PORT=${SANDBOX_PORT} NGINX_PORT=${SANDBOX_PORT}; exec /start-with-nginx.sh' \
+            > "\$SLURM_SUBMIT_DIR/slurm-logs/\${SLURM_JOB_ID}-sandbox.log" 2>&1 &
+        sandbox_step=\$!
+
+        SANDBOX_IP=\$(getent hosts "\$EVAL_NODE" | awk 'NR==1 {print \$1}')
+        echo "waiting for sandbox at \$SANDBOX_IP:${SANDBOX_PORT}/health ..."
+        for _i in \$(seq 1 60); do
+            if curl -sf -m 3 "http://\$SANDBOX_IP:${SANDBOX_PORT}/health" >/dev/null 2>&1; then
+                echo "sandbox healthy after \${_i}0s"; break
+            fi
+            if ! kill -0 "\$sandbox_step" 2>/dev/null; then
+                echo "ERROR: sandbox exited during startup; see \${SLURM_JOB_ID}-sandbox.log" >&2
+                exit 1
+            fi
+            sleep 10
+        done
+        if ! curl -sf -m 3 "http://\$SANDBOX_IP:${SANDBOX_PORT}/health" >/dev/null 2>&1; then
+            echo "ERROR: sandbox never became healthy; see \${SLURM_JOB_ID}-sandbox.log" >&2
+            exit 1
+        fi
+        # Exported, not prefixed onto srun: bash decides which words are assignments at parse
+        # time, so an expanded "VAR=value" would become the command name instead. srun propagates
+        # the environment into the container, which is how ROUTER_NODE already reaches it.
+        export NEMO_SKILLS_SANDBOX_HOST="\$SANDBOX_IP"
+        export NEMO_SKILLS_SANDBOX_PORT="${SANDBOX_PORT}"
     fi
 
     # @bxyu-nvidia: We need --cpus-per-task=SLURM_CPUS_ON_NODE, otherwise we run into a lot of ServerDisconnectedError and ConnectionResetByPeer errors from Gym servers and vLLM. Not sure what the correlation is

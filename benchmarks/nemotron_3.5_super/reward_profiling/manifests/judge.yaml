@@ -93,10 +93,16 @@ config_overlay:
           type: responses_api_models
           name: nl2bash_judge_model
         judge_responses_create_params:
-          # Upstream caps this at 64. That was fine for a judge that emits a bare verdict, but
-          # qwen-235b is a reasoning model and 64 tokens truncates it mid-thought, so the verdict
-          # never arrives. The pre-sweep configs raised it to 8192 for exactly this reason; every
-          # other judge env here already ships 8192 or no cap. abstention is the lone holdout.
+          # Paired with the rebind above, not an independent change. Upstream points abstention at
+          # genrm_model -- a GenRM scorer, served locally on its own GPUs -- and nothing here
+          # defines that name. We serve judges from the gateway instead, so it has to be a chat
+          # judge, and a chat judge grading against app.py's A/B/C prompt needs room for more than
+          # a bare letter.
+          #
+          # 64 is enough for a compliant "A", so this may never bind. It matters because failure is
+          # silent: parse_judge_grade (resources_servers/abstention/app.py:218) falls back to "B"
+          # (INCORRECT) on anything it cannot parse, so a judge truncated before its letter scores
+          # the rollout wrong rather than erroring. 8192 matches what the ultra-3 branch runs.
           max_output_tokens: 8192
 
   inverse_if:
