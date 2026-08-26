@@ -32,7 +32,8 @@ with open(
     buffering=1024 * 1024,
 ) as file:
     rows = ((line_no, (line_no, line)) for line_no, line in enumerate(tqdm(file, desc="Reading file")))
-    batches = batched(rows, 10_000)
+    batches = list(batched(rows, 10_000))
 
+print("Starting json load")
 refs = [decode_batch.remote(batch) for batch in batches]
 records = [record for batch in ray.get(refs) for record in batch]
