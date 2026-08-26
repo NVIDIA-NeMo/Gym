@@ -16,6 +16,7 @@ import json
 import warnings
 from abc import abstractmethod
 from collections import Counter, defaultdict
+from itertools import chain, count
 from math import sqrt
 from pathlib import Path
 from shutil import copyfileobj
@@ -741,12 +742,20 @@ This could be due to a change in how metrics are calculated, leading to outdated
                     prompt_cfg = load_prompt_config(d.prompt_config)
 
                 data_path = Path(d.jsonl_fpath)
-                prepare_path = data_path.with_name(f"{data_path.stem}_prepare.jsonl")
-                # Per-declaration output: when two instances declare the same jsonl_fpath, each
-                # gets its own prepared file (previously the second silently truncated the first,
-                # so all copies carried the last declarer's stamp).
-                if prepare_path in used_prepare_paths:
-                    prepare_path = data_path.with_name(f"{data_path.stem}_prepare.{c.name}.jsonl")
+                # Per-declaration output: every declaration of a jsonl_fpath gets its own prepared
+                # file (previously a second declaration silently truncated the first, so all copies
+                # carried the last declarer's stamp). Candidates are tried until one is unused, so
+                # repeats WITHIN one instance also stay distinct: bare stem, then instance-
+                # qualified, then instance+dataset-qualified, then numbered.
+                candidates = chain(
+                    (
+                        data_path.with_name(f"{data_path.stem}_prepare.jsonl"),
+                        data_path.with_name(f"{data_path.stem}_prepare.{c.name}.jsonl"),
+                        data_path.with_name(f"{data_path.stem}_prepare.{c.name}.{d.name}.jsonl"),
+                    ),
+                    (data_path.with_name(f"{data_path.stem}_prepare.{c.name}.{d.name}.{k}.jsonl") for k in count(2)),
+                )
+                prepare_path = next(p for p in candidates if p not in used_prepare_paths)
                 used_prepare_paths.add(prepare_path)
                 # Create the artifact dir if needed (the prepared file is written next to the
                 # cwd-relative jsonl_fpath, which may not exist when collating from a fresh cwd).

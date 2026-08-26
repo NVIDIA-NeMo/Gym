@@ -589,15 +589,19 @@ async def _call_aggregate_metrics(
 
     server_client = setup_server_client()
     agent_to_rs = _build_agent_to_resources_server_mapping(server_client.global_config_dict)
-    # Group results by agent name
-    agent_results: Dict[str, List[Dict]] = {}
+    # Group results per (agent, resources server), routing each row with the SAME resolver used
+    # for /verify (_rs_for_row: task_source authoritative, agent_ref via config edges as the
+    # fallback). Routing aggregation independently by the agent's configured server allowed a
+    # remapped row to be verified by one server and aggregated by another.
+    agent_results: Dict[Tuple[str, str], List[Dict]] = {}
     for row, result in zip(rows, results):
         agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
         if not agent_name:
             continue
-        agent_results.setdefault(agent_name, []).append(result)
+        rs_name = _rs_for_row(row, agent_to_rs, server_client.global_config_dict)
+        agent_results.setdefault((agent_name, rs_name), []).append(result)
 
-    async def _fetch_agent_metrics(agent_name: str, agent_result_list: List[Dict]) -> Dict:
+    async def _fetch_agent_metrics(agent_name: str, rs_name: str, agent_result_list: List[Dict]) -> Dict:
         # Strip heavyweight fields before sending, but preserve response.usage
         stripped = []
         for r in agent_result_list:
@@ -609,7 +613,7 @@ async def _call_aggregate_metrics(
 
         agg_request = AggregateMetricsRequest(verify_responses=stripped)
         agg_response = await server_client.post(
-            server_name=agent_to_rs[agent_name],
+            server_name=rs_name,
             url_path="/aggregate_metrics",
             json=agg_request,
         )
@@ -626,7 +630,9 @@ async def _call_aggregate_metrics(
         return agent_entry
 
     all_agent_metrics: List[Dict] = []
-    tasks = [_fetch_agent_metrics(name, results_list) for name, results_list in agent_results.items()]
+    tasks = [
+        _fetch_agent_metrics(name, rs_name, results_list) for (name, rs_name), results_list in agent_results.items()
+    ]
     for coro in asyncio.as_completed(tasks):
         agent_entry = await coro
         all_agent_metrics.append(agent_entry)
@@ -695,14 +701,14 @@ def _load_reverified_results(output_fpath: Path) -> Tuple[List[Dict], List[Dict]
     """Load the full main jsonl (cached + newly re-verified successes), sorted by (task, rollout).
 
     Returns ``(results, rows)``: ``results`` are the parsed rows — the source of truth used for both
-    the W&B rollouts export and the aggregate-metrics payload; ``rows`` is a minimal ``{AGENT_REF}``
-    projection used only to route each result to its resources server. Read once and reused for both
-    so the file is never read twice.
+    the W&B rollouts export and the aggregate-metrics payload; ``rows`` is a minimal
+    ``{agent_ref, task_source}`` projection used only to route each result to its resources server
+    (with the same resolver as /verify). Read once and reused for both so the file is never read twice.
     """
     with output_fpath.open("rb") as f:
         results = [orjson.loads(line) for line in f if line.strip()]
     results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
-    rows = [{AGENT_REF_KEY_NAME: r.get(AGENT_REF_KEY_NAME)} for r in results]
+    rows = [{k: r[k] for k in (AGENT_REF_KEY_NAME, TASK_SOURCE_KEY_NAME) if k in r} for r in results]
     return results, rows
 
 
@@ -759,6 +765,10 @@ class RolloutReverificationHelper(BaseModel):
                 result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
                 result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
                 result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
+                # Keep task_source alongside agent_ref: aggregation routes with the same resolver
+                # as /verify (task_source authoritative), so it must survive into the output file.
+                if TASK_SOURCE_KEY_NAME in row:
+                    result[TASK_SOURCE_KEY_NAME] = row[TASK_SOURCE_KEY_NAME]
                 if SKILLS_REF_KEY_NAME in row:
                     result[SKILLS_REF_KEY_NAME] = row[SKILLS_REF_KEY_NAME]
 

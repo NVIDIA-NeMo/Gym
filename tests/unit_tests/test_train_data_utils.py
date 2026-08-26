@@ -1397,6 +1397,26 @@ class TestCollateTaskSourceStamping:
         stamps = [self._read(p)[0]["task_source"] for p in paths]
         assert sorted(stamps) == ["agent_a", "agent_b"]
 
+    def test_same_fpath_repeated_within_one_instance_gets_distinct_prepare_files(self, tmp_path, monkeypatch) -> None:
+        """The instance-qualified fallback name alone collides when ONE instance declares the
+        same path several times; every declaration must still get its own prepared file."""
+        shared = _dataset(tmp_path, "shared", self.ROWS)
+        declarations = [dict(shared, name=f"decl_{i}") for i in range(3)]
+        a = _instance("agent_a", "responses_api_agents", {"entrypoint": "app.py", "datasets": declarations})
+        b = _instance("agent_b", "responses_api_agents", {"entrypoint": "app.py", "datasets": [dict(shared)]})
+        paths = self._collate(tmp_path, monkeypatch, [a, b])
+        assert len(paths) == len(set(paths)) == 4
+        stamps = sorted(self._read(p)[0]["task_source"] for p in paths)
+        assert stamps == ["agent_a", "agent_a", "agent_a", "agent_b"]
+
+    def test_same_fpath_same_dataset_name_repeated_gets_numbered_prepare_files(self, tmp_path, monkeypatch) -> None:
+        shared = _dataset(tmp_path, "shared", self.ROWS)
+        a = _instance(
+            "agent_a", "responses_api_agents", {"entrypoint": "app.py", "datasets": [dict(shared) for _ in range(4)]}
+        )
+        paths = self._collate(tmp_path, monkeypatch, [a])
+        assert len(paths) == len(set(paths)) == 4
+
 
 class TestDeclaringInstanceValidation:
     def _validate(self, configs_dict):
