@@ -32,5 +32,4 @@ swebench_resources_server:          # instance name — how agents/CLI refer to 
             disk_gib: 30
         metadata:
           benchmark: swebench-verified
-          harness: mini-swe-agent
           nemo.nvidia.com/resources: custom

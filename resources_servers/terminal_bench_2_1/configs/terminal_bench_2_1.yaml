@@ -22,8 +22,9 @@ terminal_bench_2_1_resources_server:          # instance name — how agents/CLI
         provider_options:
           # Scheduling requests, kept below the limits so sandboxes pack densely.
           resource_requests:
-            cpu: 0.5
-            memory_mib: 512
+            cpu: 4  # 0.5
+            memory_mib: 8192  # 512
             disk_gib: 30
         metadata:
           benchmark: terminal-bench-2.1
+          nemo.nvidia.com/resources: custom
