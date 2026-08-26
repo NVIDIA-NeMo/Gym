@@ -543,10 +543,11 @@ def test_connection_domain_url_normalization_and_proxy_secret_boundary(fake_open
     )._connection_config()
     assert "headers" not in direct.kwargs
 
-    with pytest.raises(ValueError, match="conflicts"):
-        opensandbox_provider.OpenSandboxProvider(
-            connection={"domain": "https://sandbox.example", "protocol": "http"}
-        )._connection_config()
+    url_scheme_wins = opensandbox_provider.OpenSandboxProvider(
+        connection={"domain": "https://sandbox.example", "protocol": "http"}
+    )._connection_config()
+    assert url_scheme_wins.kwargs["domain"] == "https://sandbox.example"
+    assert url_scheme_wins.kwargs["protocol"] == "https"
     with pytest.raises(ValueError, match="must not contain a path"):
         opensandbox_provider.OpenSandboxProvider(
             connection={"domain": "http://sandbox.example/api", "protocol": "http"}

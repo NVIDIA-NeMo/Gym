@@ -137,10 +137,6 @@ def _normalize_domain_protocol(domain: str | None, protocol: str | None) -> tupl
         raise ValueError("OpenSandbox connection domain URL must not contain credentials")
     if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
         raise ValueError("OpenSandbox connection domain URL must not contain a path, query, or fragment")
-    if protocol is not None and protocol.lower() != parsed.scheme:
-        raise ValueError(
-            f"OpenSandbox connection protocol {protocol!r} conflicts with domain URL scheme {parsed.scheme!r}"
-        )
     # ConnectionConfig natively accepts a URL-form domain and lets its scheme
     # override ``protocol``. Preserve that public SDK behavior for existing Gym
     # consumers while still validating ambiguous or credential-bearing URLs.
