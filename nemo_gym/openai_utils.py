@@ -69,6 +69,21 @@ from openai.types.responses import (
     ResponseFunctionWebSearch,
     ResponseInputTextParam,
 )
+from openai.types.responses.response_computer_tool_call import (
+    ActionClick,
+    ActionDoubleClick,
+    ActionDrag,
+    ActionKeypress,
+    ActionMove,
+    ActionScreenshot,
+    ActionScroll,
+    ActionType,
+    ActionWait,
+    PendingSafetyCheck,
+)
+from openai.types.responses.response_computer_tool_call_output_item import (
+    AcknowledgedSafetyCheck,
+)
 from openai.types.responses.response_create_params import (
     Metadata,
     Reasoning,
@@ -289,6 +304,180 @@ class NeMoGymResponseFunctionToolCall(BaseModel):
     status: Optional[Literal["in_progress", "completed", "incomplete"]] = None
 
 
+########################################
+# CUA extension action types
+########################################
+
+
+class _ActionBase(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+
+class ActionTripleClick(_ActionBase):
+    type: Literal["triple_click"]
+    x: int
+    y: int
+
+
+class ActionClickAt(_ActionBase):
+    type: Literal["click_at"]
+    x: int
+    y: int
+
+
+class ActionHoverAt(_ActionBase):
+    type: Literal["hover_at"]
+    x: int
+    y: int
+
+
+class ActionScrollAt(_ActionBase):
+    type: Literal["scroll_at"]
+    x: int
+    y: int
+    direction: str
+    magnitude: Optional[int] = None
+
+
+class ActionScrollDocument(_ActionBase):
+    type: Literal["scroll_document"]
+    direction: str
+
+
+class ActionTypeTextAt(_ActionBase):
+    type: Literal["type_text_at"]
+    x: int
+    y: int
+    text: str
+    press_enter: Optional[bool] = None
+    clear_before_typing: Optional[bool] = None
+
+
+class ActionGoto(_ActionBase):
+    type: Literal["goto"]
+    url: str
+
+
+class ActionGoBack(_ActionBase):
+    type: Literal["go_back"]
+
+
+class ActionGoForward(_ActionBase):
+    type: Literal["go_forward"]
+
+
+class ActionNewTab(_ActionBase):
+    type: Literal["new_tab"]
+    url: Optional[str] = None
+
+
+class ActionSwitchTab(_ActionBase):
+    type: Literal["switch_tab"]
+    tab_index: int
+
+
+class ActionCloseTab(_ActionBase):
+    type: Literal["close_tab"]
+
+
+class ActionZoom(_ActionBase):
+    type: Literal["zoom"]
+    region: Optional[List[int]] = None
+
+
+class ActionHoldKey(_ActionBase):
+    type: Literal["hold_key"]
+    key: str
+    duration: Optional[int] = None
+
+
+class ActionMouseDown(_ActionBase):
+    type: Literal["left_mouse_down"]
+    x: Optional[int] = None
+    y: Optional[int] = None
+
+
+class ActionMouseUp(_ActionBase):
+    type: Literal["left_mouse_up"]
+    x: Optional[int] = None
+    y: Optional[int] = None
+
+
+class ActionCursorPosition(_ActionBase):
+    type: Literal["cursor_position"]
+
+
+class ActionOpenBrowser(_ActionBase):
+    type: Literal["open_web_browser"]
+
+
+class ActionSearch(_ActionBase):
+    type: Literal["search"]
+
+
+NeMoGymAction: TypeAlias = Union[
+    ActionClick,
+    ActionDoubleClick,
+    ActionDrag,
+    ActionKeypress,
+    ActionMove,
+    ActionScreenshot,
+    ActionScroll,
+    ActionType,
+    ActionWait,
+    ActionTripleClick,
+    ActionClickAt,
+    ActionHoverAt,
+    ActionScrollAt,
+    ActionScrollDocument,
+    ActionTypeTextAt,
+    ActionGoto,
+    ActionGoBack,
+    ActionGoForward,
+    ActionNewTab,
+    ActionSwitchTab,
+    ActionCloseTab,
+    ActionZoom,
+    ActionHoldKey,
+    ActionMouseDown,
+    ActionMouseUp,
+    ActionCursorPosition,
+    ActionOpenBrowser,
+    ActionSearch,
+]
+
+
+########################################
+# CUA schema types
+########################################
+
+
+class NeMoGymResponseComputerToolCall(ResponseComputerToolCall):
+    """A computer-use action for the client to execute (``computer_call`` output item).
+
+    Inherits the upstream ``ResponseComputerToolCall`` typing (so ``issubclass`` holds and
+    schema drift is caught when the openai pin moves) and only widens ``action`` to our
+    cross-provider ``NeMoGymAction`` union -- a superset of the SDK action types plus the
+    normalized browser actions (goto, new_tab, switch_tab, open_browser, search, ...)
+    emitted by the Anthropic and Gemini adapters. ``pending_safety_checks`` keeps a default
+    so callers may omit it.
+    """
+
+    action: NeMoGymAction
+    pending_safety_checks: List[PendingSafetyCheck] = Field(default_factory=list)
+
+
+class NeMoGymComputerCallOutput(ComputerCallOutput):
+    """The client's result of a computer-use action (``computer_call_output`` item).
+
+    Inherits the upstream ``ComputerCallOutput`` typing; the browser agent emits its
+    screenshot/result payload as a plain mapping, so ``output`` is widened to a dict.
+    """
+
+    output: Dict[str, Any]
+    acknowledged_safety_checks: Optional[List[AcknowledgedSafetyCheck]] = None
+
+
 class NeMoGymResponseMcpCall(McpCall):
     """A hosted-MCP tool call (OpenAI Responses ``mcp_call`` output item).
 
@@ -348,10 +537,6 @@ class NeMoGymResponseFunctionWebSearch(ResponseFunctionWebSearch):
     """A hosted web-search call (OpenAI Responses ``web_search_call`` output item)."""
 
 
-class NeMoGymResponseComputerToolCall(ResponseComputerToolCall):
-    """A computer-use action for the client to execute (``computer_call`` output item)."""
-
-
 class NeMoGymImageGenerationCall(ImageGenerationCall):
     """A hosted image-generation call (OpenAI Responses ``image_generation_call`` output item)."""
 
@@ -370,10 +555,6 @@ class NeMoGymResponseCustomToolCall(ResponseCustomToolCall):
 
 # These models represent client-supplied results for the calls above.
 # The installed SDK defines them in ``response_input_item``.
-class NeMoGymComputerCallOutput(ComputerCallOutput):
-    """The client's result of a computer-use action (``computer_call_output`` item)."""
-
-
 class NeMoGymResponseCustomToolCallOutput(ResponseCustomToolCallOutput):
     """The client's result of a custom tool call (``custom_tool_call_output`` item)."""
 
@@ -849,6 +1030,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
     base_url: str
     api_key: str
+    organization: Optional[str] = None
 
     internal: bool = Field(
         default=False,
@@ -869,11 +1051,13 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     )
 
     async def _request(self, **request_kwargs: Dict) -> ClientResponse:
+        headers = self.default_headers | {
+            "Authorization": f"Bearer {self.api_key}",
+        }
+        if self.organization:
+            headers["Openai-Organization"] = self.organization
         request_kwargs = request_kwargs | {
-            "headers": self.default_headers
-            | {
-                "Authorization": f"Bearer {self.api_key}",
-            },
+            "headers": headers,
             "_internal": self.internal,
             "_max_connection_retries": self.max_connection_retries,
         }

@@ -1,0 +1,4 @@
+-e nemo-gym[dev] @ ../../
+playwright
+aiohttp
+Pillow
