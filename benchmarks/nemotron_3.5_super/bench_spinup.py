@@ -47,6 +47,12 @@ start_time = time()
 with rc_config.materialized_jsonl_fpath.open("wb") as f:
     for row in rows:
         f.write(orjson.dumps(row) + b"\n")
-print(f"Writing rows took {time() - start_time:.2f}s")
+materialized_size_gb = rc_config.materialized_jsonl_fpath.stat().st_size / (1024**3)
+print(f"Writing materialized rows took {time() - start_time:.2f}s ({materialized_size_gb}GB)")
+
+print("Starting _load_from_cache...")
+start_time = time()
+rc_helper._load_from_cache(rc_config)
+print(f"_load_from_cache took {time() - start_time}s")
 
 rmtree(output_jsonl_fpath, ignore_errors=True)

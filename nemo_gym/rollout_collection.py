@@ -735,9 +735,9 @@ class RolloutCollectionHelper(BaseModel):
         self, config: RolloutCollectionConfig
     ) -> Tuple[List[Dict], List[Dict], List[Dict], List[List[str]]]:
         with config.materialized_jsonl_fpath.open() as f:
-            original_input_rows = list(map(orjson.loads, f))
+            original_input_rows = list(map(orjson.loads, tqdm(f, desc="Reading materialized input rows")))
         with Path(config.output_jsonl_fpath).open("rb") as f:
-            result_strs = [[line.strip()] for line in f]
+            result_strs = [[line.strip()] for line in tqdm(f, desc="Reading existing output rows")]
         results = [orjson.loads(p[0]) for p in result_strs]
 
         get_key = lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
