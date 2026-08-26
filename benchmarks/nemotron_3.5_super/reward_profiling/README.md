@@ -40,13 +40,17 @@ bash $R/scripts/prepare_sweep.sh
 # 2. one job: vLLM endpoint + Gym sweep driver + reward profile
 MODEL=<checkpoint-path> \
 VLLM_CONFIG=benchmarks/nemotron_3.5_super/vllm_configs/nemotron_3.5_super.sh \
-SWEEP_DIR=$R/outputs/sweeps/<nickname> \
+SWEEP_DIR=$R/outputs/sweeps/nemotron_3_ultra \
 NUM_PREFILL_NODES=1 NUM_DECODE_NODES=2 \
-SBATCH_ACCOUNT=<account> SBATCH_PARTITION=batch SBATCH_GRES=gpu:4 \
 CONTAINER=<reward-profiling sqsh> \
-MOUNTS=/lustre:/lustre \
+SANDBOX_CONTAINER=<nemo-skills sandbox sqsh> \
 bash $R/scripts/sbatch_reward_profiling.sh
 ```
+
+`SBATCH_ACCOUNT` defaults to `nemotron_n4_post` and `SBATCH_GRES` to `gpu:4`; both override.
+`SANDBOX_CONTAINER` is required for the `ns_tools` and `math_formal_lean` entries -- only an arm64
+build works on NVL72, and there is one:
+`/lustre/fsw/portfolios/llmservice/users/igitman/images/nemo-skills-sandbox-0.7.1-arm64.sqsh`.
 
 `run_rollouts.sh` does the same collection against an **already-running** vLLM job
 (`VLLM_JOBID=<jobid>`), which is the faster loop when iterating against a warm endpoint.
