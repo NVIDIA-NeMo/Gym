@@ -4,6 +4,10 @@
 # 'agent' must match the agent_ref carried by the data; `gym sweep validate` enforces it.
 # Provenance: data_gym/ultra_v3_sets/260603_ultra_v3_set_final (36 envs; the 10 judge and
 # sandbox environments are intentionally excluded from this sweep).
+#
+# Row counts are deliberately absent: they are a property of the data, not a declaration, and
+# hand-carried copies go stale. `nemo_gym.sweep materialize` writes the observed counts to
+# <out-dir>/<nickname>/sweep_report.json.
 
 # Identifies this run and scopes its artifacts. Change it per checkpoint.
 nickname: super35_dualds0821_iter6500
@@ -21,211 +25,160 @@ extra_configs:
   - responses_api_models/vllm_model/configs/vllm_model.yaml
 
 entries:
+  # non judge envs
   - label: tau_pivot
     agent: single_step_tool_use_with_argument_comparison_agent
     configs:
       - resources_servers/single_step_tool_use_with_argument_comparison/configs/single_step_tool_use_with_argument_comparison.yaml
     data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/tau_pivot/super_row_54_1000_synthetic_tau_all_rollouts_leq_60_passrate.jsonl
-    notes:
-      rows: 170320
 
   - label: swe_pivot
     agent: swe_pivot_single_step_tool_use_with_argument_comparison_agent
     configs:
       - resources_servers/single_step_tool_use_with_argument_comparison/configs/swe_pivot_single_step_tool_use_with_argument_comparison.yaml
     data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/swe_pivot/sugam_reasoning_minimax_128k_super_yian3_mixed_agent_ref_swe.jsonl
-    notes:
-      rows: 66904
 
   - label: instruction_following
     agent: instruction_following_simple_agent
     configs:
       - resources_servers/instruction_following/configs/instruction_following.yaml
     data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/instruction_following/instruction_following_out.jsonl
-    notes:
-      rows: 46391
 
   - label: search_pivot
     agent: search_pivot_single_step_tool_use_with_argument_comparison_agent
     configs:
       - resources_servers/single_step_tool_use_with_argument_comparison/configs/search_pivot_single_step_tool_use_with_argument_comparison.yaml
     data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jkyi/current/nemo/data_gym/search_pivot/260331_search_pivot_updated.jsonl
-    notes:
-      rows: 21002
 
   - label: comp_coding
     agent: code_gen_simple_agent
     configs:
       - resources_servers/code_gen/configs/code_gen.yaml
     data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/comp_coding/comp_coding_out.jsonl
-    notes:
-      rows: 19850
 
   - label: reasoning_gym
     agent: reasoning_gym_simple_agent
     configs:
       - resources_servers/reasoning_gym/configs/reasoning_gym.yaml
     data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/reasoning_gym/reasoning_gym_out.jsonl
-    notes:
-      rows: 14194
 
   - label: calendar_v2
     agent: calendar_simple_agent
     configs:
       - resources_servers/calendar/configs/calendar.yaml
     data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/calendar_v2/calendar_out.jsonl
-    notes:
-      rows: 9659
 
   - label: toolcall_schema
     agent: toolcall_schema_single_step_tool_use_with_argument_comparison_agent
     configs:
       - resources_servers/single_step_tool_use_with_argument_comparison/configs/toolcall_schema_single_step_tool_use_with_argument_comparison.yaml
     data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/toolcall_schema_following/single-step-bfcl-30k-processed-balanced_depth-train.jsonl
-    notes:
-      rows: 9620
 
   - label: structured_outputs
     agent: structured_outputs_simple_agent
     configs:
       - resources_servers/structured_outputs/configs/structured_outputs_json.yaml
     data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/structured_outputs/structured_outputs_out.jsonl
-    notes:
-      rows: 9437
 
   - label: comp_coding_nemotronx
     agent: code_gen_simple_agent
     configs:
       - resources_servers/code_gen/configs/code_gen.yaml
     data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/comp_coding/nemotronx_code_out.jsonl
-    notes:
-      rows: 9196
 
   - label: terminal_pivot
     agent: terminus_judge_string_only_simple_agent
     configs:
       - resources_servers/terminus_judge/configs/terminus_judge_string_only.yaml
     data: /lustre/fsw/portfolios/llmservice/users/charlwang/cluster/tb/data/trainset/260327_ultra_pivot_aq2k_aq5k_t08_cap3_k02_k12_r16_stringonly_nemotron3_maxseq49152/train.jsonl
-    notes:
-      rows: 8831
 
   - label: workbench
     agent: workplace_assistant_simple_agent
     configs:
       - resources_servers/workplace_assistant/configs/workplace_assistant.yaml
     data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/workbench/workplace_assistant_out.jsonl
-    notes:
-      rows: 1255
 
   - label: droid_pivot_v1
     agent: droid_pivot_single_step_tool_use_with_argument_comparison_agent
     configs:
       - resources_servers/single_step_tool_use_with_argument_comparison/configs/droid_pivot_single_step_tool_use_with_argument_comparison.yaml
     data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/ultra_v3_sets/260501_ultra_v3_set/droid_pivot_v1/droid_pivot_v1_260501_20k.jsonl
-    notes:
-      rows: 20000
 
   - label: equivalence_rule
     agent: lc_equivalence_rule_simple_agent
     configs:
       - resources_servers/equivalence_rule/configs/lc.yaml
     data: /lustre/fsw/portfolios/llmservice/users/fjia/rl/nano_v3/data/mrcr/processed_p67_sampled_10pct_shuf_rl_fmt.train.jsonl
-    notes:
-      rows: 16055
 
   - label: stem_mcqa_ultra_0
     agent: mcqa_simple_agent
     configs:
       - resources_servers/mcqa/configs/mcqa.yaml
     data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/ultra_v3_sets/260501_ultra_v3_set/stem_mcqa_ultra_0/stem_mcqa_ultra_0_260501.jsonl
-    notes:
-      rows: 20000
 
   - label: nvarc_inductive
     agent: nvarc_inductive_simple_agent
     configs:
       - resources_servers/nvarc/configs/inductive.yaml
     data: /lustre/fsw/portfolios/llmservice/users/jiaqiz/data/gym/nvarc/python_inductive/train.jsonl
-    notes:
-      rows: 10000
 
   - label: nvarc_transductive
     agent: nvarc_transductive_simple_agent
     configs:
       - resources_servers/nvarc/configs/transductive.yaml
     data: /lustre/fsw/portfolios/llmservice/users/jiaqiz/data/gym/nvarc/transductive/train.jsonl
-    notes:
-      rows: 10000
 
   - label: ether0
     agent: ether0_simple_agent
     configs:
       - resources_servers/ether0/configs/ether0.yaml
     data: /lustre/fsw/portfolios/llmservice/users/jiaqiz/data/gym/ether0/train_curriculum_10k.jsonl
-    notes:
-      rows: 10000
 
   - label: tau_pivot_aq_mms
     agent: single_step_tool_use_with_argument_comparison_agent
     configs:
       - resources_servers/single_step_tool_use_with_argument_comparison/configs/single_step_tool_use_with_argument_comparison.yaml
     data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/tau2_afterquery/pivot_datasets/evaluator_rollouts_260507_1057_mixed_rewards_pivot.jsonl
-    notes:
-      rows: 53174
 
   - label: gdpval_pivot_v1
     agent: gdpval_single_step_tool_use_with_argument_comparison_agent
     configs:
       - /lustre/fsw/portfolios/llmservice/users/jkyi/research-scratch/260511_gdpval/data/pivot_datasets/gdpval_single_step_tool_use_with_argument_comparison.yaml
     data: /lustre/fsw/portfolios/llmservice/users/jkyi/research-scratch/260511_gdpval/data/pivot_datasets/afterquery_sft_GLM51_20260509_002133_pivot.jsonl
-    notes:
-      rows: 15845
 
   - label: structured_outputs_v2
     agent: structured_outputs_simple_agent
     configs:
       - resources_servers/structured_outputs/configs/structured_outputs_json_yaml_xml_v1.yaml
     data: /lustre/fsw/portfolios/llmservice/users/jiaqiz/data/gym/structured_output_v2/train.jsonl
-    notes:
-      rows: 28145
 
   - label: ds1_augmented
     agent: structured_outputs_v3_simple_agent
     configs:
       - resources_servers/structured_outputs/configs/structured_outputs_v3.yaml
     data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/structured_outputs_v3/ds1_augmented_train.jsonl
-    notes:
-      rows: 16985
 
   - label: ds1_basic
     agent: structured_outputs_v3_simple_agent
     configs:
       - resources_servers/structured_outputs/configs/structured_outputs_v3.yaml
     data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/structured_outputs_v3/ds1_basic_train.jsonl
-    notes:
-      rows: 8783
 
   - label: ds2_freeform
     agent: freeform_formatting_simple_agent
     configs:
       - resources_servers/format_verification/configs/freeform_formatting.yaml
     data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/structured_outputs_v3/ds2_freeform_train.jsonl
-    notes:
-      rows: 9037
 
   - label: ds3_citation
     agent: citation_format_simple_agent
     configs:
       - resources_servers/format_verification/configs/citation_format.yaml
     data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/structured_outputs_v3/ds3_citation_train.jsonl
-    notes:
-      rows: 9540
 
   - label: structured_outputs_v4
     agent: structured_outputs_v4_simple_agent
     configs:
       - resources_servers/structured_outputs/configs/structured_outputs_v4.yaml
     data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/structured_outputs_v4/structured_outputs_v4_tool_call.jsonl
-    notes:
-      rows: 8783
 

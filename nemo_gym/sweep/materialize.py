@@ -26,6 +26,7 @@ regenerating on a different node reproduces the same `(_ng_task_index, _ng_rollo
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from concurrent.futures import ProcessPoolExecutor
@@ -42,10 +43,21 @@ TASK_INDEX_KEY = "_ng_task_index"
 ROLLOUT_INDEX_KEY = "_ng_rollout_index"
 
 
+REPORT_NAME = "sweep_report.json"
+
+
 @dataclass
 class MaterializeReport:
+    """Observed counts for a materialized sweep.
+
+    The input manifest declares intent; this records what the data actually contained. Written
+    beside the artifacts so downstream cost estimates and blend accounting read a measured file
+    rather than hand-maintained numbers.
+    """
+
     materialized_fpath: Path
     output_fpath: Path
+    report_fpath: Path
     rows_per_entry: Dict[str, int]
     materialized_per_entry: Dict[str, int]
     num_repeats_per_entry: Dict[str, int]
@@ -62,12 +74,23 @@ class MaterializeReport:
         return {
             "materialized_fpath": str(self.materialized_fpath),
             "output_fpath": str(self.output_fpath),
+            "materialized_bytes": self.materialized_fpath.stat().st_size if self.materialized_fpath.exists() else None,
             "total_source_rows": self.total_source_rows,
             "total_materialized_rows": self.total_materialized_rows,
-            "rows_per_entry": self.rows_per_entry,
-            "materialized_per_entry": self.materialized_per_entry,
-            "num_repeats_per_entry": self.num_repeats_per_entry,
+            "entries": {
+                label: {
+                    "source_rows": self.rows_per_entry[label],
+                    "materialized_rows": self.materialized_per_entry[label],
+                    "num_repeats": self.num_repeats_per_entry[label],
+                }
+                for label in self.rows_per_entry
+            },
         }
+
+    def write(self) -> Path:
+        with open(self.report_fpath, "w") as handle:
+            json.dump(self.to_dict(), handle, indent=2)
+        return self.report_fpath
 
 
 def _count_rows(path: str, limit: Optional[int]) -> int:
@@ -178,10 +201,13 @@ def materialize(
     # An empty rollouts file is the second half of the resume gate.
     output_fpath.touch(exist_ok=True)
 
-    return MaterializeReport(
+    report = MaterializeReport(
         materialized_fpath=materialized_fpath,
         output_fpath=output_fpath,
+        report_fpath=out_dir / REPORT_NAME,
         rows_per_entry=rows_per_entry,
         materialized_per_entry=materialized_per_entry,
         num_repeats_per_entry=repeats_by_entry,
     )
+    report.write()
+    return report

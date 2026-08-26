@@ -98,6 +98,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\nwrote {mreport.materialized_fpath}")
             print(f"  {mreport.total_source_rows:,} source rows -> {mreport.total_materialized_rows:,} materialized")
             print(f"touched {mreport.output_fpath} (empty; completes the --resume gate)")
+            print(f"wrote {mreport.report_fpath} (observed per-entry row counts)")
             print(
                 "\nRun with --resume so Gym loads these directly and skips preprocessing:\n"
                 f"  gym eval run --no-serve --resume \\\n"

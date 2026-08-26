@@ -355,3 +355,24 @@ def test_materialize_refuses_to_clobber(tmp_path):
     materialize(manifest, tmp_path / "out")
     with pytest.raises(SweepValidationError, match="already exists"):
         materialize(manifest, tmp_path / "out")
+
+
+def test_materialize_writes_observed_counts_report(tmp_path):
+    """Row counts are a result, not a declaration: the report records what the data held."""
+    from nemo_gym.sweep.materialize import materialize
+
+    _write_config(tmp_path, "a.yaml", "agent_a")
+    _write_data(tmp_path, "x.jsonl", "agent_a", rows=5)
+    manifest = _manifest(
+        tmp_path,
+        [{"label": "one", "agent": "agent_a", "configs": ["a.yaml"], "data": str(tmp_path / "x.jsonl")}],
+        defaults={"num_repeats": 3},
+    )
+    report = materialize(manifest, tmp_path / "out")
+    assert report.report_fpath.name == "sweep_report.json"
+
+    doc = json.loads(report.report_fpath.read_text())
+    assert doc["total_source_rows"] == 5
+    assert doc["total_materialized_rows"] == 15
+    assert doc["entries"]["one"] == {"source_rows": 5, "materialized_rows": 15, "num_repeats": 3}
+    assert doc["materialized_bytes"] == report.materialized_fpath.stat().st_size
