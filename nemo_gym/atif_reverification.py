@@ -1337,6 +1337,10 @@ def strict_json_loads(payload: str | bytes) -> Any:
         parsed = float(value)
         if not math.isfinite(parsed):
             raise ValueError(f"JSON number {value!r} exceeds the finite float range")
+        if parsed == 0.0:
+            significand = value.lower().split("e", 1)[0]
+            if any(character in "123456789" for character in significand):
+                raise ValueError(f"JSON number {value!r} underflows the finite float range")
         return parsed
 
     def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

@@ -1310,6 +1310,26 @@ def test_atif_loader_rejects_float_overflow(tmp_path: Path) -> None:
         load_atif_trajectory(path)
 
 
+def test_atif_loader_rejects_nonzero_float_underflow(tmp_path: Path) -> None:
+    path = tmp_path / "trajectory.json"
+    payload = json.dumps(_trajectory_data()).replace('{"x": 2}', '{"x": 1e-999}')
+    path.write_text(payload)
+
+    with pytest.raises(AtifProjectionError, match="underflows the finite float range"):
+        load_atif_trajectory(path)
+
+
+def test_atif_loader_accepts_true_zero_with_an_extreme_exponent(tmp_path: Path) -> None:
+    path = tmp_path / "trajectory.json"
+    payload = json.dumps(_trajectory_data()).replace('{"x": 2}', '{"x": 0e-99999999999999999999}')
+    path.write_text(payload)
+
+    loaded = load_atif_trajectory(path)
+
+    assert loaded.trajectory.steps[1].tool_calls is not None
+    assert loaded.trajectory.steps[1].tool_calls[1].arguments["x"] == 0.0
+
+
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
 def test_in_memory_projection_rejects_nonfinite_tool_arguments(value: float) -> None:
     data = _trajectory_data()
@@ -1412,6 +1432,36 @@ def test_raw_tool_arguments_reject_float_overflow() -> None:
     }
 
     with pytest.raises(AtifProjectionError, match="exceeds the finite float range"):
+        atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+
+
+def test_raw_tool_arguments_reject_nonzero_float_underflow() -> None:
+    data = _trajectory_data()
+    data["steps"][1]["extra"] = {
+        "llm_response": {
+            "status": "completed",
+            "output": [
+                {
+                    "type": "function_call",
+                    "id": "fc-a",
+                    "call_id": "call-a",
+                    "name": "lookup",
+                    "arguments": '{"q":1e-999}',
+                    "status": "completed",
+                },
+                {
+                    "type": "function_call",
+                    "id": "fc-b",
+                    "call_id": "call-b",
+                    "name": "calculate",
+                    "arguments": '{"x":2}',
+                    "status": "completed",
+                },
+            ],
+        }
+    }
+
+    with pytest.raises(AtifProjectionError, match="underflows the finite float range"):
         atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
 
 
