@@ -988,7 +988,8 @@ def test_process_pool_success_path_and_explicit_rollout_file(
         def __exit__(self, *args):
             return False
 
-        def map(self, function, items):
+        def map(self, function, items, *, chunksize):
+            assert chunksize == 1
             return map(function, items)
 
     monkeypatch.setattr(health, "ProcessPoolExecutor", InlinePool)
@@ -1010,6 +1011,21 @@ def test_process_pool_success_path_and_explicit_rollout_file(
     rollout_path.rename(custom_path)
     file_result = health.health_check_run_dir(run_dir, rollout_file="custom-name.jsonl", workers=1)
     assert len(file_result.rollouts) == 2
+
+
+@pytest.mark.parametrize(
+    ("item_count", "workers", "expected"),
+    [
+        (1, 8, 1),
+        (350, 8, 11),
+        (1_600, 8, 50),
+        (6_000, 8, 128),
+        (30_000, 8, 128),
+        (1_600, 16, 25),
+    ],
+)
+def test_process_pool_chunksize(item_count: int, workers: int, expected: int) -> None:
+    assert health._process_pool_chunksize(item_count, workers) == expected
 
 
 def test_input_validation_and_nonstandard_filename_errors(tmp_path: Path) -> None:

@@ -61,6 +61,10 @@ from nemo_gym.health.types import (
 )
 
 
+_PROCESS_POOL_CHUNKS_PER_WORKER = 4
+_PROCESS_POOL_MAX_CHUNKSIZE = 128
+
+
 __all__ = [
     "CHECK_REGISTRY",
     "CheckInput",
@@ -76,6 +80,13 @@ __all__ = [
     "normalize_ignored_checks",
     "run_health_checks",
 ]
+
+
+def _process_pool_chunksize(item_count: int, workers: int) -> int:
+    """Keep several schedulable chunks per worker without unbounded IPC batches."""
+    target_chunks = workers * _PROCESS_POOL_CHUNKS_PER_WORKER
+    adaptive_size = (item_count + target_chunks - 1) // target_chunks
+    return max(1, min(adaptive_size, _PROCESS_POOL_MAX_CHUNKSIZE))
 
 
 def _read_record(line: _LineSlice) -> tuple[dict[str, Any], str | None]:
@@ -471,7 +482,13 @@ def run_health_checks(
         else:
             try:
                 with pool:
-                    worker_results = list(pool.map(_worker, worker_inputs))
+                    worker_results = list(
+                        pool.map(
+                            _worker,
+                            worker_inputs,
+                            chunksize=_process_pool_chunksize(len(worker_inputs), max_workers),
+                        )
+                    )
             except (BrokenProcessPool, OSError) as exc:
                 warnings.warn(
                     f"Process pool failed ({exc}); running rollout health checks serially.",
