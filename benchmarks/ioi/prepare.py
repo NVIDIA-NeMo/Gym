@@ -169,6 +169,36 @@ def statement_markdown(pdf_path: Path) -> str:
         pdf.close()
 
 
+#: The run harness only branches on Batch and Communication; anything else exits
+#: "Unsupported task type". BatchAndOutput is graded exactly like Batch here
+#: because none of 2026's subtasks are output-only -- every one is scored by
+#: running the submitted program.
+RUN_TASK_TYPE = {"BatchAndOutput": "Batch"}
+
+
+def grader_config(problem: dict) -> str:
+    """The `graders/grader_config.json` the run harness reads before every test.
+
+    Without it the harness aborts with "grader_config.json not found" and every
+    test scores zero, however good the submission -- compilation succeeds and the
+    program is simply never executed. Field names are what the script greps for.
+    """
+    task_type = problem.get("task_type", "Batch")
+    config = {
+        "task_type": RUN_TASK_TYPE.get(task_type, task_type),
+        "code": problem["code"],
+        "time_limit": problem.get("time_limit", 1.0),
+        "memory_limit": problem.get("memory_limit", 2147483648),
+    }
+    params = problem.get("task_type_params") or []
+    if config["task_type"] == "Communication" and params:
+        # [num_processes, "stub", user_io]
+        config["task_type_parameters_Communication_num_processes"] = int(params[0])
+        if len(params) > 2:
+            config["task_type_parameters_Communication_user_io"] = str(params[2])
+    return json.dumps(config, indent=2)
+
+
 def read_support_files(task_dir: Path) -> list[list[str]]:
     """`graders/` and `checker/` as CCC's [relpath, content] pairs.
 
@@ -226,6 +256,7 @@ def prepare() -> Path:
         problem_id = problem["code"]
         statement = statement_markdown(task_dir / "en.pdf")
         grader_files = read_support_files(task_dir)
+        grader_files.append(["graders/grader_config.json", grader_config(problem)])
         tests_dir = task_dir / "tests"
 
         archive = [
