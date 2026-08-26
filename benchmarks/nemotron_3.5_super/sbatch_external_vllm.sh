@@ -189,7 +189,7 @@ set -euo pipefail
 nodes=(\$(scontrol show hostnames "\$SLURM_JOB_NODELIST"))
 
 ALL_NODES="\${nodes[*]}" \
-srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 \
+srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 --kill-on-bad-exit=1 \
     --container-image=$CONTAINER \
     --container-name=container-on-node \
     --container-mounts=$MOUNTS \
