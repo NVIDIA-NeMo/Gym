@@ -88,26 +88,30 @@ jobs:
           done
           exit 1
 
+      # Unconditional (not gated on run_full): this is what produces the coverage baseline the
+      # "Sandbox unit tests" step below gates on. A server-only-scoped PR still touches code
+      # inside the measured coverage surface (resources_servers/, responses_api_agents/ are not
+      # in [tool.coverage.run] omit), so skipping this here would silently exempt those PRs from
+      # the coverage gate — exactly the gap this pipeline exists to close.
       - name: Core unit tests
-        if: needs.detect.outputs.run_full == 'true'
         run: ./scripts/ci/core_unit_tests.sh
 
       - name: Setup public sandbox test environment
-        if: needs.detect.outputs.run_full == 'true'
         run: |
           source ./scripts/ci/setup_dev.sh
           uv sync --extra dev --extra sandbox --extra openshell
 
       # Sandbox is public-GitHub-only and is intentionally outside scripts/ci contract v3.
       # This is also the pre-merge coverage gate: it appends to the coverage data from
-      # "Core unit tests" and enforces the repo-wide fail_under threshold (pyproject.toml
-      # [tool.coverage.report]) explicitly via --cov-fail-under, so a coverage regression
-      # fails this required PR check instead of only being reported after merge.
+      # "Core unit tests" and enforces the repo-wide fail_under threshold explicitly via
+      # --cov-fail-under (read from pyproject.toml, the single source of truth for the
+      # number — see scripts/ci/cov_fail_under.py), so a coverage regression fails this
+      # required PR check instead of only being reported after merge.
       - name: Sandbox unit tests
-        if: needs.detect.outputs.run_full == 'true'
         run: |
           source .venv/bin/activate
-          pytest --cov=. --cov-append --cov-report=term-missing --cov-fail-under=96 --durations=10 -m sandbox
+          pytest --cov=. --cov-append --cov-report=term-missing \
+            --cov-fail-under="$(python3 scripts/ci/cov_fail_under.py)" --durations=10 -m sandbox
 
       # The changed-server optimization is specific to GitHub pull requests; internal
       # GitLab merge requests always run the full eight-shard server suite.

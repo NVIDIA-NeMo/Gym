@@ -406,9 +406,9 @@ class TestReadEnvironmentDetails:
         assert details["datasets"] == ["train", "example"]
 
 
-def _entry(name: str, kind: str = "environment") -> registry_module.EnvironmentCatalogEntry:
+def _entry(base_path: Path, name: str, kind: str = "environment") -> registry_module.EnvironmentCatalogEntry:
     return registry_module.EnvironmentCatalogEntry(
-        name=name, config_path=Path(f"/tmp/{name}/config.yaml"), path=Path(f"/tmp/{name}"), kind=kind
+        name=name, config_path=base_path / name / "config.yaml", path=base_path / name, kind=kind
     )
 
 
@@ -428,14 +428,20 @@ class TestResolveCatalogEntry:
         with pytest.raises(RegistryError, match="Unknown catalog kind"):
             resolve_catalog_entry("anything", kind="not_a_real_kind", entries=[])
 
-    def test_ambiguous_name_across_kinds_raises(self) -> None:
-        entries = [_entry("shared_name", kind="environment"), _entry("shared_name", kind="benchmark")]
+    def test_ambiguous_name_across_kinds_raises(self, tmp_path: Path) -> None:
+        entries = [
+            _entry(tmp_path, "shared_name", kind="environment"),
+            _entry(tmp_path, "shared_name", kind="benchmark"),
+        ]
 
         with pytest.raises(RegistryError, match="is ambiguous"):
             resolve_catalog_entry("shared_name", entries=entries)
 
-    def test_ambiguous_name_resolved_by_specifying_kind(self) -> None:
-        entries = [_entry("shared_name", kind="environment"), _entry("shared_name", kind="benchmark")]
+    def test_ambiguous_name_resolved_by_specifying_kind(self, tmp_path: Path) -> None:
+        entries = [
+            _entry(tmp_path, "shared_name", kind="environment"),
+            _entry(tmp_path, "shared_name", kind="benchmark"),
+        ]
 
         resolved = resolve_catalog_entry("shared_name", kind="benchmark", entries=entries)
 
