@@ -325,11 +325,25 @@ async def test_real_nooa_codeact_rollout_calls_generated_gym_tool() -> None:
     )
 
     assert result.return_value == "cold"
+    assert result.model_requests == client.model_requests
+    assert result.model_requests is not client.model_requests
     assert [response.id for response in result.model_responses] == ["resp-1", "resp-2"]
     assert result.model_responses[0].output[0].generation_token_ids == [3, 4]
     prior_call = next(
         item for item in client.model_requests[1].input if item.type == "function_call" and item.call_id == "code-1"
     )
     assert prior_call.generation_token_ids == [3, 4]
+    code_output = next(
+        item
+        for item in client.model_requests[1].input
+        if item.type == "function_call_output" and item.call_id == "code-1"
+    )
+    assert code_output.output == "status: complete"
+    python_output = next(
+        item
+        for item in result.model_requests[1].input
+        if item.type == "message" and "PythonOutput" in str(item.content) and "cold" in str(item.content)
+    )
+    assert "cold" in str(python_output.content)
     assert result.tool_executions[0].name == "get_weather"
     assert [event.kind for event in result.timeline] == ["model", "tool", "model"]
