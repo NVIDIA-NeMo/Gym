@@ -898,16 +898,21 @@ async def test_exec_background_rejects_status_missing_a_field(
         await provider.exec(handle, "make build", timeout_s=30)
 
 
-async def test_exec_hard_cap_converts_wait_for_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A wedged exec (hard wall-clock cap tripping) surfaces as TimeoutError."""
+async def test_exec_hard_cap_labels_genuinely_wedged_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A wedged exec (hard wall-clock cap tripping) surfaces as the hard-cap TimeoutError.
+
+    The cap formula floors the real duration at minutes, so the test shrinks it
+    by patching asyncio.timeout to ignore the requested duration — the genuine
+    cancellation-to-TimeoutError conversion path still runs.
+    """
 
     class FakeRunCommandOpts:
         def __init__(self, **kwargs: Any) -> None:
             self.kwargs = kwargs
 
     class FakeCommands:
-        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:  # pragma: no cover
-            return SimpleNamespace(id="exec-wedged")
+        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:
+            await asyncio.Event().wait()  # wedged: never returns
 
     class FakeRaw:
         def __init__(self) -> None:
@@ -919,23 +924,77 @@ async def test_exec_hard_cap_converts_wait_for_timeout(monkeypatch: pytest.Monke
         lambda: (object, object, FakeRunCommandOpts, object, object),
     )
 
-    # Simulate the outer hard-cap wait_for timing out before _dispatch completes.
-    async def fake_wait_for(awaitable: Any, timeout: float | None = None) -> Any:
-        if asyncio.iscoroutine(awaitable):
-            awaitable.close()
-        raise asyncio.TimeoutError
-
-    monkeypatch.setattr(asyncio, "wait_for", fake_wait_for)
+    real_timeout = asyncio.timeout
+    monkeypatch.setattr(asyncio, "timeout", lambda delay: real_timeout(0.05))
 
     provider = opensandbox_provider.OpenSandboxProvider(
         connection={"request_timeout_s": 5},
         probe={"command": None},
-        operations={"background_exec": True},
     )
     handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-wedge", provider_name="opensandbox", raw=FakeRaw())
 
     with pytest.raises(TimeoutError, match="hard cap"):
         await provider.exec(handle, "sleep 999", timeout_s=30)
+
+
+async def test_exec_hard_cap_does_not_relabel_inner_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A TimeoutError raised inside the dispatch keeps its own message.
+
+    Since Python 3.11 asyncio.TimeoutError IS builtin TimeoutError, so a
+    wait_for-based cap caught e.g. an exhausted status-poll budget (a
+    minutes-scale failure) and relabeled it as a trip of the hours-scale hard
+    cap, corrupting the failure taxonomy. Only the cap's own expiry may carry
+    the wedged message.
+    """
+
+    class FakeRunCommandOpts:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class FakeCommands:
+        def __init__(self) -> None:
+            self.status_calls = 0
+
+        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:
+            return SimpleNamespace(id="exec-slowpolls")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            self.status_calls += 1
+            raise TimeoutError("simulated status poll budget expiry")
+
+        async def get_background_command_logs(self, execution_id: str) -> Any:  # pragma: no cover
+            return SimpleNamespace(content="ok", cursor=None)
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, FakeRunCommandOpts, object, object),
+    )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 120},
+        probe={"command": None},
+        operations={
+            "background_exec": True,
+            "retries": 1,
+            "retry_delay_s": 0.001,
+            "background_poll_interval_s": 0.01,
+        },
+    )
+    commands = FakeCommands()
+    handle = opensandbox_provider.SandboxHandle(
+        sandbox_id="sandbox-slowpolls", provider_name="opensandbox", raw=SimpleNamespace(commands=commands)
+    )
+
+    with pytest.raises(TimeoutError) as exc_info:
+        await provider.exec(handle, "echo ok", timeout_s=30)
+
+    # The poll-budget failure surfaced with its own message (after using its
+    # retry budget), not relabeled as the wall-clock hard cap tripping.
+    assert commands.status_calls == 2
+    assert "command status" in str(exc_info.value)
+    assert "hard cap" not in str(exc_info.value)
 
 
 @pytest.mark.parametrize("request_timeout_s", [None, 5])

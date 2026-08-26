@@ -1257,9 +1257,17 @@ class OpenSandboxProvider:
             if sdk_timeout_s is None or (self._operations.background_exec and timeout_s is None):
                 return await _dispatch()
             hard_cap_s = 2.0 * float(sdk_timeout_s) + 30.0
+            # asyncio.timeout instead of wait_for: since Python 3.11
+            # asyncio.TimeoutError IS builtin TimeoutError, so a wait_for-based
+            # cap would also catch timeouts raised INSIDE the dispatch (e.g. an
+            # exhausted status-poll budget) and relabel them as a hard-cap trip.
+            hard_cap = asyncio.timeout(hard_cap_s)
             try:
-                return await asyncio.wait_for(_dispatch(), timeout=hard_cap_s)
-            except asyncio.TimeoutError as e:
+                async with hard_cap:
+                    return await _dispatch()
+            except TimeoutError as e:
+                if not hard_cap.expired():
+                    raise
                 raise TimeoutError(
                     f"OpenSandbox exec exceeded hard cap of {hard_cap_s:g}s; the command wedged "
                     f"(sandbox_id={handle.sandbox_id!r})"
