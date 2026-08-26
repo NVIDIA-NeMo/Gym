@@ -231,8 +231,16 @@ class TestShippedSchemas:
         adapter = load_task_data_schema(schema_file.parent)
         assert adapter is not None
         core = getattr(adapter, "_type", None)
-        candidates = get_args(core) or [core]
-        models = [c for c in candidates if isinstance(c, type) and issubclass(c, BaseModel)]
+
+        def collect_models(tp, out):
+            if isinstance(tp, type) and issubclass(tp, BaseModel):
+                out.append(tp)
+                return out
+            for arg in get_args(tp):  # unwraps Annotated[...] and Union[...] alike
+                collect_models(arg, out)
+            return out
+
+        models = collect_models(core, [])
         assert models, f"{schema_file}: TaskData must resolve to at least one BaseModel"
         for model in models:
             extra = model.model_config.get("extra")
