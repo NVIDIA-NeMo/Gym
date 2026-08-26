@@ -11,6 +11,7 @@ ray.init()
 
 @ray.remote
 def decode_batch(batch):
+    print(f"hit at {time():.2f}")
     results = []
 
     for line_no, (row_idx, row_str) in batch:
