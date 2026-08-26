@@ -460,10 +460,10 @@ class TestRolloutCollection:
 
         ng_perf = _build_ng_perf(result, rollout_latency_ms=None)
 
-        # One physical model call means one reasoning turn: with no explicit TrajectoryTurn
-        # records, num_turns falls back to the deduplicated owned-call count, so the shared
-        # call contributes a single turn and a single token attribution.
-        assert ng_perf["num_turns"] == 1
+        # Token dedup must not erase the losing invocation from the turn count: the shared
+        # call contributes one owned-call turn to "root", and "sub" -- a real conversation
+        # left with no owned calls -- still counts as at least one turn.
+        assert ng_perf["num_turns"] == 2
         assert ng_perf["prompt_tokens"] == 100
         assert ng_perf["completion_tokens"] == 10
 
@@ -497,6 +497,41 @@ class TestRolloutCollection:
 
         assert ng_perf["num_turns"] == 3
         assert ng_perf["completion_tokens"] == 30
+
+    def test_build_ng_perf_sums_turns_across_invocations_with_per_invocation_fallback(self) -> None:
+        # Hybrid trajectory: "root" emits explicit TrajectoryTurn records (2 turns), "sub-a"
+        # emits none but owns 4 resolved model calls, "sub-b" emits nothing at all. Each
+        # invocation contributes its own best turn count: 2 + 4 + 1 = 7.
+        result = {
+            NG_TRAJECTORY_KEY: {
+                "task_id": "t",
+                "rollout_id": "t-0",
+                "invocations": [
+                    {"invocation_id": "root"},
+                    {"invocation_id": "sub-a", "model_calls": [{"model_call_id": f"call-{i}"} for i in range(4)]},
+                    {"invocation_id": "sub-b"},
+                ],
+                "turns": [
+                    {
+                        "invocation_id": "root",
+                        "task_id": "t",
+                        "rollout_id": "t-0",
+                        "turn_no": turn_no,
+                        "timestamp": 1.0,
+                        "step_count": 0,
+                    }
+                    for turn_no in (1, 2)
+                ],
+                "model_calls": [
+                    {"model_call_id": f"call-{i}", "token_stats": {"completion_tokens": 10}} for i in range(4)
+                ],
+            }
+        }
+
+        ng_perf = _build_ng_perf(result, rollout_latency_ms=None)
+
+        assert ng_perf["num_turns"] == 7
+        assert ng_perf["completion_tokens"] == 40
 
     def test_attach_ng_perf_absent_when_observability_disabled(self) -> None:
         result = {

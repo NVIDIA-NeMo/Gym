@@ -396,10 +396,12 @@ def _build_ng_perf(result: dict[str, Any], *, rollout_latency_ms: Optional[float
     Token fields are summed only over model calls owned by a reasoning-turn ``AgentInvocation``,
     excluding compaction calls -- mixing in compaction overhead would skew the token efficiency signal.
 
-    ``num_turns`` counts reasoning turns, where explicit ``TrajectoryTurn`` records are preferred;
-    harnesses that don't emit them fall back to the invocation-owned model call count (one assistant
-    response per turn, and the same call set the token sums cover), then to the invocation count as a
-    lower bound when no call references resolved.
+    ``num_turns`` counts reasoning turns summed across all invocations (an ``AgentInvocation``
+    is one root-agent or subagent conversation that may span many turns). Each invocation
+    contributes its explicit ``TrajectoryTurn`` count when the harness emits turn records,
+    falling back to its owned model-call count (one assistant response per turn), then to 1
+    (an invocation that ran had at least one turn) -- so hybrid trajectories where only some
+    invocations report turns still count every conversation.
     """
     raw_trajectory = result.get(NG_TRAJECTORY_KEY)
     if not isinstance(raw_trajectory, dict):
@@ -418,12 +420,14 @@ def _build_ng_perf(result: dict[str, Any], *, rollout_latency_ms: Optional[float
     # invocations could otherwise claim -- and double-count -- the same physical call.
     seen_call_ids: set[str] = set()
     owned_calls = []
+    owned_calls_by_invocation: Counter = Counter()
     for invocation in trajectory.invocations:
         for ref in invocation.model_calls:
             if ref.model_call_id not in calls_by_id or ref.model_call_id in seen_call_ids:
                 continue
             seen_call_ids.add(ref.model_call_id)
             owned_calls.append(calls_by_id[ref.model_call_id])
+            owned_calls_by_invocation[invocation.invocation_id] += 1
     tool_calls_by_invocation = Counter(tool.invocation_id for tool in trajectory.tool_calls)
     num_tool_calls = sum(
         tool_calls_by_invocation.get(invocation.invocation_id, 0) for invocation in trajectory.invocations
@@ -435,7 +439,13 @@ def _build_ng_perf(result: dict[str, Any], *, rollout_latency_ms: Optional[float
         ]
         return sum(values) if values else None
 
-    num_turns = len(trajectory.turns) or len(owned_calls) or len(trajectory.invocations)
+    turns_by_invocation = Counter(turn.invocation_id for turn in trajectory.turns)
+    num_turns = sum(
+        turns_by_invocation.get(invocation.invocation_id, 0)
+        or owned_calls_by_invocation.get(invocation.invocation_id, 0)
+        or 1
+        for invocation in trajectory.invocations
+    )
     ng_perf: dict[str, Any] = {
         "num_turns": num_turns,
         "num_tool_calls": num_tool_calls,
