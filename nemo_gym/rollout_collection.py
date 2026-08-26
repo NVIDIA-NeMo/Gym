@@ -647,7 +647,7 @@ class RolloutCollectionHelper(BaseModel):
             with open(_input_path) as input_file:
                 rows_iterator: List[str] = list(tqdm(input_file, desc="Reading rows"))
             lines_range_iter: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
-            raw_rows = self._read_jsonl_file_using_ray(lines_range_iter)
+            raw_rows = self._load_jsonl_via_ray(lines_range_iter)
         else:
             with open(_input_path) as input_file:
                 rows_iterator: Iterator[str] = tqdm(input_file, desc="Reading rows")
