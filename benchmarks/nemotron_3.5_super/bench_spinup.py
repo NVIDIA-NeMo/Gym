@@ -13,6 +13,7 @@ from shutil import rmtree
 from time import time
 
 import orjson
+from tqdm.auto import tqdm
 
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
@@ -45,7 +46,7 @@ print(f"_preprocess_rows_from_config {len(rows):,} materialized rows in {time() 
 print("Starting to write rows...")
 start_time = time()
 with rc_config.materialized_jsonl_fpath.open("wb") as f:
-    for row in rows:
+    for row in tqdm(rows, desc="Writing materialized rows"):
         f.write(orjson.dumps(row) + b"\n")
 materialized_size_gb = rc_config.materialized_jsonl_fpath.stat().st_size / (1024**3)
 print(f"Writing materialized rows took {time() - start_time:.2f}s ({materialized_size_gb}GB)")
