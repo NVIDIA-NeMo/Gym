@@ -1,6 +1,6 @@
 # HotPotQA (Aviary)
 
-This environment exposes [HotPotQA](https://aclanthology.org/D18-1259/) through the [Aviary](https://github.com/Future-House/aviary) Wikipedia-search environment.
+This environment runs [HotPotQA](https://aclanthology.org/D18-1259/) through [Aviary](https://github.com/Future-House/aviary). It is a multi-hop question-answering environment with Wikipedia search.
 
 The commands below assume that a model endpoint is configured with `policy_base_url`, `policy_model_name`, and `policy_api_key` in `env.yaml`. See the [local configuration documentation](https://docs.nvidia.com/nemo/gym/reference/configuration#local-configuration-envyaml).
 

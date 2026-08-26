@@ -1,6 +1,6 @@
 # BixBench (Aviary)
 
-This environment exposes [BixBench](https://arxiv.org/abs/2503.00096) through an [Aviary](https://github.com/Future-House/aviary) Jupyter notebook. Docker must be available, and the first run downloads and extracts the BixBench capsules.
+This environment runs [BixBench](https://arxiv.org/abs/2503.00096) through [Aviary](https://github.com/Future-House/aviary). It is a scientific question-answering environment with a Jupyter notebook. Docker must be available, and the first run downloads and extracts the BixBench capsules.
 
 The commands below assume that a model endpoint is configured with `policy_base_url`, `policy_model_name`, and `policy_api_key` in `env.yaml`. See the [local configuration documentation](https://docs.nvidia.com/nemo/gym/reference/configuration#local-configuration-envyaml).
 
