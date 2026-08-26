@@ -48,9 +48,28 @@ runs:
         set +e
         COMMITS_LINE=""
 
-        RUNS_JSON=$(gh api "repos/$REPO/actions/workflows/$WORKFLOW_FILE/runs?per_page=10" 2>/dev/null)
-        PREV_RUN_JSON=$(echo "$RUNS_JSON" | jq -c --argjson cur "$CURRENT_RUN_ID" \
-          '[.workflow_runs[]? | select(.id != $cur) | select(.event == "schedule" or .event == "workflow_dispatch")] | sort_by(.created_at) | reverse | .[0]' 2>/dev/null)
+        # Query with an explicit event= filter (server-side) rather than
+        # fetching an unfiltered page of recent runs and filtering
+        # client-side - this workflow file may also trigger on push/PR
+        # events far more often than the schedule fires, which would
+        # otherwise push the actual last schedule/workflow_dispatch run out
+        # of a small unfiltered page.
+        fetch_latest_run() {
+          local event="$1"
+          local result
+          result=$(gh api "repos/$REPO/actions/workflows/$WORKFLOW_FILE/runs?event=$event&per_page=5" 2>/dev/null | \
+            jq -c --argjson cur "$CURRENT_RUN_ID" \
+              '[.workflow_runs[]? | select(.id != $cur)] | sort_by(.created_at) | reverse | .[0]' 2>/dev/null)
+          [[ -z "$result" ]] && result="null"
+          echo "$result"
+        }
+
+        SCHEDULE_RUN=$(fetch_latest_run schedule)
+        DISPATCH_RUN=$(fetch_latest_run workflow_dispatch)
+
+        PREV_RUN_JSON=$(jq -cn --argjson a "$SCHEDULE_RUN" --argjson b "$DISPATCH_RUN" \
+          '[$a, $b] | map(select(. != null)) | sort_by(.created_at) | reverse | .[0] // null' 2>/dev/null)
+        [[ -z "$PREV_RUN_JSON" ]] && PREV_RUN_JSON="null"
 
         if [[ -z "$PREV_RUN_JSON" || "$PREV_RUN_JSON" == "null" ]]; then
           echo "No previous scheduled/workflow_dispatch run found; skipping commit list."
