@@ -651,7 +651,7 @@ class RolloutCollectionHelper(BaseModel):
         row_idxs_missing_agent_ref: List[int] = []
         agents_missing_from_num_repeats: set[str] = set()
         rows: List[Dict] = []
-        for row_idx, row_str, row in raw_rows:
+        for row_idx, row_str, row in tqdm(raw_rows, desc="Preprocessing and repeating rows"):
             # Resolve agent name. Missing agent_ref is a hard error reported in
             # bulk after the loop; skip the row immediately so the rest of the
             # body can assume agent_name is non-None.
