@@ -461,6 +461,11 @@ def _validate_responses_output(response: dict[str, Any], step: AtifStep, *, path
             message_items += 1
             if item.get("role") != "assistant":
                 raise _path_error(f"{item_path}.role", "expected 'assistant'")
+            if item.get("phase") is not None:
+                raise _path_error(
+                    f"{item_path}.phase",
+                    "Responses message phase is not representable in ATIF v1.7",
+                )
             content = item.get("content")
             if not isinstance(content, list):
                 raise _path_error(f"{item_path}.content", "expected an output content array")
@@ -482,6 +487,11 @@ def _validate_responses_output(response: dict[str, Any], step: AtifStep, *, path
             reasoning_items += 1
             reasoning = _responses_reasoning(item, path=item_path)
         elif item_type == "function_call":
+            if item.get("namespace") is not None:
+                raise _path_error(
+                    f"{item_path}.namespace",
+                    "namespaced Responses function calls are not representable in ATIF v1.7",
+                )
             tool_calls.append(
                 _provider_tool_call(
                     call_id=item.get("call_id"),

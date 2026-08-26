@@ -30,6 +30,12 @@ structure, tool correlation, or provider completion evidence would require dropp
 boundary means an accepted conversion is complete for the supported source profile; it does not claim that the original
 agent harness observed every action outside Gym.
 
+Responses message `phase` values such as `commentary` and `final_answer` are rejected because ATIF v1.7 has no equivalent
+field. Namespaced Responses function calls are also rejected because the standard ATIF tool-call fields cannot retain the
+separate namespace identity. A missing or null phase or namespace is accepted because it carries no additional source meaning.
+Provider-native hosted tools, shell and patch calls, tool search, compaction records, approvals, and additional-tool records
+remain outside the initial generic function-call profile and are rejected rather than flattened.
+
 The semantic profile maps ordered messages, reasoning, function calls and results, turn identity and resolution, tool timing,
 model identity, token counts, and available training prompt/completion token IDs and generation log probabilities when the
 source attaches them to the final model-generated item for that turn. Gym's routed-expert training metadata is retained under

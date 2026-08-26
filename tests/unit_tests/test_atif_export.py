@@ -604,6 +604,78 @@ def test_strict_export_accepts_known_optional_nulls_from_producer_model_dump() -
     assert trajectory.steps[3].message[0].text == "Both records contain the same value."
 
 
+@pytest.mark.parametrize(
+    ("conversation_index", "phase"),
+    (
+        (0, "commentary"),
+        (8, "final_answer"),
+    ),
+)
+def test_strict_export_rejects_responses_message_phase(conversation_index: int, phase: str) -> None:
+    rollout = _canonical_rollout()
+    rollout["ng_trajectory"]["invocations"][0]["conversation"][conversation_index]["phase"] = phase
+
+    with pytest.raises(AtifExportError, match="Responses message phase is not representable in ATIF v1.7"):
+        gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
+
+
+def test_strict_export_accepts_absent_responses_message_phase_and_function_namespace() -> None:
+    rollout = _canonical_rollout()
+    rollout["ng_trajectory"]["invocations"][0]["conversation"][0]["phase"] = None
+    rollout["ng_trajectory"]["invocations"][0]["conversation"][3]["namespace"] = None
+
+    trajectory = gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
+
+    assert trajectory.steps[0].message == "Use tools when needed."
+    assert trajectory.steps[2].tool_calls[0].function_name == "search"
+
+
+def test_strict_export_rejects_namespaced_responses_function_calls() -> None:
+    rollout = _canonical_rollout()
+    rollout["ng_trajectory"]["invocations"][0]["conversation"][3]["namespace"] = "mcp__weather"
+
+    with pytest.raises(
+        AtifExportError, match="namespaced Responses function calls are not representable in ATIF v1.7"
+    ):
+        gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
+
+
+@pytest.mark.parametrize(
+    "item_type",
+    (
+        "mcp_call",
+        "mcp_list_tools",
+        "mcp_approval_request",
+        "file_search_call",
+        "web_search_call",
+        "computer_call",
+        "image_generation_call",
+        "code_interpreter_call",
+        "local_shell_call",
+        "custom_tool_call",
+        "computer_call_output",
+        "custom_tool_call_output",
+        "local_shell_call_output",
+        "mcp_approval_response",
+        "apply_patch_call",
+        "apply_patch_call_output",
+        "compaction",
+        "shell_call",
+        "shell_call_output",
+        "tool_search_call",
+        "tool_search_output",
+        "compaction_trigger",
+        "additional_tools",
+    ),
+)
+def test_strict_export_rejects_unprojected_responses_item_families(item_type: str) -> None:
+    rollout = _canonical_rollout()
+    rollout["ng_trajectory"]["invocations"][0]["conversation"].append({"type": item_type})
+
+    with pytest.raises(AtifExportError, match=rf"unsupported conversation item type '{item_type}'"):
+        gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
+
+
 @pytest.mark.parametrize("location", ("agent", "captured", "turn", "invocation"))
 def test_strict_export_rejects_unknown_null_fields_in_nested_server_references(location: str) -> None:
     rollout = _canonical_rollout()
@@ -1642,6 +1714,45 @@ def test_strict_export_rejects_provider_output_that_conflicts_with_canonical_ati
     expected = "message|reasoning" if mismatch in {"message", "reasoning"} else "tool calls"
     with pytest.raises(AtifExportError, match=expected):
         gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
+
+
+@pytest.mark.parametrize("phase", ("commentary", "final_answer"))
+def test_strict_export_rejects_responses_message_phase_present_only_in_provider_output(phase: str) -> None:
+    rollout = _canonical_rollout()
+    response = _install_matching_provider_response(rollout, "responses", tool_step=False)
+    response["output"][1]["phase"] = phase
+
+    with pytest.raises(AtifExportError, match="Responses message phase is not representable in ATIF v1.7"):
+        gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
+
+
+def test_strict_export_rejects_responses_namespace_present_only_in_provider_output() -> None:
+    rollout = _canonical_rollout()
+    response = _install_matching_provider_response(rollout, "responses", tool_step=True)
+    response["output"][1]["namespace"] = "mcp__weather"
+
+    with pytest.raises(
+        AtifExportError, match="namespaced Responses function calls are not representable in ATIF v1.7"
+    ):
+        gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
+
+
+def test_strict_export_accepts_null_responses_phase_and_namespace_in_provider_output() -> None:
+    rollout = _canonical_rollout()
+    response = _install_matching_provider_response(rollout, "responses", tool_step=True)
+    response["output"][1]["namespace"] = None
+
+    trajectory = gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
+
+    assert trajectory.steps[2].tool_calls[0].function_name == "search"
+
+    rollout = _canonical_rollout()
+    response = _install_matching_provider_response(rollout, "responses", tool_step=False)
+    response["output"][1]["phase"] = None
+
+    trajectory = gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
+
+    assert trajectory.steps[3].message[0].text == "Both records contain the same value."
 
 
 @pytest.mark.parametrize(

@@ -247,16 +247,26 @@ def _preflight_conversation(conversation: Any, *, path: str) -> None:
         if item_type == "message" and item.get("role") == "assistant":
             _reject_unknown_fields(
                 item,
-                frozenset({"id", "content", "role", "status", "type"}) | _TRAINING_METADATA_FIELDS,
+                frozenset({"id", "content", "role", "status", "type", "phase"}) | _TRAINING_METADATA_FIELDS,
                 path=item_path,
             )
+            if item.get("phase") is not None:
+                raise _path_error(
+                    f"{item_path}.phase",
+                    "Responses message phase is not representable in ATIF v1.7",
+                )
             _preflight_parts(item.get("content"), path=f"{item_path}.content", supported_fields=output_part_fields)
         elif item_type == "message" and item.get("role") in ("system", "user", "developer"):
             _reject_unknown_fields(
                 item,
-                frozenset({"content", "role", "status", "type"}) | _TRAINING_METADATA_FIELDS,
+                frozenset({"content", "role", "status", "type", "phase"}) | _TRAINING_METADATA_FIELDS,
                 path=item_path,
             )
+            if item.get("phase") is not None:
+                raise _path_error(
+                    f"{item_path}.phase",
+                    "Responses message phase is not representable in ATIF v1.7",
+                )
             if "status" in item and not isinstance(item.get("content"), list):
                 raise _path_error(
                     f"{item_path}.status",
@@ -274,9 +284,15 @@ def _preflight_conversation(conversation: Any, *, path: str) -> None:
         elif item_type == "function_call":
             _reject_unknown_fields(
                 item,
-                frozenset({"arguments", "call_id", "name", "type", "id", "status"}) | _TRAINING_METADATA_FIELDS,
+                frozenset({"arguments", "call_id", "name", "type", "id", "status", "namespace"})
+                | _TRAINING_METADATA_FIELDS,
                 path=item_path,
             )
+            if item.get("namespace") is not None:
+                raise _path_error(
+                    f"{item_path}.namespace",
+                    "namespaced Responses function calls are not representable in ATIF v1.7",
+                )
         elif item_type == "function_call_output":
             _reject_unknown_fields(
                 item,
