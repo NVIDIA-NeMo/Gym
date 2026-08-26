@@ -576,15 +576,20 @@ def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
 
 
 class RolloutCollectionHelper(BaseModel):
-    def _load_jsonl_via_ray(self, lines_range_iter: Iterator[Tuple[int, str]]) -> List[Dict]:
+    def _load_jsonl_via_ray(
+        self, lines_range_iter: Iterator[Tuple[int, str]]
+    ) -> List[Tuple[int, str, Dict[str, Any]]]:
         initialize_ray()
 
         @ray.remote
         def _load_batch(batch: List[Tuple[int, str]]):
             return [(row_idx, row_str, orjson.loads(row_str)) for row_idx, row_str in batch]
 
+        start_time = time()
         refs = [_load_batch.remote(batch) for batch in batched(lines_range_iter, 10_000)]
-        return [row for batch in ray.get(refs) for row in batch]
+        res = [row for batch in ray.get(refs) for row in batch]
+        print(f"Loading {len(res)} JSON rows took {time() - start_time:.2f}s!")
+        return res
 
     def _preprocess_rows_from_config(self, config: RolloutCollectionConfig) -> List[Dict]:
         range_iterator = repeat(0)
@@ -752,11 +757,21 @@ class RolloutCollectionHelper(BaseModel):
     def _load_from_cache(
         self, config: RolloutCollectionConfig
     ) -> Tuple[List[Dict], List[Dict], List[Dict], List[List[str]]]:
-        with config.materialized_jsonl_fpath.open() as f:
-            original_input_rows = list(map(orjson.loads, tqdm(f, desc="Reading materialized input rows")))
-        with Path(config.output_jsonl_fpath).open("rb") as f:
-            result_strs = [[line.strip()] for line in tqdm(f, desc="Reading existing output rows")]
-        results = [orjson.loads(p[0]) for p in result_strs]
+        if True:
+            with config.materialized_jsonl_fpath.open() as f:
+                original_input_rows = list(tqdm(f, desc="Reading materialized input rows"))
+            original_input_rows = [t[2] for t in self._load_jsonl_via_ray(enumerate(original_input_rows))]
+            with Path(config.output_jsonl_fpath).open("rb") as f:
+                output_lines = list(tqdm(f, desc="Reading existing output rows"))
+            output_json_load = self._load_jsonl_via_ray(enumerate(output_lines))
+            result_strs = [[t[1].strip()] for t in output_json_load]
+            results = [t[2] for t in output_json_load]
+        else:
+            with config.materialized_jsonl_fpath.open() as f:
+                original_input_rows = list(map(orjson.loads, tqdm(f, desc="Reading materialized input rows")))
+            with Path(config.output_jsonl_fpath).open("rb") as f:
+                result_strs = [[line.strip()] for line in tqdm(f, desc="Reading existing output rows")]
+            results = [orjson.loads(p[0]) for p in result_strs]
 
         get_key = lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
 
