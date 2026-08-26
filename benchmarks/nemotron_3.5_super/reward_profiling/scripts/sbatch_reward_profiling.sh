@@ -113,11 +113,11 @@ gym env start --config $SWEEP_DIR/sweep_config.yaml \\
     +uv_venv_dir=/opt/uv_venvs \\
     +skip_venv_if_present=true \\
     ++use_absolute_ip=true \\
-    ++policy_base_url=http://\\\$(getent hosts "\\\$ROUTER_NODE" | awk 'NR == 1 {print \\\$1}'):$ROUTER_SERVER_PORT/v1 \\
+    ++policy_base_url=http://\$(getent hosts "\$ROUTER_NODE" | awk 'NR == 1 {print \$1}'):$ROUTER_SERVER_PORT/v1 \
     ++policy_api_key=dummy_api_key \\
     ++policy_model_name=$MODEL &
-gym_servers_pid=\\\$!
-trap 'kill \\\$gym_servers_pid 2>/dev/null || true' EXIT
+gym_servers_pid=\$!
+trap 'kill \$gym_servers_pid 2>/dev/null || true' EXIT
 
 # --resume is load-bearing: Gym reads the pre-expanded inputs instead of re-expanding them
 # (~100 min single-threaded for a full sweep), and a walltime kill continues where it stopped.
@@ -305,7 +305,7 @@ trap cleanup_server EXIT INT TERM
         bash -lc '
             set -euo pipefail
             cd "\$SLURM_SUBMIT_DIR"
-            # `set -e` is not inherited through a fresh `bash -lc`, so a failing gym command
+            # set -e is not inherited through a fresh bash -lc, so a failing gym command
             # inside eval_command would otherwise exit 0 and look like a successful run.
             exec bash -lc "set -euo pipefail; \$eval_command"
         ' &
