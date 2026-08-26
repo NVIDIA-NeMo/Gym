@@ -18,5 +18,5 @@ with open(
     lines = list(tqdm(file, desc="Reading file"))
 
 print("Starting json load")
-agent_refs = list(map(AgentRefModel.model_validate_json, lines))
+agent_refs = list(tqdm(map(AgentRefModel.model_validate_json, lines), desc="Validating AgentRefs"))
 print(f"Finished loading {len(agent_refs)} rows in {time() - start_time:.2f}s")
