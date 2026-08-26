@@ -64,10 +64,7 @@ apt-get install -y /tmp/enroot.deb
 rm /tmp/enroot.deb
 
 # Drop the --ldconfig arg from enroot's NVIDIA hook so nvidia-container-cli
-# reuses the sandbox's existing ld.so.cache instead of regenerating it. The
-# regeneration step fails under some Slurm/pyxis GPU cgroup configurations
-# ("ldcache error: process /usr/sbin/ldconfig.real failed with error code: 1"),
-# breaking GPU passthrough for nested enroot sandboxes.
+# reuses the sandbox's existing ld.so.cache instead of regenerating it.
 sed -i 's/cli_args=("--no-cgroups" "--ldconfig=@$(command -v ldconfig.real || command -v ldconfig)")/cli_args=("--no-cgroups")/' \
     /etc/enroot/hooks.d/98-nvidia.sh
 grep -q '^cli_args=("--no-cgroups")$' /etc/enroot/hooks.d/98-nvidia.sh
