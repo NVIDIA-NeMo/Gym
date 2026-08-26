@@ -45,6 +45,11 @@ Gym's rollout-attempt id is forwarded as Switchyard's session id (`x-switchyard-
 proxy-side routing decisions and costs — request logs, spans, session-affinity state, and the
 aggregates on `/v1/stats` — can be joined back to the rollout that produced them.
 
+The id arrives on the `/ng-rollout/<id>/` URL prefix, which agents add only when model-call
+capture (`observability_enabled` plus a capture directory) or training-token capture is enabled.
+The server checks this at startup: it warns when `forward_session_id` is merely the default, and
+refuses to start when forwarding was requested explicitly but no capture is on.
+
 For per-session snapshots on `/v1/routing/session-stats`, run `switchyard-server` yourself with
 `--routing-log-file`, attach with `switchyard_base_url`, and add `proxy_x_session_id` to
 `session_id_headers` — the name the 0.2.0 routing log keys on. Add names knowingly: Switchyard
@@ -61,11 +66,15 @@ attribution should be read from the model-call capture records rather than the r
 
 Set `condition_dir` (one directory per run) and the server records the routing condition the run
 served under: `switchyard-condition.json` at startup — route, mode, deployment SHA-256 and
-archived contents (credential values redacted), `nemo-switchyard` version — and
-`switchyard-stats.json` at shutdown, the proxy's `/v1/stats` (per-target requests, tokens,
-retries, latency), which for a hosted proxy would otherwise die with the process. This is what
-makes two routed runs comparable and one routed run reproducible after the fact; the documented
-comparison workflow in the docs page builds on it.
+archived contents (inline `api_key` and all `extra_headers` values redacted), `nemo-switchyard`
+version when hosting — and `switchyard-stats.json` at shutdown, wrapping the proxy's `/v1/stats`
+(per-target requests, errors, tokens, latency, and classifier-side usage), which for a hosted
+proxy would otherwise die with the process. The snapshot's `scope` field says what the counters
+cover: a hosted proxy lives for exactly the run, while an attached proxy aggregates everything it
+has served. An attached proxy is also a build Gym cannot identify, so its manifest takes identity
+from the caller-supplied `proxy_provenance` mapping instead of the local wheel version. This is
+what makes two routed runs comparable and one routed run reproducible after the fact; the
+documented comparison workflow in the docs page builds on it.
 
 ## Dependency direction
 
