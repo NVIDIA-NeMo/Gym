@@ -1,7 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Map Gym MCP tools to Hermes wire names while preserving canonical identity for verification."""
+"""Bridge Hermes MCP aliases to Gym's structured verification identity.
+
+Hermes conversations retain only the flattened ``mcp__<server>__<tool>`` wire name, while Gym's
+``/seed_session`` metadata advertises the canonical server and tool names before execution. This
+module builds that pre-execution alias map and joins it to projected Responses calls by ``call_id``.
+"""
 
 from __future__ import annotations
 
