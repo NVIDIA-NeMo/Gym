@@ -260,8 +260,15 @@ def _is_retryable_sdk_operation_error(exception: BaseException, seen: set[int] |
 
 
 def _is_missing_sandbox_delete_error(exception: BaseException) -> bool:
+    """Match kill errors meaning the sandbox is already gone (terminate's goal state).
+
+    Only the terminate path may treat this as success; other operations must
+    keep failing loudly on not-found.
+    """
+    if _exception_status_code(exception) == 404:
+        return True
     message = str(exception).lower()
-    return "sandbox" in message and "not found" in message
+    return "sandbox_not_found" in message or ("sandbox" in message and "not found" in message)
 
 
 def _log_create_retry(retry_state: Any) -> None:
@@ -509,6 +516,11 @@ class OpenSandboxOperationConfig:
     # Backs off from initial to interval.
     background_poll_initial_s: float = 0.25
     background_poll_interval_s: float = 2.0
+    # Per-request budget for background-command status polls, which are small
+    # idempotent GETs: without their own short budget, each poll against an
+    # unreachable sandbox hangs for the shared request timeout (tuned for long
+    # submits) before failing. None falls back to that shared budget.
+    status_poll_timeout_s: float | None = 10.0
 
     def __post_init__(self) -> None:
         if self.retries < 0:
@@ -525,6 +537,8 @@ class OpenSandboxOperationConfig:
             raise ValueError("operations.background_poll_interval_s must be > 0")
         if self.background_poll_initial_s <= 0:
             raise ValueError("operations.background_poll_initial_s must be > 0")
+        if self.status_poll_timeout_s is not None and self.status_poll_timeout_s <= 0:
+            raise ValueError("operations.status_poll_timeout_s must be > 0")
 
 
 @dataclass(frozen=True)
@@ -794,6 +808,10 @@ class OpenSandboxProvider:
         sandbox_id: str,
         timeout_s: float | None,
         retries: int | None = None,
+        # The default classifier treats per-call timeouts as terminal, which is
+        # right for mutating calls but wrong for short idempotent polls; those
+        # callers pass their own predicate.
+        is_retryable: Callable[[BaseException], bool] = _is_retryable_sdk_operation_error,
     ) -> Any:
         AsyncRetrying, retry_if_exception, stop_after_attempt, wait_random_exponential = _require_tenacity()
         retry_count = self._operations.retries if retries is None else retries
@@ -803,7 +821,7 @@ class OpenSandboxProvider:
             _log_operation_retry(retry_state, operation=operation, sandbox_id=sandbox_id)
 
         retry_policy = AsyncRetrying(
-            retry=retry_if_exception(_is_retryable_sdk_operation_error),
+            retry=retry_if_exception(is_retryable),
             stop=stop_after_attempt(max_attempts),
             wait=wait_random_exponential(
                 multiplier=self._operations.retry_delay_s,
@@ -1246,9 +1264,17 @@ class OpenSandboxProvider:
             if sdk_timeout_s is None or (self._operations.background_exec and timeout_s is None):
                 return await _dispatch()
             hard_cap_s = 2.0 * float(sdk_timeout_s) + 30.0
+            # asyncio.timeout instead of wait_for: since Python 3.11
+            # asyncio.TimeoutError IS builtin TimeoutError, so a wait_for-based
+            # cap would also catch timeouts raised INSIDE the dispatch (e.g. an
+            # exhausted status-poll budget) and relabel them as a hard-cap trip.
+            hard_cap = asyncio.timeout(hard_cap_s)
             try:
-                return await asyncio.wait_for(_dispatch(), timeout=hard_cap_s)
-            except asyncio.TimeoutError as e:
+                async with hard_cap:
+                    return await _dispatch()
+            except TimeoutError as e:
+                if not hard_cap.expired():
+                    raise
                 raise TimeoutError(
                     f"OpenSandbox exec exceeded hard cap of {hard_cap_s:g}s; the command wedged "
                     f"(sandbox_id={handle.sandbox_id!r})"
@@ -1324,6 +1350,21 @@ class OpenSandboxProvider:
         poll_timeout_s = (
             float(self._connection.request_timeout_s) if self._connection.request_timeout_s is not None else 60.0
         )
+        # Status polls are sub-second GETs; against an unreachable sandbox each
+        # one would otherwise hang for the shared budget above (tuned for long
+        # submits) per retry before the typed failure fires.
+        status_timeout_s = self._operations.status_poll_timeout_s
+        if status_timeout_s is None:
+            status_timeout_s = poll_timeout_s
+
+        def _status_poll_is_retryable(exception: BaseException) -> bool:
+            # The short budget makes poll timeouts routine rather than fatal:
+            # re-polling a status is an idempotent GET, so unlike a submit
+            # (where a timeout stays terminal to avoid a double-run) a timed-out
+            # poll retries within the normal budget instead of killing the command.
+            if isinstance(exception, TimeoutError):
+                return True
+            return _is_retryable_sdk_operation_error(exception)
 
         # Poll fast at first so the many short commands an agent issues are
         # detected promptly, then back off so long ones do not spam requests.
@@ -1333,8 +1374,9 @@ class OpenSandboxProvider:
                 lambda: handle.raw.commands.get_command_status(execution_id),
                 operation="command status",
                 sandbox_id=handle.sandbox_id,
-                timeout_s=poll_timeout_s,
+                timeout_s=status_timeout_s,
                 retries=self._operations.retries,
+                is_retryable=_status_poll_is_retryable,
             )
             # A renamed SDK field must not degrade silently: a missing `running`
             # would end the poll at once, a missing `exit_code` would score a
@@ -1496,22 +1538,28 @@ class OpenSandboxProvider:
 
     async def close(self, handle: SandboxHandle) -> None:
         """Terminate the sandbox and close local SDK resources."""
+
+        async def kill_ignore_missing() -> None:
+            # Terminate is idempotent: not-found means the sandbox is already
+            # gone (double-termination race, or a previous run's leftover).
+            # Swallow it before the retry wrapper so the 404 is never retried.
+            try:
+                await handle.raw.kill()
+            except Exception as e:
+                if not _is_missing_sandbox_delete_error(e):
+                    raise
+                LOGGER.debug("OpenSandbox sandbox %r already gone; treating terminate as success", handle.sandbox_id)
+
         stop_error: Exception | None = None
         try:
             await self._await_sdk_operation(
-                lambda: handle.raw.kill(),
+                kill_ignore_missing,
                 operation="kill",
                 sandbox_id=handle.sandbox_id,
                 timeout_s=self._operations.close_timeout_s,
             )
         except Exception as e:
-            if not _is_missing_sandbox_delete_error(e):
-                stop_error = e
-            else:
-                LOGGER.info(
-                    "OpenSandbox sandbox %r was already deleted during close",
-                    handle.sandbox_id,
-                )
+            stop_error = e
 
         close_error: Exception | None = None
         try:

@@ -14,7 +14,14 @@ policy_model:
       # If your model is downloaded at ~/.cache/huggingface/hub/models--<org>--<model>, set hf_home to ~/.cache/huggingface.
       hf_home: null
 
-      vllm_serve_env_vars: {}
+      # `app.py::_configure_vllm_serve` asserts VLLM_RAY_DP_PACK_STRATEGY is set,
+      # so this cannot be empty or the generic config fails to start for every
+      # model without a dedicated config file. `strict` matches what every
+      # per-model config in this directory uses: it keeps each data-parallel
+      # replica's ranks on one node, which is what the single-instance defaults
+      # below (data_parallel_size 1) expect.
+      vllm_serve_env_vars:
+        VLLM_RAY_DP_PACK_STRATEGY: strict
 
       # vLLM parallelism is sensitive; tensor_parallel_size * pipeline_parallel_size GPUs are used per model instance.
       # Override per node, e.g. `++policy_model.responses_api_models.local_vllm_model.vllm_serve_kwargs.tensor_parallel_size=8`.
