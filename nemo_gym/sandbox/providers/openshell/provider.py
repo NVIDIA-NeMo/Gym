@@ -52,12 +52,10 @@ from nemo_gym.sandbox.providers.base import (
 
 LOGGER = logging.getLogger(__name__)
 
-# OpenShell 0.0.92 limits sandbox names to 19 characters. Preserve a readable
-# Gym prefix and use 64 random bits; at one million generated names the birthday
-# collision probability remains below 3e-8.
-SANDBOX_NAME_PREFIX = "ng-"
-SANDBOX_NAME_RANDOM_HEX = 16
+# OpenShell includes sandbox names in service-routing hostnames and accepts at most 19 characters.
 MAX_SANDBOX_NAME_LENGTH = 19
+SANDBOX_NAME_PREFIX = "ng-"
+SANDBOX_NAME_RANDOM_HEX_LENGTH = MAX_SANDBOX_NAME_LENGTH - len(SANDBOX_NAME_PREFIX)
 SANDBOX_LABEL = "nemo-gym.sandbox"
 READY_PROBE_COMMAND = "printf openshell-sandbox-ready"
 READY_PROBE_EXPECTED = "openshell-sandbox-ready"
@@ -74,6 +72,11 @@ class OpenShellCreateError(SandboxCreateError):
 
 class OpenShellCreateVerificationError(SandboxCreateVerificationError):
     """Raised when a new sandbox fails its readiness probe."""
+
+
+def _generate_sandbox_name() -> str:
+    """Return a DNS-safe name within OpenShell's routable-name limit."""
+    return SANDBOX_NAME_PREFIX + uuid.uuid4().hex[:SANDBOX_NAME_RANDOM_HEX_LENGTH]
 
 
 def _require_openshell() -> None:
@@ -99,12 +102,6 @@ def _coerce_config(value: Any, config_cls: type[Any]) -> Any:
 def _normalize_image(image: str) -> str:
     prefix = "docker://"
     return image[len(prefix) :] if image.startswith(prefix) else image
-
-
-def _new_sandbox_name() -> str:
-    name = SANDBOX_NAME_PREFIX + uuid.uuid4().hex[:SANDBOX_NAME_RANDOM_HEX]
-    assert len(name) <= MAX_SANDBOX_NAME_LENGTH
-    return name
 
 
 @functools.cache
@@ -590,7 +587,7 @@ class OpenShellProvider:
         image = _normalize_image(spec.image) if spec.image else None
         options = OpenShellProviderOptions.from_mapping(spec.provider_options)
         pb_spec = self._build_sandbox_spec(spec, image, options)
-        name = _new_sandbox_name()
+        name = _generate_sandbox_name()
         # Marker label goes last so user metadata cannot clobber it.
         labels = {**{str(k): str(v) for k, v in spec.metadata.items()}, SANDBOX_LABEL: "1"}
 

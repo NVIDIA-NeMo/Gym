@@ -16,6 +16,7 @@
 import base64
 import builtins
 import inspect
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -51,7 +52,6 @@ from nemo_gym.sandbox.providers.openshell.provider import (  # noqa: E402
     MAX_SANDBOX_NAME_LENGTH,
     SANDBOX_LABEL,
     SANDBOX_NAME_PREFIX,
-    SANDBOX_NAME_RANDOM_HEX,
     SANDBOX_RUNTIME_RETURN_CODE,
     OpenShellConnectionConfig,
     OpenShellCreateConfig,
@@ -62,7 +62,7 @@ from nemo_gym.sandbox.providers.openshell.provider import (  # noqa: E402
     OpenShellProbeConfig,
     OpenShellProvider,
     OpenShellProviderOptions,
-    _new_sandbox_name,
+    _generate_sandbox_name,
     _OpenShellSandbox,
 )
 
@@ -262,13 +262,6 @@ def test_missing_openshell_dependency_message(monkeypatch: pytest.MonkeyPatch) -
         openshell_provider._require_openshell()
 
 
-def test_generated_name_respects_openshell_limit(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(openshell_provider.uuid, "uuid4", lambda: SimpleNamespace(hex="a" * 32))
-    name = _new_sandbox_name()
-    assert name == SANDBOX_NAME_PREFIX + "a" * SANDBOX_NAME_RANDOM_HEX
-    assert len(name) == MAX_SANDBOX_NAME_LENGTH
-
-
 def test_provider_call_shapes_bind_against_installed_sdk() -> None:
     """Bind the provider's exact SDK call shapes against the installed openshell signatures.
 
@@ -399,6 +392,14 @@ def test_provider_options_validation() -> None:
         OpenShellProviderOptions.from_mapping({"driver_config": ["not", "a", "mapping"]})
     options = OpenShellProviderOptions.from_mapping({"providers": "solo"})
     assert options.providers == ["solo"]
+
+
+def test_generated_sandbox_names_fit_routable_name_limit() -> None:
+    names = [_generate_sandbox_name() for _ in range(100)]
+
+    assert len(set(names)) == len(names)
+    assert all(len(name) == MAX_SANDBOX_NAME_LENGTH for name in names)
+    assert all(re.fullmatch(rf"{re.escape(SANDBOX_NAME_PREFIX)}[0-9a-f]+", name) for name in names)
 
 
 async def test_create_success_maps_spec(make_provider, fake_client: FakeClient) -> None:

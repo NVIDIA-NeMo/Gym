@@ -16,6 +16,7 @@
 import asyncio
 import base64
 import glob
+import hashlib
 import importlib.util
 import json
 import os
@@ -45,7 +46,7 @@ from openai.types.responses.function_tool import FunctionTool
 from pydantic import BaseModel, ConfigDict, Field
 from pydot import graph_from_dot_file
 
-from nemo_gym import PARENT_DIR
+from nemo_gym import CACHE_DIR, PARENT_DIR, RESULTS_DIR
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyResponse,
@@ -56,13 +57,26 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import OmegaConf, get_global_config_dict
+from nemo_gym.global_config import (
+    CACHE_DIR_KEY_NAME,
+    RESULTS_DIR_KEY_NAME,
+    OmegaConf,
+    get_global_config_dict,
+    maybe_get_global_config_dict,
+)
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.profiling import Profiler
-from nemo_gym.server_utils import get_first_server_config_dict
+from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap
+from nemo_gym.server_utils import apply_rollout_prefix, get_first_server_config_dict
+from responses_api_agents.swe_agents.observability import (
+    OBSERVATIONS_FILENAME,
+    build_swe_observations,
+    materialize_completion,
+    sandbox_observations_from_metrics,
+)
 from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
 
 
@@ -212,6 +226,8 @@ class ExecuteContainerCommandArgs(BaseModel):
 
 
 class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapperConfig):
+    rollout_id: Optional[str] = Field(default=None, exclude_if=lambda value: value is None)
+    token_id_capture_enabled: bool = False
     metrics_fpath: Path
     problem_info: Dict[str, Any]
     body: NeMoGymResponseCreateParamsNonStreaming
@@ -299,11 +315,63 @@ class SWEBenchMetrics(BaseModel):
 class SWEBenchVerifyResponse(SWEBenchMetrics, BaseVerifyResponse):
     instance_config: SWEBenchWrapperInstanceConfig
     subagent_trajectories: Optional[List[Dict[str, Any]]] = None
+    ng_agent_observations: Optional[AgentObservationBundle] = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+
+class SWEBenchRunRequest(BaseRunRequest):
+    model_config = ConfigDict(extra="allow")
 
 
 ########################################
 # START Dataset and harness handling
 ########################################
+
+
+def _is_full_commit(ref: str) -> bool:
+    """True for a full 40-hex object id (immutable)."""
+    return re.fullmatch(r"[0-9a-fA-F]{40}", ref) is not None
+
+
+def _repo_slug(repo: Optional[str]) -> str:
+    """Filesystem token identifying the configured repository."""
+    if not repo:
+        return "default-repo"
+    name = re.sub(r"\.git$", "", repo.rstrip("/").rsplit("/", 1)[-1]) or "repo"
+    return f"{name}-{hashlib.sha256(repo.encode()).hexdigest()[:8]}"
+
+
+def _resolve_remote_commit(repo: Optional[str], ref: str) -> str:
+    """The full commit SHA `ref` points to, resolving mutable refs against the remote.
+
+    Full 40-hex ids pass through unchanged (immutable, no network). Everything
+    else (HEAD, branches, tags) is resolved with `git ls-remote`, so setup
+    trees are keyed by what the ref points to now — never by whatever a local
+    checkout happens to contain.
+    """
+    if _is_full_commit(ref):
+        return ref.lower()
+    if not repo:
+        raise ValueError(
+            f"agent_framework_commit={ref!r} is not a full commit SHA and no "
+            "agent_framework_repo is configured to resolve it against; pin a "
+            "full 40-hex SHA or configure the repository URL."
+        )
+    result = subprocess_run(
+        ["git", "ls-remote", repo, ref, f"refs/heads/{ref}", f"refs/tags/{ref}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    for line in result.stdout.splitlines():
+        sha = line.split("\t", 1)[0].strip()
+        if _is_full_commit(sha):
+            return sha.lower()
+    raise ValueError(
+        f"could not resolve agent_framework_commit={ref!r} against {repo}; "
+        "pin a full 40-hex SHA or use a branch/tag that exists on the remote."
+    )
 
 
 @contextmanager
@@ -350,7 +418,44 @@ class BaseDatasetHarnessProcessor(BaseModel):
 
     @property
     def parent_dir(self) -> Path:
+        """Anchor for packaged read-only assets (setup scripts, prompts, configs)."""
         return Path(__file__).parent
+
+    @property
+    def setup_root(self) -> Path:
+        """Root for the reusable multi-GB setup trees (clones, venvs, toolchains).
+
+        Anchored at the global `cache_dir` so deployments can relocate the
+        caches (e.g. to node-local or baked container storage) independently of
+        the package and of where run artifacts go. Consults the config without
+        parsing it, so bare processors (no gym CLI, no injected config) fall
+        back to the install-anchored default rather than triggering a parse.
+        """
+        global_config_dict = maybe_get_global_config_dict()
+        configured = global_config_dict.get(CACHE_DIR_KEY_NAME) if global_config_dict is not None else None
+        return (Path(configured) if configured else CACHE_DIR) / "swe_agents"
+
+    @staticmethod
+    def _cache_dir_is_default() -> bool:
+        global_config_dict = maybe_get_global_config_dict()
+        configured = global_config_dict.get(CACHE_DIR_KEY_NAME) if global_config_dict is not None else None
+        return not configured or Path(configured) == CACHE_DIR.expanduser().resolve()
+
+    def resolve_setup_dir(self, name: str) -> Path:
+        """A pre-staged install-relative tree when `cache_dir` is default, else the cache-root tree.
+
+        Deployments that bake the setup trees at build time stage them next to
+        the package (the pre-`cache_dir` layout); abandoning those would mean a
+        multi-GB re-clone per node, or a hard failure on egress-restricted
+        clusters. An explicitly configured `cache_dir` opts out: the user's
+        choice wins over the compatibility fallback. Both inputs are fixed for
+        the lifetime of a deployment, so resolution is stable over time.
+        """
+        legacy_dir = self.parent_dir / name
+        if legacy_dir.exists() and self._cache_dir_is_default():
+            print(f"Using pre-staged setup tree at {legacy_dir}", flush=True)
+            return legacy_dir
+        return self.setup_root / name
 
     def _run_setup_command(self, command: str) -> None:
         process = Popen(command, shell=True)
@@ -376,7 +481,7 @@ class SweBenchDatasetProcessor(BaseDatasetHarnessProcessor):
         swebench_repo = "https://github.com/HeyyyyyyG/SWE-bench.git"
         swebench_commit = "HEAD"
 
-        setup_dir = self.parent_dir / "swe_swebench_setup"
+        setup_dir = self.resolve_setup_dir("swe_swebench_setup")
         setup_dir.mkdir(parents=True, exist_ok=True)
 
         with file_lock(setup_dir, "SWE-bench setup"):
@@ -446,7 +551,7 @@ class SweBenchMultilingualDatasetProcessor(BaseDatasetHarnessProcessor):
         swebench_repo = "https://github.com/Kipok/SWE-bench.git"
         swebench_commit = "HEAD"
 
-        setup_dir = self.parent_dir / "swe_swebench_multilingual_setup"
+        setup_dir = self.resolve_setup_dir("swe_swebench_multilingual_setup")
         setup_dir.mkdir(parents=True, exist_ok=True)
 
         with file_lock(setup_dir, "SWE-bench_Multilingual setup"):
@@ -516,7 +621,7 @@ class R2EGymDatasetProcessor(BaseDatasetHarnessProcessor):
         eval_harness_repo = "https://github.com/sdevare-nv/nv-R2E-Gym.git"
         eval_harness_commit = "local-eval"
 
-        setup_dir = self.parent_dir / "swe_r2e_gym_setup"
+        setup_dir = self.resolve_setup_dir("swe_r2e_gym_setup")
 
         with file_lock(setup_dir, "R2E-Gym setup"):
             r2e_gym_dir = setup_dir / "R2E-Gym"
@@ -760,7 +865,7 @@ def _load_rebench_log_parsers(rebench_repo_dir: Path):
 
 class SWERebenchDatasetProcessor(BaseDatasetHarnessProcessor):
     def setup(self) -> Path:
-        setup_dir = self.parent_dir / "swe_rebench_setup"
+        setup_dir = self.resolve_setup_dir("swe_rebench_setup")
 
         with file_lock(setup_dir, "SWE-rebench setup"):
             rebench_dir = setup_dir / "SWE-rebench-V2"
@@ -901,7 +1006,9 @@ printf '{{"_test_completed": true, "exit_code": %d}}\\n' $TEST_EXIT \
             report_path.write_text(json.dumps(report, indent=2))
             return
 
-        setup_dir = self.parent_dir / "swe_rebench_setup"
+        # Use the tree resolved at server startup (carried in the instance
+        # config); re-resolving here could pick a different tree mid-run.
+        setup_dir = Path(self.config.swe_rebench_setup_dir)
         log_parsers = _load_rebench_log_parsers(setup_dir / "SWE-rebench-V2")
 
         parser = log_parsers.NAME_TO_PARSER.get(log_parser_name) or getattr(log_parsers, log_parser_name, None)
@@ -1498,15 +1605,16 @@ fi
 
 
 class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
-    def _sync_openhands_to_config_commit(self, openhands_dir: Path) -> None:
-        """Ensure OpenHands checkout matches config.agent_framework_commit.
+    def _sync_openhands_to_commit(self, openhands_dir: Path, target: str) -> None:
+        """Ensure the OpenHands checkout is at `target` (a resolved, full commit SHA).
 
-        The config is treated as the golden truth. If the local HEAD differs
-        from the target commit, this fetches from the remote, discards any
-        local changes (tracked modifications and untracked files, while
-        preserving gitignored paths like `.venv`), and checks out the target.
+        The caller resolves mutable refs against the remote first
+        (`_resolve_remote_commit`), so comparing against the local object store
+        here is sound — a moved remote branch can no longer be mistaken for
+        current. If the local HEAD differs, this fetches, discards local
+        changes (preserving gitignored paths like `.venv`), and checks out the
+        target.
         """
-        target = self.config.agent_framework_commit
 
         def _git(*args: str) -> str:
             result = subprocess_run(
@@ -1525,7 +1633,7 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
 
         if resolved_target and resolved_target == current_commit:
             print(
-                f"OpenHands already at config commit {current_commit[:12]} (target={target})",
+                f"OpenHands already at target commit {current_commit[:12]}",
                 flush=True,
             )
             return
@@ -1543,16 +1651,52 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
         new_commit = _git("rev-parse", "HEAD")
         print(f"OpenHands now at commit {new_commit[:12]} (target={target})", flush=True)
 
+    @staticmethod
+    def _openhands_tree_valid(setup_dir: Path) -> bool:
+        return (setup_dir / "OpenHands" / ".venv" / "bin" / "python").exists()
+
+    def _openhands_setup_target(self, commit: str) -> Path:
+        # A valid pre-staged tree wins while cache_dir is default (see
+        # resolve_setup_dir); anything else builds under the cache root, so the
+        # rmtree below can never rewrite a pre-staged tree other nodes may be
+        # executing from. OpenHands is the only processor whose checkout comes
+        # from config (the others hardcode their pins per code version), so its
+        # cache trees are keyed by repository identity + resolved commit SHA:
+        # file_lock is held during setup() only, and without the keying a later
+        # run configured with a different ref could `reset --hard` the shared
+        # tree while containers still execute from it.
+        legacy_dir = self.parent_dir / "swe_openhands_setup"
+        if legacy_dir.exists() and self._cache_dir_is_default() and self._openhands_tree_valid(legacy_dir):
+            print(f"Using pre-staged setup tree at {legacy_dir}", flush=True)
+            return legacy_dir
+        return self.setup_root / "swe_openhands_setup" / _repo_slug(self.config.agent_framework_repo) / commit
+
     def setup(self) -> Path:
-        setup_dir = self.parent_dir / "swe_openhands_setup"
+        repo = self.config.agent_framework_repo
+        ref = self.config.agent_framework_commit
+        legacy_dir = self.parent_dir / "swe_openhands_setup"
+        if (
+            not repo
+            and not _is_full_commit(ref)
+            and legacy_dir.exists()
+            and self._cache_dir_is_default()
+            and self._openhands_tree_valid(legacy_dir)
+        ):
+            # Baked tree with no remote to resolve `ref` against: use it as
+            # shipped (the pre-resolution local-HEAD sync was a no-op here).
+            print(f"Using pre-staged setup tree at {legacy_dir} (no resolvable remote)", flush=True)
+            return legacy_dir
+
+        commit = _resolve_remote_commit(repo, ref)
+        setup_dir = self._openhands_setup_target(commit)
 
         with file_lock(setup_dir, "OpenHands setup"):
             openhands_dir = setup_dir / "OpenHands"
             miniforge_dir = setup_dir / "miniforge3"
 
-            if openhands_dir.exists() and Path(openhands_dir / ".venv" / "bin" / "python").exists():
+            if self._openhands_tree_valid(setup_dir):
                 print(f"OpenHands already set up at {setup_dir}", flush=True)
-                self._sync_openhands_to_config_commit(openhands_dir)
+                self._sync_openhands_to_commit(openhands_dir, commit)
                 return setup_dir
 
             print(f"Setting up OpenHands environment at {setup_dir}...", flush=True)
@@ -1564,7 +1708,7 @@ class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
 MINIFORGE_DIR={miniforge_dir} \\
 OPENHANDS_DIR={openhands_dir} \\
 AGENT_FRAMEWORK_REPO={self.config.agent_framework_repo} \\
-AGENT_FRAMEWORK_COMMIT={self.config.agent_framework_commit} \\
+AGENT_FRAMEWORK_COMMIT={commit} \\
     {script_fpath}"""
             self._run_setup_command(command)
 
@@ -1912,7 +2056,7 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
     """Drives the opencode fork; mirrors OpenHandsHarnessProcessor."""
 
     def setup(self) -> Path:
-        setup_dir = self.parent_dir / "swe_opencode_setup"
+        setup_dir = self.resolve_setup_dir("swe_opencode_setup")
 
         with file_lock(setup_dir, "opencode"):
             opencode_dir = setup_dir / "opencode"
@@ -1958,7 +2102,11 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
         # openai_model.yaml uses `openai_model`; vllm_model.yaml uses `model`.
         try:
             model_server_cfg = get_first_server_config_dict(get_global_config_dict(), self.config.model_server_name)
-            model_server_base_url = f"http://{model_server_cfg.host}:{model_server_cfg.port}"
+            model_server_base_url = apply_rollout_prefix(
+                f"http://{model_server_cfg.host}:{model_server_cfg.port}",
+                self.config.rollout_id,
+                token_capture=self.config.token_id_capture_enabled,
+            )
             default_model_name = (
                 getattr(model_server_cfg, "openai_model", None) or getattr(model_server_cfg, "model", None) or ""
             )
@@ -2365,6 +2513,27 @@ class RunOpenHandsAgent(BaseModel):
             str(eval_dir_on_host / "**" / "llm_completions" / "*" / "*.json"),
             recursive=True,
         )
+        if self.config.rollout_id is not None:
+            try:
+                observations = build_swe_observations(
+                    (Path(path) for path in completion_candidates),
+                    framework=self.config.agent_framework,
+                    model_ref=self.config.model_server,
+                )
+            except Exception:
+                observations = AgentObservationBundle(
+                    source=f"swe_{self.config.agent_framework}",
+                    gaps=[
+                        ObservationGap(
+                            code="observation_parse_failed",
+                        )
+                    ],
+                )
+            try:
+                (self.config.persistent_dir / OBSERVATIONS_FILENAME).write_text(observations.model_dump_json())
+            except OSError:
+                pass
+
         # When subagents are enabled (opencode) we get multiple sessions, each
         # writing its own per-turn JSONs. Group by session_id (from the file
         # payload) and copy each session's most recent turn — that file's
@@ -2379,7 +2548,7 @@ class RunOpenHandsAgent(BaseModel):
                         payload = json.load(f)
                     if isinstance(payload, dict) and payload.get("session_id"):
                         sess_id = str(payload["session_id"])
-                except (OSError, json.JSONDecodeError):
+                except (OSError, UnicodeError, json.JSONDecodeError):
                     pass
                 mtime = os.path.getmtime(path_str)
                 if mtime > session_mtime.get(sess_id, -1):
@@ -2449,7 +2618,7 @@ class RunOpenHandsAgent(BaseModel):
     ) -> ActiveContainerCommand:
         # Stream output to log file as it appears
         logs_dir = self.config.persistent_dir / "apptainer_logs"
-        logs_dir.mkdir(exist_ok=True)
+        logs_dir.mkdir(parents=True, exist_ok=True)
         log_file_path = logs_dir / f"{self.config.instance_id}_{command.mode}.log"
         log_file = open(log_file_path, "w")
 
@@ -2766,7 +2935,17 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
     def model_post_init(self, context: Any) -> None:
         run_session_id = f"{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
-        workspace_root = Path(__file__).parent
+        # Run artifacts are written here by this server and read across the run
+        # (on multinode deployments, from other nodes); resolved from the global
+        # `results_dir` so runs can point it at a shared filesystem. The key is
+        # absent only for hand-built config dicts that bypassed the parser.
+        configured_results_root = get_global_config_dict().get(RESULTS_DIR_KEY_NAME)
+        results_root = Path(configured_results_root) if configured_results_root else RESULTS_DIR
+        base_results_dir = results_root / f"swebench_results_{run_session_id}"
+        base_results_dir.mkdir(parents=True, exist_ok=True)
+        # Rollout workers and eval containers consume this path (and the setup
+        # trees) by host path from other nodes; say where they resolved to.
+        print(f"SWE agents results root for this run: {base_results_dir}", flush=True)
         # Only set up the agent harness that's actually selected. Both share the
         # same dataset/eval setup paths.
         openhands_setup_dir, opencode_setup_dir = None, None
@@ -2777,7 +2956,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         self._swe_bench_wrapper_server_config = SWEBenchWrapperServerConfig(
             run_session_id=run_session_id,
-            base_results_dir=workspace_root / "results" / f"swebench_results_{run_session_id}",
+            base_results_dir=base_results_dir,
             ng_global_config_dict_str=shlex.quote(OmegaConf.to_yaml(get_global_config_dict())),
             model_server_name=self.config.model_server.name,
             openhands_setup_dir=openhands_setup_dir,
@@ -2796,31 +2975,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     ########################################
     # START Results processing logic
     ########################################
-
-    @staticmethod
-    def _materialize_trajectory(data: dict) -> tuple[list, list]:
-        """Inflate one completion-file payload into (messages, tools)."""
-        messages = list(data.get("messages") or [])
-        tools = data.get("kwargs", {}).get("tools", [])
-        provider_specific_fields = data.get("provider_specific_fields", {})
-        try:
-            final_assistant_message = data["response"]["choices"][0]["message"]
-        except (KeyError, IndexError):
-            return messages, tools
-
-        for key in [
-            "prompt_token_ids",
-            "generation_token_ids",
-            "generation_log_probs",
-            "routed_experts",
-        ]:
-            if key in provider_specific_fields:
-                final_assistant_message[key] = provider_specific_fields[key]
-
-        if final_assistant_message.get("content") or final_assistant_message.get("tool_calls"):
-            messages.append(final_assistant_message)
-
-        return messages, tools
 
     def get_openhands_trajectory_from_completions(self, trajectories_dir: Path, instance_id: str) -> tuple:
         """Extract the main session's trajectory for the API response.
@@ -2873,7 +3027,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             with open(completion_files[-1], "r") as f:
                 main_data = json.load(f)
 
-        messages, tools = self._materialize_trajectory(main_data)
+        messages, tools = materialize_completion(main_data)
         return messages, tools, first_prefix_count
 
     def get_all_session_trajectories_from_completions(self, trajectories_dir: Path, instance_id: str) -> list[dict]:
@@ -2899,7 +3053,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 continue
             by_session[sess_id] = data
         for sess_id, data in by_session.items():
-            messages, tools = self._materialize_trajectory(data)
+            messages, tools = materialize_completion(data)
             out.append(
                 {
                     "session_id": sess_id,
@@ -3379,7 +3533,11 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         return json.dumps(chat_messages)
 
     def _setup_params(
-        self, body: NeMoGymResponseCreateParamsNonStreaming
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        rollout_id: Optional[str] = None,
+        *,
+        token_id_capture_enabled: bool = False,
     ) -> Tuple[SWEBenchWrapperInstanceConfig, BaseDatasetHarnessProcessor]:
         problem_info = body.metadata | {"container_formatter": self.config.container_formatter}
         instance_id = problem_info.get("instance_id", "unknown")
@@ -3453,6 +3611,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         params: SWEBenchWrapperInstanceConfig = SWEBenchWrapperInstanceConfig(
             **self.config.model_dump(),
             **self._swe_bench_wrapper_server_config.model_dump(),
+            rollout_id=rollout_id,
+            token_id_capture_enabled=token_id_capture_enabled,
             problem_info=problem_info,
             body=body,
             persistent_dir=persistent_dir,
@@ -3527,7 +3687,20 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         return params, dataset_processor
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
-        params, dataset_processor = self._setup_params(body)
+        return await self._responses(body)
+
+    async def _responses(
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        rollout_id: Optional[str] = None,
+        *,
+        token_id_capture_enabled: bool = False,
+    ) -> NeMoGymResponse:
+        params, dataset_processor = self._setup_params(
+            body,
+            rollout_id,
+            token_id_capture_enabled=token_id_capture_enabled,
+        )
 
         with (params.eval_private_dir / "params.json").open("w") as f:
             f.write(params.model_dump_json(indent=4))
@@ -3645,6 +3818,62 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         updated_metrics = update_and_read_metrics(params.metrics_fpath, metrics_to_update)
 
+        observations: Optional[AgentObservationBundle] = None
+        if params.rollout_id is not None:
+            observations_path = params.persistent_dir / OBSERVATIONS_FILENAME
+            try:
+                observations = AgentObservationBundle.model_validate_json(observations_path.read_text())
+            except (OSError, ValueError):
+                observations = AgentObservationBundle(
+                    source=f"swe_{params.agent_framework}",
+                    gaps=[
+                        ObservationGap(
+                            code="agent_artifact_unavailable",
+                        )
+                    ],
+                )
+            if params.agent_framework == "openhands":
+                observations.gaps.append(
+                    ObservationGap(
+                        code="model_call_capture_correlation_unavailable",
+                    )
+                )
+            try:
+                sandbox_observations = sandbox_observations_from_metrics(updated_metrics)
+            except ValueError:
+                print(f"Error creating sandbox observations: {format_exc()}", flush=True)
+                observations.gaps.append(ObservationGap(code="sandbox_observation_unavailable"))
+                sandbox_observations = []
+            observations.records.extend(sandbox_observations)
+            for sandbox in sandbox_observations:
+                observations.gaps.append(
+                    ObservationGap(
+                        code="sandbox_identity_unavailable",
+                        detail=sandbox.role,
+                    )
+                )
+                if sandbox.cpu_time_s is None:
+                    observations.gaps.append(
+                        ObservationGap(
+                            code="sandbox_cpu_time_unavailable",
+                            detail=sandbox.role,
+                        )
+                    )
+                if sandbox.peak_memory_mib is None:
+                    observations.gaps.append(
+                        ObservationGap(
+                            code="sandbox_memory_usage_unavailable",
+                            detail=sandbox.role,
+                        )
+                    )
+                else:
+                    observations.gaps.append(
+                        ObservationGap(
+                            code="sandbox_memory_usage_sampled",
+                            detail=sandbox.role,
+                        )
+                    )
+
         # body.model can be None (replay JSONLs omit it; the openai_model proxy
         # picks the backend). NeMoGymResponse.model is a required non-None string,
         # so fall back to the agent's configured model server name.
@@ -3660,6 +3889,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 if entry.get("parent_session_id")
             ]
             metadata["subagent_trajectories"] = json.dumps(subagent_trajectories)
+        if observations is not None:
+            metadata["agent_observations"] = observations.model_dump_json()
 
         return NeMoGymResponse(
             id=f"swebench-{params.instance_id}",
@@ -3673,12 +3904,18 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             metadata=metadata,
         )
 
-    async def run(self, body: BaseRunRequest) -> SWEBenchVerifyResponse:
+    async def run(self, body: SWEBenchRunRequest) -> SWEBenchVerifyResponse:
         async with self._sem:
             body.responses_create_params.parallel_tool_calls = True
             body.responses_create_params.tool_choice = "auto"
 
-            response = await self.responses(body.responses_create_params)
+            rollout_id = self.rollout_id_from_run(body)
+            token_id_capture_enabled = self._token_id_capture_enabled()
+            response = await self._responses(
+                body.responses_create_params,
+                rollout_id,
+                token_id_capture_enabled=token_id_capture_enabled,
+            )
 
             metadata, response.metadata = response.metadata, None
             responses_create_params = body.responses_create_params.model_dump() | {
@@ -3689,6 +3926,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             subagent_trajectories = None
             if "subagent_trajectories" in metadata:
                 subagent_trajectories = json.loads(metadata["subagent_trajectories"])
+            observations = None
+            if rollout_id is not None and "agent_observations" in metadata:
+                observations = AgentObservationBundle.model_validate_json(metadata["agent_observations"])
 
             return SWEBenchVerifyResponse(
                 responses_create_params=responses_create_params,
@@ -3699,6 +3939,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                     metadata["instance_config"]
                 ).model_dump(),
                 subagent_trajectories=subagent_trajectories,
+                ng_agent_observations=observations,
             )
 
 

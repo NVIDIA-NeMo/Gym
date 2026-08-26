@@ -25,7 +25,7 @@
 # --no-config bypasses the project's sys_platform=='never' overrides.
 set -euo pipefail
 
-if python -c "import cv2, torchvision, torchaudio" 2>/dev/null; then
+if python -c "import cv2, PyNvVideoCodec, torchcodec, torchvision, torchaudio" 2>/dev/null; then
     echo "[codec-deps] Already installed, skipping."
     exit 0
 fi
@@ -33,6 +33,8 @@ fi
 echo "[codec-deps] Installing codec-bearing packages..."
 uv pip install --no-config \
     "opencv-python-headless==5.0.0.93" \
+    "pynvvideocodec==2.0.4" \
+    "torchcodec==0.16.0" \
     "torchvision==0.26.0" \
     "torchaudio==2.11.0"
 

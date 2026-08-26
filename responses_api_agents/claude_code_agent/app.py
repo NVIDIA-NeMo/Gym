@@ -318,13 +318,18 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         return self.config.anthropic_base_url or ""
 
     def _resolve_call_base_url(self, rollout_id: Optional[str]) -> str:
-        """Base URL for the CLI's model calls, with the per-rollout capture prefix applied only when a
-        Gym model server is configured. A real Anthropic endpoint (``model_server`` unset) has no
-        prefix-stripping middleware, so prefixing it would 404 every call.
+        """Return the CLI model-call URL with its rollout prefix.
+
+        Apply the prefix only for a configured Gym model server.
+        A real Anthropic endpoint has no prefix-stripping middleware.
         """
         base_url = self._resolve_base_url()
         if base_url and self.config.model_server:
-            base_url = apply_rollout_prefix(base_url, rollout_id)
+            base_url = apply_rollout_prefix(
+                base_url,
+                rollout_id,
+                token_capture=self._token_id_capture_enabled(),
+            )
         return base_url
 
     def _build_settings(self) -> dict[str, Any]:

@@ -84,9 +84,14 @@ dependencies = [
 
     # OpenAI: We leverage OpenAI Responses, Chat Completions, and Completions schemas for Nemo Gym abstractions. It may also be used to directly query endpoints.
     # We specifically upper bound this OpenAI dependency since the version bumps so frequently.
-    # Updated Wed Feb 17, 2026 with openai<=2.7.2
-    # License: Apache 2.0 https://github.com/openai/openai-python/blob/a8258744cbecf51321587fc870e8920bd2c07809/LICENSE
-    "openai<=2.7.2",
+    # Pinned to a single version, not a range.
+    # Gym subclasses the SDK's pydantic models and mirrors its Responses item union by hand.
+    # Each version needs its own audit, so a range would claim support for versions nobody tested.
+    # 2.45.0 makes InputTokensDetails.cache_write_tokens required, which NeMoGymResponseInputTokensDetails cannot satisfy.
+    # Moving this pin means re-running tests/unit_tests/test_openai_utils.py, which names each item type Gym cannot represent.
+    # Updated Tue Aug 11, 2026 with openai==2.44.0
+    # License: Apache 2.0 https://github.com/openai/openai-python/blob/v2.44.0/LICENSE
+    "openai==2.44.0",
 
     # Anthropic: We leverage the Anthropic Messages schemas (request/response Python types) for the
     # /v1/messages <-> Responses mapping in nemo_gym/anthropic_converter.py. Types only — we never
@@ -237,12 +242,12 @@ all = [
 
 vllm = [
     # Pin to the same version used by local_vllm_model / genrm_model server venvs.
-    # Updated: Mon Aug 04, 2026 with vllm==0.24.0
-    "vllm==0.24.0",
-    # Pin flashinfer to the exact version vllm 0.24.0 specifies, ensuring pre-compiled
+    # Updated: Mon Aug 24, 2026 with vllm==0.25.1
+    "vllm==0.25.1",
+    # Pin flashinfer to the exact version vllm 0.25.1 specifies, ensuring pre-compiled
     # CUDA kernels are used (avoids JIT compilation on first generation == slow step time).
     # flashinfer>=0.2 bundles compiled kernels in the python package directly.
-    "flashinfer-python==0.6.12",
+    "flashinfer-python==0.6.13",
 ]
 
 sandbox = [
@@ -343,6 +348,8 @@ dev = [
 # update the script when uv lock bumps them.
 codec = [
     "opencv-python-headless",
+    "pynvvideocodec",
+    "torchcodec",
     "torchvision",
     "torchaudio",
 ]
@@ -374,6 +381,8 @@ override-dependencies = [
     # [tool.uv] override-dependencies (pyproject.toml servers), which takes
     # precedence. Reinstall for testing via docker/install_codec_deps.sh.
     "opencv-python-headless; sys_platform == 'never'",
+    "pynvvideocodec; sys_platform == 'never'",
+    "torchcodec; sys_platform == 'never'",
     "torchvision; sys_platform == 'never'",
     "torchaudio; sys_platform == 'never'",
     "pycountry; sys_platform == 'never'",
