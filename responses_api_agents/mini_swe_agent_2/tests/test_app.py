@@ -344,7 +344,7 @@ class TestApp:
 
     def test_sandbox_resource_profiles_override_static_resources(self) -> None:
         spec = _sandbox_spec_for_instance(
-            {"resources": {"cpu": 1, "memory_mib": 8192, "disk_gib": 20}},
+            {"resource_limits": {"cpu": 1, "memory_mib": 8192, "disk_gib": 20}},
             resource_profiles=[
                 {"cpu": 0.25, "memory_mib": 3072, "disk_gib": 1},
                 {"cpu": 0.5, "memory_mib": 4096, "disk_gib": 1},
@@ -352,11 +352,21 @@ class TestApp:
             instance_id="django__django-12345",
         )
 
-        assert spec["resources"] in (
+        assert spec["resource_limits"] in (
             {"cpu": 0.25, "memory_mib": 3072, "disk_gib": 1},
             {"cpu": 0.5, "memory_mib": 4096, "disk_gib": 1},
         )
         assert _sandbox_spec_for_instance(None, resource_profiles=None, instance_id="task") == {}
+
+        # A spec still using the deprecated `resources` key keeps it, so the
+        # SandboxSpec deprecation warning fires downstream.
+        legacy = _sandbox_spec_for_instance(
+            {"resources": {"cpu": 1}},
+            resource_profiles=[{"cpu": 0.25}],
+            instance_id="task",
+        )
+        assert "resource_limits" not in legacy
+        assert legacy["resources"] == {"cpu": 0.25}
 
     def test_sandbox_provider_config_dump_strips_api_key(self) -> None:
         provider = {

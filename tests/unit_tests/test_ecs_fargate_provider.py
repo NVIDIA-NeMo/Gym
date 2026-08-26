@@ -407,7 +407,7 @@ def test_apply_spec_overrides_maps_resources_and_ttl():
         image="img",
         ttl_s=3600,
         ready_timeout_s=120,
-        resources={"cpu": 2, "memory_mib": 4096, "disk_gib": 50},
+        resource_limits={"cpu": 2, "memory_mib": 4096, "disk_gib": 50},
     )
     out = _apply_spec_overrides(cfg, spec)
     assert out.max_task_lifetime_sec == 3600
@@ -424,7 +424,7 @@ def test_apply_spec_overrides_rejects_gpu():
 
     cfg = engine.EcsFargateConfig(region="us-east-1")
     with pytest.raises(SandboxCreateError, match="GPU"):
-        _apply_spec_overrides(cfg, SandboxSpec(image="img", resources={"gpu": 1}))
+        _apply_spec_overrides(cfg, SandboxSpec(image="img", resource_limits={"gpu": 1}))
 
 
 # ── Phase B review fixes ──────────────────────────────────────────────

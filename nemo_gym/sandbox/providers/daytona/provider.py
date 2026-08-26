@@ -414,18 +414,18 @@ def _coerce_int(name: str, value: Any) -> int:
 
 def _quantity_to_int(name: str, value: Any) -> int:
     if isinstance(value, bool):
-        raise ValueError(f"resources.{name} must be an integer-like quantity")
+        raise ValueError(f"resource_limits.{name} must be an integer-like quantity")
     if isinstance(value, int):
         return value
     if isinstance(value, float):
         if not value.is_integer():
-            raise ValueError(f"resources.{name} must be an integer-like quantity")
+            raise ValueError(f"resource_limits.{name} must be an integer-like quantity")
         return int(value)
 
     text = str(value).strip()
     match = re.fullmatch(r"(\d+(?:\.\d+)?)([A-Za-z]*)", text)
     if match is None:
-        raise ValueError(f"resources.{name} must be an integer-like quantity")
+        raise ValueError(f"resource_limits.{name} must be an integer-like quantity")
     number = float(match.group(1))
     unit = match.group(2).lower()
     if name == "cpu" and unit == "m":
@@ -434,7 +434,7 @@ def _quantity_to_int(name: str, value: Any) -> int:
         return math.ceil(number / 1024)
     if unit in {"", "g", "gb", "gi", "gib"}:
         return math.ceil(number)
-    raise ValueError(f"resources.{name} uses unsupported unit {unit!r}")
+    raise ValueError(f"resource_limits.{name} uses unsupported unit {unit!r}")
 
 
 def _spec_extensions(spec: SandboxSpec) -> dict[str, str]:
@@ -458,7 +458,7 @@ def _resources_requested(resources: SandboxResources | Mapping[str, Any]) -> boo
 
 def _mib_to_gib(name: str, value: Any) -> int:
     if isinstance(value, bool):
-        raise ValueError(f"resources.{name} must be an integer-like quantity")
+        raise ValueError(f"resource_limits.{name} must be an integer-like quantity")
     return math.ceil(float(value) / 1024)
 
 
@@ -760,12 +760,12 @@ class DaytonaProvider:
         kwargs = self._base_create_kwargs(spec)
         if spec.image is not None:
             kwargs["image"] = spec.image
-            resources = _to_resources(spec.resources) if _resources_requested(spec.resources) else None
+            resources = _to_resources(spec.resource_limits) if _resources_requested(spec.resource_limits) else None
             if resources is not None:
                 kwargs["resources"] = resources
             return ImageParams(**kwargs)
         if snapshot_id is not None:
-            if _resources_requested(spec.resources):
+            if _resources_requested(spec.resource_limits):
                 raise ValueError("Daytona snapshot creation does not support resource overrides")
             kwargs["snapshot"] = snapshot_id
             return SnapshotParams(**kwargs)

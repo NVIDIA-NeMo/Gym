@@ -196,15 +196,15 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
 
     def _build_spec(self) -> SandboxSpec:
         config = self.task_env_config
-        resources: dict[str, Any] = {}
+        resource_limits: dict[str, Any] = {}
         if config.cpus:
-            resources["cpu"] = float(config.cpus)
+            resource_limits["cpu"] = float(config.cpus)
         if config.memory_mb:
-            resources["memory_mib"] = int(config.memory_mb)
+            resource_limits["memory_mib"] = int(config.memory_mb)
         if config.storage_mb:
-            resources["disk_gib"] = max(1, round(config.storage_mb / 1024))
+            resource_limits["disk_gib"] = max(1, round(config.storage_mb / 1024))
         if config.gpus:
-            resources["gpu"] = int(config.gpus)
+            resource_limits["gpu"] = int(config.gpus)
 
         metadata = {
             "harbor-session": self.session_id,
@@ -220,7 +220,7 @@ class NemoGymSandboxEnvironment(BaseEnvironment):
             workdir=self._workdir,
             env=self._sandbox_env,
             metadata=metadata,
-            resources=resources,
+            resource_limits=resource_limits,
             provider_options=dict(self._sandbox_provider_options),
         )
 

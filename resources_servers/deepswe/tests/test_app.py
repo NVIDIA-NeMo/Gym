@@ -148,7 +148,7 @@ async def test_create_sandbox_scales_phase_limits_from_task_toml(
 
     assert created is sandbox
     spec = sandbox.start.await_args.args[0]
-    assert spec.resources == expected_resources
+    assert spec.resource_limits == expected_resources
     assert spec.image == UPSTREAM_IMAGE
 
 
@@ -159,7 +159,7 @@ async def test_create_sandbox_allows_resource_multiplier_and_explicit_overrides(
     config = _config(task_assets)
     config.task_cpu_multiplier = 1.5
     config.task_memory_multiplier = 1.25
-    config.sandbox_config = {"resources": {"memory_mib": 20000}}
+    config.sandbox_config = {"resource_limits": {"memory_mib": 20000}}
     server = DeepSWEResourcesServer(
         config=config,
         server_client=MagicMock(spec=ServerClient),
@@ -173,7 +173,7 @@ async def test_create_sandbox_allows_resource_multiplier_and_explicit_overrides(
     await server._create_sandbox(server._task_store.get("example-task"), phase="agent")
 
     spec = sandbox.start.await_args.args[0]
-    assert spec.resources == SandboxResources(cpu=3, memory_mib=20000, disk_gib=20)
+    assert spec.resource_limits == SandboxResources(cpu=3, memory_mib=20000, disk_gib=20)
 
 
 async def test_golden_verify_passes_structured_result(

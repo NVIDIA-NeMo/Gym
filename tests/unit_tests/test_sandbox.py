@@ -379,12 +379,12 @@ def test_rewrite_image_validation() -> None:
 
 
 def test_sandbox_resources_validation() -> None:
-    spec = SandboxSpec(resources={"cpu": "0.5", "memory_mib": "4096", "disk_gib": "8"}, ports=[8000, "9222"])
-    assert spec.resources == SandboxResources(cpu=0.5, memory_mib=4096, disk_gib=8)
+    spec = SandboxSpec(resource_limits={"cpu": "0.5", "memory_mib": "4096", "disk_gib": "8"}, ports=[8000, "9222"])
+    assert spec.resource_limits == SandboxResources(cpu=0.5, memory_mib=4096, disk_gib=8)
     assert spec.ports == (8000, 9222)
 
     with pytest.raises(ValueError, match="Unknown sandbox resource keys"):
-        SandboxSpec(resources={"memory": "4Gi"})
+        SandboxSpec(resource_limits={"memory": "4Gi"})
     with pytest.raises(ValueError, match="Duplicate sandbox TCP port"):
         SandboxSpec(ports=[8000, 8000])
     with pytest.raises(ValueError, match="between 1 and 65535"):
@@ -393,6 +393,17 @@ def test_sandbox_resources_validation() -> None:
         SandboxSpec(ports=[8000.5])
     with pytest.raises(ValueError, match="absolute URL"):
         SandboxEndpoint(endpoint="/relative/path")
+
+
+def test_sandbox_resources_deprecated_alias_maps_to_resource_limits() -> None:
+    with pytest.warns(DeprecationWarning, match="resource_limits"):
+        spec = SandboxSpec(resources={"cpu": 1})
+    assert spec.resource_limits == SandboxResources(cpu=1.0)
+
+    # An explicit resource_limits wins over the deprecated alias.
+    with pytest.warns(DeprecationWarning, match="resource_limits"):
+        spec = SandboxSpec(resource_limits={"cpu": 2}, resources={"cpu": 1})
+    assert spec.resource_limits == SandboxResources(cpu=2.0)
 
 
 def test_sandbox_endpoint_is_an_optional_provider_capability() -> None:
@@ -1154,7 +1165,7 @@ def test_mini_swe_sandbox_environment_owns_conda_setup(monkeypatch) -> None:
         spec={
             "image_rewrites": [{"from": "upstream/", "to": "mirror/"}],
             "metadata": {"suite": "unit"},
-            "resources": {"cpu": 1},
+            "resource_limits": {"cpu": 1},
         },
         env={"STATIC_KEY": "static-value"},
         forward_env=["FORWARDED_KEY"],
@@ -1179,7 +1190,7 @@ def test_mini_swe_sandbox_environment_owns_conda_setup(monkeypatch) -> None:
             "FORWARDED_KEY": "forwarded-value",
             "STATIC_KEY": "static-value",
         }
-        assert provider.created_specs[0].resources == SandboxResources(cpu=1.0)
+        assert provider.created_specs[0].resource_limits == SandboxResources(cpu=1.0)
 
         result = env.execute("pytest -q", is_eval=True)
         assert result == {"output": "ok", "returncode": 0, "exception_info": ""}

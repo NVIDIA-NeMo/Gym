@@ -112,13 +112,13 @@ def test_build_spec_from_config(tmp_path):
         sandbox_spec={
             "image": str(image),
             "ready_timeout_s": 600,
-            "resources": {"cpu": 4, "memory_mib": 8192},
+            "resource_limits": {"cpu": 4, "memory_mib": 8192},
         }
     )
     spec = agent._build_spec("task_x")
     assert spec.image == str(image)
     assert spec.ready_timeout_s == 600
-    assert spec.resources.cpu == 4 and spec.resources.memory_mib == 8192
+    assert spec.resource_limits.cpu == 4 and spec.resource_limits.memory_mib == 8192
     assert spec.metadata == {"task_id": "task_x"}
     # the per-task env (incl the in-sandbox gateway token) is injected into the spec
     assert spec.env["TASK_ID"] == "task_x"

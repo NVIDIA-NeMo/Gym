@@ -36,7 +36,7 @@ spec = SandboxSpec(
     workdir="/sandbox",
     env={"GREETING": "hello"},
     files={"/sandbox/input.txt": "some seed content"},
-    resources={"cpu": 2, "memory_mib": 4096},
+    resource_limits={"cpu": 2, "memory_mib": 4096},
     ports=[8000],
 )
 
@@ -94,7 +94,7 @@ docker:
 | `security_opt` | `[]` | `--security-opt` values, e.g. `["no-new-privileges"]` (blocks setuid escalation). |
 | `pids_limit` | `None` | Cap the container's process count (`--pids-limit`). |
 | `extra_run_args` | `[]` | Extra raw flags appended to `docker run`. |
-| `apply_resource_limits` | `true` | Apply CPU/memory flags from `SandboxSpec.resources`. |
+| `apply_resource_limits` | `true` | Apply CPU/memory flags from `SandboxSpec.resource_limits`. |
 | `publish_host` | `127.0.0.1` | Host address used for dynamic mappings declared by `SandboxSpec.ports`. |
 
 ### `exec` — `DockerExecConfig`

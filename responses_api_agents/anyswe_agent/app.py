@@ -327,7 +327,9 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             env=config.pop("env", {}),
             files=files or {},
             metadata=metadata,
-            resources=SandboxResources.from_mapping(config.pop("resources", {})),
+            resource_limits=SandboxResources.from_mapping(config.pop("resource_limits", {})),
+            # Deprecated alias; SandboxSpec warns and maps it onto resource_limits.
+            resources=config.pop("resources", None),
             entrypoint=config.pop("entrypoint", None),
             provider_options=provider_options,
         )

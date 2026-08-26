@@ -464,7 +464,7 @@ class OpenShellProvider:
             kwargs["policy"] = self._build_policy(options.policy)
         if options.providers:
             kwargs["providers"] = options.providers
-        resources = spec.resources
+        resources = spec.resource_limits
         if resources.gpu:
             kwargs["resource_requirements"] = openshell_pb2.ResourceRequirements(
                 gpu=openshell_pb2.GpuResourceRequirements(count=resources.gpu)

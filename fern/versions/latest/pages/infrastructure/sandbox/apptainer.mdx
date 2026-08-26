@@ -81,7 +81,7 @@ These binds are added on top of the provider's staging mount and `exec.default_b
 | `env` | Passed as `--env KEY=VALUE` at instance start and on each `exec()`. |
 | `workdir` | Used as the default command working directory through `--pwd`. |
 | `files` | Seed files uploaded before the first command. |
-| `resources` | Mapped to cgroup and GPU flags when supported by the host. |
+| `resource_limits` | Mapped to cgroup and GPU flags when supported by the host. |
 | `provider_options.binds` | Extra per-sandbox bind mounts. |
 | `ttl_s` | Not supported by Apptainer; the provider logs a warning and ignores it. |
 

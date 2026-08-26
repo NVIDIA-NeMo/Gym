@@ -316,8 +316,8 @@ class DockerProvider:
         for key, value in spec.env.items():
             argv += ["--env", f"{key}={value}"]
         if cfg.apply_resource_limits:
-            argv += _resource_limit_flags(spec.resources)
-        argv += _resource_passthrough_flags(spec.resources)
+            argv += _resource_limit_flags(spec.resource_limits)
+        argv += _resource_passthrough_flags(spec.resource_limits)
         if cfg.network is not None:
             argv += ["--network", cfg.network]
         if cfg.read_only:

@@ -224,7 +224,7 @@ async def test_direct_create_passes_resource_requests_to_sdk_create(
     await provider.create(
         SandboxSpec(
             image="mirror.gcr.io/astral/uv:python3.12-bookworm-slim",
-            resources={"cpu": 1, "memory_mib": 8192, "disk_gib": 30},
+            resource_limits={"cpu": 1, "memory_mib": 8192, "disk_gib": 30},
             provider_options={"resource_requests": {"cpu": 0.5, "memory_mib": 2048, "disk_gib": 30}},
         ),
     )
@@ -1177,7 +1177,7 @@ async def test_create_once_and_connect_after_create_error_paths(
         image="image:tag",
         ttl_s=10,
         ready_timeout_s=20,
-        resources=SandboxResources(cpu=2, memory_mib=8192, disk_gib=20, gpu=1, gpu_type="H100"),
+        resource_limits=SandboxResources(cpu=2, memory_mib=8192, disk_gib=20, gpu=1, gpu_type="H100"),
         entrypoint=["/bin/sh"],
         provider_options={
             "snapshot_id": "snapshot-1",

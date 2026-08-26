@@ -101,7 +101,9 @@ class MiniSWESandboxEnvironment:
                     "nemo_gym_agent": "mini_swe_agent_2",
                     "instance_id": (self.config.instance_id or "unknown")[:63],
                 },
-                resources=SandboxResources.from_mapping(spec_config.pop("resources", {})),
+                resource_limits=SandboxResources.from_mapping(spec_config.pop("resource_limits", {})),
+                # Deprecated alias; SandboxSpec warns and maps it onto resource_limits.
+                resources=spec_config.pop("resources", None),
                 entrypoint=spec_config.pop("entrypoint", None),
                 provider_options=provider_options,
             )

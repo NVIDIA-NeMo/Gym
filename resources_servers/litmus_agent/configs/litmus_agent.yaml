@@ -54,7 +54,7 @@ litmus_agent:
         ready_timeout_s: 1200
         # OpenSandbox does not create workdir; must be a dir that exists in the image.
         workdir: /tmp
-        resources:
+        resource_limits:
           cpu: 2
           memory_mib: 4096
           disk_gib: 10

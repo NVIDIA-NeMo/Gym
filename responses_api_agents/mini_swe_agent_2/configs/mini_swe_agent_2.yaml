@@ -31,7 +31,7 @@ mini_swe_agent_2:
         ttl_s: 18000
         ready_timeout_s: 1200
         # Limits (burst ceiling); memory-spiky test suites OOM-kill below this.
-        resources:
+        resource_limits:
           cpu: 2
           memory_mib: 8192
           # 30 GiB works on every provider: within Fargate's 21-200 GiB ephemeral range

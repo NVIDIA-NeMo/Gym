@@ -213,11 +213,14 @@ def _sandbox_spec_for_instance(
     if not resource_profiles:
         return instance_spec
 
-    resources = dict(instance_spec.get("resources") or {})
+    # Merge into whichever key the spec uses so a deprecated `resources` key
+    # still reaches SandboxSpec and emits its deprecation warning.
+    key = "resources" if "resources" in instance_spec and "resource_limits" not in instance_spec else "resource_limits"
+    resources = dict(instance_spec.get(key) or {})
     digest = hashlib.sha256(instance_id.encode("utf-8")).digest()
     profile = resource_profiles[int.from_bytes(digest[:4], "big") % len(resource_profiles)]
     resources.update(profile)
-    instance_spec["resources"] = resources
+    instance_spec[key] = resources
     return instance_spec
 
 

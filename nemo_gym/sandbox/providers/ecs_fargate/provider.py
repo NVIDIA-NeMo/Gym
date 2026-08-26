@@ -85,11 +85,11 @@ def _apply_spec_overrides(cfg: engine.EcsFargateConfig, spec: SandboxSpec) -> en
         overrides["startup_timeout_sec"] = float(spec.ready_timeout_s)
     if spec.ttl_s is not None:
         overrides["max_task_lifetime_sec"] = int(spec.ttl_s)
-    resources = spec.resources
+    resources = spec.resource_limits
     if not isinstance(resources, SandboxResources):
         resources = SandboxResources.from_mapping(resources)
     if resources.gpu:
-        raise SandboxCreateError("ECS Fargate does not support GPU sandboxes (spec.resources.gpu)")
+        raise SandboxCreateError("ECS Fargate does not support GPU sandboxes (spec.resource_limits.gpu)")
     if resources.cpu is not None:
         overrides["cpu"] = str(int(resources.cpu * 1024))
     if resources.memory_mib is not None:

@@ -173,7 +173,7 @@ mini_swe_agent_2:
       sandbox_spec:
         ttl_s: 18000
         ready_timeout_s: 1200
-        resources:
+        resource_limits:
           cpu: 2
           memory_mib: 8192
           disk_gib: 20
@@ -262,7 +262,7 @@ my_provider = "my_pkg.provider:MyProvider"
 
 Optional `sandbox_resource_profiles` can be configured as a list of resource
 maps. When present, the agent hashes `instance_id` and deterministically merges
-one profile into `sandbox_spec.resources`. This is useful for spreading
+one profile into `sandbox_spec.resource_limits`. This is useful for spreading
 SWE-bench tasks across a small set of resource sizes without changing the input
 data.
 
@@ -655,7 +655,7 @@ environment:
     opensandbox:
       connection: ...
   spec:
-    resources: ...
+    resource_limits: ...
     provider_options:
       platform: ...
     metadata: ...

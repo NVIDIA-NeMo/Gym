@@ -232,7 +232,7 @@ async def test_create_builds_argv_and_runs_probe(fake_binary: str, monkeypatch: 
         image="ubuntu:22.04",
         workdir="/sandbox",
         env={"FOO": "bar"},
-        resources={"cpu": 2, "memory_mib": 1024, "gpu": 1},
+        resource_limits={"cpu": 2, "memory_mib": 1024, "gpu": 1},
         ports=[5000, 9222],
     )
     handle = await provider.create(spec)
@@ -284,7 +284,7 @@ async def test_create_skips_cgroup_resource_limits(fake_binary: str, monkeypatch
         return (0, "", "")
 
     provider, rec = _make_provider(monkeypatch, responder, create={"apply_resource_limits": False})
-    await provider.create(SandboxSpec(image="ubuntu:22.04", resources={"cpu": 2, "memory_mib": 1024, "gpu": 1}))
+    await provider.create(SandboxSpec(image="ubuntu:22.04", resource_limits={"cpu": 2, "memory_mib": 1024, "gpu": 1}))
 
     run_argv = rec.calls[0]["argv"]
     assert "--cpus" not in run_argv

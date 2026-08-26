@@ -330,7 +330,7 @@ async def test_create_success_maps_spec(make_provider, fake_client: FakeClient) 
         env={"FOO": "bar"},
         metadata={"task": "demo", SANDBOX_LABEL: "user-override"},
         workdir="/workspace",
-        resources={"gpu": 2},
+        resource_limits={"gpu": 2},
         provider_options={"providers": ["nvidia"]},
     )
     handle = await provider.create(spec)
@@ -410,7 +410,7 @@ async def test_create_unknown_provider_option_raises(make_provider, fake_client:
 async def test_create_warns_on_unmapped_resources(make_provider, fake_client: FakeClient, caplog) -> None:
     provider = make_provider()
     with caplog.at_level("WARNING"):
-        await provider.create(SandboxSpec(resources={"cpu": 2, "memory_mib": 1024}))
+        await provider.create(SandboxSpec(resource_limits={"cpu": 2, "memory_mib": 1024}))
     assert "not mapped by this provider" in caplog.text
     assert "template_resources" in caplog.text
 
