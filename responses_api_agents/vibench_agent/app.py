@@ -66,6 +66,14 @@ from responses_api_agents.opencode_sandboxed_agent.app import (
 # are handed the same PRD text separately at grade time.
 PRD_FILENAME = "prd.txt"
 
+# Dependency and VCS trees never travel with the app. .venv/venv matter beyond size: their
+# bin/python symlinks point outside the app dir, which the verifier refuses as an escaping
+# link -- rejecting the entire artifact over a directory the grader would rebuild anyway.
+HARVEST_EXCLUDES = " ".join(
+    f"--exclude=./{name}"
+    for name in ("node_modules", ".git", ".venv", "venv", "env", "__pycache__", ".mypy_cache", ".pytest_cache")
+)
+
 # Bind addresses that are valid on the Gym host but mean "this container" inside a
 # bridged Docker sandbox. host.docker.internal is added via --add-host=host-gateway.
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "0.0.0.0", "::1", "[::1]"})
@@ -189,10 +197,15 @@ class VibenchAgent(OpenCodeSandboxedAgent):
     async def _harvest_app(self, sandbox: AsyncSandbox, session_id: str) -> Optional[str]:
         """Tar the built app out of the sandbox into ``artifact_dir``.
 
-        node_modules is excluded because it is huge and platform-specific -- the grading
-        stack reinstalls dependencies anyway -- and prd.txt because the grader supplies its
-        own copy. Returns None when nothing could be harvested, which the resources server
-        scores as a build failure.
+        Dependency trees are excluded because they are huge and machine-specific, and
+        setup-environment.sh reinstalls them anyway. That is not only a size concern: a
+        virtualenv's bin/python symlinks to the system interpreter *outside* the app, so
+        harvesting one makes the verifier refuse the whole tarball as an escaping link and
+        score a working app as a build failure. prd.txt is dropped because the grader
+        supplies its own copy.
+
+        Returns None when nothing could be harvested, which the resources server scores as a
+        build failure.
         """
         artifact_root = Path(self.config.artifact_dir).expanduser()
         artifact_root.mkdir(parents=True, exist_ok=True)
@@ -202,7 +215,7 @@ class VibenchAgent(OpenCodeSandboxedAgent):
         try:
             result = await sandbox.exec(
                 f"cd {quote(self.config.app_workdir)} && tar "
-                f"--exclude=./node_modules --exclude=./.git --exclude=./{PRD_FILENAME} "
+                f"{HARVEST_EXCLUDES} --exclude=./{PRD_FILENAME} "
                 f"-cf {quote(remote)} .",
                 timeout_s=self.config.harvest_timeout_s,
             )

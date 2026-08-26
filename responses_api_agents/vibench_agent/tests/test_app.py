@@ -95,8 +95,8 @@ class TestHarvest:
         assert Path(path).parent == Path(agent.config.artifact_dir).expanduser()
 
     @pytest.mark.asyncio
-    async def test_excludes_node_modules_and_the_prd(self, tmp_path):
-        """node_modules is huge and platform-specific; the grader supplies its own PRD."""
+    async def test_excludes_dependency_trees_and_the_prd(self, tmp_path):
+        """Dependency trees are machine-specific and setup-environment.sh rebuilds them."""
         agent = make_agent(tmp_path)
         sandbox = _FakeSandbox()
 
@@ -106,6 +106,19 @@ class TestHarvest:
         assert "--exclude=./node_modules" in cmd
         assert "--exclude=./.git" in cmd
         assert f"--exclude=./{PRD_FILENAME}" in cmd
+
+    @pytest.mark.asyncio
+    async def test_excludes_virtualenvs(self, tmp_path):
+        """A venv's bin/python symlinks outside the app dir, so harvesting one makes the
+        verifier refuse the whole tarball and score a working app as a build failure."""
+        agent = make_agent(tmp_path)
+        sandbox = _FakeSandbox()
+
+        await agent._harvest_app(sandbox, "sess-1")
+
+        cmd = sandbox.execs[0]
+        for name in (".venv", "venv", "__pycache__"):
+            assert f"--exclude=./{name}" in cmd, f"{name} would be harvested"
 
     @pytest.mark.asyncio
     async def test_tar_failure_yields_no_artifact(self, tmp_path):
