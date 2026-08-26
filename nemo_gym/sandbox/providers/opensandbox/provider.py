@@ -39,6 +39,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxStatus,
 )
 from nemo_gym.sandbox.providers.utils import coerce_config as _coerce_config
+from nemo_gym.sandbox.utils import await_cleanup
 
 
 LOGGER = logging.getLogger(__name__)
@@ -668,17 +669,16 @@ class OpenSandboxProvider:
             kwargs["request_timeout"] = timedelta(seconds=request_timeout_s)
         if self._connection.use_server_proxy:
             kwargs["use_server_proxy"] = True
-            # The SDK's execd-facing clients (health ping, commands, files)
-            # send only ConnectionConfig.headers — api_key alone never reaches
-            # proxied /proxy/* routes, so servers that enforce auth there 401
-            # every health ping and create times out at ready_timeout. Inject
-            # the key only in proxy mode: a direct sandbox endpoint runs
-            # untrusted code and must never see it.
             if self._connection.api_key is not None:
                 kwargs["headers"] = {"OPEN-SANDBOX-API-KEY": self._connection.api_key}
         if self._connection.keepalive_expiry_s is not None or self._connection.disable_connection_pooling:
             kwargs["transport"] = self._get_transport()
-        return ConnectionConfig(**kwargs)
+        config = ConnectionConfig(**kwargs)
+        if self._connection.use_server_proxy and (api_key := config.get_api_key()):
+            # Execd-facing SDK clients send only ConnectionConfig.headers.
+            # Direct endpoints run untrusted code and must never see this key.
+            config.headers.setdefault("OPEN-SANDBOX-API-KEY", api_key)
+        return config
 
     def _get_transport(self) -> Any:
         """Return the provider-owned shared transport, building it on first use."""
@@ -1015,29 +1015,35 @@ class OpenSandboxProvider:
     ) -> SandboxEndpoint:
         """Resolve one client-reachable direct or server-proxied service URL."""
 
+        get_endpoint = getattr(handle.raw, "get_endpoint", None)
+        if get_endpoint is None:
+            raise NotImplementedError(
+                "The installed opensandbox SDK does not expose Sandbox.get_endpoint; "
+                "sandbox service endpoints require opensandbox>=0.1.15"
+            )
         resolved = await self._await_sdk_operation(
-            lambda: handle.raw.get_endpoint(port),
+            lambda: get_endpoint(port),
             operation="get_endpoint",
             sandbox_id=handle.sandbox_id,
             timeout_s=(
                 float(self._connection.request_timeout_s) if self._connection.request_timeout_s is not None else None
             ),
         )
-        endpoint_url = str(resolved.endpoint or "")
+        endpoint_url = str(getattr(resolved, "endpoint", "") or "")
         if not endpoint_url:
             raise RuntimeError(f"OpenSandbox returned an empty endpoint for sandbox {handle.sandbox_id!r} port {port}")
+        connection = handle.raw.connection_config
         if "://" not in endpoint_url:
             # Use the SDK handle's effective configuration so environment-
             # resolved domains and protocols match the lifecycle request.
-            scheme = urlsplit(handle.raw.connection_config.get_base_url()).scheme or "http"
+            scheme = urlsplit(connection.get_base_url()).scheme or "http"
             endpoint_url = f"{scheme}://{endpoint_url.lstrip('/')}"
-        headers = dict(handle.raw.connection_config.headers)
-        # Match the SDK's service adapters: connection-wide headers apply to
-        # every request, while endpoint-specific routing or auth headers win.
-        # The upstream proxy-auth fix adds the management API key to
-        # ConnectionConfig.headers only in server-proxy mode, so direct
-        # sandbox endpoints never receive it.
-        headers.update(resolved.headers)
+        headers = dict(getattr(connection, "headers", None) or {})
+        headers.update(getattr(resolved, "headers", None) or {})
+        if not getattr(connection, "use_server_proxy", self._connection.use_server_proxy):
+            # Direct endpoints terminate at untrusted sandbox code and must
+            # never receive the management credential.
+            headers.pop("OPEN-SANDBOX-API-KEY", None)
         return SandboxEndpoint(endpoint=endpoint_url, headers=headers)
 
     async def _create_once(self, spec: SandboxSpec) -> SandboxHandle:
@@ -1111,8 +1117,11 @@ class OpenSandboxProvider:
             if self._create.skip_health_check:
                 handle = await self._connect_after_create(created_handle, spec)
             await self._verify_created_handle(handle)
-        except Exception:
-            await self._cleanup_failed_create_handle(created_handle)
+        except BaseException:
+            # Once create returns an id, cancellation must not strand its
+            # remote sandbox. close() applies the configured cleanup bounds.
+            cleanup = asyncio.create_task(self._cleanup_failed_create_handle(created_handle))
+            await await_cleanup(cleanup)
             raise
         return handle
 
@@ -1531,7 +1540,7 @@ class OpenSandboxProvider:
 
     async def close(self, handle: SandboxHandle) -> None:
         """Terminate the sandbox and close local SDK resources."""
-        stop_error: Exception | None = None
+        stop_error: BaseException | None = None
         try:
             await self._await_sdk_operation(
                 lambda: handle.raw.kill(),
@@ -1539,7 +1548,7 @@ class OpenSandboxProvider:
                 sandbox_id=handle.sandbox_id,
                 timeout_s=self._operations.close_timeout_s,
             )
-        except Exception as e:
+        except BaseException as e:
             if not _is_missing_sandbox_delete_error(e):
                 stop_error = e
             else:
@@ -1563,8 +1572,9 @@ class OpenSandboxProvider:
                 handle.sandbox_id,
                 e,
             )
-
         if stop_error is not None:
+            if not isinstance(stop_error, Exception):
+                raise stop_error
             if close_error is not None:
                 raise RuntimeError(
                     "Failed to stop and close OpenSandbox sandbox "
