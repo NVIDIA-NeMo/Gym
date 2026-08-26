@@ -18,9 +18,11 @@ install_portable_python
 install_nemo_gym_deps
 
 echo "Installing hermes-agent ($HERMES_SPEC)"
-"$DEPS_DIR/bin/python3" -m pip install --force-reinstall --no-deps "$HERMES_SPEC"
-"$DEPS_DIR/bin/python3" -m pip install "$HERMES_SPEC"
+# HERMES_NIX_BUILD=1 bypasses the wheel-build restriction added in some branches.
+HERMES_NIX_BUILD=1 "$DEPS_DIR/bin/python3" -m pip install --force-reinstall --no-deps "$HERMES_SPEC"
+HERMES_NIX_BUILD=1 "$DEPS_DIR/bin/python3" -m pip install "$HERMES_SPEC"
 
 "$DEPS_DIR/bin/python3" -c "import model_tools; from run_agent import AIAgent; print('hermes-agent OK')"
 
+echo "$HERMES_SPEC" > "$DEPS_DIR/.hermes_spec"
 echo "hermes_agent deps ready at $DEPS_DIR"
