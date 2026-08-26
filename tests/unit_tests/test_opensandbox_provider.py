@@ -126,6 +126,15 @@ def test_sdk_import_helpers_and_retry_classification() -> None:
     assert opensandbox_provider._is_retryable_create_error(nonretryable_api_error) is False
     assert opensandbox_provider._is_retryable_create_error(SandboxException("gateway timeout")) is True
 
+    status_only_not_found = SandboxApiException("gone")
+    status_only_not_found.status_code = 404
+    assert opensandbox_provider._is_missing_sandbox_delete_error(status_only_not_found) is True
+    assert (
+        opensandbox_provider._is_missing_sandbox_delete_error(RuntimeError("[KUBERNETES::SANDBOX_NOT_FOUND]")) is True
+    )
+    assert opensandbox_provider._is_missing_sandbox_delete_error(RuntimeError("sandbox sandbox-1 not found")) is True
+    assert opensandbox_provider._is_missing_sandbox_delete_error(RuntimeError("http 500 boom")) is False
+
     retry_state = SimpleNamespace(
         outcome=SimpleNamespace(exception=lambda: RuntimeError("temporary")),
         next_action=SimpleNamespace(sleep=0.5),
@@ -432,6 +441,7 @@ def test_provider_validation_and_retry_helpers() -> None:
         {"operations": {"retry_max_delay_s": -1}},
         {"operations": {"command_retries": -1}},
         {"operations": {"close_timeout_s": 0}},
+        {"operations": {"status_poll_timeout_s": 0}},
         {"create": {"connect_attempt_timeout_s": 0}},
         {"create": {"connect_poll_s": 0}},
         {"create": {"image_pull_policy": "Sometimes"}},
@@ -897,16 +907,21 @@ async def test_exec_background_rejects_status_missing_a_field(
         await provider.exec(handle, "make build", timeout_s=30)
 
 
-async def test_exec_hard_cap_converts_wait_for_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A wedged exec (hard wall-clock cap tripping) surfaces as TimeoutError."""
+async def test_exec_hard_cap_labels_genuinely_wedged_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A wedged exec (hard wall-clock cap tripping) surfaces as the hard-cap TimeoutError.
+
+    The cap formula floors the real duration at minutes, so the test shrinks it
+    by patching asyncio.timeout to ignore the requested duration — the genuine
+    cancellation-to-TimeoutError conversion path still runs.
+    """
 
     class FakeRunCommandOpts:
         def __init__(self, **kwargs: Any) -> None:
             self.kwargs = kwargs
 
     class FakeCommands:
-        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:  # pragma: no cover
-            return SimpleNamespace(id="exec-wedged")
+        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:
+            await asyncio.Event().wait()  # wedged: never returns
 
     class FakeRaw:
         def __init__(self) -> None:
@@ -918,23 +933,77 @@ async def test_exec_hard_cap_converts_wait_for_timeout(monkeypatch: pytest.Monke
         lambda: (object, object, FakeRunCommandOpts, object, object),
     )
 
-    # Simulate the outer hard-cap wait_for timing out before _dispatch completes.
-    async def fake_wait_for(awaitable: Any, timeout: float | None = None) -> Any:
-        if asyncio.iscoroutine(awaitable):
-            awaitable.close()
-        raise asyncio.TimeoutError
-
-    monkeypatch.setattr(asyncio, "wait_for", fake_wait_for)
+    real_timeout = asyncio.timeout
+    monkeypatch.setattr(asyncio, "timeout", lambda delay: real_timeout(0.05))
 
     provider = opensandbox_provider.OpenSandboxProvider(
         connection={"request_timeout_s": 5},
         probe={"command": None},
-        operations={"background_exec": True},
     )
     handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-wedge", provider_name="opensandbox", raw=FakeRaw())
 
     with pytest.raises(TimeoutError, match="hard cap"):
         await provider.exec(handle, "sleep 999", timeout_s=30)
+
+
+async def test_exec_hard_cap_does_not_relabel_inner_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A TimeoutError raised inside the dispatch keeps its own message.
+
+    Since Python 3.11 asyncio.TimeoutError IS builtin TimeoutError, so a
+    wait_for-based cap caught e.g. an exhausted status-poll budget (a
+    minutes-scale failure) and relabeled it as a trip of the hours-scale hard
+    cap, corrupting the failure taxonomy. Only the cap's own expiry may carry
+    the wedged message.
+    """
+
+    class FakeRunCommandOpts:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class FakeCommands:
+        def __init__(self) -> None:
+            self.status_calls = 0
+
+        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:
+            return SimpleNamespace(id="exec-slowpolls")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            self.status_calls += 1
+            raise TimeoutError("simulated status poll budget expiry")
+
+        async def get_background_command_logs(self, execution_id: str) -> Any:  # pragma: no cover
+            return SimpleNamespace(content="ok", cursor=None)
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, FakeRunCommandOpts, object, object),
+    )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 120},
+        probe={"command": None},
+        operations={
+            "background_exec": True,
+            "retries": 1,
+            "retry_delay_s": 0.001,
+            "background_poll_interval_s": 0.01,
+        },
+    )
+    commands = FakeCommands()
+    handle = opensandbox_provider.SandboxHandle(
+        sandbox_id="sandbox-slowpolls", provider_name="opensandbox", raw=SimpleNamespace(commands=commands)
+    )
+
+    with pytest.raises(TimeoutError) as exc_info:
+        await provider.exec(handle, "echo ok", timeout_s=30)
+
+    # The poll-budget failure surfaced with its own message (after using its
+    # retry budget), not relabeled as the wall-clock hard cap tripping.
+    assert commands.status_calls == 2
+    assert "command status" in str(exc_info.value)
+    assert "hard cap" not in str(exc_info.value)
 
 
 @pytest.mark.parametrize("request_timeout_s", [None, 5])
@@ -1102,6 +1171,71 @@ async def test_provider_create_probe_and_close_error_paths(monkeypatch: pytest.M
                 raw=StopFailsCloseSucceedsRaw(),
             ),
         )
+
+
+async def test_close_treats_missing_sandbox_as_terminated_without_retry(caplog: pytest.LogCaptureFixture) -> None:
+    from opensandbox.exceptions import SandboxApiException  # noqa: PLC0415
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        probe={"command": None},
+        operations={"retries": 2, "retry_delay_s": 0, "retry_max_delay_s": 0},
+    )
+    not_found = SandboxApiException(
+        "Kill sandbox sandbox-1 failed: Sandbox 'sandbox-1' not found | "
+        "[KUBERNETES::SANDBOX_NOT_FOUND] Sandbox 'sandbox-1' not found"
+    )
+    not_found.status_code = 404
+    kill_calls = 0
+
+    class AlreadyGoneRaw:
+        async def kill(self) -> None:
+            nonlocal kill_calls
+            kill_calls += 1
+            raise not_found
+
+        async def close(self) -> None:
+            return None
+
+    with caplog.at_level(logging.DEBUG):
+        await provider.close(
+            opensandbox_provider.SandboxHandle(
+                sandbox_id="sandbox-1",
+                provider_name="opensandbox",
+                raw=AlreadyGoneRaw(),
+            ),
+        )
+
+    assert kill_calls == 1
+    assert any("already gone; treating terminate as success" in record.message for record in caplog.records)
+
+
+async def test_non_terminate_operation_still_raises_on_missing_sandbox() -> None:
+    from opensandbox.exceptions import SandboxApiException  # noqa: PLC0415
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        probe={"command": None},
+        operations={"retries": 2, "retry_delay_s": 0, "retry_max_delay_s": 0},
+    )
+    not_found = SandboxApiException("Get sandbox sandbox-1 failed: Sandbox 'sandbox-1' not found")
+    not_found.status_code = 404
+    get_info_calls = 0
+
+    class MissingRaw:
+        async def get_info(self) -> Any:
+            nonlocal get_info_calls
+            get_info_calls += 1
+            raise not_found
+
+    with pytest.raises(SandboxApiException, match="not found"):
+        await provider.status(
+            opensandbox_provider.SandboxHandle(
+                sandbox_id="sandbox-1",
+                provider_name="opensandbox",
+                raw=MissingRaw(),
+            ),
+        )
+
+    assert get_info_calls == 1
 
 
 async def test_create_once_and_connect_after_create_error_paths(
@@ -1575,3 +1709,135 @@ async def test_exec_persistent_502_raises_typed_backend_unreachable(
         await provider.exec(handle, "echo ok", timeout_s=30)
 
     assert calls["n"] == 3  # operations.retries + 1 submissions, then typed failure
+
+
+@pytest.mark.parametrize(
+    ("operations_overrides", "expected_status_timeout_s"),
+    [
+        ({}, 10.0),  # config default
+        ({"status_poll_timeout_s": 5.0}, 5.0),
+        ({"status_poll_timeout_s": None}, 120.0),  # falls back to the shared request budget
+    ],
+)
+@pytest.mark.asyncio
+async def test_exec_background_status_polls_use_dedicated_timeout(
+    monkeypatch: pytest.MonkeyPatch, operations_overrides: dict[str, Any], expected_status_timeout_s: float
+) -> None:
+    """Status polls get their own short budget; the submit and logs calls keep theirs.
+
+    Status polls are sub-second GETs, so inheriting the shared request budget
+    (tuned for long submits) lets each poll against an unreachable sandbox hang
+    for minutes. status_poll_timeout_s: None restores the shared budget.
+    """
+
+    class FakeRunCommandOpts:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class FakeCommands:
+        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:
+            return SimpleNamespace(id="exec-budget")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            return SimpleNamespace(running=False, exit_code=0, error=None)
+
+        async def get_background_command_logs(self, execution_id: str) -> Any:
+            return SimpleNamespace(content="ok", cursor=None)
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, FakeRunCommandOpts, object, object),
+    )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+
+    recorded: dict[str, float | None] = {}
+    real_await_sdk_call = opensandbox_provider.OpenSandboxProvider._await_sdk_call
+
+    async def recording_await_sdk_call(
+        self: Any, awaitable: Any, *, operation: str, sandbox_id: str, timeout_s: float | None
+    ) -> Any:
+        recorded[operation] = timeout_s
+        return await real_await_sdk_call(
+            self, awaitable, operation=operation, sandbox_id=sandbox_id, timeout_s=timeout_s
+        )
+
+    monkeypatch.setattr(opensandbox_provider.OpenSandboxProvider, "_await_sdk_call", recording_await_sdk_call)
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 120},
+        probe={"command": None},
+        operations={"background_exec": True, "background_poll_interval_s": 0.01, **operations_overrides},
+    )
+    handle = opensandbox_provider.SandboxHandle(
+        sandbox_id="sandbox-budget", provider_name="opensandbox", raw=SimpleNamespace(commands=FakeCommands())
+    )
+
+    result = await provider.exec(handle, "echo ok", timeout_s=30)
+
+    assert result.return_code == 0
+    assert recorded["command status"] == expected_status_timeout_s
+    # Everything else keeps its existing budget: submit gets timeout_s + 60
+    # headroom, logs the shared request budget (payloads can be large).
+    assert recorded["command run (background submit)"] == 90.0
+    assert recorded["command logs"] == 120.0
+
+
+@pytest.mark.asyncio
+async def test_exec_background_retries_timed_out_status_poll(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A timed-out status poll retries instead of killing the running command.
+
+    Per-call timeouts are deliberately terminal for submits (a retry could
+    double-run the command), so with the short poll budget a single slow poll
+    would otherwise fail the whole command; re-polling a status is an
+    idempotent GET and must retry within the normal budget.
+    """
+
+    class FakeRunCommandOpts:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    class FakeCommands:
+        def __init__(self) -> None:
+            self.status_calls: list[str] = []
+
+        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> Any:
+            return SimpleNamespace(id="exec-slowpoll")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            self.status_calls.append(execution_id)
+            if len(self.status_calls) == 1:
+                # Surfaces through _await_sdk_call the same way an expired
+                # per-call budget does (asyncio.TimeoutError is TimeoutError).
+                raise TimeoutError("simulated status poll budget expiry")
+            return SimpleNamespace(running=False, exit_code=0, error=None)
+
+        async def get_background_command_logs(self, execution_id: str) -> Any:
+            return SimpleNamespace(content="ok", cursor=None)
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (object, object, FakeRunCommandOpts, object, object),
+    )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 120},
+        probe={"command": None},
+        operations={
+            "background_exec": True,
+            "retries": 2,
+            "retry_delay_s": 0.001,
+            "background_poll_interval_s": 0.01,
+        },
+    )
+    commands = FakeCommands()
+    handle = opensandbox_provider.SandboxHandle(
+        sandbox_id="sandbox-slowpoll", provider_name="opensandbox", raw=SimpleNamespace(commands=commands)
+    )
+
+    result = await provider.exec(handle, "echo ok", timeout_s=30)
+
+    assert commands.status_calls == ["exec-slowpoll", "exec-slowpoll"]
+    assert result.return_code == 0
