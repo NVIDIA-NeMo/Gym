@@ -249,6 +249,17 @@ EOF
 # --segment > 0 otherwise the engine will hang on the second or third engine step.
 submit_dir=$(pwd -P)
 cleanup_user=${NEMO_GYM_USER:-$USER}
+# A caller that launches from a run directory rather than from the checkout
+# names the tree here; the cleanup script and its connection config are read
+# from it, not from wherever this happens to be invoked.
+cleanup_root=${NEMO_GYM_REPO_ROOT:-$submit_dir}
+# An explicit setting wins; otherwise the checkout's own env.yaml is used when
+# it is there, and the cleanup script reads the connection from the
+# environment when it is not.
+cleanup_config=${NEMO_GYM_CONNECTION_CONFIG-}
+if [[ -z "$cleanup_config" && -f "$submit_dir/env.yaml" ]]; then
+    cleanup_config="$submit_dir/env.yaml"
+fi
 main_job_id=$(
     NEMO_GYM_USER="$cleanup_user" \
     vllm_command="$pd_command" \
@@ -283,14 +294,16 @@ if (( should_run_eval )); then
             --time=00:30:00 \
             --job-name="gym-cleanup-$main_job_id" \
             --output="$submit_dir/slurm-logs/%j-gym-cleanup-$main_job_id.log" \
-            "$submit_dir/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py" \
-            --connection-config "$submit_dir/env.yaml" \
+            "$cleanup_root/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py" \
+            ${cleanup_config:+--connection-config "$cleanup_config"} \
             --run-id "$main_job_id" \
             --user "$cleanup_user" \
             --reap
     ); then
-        echo "Failed to submit cleanup job for batch job $main_job_id; the batch job is still active" >&2
-        exit 1
+        echo "Submitted batch job $main_job_id"
+        echo "Failed to submit the sandbox-cleanup job for batch job $main_job_id;" \
+            "it is running and its sandboxes will need reaping by hand" >&2
+        exit 0
     fi
     cleanup_job_id=${cleanup_job_id%%;*}
 fi
