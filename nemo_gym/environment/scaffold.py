@@ -278,11 +278,11 @@ def _manifest(composition: _Composition) -> EnvironmentManifest:
 
 def _asset_config(composition: _Composition) -> str:
     # Datasets are declared on the resources server (which defines what the rows mean and how
-    # they are scored), never on the agent — the agent is a run-time choice. Benchmarks pin
-    # their harness explicitly with the dataset-level `agent:` key, since scores depend on it.
+    # they are scored), never on the agent — the agent is a run-time choice. The scaffolded
+    # config has exactly one agent referencing the resources server, so benchmark datasets
+    # resolve their harness from that edge; the dataset-level `agent:` key stays reserved for
+    # genuinely ambiguous configs.
     dataset_dict = composition.dataset.model_dump(mode="json", exclude_none=True)
-    if composition.kind == EnvironmentKind.BENCHMARK:
-        dataset_dict["agent"] = composition.agent_instance
     agent_config: dict[str, Any] = {
         "resources_server": {"type": "resources_servers", "name": composition.resource_instance},
         "model_server": {"type": "responses_api_models", "name": "policy_model"},
