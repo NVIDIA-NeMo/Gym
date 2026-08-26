@@ -6,7 +6,7 @@
 # and re-expands from scratch, and a sweep this size will not finish inside one allocation.
 #
 #   VLLM_JOBID=<jobid> \
-#   SWEEP_DIR=<manifests_output>/<nickname> \
+#   SWEEP_DIR=<outputs/sweeps>/<nickname> \
 #   POLICY_MODEL_NAME=<checkpoint-path> \
 #   bash .../scripts/run_rollouts.sh
 set -euo pipefail

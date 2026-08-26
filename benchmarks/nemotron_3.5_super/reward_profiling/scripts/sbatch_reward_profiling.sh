@@ -45,6 +45,12 @@ VLLM_CONFIG=${VLLM_CONFIG:-benchmarks/nemotron_3.5_super/vllm_configs/nemotron_3
 MOUNTS=${MOUNTS:-/lustre:/lustre}
 
 # Sandbox sidecar. Empty disables it, which is correct for the no-judge and judge lanes.
+# All job output lands under reward_profiling/outputs/, alongside the sweep dirs, so a run's
+# artifacts and its logs are in one gitignored place rather than three.
+RP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LOG_DIR=${LOG_DIR:-$RP_DIR/outputs/slurm-logs}
+mkdir -p "$LOG_DIR"
+
 SANDBOX_CONTAINER=${SANDBOX_CONTAINER:-}
 SANDBOX_PORT=${SANDBOX_PORT:-6000}
 # One worker per core starves the driver, which shares the node. 32 was measured; raise it when the
@@ -252,7 +258,7 @@ trap cleanup_server EXIT INT TERM
             --no-container-mount-home \
             bash -lc 'export UWSGI_PROCESSES=${SANDBOX_WORKERS} NUM_WORKERS=${SANDBOX_WORKERS} \
                       LISTEN_PORT=${SANDBOX_PORT} NGINX_PORT=${SANDBOX_PORT}; exec /start-with-nginx.sh' \
-            > "\$SLURM_SUBMIT_DIR/slurm-logs/\${SLURM_JOB_ID}-sandbox.log" 2>&1 &
+            > "$LOG_DIR/\${SLURM_JOB_ID}-sandbox.log" 2>&1 &
         sandbox_step=\$!
 
         SANDBOX_IP=\$(getent hosts "\$EVAL_NODE" | awk 'NR==1 {print \$1}')
@@ -262,13 +268,13 @@ trap cleanup_server EXIT INT TERM
                 echo "sandbox healthy after \${_i}0s"; break
             fi
             if ! kill -0 "\$sandbox_step" 2>/dev/null; then
-                echo "ERROR: sandbox exited during startup; see \${SLURM_JOB_ID}-sandbox.log" >&2
+                echo "ERROR: sandbox exited during startup; see $LOG_DIR/\${SLURM_JOB_ID}-sandbox.log" >&2
                 exit 1
             fi
             sleep 10
         done
         if ! curl -sf -m 3 "http://\$SANDBOX_IP:${SANDBOX_PORT}/health" >/dev/null 2>&1; then
-            echo "ERROR: sandbox never became healthy; see \${SLURM_JOB_ID}-sandbox.log" >&2
+            echo "ERROR: sandbox never became healthy; see $LOG_DIR/\${SLURM_JOB_ID}-sandbox.log" >&2
             exit 1
         fi
         # Exported, not prefixed onto srun: bash decides which words are assignments at parse
@@ -324,7 +330,7 @@ sbatch \
     --nodes=$NUM_NODES \
     --time=$WALLTIME \
     --job-name=gym-$EXPERIMENT_NAME-$USER \
-    --output=slurm-logs/%j-%x.log \
+    --output="$LOG_DIR/%j-%x.log" \
     --ntasks-per-node=1 \
     --comment="$SLURM_COMMENT" \
     --exclusive \

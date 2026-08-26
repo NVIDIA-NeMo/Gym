@@ -5,13 +5,18 @@
 # from it and skips preprocessing, which is otherwise ~100 minutes single-threaded for a full
 # sweep. Expansion is parallel across entries.
 #
+# Everything this benchmark writes goes under reward_profiling/outputs/, which is gitignored.
+# OUT_DIR defaults to outputs/sweeps; the sweep dir is OUT_DIR/<nickname>, and that is what
+# SWEEP_DIR must point at when running sbatch_reward_profiling.sh.
+#
 #   MANIFEST=benchmarks/nemotron_3.5_super/reward_profiling/manifests/no_judge_no_sandbox.yaml \
-#   OUT_DIR=benchmarks/nemotron_3.5_super/reward_profiling/manifests_output \
 #   bash benchmarks/nemotron_3.5_super/reward_profiling/scripts/prepare_sweep.sh
 set -euo pipefail
 
 MANIFEST=${MANIFEST:?set MANIFEST to a sweep manifest yaml}
-OUT_DIR=${OUT_DIR:?set OUT_DIR to where artifacts should land}
+RP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+OUT_DIR=${OUT_DIR:-$RP_DIR/outputs/sweeps}
+mkdir -p "$OUT_DIR"
 JOBS=${JOBS:-}
 LIMIT_PER_ENTRY=${LIMIT_PER_ENTRY:-}
 
@@ -23,5 +28,5 @@ args=(--out-dir "$OUT_DIR")
 echo ">>> validating $MANIFEST"
 python -m nemo_gym.sweep validate "$MANIFEST"
 
-echo ">>> materializing"
+echo ">>> materializing into $OUT_DIR"
 python -m nemo_gym.sweep materialize "$MANIFEST" "${args[@]}"

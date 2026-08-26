@@ -12,7 +12,7 @@ Nemotron-specific.
 
 ```
 manifests/         input: what to profile. Hand-edited.
-manifests_output/  output: observed row counts and generated inputs. Gitignored.
+outputs/         everything a run produces: sweeps/<nickname>/ and slurm-logs/. Gitignored.
 scripts/           launchers.
 ```
 
@@ -30,13 +30,12 @@ R=benchmarks/nemotron_3.5_super/reward_profiling
 
 # 1. validate + expand repeats in parallel. Once per (manifest, checkpoint).
 MANIFEST=$R/manifests/no_judge_no_sandbox.yaml \
-OUT_DIR=$R/manifests_output \
 bash $R/scripts/prepare_sweep.sh
 
 # 2. one job: vLLM endpoint + Gym sweep driver + reward profile
 MODEL=<checkpoint-path> \
 VLLM_CONFIG=benchmarks/nemotron_3.5_super/vllm_configs/nemotron_3.5_super.sh \
-SWEEP_DIR=$R/manifests_output/<nickname> \
+SWEEP_DIR=$R/outputs/sweeps/<nickname> \
 NUM_PREFILL_NODES=1 NUM_DECODE_NODES=2 \
 SBATCH_ACCOUNT=<account> SBATCH_PARTITION=batch SBATCH_GRES=gpu:4 \
 CONTAINER=<reward-profiling sqsh> \
@@ -55,7 +54,7 @@ mispairing from silently scoring rollouts with the wrong verifier.
 materialized inputs, and runs `gym eval profile` at the end. It runs the driver on `nodes[1]` of
 the vLLM allocation, off the node serving prefill and the router.
 
-Artifacts land in `manifests_output/<nickname>/`:
+Artifacts land in `outputs/sweeps/<nickname>/`:
 
 | file | |
 |---|---|
