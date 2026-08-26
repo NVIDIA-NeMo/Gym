@@ -11,7 +11,9 @@ CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
 VLLM_CONFIG=$VLLM_CONFIG
 SLURM_COMMENT="${SLURM_COMMENT:-}"
-NEMO_GYM_REPO_ROOT="${NEMO_GYM_REPO_ROOT:-$(pwd -P)}"
+OPENSANDBOX_DOMAIN="${OPENSANDBOX_DOMAIN:-}"
+OPENSANDBOX_API_KEY="${OPENSANDBOX_API_KEY:-}"
+OPENSANDBOX_PROTOCOL="${OPENSANDBOX_PROTOCOL:-http}"
 
 should_run_eval=$(( $# > 0 ))
 if (( should_run_eval )); then
@@ -250,6 +252,7 @@ EOF
 
 # --segment > 0 otherwise the engine will hang on the second or third engine step.
 submit_dir=$(pwd -P)
+gym_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
 cleanup_user=${NEMO_GYM_USER:-$USER}
 main_job_id=$(
     NEMO_GYM_USER="$cleanup_user" \
@@ -286,7 +289,10 @@ if (( should_run_eval )); then
             --time=00:30:00 \
             --job-name="gym-cleanup-$main_job_id" \
             --output="$submit_dir/slurm-logs/%j-gym-cleanup-$main_job_id.log" \
-            "$NEMO_GYM_REPO_ROOT/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py" \
+            "$gym_root/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py" \
+            --domain "$OPENSANDBOX_DOMAIN" \
+            --api-key "$OPENSANDBOX_API_KEY" \
+            --protocol "$OPENSANDBOX_PROTOCOL" \
             --run-id "$main_job_id" \
             --user "$cleanup_user" \
             --reap

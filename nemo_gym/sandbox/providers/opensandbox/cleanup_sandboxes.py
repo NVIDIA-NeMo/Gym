@@ -6,7 +6,6 @@
 
 import argparse
 import asyncio
-import os
 import re
 import sys
 import urllib.parse
@@ -17,9 +16,6 @@ import aiohttp
 import yaml
 
 
-DOMAIN_ENV_VAR = "OPENSANDBOX_DOMAIN"
-API_KEY_ENV_VAR = "OPENSANDBOX_API_KEY"
-PROTOCOL_ENV_VAR = "OPENSANDBOX_PROTOCOL"
 RUN_METADATA_KEY = "nemo-gym.nvidia.com/run"
 USER_METADATA_KEY = "nemo-gym.nvidia.com/user"
 REQUEST_TIMEOUT_SECONDS = 30
@@ -141,27 +137,43 @@ async def cleanup_sandboxes(
         return 1
 
 
-def connection_from_environment() -> tuple[str, str, str]:
-    """The connection a caller exports rather than writes to a file."""
-    domain = os.environ.get(DOMAIN_ENV_VAR, "").strip()
-    access_key = os.environ.get(API_KEY_ENV_VAR, "").strip()
-    protocol = os.environ.get(PROTOCOL_ENV_VAR, "").strip() or "http"
-    for name, value in ((DOMAIN_ENV_VAR, domain), (API_KEY_ENV_VAR, access_key)):
-        if not value:
-            raise ValueError(f"{name} must be set when --connection-config is omitted")
-    if protocol not in {"http", "https"}:
-        raise ValueError(f"{PROTOCOL_ENV_VAR} must be http or https")
-    return domain, access_key, protocol
+def _run(
+    parser: argparse.ArgumentParser,
+    domain: str,
+    access_key: str,
+    protocol: str,
+    args: argparse.Namespace,
+) -> int:
+    """Run the cleanup and turn its failures into a message and a status."""
+    try:
+        return asyncio.run(
+            cleanup_sandboxes(
+                domain=domain,
+                protocol=protocol,
+                access_key=access_key,
+                run_id=args.run_id,
+                user=args.user,
+                reap=args.reap,
+            )
+        )
+    except (aiohttp.ClientError, OSError, TypeError, ValueError) as error:
+        print(f"OpenSandbox cleanup failed: {error}", file=sys.stderr)
+        return 1
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--connection-config",
-        help=(
-            "YAML file containing sandbox.opensandbox.connection. Omit it to read the connection from "
-            f"{DOMAIN_ENV_VAR}, {API_KEY_ENV_VAR} and {PROTOCOL_ENV_VAR} instead."
-        ),
+        help="YAML file containing sandbox.opensandbox.connection, as an alternative to --domain/--api-key.",
+    )
+    parser.add_argument("--domain", help="OpenSandbox domain, host or full URL.")
+    parser.add_argument("--api-key", help="OpenSandbox access key.")
+    parser.add_argument(
+        "--protocol",
+        default="http",
+        choices=("http", "https"),
+        help="Scheme for --domain when it carries none (default: http).",
     )
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--user", required=True)
@@ -172,19 +184,16 @@ def main(argv: list[str] | None = None) -> int:
         if not value.strip():
             parser.error(f"--{name} must not be empty")
 
+    if args.connection_config is None:
+        for name, value in (("domain", args.domain), ("api-key", args.api_key)):
+            if value is None or not value.strip():
+                parser.error(f"--{name} is required when --connection-config is omitted")
+        return _run(parser, args.domain.strip(), args.api_key.strip(), args.protocol, args)
+    for name, value in (("domain", args.domain), ("api-key", args.api_key)):
+        if value is not None:
+            parser.error(f"--{name} cannot be combined with --connection-config")
+
     try:
-        if args.connection_config is None:
-            domain, access_key, protocol = connection_from_environment()
-            return asyncio.run(
-                cleanup_sandboxes(
-                    domain=domain,
-                    protocol=protocol,
-                    access_key=access_key,
-                    run_id=args.run_id,
-                    user=args.user,
-                    reap=args.reap,
-                )
-            )
         with open(args.connection_config, encoding="utf-8") as config_file:
             config = yaml.safe_load(config_file)
         if not isinstance(config, Mapping):
@@ -208,16 +217,7 @@ def main(argv: list[str] | None = None) -> int:
         if not isinstance(protocol, str) or protocol.strip() not in {"http", "https"}:
             raise ValueError("connection config 'sandbox.opensandbox.connection.protocol' must be http or https")
 
-        return asyncio.run(
-            cleanup_sandboxes(
-                domain=domain.strip(),
-                protocol=protocol.strip(),
-                access_key=access_key.strip(),
-                run_id=args.run_id,
-                user=args.user,
-                reap=args.reap,
-            )
-        )
+        return _run(parser, domain.strip(), access_key.strip(), protocol.strip(), args)
     except yaml.YAMLError:
         print("OpenSandbox cleanup failed: invalid YAML connection config", file=sys.stderr)
         return 1
