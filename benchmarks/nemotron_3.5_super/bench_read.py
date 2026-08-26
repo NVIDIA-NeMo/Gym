@@ -1,4 +1,5 @@
 from itertools import islice
+from time import time
 
 import orjson
 import ray
@@ -25,6 +26,7 @@ def batched(iterable, size):
         yield batch
 
 
+start_time = time()
 print("Starting read")
 with open(
     "/lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/tau_pivot/super_row_54_1000_synthetic_tau_all_rollouts_leq_60_passrate.jsonl",
@@ -40,4 +42,4 @@ refs = [decode_batch.remote(batch) for batch in batches]
 records = []
 for batch_result in tqdm(ray.util.as_completed(refs), desc="Loading batches"):
     records.extend(ray.get(batch_result))
-print(f"Finished json loading {len(records)} rows")
+print(f"Finished loading {len(records)} rows in {time() - start_time:.2f}s")
