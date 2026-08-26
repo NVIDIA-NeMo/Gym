@@ -992,7 +992,25 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             if key in chat_completion_create_params:
                 tokenize_body_dict[key] = chat_completion_create_params[key]
         tokenize_response = await self._policy_model_openai_client.create_tokenize(**tokenize_body_dict)
-        return len(tokenize_response["tokens"])
+        return _prompt_tokens_from_tokenize_response(tokenize_response)
+
+
+def _prompt_tokens_from_tokenize_response(tokenize_response: dict) -> int:
+    """Prompt token count from a vLLM /tokenize response.
+
+    The response shape varies across vLLM versions: mainstream builds
+    (>=0.19.1) return {"count": N, "max_model_len": ...} and only include the
+    "tokens" list when token ids are requested, while older builds return just
+    {"tokens": [...]}. Prefer the explicit count and fall back to the token
+    list, so the agent works against both.
+    """
+    count = tokenize_response.get("count")
+    if count is not None:
+        return int(count)
+    tokens = tokenize_response.get("tokens")
+    if tokens is not None:
+        return len(tokens)
+    raise KeyError(f"/tokenize response has neither 'count' nor 'tokens'; got keys: {sorted(tokenize_response)}")
 
 
 if __name__ == "__main__":
