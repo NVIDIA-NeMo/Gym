@@ -17,9 +17,6 @@ import aiohttp
 import yaml
 
 
-DOMAIN_ENV_VAR = "OPENSANDBOX_DOMAIN"
-API_KEY_ENV_VAR = "OPENSANDBOX_API_KEY"
-PROTOCOL_ENV_VAR = "OPENSANDBOX_PROTOCOL"
 RUN_METADATA_KEY = "nemo-gym.nvidia.com/run"
 USER_METADATA_KEY = "nemo-gym.nvidia.com/user"
 REQUEST_TIMEOUT_SECONDS = 30
@@ -143,14 +140,14 @@ async def cleanup_sandboxes(
 
 def connection_from_environment() -> tuple[str, str, str]:
     """The connection a caller exports rather than writes to a file."""
-    domain = os.environ.get(DOMAIN_ENV_VAR, "").strip()
-    access_key = os.environ.get(API_KEY_ENV_VAR, "").strip()
-    protocol = os.environ.get(PROTOCOL_ENV_VAR, "").strip() or "http"
-    for name, value in ((DOMAIN_ENV_VAR, domain), (API_KEY_ENV_VAR, access_key)):
+    domain = os.environ.get("OPENSANDBOX_DOMAIN", "").strip()
+    access_key = os.environ.get("OPENSANDBOX_API_KEY", "").strip()
+    protocol = os.environ.get("OPENSANDBOX_PROTOCOL", "").strip() or "http"
+    for name, value in (("OPENSANDBOX_DOMAIN", domain), ("OPENSANDBOX_API_KEY", access_key)):
         if not value:
             raise ValueError(f"{name} must be set when --connection-config is omitted")
     if protocol not in {"http", "https"}:
-        raise ValueError(f"{PROTOCOL_ENV_VAR} must be http or https")
+        raise ValueError("OPENSANDBOX_PROTOCOL must be http or https")
     return domain, access_key, protocol
 
 
@@ -160,7 +157,7 @@ def main(argv: list[str] | None = None) -> int:
         "--connection-config",
         help=(
             "YAML file containing sandbox.opensandbox.connection. Omit it to read the connection from "
-            f"{DOMAIN_ENV_VAR}, {API_KEY_ENV_VAR} and {PROTOCOL_ENV_VAR} instead."
+            "OPENSANDBOX_DOMAIN, OPENSANDBOX_API_KEY and OPENSANDBOX_PROTOCOL instead."
         ),
     )
     parser.add_argument("--run-id", required=True)
