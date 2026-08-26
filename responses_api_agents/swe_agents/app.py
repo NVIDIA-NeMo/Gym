@@ -69,14 +69,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.profiling import Profiler
-from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap
-from nemo_gym.server_utils import apply_rollout_prefix, get_first_server_config_dict
-from responses_api_agents.swe_agents.observability import (
-    OBSERVATIONS_FILENAME,
-    build_swe_observations,
-    materialize_completion,
-    sandbox_observations_from_metrics,
-)
+from nemo_gym.server_utils import get_first_server_config_dict
 from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
 
 
@@ -204,6 +197,25 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
         ),
     )
 
+    opencode_patch_mode: Literal["worktree", "committed"] = Field(
+        default="worktree",
+        description=(
+            "How the opencode harness extracts the model patch at the end of a "
+            "rollout.\n"
+            "  'worktree' (default): `git diff` of the working tree (untracked "
+            "files intent-to-added first). Correct for the SWE-bench-style "
+            "prompts that tell the agent NOT to commit.\n"
+            "  'committed': diff the pre-run HEAD against the most-advanced "
+            "commit the agent left behind (searched across HEAD and every local "
+            "branch), ignoring the working tree. Required by task families whose "
+            "problem statement asks the agent to commit its solution — e.g. the "
+            "DeepSWE set, whose statements end with 'work on this in a new "
+            "branch from main and commit everything when you are done'. Under "
+            "'worktree' those rollouts leave a clean tree and every patch is "
+            "recorded as 0 bytes."
+        ),
+    )
+
 
 class SWEBenchWrapperServerConfig(BaseModel):
     ng_global_config_dict_str: str
@@ -226,8 +238,6 @@ class ExecuteContainerCommandArgs(BaseModel):
 
 
 class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapperConfig):
-    rollout_id: Optional[str] = Field(default=None, exclude_if=lambda value: value is None)
-    token_id_capture_enabled: bool = False
     metrics_fpath: Path
     problem_info: Dict[str, Any]
     body: NeMoGymResponseCreateParamsNonStreaming
@@ -315,13 +325,6 @@ class SWEBenchMetrics(BaseModel):
 class SWEBenchVerifyResponse(SWEBenchMetrics, BaseVerifyResponse):
     instance_config: SWEBenchWrapperInstanceConfig
     subagent_trajectories: Optional[List[Dict[str, Any]]] = None
-    ng_agent_observations: Optional[AgentObservationBundle] = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
-
-
-class SWEBenchRunRequest(BaseRunRequest):
-    model_config = ConfigDict(extra="allow")
 
 
 ########################################
@@ -1243,6 +1246,8 @@ class DeepSWEDatasetProcessor(BaseDatasetHarnessProcessor):
         base_commit = inst.get("base_commit", "")
         test_patch = inst.get("test_patch", "")
         test_sh = inst.get("test_sh", "")
+        grader_py = inst.get("grader_py", "")
+        test_config_json = inst.get("test_config_json", "")
         # Optional environment-repair command run before the verifier. Some mirror
         # images were built with newer deps than the repo pins, breaking the
         # pre-existing (base) suite regardless of the patch ("broken baseline").
@@ -1251,11 +1256,16 @@ class DeepSWEDatasetProcessor(BaseDatasetHarnessProcessor):
 
         # Materialize the verifier artifacts on the host; _build_apptainer_command
         # binds them into the eval container at the absolute paths test.sh expects
-        # (/tests/test.sh, /tests/test.patch).
+        # (/tests/test.sh, /tests/test.patch, /tests/grader.py, and
+        # /tests/config.json).
         test_patch_path = self.config.eval_private_dir / "test.patch"
         test_patch_path.write_text(test_patch)
         test_sh_path = self.config.eval_private_dir / "test.sh"
         test_sh_path.write_text(test_sh)
+        grader_py_path = self.config.eval_private_dir / "grader.py"
+        grader_py_path.write_text(grader_py)
+        test_config_path = self.config.eval_private_dir / "config.json"
+        test_config_path.write_text(test_config_json)
 
         reset_cmd = f"git reset --hard {base_commit}" if base_commit else "git reset --hard HEAD"
         # Brace group (not a subshell) so env changes — e.g. `unset LD_LIBRARY_PATH`
@@ -1289,9 +1299,9 @@ git apply --whitespace=nowarn /root/patch.diff \
   || git apply --reject --recount --ignore-space-change --whitespace=nowarn /root/patch.diff \
   || true
 
-# The Harbor verifier writes 1/0 to /logs/verifier/reward.txt and the captured
+# The Harbor verifier writes its score under /logs/verifier and the captured
 # model diff to /logs/artifacts/model.patch; create both dirs first.
-mkdir -p /logs/verifier /logs/artifacts /trajectories_mount/eval_results
+mkdir -p /logs/vserifier /logs/artifacts /trajectories_mount/eval_results
 chmod +x /tests/test.sh 2>/dev/null || true
 
 # Optional baseline repair (restore repo-pinned deps the image drifted from).
@@ -1300,8 +1310,11 @@ chmod +x /tests/test.sh 2>/dev/null || true
 bash /tests/test.sh > /trajectories_mount/eval_results/verifier_output.log 2>&1
 VERIFIER_EXIT=$?
 
-REWARD=$(cat /logs/verifier/reward.txt 2>/dev/null | tr -dc '0-9')
-cp /logs/verifier/reward.txt /trajectories_mount/eval_results/reward.txt 2>/dev/null || true
+REWARD=$(cat /logs/verifier/reward.txt 2>/dev/null | tr -dc '0-9-')
+if [ -z "$REWARD" ] && [ -f /logs/verifier/reward.json ]; then
+  REWARD=$(python3 -c 'import json; print(json.load(open("/logs/verifier/reward.json")).get("reward", ""))' 2>/dev/null)
+fi
+printf '%s\\n' "${{REWARD:-}}" > /trajectories_mount/eval_results/reward.txt
 printf '{{"_test_completed": true, "verifier_exit": %d, "reward": "%s"}}\\n' "$VERIFIER_EXIT" "${{REWARD:-}}" \
   > /trajectories_mount/eval_results/report.json
 """
@@ -1989,6 +2002,23 @@ def _extract_instance_dict(problem_info: Dict[str, Any]) -> Dict[str, Any]:
     return {}
 
 
+def _deepswe_uses_offline_jvm_cache(problem_info: Dict[str, Any]) -> bool:
+    """Return whether a DeepSWE verifier deliberately uses its image's JVM cache.
+
+    Maven records the repository ID that supplied each cached artifact, while
+    Gradle also retains repository-specific resolution metadata. Replacing
+    Maven Central with a differently named/located mirror immediately before
+    an offline verifier run can therefore make already-cached plugins appear
+    unavailable. Preserve the image's build-time repository configuration for
+    these tasks instead of injecting the online-evaluation mirror.
+    """
+    if problem_info.get("dataset_name") != "deepswe":
+        return False
+
+    test_sh = str(_extract_instance_dict(problem_info).get("test_sh", ""))
+    return "--offline" in test_sh or re.search(r"\bmvn[^\n]*\s-o(?:\s|$)", test_sh) is not None
+
+
 # The ONLY instance fields exposed to the AGENT container; ground truth (gold/test
 # patches, graded test names, verifier scripts) stays host-side by default.
 AGENT_VISIBLE_INSTANCE_FIELDS = frozenset(
@@ -2102,11 +2132,7 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
         # openai_model.yaml uses `openai_model`; vllm_model.yaml uses `model`.
         try:
             model_server_cfg = get_first_server_config_dict(get_global_config_dict(), self.config.model_server_name)
-            model_server_base_url = apply_rollout_prefix(
-                f"http://{model_server_cfg.host}:{model_server_cfg.port}",
-                self.config.rollout_id,
-                token_capture=self.config.token_id_capture_enabled,
-            )
+            model_server_base_url = f"http://{model_server_cfg.host}:{model_server_cfg.port}"
             default_model_name = (
                 getattr(model_server_cfg, "openai_model", None) or getattr(model_server_cfg, "model", None) or ""
             )
@@ -2207,6 +2233,9 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             f"export NEMO_GYM_MODEL_SERVER_BASE_URL={shlex.quote(model_server_base_url)} && "
             f"export COMMAND_EXEC_TIMEOUT={self.config.command_exec_timeout} && "
             f"export ENABLE_SUBAGENTS={'1' if self.config.opencode_subagents_enabled else '0'} && "
+            # bench/cli.ts decides how to extract the model patch; 'worktree'
+            # (its own default) reproduces the historical `git diff` capture.
+            f"export PATCH_MODE={shlex.quote(self.config.opencode_patch_mode)} && "
             "export OPENCODE_DISABLE_MODELS_FETCH=1 && "
             "mkdir -p /root/.cache/opencode && "
             "echo '{}' >/root/.cache/opencode/models.json && "
@@ -2513,27 +2542,6 @@ class RunOpenHandsAgent(BaseModel):
             str(eval_dir_on_host / "**" / "llm_completions" / "*" / "*.json"),
             recursive=True,
         )
-        if self.config.rollout_id is not None:
-            try:
-                observations = build_swe_observations(
-                    (Path(path) for path in completion_candidates),
-                    framework=self.config.agent_framework,
-                    model_ref=self.config.model_server,
-                )
-            except Exception:
-                observations = AgentObservationBundle(
-                    source=f"swe_{self.config.agent_framework}",
-                    gaps=[
-                        ObservationGap(
-                            code="observation_parse_failed",
-                        )
-                    ],
-                )
-            try:
-                (self.config.persistent_dir / OBSERVATIONS_FILENAME).write_text(observations.model_dump_json())
-            except OSError:
-                pass
-
         # When subagents are enabled (opencode) we get multiple sessions, each
         # writing its own per-turn JSONs. Group by session_id (from the file
         # payload) and copy each session's most recent turn — that file's
@@ -2548,7 +2556,7 @@ class RunOpenHandsAgent(BaseModel):
                         payload = json.load(f)
                     if isinstance(payload, dict) and payload.get("session_id"):
                         sess_id = str(payload["session_id"])
-                except (OSError, UnicodeError, json.JSONDecodeError):
+                except (OSError, json.JSONDecodeError):
                     pass
                 mtime = os.path.getmtime(path_str)
                 if mtime > session_mtime.get(sess_id, -1):
@@ -2976,6 +2984,31 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     # START Results processing logic
     ########################################
 
+    @staticmethod
+    def _materialize_trajectory(data: dict) -> tuple[list, list]:
+        """Inflate one completion-file payload into (messages, tools)."""
+        messages = list(data.get("messages") or [])
+        tools = data.get("kwargs", {}).get("tools", [])
+        provider_specific_fields = data.get("provider_specific_fields", {})
+        try:
+            final_assistant_message = data["response"]["choices"][0]["message"]
+        except (KeyError, IndexError):
+            return messages, tools
+
+        for key in [
+            "prompt_token_ids",
+            "generation_token_ids",
+            "generation_log_probs",
+            "routed_experts",
+        ]:
+            if key in provider_specific_fields:
+                final_assistant_message[key] = provider_specific_fields[key]
+
+        if final_assistant_message.get("content") or final_assistant_message.get("tool_calls"):
+            messages.append(final_assistant_message)
+
+        return messages, tools
+
     def get_openhands_trajectory_from_completions(self, trajectories_dir: Path, instance_id: str) -> tuple:
         """Extract the main session's trajectory for the API response.
 
@@ -3027,7 +3060,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             with open(completion_files[-1], "r") as f:
                 main_data = json.load(f)
 
-        messages, tools = materialize_completion(main_data)
+        messages, tools = self._materialize_trajectory(main_data)
         return messages, tools, first_prefix_count
 
     def get_all_session_trajectories_from_completions(self, trajectories_dir: Path, instance_id: str) -> list[dict]:
@@ -3053,7 +3086,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 continue
             by_session[sess_id] = data
         for sess_id, data in by_session.items():
-            messages, tools = materialize_completion(data)
+            messages, tools = self._materialize_trajectory(data)
             out.append(
                 {
                     "session_id": sess_id,
@@ -3208,7 +3241,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         maven_mirror_dir = Path(__file__).parent / "maven_mirror"
         mvn_settings_path = maven_mirror_dir / "settings.xml"
         gradle_init_path = maven_mirror_dir / "init.gradle"
-        if mvn_settings_path.exists() and gradle_init_path.exists():
+        preserve_offline_jvm_cache = command.mode == "eval" and _deepswe_uses_offline_jvm_cache(data_point)
+        if mvn_settings_path.exists() and gradle_init_path.exists() and not preserve_offline_jvm_cache:
             mvn_b64 = base64.b64encode(mvn_settings_path.read_bytes()).decode()
             grad_b64 = base64.b64encode(gradle_init_path.read_bytes()).decode()
             # Belt-and-suspenders: write init.gradle to every common
@@ -3395,12 +3429,16 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             # DeepSWEDatasetProcessor.get_run_command() wrote these to persistent_dir.
             test_sh_path = params.eval_private_dir / "test.sh"
             test_patch_path = params.eval_private_dir / "test.patch"
+            grader_py_path = params.eval_private_dir / "grader.py"
+            test_config_path = params.eval_private_dir / "config.json"
             # Placeholder needed: eval container starts before the agent writes the
             # patch (golden-patch path writes it before launch).
             if not params.model_patch_path.exists():
                 params.model_patch_path.write_text("")
             mount_args.append(f"--mount type=bind,src={test_sh_path},dst=/tests/test.sh,ro")
             mount_args.append(f"--mount type=bind,src={test_patch_path},dst=/tests/test.patch,ro")
+            mount_args.append(f"--mount type=bind,src={grader_py_path},dst=/tests/grader.py,ro")
+            mount_args.append(f"--mount type=bind,src={test_config_path},dst=/tests/config.json,ro")
             mount_args.append(f"--mount type=bind,src={params.model_patch_path},dst=/root/patch.diff")
 
         if data_point.get("dataset_name") == "denovoswe":
@@ -3533,11 +3571,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         return json.dumps(chat_messages)
 
     def _setup_params(
-        self,
-        body: NeMoGymResponseCreateParamsNonStreaming,
-        rollout_id: Optional[str] = None,
-        *,
-        token_id_capture_enabled: bool = False,
+        self, body: NeMoGymResponseCreateParamsNonStreaming
     ) -> Tuple[SWEBenchWrapperInstanceConfig, BaseDatasetHarnessProcessor]:
         problem_info = body.metadata | {"container_formatter": self.config.container_formatter}
         instance_id = problem_info.get("instance_id", "unknown")
@@ -3611,8 +3645,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         params: SWEBenchWrapperInstanceConfig = SWEBenchWrapperInstanceConfig(
             **self.config.model_dump(),
             **self._swe_bench_wrapper_server_config.model_dump(),
-            rollout_id=rollout_id,
-            token_id_capture_enabled=token_id_capture_enabled,
             problem_info=problem_info,
             body=body,
             persistent_dir=persistent_dir,
@@ -3687,20 +3719,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         return params, dataset_processor
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
-        return await self._responses(body)
-
-    async def _responses(
-        self,
-        body: NeMoGymResponseCreateParamsNonStreaming,
-        rollout_id: Optional[str] = None,
-        *,
-        token_id_capture_enabled: bool = False,
-    ) -> NeMoGymResponse:
-        params, dataset_processor = self._setup_params(
-            body,
-            rollout_id,
-            token_id_capture_enabled=token_id_capture_enabled,
-        )
+        params, dataset_processor = self._setup_params(body)
 
         with (params.eval_private_dir / "params.json").open("w") as f:
             f.write(params.model_dump_json(indent=4))
@@ -3818,62 +3837,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         updated_metrics = update_and_read_metrics(params.metrics_fpath, metrics_to_update)
 
-        observations: Optional[AgentObservationBundle] = None
-        if params.rollout_id is not None:
-            observations_path = params.persistent_dir / OBSERVATIONS_FILENAME
-            try:
-                observations = AgentObservationBundle.model_validate_json(observations_path.read_text())
-            except (OSError, ValueError):
-                observations = AgentObservationBundle(
-                    source=f"swe_{params.agent_framework}",
-                    gaps=[
-                        ObservationGap(
-                            code="agent_artifact_unavailable",
-                        )
-                    ],
-                )
-            if params.agent_framework == "openhands":
-                observations.gaps.append(
-                    ObservationGap(
-                        code="model_call_capture_correlation_unavailable",
-                    )
-                )
-            try:
-                sandbox_observations = sandbox_observations_from_metrics(updated_metrics)
-            except ValueError:
-                print(f"Error creating sandbox observations: {format_exc()}", flush=True)
-                observations.gaps.append(ObservationGap(code="sandbox_observation_unavailable"))
-                sandbox_observations = []
-            observations.records.extend(sandbox_observations)
-            for sandbox in sandbox_observations:
-                observations.gaps.append(
-                    ObservationGap(
-                        code="sandbox_identity_unavailable",
-                        detail=sandbox.role,
-                    )
-                )
-                if sandbox.cpu_time_s is None:
-                    observations.gaps.append(
-                        ObservationGap(
-                            code="sandbox_cpu_time_unavailable",
-                            detail=sandbox.role,
-                        )
-                    )
-                if sandbox.peak_memory_mib is None:
-                    observations.gaps.append(
-                        ObservationGap(
-                            code="sandbox_memory_usage_unavailable",
-                            detail=sandbox.role,
-                        )
-                    )
-                else:
-                    observations.gaps.append(
-                        ObservationGap(
-                            code="sandbox_memory_usage_sampled",
-                            detail=sandbox.role,
-                        )
-                    )
-
         # body.model can be None (replay JSONLs omit it; the openai_model proxy
         # picks the backend). NeMoGymResponse.model is a required non-None string,
         # so fall back to the agent's configured model server name.
@@ -3889,8 +3852,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 if entry.get("parent_session_id")
             ]
             metadata["subagent_trajectories"] = json.dumps(subagent_trajectories)
-        if observations is not None:
-            metadata["agent_observations"] = observations.model_dump_json()
 
         return NeMoGymResponse(
             id=f"swebench-{params.instance_id}",
@@ -3904,18 +3865,12 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             metadata=metadata,
         )
 
-    async def run(self, body: SWEBenchRunRequest) -> SWEBenchVerifyResponse:
+    async def run(self, body: BaseRunRequest) -> SWEBenchVerifyResponse:
         async with self._sem:
             body.responses_create_params.parallel_tool_calls = True
             body.responses_create_params.tool_choice = "auto"
 
-            rollout_id = self.rollout_id_from_run(body)
-            token_id_capture_enabled = self._token_id_capture_enabled()
-            response = await self._responses(
-                body.responses_create_params,
-                rollout_id,
-                token_id_capture_enabled=token_id_capture_enabled,
-            )
+            response = await self.responses(body.responses_create_params)
 
             metadata, response.metadata = response.metadata, None
             responses_create_params = body.responses_create_params.model_dump() | {
@@ -3926,9 +3881,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             subagent_trajectories = None
             if "subagent_trajectories" in metadata:
                 subagent_trajectories = json.loads(metadata["subagent_trajectories"])
-            observations = None
-            if rollout_id is not None and "agent_observations" in metadata:
-                observations = AgentObservationBundle.model_validate_json(metadata["agent_observations"])
 
             return SWEBenchVerifyResponse(
                 responses_create_params=responses_create_params,
@@ -3939,7 +3891,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                     metadata["instance_config"]
                 ).model_dump(),
                 subagent_trajectories=subagent_trajectories,
-                ng_agent_observations=observations,
             )
 
 
