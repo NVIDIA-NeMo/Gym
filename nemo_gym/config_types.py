@@ -537,8 +537,9 @@ class BenchmarkDatasetConfig(BaseModel):
         default=None,
         description=(
             "Agent instance that runs this benchmark (a top-level key of the merged config). "
-            "A benchmark's score depends on the harness, so pinning it explicitly is preferred "
-            "over inferring it from which block declares the dataset."
+            "Only needed when the config is ambiguous: when the dataset is not declared inside "
+            "an agent block and more (or fewer) than one agent references the declaring "
+            "resources server. Unambiguous configs resolve without it."
         ),
     )
 

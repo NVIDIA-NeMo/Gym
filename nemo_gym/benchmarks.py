@@ -72,8 +72,8 @@ class BenchmarkConfig(BaseModel):
 
         # A benchmark dataset may be declared by an agent block (legacy) or a resources server
         # block (decoupled layout). The agent that runs the benchmark resolves, first hit wins:
-        # 1. the dataset's explicit `agent:` key (preferred: a benchmark's score depends on the
-        #    harness, so the manifest should pin it);
+        # 1. the dataset's explicit `agent:` key (the escape hatch for ambiguous configs;
+        #    unambiguous configs don't need it);
         # 2. the declaring agent block itself (legacy inference);
         # 3. the unique agent referencing the declaring resources server.
         datasets: List[BenchmarkDatasetConfig] = []
