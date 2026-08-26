@@ -264,6 +264,28 @@ jobs:
             exit 1
           fi
 
+          if [[ "$EVENT_NAME" == "schedule" || "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            # Nightly/manual runs always fall through to the nightly-job gate
+            # below, regardless of docs_only classification - unit_tests may
+            # legitimately be skipped if the latest commit happens to be
+            # docs-only, but container_build/gpu_e2e_tests/provider_e2e_tests
+            # still ran and must be checked either way.
+            if [[ "$UNIT_TEST_RESULT" != "success" && "$UNIT_TEST_RESULT" != "skipped" ]]; then
+              echo "Unit tests did not succeed."
+              exit 1
+            fi
+
+            if [[ "$CONTAINER_BUILD_RESULT" != "success" || \
+                  "$GPU_E2E_TEST_RESULT" != "success" || \
+                  "$PROVIDER_E2E_TEST_RESULT" != "success" ]]; then
+              echo "One or more nightly jobs did not succeed."
+              exit 1
+            fi
+
+            echo "All required test jobs completed successfully."
+            exit 0
+          fi
+
           if [[ "$DOCS_ONLY" == "true" ]]; then
             if [[ "$UNIT_TEST_RESULT" == "skipped" ]]; then
               echo "Docs-only change: tests were skipped as expected."
@@ -277,17 +299,6 @@ jobs:
           if [[ "$UNIT_TEST_RESULT" != "success" ]]; then
             echo "One or more required test jobs did not succeed."
             exit 1
-          fi
-
-          # container_build, gpu_e2e_tests, and provider_e2e_tests only run on
-          # schedule/workflow_dispatch (nightly); only gate on them then.
-          if [[ "$EVENT_NAME" == "schedule" || "$EVENT_NAME" == "workflow_dispatch" ]]; then
-            if [[ "$CONTAINER_BUILD_RESULT" != "success" || \
-                  "$GPU_E2E_TEST_RESULT" != "success" || \
-                  "$PROVIDER_E2E_TEST_RESULT" != "success" ]]; then
-              echo "One or more nightly jobs did not succeed."
-              exit 1
-            fi
           fi
 
           echo "All required test jobs completed successfully."
