@@ -580,6 +580,20 @@ def highest_k_metrics(
     return {key: agent_metrics[key] for k, key in matches if k == max_k}
 
 
+def _default_key_metrics(agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
+    """Narrow default headline metric: mean/reward only, if present.
+
+    ``agent_metrics`` has a mean/max/min/median/std entry for every numeric field seen in
+    verify responses (custom score fields, token usage counts, etc.), so naively taking all
+    mean/* entries produces a cluttered, non-differentiated summary. Reward is the one metric
+    every benchmark reports, so it is the only one surfaced unless a benchmark overrides
+    get_key_metrics() to report something more meaningful (e.g. pass@k accuracy).
+    """
+    if "mean/reward" in agent_metrics:
+        return {"mean/reward": agent_metrics["mean/reward"]}
+    return {}
+
+
 class AggregateMetricsMixin:
     """Mixin providing compute_metrics/get_key_metrics hooks and the aggregate_metrics endpoint.
 
@@ -607,9 +621,10 @@ class AggregateMetricsMixin:
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
         """Override to select headline metrics for this benchmark.
 
-        Default: all mean/* entries from agent_metrics.
+        Default: mean/reward only (see _default_key_metrics). Override for benchmarks
+        that should headline a different or additional metric, e.g. pass@k accuracy.
         """
-        return {k: v for k, v in agent_metrics.items() if k.startswith("mean/")}
+        return _default_key_metrics(agent_metrics)
 
 
 def _group_by_task(verify_responses: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
@@ -693,7 +708,7 @@ def compute_aggregate_metrics(
     if get_key_metrics_fn:
         key_metrics = get_key_metrics_fn(serialized_agent)
     else:
-        key_metrics = {k: v for k, v in serialized_agent.items() if k.startswith("mean/")}
+        key_metrics = _default_key_metrics(serialized_agent)
 
     return AggregateMetrics(
         group_level_metrics=serialized_group,

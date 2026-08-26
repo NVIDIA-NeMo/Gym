@@ -897,7 +897,7 @@ class TestRolloutCollection:
                     "median/abc usage": 1.0,
                     "std/abc usage": 0.0,
                 },
-                "key_metrics": {"mean/abc usage": 1.0},
+                "key_metrics": {},
                 "group_level_metrics": actual_aggregate_metrics[0]["group_level_metrics"],
             }
         ]

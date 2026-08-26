@@ -119,6 +119,25 @@ class TestAggregateMetricsRoute:
         assert result.key_metrics["mean/reward"] == pytest.approx(1.0)
 
     @pytest.mark.asyncio
+    async def test_key_metrics_default_excludes_other_numeric_fields(self) -> None:
+        """Default key_metrics should surface mean/reward only, not every mean/* stat.
+
+        agent_metrics gets a mean/max/min/median/std entry for every numeric field in verify
+        responses (custom score fields, usage counts, etc.); key_metrics should stay narrow.
+        """
+        server = _make_server()
+        responses = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0, "judgement_score": 4.0},
+            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0, "judgement_score": 2.0},
+        ]
+        body = AggregateMetricsRequest(verify_responses=responses)
+
+        result = await server.aggregate_metrics(body)
+
+        assert "mean/judgement_score" in result.agent_metrics
+        assert result.key_metrics == {"mean/reward": pytest.approx(0.5)}
+
+    @pytest.mark.asyncio
     async def test_histograms_stripped(self) -> None:
         """RewardProfiler produces histograms; they should be stripped from the response."""
         server = _make_server()

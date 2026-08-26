@@ -45,7 +45,7 @@ The output file is a JSON array with one entry per agent:
 |---|---|
 | `agent_ref` | Agent identity (`{"name": "..."}`) |
 | `agent_metrics` | Overall stats across all rollouts, plus any custom metrics from `compute_metrics()` |
-| `key_metrics` | Headline numbers (default: all `mean/*` entries from `agent_metrics`) |
+| `key_metrics` | Headline numbers (default: `mean/reward` only) |
 | `group_level_metrics` | Per-task breakdown — one entry per task with stats across that task's rollouts |
 
 ---
@@ -60,7 +60,7 @@ Receives all verify responses grouped by task. Use this for metrics that need th
 
 ### `get_key_metrics(agent_metrics)`
 
-Selects headline numbers from the final `agent_metrics` dict. Default returns all `mean/*` entries.
+Selects headline numbers from the final `agent_metrics` dict. Default returns just `mean/reward` (if present) — `agent_metrics` has a `mean/*` entry for every numeric field seen in verify responses (custom score fields, token usage counts, and so on), so surfacing all of them would produce a cluttered, non-differentiated summary. Override this to headline a different or additional metric, such as pass@k accuracy.
 
 ### Example: pass@k
 
