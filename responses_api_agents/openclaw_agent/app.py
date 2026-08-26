@@ -14,12 +14,14 @@
 # limitations under the License.
 
 import asyncio
+import contextlib
 import copy
 import json
 import logging
 import os
 import shlex
 import shutil
+import signal
 from asyncio import Semaphore
 from collections.abc import Mapping
 from pathlib import Path
@@ -27,14 +29,15 @@ from time import time
 from typing import Any, Callable, ClassVar, Optional
 from uuid import uuid4
 
+import psutil
 from fastapi import Request
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
-    NEMO_GYM_MCP_METADATA_KEY,
     NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY,
     BaseRunRequest,
     BaseVerifyResponse,
+    MCPToolCallProvenance,
 )
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
@@ -42,7 +45,12 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import get_first_server_config_dict
+from nemo_gym.mcp import (
+    AgentExecutionResult,
+    RolloutMCPServer,
+    parse_rollout_mcp_server,
+    resources_server_base_url,
+)
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -412,6 +420,8 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
 
     config: OpenClawAgentConfig
     sem: Semaphore = None
+    sigterm_events: set = Field(default_factory=set)
+    sigterm_handler_installed: bool = False
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     # deny the interactive "message" channel so the headless agent finishes
@@ -491,62 +501,26 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
     def _effective_model(self) -> str:
         return f"nemo/{self.config.model}" if self.config.model_server else self.config.model
 
-    def _resources_server_base_url(self) -> str:
-        cfg = get_first_server_config_dict(
-            self.server_client.global_config_dict,
-            self.config.resources_server.name,
-        )
-        return self.server_client._build_server_base_url(cfg)
-
-    def _openclaw_mcp_servers_from_seed(self, seed_response_json: dict[str, Any]) -> Optional[dict[str, Any]]:
-        """Translate rollout-specific Gym MCP metadata into OpenClaw config."""
-        if NEMO_GYM_MCP_METADATA_KEY not in seed_response_json:
+    @staticmethod
+    def _openclaw_mcp_servers(server: RolloutMCPServer | None) -> Optional[dict[str, Any]]:
+        """Translate canonical Gym MCP metadata into OpenClaw configuration."""
+        if server is None:
             return None
-        metadata = seed_response_json[NEMO_GYM_MCP_METADATA_KEY]
-        if not isinstance(metadata, dict):
-            raise ValueError("MCP seed metadata must be an object")
-
-        server_name = metadata.get("server_name") or self.config.resources_server.name
-        if not isinstance(server_name, str) or not server_name:
-            raise ValueError("MCP seed metadata server_name must be a non-empty string")
-
-        url_path = metadata.get("url_path") or "/mcp"
-        if not isinstance(url_path, str):
-            raise ValueError("MCP seed metadata url_path must be a string")
-
-        transport = metadata.get("transport") or "http"
-        if not isinstance(transport, str):
-            raise ValueError("MCP seed metadata transport must be a string")
         openclaw_transport = {
             "http": "streamable-http",
             "streamable-http": "streamable-http",
             "sse": "sse",
-        }.get(transport)
+        }.get(server.transport)
         if openclaw_transport is None:
             raise ValueError("MCP seed metadata transport is not supported by OpenClaw")
 
         server_config: dict[str, Any] = {
-            "url": f"{self._resources_server_base_url().rstrip('/')}/{url_path.lstrip('/')}",
+            "url": server.url,
             "transport": openclaw_transport,
         }
-        headers = metadata.get("headers")
-        if headers is not None and not isinstance(headers, dict):
-            raise ValueError("MCP seed metadata headers must be an object")
-        normalized_headers: dict[str, str] = {}
-        if isinstance(headers, dict):
-            for key, value in headers.items():
-                if not isinstance(key, str) or not isinstance(value, (str, int, float, bool)):
-                    raise ValueError("MCP seed metadata headers must contain scalar values")
-                normalized_headers[key] = str(value)
-        if normalized_headers:
-            server_config["headers"] = normalized_headers
-        else:
-            LOG.warning(
-                "MCP seed metadata for %r has no headers; the tool endpoint will be called without a "
-                "session token and will reject the calls.",
-                server_name,
-            )
-        return {server_name: server_config}
+        if server.headers:
+            server_config["headers"] = server.headers
+        return {server.server_name: server_config}
 
     def _workspace_root(self) -> Path:
         root = Path(self.config.workspace_root).expanduser() / f"openclaw_{uuid4().hex[:8]}"
@@ -580,10 +554,31 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
-            proc.kill()
+            self._kill_process_tree(proc.pid)
             await proc.communicate()
             raise TimeoutError(f"Timed out after {timeout}s: {shlex.join(args)}") from None
+        except asyncio.CancelledError:
+            # Cancellation (e.g. SIGTERM salvage) only stops us from awaiting the process; it does
+            # not stop the process itself. Kill it here so we never leak an orphaned process tree.
+            self._kill_process_tree(proc.pid)
+            with contextlib.suppress(Exception):
+                await proc.communicate()
+            raise
         return proc.returncode or 0, stdout.decode(errors="replace"), stderr.decode(errors="replace")
+
+    @staticmethod
+    def _kill_process_tree(pid: int) -> None:
+        """Kill a subprocess and every descendant it has already started."""
+        try:
+            parent = psutil.Process(pid)
+            children = parent.children(recursive=True)
+        except psutil.NoSuchProcess:
+            return
+        for child in reversed(children):
+            with contextlib.suppress(psutil.NoSuchProcess):
+                child.kill()
+        with contextlib.suppress(psutil.NoSuchProcess):
+            parent.kill()
 
     @staticmethod
     def _session_file(envelope: Optional[dict[str, Any]]) -> Optional[Path]:
@@ -591,6 +586,50 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         agent_meta = meta.get("agentMeta") if isinstance(meta, dict) else None
         session_file = agent_meta.get("sessionFile") if isinstance(agent_meta, dict) else None
         return Path(session_file) if isinstance(session_file, str) and session_file else None
+
+    @staticmethod
+    def _find_partial_session(home: Path) -> Optional[Path]:
+        """Locate OpenClaw's session file on disk when there is no completion envelope to point at
+        it, i.e. the run was cut short by a timeout. OpenClaw writes the session incrementally, so
+        the transcript up to the last completed turn is already on disk; return the most recently
+        written .jsonl under the OpenClaw home that parses to at least one message."""
+        try:
+            candidates = sorted(
+                (p for p in home.rglob("*.jsonl") if p.is_file()),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError:
+            return None
+        for path in candidates:
+            try:
+                if parse_openclaw_session(path.read_text(errors="replace")):
+                    return path
+            except OSError:
+                continue
+        return None
+
+    def _install_sigterm_handler(self) -> None:
+        """Install one process-level wrapper that fans SIGTERM out to active runs.
+
+        Keep the event loop's existing handler registered so uvicorn still receives the signal
+        through Python's wakeup fd and performs its normal graceful shutdown.
+        """
+        if self.sigterm_handler_installed:
+            return
+        previous = signal.getsignal(signal.SIGTERM)
+
+        def _on_sigterm(signum, frame) -> None:
+            for event in self.sigterm_events:
+                event.set()
+            if callable(previous):
+                previous(signum, frame)
+
+        try:
+            signal.signal(signal.SIGTERM, _on_sigterm)
+            self.sigterm_handler_installed = True
+        except ValueError:
+            pass  # signal handlers need the main thread; fall back to timeout-only salvage
 
     async def _run_openclaw(
         self,
@@ -650,17 +689,49 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 prompt,
                 *self.config.extra_args,
             ]
-            code, stdout, stderr = await self._run_exec(cmd, cwd=str(work_dir), env=env, timeout=self.config.timeout)
+            # Run OpenClaw, salvaging a partial transcript if the run is cut short. It can be cut
+            # short two ways: our own self.config.timeout (raises TimeoutError), or an outer
+            # harness/sandbox timeout that SIGTERMs this whole process during its grace window before
+            # SIGKILL. In the SIGTERM case a plain `finally` would not run in time and the workdir
+            # would be lost, so we stop waiting on the signal, read OpenClaw's incrementally-written
+            # session off disk, and return it. Returning quickly lets the harness still write the
+            # response before the SIGKILL, so no harness change is needed.
+            code, stdout, stderr = None, "", ""
+            self._install_sigterm_handler()
+            sigterm_hit = asyncio.Event()
+            self.sigterm_events.add(sigterm_hit)
+            run_task = asyncio.ensure_future(
+                self._run_exec(cmd, cwd=str(work_dir), env=env, timeout=self.config.timeout)
+            )
+            try:
+                term_task = asyncio.ensure_future(sigterm_hit.wait())
+                done, _ = await asyncio.wait({run_task, term_task}, return_when=asyncio.FIRST_COMPLETED)
+                term_task.cancel()
+                if run_task in done:
+                    code, stdout, stderr = run_task.result()
+                else:
+                    LOG.warning("openclaw received SIGTERM; salvaging partial session")
+                    run_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await run_task
+            except TimeoutError:
+                LOG.warning("openclaw timed out after %ds; salvaging partial session", self.config.timeout)
+            finally:
+                self.sigterm_events.discard(sigterm_hit)
+
             if code:
                 LOG.warning("openclaw exited %d: %s", code, stderr)
-            LOG.debug("openclaw stdout (%d chars): %s", len(stdout), stdout[:2000])
+            if stdout:
+                LOG.debug("openclaw stdout (%d chars): %s", len(stdout), stdout[:2000])
 
             fallback_items, usage = parse_openclaw_output(stdout)
             envelope = _decode_last_json_dict_suffix(stdout)
 
+            # On a normal finish the envelope points at the session file; on a cut-short run there is
+            # no envelope, so fall back to locating the partial session that OpenClaw wrote to disk.
             output_items: list[Any] = []
             mcp_tool_call_provenance: dict[str, dict[str, str]] = {}
-            session_path = self._session_file(envelope)
+            session_path = self._session_file(envelope) or self._find_partial_session(home)
             if session_path and session_path.is_file():
                 session_text = session_path.read_text(errors="replace")
                 session_events = parse_openclaw_session_events(session_text)
@@ -698,7 +769,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         ] = None,
         output_collector: Optional[Callable[[list[Any]], None]] = None,
         openclaw_mcp_servers: Optional[dict[str, Any]] = None,
-    ) -> tuple[NeMoGymResponse, dict[str, dict[str, str]]]:
+    ) -> AgentExecutionResult:
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
@@ -738,26 +809,28 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         output_tokens = usage.get("output_tokens", 0)
         cached_tokens = usage.get("cached_tokens", 0)
 
-        return (
-            NeMoGymResponse(
-                id=f"resp_{uuid4().hex}",
-                created_at=int(time()),
-                model=model_name,
-                object="response",
-                output=output_items,
-                tool_choice=body.tool_choice,
-                tools=body.tools,
-                parallel_tool_calls=body.parallel_tool_calls,
-                usage=NeMoGymResponseUsage(
-                    input_tokens=input_tokens,
-                    input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=cached_tokens),
-                    output_tokens=output_tokens,
-                    output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
-                    total_tokens=input_tokens + output_tokens,
-                ),
+        response = NeMoGymResponse(
+            id=f"resp_{uuid4().hex}",
+            created_at=int(time()),
+            model=model_name,
+            object="response",
+            output=output_items,
+            tool_choice=body.tool_choice,
+            tools=body.tools,
+            parallel_tool_calls=body.parallel_tool_calls,
+            usage=NeMoGymResponseUsage(
+                input_tokens=input_tokens,
+                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=cached_tokens),
+                output_tokens=output_tokens,
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+                total_tokens=input_tokens + output_tokens,
             ),
-            mcp_tool_call_provenance,
         )
+        provenance = {
+            call_id: MCPToolCallProvenance.model_validate(identity)
+            for call_id, identity in mcp_tool_call_provenance.items()
+        }
+        return AgentExecutionResult(response=response, mcp_tool_call_provenance=provenance)
 
     async def responses(
         self,
@@ -767,10 +840,10 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         path_params = getattr(request, "path_params", None)
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
         if not isinstance(rollout_id, str):
-            response, _ = await self._create_response(body)
-            return response
+            result = await self._create_response(body)
+            return result.response
 
-        episode, _ = await self._create_episode(
+        episode = await self._create_episode(
             body,
             rollout_id=rollout_id,
         )
@@ -784,7 +857,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         *,
         rollout_id: str,
         openclaw_mcp_servers: Optional[dict[str, Any]] = None,
-    ) -> tuple[AgentEpisode, dict[str, dict[str, str]]]:
+    ) -> AgentEpisode:
         session_id: Optional[str] = None
         session_events: list[dict[str, Any]] = []
         session_tree: OpenClawSessionTree = []
@@ -811,7 +884,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         def collect_output(value: list[Any]) -> None:
             observed_output.extend(value)
 
-        response, mcp_tool_call_provenance = await self._create_response(
+        result = await self._create_response(
             body,
             rollout_id=rollout_id,
             observation_collector=collect,
@@ -836,7 +909,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             else:
                 transcript_available = any(event.get("type") == "message" for event in session_events)
                 observations = build_openclaw_observations(
-                    session_id or response.id,
+                    session_id or result.response.id,
                     openclaw_session_conversation(
                         session_events,
                         input_items=input_items,
@@ -857,7 +930,11 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 source=OPENCLAW_OBSERVATION_SOURCE,
                 gaps=[ObservationGap(code="observation_capture_failed")],
             )
-        return AgentEpisode(response=response, observations=observations), mcp_tool_call_provenance
+        return AgentEpisode(
+            response=result.response,
+            observations=observations,
+            mcp_tool_call_provenance=result.mcp_tool_call_provenance,
+        )
 
     async def run(self, request: Request, body: OpenClawAgentRunRequest) -> OpenClawAgentVerifyResponse:
         async with self.sem:
@@ -874,20 +951,31 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             seed_resp_json = await get_response_json(seed_resp)
 
             rollout_id = self.rollout_id_from_run(body)
-            openclaw_mcp_servers = self._openclaw_mcp_servers_from_seed(seed_resp_json)
+            mcp_server = parse_rollout_mcp_server(
+                seed_resp_json,
+                resources_server_name=self.config.resources_server.name,
+                resources_server_base_url=lambda: resources_server_base_url(
+                    self.server_client, self.config.resources_server.name
+                ),
+                logger=LOG,
+            )
+            openclaw_mcp_servers = self._openclaw_mcp_servers(mcp_server)
 
             if rollout_id is not None:
-                episode, mcp_tool_call_provenance = await self._create_episode(
+                episode = await self._create_episode(
                     body.responses_create_params,
                     rollout_id=rollout_id,
                     openclaw_mcp_servers=openclaw_mcp_servers,
                 )
                 agent_resp, observations = episode.response, episode.observations
+                mcp_tool_call_provenance = episode.mcp_tool_call_provenance or {}
             else:
-                agent_resp, mcp_tool_call_provenance = await self._create_response(
+                execution = await self._create_response(
                     body.responses_create_params,
                     openclaw_mcp_servers=openclaw_mcp_servers,
                 )
+                agent_resp = execution.response
+                mcp_tool_call_provenance = execution.mcp_tool_call_provenance or {}
                 observations = None
             agent_resp_json = agent_resp.model_dump(mode="json")
 
@@ -897,7 +985,10 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 json=body.model_dump()
                 | {
                     "response": agent_resp_json,
-                    NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY: mcp_tool_call_provenance,
+                    NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY: {
+                        call_id: identity.model_dump(mode="json")
+                        for call_id, identity in mcp_tool_call_provenance.items()
+                    },
                 },
                 cookies=cookies,
             )

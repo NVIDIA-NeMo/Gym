@@ -445,6 +445,21 @@ class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
     split: Union[Literal["train"], Literal["validation"], Literal["benchmark"]]
     reuse_existing_data_preparation: bool = False
 
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_input_jsonl_fpath(cls, data):
+        # This config has no input_jsonl_fpath field, so pydantic would silently drop it and
+        # e2e collection would overwrite it with the prepared split path — the user's file
+        # would be ignored without any indication.
+        if isinstance(data, dict) and "input_jsonl_fpath" in data:
+            raise ConfigError(
+                "`input_jsonl_fpath` (-i/--input) is not supported when serving end-to-end: the input is "
+                "always the prepared dataset for the requested split. Either add --no-serve to collect "
+                "rollouts from your own input file against already-running servers, or drop -i/--input "
+                "to use the prepared data."
+            )
+        return data
+
 
 class RolloutCollectionConfig(SharedRolloutCollectionConfig):
     """
@@ -974,7 +989,8 @@ class RolloutCollectionHelper(BaseModel):
 
             current_pct = 100 * len(results) / len(input_rows)
             if pcts_to_print and current_pct >= pcts_to_print[0]:
-                pcts_to_print.pop(0)
+                while pcts_to_print and current_pct >= pcts_to_print[0]:
+                    pcts_to_print.pop(0)
 
                 time_taken_s = time() - start_time
                 time_taken = timedelta(seconds=int(time_taken_s))
@@ -996,6 +1012,16 @@ class RolloutCollectionHelper(BaseModel):
 """
                 # Use tqdm.write here so we can print properly with tqdm being used.
                 tqdm.write(print_str)
+
+                if get_exporters():
+                    step_metrics = {
+                        f"progress/{agent_name}/reward": round(
+                            100 * metrics["reward"] / agent_name_to_counts[agent_name], 2
+                        )
+                        for agent_name, metrics in agent_name_to_metrics.items()
+                    }
+
+                    export_metrics(step_metrics, step=int(current_pct))
 
         results_file.close()
         failures_file.close()

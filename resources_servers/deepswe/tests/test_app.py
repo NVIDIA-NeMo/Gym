@@ -8,6 +8,7 @@ import pytest
 from pytest import MonkeyPatch
 
 import resources_servers.deepswe.app as app_module
+from nemo_gym.config_types import ModelServerRef
 from nemo_gym.sandbox import SandboxResources
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.deepswe.app import (
@@ -62,9 +63,16 @@ def _request() -> dict:
     }
 
 
-def test_model_endpoint_is_the_only_added_egress_target(task_assets: Path, tmp_path: Path) -> None:
+def test_model_endpoint_is_the_only_added_egress_target(
+    monkeypatch: MonkeyPatch, task_assets: Path, tmp_path: Path
+) -> None:
     config = _config(task_assets)
-    config.sandbox_model_base_url = "http://model.internal:8000"
+    config.sandbox_model_server = ModelServerRef(type="responses_api_models", name="policy_model")
+
+    monkeypatch.setattr(
+        "resources_servers.deepswe.app.get_global_config_dict",
+        lambda: {"policy_model": {"responses_api_agents": {"model": {"host": "model.internal", "port": 8000}}}},
+    )
     config.sandbox_config = {
         "provider_options": {
             "network_policy": {
@@ -84,9 +92,14 @@ def test_model_endpoint_is_the_only_added_egress_target(task_assets: Path, tmp_p
     }
 
 
-def test_loopback_model_endpoint_is_rejected(task_assets: Path, tmp_path: Path) -> None:
+def test_loopback_model_endpoint_is_rejected(monkeypatch: MonkeyPatch, task_assets: Path, tmp_path: Path) -> None:
     config = _config(task_assets)
-    config.sandbox_model_base_url = "http://127.0.0.1:8000"
+    config.sandbox_model_server = ModelServerRef(type="responses_api_models", name="policy_model")
+
+    monkeypatch.setattr(
+        "resources_servers.deepswe.app.get_global_config_dict",
+        lambda: {"policy_model": {"responses_api_agents": {"model": {"host": "127.0.0.1", "port": 8000}}}},
+    )
     server = DeepSWEResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
     with pytest.raises(ValueError, match="loopback model host"):

@@ -26,6 +26,7 @@ from fastapi import Request
 from pydantic import ValidationError
 
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME
+from nemo_gym.mcp import parse_rollout_mcp_server
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -473,19 +474,22 @@ class TestRolloutMCPServers:
 
     def test_no_metadata_returns_none(self) -> None:
         agent = self._agent_with_resources_server()
-        assert agent._rollout_mcp_servers({}) is None
+        assert agent._codex_mcp_servers(None) is None
 
     def test_builds_streamable_http_entry_with_session_header(self) -> None:
         agent = self._agent_with_resources_server()
-        servers = agent._rollout_mcp_servers(
+        server = parse_rollout_mcp_server(
             {
                 "mcp": {
                     "server_name": "example_mcp_weather",
                     "url_path": "/mcp",
                     "headers": {"X-NeMo-Gym-Session-Token": "secret-token"},
                 }
-            }
+            },
+            resources_server_name="example_mcp_weather",
+            resources_server_base_url="http://127.0.0.1:8123",
         )
+        servers = agent._codex_mcp_servers(server)
         assert servers == {
             "example_mcp_weather": {
                 "url": "http://127.0.0.1:8123/mcp",

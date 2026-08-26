@@ -160,7 +160,7 @@ At startup (`run_webserver`), Gym:
 
 - turns each plain `POST` route into an MCP tool **named after its path** (`POST /get_weather` → tool `get_weather`), with the input schema derived from the route's Pydantic body model and the description from the handler's docstring. `/seed_session`, `/verify`, `/aggregate_metrics`, and `/mcp` are never tools.
 - mounts a Streamable-HTTP `/mcp` endpoint on the same app.
-- wraps `/seed_session` so its response also carries the `mcp` metadata (server name, `/mcp` URL path, and a signed per-rollout `X-NeMo-Gym-Session-Token`) — which is how an MCP-native agent discovers the endpoint and its rollout-scoped credentials.
+- wraps `/seed_session` so its response also carries the `mcp` metadata (server name, `/mcp` URL path, transport, exposed tool names, and a signed per-rollout `X-NeMo-Gym-Session-Token`) — which is how an MCP-native agent discovers the endpoint, builds an exact tool-identity map, and receives its rollout-scoped credentials.
 
 An MCP `tools/call` invokes the route's own handler directly, with the rollout's session materialized on the `Request` — handlers keep their `request.session` reads exactly as written. The route stays callable over plain HTTP too: the same tool serves both transports, and `/verify` scores both identically. Tool errors (`HTTPException`, validation failures, crashes) surface to the MCP client as tool errors with the same status and text the plain HTTP route would have returned.
 
@@ -295,7 +295,33 @@ gym eval run --no-serve \
     --output results/workplace_claude_rollouts.jsonl
 ```
 
-A correct rollout shows Claude Code calling `mcp__workplace_assistant__*` tools (e.g. `mcp__workplace_assistant__email_reply_email`) and a `reward` of `1.0`. `/verify` scores MCP and HTTP trajectories identically: when the flag is on, the verify endpoint is wrapped at startup to normalize MCP-namespaced tool-call names (`mcp__workplace_assistant__email_reply_email` → `email_reply_email`) for scoring only, while the persisted rollout keeps the names the model actually emitted.
+A correct rollout shows Claude Code calling `mcp__workplace_assistant__*` tools (for example, `mcp__workplace_assistant__email_reply_email`) and a `reward` of `1.0`. The stored rollout keeps that client-facing name and records its canonical MCP identity separately under the same `call_id`:
+
+```json
+{
+  "response": {
+    "output": [
+      {
+        "type": "function_call",
+        "call_id": "call_1",
+        "name": "mcp__workplace_assistant__email_reply_email"
+      }
+    ]
+  },
+  "mcp_tool_call_provenance": {
+    "call_1": {
+      "server_name": "workplace_assistant",
+      "tool_name": "email_reply_email"
+    }
+  }
+}
+```
+
+`/verify` uses this sidecar on a copy of the trajectory: calls attributed to the Resources Server being verified use their canonical `tool_name` for scoring, while built-in calls, calls from other MCP servers, and calls absent from the sidecar keep their emitted names. The persisted rollout and verify response retain the original client-facing names.
+
+<Note>
+For historical Claude Code trajectories that do not have `mcp_tool_call_provenance`, Gym retains a narrow compatibility fallback that recognizes `mcp__<server>__<tool>`. New trajectories use structured provenance rather than parsing a client-specific naming convention.
+</Note>
 
 ### The weather server runs the same way
 
@@ -337,6 +363,7 @@ Things to know about this flow:
 
 - **No cookie/session entanglement.** Gym's session cookie flows only between the agent server and the Resources Server (`/seed_session` ↔ `/verify`). The agent-to-external-MCP connection is a separate channel with its own auth (whatever `headers` you put in the static config). They don't interfere.
 - **Verify off the trajectory.** Gym can't observe the external server's calls, so `verify()` must score the `function_call` / `function_call_output` items in the agent's Responses-API output — not server-side session state.
+- **Identity remains source-specific.** When an agent adapter records structured MCP provenance for an external call, its external `server_name` is preserved. A Gym Resources Server only substitutes canonical names for sidecar entries attributed to that Resources Server; it does not reinterpret calls from other MCP servers.
 - **Static + per-rollout compose.** When both are present, the agent merges your static `mcp_config` with the per-rollout Gym-owned entry, so a single rollout can use external tools *and* Gym-owned MCP tools at once. If a static server happens to share the **same name** as the Gym resources server, the per-rollout Gym entry takes precedence and overwrites it.
 
 ---
