@@ -55,6 +55,6 @@ print(f"Writing materialized rows took {time() - start_time:.2f}s ({materialized
 print("Starting _load_from_cache...")
 start_time = time()
 rc_helper._load_from_cache(rc_config)
-print(f"_load_from_cache took {time() - start_time}s")
+print(f"_load_from_cache took {time() - start_time:.2f}s")
 
 rmtree(rc_config.materialized_jsonl_fpath, ignore_errors=True)
