@@ -42,6 +42,7 @@ from responses_api_agents.anyterminal_agent.app import (
     GymAgentHarnessProcessor,
     RunTerminalAgent,
     _build_provider,
+    _file_lock,
     _format_container,
     _instruction_from_input,
     _read_task_meta,
@@ -512,6 +513,36 @@ class TestHarnessProcessorSetup:
             assert proc.setup() == deps_dir
 
         assert not lock_path.exists()
+
+    def test_file_lock_retries_when_lock_disappears_before_stat(self, tmp_path: Path) -> None:
+        setup_dir = tmp_path / "target"
+        lock_path = setup_dir.parent / f".{setup_dir.name}.lockdir"
+        lock_path.mkdir()
+        original_stat = Path.stat
+        removed = False
+
+        def stat(path: Path, *args, **kwargs):
+            nonlocal removed
+            if path == lock_path and not removed:
+                removed = True
+                shutil.rmtree(lock_path)
+                raise FileNotFoundError
+            return original_stat(path, *args, **kwargs)
+
+        with patch.object(Path, "stat", stat):
+            with _file_lock(setup_dir, "test", max_wait=0, poll_interval=0):
+                assert lock_path.exists()
+
+    def test_file_lock_timeout_does_not_remove_existing_lock(self, tmp_path: Path) -> None:
+        setup_dir = tmp_path / "target"
+        lock_path = setup_dir.parent / f".{setup_dir.name}.lockdir"
+        lock_path.mkdir()
+
+        with pytest.raises(TimeoutError):
+            with _file_lock(setup_dir, "test", max_wait=0, poll_interval=0):
+                pass
+
+        assert lock_path.exists()
 
 
 # ── GymAgentHarnessProcessor.get_run_command ─────────────────────────────────────

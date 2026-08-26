@@ -17,15 +17,19 @@ These exercise runner generation, image resolution, and configuration.
 """
 
 import base64
+import hashlib
 import json
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from responses_api_agents.anyswe_agent.agent_runner import _extract_patch, _snapshot_repo
 from responses_api_agents.anyswe_agent.app import (
     AnySweAgent,
     AnySweAgentConfig,
+    GymAgentHarnessProcessor,
     _classify_agent_error,
     _dataset_family,
     _r2e_resolved,
@@ -50,6 +54,31 @@ def _config(**overrides) -> AnySweAgentConfig:
     )
     base.update(overrides)
     return AnySweAgentConfig(**base)
+
+
+class TestHarnessProcessorSetup:
+    def test_rechecks_sentinel_after_acquiring_lock(self, tmp_path: Path) -> None:
+        proc = GymAgentHarnessProcessor(
+            config=_config(
+                agent_server_module="responses_api_agents.no_such_agent.app",
+                agent_server_class="NoSuchAgent",
+                agent_config_class="NoSuchAgentConfig",
+            )
+        )
+        deps_dir = tmp_path / "anyswe_no_such_agent_deps"
+        recipe = hashlib.sha256(b"").hexdigest()
+
+        @contextmanager
+        def finish_other_install(_file_path: Path, _label: str):
+            deps_dir.mkdir(parents=True)
+            (deps_dir / ".installed").write_text(recipe)
+            yield
+
+        with (
+            patch("responses_api_agents.anyswe_agent.app.__file__", str(tmp_path / "app.py")),
+            patch("responses_api_agents.anyswe_agent.app._file_lock", side_effect=finish_other_install),
+        ):
+            assert proc.setup() == deps_dir
 
 
 class TestAgentRunner:

@@ -22,6 +22,7 @@ import tempfile
 import time
 import uuid
 from asyncio import Semaphore
+from contextlib import contextmanager
 from pathlib import Path
 from subprocess import Popen
 from traceback import format_exc
@@ -57,6 +58,39 @@ def update_metrics(metrics_fpath: Path, update_dict: Dict[str, Any]) -> None:
     existing = {k: v for k, v in json.loads(metrics_fpath.read_text()).items() if v is not None}
     update = {k: v for k, v in update_dict.items() if v is not None}
     metrics_fpath.write_text(json.dumps(existing | update))
+
+
+@contextmanager
+def _file_lock(file_path: Path, label: str, max_wait: float = 3600.0, poll_interval: float = 5.0):
+    """Cross-node lock using mkdir, which is atomic on Lustre/NFS."""
+    lock_dir = file_path.parent
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / f".{file_path.name}.lockdir"
+
+    print(f"Acquiring {label} lock at {lock_path}", flush=True)
+    waited = 0.0
+    while True:
+        try:
+            lock_path.mkdir(exist_ok=False)
+            break
+        except FileExistsError:
+            try:
+                lock_age = time.time() - lock_path.stat().st_mtime
+            except FileNotFoundError:
+                continue
+            if waited >= max_wait:
+                raise TimeoutError(
+                    f"Timed out waiting for {label} lock at {lock_path} after {max_wait}s; lock age is {lock_age:.0f}s"
+                )
+            if waited % 30 == 0:
+                print(f"  Waiting for {label} lock (held by another process, {waited:.0f}s elapsed)...", flush=True)
+            time.sleep(poll_interval)
+            waited += poll_interval
+
+    try:
+        yield
+    finally:
+        shutil.rmtree(lock_path, ignore_errors=True)
 
 
 def _safe_config_json(params: "AnySweInstanceConfig", indent: Optional[int] = None) -> str:
@@ -199,18 +233,7 @@ class GymAgentHarnessProcessor(BaseModel):
         if sentinel.exists() and sentinel.read_text().strip() == recipe:
             return deps_dir
 
-        lock = deps_dir.parent / f".{deps_dir.name}.lockdir"
-        while True:
-            try:
-                lock.mkdir(exist_ok=False)
-                break
-            except FileExistsError:
-                if time.time() - lock.stat().st_mtime > 3600:
-                    shutil.rmtree(lock, ignore_errors=True)
-                else:
-                    time.sleep(5)
-
-        try:
+        with _file_lock(deps_dir, f"{self._agent_key} deps setup"):
             if sentinel.exists() and sentinel.read_text().strip() == recipe:
                 return deps_dir
             if not script.exists():
@@ -221,8 +244,6 @@ class GymAgentHarnessProcessor(BaseModel):
                 raise RuntimeError(f"agent runtime setup failed: {script}")
             sentinel.write_text(recipe)
             return deps_dir
-        finally:
-            shutil.rmtree(lock, ignore_errors=True)
 
     def write_runner(self) -> None:
         cfg: AnySweInstanceConfig = self.config
