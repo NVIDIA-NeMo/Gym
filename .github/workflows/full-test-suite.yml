@@ -284,21 +284,15 @@ jobs:
         (github.event_name != 'workflow_dispatch' || inputs.send_notification)
       }}
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
       # workflow_dispatch can be run against any ref via the Actions UI, so
       # only alert the shared Gym channel for runs against main or a release
       # branch (rMAJOR.MINOR.PATCH) - not ad-hoc feature-branch dispatches.
       - name: Check ref is main or a release branch
         id: ref_check
-        shell: bash
-        env:
-          REF: ${{ github.ref_name }}
-        run: |
-          if [[ "$REF" == "main" || "$REF" =~ ^r[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "allowed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "allowed=false" >> "$GITHUB_OUTPUT"
-            echo "Ref '$REF' is not main or a release branch; suppressing Slack alert."
-          fi
+        uses: ./.github/actions/is-main-or-release-ref
 
       - name: Notify Gym alerts channel
         if: steps.ref_check.outputs.allowed == 'true'
