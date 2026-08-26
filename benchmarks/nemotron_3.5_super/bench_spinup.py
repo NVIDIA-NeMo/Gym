@@ -49,7 +49,7 @@ with rc_config.materialized_jsonl_fpath.open("wb") as f:
     for row in tqdm(rows, desc="Writing materialized rows"):
         f.write(orjson.dumps(row) + b"\n")
 materialized_size_gb = rc_config.materialized_jsonl_fpath.stat().st_size / (1024**3)
-print(f"Writing materialized rows took {time() - start_time:.2f}s ({materialized_size_gb}GB)")
+print(f"Writing materialized rows took {time() - start_time:.2f}s ({materialized_size_gb:.2f}GB)")
 
 print("Starting _load_from_cache...")
 start_time = time()
