@@ -110,17 +110,108 @@ _TRAINING_METADATA_FIELDS = frozenset(
 _CONVERSATION_ADAPTER = TypeAdapter(list[NeMoGymResponseInputItem])
 _KNOWN_INCOMPLETE_FINISH_REASONS = frozenset(
     {
+        "aborted",
+        "canceled",
+        "cancelled",
         "content_filter",
+        "failed",
+        "incomplete",
         "length",
+        "max_output_tokens",
         "max_tokens",
         "model_context_window_exceeded",
+        "pause_turn",
         "refusal",
+        "timed_out",
+        "timeout",
     }
 )
 
 
 def _path_error(path: str, detail: str) -> AtifExportError:
     return AtifExportError(f"{path}: {detail}")
+
+
+def _provider_termination_evidence(
+    call: TrajectoryModelCall,
+    *,
+    path: str,
+) -> tuple[str | None, str | None, bool]:
+    """Read termination fields from provider responses whose dialect is known."""
+
+    response = call.response
+    dialect = call.response_metadata.dialect
+    if dialect not in {"responses", "chat", "messages"}:
+        return None, None, False
+    if response is None:
+        return None, None, False
+    if not isinstance(response, dict):
+        raise _path_error(path, f"{dialect} provider response is not an object")
+    if response.get("error") is not None:
+        raise _path_error(path, f"{dialect} provider response contains error evidence")
+
+    if dialect == "responses":
+        status = response.get("status")
+        if status is not None and not isinstance(status, str):
+            raise _path_error(path, "Responses status is not a string")
+        incomplete_details = response.get("incomplete_details")
+        if incomplete_details is None:
+            return status, None, False
+        if not isinstance(incomplete_details, dict):
+            raise _path_error(path, "Responses incomplete_details is not an object")
+        reason = incomplete_details.get("reason")
+        if reason is not None and not isinstance(reason, str):
+            raise _path_error(path, "Responses incomplete_details.reason is not a string")
+        return status, reason, True
+    if dialect == "chat":
+        choices = response.get("choices")
+        if choices is None:
+            return None, None, False
+        if not isinstance(choices, list):
+            raise _path_error(path, "Chat choices is not an array")
+        if not choices:
+            return None, None, False
+        if not isinstance(choices[0], dict):
+            raise _path_error(path, "Chat first choice is not an object")
+        first_choice = choices[0]
+        finish_reason = first_choice.get("finish_reason")
+        if finish_reason is not None and not isinstance(finish_reason, str):
+            raise _path_error(path, "Chat finish_reason is not a string")
+        return None, finish_reason, False
+
+    response_type = response.get("type")
+    if response_type is not None and not isinstance(response_type, str):
+        raise _path_error(path, "Messages type is not a string")
+    if response_type == "error":
+        raise _path_error(path, "messages provider response contains error evidence")
+    stop_reason = response.get("stop_reason")
+    if stop_reason is not None and not isinstance(stop_reason, str):
+        raise _path_error(path, "Messages stop_reason is not a string")
+    return None, stop_reason, False
+
+
+def _reconciled_finish_reason(call: TrajectoryModelCall, *, path: str) -> str | None:
+    """Reject provider-native failure evidence and reconcile redundant metadata."""
+
+    metadata = call.response_metadata
+    raw_status, raw_finish_reason, raw_incomplete = _provider_termination_evidence(call, path=path)
+    if (
+        metadata.response_status is not None
+        and raw_status is not None
+        and metadata.response_status.strip().lower() != raw_status.strip().lower()
+    ):
+        raise _path_error(path, "normalized response_status conflicts with the provider response")
+    if (
+        metadata.finish_reason is not None
+        and raw_finish_reason is not None
+        and metadata.finish_reason.strip().lower() != raw_finish_reason.strip().lower()
+    ):
+        raise _path_error(path, "normalized finish_reason conflicts with the provider response")
+    if raw_status is not None and raw_status.strip().lower() != "completed":
+        raise _path_error(path, f"provider response is {raw_status!r}, not completed")
+    if raw_incomplete:
+        raise _path_error(path, "Responses provider response contains incomplete_details")
+    return metadata.finish_reason if metadata.finish_reason is not None else raw_finish_reason
 
 
 def _strict_json_loads(value: str | bytes) -> Any:
@@ -133,6 +224,10 @@ def _strict_json_loads(value: str | bytes) -> Any:
         parsed = float(number)
         if not math.isfinite(parsed):
             raise ValueError(f"JSON number {number!r} is outside the finite float range")
+        if parsed == 0.0:
+            significand = number.lower().split("e", 1)[0]
+            if any(character in "123456789" for character in significand):
+                raise ValueError(f"JSON number {number!r} underflows the finite float range")
         return parsed
 
     def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -502,13 +597,27 @@ def _parse_arguments(call: NeMoGymResponseFunctionToolCall, *, path: str) -> dic
     return arguments
 
 
-def _tool_record_extra(record: Any) -> dict[str, Any] | None:
+def _tool_record_extra(record: Any, *, source_item_id: str | None = None) -> dict[str, Any] | None:
     source = record.model_dump(
         mode="json",
         include={"sandbox_id", "started_at", "completed_at", "duration_ms", "timing_source"},
         exclude_none=True,
     )
+    if source_item_id is not None:
+        source["source_item_id"] = source_item_id
     return {"nemo_gym": source} if source else None
+
+
+def _source_item_ids(group: _AgentGroup) -> dict[str, Any]:
+    """Return provider item identities that ATIF has no standard fields for."""
+
+    source_items: dict[str, Any] = {}
+    reasoning_ids = [item.id for item in group.reasoning]
+    if reasoning_ids:
+        source_items["reasoning_ids"] = reasoning_ids
+    if len(group.answer) == 1 and isinstance(group.answer[0], NeMoGymResponseOutputMessage):
+        source_items["message_id"] = group.answer[0].id
+    return source_items
 
 
 def _build_groups(trajectory: TrajectoryRecord, invocation: Any) -> tuple[list[AtifStep], list[_AgentGroup]]:
@@ -634,13 +743,17 @@ def _build_groups(trajectory: TrajectoryRecord, invocation: Any) -> tuple[list[A
                         tool_call_id=call.call_id,
                         function_name=call.name,
                         arguments=_parse_arguments(call, path=f"{item_path}.tool_calls[{call_index}]"),
+                        extra=({"nemo_gym": {"source_item_id": call.id}} if call.id is not None else None),
                     )
                 )
             results = [
                 AtifObservationResult(
                     source_call_id=output.call_id,
                     content=results_by_id[output.call_id],
-                    extra=_tool_record_extra(records_by_id[output.call_id]),
+                    extra=_tool_record_extra(
+                        records_by_id[output.call_id],
+                        source_item_id=output.id,
+                    ),
                 )
                 for output in output_sequence
             ]
@@ -772,19 +885,19 @@ def _apply_turns(trajectory: TrajectoryRecord, groups: list[_AgentGroup]) -> Non
         if call_index in used_calls:
             raise _path_error(f"{path}.model_calls[0]", "model call is referenced by more than one turn")
         used_calls.add(call_index)
+        finish_reason = _reconciled_finish_reason(call, path=path)
         if call.response_metadata.response_status not in (None, "completed"):
             raise _path_error(path, f"model call is {call.response_metadata.response_status!r}, not completed")
         if call.response_metadata.error_category is not None:
             raise _path_error(path, "model call contains provider error evidence")
         if call.response_metadata.status_code is not None and not 200 <= call.response_metadata.status_code < 300:
             raise _path_error(path, f"model call returned non-success status {call.response_metadata.status_code}")
-        finish_reason = call.response_metadata.finish_reason
         normalized_finish_reason = finish_reason.strip().lower() if finish_reason is not None else None
         if normalized_finish_reason in _KNOWN_INCOMPLETE_FINISH_REASONS:
             raise _path_error(path, f"finish reason {finish_reason!r} indicates an incomplete model response")
         if group.step.tool_calls and normalized_finish_reason in {"stop", "end_turn", "stop_sequence"}:
             raise _path_error(path, f"finish reason {finish_reason!r} contradicts the captured tool calls")
-        if not group.step.tool_calls and normalized_finish_reason in {"tool_calls", "tool_use"}:
+        if not group.step.tool_calls and normalized_finish_reason in {"tool_calls", "tool_use", "function_call"}:
             raise _path_error(path, f"finish reason {finish_reason!r} contradicts the captured text-only output")
 
         try:
@@ -794,29 +907,46 @@ def _apply_turns(trajectory: TrajectoryRecord, groups: list[_AgentGroup]) -> Non
         group.step.model_name = call.response_metadata.model
         group.step.llm_call_count = 1
         stats = call.token_stats
+        training = _training_metadata(
+            [*group.reasoning, *group.answer],
+            path=f"{path}.answer",
+        )
+        if stats.total_tokens is not None:
+            for field_name, value in (
+                ("prompt_tokens", stats.prompt_tokens),
+                ("completion_tokens", stats.completion_tokens),
+                ("reasoning_tokens", stats.reasoning_tokens),
+                ("cached_tokens", stats.cached_tokens),
+            ):
+                if value is not None and value > stats.total_tokens:
+                    raise _path_error(path, f"model-call {field_name} exceeds total_tokens")
+            if (
+                stats.prompt_tokens is not None
+                and stats.completion_tokens is not None
+                and stats.total_tokens != stats.prompt_tokens + stats.completion_tokens
+            ):
+                raise _path_error(
+                    path,
+                    "model-call total_tokens does not match prompt_tokens + completion_tokens",
+                )
         if (
-            stats.total_tokens is not None
+            stats.cached_tokens is not None
             and stats.prompt_tokens is not None
-            and stats.completion_tokens is not None
-            and stats.total_tokens != stats.prompt_tokens + stats.completion_tokens
-        ):
-            raise _path_error(
-                path,
-                "model-call total_tokens does not match prompt_tokens + completion_tokens",
-            )
-        if (
-            stats.prompt_tokens is not None
-            and stats.cached_tokens is not None
             and stats.cached_tokens > stats.prompt_tokens
         ):
             raise _path_error(
                 path,
                 "model-call cached_tokens exceeds prompt_tokens; cached tokens must be a subset",
             )
-        training = _training_metadata(
-            [*group.reasoning, *group.answer],
-            path=f"{path}.answer",
-        )
+        if (
+            stats.reasoning_tokens is not None
+            and stats.completion_tokens is not None
+            and stats.reasoning_tokens > stats.completion_tokens
+        ):
+            raise _path_error(
+                path,
+                "model-call reasoning_tokens exceeds completion_tokens; reasoning tokens must be a subset",
+            )
         if any(
             value is not None
             for value in (
@@ -847,6 +977,7 @@ def _apply_turns(trajectory: TrajectoryRecord, groups: list[_AgentGroup]) -> Non
                 logprobs=training.generation_log_probs if training is not None else None,
                 extra={"nemo_gym": extra} if extra else None,
             )
+        source_items = _source_item_ids(group)
         group.step.extra = {
             "nemo_gym": {
                 "turn": {
@@ -855,6 +986,7 @@ def _apply_turns(trajectory: TrajectoryRecord, groups: list[_AgentGroup]) -> Non
                     **({"resolved": turn.resolved} if turn.resolved is not None else {}),
                 },
                 "model_call": call.model_dump(mode="json", exclude_none=True),
+                **({"source_items": source_items} if source_items else {}),
             }
         }
 
@@ -880,14 +1012,13 @@ def _apply_turns(trajectory: TrajectoryRecord, groups: list[_AgentGroup]) -> Non
         )
 
 
-def _final_metrics(groups: list[_AgentGroup], *, total_steps: int) -> AtifFinalMetrics | None:
+def _final_metrics(groups: list[_AgentGroup], *, total_steps: int) -> AtifFinalMetrics:
     metrics = [group.step.metrics for group in groups]
-    if not metrics or any(metric is None for metric in metrics):
-        return None
-    typed_metrics = [metric for metric in metrics if metric is not None]
 
     def total(field_name: str) -> int | None:
-        values = [getattr(metric, field_name) for metric in typed_metrics]
+        if not metrics or any(metric is None for metric in metrics):
+            return None
+        values = [getattr(metric, field_name) for metric in metrics if metric is not None]
         return sum(values) if all(value is not None for value in values) else None
 
     return AtifFinalMetrics(
@@ -901,6 +1032,10 @@ def _final_metrics(groups: list[_AgentGroup], *, total_steps: int) -> AtifFinalM
 def gym_rollout_to_atif(rollout: dict[str, Any], *, session_id: str, agent_version: str) -> AtifTrajectoryV1_7:
     """Convert one rollout row, rejecting any structure Gym cannot represent completely."""
 
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise _path_error("session_id", "expected a non-empty string")
+    if not isinstance(agent_version, str) or not agent_version.strip():
+        raise _path_error("agent_version", "expected a non-empty string")
     _reject_non_finite_numbers(rollout, path="rollout")
     raw_trajectory = rollout.get("ng_trajectory")
     _preflight_raw_trajectory(raw_trajectory)
@@ -915,6 +1050,8 @@ def gym_rollout_to_atif(rollout: dict[str, Any], *, session_id: str, agent_versi
     if len(trajectory.invocations) != 1:
         raise _path_error("ng_trajectory.invocations", "expected exactly one root invocation")
     invocation = trajectory.invocations[0]
+    if not invocation.invocation_id.strip():
+        raise _path_error("ng_trajectory.invocations[0].invocation_id", "cannot be blank")
     if invocation.parent_invocation_id is not None or invocation.spawned_by_tool_call_id is not None:
         raise _path_error("ng_trajectory.invocations[0]", "subagent invocations are not supported")
     if invocation.status != "completed":
@@ -999,13 +1136,13 @@ def export_rollouts_to_atif(config: ExportAtifConfig) -> AtifExportResult:
     staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.tmp-", dir=output.parent))
     try:
         manifest_lines: list[str] = []
-        with source.open(encoding="utf-8") as handle:
+        with source.open("rb") as handle:
             for line_no, line in enumerate(handle, 1):
                 if not line.strip():
                     raise _path_error(f"line {line_no}", "blank JSONL records are not supported")
                 try:
-                    row = _strict_json_loads(line)
-                except (TypeError, json.JSONDecodeError, ValueError) as exc:
+                    row = _strict_json_loads(line.decode("utf-8"))
+                except (TypeError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
                     raise _path_error(f"line {line_no}", "invalid JSON") from exc
                 if not isinstance(row, dict):
                     raise _path_error(f"line {line_no}", "expected a JSON object")
