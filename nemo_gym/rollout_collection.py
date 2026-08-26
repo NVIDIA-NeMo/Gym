@@ -1087,7 +1087,8 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
             from nemo_gym.rollout_health import format_health_report, run_health_checks
 
             try:
-                health_result = run_health_checks(
+                health_result = await asyncio.to_thread(
+                    run_health_checks,
                     output_fpath,
                     workers=config.health_check_workers,
                     ignored_checks=config.health_check_ignored_checks,
@@ -1366,7 +1367,8 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
             from nemo_gym.rollout_health import format_health_report, run_health_checks
 
             try:
-                health_result = run_health_checks(
+                health_result = await asyncio.to_thread(
+                    run_health_checks,
                     output_fpath if config.merge_shards else [Path(path) for path in input_paths],
                     output_dir=output_fpath.parent,
                     workers=config.health_check_workers,

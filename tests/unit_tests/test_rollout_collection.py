@@ -18,6 +18,7 @@ from asyncio import Future
 from collections import Counter
 from copy import deepcopy
 from pathlib import Path
+from threading import get_ident
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
@@ -1885,7 +1886,12 @@ class TestRolloutAggregationHelper:
             metrics_path.write_text("[]")
             return metrics_path
 
+        caller_thread = get_ident()
+        health_thread = None
+
         def broken_health_check(*args, **kwargs):
+            nonlocal health_thread
+            health_thread = get_ident()
             raise RuntimeError("health failed")
 
         monkeypatch.setattr(RolloutCollectionHelper, "_call_aggregate_metrics", fake_call)
@@ -1900,6 +1906,8 @@ class TestRolloutAggregationHelper:
 
         assert metrics_path.exists()
         assert output_fpath.exists()
+        assert health_thread is not None
+        assert health_thread != caller_thread
         assert "Rollout health checks failed after aggregation" in caplog.text
 
 

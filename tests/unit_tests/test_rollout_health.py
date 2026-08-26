@@ -6,6 +6,7 @@ import sys
 from asyncio import Future
 from copy import deepcopy
 from pathlib import Path
+from threading import get_ident
 
 import orjson
 import pytest
@@ -315,13 +316,20 @@ async def test_health_on_and_off_leave_collection_and_metrics_byte_identical(
         upload_rollouts=False,
     )
 
+    caller_thread = get_ident()
+    health_thread = None
+
     def broken_health_check(*args, **kwargs):
+        nonlocal health_thread
+        health_thread = get_ident()
         raise RuntimeError("health failed")
 
     monkeypatch.setattr(health, "run_health_checks", broken_health_check)
     await GoldenHelper().run_from_config(failed_config)
 
     assert failed_output_path.exists()
+    assert health_thread is not None
+    assert health_thread != caller_thread
     assert "Rollout health checks failed after collection" in caplog.text
 
 
