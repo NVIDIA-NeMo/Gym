@@ -589,6 +589,7 @@ class RolloutCollectionHelper(BaseModel):
         rows = []
         for batch_result in tqdm(ray.util.as_completed(refs), desc="Loading JSON batches", total=len(refs)):
             rows.extend(batch_result)
+        rows.sort(key=lambda t: t[0])
         return rows
 
     def _preprocess_rows_from_config(self, config: RolloutCollectionConfig) -> List[Dict]:
