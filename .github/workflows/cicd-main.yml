@@ -306,13 +306,10 @@ jobs:
         (github.event_name != 'workflow_dispatch' || inputs.send_notification)
       }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-
       - name: Notify Gym alerts channel
-        uses: ./.github/actions/notify-slack-failure
+        uses: NVIDIA-NeMo/FW-CI-templates/.github/actions/send-slack-alert@cf5acebace78c7c339bc1f804357a991336f1c4d # v1.8.10
         with:
-          webhook-url: ${{ secrets.SLACK_TEAM_CHANNEL_WEBHOOK }}
+          webhook: ${{ secrets.SLACK_TEAM_CHANNEL_WEBHOOK }}
           message: |
             :rotating_light: Nightly Gym CI failed on main branch
 
