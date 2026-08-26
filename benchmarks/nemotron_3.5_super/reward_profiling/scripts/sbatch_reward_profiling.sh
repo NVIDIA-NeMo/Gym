@@ -37,6 +37,16 @@ NUM_DECODE_NODES=${NUM_DECODE_NODES:-2}
 VLLM_CONFIG=${VLLM_CONFIG:-benchmarks/nemotron_3.5_super/vllm_configs/nemotron_3.5_super.sh}
 MOUNTS=${MOUNTS:-/lustre:/lustre}
 
+# Secrets reach Gym through env.yaml, which it auto-loads from its working directory. The judge
+# lane needs it: judges_remote.yaml interpolates ${nv_inference_api_key}, which env.yaml resolves
+# from the shell. Without the mount the config fails to parse rather than failing at judge time.
+ENV_YAML=${ENV_YAML:-$PWD/env.yaml}
+if [[ -f "$ENV_YAML" ]]; then
+    MOUNTS="$MOUNTS,$ENV_YAML:/opt/Gym/env.yaml"
+else
+    echo "WARNING: no env.yaml at $ENV_YAML; judge environments will fail to resolve their API key." >&2
+fi
+
 # Scale concurrency with decode capacity: each decode engine schedules up to max_num_seqs
 # sequences (512 in vllm_configs/nemotron_3.5_super.sh), so this saturates the engines instead of
 # leaving them idle. A measured run at 128 against D2 sat at 12.5% of capacity, with the client

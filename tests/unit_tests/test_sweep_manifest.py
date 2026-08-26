@@ -518,3 +518,21 @@ def test_agent_declared_by_no_config_is_still_an_error(tmp_path):
     )
     with pytest.raises(SweepValidationError, match="is not declared by any of its configs"):
         validate_manifest(manifest, repo_root=tmp_path)
+
+
+def test_materialize_writes_a_self_contained_sweep_dir(tmp_path):
+    """The launchers serve from SWEEP_DIR, so the composed config must land beside the inputs."""
+    from nemo_gym.sweep.materialize import materialize
+
+    _write_config(tmp_path, "a.yaml", "agent_a")
+    _write_data(tmp_path, "x.jsonl", "agent_a", rows=2)
+    manifest = _manifest(
+        tmp_path,
+        [{"label": "one", "agent": "agent_a", "configs": ["a.yaml"], "data": str(tmp_path / "x.jsonl")}],
+    )
+    report = materialize(manifest, tmp_path / "out")
+    assert report.config_fpath.name == "sweep_config.yaml"
+    assert yaml.safe_load(report.config_fpath.read_text())["config_paths"] == ["a.yaml"]
+    # everything gym env start / gym eval run --resume needs, in one directory
+    names = {p.name for p in report.config_fpath.parent.iterdir()}
+    assert {"sweep_config.yaml", "rollouts_materialized_inputs.jsonl", "rollouts.jsonl"} <= names

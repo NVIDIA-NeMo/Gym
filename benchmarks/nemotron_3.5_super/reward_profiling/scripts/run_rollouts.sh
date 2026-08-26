@@ -18,6 +18,16 @@ CONTAINER=${CONTAINER:?set CONTAINER to the reward-profiling sqsh}
 GYM_CONFIG=${GYM_CONFIG:-sweep_config.yaml}
 CONCURRENCY=${CONCURRENCY:-128}
 ROUTER_PORT=${ROUTER_PORT:-8000}
+MOUNTS=${MOUNTS:-/lustre:/lustre}
+# Secrets reach Gym through env.yaml, which it auto-loads from its working directory. The judge
+# lane needs it: judges_remote.yaml interpolates ${nv_inference_api_key}, which env.yaml resolves
+# from the shell. Without the mount the config fails to parse rather than failing at judge time.
+ENV_YAML=${ENV_YAML:-$PWD/env.yaml}
+if [[ -f "$ENV_YAML" ]]; then
+    MOUNTS="$MOUNTS,$ENV_YAML:/opt/Gym/env.yaml"
+else
+    echo "WARNING: no env.yaml at $ENV_YAML; judge environments will fail to resolve their API key." >&2
+fi
 
 mapfile -t NODES < <(scontrol show hostnames "$(squeue -j "$VLLM_JOBID" -h -o '%N')")
 ROUTER_IP=$(getent hosts "${NODES[0]}" | awk 'NR==1 {print $1}')
@@ -31,7 +41,7 @@ echo "sweep  : $SWEEP_DIR"
 srun --overlap --jobid="$VLLM_JOBID" --nodes=1 --ntasks=1 \
      --nodelist="$DRIVER_NODE" --gpus=0 --cpus-per-task="${CPUS:-64}" \
      --container-image="$CONTAINER" \
-     --container-mounts="${MOUNTS:-/lustre:/lustre}" \
+     --container-mounts="$MOUNTS" \
      --container-workdir=/opt/Gym --no-container-mount-home \
      bash -lc "
        set -euo pipefail

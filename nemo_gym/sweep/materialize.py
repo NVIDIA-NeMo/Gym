@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import orjson
+import yaml
 
 from nemo_gym.sweep.manifest import AGENT_REF_KEY, SweepManifest, SweepValidationError
 from nemo_gym.sweep.shuffle import DEFAULT_BUFFER_ROWS, streaming_shuffle
@@ -45,6 +46,7 @@ ROLLOUT_INDEX_KEY = "_ng_rollout_index"
 
 
 REPORT_NAME = "sweep_report.json"
+CONFIG_NAME = "sweep_config.yaml"
 
 
 @dataclass
@@ -59,6 +61,7 @@ class MaterializeReport:
     materialized_fpath: Path
     output_fpath: Path
     report_fpath: Path
+    config_fpath: Path
     rows_per_entry: Dict[str, int]
     materialized_per_entry: Dict[str, int]
     num_repeats_per_entry: Dict[str, int]
@@ -81,6 +84,7 @@ class MaterializeReport:
         return {
             "materialized_fpath": str(self.materialized_fpath),
             "output_fpath": str(self.output_fpath),
+            "config_fpath": str(self.config_fpath),
             "materialized_bytes": self.materialized_fpath.stat().st_size if self.materialized_fpath.exists() else None,
             "nickname": self.nickname,
             "shuffle_seed": self.shuffle_seed,
@@ -222,10 +226,18 @@ def materialize(
     # An empty rollouts file is the second half of the resume gate.
     output_fpath.touch(exist_ok=True)
 
+    # The launchers serve this deployment from SWEEP_DIR, so the composed config has to land
+    # beside the inputs; otherwise SWEEP_DIR is not self-contained and `gym env start` has nothing
+    # to read.
+    config_fpath = out_dir / CONFIG_NAME
+    with open(config_fpath, "w") as handle:
+        yaml.safe_dump({"config_paths": manifest.config_paths()}, handle, default_flow_style=False, sort_keys=False)
+
     report = MaterializeReport(
         materialized_fpath=materialized_fpath,
         output_fpath=output_fpath,
         report_fpath=out_dir / REPORT_NAME,
+        config_fpath=config_fpath,
         task_index_ranges={
             entry.label: (offsets[i], offsets[i] + counts[i] - 1) for i, entry in enumerate(manifest.entries)
         },
