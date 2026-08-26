@@ -632,13 +632,16 @@ class RolloutCollectionHelper(BaseModel):
                 f"Input file not found: '{config.input_jsonl_fpath}' (--input). Check the path is spelled correctly."
             )
 
-        with open(_input_path) as input_file:
+        def _load_single(d):
+            (line_no, (row_idx, row_str)) = d
+            return (row_idx, row_str, loads_jsonl_line(row_str, _input_path, line_no))
+
+        from concurrent.futures import ThreadPoolExecutor
+
+        with open(_input_path) as input_file, ThreadPoolExecutor(max_workers=16) as pool:
             rows_iterator: Iterator[str] = tqdm(input_file, desc="Reading rows")
             rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
-            raw_rows = [
-                (row_idx, row_str, loads_jsonl_line(row_str, _input_path, line_no))
-                for line_no, (row_idx, row_str) in enumerate(rows_iterator, 1)
-            ]
+            raw_rows = list(pool.map(_load_single, enumerate(rows_iterator, 1)))
 
         # Validate and apply prompt config before per-row processing
         if prompt_cfg is not None:
