@@ -30,12 +30,16 @@ Output:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
-from collections import defaultdict
-from typing import Any, Dict, List, Optional, Tuple
+import time
+import warnings
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
-from fastapi import FastAPI
-from pydantic import BaseModel, ConfigDict, Field
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -44,7 +48,12 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.global_config import (
+    GROUP_ATTEMPT_KEY_NAME,
+    GROUP_ID_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+)
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -61,10 +70,44 @@ from resources_servers.genrm_compare.utils import (
 
 logger = logging.getLogger(__name__)
 
-# Cohort state for verify(): buffer by prompt_key until num_rollouts_per_prompt received (Difference 1)
-_cohort_lock: asyncio.Lock = asyncio.Lock()
-_cohort_buffers: Dict[str, List[Tuple[Any, asyncio.Future]]] = defaultdict(list)
-_cohort_jit_buffers: Dict[str, Tuple[List[float, float, float], List[int, int, int]]] = defaultdict(lambda: ([], []))
+
+class CohortEvaluationError(RuntimeError):
+    """A cohort-level failure that callers should treat as retriable."""
+
+
+@dataclass
+class _CohortMember:
+    """One authoritative response for a logical rollout slot."""
+
+    body: Optional["GenRMCompareVerifyRequest"]
+    response_digest: str
+    waiters: List[asyncio.Future[float]] = field(default_factory=list)
+
+
+@dataclass
+class _CohortState:
+    """Process-local state for one prompt cohort."""
+
+    prompt_digest: str
+    group_id: Optional[str] = None
+    group_attempt: int = 0
+    members: Dict[int, _CohortMember] = field(default_factory=dict)
+    phase: Literal["collecting", "evaluating", "completed", "failed"] = "collecting"
+    rewards: Dict[int, float] = field(default_factory=dict)
+    failure: Optional[str] = None
+    terminal_at: Optional[float] = None
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    collection_timeout_task: Optional[asyncio.Task[None]] = None
+    evaluation_task: Optional[asyncio.Task[None]] = None
+
+
+@dataclass
+class _GroupAttemptWatermark:
+    """Newest physical attempt observed for one logical prompt group."""
+
+    latest_attempt: int
+    prompt_digest: str
+    updated_at: float
 
 
 class GenRMCompareConfig(BaseResourcesServerConfig):
@@ -87,6 +130,9 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
         debug_logging: Enable verbose logging for debugging
         genrm_parse_retries: Number of retries on parse failures
         genrm_parse_retry_sleep_s: Sleep duration between parse retries
+        cohort_collection_timeout_s: Optional maximum time to wait for every logical rollout index
+        cohort_result_ttl_s: Optional retention time for completed and failed cohort tombstones
+        max_terminal_cohorts: Maximum number of completed and failed cohort tombstones
         use_principle: Enable principle-based comparison
         default_principle: Default principle when none provided in request
     """
@@ -99,6 +145,9 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
     # When > 1, verify() buffers by prompt and runs comparison when cohort is full; rewards are relative to cohort.
     # When <= 1, verify() returns default_score (no comparison).
     num_rollouts_per_prompt: int = 1
+    cohort_collection_timeout_s: Optional[float] = Field(default=None, gt=0)
+    cohort_result_ttl_s: Optional[float] = Field(default=3600.0, gt=0)
+    max_terminal_cohorts: int = Field(default=4096, gt=0)
 
     # Comparison strategy
     comparison_strategy: str = "circular"  # "all_pairs" or "circular"
@@ -151,8 +200,37 @@ class GenRMCompareVerifyRequest(BaseVerifyRequest):
 
     principle: Optional[str] = None  # Principle for principle-based GenRM; forwarded by agent when provided
     task_index: Optional[int] = Field(default=None, alias=TASK_INDEX_KEY_NAME)
+    group_id: Optional[str] = Field(default=None, alias=GROUP_ID_KEY_NAME)
+    group_attempt: int = Field(default=0, alias=GROUP_ATTEMPT_KEY_NAME, ge=0)
     rollout_index: Optional[int] = Field(default=None, alias=ROLLOUT_INDEX_KEY_NAME)
     prompt_id: Optional[str] = None  # Optional stable prompt identifier from the caller
+
+    @model_validator(mode="before")
+    @classmethod
+    def _warn_on_legacy_group_identity(cls, data: Any) -> Any:
+        """Treat an omitted group attempt as zero during client migration."""
+        if not isinstance(data, dict):
+            return data
+        group_id = data.get(GROUP_ID_KEY_NAME, data.get("group_id"))
+        has_group_attempt = GROUP_ATTEMPT_KEY_NAME in data or "group_attempt" in data
+        if group_id is not None and not has_group_attempt:
+            warnings.warn(
+                f"{GROUP_ATTEMPT_KEY_NAME} was omitted for {GROUP_ID_KEY_NAME}={group_id!r}; "
+                "treating this legacy request as group attempt zero",
+                UserWarning,
+                stacklevel=2,
+            )
+        return data
+
+
+class GenRMCompareVerifyResponse(BaseVerifyResponse):
+    """Verification response that echoes logical cohort coordinates."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    group_id: Optional[str] = Field(default=None, alias=GROUP_ID_KEY_NAME)
+    group_attempt: int = Field(alias=GROUP_ATTEMPT_KEY_NAME, ge=0)
+    rollout_index: Optional[int] = Field(default=None, alias=ROLLOUT_INDEX_KEY_NAME)
 
 
 class GenRMCompareRequest(BaseModel):
@@ -203,83 +281,395 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
     """
 
     config: GenRMCompareConfig
+    _verify_cohorts: Dict[str, _CohortState] = PrivateAttr(default_factory=dict)
+    _latest_group_attempts: Dict[str, _GroupAttemptWatermark] = PrivateAttr(default_factory=dict)
+    _cohort_registry_lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
 
-    async def verify(self, body: GenRMCompareVerifyRequest) -> BaseVerifyResponse:
-        """Verify a single rollout. When num_rollouts_per_prompt > 1, buffers by prompt and runs comparison when cohort is full."""
+    async def verify(self, body: GenRMCompareVerifyRequest) -> GenRMCompareVerifyResponse:
+        """Verify one logical rollout slot as part of a prompt cohort."""
         cfg = self.config
         principle = body.principle
         if cfg.num_rollouts_per_prompt <= 1:
-            return BaseVerifyResponse(
-                responses_create_params=body.responses_create_params,
-                response=body.response,
-                reward=cfg.default_score,
-            )
+            return self._verify_response(body, cfg.default_score)
 
+        self._validate_logical_coordinates(body)
         input_messages = getattr(body.responses_create_params, "input", None) or []
         prompt_key = self._get_verify_cohort_key(
             body,
             input_messages if isinstance(input_messages, list) else list(input_messages),
             principle,
         )
-        future: asyncio.Future[float] = asyncio.get_running_loop().create_future()
-
-        _cohort_buffers[prompt_key].append((body, future))
-
-        conversation_history = _input_to_conversation_history(getattr(body.responses_create_params, "input", []) or [])
-        buf = _cohort_buffers[prompt_key]
-        response_objs = [
-            (b.response.model_dump() if hasattr(b.response, "model_dump") else b.response) for b, _ in buf
-        ]
-        principle_val = getattr(body, "principle", None) or principle
-
-        existing_results, existing_metadata = _cohort_jit_buffers[prompt_key]
-        new_results, new_metadata = await self._run_jit_compare_using_most_recent_response_obj(
-            conversation_history, response_objs, existing_metadata, principle_val
+        prompt_digest = get_prompt_key_from_input(
+            input_messages if isinstance(input_messages, list) else list(input_messages),
+            principle,
         )
-        existing_results.extend(new_results)
-        existing_metadata.extend(new_metadata)
+        rollout_index = body.rollout_index
+        assert rollout_index is not None  # Validated above; keeps the type narrow below.
+        response_digest = self._response_digest(body.response)
+        future: asyncio.Future[float] = asyncio.get_running_loop().create_future()
+        cohort_identity = body.task_index if body.task_index is not None else body.group_id
 
-        cohort_ready = False
-        if len(response_objs) >= cfg.num_rollouts_per_prompt:
-            assert len(response_objs) == cfg.num_rollouts_per_prompt
-            cohort_ready = True
-
-        # Only run for the final response
-        if cohort_ready:
-            existing_results, existing_metadata = _cohort_jit_buffers.pop(prompt_key)
-
-            # Sort to match the ordering of the original `_run_compare` logic
-            existing_results, existing_metadata = zip(
-                *sorted(
-                    zip(existing_results, existing_metadata), key=lambda pair: (pair[1][2], pair[1][0], pair[1][1])
+        cohort = await self._resolve_verify_cohort(
+            body=body,
+            prompt_key=prompt_key,
+            prompt_digest=prompt_digest,
+        )
+        async with cohort.lock:
+            if cohort.prompt_digest != prompt_digest:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(f"GenRM cohort {prompt_key!r} received inconsistent prompt or principle content"),
                 )
-            )
+            member = cohort.members.get(rollout_index)
+            if member is not None:
+                if member.response_digest != response_digest:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"GenRM cohort {prompt_key!r} already has a different response for "
+                            f"rollout_index={rollout_index}"
+                        ),
+                    )
+                if cohort.phase == "completed":
+                    reward = cohort.rewards[rollout_index]
+                    return self._verify_response(body, reward)
+                if cohort.phase == "failed":
+                    raise HTTPException(status_code=503, detail=cohort.failure or "GenRM cohort evaluation failed")
+                member.waiters.append(future)
+            else:
+                if cohort.phase != "collecting":
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"GenRM cohort {prompt_key!r} is already {cohort.phase}; "
+                            f"rollout_index={rollout_index} cannot be added"
+                        ),
+                    )
+                cohort.members[rollout_index] = _CohortMember(
+                    body=body,
+                    response_digest=response_digest,
+                    waiters=[future],
+                )
+                if cohort.collection_timeout_task is None and cfg.cohort_collection_timeout_s is not None:
+                    cohort.collection_timeout_task = asyncio.create_task(
+                        self._expire_collecting_cohort(
+                            prompt_key,
+                            cohort,
+                            cfg.cohort_collection_timeout_s,
+                        ),
+                        name=f"genrm-cohort-collection-{cohort_identity}-attempt-{body.group_attempt}",
+                    )
 
-            rewards, _, _, _ = aggregate_scores(
-                comparison_results=existing_results,
-                comparison_metadata=existing_metadata,
-                response_objs=response_objs,
-                aggregator_method=cfg.aggregator_method,
-                default_score=cfg.default_score,
-                reasoning_bonus=cfg.reasoning_bonus,
-                answer_bonus=cfg.answer_bonus,
-                top_percentile=cfg.top_percentile,
-                group_reasoning_length_penalty_coeff=cfg.group_reasoning_length_penalty_coeff,
-                group_answer_length_penalty_coeff=cfg.group_answer_length_penalty_coeff,
-                group_style_penalty_coeff=cfg.group_style_penalty_coeff,
-            )
+            if len(cohort.members) == cfg.num_rollouts_per_prompt and cohort.phase == "collecting":
+                cohort.phase = "evaluating"
+                if cohort.collection_timeout_task is not None:
+                    cohort.collection_timeout_task.cancel()
+                    cohort.collection_timeout_task = None
+                members = dict(cohort.members)
+                cohort.evaluation_task = asyncio.create_task(
+                    self._evaluate_verify_cohort(prompt_key, cohort, members),
+                    name=f"genrm-cohort-evaluation-{cohort_identity}",
+                )
 
-            cohort_buf = _cohort_buffers.pop(prompt_key)
-            for i, (_, f) in enumerate(cohort_buf):
-                if not f.done():
-                    f.set_result(rewards[i])
+        # A disconnected request must not cancel the shared cohort result.
+        try:
+            reward = await asyncio.shield(future)
+        except CohortEvaluationError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        except asyncio.CancelledError:
+            # The logical member remains registered, but this HTTP request no
+            # longer needs a result. Mark its waiter consumed so a later cohort
+            # failure does not produce an unobserved Future exception.
+            future.cancel()
+            await asyncio.shield(self._remove_waiter(cohort, rollout_index, future))
+            raise
+        return self._verify_response(body, reward)
 
-        reward = await future
-        return BaseVerifyResponse(
+    @staticmethod
+    def _verify_response(body: GenRMCompareVerifyRequest, reward: float) -> GenRMCompareVerifyResponse:
+        return GenRMCompareVerifyResponse(
             responses_create_params=body.responses_create_params,
             response=body.response,
             reward=reward,
+            group_id=body.group_id,
+            group_attempt=body.group_attempt,
+            rollout_index=body.rollout_index,
         )
+
+    def _validate_logical_coordinates(self, body: GenRMCompareVerifyRequest) -> None:
+        """Reject malformed cohort members before mutating shared state."""
+        expected_size = self.config.num_rollouts_per_prompt
+        if body.task_index is None and not body.group_id:
+            raise HTTPException(
+                status_code=422,
+                detail=f"either {TASK_INDEX_KEY_NAME} or {GROUP_ID_KEY_NAME} is required for cohort comparison",
+            )
+        if body.rollout_index is None:
+            raise HTTPException(status_code=422, detail=f"{ROLLOUT_INDEX_KEY_NAME} is required for cohort comparison")
+        if not 0 <= body.rollout_index < expected_size:
+            raise HTTPException(
+                status_code=422,
+                detail=(f"{ROLLOUT_INDEX_KEY_NAME} must be in [0, {expected_size}); got {body.rollout_index}"),
+            )
+
+    async def _resolve_verify_cohort(
+        self,
+        *,
+        body: GenRMCompareVerifyRequest,
+        prompt_key: str,
+        prompt_digest: str,
+    ) -> _CohortState:
+        """Resolve one attempt cohort and retire superseded attempts atomically."""
+        if body.group_id is None:
+            self._prune_terminal_cohorts()
+            cohort = self._verify_cohorts.get(prompt_key)
+            if cohort is None:
+                cohort = _CohortState(prompt_digest=prompt_digest)
+                self._verify_cohorts[prompt_key] = cohort
+            return cohort
+
+        async with self._cohort_registry_lock:
+            self._prune_terminal_cohorts()
+            now = time.monotonic()
+            watermark = self._latest_group_attempts.get(body.group_id)
+            if watermark is not None and watermark.prompt_digest != prompt_digest:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(f"GenRM group {body.group_id!r} received inconsistent prompt or principle content"),
+                )
+            if watermark is not None and body.group_attempt < watermark.latest_attempt:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"GenRM group {body.group_id!r} attempt {body.group_attempt} "
+                        f"was superseded by attempt {watermark.latest_attempt}"
+                    ),
+                )
+
+            if watermark is None or body.group_attempt > watermark.latest_attempt:
+                self._latest_group_attempts[body.group_id] = _GroupAttemptWatermark(
+                    latest_attempt=body.group_attempt,
+                    prompt_digest=prompt_digest,
+                    updated_at=now,
+                )
+                await self._supersede_older_group_attempts(
+                    group_id=body.group_id,
+                    new_attempt=body.group_attempt,
+                )
+            else:
+                watermark.updated_at = now
+
+            cohort = self._verify_cohorts.get(prompt_key)
+            if cohort is None:
+                cohort = _CohortState(
+                    prompt_digest=prompt_digest,
+                    group_id=body.group_id,
+                    group_attempt=body.group_attempt,
+                )
+                self._verify_cohorts[prompt_key] = cohort
+            return cohort
+
+    async def _supersede_older_group_attempts(
+        self,
+        *,
+        group_id: str,
+        new_attempt: int,
+    ) -> None:
+        """Release waiters and payloads owned by older active attempts."""
+        for cohort in self._verify_cohorts.values():
+            if (
+                cohort.group_id != group_id
+                or cohort.group_attempt >= new_attempt
+                or cohort.phase not in ("collecting", "evaluating")
+            ):
+                continue
+            old_phase = cohort.phase
+            evaluation_task = cohort.evaluation_task
+            failed = await self._fail_verify_cohort(
+                cohort,
+                (f"GenRM group {group_id!r} attempt {cohort.group_attempt} was superseded by attempt {new_attempt}"),
+                expected_phase=old_phase,
+            )
+            if failed and evaluation_task is not None and not evaluation_task.done():
+                evaluation_task.cancel()
+
+    async def _expire_collecting_cohort(
+        self,
+        prompt_key: str,
+        cohort: _CohortState,
+        timeout_s: float,
+    ) -> None:
+        """Fail a cohort that never receives all of its logical members."""
+        try:
+            await asyncio.sleep(timeout_s)
+        except asyncio.CancelledError:
+            return
+
+        await self._fail_verify_cohort(
+            cohort,
+            (
+                f"GenRM cohort {prompt_key!r} did not collect "
+                f"{self.config.num_rollouts_per_prompt} unique rollout indices within "
+                f"{timeout_s}s"
+            ),
+            expected_phase="collecting",
+        )
+
+    @staticmethod
+    async def _remove_waiter(
+        cohort: _CohortState,
+        rollout_index: int,
+        waiter: asyncio.Future[float],
+    ) -> None:
+        """Detach one transport waiter without retiring its logical member."""
+        async with cohort.lock:
+            member = cohort.members.get(rollout_index)
+            if member is not None and waiter in member.waiters:
+                member.waiters.remove(waiter)
+
+    @staticmethod
+    def _response_digest(response: Any) -> str:
+        """Hash the exact response payload whose tokens will receive the reward."""
+        payload = response.model_dump(mode="json") if hasattr(response, "model_dump") else response
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    async def _evaluate_verify_cohort(
+        self,
+        prompt_key: str,
+        cohort: _CohortState,
+        members: Dict[int, _CohortMember],
+    ) -> None:
+        """Evaluate exactly one immutable snapshot and publish results to all waiters."""
+        try:
+            sorted_indices = sorted(members)
+            first_body = members[sorted_indices[0]].body
+            if first_body is None:
+                raise RuntimeError("GenRM cohort member body was discarded before evaluation")
+            conversation_history = _input_to_conversation_history(
+                getattr(first_body.responses_create_params, "input", []) or []
+            )
+            response_objs = []
+            for index in sorted_indices:
+                member_body = members[index].body
+                if member_body is None:
+                    raise RuntimeError(f"GenRM cohort member rollout_index={index} was discarded before evaluation")
+                response_objs.append(
+                    member_body.response.model_dump()
+                    if hasattr(member_body.response, "model_dump")
+                    else member_body.response
+                )
+
+            rewards, _, _, _ = await self._run_compare(
+                conversation_history=conversation_history,
+                response_objs=response_objs,
+                principle=first_body.principle,
+            )
+            if len(rewards) != len(sorted_indices):
+                raise RuntimeError(f"GenRM returned {len(rewards)} rewards for {len(sorted_indices)} cohort members")
+            reward_by_index = dict(zip(sorted_indices, rewards))
+            await self._publish_verify_cohort(cohort, reward_by_index)
+        except asyncio.CancelledError:
+            await asyncio.shield(
+                self._fail_verify_cohort(
+                    cohort,
+                    "GenRM cohort evaluation was cancelled",
+                    expected_phase="evaluating",
+                )
+            )
+            raise
+        except Exception as error:
+            logger.exception("GenRM cohort evaluation failed for %s", prompt_key)
+            await self._fail_verify_cohort(
+                cohort,
+                f"GenRM cohort evaluation failed: {error}",
+                expected_phase="evaluating",
+            )
+
+    @staticmethod
+    async def _publish_verify_cohort(cohort: _CohortState, reward_by_index: Dict[int, float]) -> None:
+        """Atomically publish a complete reward map and compact the tombstone."""
+        async with cohort.lock:
+            if cohort.phase != "evaluating":
+                raise RuntimeError(f"cannot publish GenRM rewards while cohort is {cohort.phase}")
+            cohort.rewards = reward_by_index
+            cohort.phase = "completed"
+            cohort.terminal_at = time.monotonic()
+            cohort.evaluation_task = None
+            for index, member in cohort.members.items():
+                for waiter in member.waiters:
+                    if not waiter.done():
+                        waiter.set_result(reward_by_index[index])
+                # A tombstone only needs the digest and reward. Do not retain
+                # full response payloads for every completed training cohort.
+                member.body = None
+                member.waiters.clear()
+
+    @staticmethod
+    async def _fail_verify_cohort(
+        cohort: _CohortState,
+        message: str,
+        *,
+        expected_phase: Literal["collecting", "evaluating"],
+    ) -> bool:
+        async with cohort.lock:
+            if cohort.phase != expected_phase:
+                return False
+            cohort.phase = "failed"
+            cohort.failure = message
+            cohort.terminal_at = time.monotonic()
+            timeout_task = cohort.collection_timeout_task
+            cohort.collection_timeout_task = None
+            current_task = asyncio.current_task()
+            if timeout_task is not None and timeout_task is not current_task:
+                timeout_task.cancel()
+            cohort.evaluation_task = None
+            for member in cohort.members.values():
+                for waiter in member.waiters:
+                    if not waiter.done():
+                        waiter.set_exception(CohortEvaluationError(message))
+                member.body = None
+                member.waiters.clear()
+            return True
+
+    def _prune_terminal_cohorts(self) -> None:
+        """Bound process-local cohort tombstones and attempt watermarks."""
+        now = time.monotonic()
+        terminal = [(key, cohort) for key, cohort in self._verify_cohorts.items() if cohort.terminal_at is not None]
+        terminal_ttl_s = self.config.cohort_result_ttl_s
+        if terminal_ttl_s is not None:
+            for key, cohort in terminal:
+                if now - cohort.terminal_at >= terminal_ttl_s:
+                    self._verify_cohorts.pop(key, None)
+
+        terminal = sorted(
+            ((key, cohort) for key, cohort in self._verify_cohorts.items() if cohort.terminal_at is not None),
+            key=lambda item: item[1].terminal_at or 0.0,
+        )
+        for key, _ in terminal[: -self.config.max_terminal_cohorts]:
+            self._verify_cohorts.pop(key, None)
+
+        active_group_ids = {
+            cohort.group_id
+            for cohort in self._verify_cohorts.values()
+            if cohort.group_id is not None and cohort.terminal_at is None
+        }
+        if terminal_ttl_s is not None:
+            for group_id, watermark in list(self._latest_group_attempts.items()):
+                if group_id not in active_group_ids and now - watermark.updated_at >= terminal_ttl_s:
+                    self._latest_group_attempts.pop(group_id, None)
+
+        prunable_watermarks = sorted(
+            (
+                (group_id, watermark)
+                for group_id, watermark in self._latest_group_attempts.items()
+                if group_id not in active_group_ids
+            ),
+            key=lambda item: item[1].updated_at,
+        )
+        excess = len(self._latest_group_attempts) - self.config.max_terminal_cohorts
+        for group_id, _ in prunable_watermarks[: max(0, excess)]:
+            self._latest_group_attempts.pop(group_id, None)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -292,13 +682,18 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         input_messages: List[Any],
         principle: Optional[str] = None,
     ) -> str:
-        """Prefer task-scoped keys when available so identical prompt text from different tasks does not collide."""
+        """Return an attempt-scoped key so replacement cohorts cannot mix with old responses."""
+        if body.group_id is not None:
+            return f"group_id::{body.group_id}::group_attempt::{body.group_attempt}"
+
         prompt_key = get_prompt_key_from_input(input_messages, principle)
         if body.task_index is not None:
-            return f"task_idx::{body.task_index}::{prompt_key}"
-        if body.prompt_id is not None:
-            return f"prompt_id::{body.prompt_id}::{prompt_key}"
-        return prompt_key
+            logical_key = f"task_idx::{body.task_index}::{prompt_key}"
+        elif body.prompt_id is not None:
+            logical_key = f"prompt_id::{body.prompt_id}::{prompt_key}"
+        else:
+            logical_key = prompt_key
+        return f"{logical_key}::group_attempt::{body.group_attempt}"
 
     async def _run_jit_compare_using_most_recent_response_obj(
         self,
