@@ -89,6 +89,10 @@ WALLTIME=${WALLTIME:-04:00:00}
 # get defaults rather than being discovered one failed submission at a time.
 export SBATCH_ACCOUNT=${SBATCH_ACCOUNT:-nemotron_n4_post}
 export SBATCH_GRES=${SBATCH_GRES:-gpu:4}
+# interactive schedules far sooner than normal on this cluster, and a profiling sweep is
+# restartable -- it resumes from the materialized inputs -- so latency to first rollout matters
+# more than protection from preemption.
+export SBATCH_QOS=${SBATCH_QOS:-interactive}
 SLURM_COMMENT="${SLURM_COMMENT:-}"
 
 # Fixed vLLM Port configurations
