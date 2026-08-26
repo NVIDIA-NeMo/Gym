@@ -284,41 +284,13 @@ jobs:
         (github.event_name != 'workflow_dispatch' || inputs.send_notification)
       }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-
-      - name: Find commits since last run
-        id: commits
-        continue-on-error: true
-        uses: ./.github/actions/commits-since-last-run
-        with:
-          workflow-file: full-test-suite.yml
-          github-token: ${{ github.token }}
-
-      - name: Build failure message
-        id: message
-        shell: bash -e -u -o pipefail {0}
-        env:
-          COMMITS_LINE: ${{ steps.commits.outputs.commits-line }}
-        run: |
-          COMMITS_SECTION=""
-          if [[ -n "$COMMITS_LINE" ]]; then
-            COMMITS_SECTION=$'\n'"• Commits since last run:"$'\n'"$COMMITS_LINE"
-          fi
-
-          {
-            echo "text<<TEXT_EOF"
-            echo ":rotating_light: Full test suite failed on main branch"
-            echo ""
-            echo "• Repository: ${{ github.repository }}"
-            echo "• Commit: \`${{ github.sha }}\`"
-            echo "$COMMITS_SECTION"
-            echo "• Workflow: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>"
-            echo "TEXT_EOF"
-          } >> "$GITHUB_OUTPUT"
-
       - name: Notify Gym alerts channel
         uses: NVIDIA-NeMo/FW-CI-templates/.github/actions/send-slack-alert@cf5acebace78c7c339bc1f804357a991336f1c4d # v1.8.10
         with:
           webhook: ${{ secrets.SLACK_TEAM_CHANNEL_WEBHOOK }}
-          message: ${{ steps.message.outputs.text }}
+          message: |
+            :rotating_light: Full test suite failed on main branch
+
+            • Repository: ${{ github.repository }}
+            • Commit: `${{ github.sha }}`
+            • Workflow: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>
