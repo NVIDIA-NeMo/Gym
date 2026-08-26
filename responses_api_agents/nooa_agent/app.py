@@ -36,7 +36,11 @@ from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig
 from responses_api_agents.nooa_agent.observability import project_nooa_result
-from responses_api_agents.nooa_agent.runner import EmbeddedNOOARunner, NOOARunRequest
+from responses_api_agents.nooa_agent.runner import EmbeddedNOOARunner, NOOARunRequest, NOOARunResult
+
+
+NOOA_TERMINATION_REASON_KEY = "nooa_termination_reason"
+NOOA_TERMINATION_ERROR_KEY = "nooa_termination_error"
 
 
 class NOOAAgentRunRequest(BaseRunRequest):
@@ -94,7 +98,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         *,
         model_cookies: dict[str, str],
         resource_cookies: dict[str, str],
-    ) -> tuple[NeMoGymResponse, AgentObservationBundle, dict[str, str], dict[str, str]]:
+    ) -> tuple[NeMoGymResponse, AgentObservationBundle, NOOARunResult]:
         rollout_id = maybe_rollout_id_from_run_body(body) or uuid4().hex
         result = await self.runner.run(
             NOOARunRequest(
@@ -114,8 +118,10 @@ class NOOAAgent(SimpleResponsesAPIAgent):
             timeline=result.timeline,
             nooa_events=result.nooa_events,
             model_ref=self.config.model_server,
+            termination_reason=result.termination_reason,
+            termination_error=result.termination_error,
         )
-        return response, observations, result.model_cookies, result.resource_cookies
+        return response, observations, result
 
     async def responses(
         self,
@@ -127,7 +133,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         cookies = dict(request.cookies)
         try:
             async with self.sem, asyncio.timeout(self.config.run_timeout_secs):
-                projected, _, model_cookies, resource_cookies = await self._episode(
+                projected, _, run_result = await self._episode(
                     run_body,
                     model_cookies=dict(cookies),
                     resource_cookies=dict(cookies),
@@ -137,7 +143,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                 status_code=422,
                 detail=f"NOOA argument mapping failed for /v1/responses: {error}",
             ) from error
-        for name, value in (model_cookies | resource_cookies).items():
+        for name, value in (run_result.model_cookies | run_result.resource_cookies).items():
             response.set_cookie(name, value)
         return projected
 
@@ -185,7 +191,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         await raise_for_status(seed)
         _merge_cookies(resource_cookies, seed)
 
-        projected, observations, model_cookies, resource_cookies = await self._episode(
+        projected, observations, run_result = await self._episode(
             body,
             model_cookies=dict(request.cookies),
             resource_cookies=resource_cookies,
@@ -207,8 +213,11 @@ class NOOAAgent(SimpleResponsesAPIAgent):
             await raise_for_status(verify)
             _merge_cookies(resource_cookies, verify)
             result = await get_response_json(verify)
+        if run_result.termination_reason is not None:
+            result[NOOA_TERMINATION_REASON_KEY] = run_result.termination_reason
+            result[NOOA_TERMINATION_ERROR_KEY] = run_result.termination_error
         result["ng_agent_observations"] = observations.model_dump(mode="json")
-        result["_response_cookies"] = model_cookies | resource_cookies
+        result["_response_cookies"] = run_result.model_cookies | run_result.resource_cookies
         return NOOAAgentVerifyResponse.model_validate(result)
 
     def _failure_response(

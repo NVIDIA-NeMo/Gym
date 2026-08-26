@@ -89,6 +89,8 @@ def project_nooa_result(
     timeline: list[TraceEvent],
     nooa_events: list[Any],
     model_ref: ModelServerRef,
+    termination_reason: str | None = None,
+    termination_error: str | None = None,
 ) -> tuple[NeMoGymResponse, AgentObservationBundle]:
     """Project embedded execution into Responses output and normalized observations."""
 
@@ -119,6 +121,13 @@ def project_nooa_result(
             )
 
     gaps: list[ObservationGap] = []
+    if termination_reason is not None:
+        gaps.append(
+            ObservationGap(
+                code=termination_reason,
+                detail=termination_error or f"NOOA execution terminated with {termination_reason}.",
+            )
+        )
     has_final_message = any(
         isinstance(item, NeMoGymResponseOutputMessage) and item.status == "completed" for item in output
     )
@@ -191,7 +200,8 @@ def project_nooa_result(
         invocations.append(
             AgentInvocation(
                 invocation_id="root",
-                status="completed",
+                status="incomplete" if termination_reason is not None else "completed",
+                error_type=termination_reason,
                 model_calls=model_calls.get("root", []),
                 conversation=root_conversation,
             )

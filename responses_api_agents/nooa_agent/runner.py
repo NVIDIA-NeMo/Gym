@@ -23,7 +23,7 @@ from nooa import Agent
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig, validate_invocation
-from responses_api_agents.nooa_agent.gym_llm import GymResponsesLLM
+from responses_api_agents.nooa_agent.gym_llm import GymResponsesLLM, PolicyCallBudgetExceeded
 from responses_api_agents.nooa_agent.gym_tools import GymToolExecution, GymTools
 from responses_api_agents.nooa_agent.mapping import materialize_arguments
 from responses_api_agents.nooa_agent.observability import NOOAEventTracker, TraceEvent
@@ -49,6 +49,8 @@ class NOOARunResult:
     resource_cookies: dict[str, str]
     timeline: list[TraceEvent]
     nooa_events: list[Any]
+    termination_reason: str | None = None
+    termination_error: str | None = None
 
 
 class NOOARunner(Protocol):
@@ -104,8 +106,14 @@ class EmbeddedNOOARunner:
 
         arguments = materialize_arguments(request.row, self._invocation.arguments)
         entrypoint = getattr(agent, self._invocation.entrypoint)
+        termination_reason = None
+        termination_error = None
         try:
             return_value = await entrypoint(**arguments)
+        except PolicyCallBudgetExceeded as error:
+            return_value = None
+            termination_reason = "policy_budget_exceeded"
+            termination_error = str(error)
         finally:
             unsubscribe()
         return NOOARunResult(
@@ -117,4 +125,6 @@ class EmbeddedNOOARunner:
             resource_cookies=request.resource_cookies,
             timeline=timeline,
             nooa_events=tracker.events,
+            termination_reason=termination_reason,
+            termination_error=termination_error,
         )

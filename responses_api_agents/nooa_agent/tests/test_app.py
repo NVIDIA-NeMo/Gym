@@ -25,7 +25,12 @@ from fastapi import HTTPException, Response
 from nemo_gym.base_resources_server import AggregateMetricsRequest
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
 from nemo_gym.server_utils import ServerClient
-from responses_api_agents.nooa_agent.app import NOOAAgent, NOOAAgentRunRequest
+from responses_api_agents.nooa_agent.app import (
+    NOOA_TERMINATION_ERROR_KEY,
+    NOOA_TERMINATION_REASON_KEY,
+    NOOAAgent,
+    NOOAAgentRunRequest,
+)
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig
 from responses_api_agents.nooa_agent.runner import NOOARunResult
 
@@ -105,7 +110,7 @@ def server_client() -> ServerClient:
     return ServerClient.model_construct(head_server_config=MagicMock(), global_config_dict={})
 
 
-def make_agent() -> tuple[NOOAAgent, ServerClient]:
+def make_agent(*, verify_reward: float = 1.0) -> tuple[NOOAAgent, ServerClient]:
     client = server_client()
     seed = FakeHTTPResponse({}, cookie=("session", "seed-cookie"))
     verify = FakeHTTPResponse(
@@ -122,7 +127,7 @@ def make_agent() -> tuple[NOOAAgent, ServerClient]:
                 "tool_choice": "none",
                 "tools": [],
             },
-            "reward": 1.0,
+            "reward": verify_reward,
         },
         cookie=("verified", "yes"),
     )
@@ -181,6 +186,29 @@ async def test_model_failure_becomes_rollout_failure_sentinel() -> None:
     assert result.reward == 0
     assert result.model_extra[NG_FAILURE_CLASS_KEY] == "legitimate"
     assert "model unavailable" in result.model_extra["error"]
+
+
+@pytest.mark.asyncio
+async def test_policy_budget_exhaustion_is_verified_and_counted() -> None:
+    agent, client = make_agent(verify_reward=0.0)
+
+    def budget_exhausted(run_request: object) -> NOOARunResult:
+        result = runner_result(run_request)
+        result.return_value = None
+        result.termination_reason = "policy_budget_exceeded"
+        result.termination_error = "NOOA policy call budget exhausted after 1 calls"
+        return result
+
+    agent.runner.run = AsyncMock(side_effect=budget_exhausted)
+
+    result = await agent.run(request(), Response(), body())
+
+    assert result.reward == 0.0
+    assert NG_FAILURE_CLASS_KEY not in result.model_extra
+    assert result.model_extra[NOOA_TERMINATION_REASON_KEY] == "policy_budget_exceeded"
+    assert "exhausted after 1 calls" in result.model_extra[NOOA_TERMINATION_ERROR_KEY]
+    assert result.ng_agent_observations.gaps[0].code == "policy_budget_exceeded"
+    assert [call.kwargs["url_path"] for call in client.post.await_args_list] == ["/seed_session", "/verify"]
 
 
 @pytest.mark.asyncio
