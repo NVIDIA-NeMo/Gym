@@ -13,7 +13,7 @@ set -euo pipefail
 #   SWEEP_DIR    <out-dir>/<nickname> written by prepare_sweep.sh
 #
 # Optional, with defaults below. SBATCH_ACCOUNT / SBATCH_PARTITION / SBATCH_QOS / SBATCH_GRES are
-# read by sbatch itself.
+# read by sbatch itself from the environment, so they are exported rather than passed as flags.
 #
 # Sandbox lane: set SANDBOX_CONTAINER to a nemo-skills sandbox sqsh to run one alongside. Required
 # by ns_tools and math_formal_lean, which read NEMO_SKILLS_SANDBOX_HOST/PORT and otherwise fall
@@ -83,6 +83,12 @@ NUM_SAMPLES_IN_PARALLEL=${NUM_SAMPLES_IN_PARALLEL:-$((MAX_NUM_SEQS_PER_DECODE_EN
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-reward-profiling}"
 
 WALLTIME=${WALLTIME:-04:00:00}
+
+# sbatch picks these up from the environment. Without an account it refuses the job outright, and
+# without a GRES request a non-CPU partition rejects it -- both are hard errors at submit, so they
+# get defaults rather than being discovered one failed submission at a time.
+export SBATCH_ACCOUNT=${SBATCH_ACCOUNT:-nemotron_n4_post}
+export SBATCH_GRES=${SBATCH_GRES:-gpu:4}
 SLURM_COMMENT="${SLURM_COMMENT:-}"
 
 # Fixed vLLM Port configurations
