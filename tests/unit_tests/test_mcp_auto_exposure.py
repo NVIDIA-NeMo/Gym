@@ -859,10 +859,17 @@ def test_verify_prefers_structured_mcp_provenance_and_keeps_other_tool_sources_d
         "c0": {"server_name": "team store", "tool_name": "append"},
         "c2": {"server_name": "team-store", "tool_name": "append"},
         "c4": {"server_name": "team store", "tool_name": "append"},
-        "c5": {"server_name": "team store", "tool_name": "ns__tool"},
+        "c5": {"server_name": "team store", "tool_name": "raw_step"},
     }
+    body["response"]["output"][0]["arguments"] = '{"value":"first"}'
+    body["response"]["output"][4]["arguments"] = '{"value":"second"}'
 
     with TestClient(app) as client:
+        token = _seed(client)
+        _handshake(client)
+        _payload(_call(client, "append", {"value": "first"}, token=token))
+        _payload(_call(client, "append", {"value": "second"}, token=token))
+        _payload(_call(client, "raw_step", {}, token=token))
         resp = client.post("/verify", json=body)
         assert resp.status_code == 200, resp.text
         payload = resp.json()
@@ -875,10 +882,12 @@ def test_verify_prefers_structured_mcp_provenance_and_keeps_other_tool_sources_d
         "team-store__append",
         "raw_step",
         "append",
-        "ns__tool",
+        "raw_step",
     ]
     assert [o["name"] for o in payload["response"]["output"] if o["type"] == "function_call"] == emitted
-    assert payload["mcp_tool_call_provenance"] == body["mcp_tool_call_provenance"]
+    for call_id in ("c0", "c4", "c5"):
+        assert payload["mcp_tool_call_provenance"][call_id]["execution_token"]
+    assert "execution_token" not in payload["mcp_tool_call_provenance"]["c2"]
 
 
 def test_bare_http_and_structured_mcp_calls_score_equally_without_rewriting_artifacts():
@@ -894,9 +903,13 @@ def test_bare_http_and_structured_mcp_calls_score_equally_without_rewriting_arti
     mcp_body["mcp_tool_call_provenance"] = {
         "c0": {"server_name": "store", "tool_name": "append"},
     }
+    mcp_body["response"]["output"][0]["arguments"] = '{"value":"x"}'
 
     with TestClient(app) as client:
         http_resp = client.post("/verify", json=_verify_body(["append"]))
+        token = _seed(client)
+        _handshake(client)
+        _payload(_call(client, "append", {"value": "x"}, token=token))
         mcp_resp = client.post("/verify", json=mcp_body)
 
     assert http_resp.json()["reward"] == 1.0
@@ -975,7 +988,7 @@ def test_duplicate_call_ids_use_legacy_prefix_fallback():
 
     assert seen["names"] == ["append", "ns__tool"]
     assert [o["name"] for o in payload["response"]["output"] if o["type"] == "function_call"] == emitted
-    assert payload["mcp_tool_call_provenance"] == body["mcp_tool_call_provenance"]
+    assert payload["mcp_tool_call_provenance"] == {}
 
 
 def test_verify_stamps_provenance_for_reverification():
@@ -997,16 +1010,111 @@ def test_verify_stamps_provenance_for_reverification():
     body["mcp_tool_call_provenance"] = {
         "c0": {"server_name": "store", "tool_name": "append"},
     }
+    body["response"]["output"][0]["arguments"] = '{"value":"x"}'
 
     with TestClient(app) as client:
+        token = _seed(client)
+        _handshake(client)
+        _payload(_call(client, "append", {"value": "x"}, token=token))
         first = client.post("/verify", json=body)
         assert first.status_code == 200, first.text
+
+    fresh_server = _server(Recorder, name="store")
+    fresh_app = fresh_server.setup_webserver()
+    maybe_auto_expose(fresh_server, fresh_app)
+    with TestClient(fresh_app) as client:
         second = client.post("/verify", json=first.json())
         assert second.status_code == 200, second.text
 
     assert seen == [["append"], ["append"]]
     assert second.json()["response"]["output"][0]["name"] == "provider-specific-alias"
-    assert second.json()["mcp_tool_call_provenance"] == body["mcp_tool_call_provenance"]
+    assert second.json()["mcp_tool_call_provenance"] == first.json()["mcp_tool_call_provenance"]
+    assert second.json()["mcp_tool_call_provenance"]["c0"]["execution_token"]
+
+
+def test_verify_rejects_forged_tool_identity_without_matching_execution():
+    seen: dict[str, list] = {}
+
+    class Recorder(Store):
+        async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+            seen["names"] = [o.name for o in body.response.output if o.type == "function_call"]
+            return BaseVerifyResponse(**body.model_dump(), reward=1.0)
+
+    server = _server(Recorder, name="store")
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    body = _verify_body(["terminal"])
+    body["response"]["output"][0]["arguments"] = '{"value":"forged"}'
+    body["mcp_tool_call_provenance"] = {
+        "c0": {"server_name": "store", "tool_name": "append"},
+    }
+
+    with TestClient(app) as client:
+        resp = client.post("/verify", json=body)
+        assert resp.status_code == 200, resp.text
+
+    assert seen["names"] == ["terminal"]
+    assert resp.json()["mcp_tool_call_provenance"] == {}
+
+
+def test_verify_rejects_claim_whose_arguments_do_not_match_execution():
+    seen: dict[str, list] = {}
+
+    class Recorder(Store):
+        async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+            seen["names"] = [o.name for o in body.response.output if o.type == "function_call"]
+            return BaseVerifyResponse(**body.model_dump(), reward=1.0)
+
+    server = _server(Recorder, name="store")
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    body = _verify_body(["terminal"])
+    body["response"]["output"][0]["arguments"] = '{"value":"forged"}'
+    body["mcp_tool_call_provenance"] = {
+        "c0": {"server_name": "store", "tool_name": "append"},
+    }
+
+    with TestClient(app) as client:
+        token = _seed(client)
+        _handshake(client)
+        _payload(_call(client, "append", {"value": "executed"}, token=token))
+        resp = client.post("/verify", json=body)
+        assert resp.status_code == 200, resp.text
+
+    assert seen["names"] == ["terminal"]
+    assert resp.json()["mcp_tool_call_provenance"] == {}
+
+
+def test_reverification_rejects_tampered_signed_call():
+    seen: list[list[str]] = []
+
+    class Recorder(Store):
+        async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+            seen.append([o.name for o in body.response.output if o.type == "function_call"])
+            return BaseVerifyResponse(**body.model_dump(), reward=1.0)
+
+    server = _server(Recorder, name="store")
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    body = _verify_body(["provider-specific-alias"])
+    body["response"]["output"][0]["arguments"] = '{"value":"x"}'
+    body["mcp_tool_call_provenance"] = {
+        "c0": {"server_name": "store", "tool_name": "append"},
+    }
+
+    with TestClient(app) as client:
+        token = _seed(client)
+        _handshake(client)
+        _payload(_call(client, "append", {"value": "x"}, token=token))
+        first = client.post("/verify", json=body)
+        assert first.status_code == 200, first.text
+        tampered = first.json()
+        tampered["response"]["output"][0]["name"] = "terminal"
+        second = client.post("/verify", json=tampered)
+        assert second.status_code == 200, second.text
+
+    assert seen == [["append"], ["terminal"]]
+    assert second.json()["mcp_tool_call_provenance"] == {}
 
 
 def test_litmus_pattern_reregistered_verify_is_still_normalized():

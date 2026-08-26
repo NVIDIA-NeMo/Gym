@@ -95,6 +95,9 @@ class MCPToolCallProvenance(BaseModel):
 
     server_name: str = Field(min_length=1, pattern=r"\S")
     tool_name: str = Field(min_length=1, pattern=r"\S")
+    # Resources servers stamp this after validating the identity against an actual MCP execution.
+    # It lets a stored trajectory prove the same call identity during later reverification.
+    execution_token: Optional[str] = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class BaseVerifyRequest(BaseRunRequest):
