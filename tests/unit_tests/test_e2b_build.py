@@ -124,13 +124,16 @@ async def test_build_loader_sets_integration_once_per_sdk_module(monkeypatch: py
     sdk_module = types.ModuleType("e2b")
     sdk_module.AsyncTemplate = FakeTemplate
     sdk_module.ConnectionConfig = FakeConnectionConfig
+    configured_transports = []
     monkeypatch.setitem(sys.modules, "e2b", sdk_module)
     monkeypatch.setattr(e2b_sdk, "_CONFIGURED_SDK_MODULES", {})
+    monkeypatch.setattr(e2b_sdk, "_configure_async_http", lambda: configured_transports.append(True))
     monkeypatch.setattr(e2b_build, "_require_e2b_sdk", _REAL_BUILD_REQUIRE_E2B_SDK)
 
     await build_template("ghcr.io/acme/task:1.0")
 
     assert FakeConnectionConfig.integrations == [f"nemo-gym/{nemo_gym_version}"]
+    assert configured_transports == [True]
 
 
 class TestDeriveAlias:

@@ -90,9 +90,9 @@ sandbox:
       # every command with background=True.
       #
       # Reattaching is lossy, so it is a fallback rather than the happy path:
-      # the stream is live rather than replayed, so stdout/stderr cover only
-      # from the reattach onwards (exit codes are unaffected), and a command
-      # that finishes while disconnected cannot be recovered at all.
+      # output received before the disconnect is preserved, but the stream is
+      # live rather than replayed, so output emitted during the gap is lost. A
+      # command that finishes while disconnected cannot be recovered at all.
       background: true
       reconnect_attempts: 2
     operations:

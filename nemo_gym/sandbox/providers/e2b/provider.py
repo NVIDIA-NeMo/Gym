@@ -514,9 +514,9 @@ class E2BProvider:
 
         Reattaching has two inherent limits:
 
-        * **Output before the reattach is lost.** The stream is live, not
-          replayed, so ``stdout``/``stderr`` cover only from the reattach on.
-          Exit codes are unaffected.
+        * **Output emitted while disconnected is lost.** Output already
+          received by the previous handle is retained and combined with the
+          reattached stream, but the stream is live rather than replayed.
         * **The process must still be running.** ``connect`` raises
           not-found once it has exited, so a command that finishes during the
           gap cannot be recovered.
@@ -530,14 +530,17 @@ class E2BProvider:
         )
         handle = await sandbox.commands.run(**kwargs, background=True)
         pid = getattr(handle, "pid", None)
+        stdout = ""
+        stderr = ""
 
         # Never swallow these while reattaching: a non-zero exit and a command
         # timeout are real outcomes, not transport failures.
+        exit_exc = getattr(e2b, "CommandExitException", None)
         terminal = tuple(
             exc
             for exc in (
                 TimeoutError,
-                getattr(e2b, "CommandExitException", None),
+                exit_exc,
                 getattr(e2b, "TimeoutException", None),
             )
             if isinstance(exc, type)
@@ -545,10 +548,18 @@ class E2BProvider:
 
         for attempt in range(self._exec.reconnect_attempts + 1):
             try:
-                return await handle.wait()
-            except terminal:
+                result = await handle.wait()
+                result.stdout = stdout + (getattr(result, "stdout", "") or "")
+                result.stderr = stderr + (getattr(result, "stderr", "") or "")
+                return result
+            except terminal as exc:
+                if isinstance(exit_exc, type) and isinstance(exc, exit_exc):
+                    exc.stdout = stdout + (getattr(exc, "stdout", "") or "")
+                    exc.stderr = stderr + (getattr(exc, "stderr", "") or "")
                 raise
             except Exception as exc:  # noqa: BLE001 - transport failure; try to reattach
+                stdout += getattr(handle, "stdout", "") or ""
+                stderr += getattr(handle, "stderr", "") or ""
                 if pid is None or attempt >= self._exec.reconnect_attempts:
                     raise
                 LOGGER.warning(

@@ -104,6 +104,8 @@ class FakeCommandHandle:
         self._outcomes = outcomes
         self._fallback = fallback
         self.waits = 0
+        self.stdout = ""
+        self.stderr = ""
 
     async def wait(self):
         self.waits += 1
@@ -112,6 +114,8 @@ class FakeCommandHandle:
         else:
             outcome = self._fallback or FakeCommandResult(stdout="ok")
         if isinstance(outcome, Exception):
+            self.stdout = getattr(outcome, "stdout", "")
+            self.stderr = getattr(outcome, "stderr", "")
             raise outcome
         return outcome
 
@@ -245,8 +249,10 @@ def test_provider_is_registered_as_builtin() -> None:
 
 async def test_runtime_loader_sets_integration_once_per_sdk_module(monkeypatch: pytest.MonkeyPatch) -> None:
     sdk_module = _fake_sdk_module()
+    configured_transports = []
     monkeypatch.setitem(sys.modules, "e2b", sdk_module)
     monkeypatch.setattr(e2b_sdk, "_CONFIGURED_SDK_MODULES", {})
+    monkeypatch.setattr(e2b_sdk, "_configure_async_http", lambda: configured_transports.append(True))
     monkeypatch.setattr(e2b_provider, "_require_e2b_sdk", _REAL_PROVIDER_REQUIRE_E2B_SDK)
 
     provider = E2BProvider(create={"template": "base"})
@@ -254,6 +260,54 @@ async def test_runtime_loader_sets_integration_once_per_sdk_module(monkeypatch: 
     assert await provider.status(handle) is SandboxStatus.RUNNING
 
     assert FakeConnectionConfig.integrations == [f"nemo-gym/{nemo_gym_version}"]
+    assert configured_transports == [True]
+
+
+async def test_runtime_loader_routes_e2b_httpx_through_global_aiohttp(monkeypatch: pytest.MonkeyPatch) -> None:
+    import httpx
+    from httpx_aiohttp import AiohttpTransport
+
+    from nemo_gym.server_utils import get_global_aiohttp_client
+
+    sdk_module = _fake_sdk_module()
+    sdk_module.__path__ = []
+    api_module = types.ModuleType("e2b.api")
+    api_module.__path__ = []
+    client_async_module = types.ModuleType("e2b.api.client_async")
+    client_async_module.limits = httpx.Limits(max_connections=10)
+    client_async_module.connection_retries = 2
+    client_async_module.get_transport = lambda config, http2=True: object()
+    client_async_module.get_envd_transport = lambda config, http2=True: object()
+    sandbox_async_module = types.ModuleType("e2b.sandbox_async")
+    sandbox_async_module.__path__ = []
+    sandbox_main_module = types.ModuleType("e2b.sandbox_async.main")
+    sandbox_main_module.get_transport = client_async_module.get_envd_transport
+
+    sdk_module.api = api_module
+    sdk_module.sandbox_async = sandbox_async_module
+    api_module.client_async = client_async_module
+    sandbox_async_module.main = sandbox_main_module
+    for name, module in {
+        "e2b": sdk_module,
+        "e2b.api": api_module,
+        "e2b.api.client_async": client_async_module,
+        "e2b.sandbox_async": sandbox_async_module,
+        "e2b.sandbox_async.main": sandbox_main_module,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.setattr(e2b_sdk, "_CONFIGURED_SDK_MODULES", {})
+
+    e2b_sdk.require_e2b_sdk("Testing the e2b provider")
+    config = types.SimpleNamespace(proxy=None)
+    control_transport = client_async_module.get_transport(config)
+    envd_transport = sandbox_main_module.get_transport(config)
+
+    assert isinstance(control_transport, AiohttpTransport)
+    assert isinstance(envd_transport, AiohttpTransport)
+    assert control_transport.client is get_global_aiohttp_client
+    assert envd_transport.client is get_global_aiohttp_client
+    with pytest.raises(ValueError, match="HTTP or HTTPS proxy"):
+        client_async_module.get_transport(types.SimpleNamespace(proxy="socks5h://proxy.example:1080"))
 
 
 def test_loader_reports_missing_optional_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -263,8 +317,14 @@ def test_loader_reports_missing_optional_sdk(monkeypatch: pytest.MonkeyPatch) ->
         e2b_sdk.require_e2b_sdk("Testing the e2b provider")
 
 
-def test_real_sdk_user_agent_and_call_shapes() -> None:
+async def test_real_sdk_user_agent_and_call_shapes() -> None:
     e2b = pytest.importorskip("e2b", reason="e2b optional sandbox dependency is not installed")
+    from e2b.api import client_async
+    from e2b.sandbox_async import main as sandbox_async
+    from httpx_aiohttp import AiohttpTransport
+
+    from nemo_gym.server_utils import get_global_aiohttp_client
+
     installed_match = re.match(r"^(\d+)\.(\d+)", version("e2b"))
     assert installed_match is not None
     assert (int(installed_match[1]), int(installed_match[2])) >= (2, 36)
@@ -272,8 +332,14 @@ def test_real_sdk_user_agent_and_call_shapes() -> None:
     assert set(_API_PARAM_KEYS) <= set(e2b.ApiParams.__annotations__)
 
     e2b_sdk.require_e2b_sdk("Testing the e2b provider")
-    products = e2b.ConnectionConfig().headers["User-Agent"].split()
+    connection = e2b.ConnectionConfig()
+    products = connection.headers["User-Agent"].split()
     assert f"nemo-gym/{nemo_gym_version}" in products
+    envd_client = sandbox_async.get_envd_api(connection, "https://sandbox.example")
+    for transport in (client_async.get_transport(connection), envd_client._transport):
+        assert isinstance(transport, AiohttpTransport)
+        assert transport.client is get_global_aiohttp_client
+    await envd_client.aclose()
 
     inspect.signature(e2b.AsyncSandbox.create).bind(
         template="base",
@@ -516,6 +582,22 @@ class TestBackgroundExec:
         assert result.return_code == 0
         assert result.stdout == "finished"
 
+    async def test_reattach_preserves_output_received_before_disconnect(self) -> None:
+        provider = self._provider()
+        handle = await provider.create(_spec())
+        stream_error = ConnectionError("stream lost")
+        stream_error.stdout = "before-out\n"
+        stream_error.stderr = "before-err\n"
+        handle.raw.wait_outcomes = [
+            stream_error,
+            FakeCommandResult(stdout="after-out\n", stderr="after-err\n", exit_code=0),
+        ]
+
+        result = await provider.exec(handle, "make -j8")
+
+        assert result.stdout == "before-out\nafter-out\n"
+        assert result.stderr == "before-err\nafter-err\n"
+
     async def test_lost_stream_does_not_reattach_after_deadline(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -532,13 +614,19 @@ class TestBackgroundExec:
         assert handle.raw.connect_calls == []
 
     async def test_reattach_recovers_the_real_exit_code(self) -> None:
-        # The exit code is what a benchmark scores on, and it survives even
-        # though the output emitted before the reattach does not.
         provider = self._provider()
         handle = await provider.create(_spec())
-        handle.raw.wait_outcomes = [ConnectionError("stream lost"), FakeCommandExit(7, stdout="", stderr="boom")]
+        stream_error = ConnectionError("stream lost")
+        stream_error.stdout = "before-out\n"
+        stream_error.stderr = "before-err\n"
+        handle.raw.wait_outcomes = [
+            stream_error,
+            FakeCommandExit(7, stdout="after-out\n", stderr="after-err\n"),
+        ]
         result = await provider.exec(handle, "false")
         assert result.return_code == 7
+        assert result.stdout == "before-out\nafter-out\n"
+        assert result.stderr == "before-err\nafter-err\n"
 
     async def test_reattach_attempts_are_bounded(self) -> None:
         provider = self._provider(reconnect_attempts=2)

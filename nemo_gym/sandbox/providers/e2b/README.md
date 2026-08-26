@@ -140,9 +140,9 @@ workload needs. Keep E2B API credentials in the provider connection config or ho
 not in `SandboxSpec.env`.
 
 When `mini_swe_agent_2` writes its per-instance worker config, it removes
-`e2b.connection.api_key` and passes the value through the worker's `E2B_API_KEY` environment
-instead. The worker leaves the key out of its serializable provider config and lets the E2B SDK
-read the environment variable directly.
+`e2b.connection.api_key`, `headers`, and `api_headers`. It passes them through the worker
+environment, then reconstructs the header mappings only in worker memory. The API key stays out
+of the serializable provider config and is read directly from `E2B_API_KEY` by the E2B SDK.
 
 NeMo Gym identifies provider and template-builder SDK traffic by adding
 `nemo-gym/<version>` to the E2B SDK `User-Agent`. An explicit custom `User-Agent` in
@@ -150,5 +150,7 @@ NeMo Gym identifies provider and template-builder SDK traffic by adding
 that attribution.
 
 Sandbox and template operations use the E2B SDK's public high-level APIs; attribution uses
-E2B's set-once integration hook. E2B owns and pools its HTTP and ConnectRPC transports, and
-NeMo Gym does not replace them through private SDK hooks.
+E2B's set-once integration hook. Because E2B 2.x does not expose transport injection on those
+APIs, NeMo Gym replaces its module-level HTTP transport factories with an aiohttp adapter backed
+by Gym's shared client session. The adapter accepts HTTP and HTTPS proxies; SOCKS proxies are
+rejected explicitly. E2B's ConnectRPC command streams keep their SDK-owned pyqwest transport.

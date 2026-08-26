@@ -375,11 +375,15 @@ class TestApp:
         }
 
     def test_e2b_sandbox_provider_secret_is_kept_out_of_config_dump(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        headers = {"Authorization": "Bearer header-value"}  # pragma: allowlist secret
+        api_headers = {"X-Gateway-Key": "api-header-value"}  # pragma: allowlist secret
         provider = {
             "e2b": {
                 "connection": {
                     "api_url": "https://gateway.example",
                     "api_key": "fixture-value",  # pragma: allowlist secret
+                    "headers": headers,
+                    "api_headers": api_headers,
                 }
             }
         }
@@ -388,17 +392,16 @@ class TestApp:
         connection_for_disk = provider_for_disk["e2b"]["connection"]
         assert connection_for_disk == {"api_url": "https://gateway.example"}
         assert provider["e2b"]["connection"]["api_key"] == "fixture-value"  # pragma: allowlist secret
-        assert _sandbox_runtime_env(provider)["env_vars"] == {
-            E2B_API_KEY_ENV: "fixture-value"  # pragma: allowlist secret
-        }
+        runtime_env = _sandbox_runtime_env(provider)
+        assert runtime_env["env_vars"][E2B_API_KEY_ENV] == "fixture-value"  # pragma: allowlist secret
 
         config = {"environment": {"provider": provider_for_disk}}
-        monkeypatch.setenv(E2B_API_KEY_ENV, "worker-value")  # pragma: allowlist secret
+        for name, value in runtime_env["env_vars"].items():
+            monkeypatch.setenv(name, value)
         _restore_sandbox_provider_secrets(config)
         assert "api_key" not in connection_for_disk
-        assert _sandbox_runtime_env(provider_for_disk)["env_vars"] == {
-            E2B_API_KEY_ENV: "worker-value"  # pragma: allowlist secret
-        }
+        assert connection_for_disk["headers"] == headers
+        assert connection_for_disk["api_headers"] == api_headers
 
     def test_split_trajectory_and_resolution_helpers_cover_edge_cases(self) -> None:
         input_messages, output_items, raw_responses = _split_trajectory_for_responses(
