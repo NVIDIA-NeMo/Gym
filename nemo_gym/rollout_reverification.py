@@ -286,24 +286,14 @@ def _build_agent_to_resources_server_mapping(
     return _agent_to_rs_mapping_from_resources_only_config(global_config_dict)
 
 
-def _selected_atif_agent_to_resources_server_mapping(
+def _selected_atif_resources_server_routes(
     global_config_dict: Union[Dict[str, Any], "DictConfig"],
     payloads: List[Dict[str, Any]],
-) -> Dict[str, str]:
-    """Resolve only the resource servers selected by this ATIF batch."""
+) -> List[str]:
+    """Resolve each ATIF row through the same routing policy used by ``/verify``."""
 
     configured_mapping = _build_agent_to_resources_server_mapping(global_config_dict)
-    selected_mapping: Dict[str, str] = {}
-    for row in payloads:
-        agent_ref = row.get(AGENT_REF_KEY_NAME)
-        agent_name = agent_ref.get("name") if isinstance(agent_ref, dict) else None
-        if not isinstance(agent_name, str) or not agent_name:
-            raise ConfigError("ATIF reverification requires every materialized input to identify an agent.")
-        try:
-            selected_mapping[agent_name] = configured_mapping[agent_name]
-        except KeyError as exc:
-            raise ConfigError(f"reverify: agent {agent_name!r} has no resources server mapping.") from exc
-    return selected_mapping
+    return [_rs_for_row(row, configured_mapping, global_config_dict) for row in payloads]
 
 
 def _resources_server_exposes_tools_over_mcp(
@@ -351,14 +341,11 @@ def _guard_atif_tool_identity(payloads: List[Dict[str, Any]]) -> None:
     """
 
     server_client = setup_server_client()
-    agent_to_rs = _selected_atif_agent_to_resources_server_mapping(
+    selected_routes = _selected_atif_resources_server_routes(
         server_client.global_config_dict,
         payloads,
     )
-    for row in payloads:
-        agent_ref = row.get(AGENT_REF_KEY_NAME)
-        agent_name = agent_ref["name"]
-        resources_server_name = agent_to_rs[agent_name]
+    for row, resources_server_name in zip(payloads, selected_routes, strict=True):
         if _response_has_function_calls(row) and _resources_server_exposes_tools_over_mcp(
             server_client.global_config_dict, resources_server_name
         ):
@@ -759,10 +746,11 @@ async def _guard_atif_reverify_mode(payloads: List[Dict[str, Any]]) -> None:
     """Require STATELESS only for resource servers selected by this ATIF batch."""
 
     server_client = setup_server_client()
-    selected_mapping = _selected_atif_agent_to_resources_server_mapping(
+    selected_routes = _selected_atif_resources_server_routes(
         server_client.global_config_dict,
         payloads,
     )
+    selected_mapping = {str(index): route for index, route in enumerate(selected_routes)}
     non_stateless_rs = await _check_reverify_mode(server_client, selected_mapping)
     if non_stateless_rs:
         raise ConfigError(

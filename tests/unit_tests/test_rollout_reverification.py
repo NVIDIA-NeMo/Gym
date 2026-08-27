@@ -374,6 +374,42 @@ class TestAtifToolIdentityGuard:
 
         _guard_atif_tool_identity([self._tool_payload()])
 
+    @pytest.mark.parametrize(
+        ("agent_exposes_mcp", "task_exposes_mcp", "should_reject"),
+        [(False, True, True), (True, False, False)],
+    )
+    def test_task_source_is_authoritative_for_tool_identity_preflight(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        agent_exposes_mcp: bool,
+        task_exposes_mcp: bool,
+        should_reject: bool,
+    ) -> None:
+        config = self._config(exposes_tools_over_mcp=agent_exposes_mcp)
+        config["task-rs"] = {
+            "resources_servers": {"task": {"expose_tools_over_mcp": task_exposes_mcp}},
+        }
+        self._patch_client(monkeypatch, config)
+        payload = self._tool_payload() | {TASK_SOURCE_KEY_NAME: "task-rs"}
+
+        if should_reject:
+            with pytest.raises(AtifProjectionError, match="MCP-exposed resources server 'task-rs'"):
+                _guard_atif_tool_identity([payload])
+        else:
+            _guard_atif_tool_identity([payload])
+
+    def test_task_source_can_route_without_agent_ref(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        config = self._config(exposes_tools_over_mcp=False)
+        config["task-rs"] = {
+            "resources_servers": {"task": {"expose_tools_over_mcp": False}},
+        }
+        self._patch_client(monkeypatch, config)
+        payload = self._tool_payload()
+        payload.pop(AGENT_REF_KEY_NAME)
+        payload[TASK_SOURCE_KEY_NAME] = "task-rs"
+
+        _guard_atif_tool_identity([payload])
+
     async def test_reverify_mode_checks_only_the_selected_resources_server(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -417,6 +453,47 @@ class TestAtifToolIdentityGuard:
 
         with pytest.raises(ConfigError, match="ATIF reverification requires stateless verifiers"):
             await _guard_atif_reverify_mode([self._tool_payload()])
+
+    @pytest.mark.parametrize(
+        ("agent_mode", "task_mode", "should_reject"),
+        [
+            (ReverifyMode.UNSUPPORTED, ReverifyMode.STATELESS, False),
+            (ReverifyMode.STATELESS, ReverifyMode.UNSUPPORTED, True),
+        ],
+    )
+    async def test_task_source_is_authoritative_for_reverify_mode_preflight(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        agent_mode: ReverifyMode,
+        task_mode: ReverifyMode,
+        should_reject: bool,
+    ) -> None:
+        config = self._config(exposes_tools_over_mcp=False)
+        config["task-rs"] = {"resources_servers": {"task": {}}}
+        client = MagicMock()
+        client.global_config_dict = config
+        queried: list[str] = []
+
+        async def get(*, server_name: str, url_path: str) -> ReverifyMode:
+            assert url_path == "/reverify_mode"
+            queried.append(server_name)
+            return {"fixture-rs": agent_mode, "task-rs": task_mode}[server_name]
+
+        client.get = get
+        monkeypatch.setattr("nemo_gym.rollout_reverification.setup_server_client", lambda: client)
+        monkeypatch.setattr("nemo_gym.rollout_reverification.raise_for_status", AsyncMock())
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification.get_response_json",
+            AsyncMock(side_effect=lambda response: response),
+        )
+        payload = self._tool_payload() | {TASK_SOURCE_KEY_NAME: "task-rs"}
+
+        if should_reject:
+            with pytest.raises(ConfigError, match="ATIF reverification requires stateless verifiers"):
+                await _guard_atif_reverify_mode([payload])
+        else:
+            await _guard_atif_reverify_mode([payload])
+        assert queried == ["task-rs"]
 
     def test_only_the_selected_resources_server_controls_the_guard(self, monkeypatch: pytest.MonkeyPatch) -> None:
         config = self._config(exposes_tools_over_mcp=False)
@@ -462,7 +539,7 @@ class TestAtifToolIdentityGuard:
             "response": {"output": [{"type": "message", "content": []}]},
         }
 
-        with pytest.raises(ConfigError, match="agent 'unknown-agent' has no resources server mapping"):
+        with pytest.raises(ConfigError, match="cannot find a resources server for row"):
             _guard_atif_tool_identity([payload])
 
     async def test_run_rejects_before_preparing_output_paths(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -521,7 +598,7 @@ class TestAtifToolIdentityGuard:
             overwrite=True,
         )
 
-        with pytest.raises(ConfigError, match="agent 'unknown-agent' has no resources server mapping"):
+        with pytest.raises(ConfigError, match="cannot find a resources server for row"):
             await RolloutReverificationHelper().run_from_config(config)
 
         assert output.read_text() == "existing result\n"
