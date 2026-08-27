@@ -300,7 +300,7 @@ class TestWandbExporter:
 
         exporter._log_metrics({"reward": 1.0}, step=3)
 
-        run.log.assert_called_once_with({"reward": 1.0}, step=3)
+        run.log.assert_called_once_with({"reward": 1.0}, step=3, commit=True)
 
     def test_teardown_finishes_the_run_and_is_idempotent(
         self, monkeypatch: MonkeyPatch, wandb_config: DictConfig

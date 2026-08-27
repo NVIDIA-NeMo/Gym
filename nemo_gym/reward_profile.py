@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import math
 import re
+import statistics
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -97,8 +98,15 @@ class RewardProfiler:
         results_by_key = self._index_by_rollout_key(results, "result")
         matched_keys = rows_by_key.keys() & results_by_key.keys()
 
-        expected_by_task = Counter(task_idx for task_idx, _ in rows_by_key)
-        completed_by_task = Counter(task_idx for task_idx, _ in matched_keys)
+        # Fan-out dispatches the same task to several agents, and those copies share a task index.
+        # Count completion per (task, agent) so one agent's missing rollouts don't hide behind
+        # another's completed ones. Without fan-out each task has one agent and this reduces to
+        # the plain per-task count.
+        def _group_of(key: Tuple[int, int]) -> Tuple[int, Optional[str]]:
+            return key[0], (rows_by_key[key].get(AGENT_REF_KEY_NAME) or {}).get("name")
+
+        expected_by_task = Counter(_group_of(key) for key in rows_by_key)
+        completed_by_task = Counter(_group_of(key) for key in matched_keys)
 
         complete_input_rows = 0
         partial_input_rows = 0
@@ -209,13 +217,31 @@ class RewardProfiler:
             rows, results, allow_partial_rollouts=allow_partial_rollouts
         )
 
+        # Under fan-out the same task index appears once per agent. Profile those copies as
+        # separate groups — one per (task, agent) — so each harness keeps its own reward/length
+        # stats. Runs where every task has a single agent keep the plain per-task grouping and
+        # byte-identical output.
+        # Tolerate rows without an agent_ref exactly as before: only matched rows ever required
+        # one, so the detection must not introduce a new failure on unmatched (partial) rows.
+        def _agent_name(row: Dict[str, Any]) -> Optional[str]:
+            return (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+
+        per_agent = len({(row[TASK_INDEX_KEY_NAME], _agent_name(row)) for row in rows}) > len(
+            {row[TASK_INDEX_KEY_NAME] for row in rows}
+        )
+
+        def _group_key(row: Dict[str, Any]) -> Any:
+            if per_agent:
+                return row[TASK_INDEX_KEY_NAME], _agent_name(row)
+            return row[TASK_INDEX_KEY_NAME]
+
         filtered_results: List[Dict] = []
-        task_idx_to_row: Dict[int, Dict] = dict()
-        task_idx_to_rollout_infos: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
-        expected_rollouts_by_task = Counter(row[TASK_INDEX_KEY_NAME] for row in rows)
+        task_idx_to_row: Dict[Any, Dict] = dict()
+        task_idx_to_rollout_infos: Dict[Any, List[Dict[str, Any]]] = defaultdict(list)
+        expected_rollouts_by_task = Counter(_group_key(row) for row in rows)
         for row, result in aligned_rows_and_results:
             task_idx, rollout_idx = _rollout_key(row)
-            task_idx_to_rollout_infos[task_idx].append(self.rollout_info_from_result(result))
+            task_idx_to_rollout_infos[_group_key(row)].append(self.rollout_info_from_result(result))
 
             # Add additional helpful information
             result = result | (result["response"].get("usage") or {})
@@ -233,26 +259,33 @@ class RewardProfiler:
                     numeric_result[k] = v
 
             filtered_results.append(numeric_result)
-            task_idx_to_row.setdefault(task_idx, row)
+            task_idx_to_row.setdefault(_group_key(row), row)
 
         if not filtered_results:
             return [], []
 
         df = DataFrame.from_records(filtered_results)
 
-        group_level_df = df.drop(columns=[ROLLOUT_INDEX_KEY_NAME, "agent_name"]).groupby(TASK_INDEX_KEY_NAME)
+        if per_agent:
+            group_level_df = df.drop(columns=[ROLLOUT_INDEX_KEY_NAME]).groupby([TASK_INDEX_KEY_NAME, "agent_name"])
+        else:
+            group_level_df = df.drop(columns=[ROLLOUT_INDEX_KEY_NAME, "agent_name"]).groupby(TASK_INDEX_KEY_NAME)
         group_level_metrics = self.calculate_metrics_single_df(group_level_df)
         for group_metrics in group_level_metrics:
-            task_idx = group_metrics[TASK_INDEX_KEY_NAME]
-            row = task_idx_to_row[task_idx]
+            if per_agent:
+                group_metrics[AGENT_REF_KEY_NAME] = {"name": group_metrics.pop("agent_name")}
+                group_key = (group_metrics[TASK_INDEX_KEY_NAME], group_metrics[AGENT_REF_KEY_NAME]["name"])
+            else:
+                group_key = group_metrics[TASK_INDEX_KEY_NAME]
+            row = task_idx_to_row[group_key]
 
             row = row.copy()
             row.pop(TASK_INDEX_KEY_NAME)
             row.pop(ROLLOUT_INDEX_KEY_NAME)
 
             group_metrics["sample"] = row
-            num_rollouts = len(task_idx_to_rollout_infos[task_idx])
-            expected_num_rollouts = expected_rollouts_by_task[task_idx]
+            num_rollouts = len(task_idx_to_rollout_infos[group_key])
+            expected_num_rollouts = expected_rollouts_by_task[group_key]
             group_metrics["num_rollouts"] = num_rollouts
             group_metrics["expected_num_rollouts"] = expected_num_rollouts
             group_metrics["missing_num_rollouts"] = expected_num_rollouts - num_rollouts
@@ -260,7 +293,7 @@ class RewardProfiler:
                 100.0 if expected_num_rollouts == 0 else 100.0 * num_rollouts / expected_num_rollouts
             )
             group_metrics["rollout_infos"] = sorted(
-                task_idx_to_rollout_infos[task_idx],
+                task_idx_to_rollout_infos[group_key],
                 key=lambda r: r[ROLLOUT_INDEX_KEY_NAME],
             )
 
@@ -620,6 +653,104 @@ def _group_by_task(verify_responses: List[Dict[str, Any]]) -> List[List[Dict[str
     return [groups[k] for k in sorted(groups)]
 
 
+def _stat(values: List[float], stat: str) -> float:
+    if stat == "mean":
+        return statistics.fmean(values)
+    if stat == "median":
+        return statistics.median(values)
+    if stat == "total":
+        return sum(values)
+    if stat == "std":
+        return statistics.pstdev(values)
+    if stat == "min":
+        return min(values)
+    if stat == "max":
+        return max(values)
+    if stat.startswith("p"):
+        # Series.quantile() default (linear interpolation) matches numpy.percentile's default
+        # and, unlike statistics.quantiles, handles a single-value series with no special-casing.
+        return float(Series(values).quantile(int(stat[1:]) / 100))
+    raise ValueError(f"Unknown stat {stat!r}")
+
+
+# Per-rollout ng_perf token fields, each summarized with the same mean/median/total stats
+# (simpler than RFC R3's literal per-field list, which asymmetrically omits median/total for
+# some fields). Result keys are f"{stat}_{field}" except total_latency_ms, which uses
+# total_latency_{stat}_ms -- see the dedicated block in compute_perf_summary.
+_PERF_SUMMARY_TOKEN_FIELDS: Tuple[str, ...] = (
+    "prompt_tokens",
+    "cached_prompt_tokens",
+    "completion_tokens",
+    "reasoning_tokens",
+)
+_PERF_SUMMARY_TOKEN_STATS: Tuple[str, ...] = ("mean", "median", "total")
+_PERF_SUMMARY_NUM_TURNS_STATS: Tuple[str, ...] = ("mean", "median", "std", "min", "p90", "max")
+_PERF_SUMMARY_LATENCY_STATS: Tuple[str, ...] = ("p50", "p90", "p99", "mean")
+
+
+def compute_perf_summary(ng_perf_records: List[Dict[str, Any]], total_rollouts: int) -> Optional[Dict[str, Any]]:
+    """Aggregate per-rollout ``ng_perf`` dicts into the ``perf_summary`` block (RFC R3).
+
+    ``total_rollouts`` is the full rollout count for this batch, including rollouts that never
+    produced ``ng_perf`` at all -- the denominator for ``overall_observability_coverage`` and
+    ``token_observability_coverage``.
+
+    Returns ``None`` when there are no rollouts at all, or when none of them carried ``ng_perf``
+    (observability off for the whole run, or on but nothing was collected) -- perf_summary is
+    absent rather than present with a 0.0 coverage either way; a coverage value, when present, is
+    always > 0. Every other stat is included only when at least one rollout reported the
+    underlying field (a provider that never reports cache usage yields no
+    ``mean_cached_prompt_tokens``, for example).
+    """
+    if total_rollouts <= 0 or not ng_perf_records:
+        return None
+
+    def _values(key: str) -> List[float]:
+        return [record[key] for record in ng_perf_records if isinstance(record.get(key), (int, float))]
+
+    summary: Dict[str, Any] = {
+        "overall_observability_coverage": len(ng_perf_records) / total_rollouts,
+        "token_observability_coverage": sum(
+            1
+            for record in ng_perf_records
+            if isinstance(record.get("token_observability_coverage"), (int, float))
+            and record["token_observability_coverage"] > 0
+        )
+        / total_rollouts,
+    }
+
+    for field in _PERF_SUMMARY_TOKEN_FIELDS:
+        values = _values(field)
+        if not values:
+            continue
+        for stat in _PERF_SUMMARY_TOKEN_STATS:
+            summary[f"{stat}_{field}"] = _stat(values, stat)
+
+    num_turns_values = _values("num_turns")
+    if num_turns_values:
+        for stat in _PERF_SUMMARY_NUM_TURNS_STATS:
+            summary[f"{stat}_num_turns"] = _stat(num_turns_values, stat)
+
+    # Per-rollout ratio, then distribution of that ratio across rollouts.
+    tokens_per_turn = [
+        record["completion_tokens"] / record["num_turns"]
+        for record in ng_perf_records
+        if isinstance(record.get("completion_tokens"), (int, float))
+        and isinstance(record.get("num_turns"), (int, float))
+        and record["num_turns"] > 0
+    ]
+    if tokens_per_turn:
+        summary["mean_tokens_per_turn"] = _stat(tokens_per_turn, "mean")
+        summary["median_tokens_per_turn"] = _stat(tokens_per_turn, "median")
+
+    latency_values = _values("total_latency_ms")
+    if latency_values:
+        for stat in _PERF_SUMMARY_LATENCY_STATS:
+            summary[f"total_latency_{stat}_ms"] = _stat(latency_values, stat)
+
+    return summary
+
+
 def compute_aggregate_metrics(
     verify_responses: List[Dict[str, Any]],
     compute_metrics_fn=None,
@@ -695,10 +826,13 @@ def compute_aggregate_metrics(
     else:
         key_metrics = {k: v for k, v in serialized_agent.items() if k.startswith("mean/")}
 
+    ng_perf_records = [vr["ng_perf"] for vr in verify_responses if isinstance(vr.get("ng_perf"), dict)]
+
     return AggregateMetrics(
         group_level_metrics=serialized_group,
         agent_metrics=serialized_agent,
         key_metrics=key_metrics,
+        perf_summary=compute_perf_summary(ng_perf_records, total_rollouts=len(verify_responses)),
     )
 
 

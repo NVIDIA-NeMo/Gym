@@ -253,18 +253,18 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
         sandbox = AsyncSandbox(provider)
         await sandbox.start(spec)
         if phase == "agent":
-            # The task images carry no git user identity in this sandbox's exec
-            # environment, so every `git commit` fails with "Author identity
-            # unknown". DeepSWE v1.1 grades only committed work, so without
-            # this the strict score collapses for any model that does not
-            # self-recover by running `git config` (measured: Nemotron Super
-            # 0% -> 3.5% resolved from this fix alone; Kimi K3 self-recovered
-            # in 105/105 affected rollouts).
+            # The task images ship no git user identity, and git's identity
+            # auto-detection is hostname-dependent: an FQDN hostname passes
+            # with a warning, while a domainless one (e.g. a K8s pod name ->
+            # 'root@<pod>.(none)') makes every `git commit` fail with "Author
+            # identity unknown". v1.1 grading collects only committed work,
+            # so seed an explicit identity instead of relying on the sandbox
+            # provider's hostname format.
             await sandbox.exec(
                 'git config --global user.email "agent@nemo-gym.local"'
                 ' && git config --global user.name "NeMo Gym Agent"'
                 " && git config --global --add safe.directory /app || true",
-                timeout_s=120,
+                timeout_s=60,
             )
         return sandbox
 

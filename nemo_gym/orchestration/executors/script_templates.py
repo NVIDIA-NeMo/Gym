@@ -17,6 +17,35 @@ import re
 import shlex
 
 
+_RAY_PRELUDE = """\
+# Resolve the head node IP for multi-node vLLM services (spanning nodes via Ray).
+nodes=$(scontrol show hostnames "$SLURM_JOB_NODELIST")
+nodes_array=($nodes)
+head_node_hostname=${nodes_array[0]}
+head_node_ip=$(getent hosts "$head_node_hostname" | awk '{print $1}')
+export HEAD_NODE_IP="$head_node_ip"
+export RAY_HEAD_NODE_IP="$head_node_ip:6379"
+echo "Head node IP address: $HEAD_NODE_IP\""""
+
+
+_VLLM_RAY_SYMMETRIC_RUN = """\
+bash -lc '
+    command -v ray >/dev/null 2>&1 || pip install -q "ray[default]"
+    if ray symmetric-run --help >/dev/null 2>&1; then
+        ray symmetric-run \\
+            --address "$RAY_HEAD_NODE_IP" \\
+            --min-nodes {total_nodes} \\
+            {resource_flags} \\
+            -- {inner_cmd}
+    elif [ "$SLURM_NODEID" = "0" ]; then
+        ray start --head --port=6379 {resource_flags}
+        {inner_cmd}
+    else
+        ray start --address="$RAY_HEAD_NODE_IP" {resource_flags} --block
+    fi
+'"""
+
+
 _HEALTH_WAIT_MULTI = """\
 # Wait for {name} (try multiple health endpoints)
 echo "Waiting for {name} at {url}..."
@@ -42,6 +71,22 @@ fi
 
 def bash_var(name: str) -> str:
     return re.sub(r"[^A-Z0-9]", "_", name.upper())
+
+
+def render_ray_prelude() -> str:
+    return _RAY_PRELUDE
+
+
+def render_vllm_ray_symmetric_run(inner_cmd: str, total_nodes: int, resource_flags: str) -> str:
+    """Render the Ray head/worker bootstrap that wraps a single vLLM instance's TP/PP command so
+    it spans multiple Slurm nodes.
+
+    Uses `ray symmetric-run` when available (Ray >= 2.50), which starts/joins a Ray cluster across
+    every task and runs the entrypoint only on the elected head node. Containers with an older Ray
+    pin fall back to manually starting head/worker Ray processes, keyed on Slurm's per-node task
+    rank ($SLURM_NODEID).
+    """
+    return _VLLM_RAY_SYMMETRIC_RUN.format(total_nodes=total_nodes, resource_flags=resource_flags, inner_cmd=inner_cmd)
 
 
 def render_health_check(name: str, port: int, path: str, timeout: int) -> str:

@@ -1370,6 +1370,11 @@ def model_call_capture_dirs_from_config(global_config_dict: Any) -> list[Path]:
     return [config.model_call_capture_dir]
 
 
+def observability_enabled_from_config(global_config_dict: Any) -> bool:
+    """Return the run-wide ``observability_enabled`` flag directly, without going through capture dirs."""
+    return ModelCallCaptureConfig.model_validate(global_config_dict).observability_enabled
+
+
 def _store_for_rollout(rollout_id: str, capture_dirs: list[Path]) -> Optional[CaptureStore]:
     for directory in capture_dirs:
         store = CaptureStore(directory)

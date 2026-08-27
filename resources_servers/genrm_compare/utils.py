@@ -77,7 +77,7 @@ class GenRMOutputParseError(ValueError):
 def _to_jsonable_data(value: Any) -> Any:
     """Recursively convert request payloads into JSON-serializable data."""
     if isinstance(value, BaseModel):
-        return value.model_dump(mode="json")
+        return value.model_dump(mode="json", exclude_none=True)
     if isinstance(value, dict):
         return {str(k): _to_jsonable_data(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):

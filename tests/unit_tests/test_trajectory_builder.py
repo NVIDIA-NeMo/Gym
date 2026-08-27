@@ -671,9 +671,9 @@ def test_the_builder_runs_once_per_rollout(tmp_path, monkeypatch):
     calls = []
     real_run_builder = consumer_module.run_builder
 
-    def counting_run_builder(entries, builder="prefix_merging"):
+    def counting_run_builder(entries, builder="prefix_merging", **kwargs):
         calls.append(builder)
-        return real_run_builder(entries, builder)
+        return real_run_builder(entries, builder, **kwargs)
 
     monkeypatch.setattr(consumer_module, "run_builder", counting_run_builder)
     built = trajectories_for_rollout("t0-r0", [tmp_path])
