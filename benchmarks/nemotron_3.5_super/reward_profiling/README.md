@@ -1,5 +1,7 @@
 # Nemotron 3.5 Super reward profiling
 
+Start with [INDEX.md](INDEX.md) for the layout, commands and gotchas. This file covers the why.
+
 Reward-profiles the RL training blend by running the policy over every training dataset and
 summarizing per-task reward with `gym eval profile`.
 
