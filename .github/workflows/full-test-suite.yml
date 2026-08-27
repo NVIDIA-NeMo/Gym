@@ -68,7 +68,8 @@ jobs:
         run: |
           source .venv/bin/activate
           PYTEST_ADDOPTS='-m "not sandbox" --cov-report= --cov-fail-under=0' ng_dev_test
-          pytest --cov=. --cov-append --cov-report=term-missing --durations=10 -m sandbox
+          pytest --cov=. --cov-append --cov-report=term-missing \
+            --cov-fail-under="$(python3 scripts/ci/cov_fail_under.py)" --durations=10 -m sandbox
 
   server-suite:
     name: Server suite (shard ${{ matrix.shard }})
