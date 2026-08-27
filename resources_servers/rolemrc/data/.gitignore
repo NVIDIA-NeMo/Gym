@@ -5,3 +5,6 @@ test_judge.jsonl
 *train.jsonl
 *validation.jsonl
 *_prepare.jsonl
+# Raw upstream test file, if downloaded/copied locally for prepare_rolemrc.py
+# (ROLEMRC_LOCAL_JSONL). Fetched at prep time, never vendored.
+roleMRC_test.jsonl

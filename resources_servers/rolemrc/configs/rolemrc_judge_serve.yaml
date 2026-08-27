@@ -1,0 +1,73 @@
+# Serve ONLY the rolemrc judge scorer (the 5-aspect LLM-as-judge /verify), for
+# driving from an external evaluation harness that owns the policy model and
+# generation. The judge counterpart of rolemrc_serve.yaml.
+#
+#   ng_run "+config_paths=[resources_servers/rolemrc/configs/rolemrc_judge_serve.yaml]" \
+#     +judge_base_url=https://api.openai.com/v1/ \
+#     +judge_api_key=$OPEN_AI_KEY \
+#     +judge_model_name=gpt-4.1
+#
+# Unlike rolemrc_judge.yaml this registers NO agent, so nothing here references
+# `policy_model`: the caller generates the answer itself and POSTs it to /verify.
+# Composing rolemrc_judge.yaml into a generation-free service instead fails
+# validation on its agent's unresolvable `policy_model` reference.
+#
+# The judge still needs its own endpoint — it runs on the dedicated `judge_model`
+# instance below, never on the model under test, which would be self-grading.
+#
+# Reasoning judges (gpt-5.x and friends) need two things this config does not
+# default to, because a non-reasoning judge like gpt-4.1 wants neither:
+#
+# 1. An explicit `reasoning.effort`. The model server validates the reply into
+#    `NeMoGymResponse`, whose allowed values come from the `openai` SDK pinned in
+#    the image, and a provider default newer than that SDK 500s every call:
+#      Input should be 'minimal', 'low', 'medium' or 'high' [input_value='none']
+#    The reply echoes the request, so asking for a value the SDK knows avoids it:
+#      ++<instance>.resources_servers.rolemrc.judge_responses_create_params.reasoning.effort=low
+#
+# 2. The sampling params below dropped — reasoning models reject them outright
+#    ("Unsupported parameter: 'top_p' is not supported with this model"). Only
+#    params actually set here are sent, so deleting the two lines works, as does
+#    `~<instance>.…judge_responses_create_params.top_p` (or `=null`) per run.
+#    Such a judge then samples at the provider's defaults, so its verdicts are
+#    not deterministic the way a temperature-0 judge's are — budget for that
+#    when comparing runs.
+
+judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${judge_base_url}
+      openai_api_key: ${judge_api_key}
+      openai_model: ${judge_model_name}
+      openai_default_headers: {}
+
+rolemrc_judge:
+  resources_servers:
+    rolemrc:
+      entrypoint: app.py
+      host: 0.0.0.0
+      port: 8002
+      domain: rlhf
+      verified: false
+      description: RoleMRC role-play MRC scored by a 5-aspect LLM-as-judge (knowledge range, style, nested/multi-turn instruction, instruction priority).
+      value: Improve role-play instruction following under knowledge-range and instruction-priority constraints.
+      mode: judge
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_responses_create_params:
+        input: []
+        temperature: 0.0
+        top_p: 1.0
+        # Reasoning judges spend this budget on reasoning tokens BEFORE emitting
+        # the score, so leave headroom — an exhausted budget returns an empty
+        # response, which verify() reports as a judge failure.
+        max_output_tokens: 1024
+      judge_endpoint_max_concurrency: 64
+
+# Null defaults so OmegaConf resolves ${judge_*} without CLI overrides (needed
+# for config listing). Recommended judge: gpt-4.1.
+judge_base_url: null
+judge_api_key: null
+judge_model_name: null

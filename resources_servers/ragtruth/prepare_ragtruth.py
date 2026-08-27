@@ -56,7 +56,7 @@ _GOOD_QUALITY = "good"
 
 # Pinned to the last commit that touched dataset/ for 100% reproducibility.
 # To update: git ls-remote https://github.com/ParticleMedia/RAGTruth HEAD
-_PUBLIC_COMMIT = "c103204b9ce28d6bbad859304bf30de72b8ed8fe "
+_PUBLIC_COMMIT = "c103204b9ce28d6bbad859304bf30de72b8ed8fe"
 _PUBLIC_BASE_URL = f"https://raw.githubusercontent.com/ParticleMedia/RAGTruth/{_PUBLIC_COMMIT}/dataset"
 _REQUIRED_FILES = ("response.jsonl", "source_info.jsonl")
 _LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1"

@@ -1,3 +1,21 @@
+# RoleMRC LLM-as-judge scorer (5 aspects: knowledge range, style, nested/
+# multi-turn instruction, instruction priority).
+#
+# The judge runs on a DEDICATED model server instance named `judge_model`,
+# wired by the `${judge_*}` overrides, so it is never the model under test —
+# pointing the judge at the policy model makes it grade its own output. Supply
+# the judge endpoint alongside the policy one, e.g.:
+#
+#   gym env start \
+#     "+config_paths=[resources_servers/rolemrc/configs/rolemrc_judge.yaml,\
+# responses_api_models/vllm_model/configs/vllm_model.yaml]" \
+#     +policy_base_url=... +policy_api_key=... +policy_model_name=... \
+#     +judge_base_url=https://api.openai.com/v1/ +judge_api_key=$OPEN_AI_KEY \
+#     +judge_model_name=gpt-4.1
+#
+# To reuse the policy model as the judge anyway (cheap smoke tests, no second
+# endpoint available), set judge_model_server.name back to `policy_model`.
+
 rolemrc_judge:
   resources_servers:
     rolemrc:
@@ -7,17 +25,26 @@ rolemrc_judge:
       description: RoleMRC role-play MRC scored by a 5-aspect LLM-as-judge (knowledge range, style, nested/multi-turn instruction, instruction priority).
       value: Improve role-play instruction following under knowledge-range and instruction-priority constraints.
       mode: judge
-      # The judge defaults to the policy model. Point this at a dedicated,
-      # stronger judge server for less self-grading bias.
+      # Dedicated judge instance, NOT the model under test — see the header.
       judge_model_server:
         type: responses_api_models
-        name: policy_model
+        name: judge_model
       judge_responses_create_params:
         input: []
         temperature: 0.0
         top_p: 1.0
         max_output_tokens: 1024
       judge_endpoint_max_concurrency: 64
+
+# Dedicated judge model instance referenced above.
+judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${judge_base_url}
+      openai_api_key: ${judge_api_key}
+      openai_model: ${judge_model_name}
+      openai_default_headers: {}
 
 rolemrc_judge_simple_agent:
   responses_api_agents:
@@ -42,3 +69,11 @@ rolemrc_judge_simple_agent:
           repo_id: Junrulu/RoleMRC
           artifact_fpath: roleMRC_test.jsonl
         license: Creative Commons Attribution 4.0 International
+
+# Null defaults so OmegaConf resolves ${judge_*} without CLI overrides (needed
+# for config listing / `gym list benchmarks`). Recommended judge: gpt-4.1.
+# policy_* are intentionally NOT defaulted here: the policy model is supplied by
+# whichever model-server config is composed in.
+judge_base_url: null
+judge_api_key: null
+judge_model_name: null

@@ -31,15 +31,16 @@ Usage::
     # or read a pre-downloaded local file:
     ROLEMRC_LOCAL_JSONL=/path/roleMRC_test.jsonl python .../prepare_rolemrc.py
 
-The schema mirrors the upstream BYOB loader: the messages field is the first
-present of (question, conversations, prompt, messages); the gold reply is the
-first present of (reference, chosen, answer, target).
+The schema mirrors the upstream loader: the messages field is the first present
+of (question, conversations, prompt, messages); the gold reply is the first
+present of (reference, chosen, answer, target).
 """
 
 from __future__ import annotations
 
 import json
 import os
+from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -49,6 +50,37 @@ from app import _EVALUATION_CONFIG, _task_dimension
 _HF_DATASET = "Junrulu/RoleMRC"
 _HF_TEST_FILE = "roleMRC_test.jsonl"
 _LOCAL_PATH_ENV = "ROLEMRC_LOCAL_JSONL"
+_ALLOW_DRIFT_ENV = "ROLEMRC_ALLOW_DATASET_DRIFT"
+
+# Task histogram of the upstream ``roleMRC_test.jsonl`` (verified against the
+# real file): 14 slices of 100 rows = the paper's "1.4k testing samples", with
+# four slices split into base / -special-content / -special-format / -refused
+# variants that still sum to 100 each.
+#
+# This is asserted on every prep run so a truncated download or a silently
+# revised upstream split fails loudly instead of shifting the scores. The judge
+# denominators are derived from it, and they are what the published
+# ``AvgWeighted`` is computed over -- see ``app.py:_judge_rollups``.
+_EXPECTED_TASK_COUNTS: Dict[str, int] = {
+    "role_related_mrc_answer_no_narration": 100,
+    "role_related_mrc_answer_no_narration-refused": 20,
+    "role_related_mrc_answer_no_narration-special-content": 58,
+    "role_related_mrc_answer_no_narration-special-format": 22,
+    "role_related_mrc_answer_with_narration": 100,
+    "role_related_mrc_answer_with_narration-refused": 22,
+    "role_related_mrc_answer_with_narration-special-content": 58,
+    "role_related_mrc_answer_with_narration-special-format": 20,
+    "role_related_mrc_refused_no_narration": 100,
+    "role_related_mrc_refused_no_narration-2ndrefused": 100,
+    "role_related_mrc_refused_with_narration": 100,
+    "role_related_mrc_refused_with_narration-2ndrefused": 100,
+    "role_unrelated_mrc_answer_no_narration": 100,
+    "role_unrelated_mrc_answer_with_narration": 100,
+    "role_unrelated_mrc_refused_no_narration": 100,
+    "role_unrelated_mrc_refused_no_narration-2ndanswer": 100,
+    "role_unrelated_mrc_refused_with_narration": 100,
+    "role_unrelated_mrc_refused_with_narration-2ndanswer": 100,
+}
 
 _MESSAGES_FIELDS = ("question", "conversations", "prompt", "messages")
 _REFERENCE_FIELDS = ("reference", "chosen", "answer", "target")
@@ -125,14 +157,54 @@ def _write_jsonl(path: Path, rows: List[Dict[str, Any]]) -> None:
     print(f"RoleMRC: wrote {len(rows)} rows -> {path}")
 
 
+def check_task_histogram(rows: List[Dict[str, Any]]) -> List[str]:
+    """Return human-readable differences between ``rows`` and the known-good split."""
+    actual = Counter(row.get("task", "") for row in rows)
+    problems: List[str] = []
+    for task in sorted(set(actual) | set(_EXPECTED_TASK_COUNTS)):
+        want = _EXPECTED_TASK_COUNTS.get(task, 0)
+        got = actual.get(task, 0)
+        if want != got:
+            problems.append(f"  {task}: expected {want}, got {got}")
+    return problems
+
+
+def judge_call_counts(rows: List[Dict[str, Any]]) -> "Counter[str]":
+    """Judge calls per aspect — the denominators the per-aspect means use.
+
+    A row fires one call per aspect its ``task`` maps to, and the two on-scene
+    tasks that pair knowledge range with style fire two, so this is strictly
+    larger than the row count.
+    """
+    counts: "Counter[str]" = Counter()
+    for row in rows:
+        for aspect_name, _template, _fmt in _EVALUATION_CONFIG.get(row.get("task", ""), []):
+            counts[aspect_name] += 1
+    return counts
+
+
 def main() -> None:
     rows = _load_rolemrc()
+
+    problems = check_task_histogram(rows)
+    if problems:
+        message = "RoleMRC: dataset does not match the expected upstream split:\n" + "\n".join(problems)
+        if os.environ.get(_ALLOW_DRIFT_ENV):
+            print(f"{message}\n(continuing: {_ALLOW_DRIFT_ENV} is set)")
+        else:
+            raise SystemExit(f"{message}\n\nSet {_ALLOW_DRIFT_ENV}=1 to build anyway.")
 
     reference_rows = [_to_task(row, _REFERENCE_AGENT) for row in rows]
     judge_rows = [_to_task(row, _JUDGE_AGENT) for row in rows if row.get("task") in _EVALUATION_CONFIG]
 
     _write_jsonl(_DATA_DIR / "test.jsonl", reference_rows)
     _write_jsonl(_DATA_DIR / "test_judge.jsonl", judge_rows)
+
+    calls = judge_call_counts(rows)
+    total = sum(calls.values())
+    print(f"RoleMRC: judge calls per aspect ({total} over {len(judge_rows)} rows) — the per-aspect denominators:")
+    for aspect_name, count in sorted(calls.items()):
+        print(f"  {aspect_name:<24} {count}")
 
 
 if __name__ == "__main__":
