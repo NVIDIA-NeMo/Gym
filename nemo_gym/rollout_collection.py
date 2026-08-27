@@ -1204,6 +1204,7 @@ class RolloutCollectionHelper(BaseModel):
                         )
                         for agent_name, metrics in agent_name_to_metrics.items()
                     }
+                    step_metrics["progress/total/rollouts_per_min"] = rollouts_per_min
 
                     export_metrics(step_metrics, step=int(current_pct))
 
