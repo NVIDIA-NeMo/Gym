@@ -115,6 +115,25 @@ from nemo_gym.token_id_capture.delivery import (
 
 logger = logging.getLogger(__name__)
 
+
+def _masking_step_metrics(agent_name: str, total: int, unmasked: Counter) -> Dict[str, float]:
+    """Progress metrics for the rollouts an environment reported as masked.
+
+    ``reward`` keeps averaging over every rollout so an existing dashboard reads the
+    same number it read before. ``reward_unmasked`` is the same average with the masked
+    rollouts removed, and the gap between the two is the score a run lost to its own
+    infrastructure. Both keys appear only once something is actually masked, so a run
+    that reports no masking exports exactly what it exported before.
+    """
+    masked = total - int(unmasked["count"])
+    if not masked or not total:
+        return {}
+    metrics = {f"progress/{agent_name}/masked_pct": round(100 * masked / total, 2)}
+    if unmasked["count"]:
+        metrics[f"progress/{agent_name}/reward_unmasked"] = round(100 * unmasked["reward"] / unmasked["count"], 2)
+    return metrics
+
+
 # ---------------------------------------------------------------------------
 # Failure-routing sentinels (set by agent servers, read by the dispatcher).
 #
@@ -1337,6 +1356,10 @@ class RolloutCollectionHelper(BaseModel):
         pcts_to_print = list(range(1, 100)) + [99.5, 100]
         agent_name_to_metrics = defaultdict(Counter)
         agent_name_to_counts = defaultdict(int)
+        # Reward totals over the rollouts an environment did not mask. Token capture
+        # already reports its own masking; this is the same accounting for the masking
+        # an environment declares on its verify response.
+        agent_name_to_unmasked = defaultdict(Counter)
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
         dispatched_per_agent = Counter(counts_left)
         start_time = time()
@@ -1485,6 +1508,10 @@ class RolloutCollectionHelper(BaseModel):
                     {k: v for k, v in result.items() if isinstance(v, (int, float)) and not k.startswith("_")}
                 )
                 agent_name_to_counts[agent_name] += 1
+                if not result.get(MASK_SAMPLE_KEY):
+                    agent_name_to_unmasked[agent_name].update(
+                        {"reward": float(result.get("reward") or 0.0), "count": 1}
+                    )
 
             current_pct = 100 * len(results) / len(input_rows)
             if pcts_to_print and current_pct >= pcts_to_print[0]:
@@ -1520,6 +1547,10 @@ class RolloutCollectionHelper(BaseModel):
                         )
                         step_metrics[f"progress/{agent_name}/reward_lower_bound"] = round(
                             100 * metrics["reward"] / (counts_left[agent_name] + agent_name_to_counts[agent_name]), 2
+                        )
+                    for agent_name, total in agent_name_to_counts.items():
+                        step_metrics.update(
+                            _masking_step_metrics(agent_name, total, agent_name_to_unmasked[agent_name])
                         )
 
                     export_metrics(step_metrics, step=int(current_pct))

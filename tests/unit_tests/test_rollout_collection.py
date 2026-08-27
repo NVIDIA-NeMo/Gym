@@ -64,6 +64,7 @@ from nemo_gym.rollout_collection import (
     _failure_rows_counted_as_zero,
     _failures_path_for,
     _get_max_rollout_attempts,
+    _masking_step_metrics,
     _rollout_for_export,
     _rollout_request_debug_summary,
     loads_jsonl_line,
@@ -3964,3 +3965,23 @@ class TestPreprocessExamples:
     def test_validates_knobs_like_the_cli(self) -> None:
         with pytest.raises(ValueError, match="empty list"):
             RolloutCollectionHelper().preprocess_examples([self._ts_row()], fan_out={"math": []})
+
+
+class TestMaskingStepMetrics:
+    """`mask_sample` reported by an environment shows up in the progress metrics."""
+
+    def test_nothing_masked_adds_no_keys(self) -> None:
+        assert _masking_step_metrics("my_agent", 4, Counter({"reward": 2.0, "count": 4})) == {}
+
+    def test_masked_rollouts_report_their_share_and_the_score_without_them(self) -> None:
+        # 10 rollouts, 2 masked; the 8 unmasked ones scored 4.0 in total.
+        metrics = _masking_step_metrics("my_agent", 10, Counter({"reward": 4.0, "count": 8}))
+
+        assert metrics == {
+            "progress/my_agent/masked_pct": 20.0,
+            "progress/my_agent/reward_unmasked": 50.0,
+        }
+
+    def test_every_rollout_masked_reports_the_share_without_a_score(self) -> None:
+        """No unmasked rollout means no honest average to publish."""
+        assert _masking_step_metrics("my_agent", 6, Counter()) == {"progress/my_agent/masked_pct": 100.0}
