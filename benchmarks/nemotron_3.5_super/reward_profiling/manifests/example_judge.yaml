@@ -1,4 +1,10 @@
-# Example manifest for a judge-scored environment
+# Minimal manifest for a judge-scored environment.
+#
+# The difference from example_basic is config_overlay. The shipped config names a judge but never
+# an endpoint -- binding the judge means defining that name here. Without it the composed config
+# fails to resolve and the run dies at parse, before a single rollout.
+#
+# ${nv_inference_api_key} comes from env.yaml, which the launchers mount into the container.
 
 nickname: example_judge
 
@@ -10,7 +16,14 @@ extra_configs:
 
 config_overlay:
 
-  math_judge_model: &gateway_judge
+  # Ordinary Gym config, spliced into the emitted sweep_config.yaml as top-level keys. Inline
+  # rather than a separate file because the container is built from a Gym ref and does not contain
+  # this repo, so a repo-relative extra_config path would not resolve inside it.
+  #
+  # max_concurrent_requests is not optional at scale: the transport retries 429s with a flat sleep
+  # and extends its retry budget on rate limits, so a saturated judge degrades into a retry storm
+  # rather than backpressure.
+  math_judge_model:
     responses_api_models:
       openai_model:
         entrypoint: app.py
@@ -19,6 +32,7 @@ config_overlay:
         openai_api_key: ${nv_inference_api_key}
         max_concurrent_requests: 64
 
+  # lc_judge.yaml declares that equivalence_llm_judge needs a judge; this says which one.
   lc_judge:
     resources_servers:
       equivalence_llm_judge:
@@ -26,7 +40,8 @@ config_overlay:
           type: responses_api_models
           name: math_judge_model
 
-  # --- judge-scored ------------------------------------------------------------------------
+entries:
+
   - label: long_context
     agent: lc_judge_simple_agent
     configs:

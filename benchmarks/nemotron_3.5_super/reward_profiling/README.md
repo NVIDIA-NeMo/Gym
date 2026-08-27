@@ -18,6 +18,8 @@ Nemotron-specific.
 ```
 RATES.md         measured throughput and GPU-hour sizing. Read before allocating.
 manifests/       input: what to profile. Hand-edited.
+                 nemotron_3_ultra.yaml is the real sweep; example_*.yaml are minimal
+                 one-entry manifests for basic / judge / sandbox+judge.
 outputs/         everything a run produces: sweeps/<nickname>/ and slurm-logs/. Gitignored.
 scripts/         numbered by run order; see below.
 ```
