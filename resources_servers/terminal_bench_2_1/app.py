@@ -107,6 +107,24 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
 
         self._session_id_to_sandbox: Dict[str, Tuple[AsyncSandbox, SandboxPtySession]] = dict()
 
+    async def _patch_sandbox_provider_options_for_instances(
+        self, task_name: str, resources: SandboxResources, provider_options: Dict[str, Any]
+    ) -> None:
+        # TODO @bxyu-nvidia: These patches may not be necessary eventually, but for now we need them in order for the below instance golden patches to pass.
+        tasks_to_increase_initial_resources_for = {
+            "terminal-bench/torch-pipeline-parallelism",
+            "terminal-bench/torch-tensor-parallelism",
+            "terminal-bench/pytorch-model-recovery",
+            "terminal-bench/mteb-retrieve",
+            "terminal-bench/caffe-cifar-10",
+        }
+        if task_name in tasks_to_increase_initial_resources_for:
+            provider_options["resource_requests"] = {
+                "cpu": resources.cpu,
+                "memory_mib": resources.memory_mib,
+                "disk_gib": resources.disk_gib,
+            }
+
     async def _create_sandbox(
         self, verify_request: TerminalBench21VerifyRequest
     ) -> Tuple[AsyncSandbox, SandboxPtySession]:
@@ -123,6 +141,11 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         if self.config.sandbox_config.get("derive_cpu_env", True):
             env = cpu_cap_env(sandbox_resources.cpu) | env
 
+        provider_options = self.config.sandbox_config.get("provider_options") or {}
+        self._patch_sandbox_provider_options_for_instances(
+            verify_request.task_name, sandbox_resources, provider_options
+        )
+
         eval_sandbox_spec = SandboxSpec(
             image=verify_request.docker_image,
             ttl_s=self.config.sandbox_config.get("ttl_s", None),
@@ -138,7 +161,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             },
             resources=SandboxResources.from_mapping(resources),
             entrypoint=None,
-            provider_options=self.config.sandbox_config.get("provider_options", {}),
+            provider_options=provider_options,
         )
         eval_sandbox = AsyncSandbox(resolved_sandbox_provider)
         await eval_sandbox.start(eval_sandbox_spec)
