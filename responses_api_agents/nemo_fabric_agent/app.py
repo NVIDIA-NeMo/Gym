@@ -380,7 +380,11 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
                     "provider": self.config.model_provider,
                     "model": self.config.model,
                     "api_key_env": _MODEL_API_KEY_ENV,
-                    "base_url": model_base_url,
+                    "base_url": (
+                        model_base_url.removesuffix("/v1")
+                        if self.config.model_provider == "anthropic"
+                        else model_base_url
+                    ),
                 }
             },
         }
