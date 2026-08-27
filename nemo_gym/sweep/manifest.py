@@ -67,48 +67,68 @@ class SweepEntry(BaseModel):
         return self.agent_ref_override or self.agent
 
 
+class GymEnvStart(BaseModel):
+    """What becomes ``sweep_config.yaml``, which is passed to ``gym env start --config``.
+
+    ``config_paths`` are merged ahead of every entry's own configs: the model server the agents
+    reference, plus anything shared. Every other key is ordinary Gym config, spliced in verbatim.
+
+    Those extra keys act as an overlay. Per ``global_config.load_extra_config_paths``: "A config
+    named in another config's config_paths is *inner*. The config that pulled it in overrides it."
+    ``sweep_config.yaml`` is the outer config, so its own top-level keys beat every file it lists.
+    Use that for bindings this sweep owns -- which judge a resources server talks to, say -- rather
+    than editing an upstream config. The container is built from a Gym ref and does not contain
+    this repo, so a repo-relative config path will not resolve inside it, whereas
+    ``sweep_config.yaml`` lives in SWEEP_DIR and is always mounted.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    config_paths: List[str] = Field(default_factory=list)
+
+    def overlay(self) -> Dict[str, Any]:
+        """Every key except config_paths: the Gym config spliced in alongside it."""
+        return dict(self.model_extra or {})
+
+
+class GymEvalRun(BaseModel):
+    """Runtime settings for the collection command, emitted as ``++key=value``.
+
+    Committed with the manifest so a sweep's settings travel with it. A launcher passes an override
+    only when its own env var is set, so these are defaults rather than something clobbered:
+    manifest -> script env var -> command line, lowest to highest.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    # Rollouts per task; the spread across them is the profile. Also read by materialize, which
+    # writes this many copies of each row -- it is a gym eval run argument that the expander
+    # happens to need too.
+    num_repeats: int = Field(default=1, ge=1)
+
+    def overrides(self) -> Dict[str, Any]:
+        """Everything except num_repeats, which the launcher derives from the sweep report."""
+        return dict(self.model_extra or {})
+
+
 class SweepManifest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     # Identifies this run and scopes every artifact it writes, so profiling the same blend
-    # against a different checkpoint never collides. Mirrors NICKNAME in the pre-sweep scripts,
-    # which scoped `rollouts/$NICKNAME/<env>/`.
-    # Consumed by materialize, which writes this many copies of each row, so it is a named field
-    # rather than free-form config: the expander cannot look it up in an arbitrary dict.
-    num_repeats: int = Field(default=1, ge=1)
-
-    # Sweep-wide Gym config, committed with the manifest. Emitted into the generated
-    # sweep_config.yaml, so a launcher's ++ override beats it and Gym's own default applies when
-    # both are silent: manifest -> script env var -> command line, lowest to highest.
-    settings: Dict[str, Any] = Field(default_factory=dict)
-
+    # against a different checkpoint never collides.
     nickname: str
-    # Split the concatenated input into N files. Leave unset (the default) to emit one file and
-    # run the sweep as a single invocation; set it only when the driver process cannot hold every
-    # materialized row at once, since rollout collection keeps them all resident.
+    # Split the concatenated input into N files. Leave unset to emit one file and run the sweep as
+    # a single invocation.
     num_shards: Optional[int] = Field(default=None, ge=1)
-    # Sweep-wide configs merged ahead of every entry's: the model server the agents reference,
-    # plus optional judge and sandbox bindings. Entry configs declare agents and verifiers; they
-    # do not declare the policy, so without at least a model-server config here the composed
-    # config fails with "references responses_api_models/'policy_model', which is not defined".
-    extra_configs: List[str] = Field(default_factory=list)
-    # Ordinary Gym config, verbatim -- exactly what you would put in a standalone Gym yaml, just
-    # written here instead of in a file. Nothing in this repo interprets it; the keys are spliced
-    # unchanged into the emitted sweep_config.yaml alongside config_paths.
-    #
-    # That splice is what makes it an *overlay*. Per global_config.load_extra_config_paths: "A
-    # config named in another config's config_paths is *inner*. The config that pulled it in
-    # overrides it, however deep the nesting goes." sweep_config.yaml is the outer config, so its
-    # own top-level keys -- these -- win over every file in config_paths. Same precedence a
-    # sweep-wide extra_config gets, without the file.
-    #
-    # Use it for deployment bindings that belong to this sweep rather than to a shared file: which
-    # judge each resources server talks to, say. Prefer it over an extra_config for anything the
-    # container will not have on disk. The container is built from a Gym ref and does not contain
-    # this repo, so a repo-relative extra_config path fails to resolve inside it, whereas
-    # sweep_config.yaml lives in SWEEP_DIR and is always mounted.
-    config_overlay: Dict[str, Any] = Field(default_factory=dict)
+
+    gym_env_start: GymEnvStart = Field(default_factory=GymEnvStart)
+    gym_eval_run: GymEvalRun = Field(default_factory=GymEvalRun)
+
     entries: List[SweepEntry] = Field(min_length=1)
+
+    @property
+    def num_repeats(self) -> int:
+        return self.gym_eval_run.num_repeats
 
     @model_validator(mode="after")
     def _unique_labels(self) -> "SweepManifest":
@@ -126,7 +146,7 @@ class SweepManifest(BaseModel):
         # Sweep-wide configs go last so they win the merge: several environments ship pointing their
         # judge at policy_model (the model grading itself), and rebinding that is the whole point of
         # a judges config.
-        for config in self.extra_configs:
+        for config in self.gym_env_start.config_paths:
             seen.pop(config, None)
             seen[config] = None
         return list(seen)

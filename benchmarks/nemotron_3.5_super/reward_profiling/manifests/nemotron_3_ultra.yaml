@@ -12,12 +12,10 @@
 
 nickname: nemotron_3_ultra
 
-num_repeats: 8
-
-extra_configs:
-  - responses_api_models/vllm_model/configs/vllm_model.yaml
-
-config_overlay:
+# Becomes sweep_config.yaml, passed to `gym env start --config` (was ng_run).
+gym_env_start:
+  config_paths:
+    - responses_api_models/vllm_model/configs/vllm_model.yaml
 
   math_judge_model: &gateway_judge
     responses_api_models:
@@ -117,6 +115,10 @@ config_overlay:
         # sandbox worker restarts, replaying the session is what tends to wedge the tool call.
         disable_session_restore: true
 
+
+# Runtime settings for `gym eval run --no-serve` (was ng_collect_rollouts).
+gym_eval_run:
+  num_repeats: 8
 
 entries:
 

@@ -130,7 +130,7 @@ def build_sweep(
 
     with open(config_yaml, "w") as handle:
         yaml.safe_dump(
-            {"config_paths": report.config_paths, **manifest.config_overlay},
+            {"config_paths": report.config_paths, **manifest.gym_env_start.overlay()},
             handle,
             default_flow_style=False,
             sort_keys=False,
@@ -195,5 +195,5 @@ def container_config(manifests: List["SweepManifest"]) -> Dict:
         # Overlays declare servers too -- the judge lane's model server exists only there. Omitting
         # them bakes no venv for it, and a server with no baked venv installs at runtime and hangs
         # the lane behind connection retries rather than failing.
-        overlay.update(manifest.config_overlay)
+        overlay.update(manifest.gym_env_start.overlay())
     return {"config_paths": list(seen), **overlay, **CONTAINER_PLACEHOLDERS}

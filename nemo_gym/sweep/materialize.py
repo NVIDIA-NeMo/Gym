@@ -263,12 +263,8 @@ def materialize(
     config_fpath = out_dir / CONFIG_NAME
     with open(config_fpath, "w") as handle:
         yaml.safe_dump(
-            # settings first so config_overlay can still override them for a specific server
-            {
-                "config_paths": manifest.config_paths(),
-                **manifest.settings,
-                **manifest.config_overlay,
-            },
+            # gym env start reads this file; gym eval run's settings are ++ overrides instead.
+            {"config_paths": manifest.config_paths(), **manifest.gym_env_start.overlay()},
             handle,
             default_flow_style=False,
             sort_keys=False,

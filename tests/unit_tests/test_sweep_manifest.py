@@ -47,11 +47,13 @@ def _write_data(tmp_path, name, agent, rows=3, missing_ref=False):
     return path
 
 
-def _manifest(tmp_path, entries, defaults=None, config_overlay=None):
-    # `defaults` kept as the helper's parameter name; the manifest field is now top-level.
-    doc = {"nickname": "testrun", **(defaults or {"num_repeats": 8}), "entries": entries}
-    if config_overlay is not None:
-        doc["config_overlay"] = config_overlay
+def _manifest(tmp_path, entries, defaults=None, config_overlay=None, config_paths=None):
+    doc = {
+        "nickname": "testrun",
+        "gym_eval_run": {"num_repeats": 8, **(defaults or {})},
+        "gym_env_start": {"config_paths": config_paths or [], **(config_overlay or {})},
+        "entries": entries,
+    }
     path = tmp_path / "manifest.yaml"
     path.write_text(yaml.safe_dump(doc))
     return load_manifest(path)

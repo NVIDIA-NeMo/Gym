@@ -2,10 +2,13 @@
 
 nickname: example_basic
 
-num_repeats: 8
-
-extra_configs:
-  - responses_api_models/vllm_model/configs/vllm_model.yaml
+# Becomes sweep_config.yaml, passed to `gym env start --config` (was ng_run).
+gym_env_start:
+  config_paths:
+    - responses_api_models/vllm_model/configs/vllm_model.yaml
+# Runtime settings for `gym eval run --no-serve` (was ng_collect_rollouts).
+gym_eval_run:
+  num_repeats: 8
 
 entries:
   - label: tau_pivot

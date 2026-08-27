@@ -67,34 +67,53 @@ arm64 build exists: `/lustre/fsw/portfolios/llmservice/users/igitman/images/nemo
 
 ## 02 - Create a Manifest
 The manifest is the highest-level config of what environments are being profiled, and parameterizes any judge, sandbox, or config overrides needed.
-1. nickname: name of the reward profiling jobs
-    - becomes the output directory: artifacts land in `<OUT_DIR>/<nickname>/`
-2. num_repeats: rollouts per task; the variance across these is the profile
-    - a named field rather than config, because `materialize` consumes it to decide how many
-      copies of each row to write
-3. settings: sweep-wide Gym config, committed with the manifest
-    - anything Gym takes, e.g. `num_samples_in_parallel`, `responses_create_params.temperature`
-    - precedence, lowest to highest: **manifest `settings` -> script env var -> command line**.
-      A launcher only passes a `++` override when you set its env var, so these are defaults
-      rather than something silently clobbered. `num_samples_in_parallel` is the exception: the
-      launcher computes `512 x decode_nodes` because only it knows the job's shape
-4. extra_configs: any other configs to be loaded
-    - sweep-wide config paths, merged after every entry's own `configs`, so they win on conflict.
-      Usually just the model server, e.g. `responses_api_models/vllm_model/configs/vllm_model.yaml`
-5. config_overlay: Gym config written inline, scoped to a specific server, spliced into the generated `sweep_config.yaml`
-    - a config overrides anything its own `config_paths` pulled in, so these beat every file
-    - this is how we route different judge models to one gym_env_start server
-    - use it instead of editing upstream configs: the container is built from a Gym ref and does
-      not contain this repo, so a repo-relative config path will not resolve inside it
-6. entries: the environments to be profiled.
-    - label (required): nickname of profiled env
-    - agent (required): agent_ref of the data
-    - configs (optional but effectively required): gym configs defining the agent and its
-      resources server. The agent must be declared by at least one of them
-    - data (required): jsonl path to the data with labelled agent_ref
-    - owner (optional): owner of environment
-    - num_repeats (optional): overrides the default. Resolved per agent, so entries sharing an
+Two blocks, each named for the command it configures:
+
+1. **nickname** — names the run; artifacts land in `<OUT_DIR>/<nickname>/`
+2. **gym_env_start** (was `ng_run`) — becomes `sweep_config.yaml`, passed as `--config`
+    - `config_paths`: sweep-wide configs merged ahead of every entry's own. Usually just the model
+      server, e.g. `responses_api_models/vllm_model/configs/vllm_model.yaml`
+    - any other key: ordinary Gym config, spliced in verbatim. A config overrides whatever its own
+      `config_paths` pulled in, so these beat every file — which is how a judge gets rebound
+      without editing an upstream config. Do it here rather than in a file: the container is built
+      from a Gym ref and has no copy of this repo, so a repo-relative path will not resolve inside it
+3. **gym_eval_run** (was `ng_collect_rollouts`) — runtime settings, emitted as `++key=value`
+    - `num_repeats`: rollouts per task; the spread across them is the profile. Also read by
+      `materialize`, which writes this many copies of each row
+    - anything else Gym takes, e.g. `num_samples_in_parallel`
+    - precedence, lowest to highest: **manifest → script env var → command line**. A launcher
+      passes `++` only when its env var is set, so these are defaults rather than something
+      silently clobbered. `num_samples_in_parallel` is the exception: the launcher computes
+      `512 × decode_nodes`, since only it knows the job's shape
+4. **entries** — the environments to be profiled
+    - `label` (required): nickname of profiled env
+    - `agent` (required): `agent_ref` of the data
+    - `configs`: gym configs defining the agent and its resources server. The agent must be
+      declared by at least one of them
+    - `data` (required): jsonl path to the data with labelled `agent_ref`
+    - `owner` (optional): owner of environment
+    - `num_repeats` (optional): overrides the default. Resolved per agent, so entries sharing an
       agent share a value
+
+```yaml
+nickname: my_sweep
+
+gym_env_start:
+  config_paths:
+    - responses_api_models/vllm_model/configs/vllm_model.yaml
+  math_judge_model:              # bind a judge without touching upstream configs
+    responses_api_models: {...}
+
+gym_eval_run:
+  num_repeats: 8
+  num_samples_in_parallel: 512
+
+entries:
+  - label: my_env
+    agent: my_simple_agent
+    configs: [resources_servers/my_env/configs/my_env.yaml]
+    data: /path/to/data.jsonl
+```
 
 Validate before running — it checks the configs exist, the agent is declared, and the data parses:
 

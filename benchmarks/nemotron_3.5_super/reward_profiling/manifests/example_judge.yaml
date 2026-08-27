@@ -8,12 +8,10 @@
 
 nickname: example_judge
 
-num_repeats: 8
-
-extra_configs:
-  - responses_api_models/vllm_model/configs/vllm_model.yaml
-
-config_overlay:
+# Becomes sweep_config.yaml, passed to `gym env start --config` (was ng_run).
+gym_env_start:
+  config_paths:
+    - responses_api_models/vllm_model/configs/vllm_model.yaml
 
   # Ordinary Gym config, spliced into the emitted sweep_config.yaml as top-level keys. Inline
   # rather than a separate file because the container is built from a Gym ref and does not contain
@@ -38,6 +36,10 @@ config_overlay:
         judge_model_server:
           type: responses_api_models
           name: math_judge_model
+
+# Runtime settings for `gym eval run --no-serve` (was ng_collect_rollouts).
+gym_eval_run:
+  num_repeats: 8
 
 entries:
 
