@@ -125,29 +125,31 @@ def load_task_data_schema(server_dir: Path) -> Optional[TypeAdapter]:
 
 
 LEGACY_METADATA_KEY = "verifier_metadata"
+TASK_DATA_ROW_KEY = "task_data"
 
 
 def normalize_task_fields(row: Dict[str, Any]) -> tuple[Dict[str, Any], List[str]]:
     """The task-owned subset of a dataset row, normalized to the flat end-state shape.
 
-    Drops framework keys, then splices the contents of a legacy ``verifier_metadata`` dict up to
-    the top level (the row-format migration renames that bucket into ``task_data``, so schemas are
-    written flat).
-    A key present in both places with the same value is a harmless duplicate; with different
+    Drops framework keys, then splices the contents of a legacy ``verifier_metadata`` dict and of
+    a migrated ``task_data`` dict up to the top level (schemas are written flat, so fields
+    validate the same whether a row is flat, legacy-nested, or migrated).
+    A key present in two places with the same value is a harmless duplicate; with different
     values it is ambiguous data and gets reported. Returns ``(fields, conflicts)``.
     """
     fields = {k: v for k, v in row.items() if k not in RESERVED_ROW_KEYS}
     conflicts: List[str] = []
-    legacy = fields.pop(LEGACY_METADATA_KEY, None)
-    if isinstance(legacy, dict):
-        for key, value in legacy.items():
-            if key in fields and fields[key] != value:
-                conflicts.append(key)
-                continue
-            fields[key] = value
-    elif legacy is not None:
-        # A non-dict verifier_metadata is malformed; surface it to the schema as-is.
-        fields[LEGACY_METADATA_KEY] = legacy
+    for container_key in (LEGACY_METADATA_KEY, TASK_DATA_ROW_KEY):
+        container = fields.pop(container_key, None)
+        if isinstance(container, dict):
+            for key, value in container.items():
+                if key in fields and fields[key] != value:
+                    conflicts.append(key)
+                    continue
+                fields[key] = value
+        elif container is not None:
+            # A non-dict container is malformed; surface it to the schema as-is.
+            fields[container_key] = container
     return fields, conflicts
 
 
@@ -168,7 +170,7 @@ class TaskDataValidationReport:
 
     @property
     def clean(self) -> bool:
-        return self.error_rows == 0 and not self.conflicting_keys and not self.misplaced_keys
+        return self.error_rows == 0 and not self.conflicting_keys and not self.misplaced_keys and not self.unknown_keys
 
     def summary(self) -> str:
         parts = [
@@ -189,7 +191,7 @@ class TaskDataValidationReport:
             )
         if self.unknown_keys:
             keys = ", ".join(f"{k} ({n} rows)" for k, n in sorted(self.unknown_keys.items()))
-            parts.append(f"  keys not declared by the schema (passed through unvalidated): {keys}")
+            parts.append(f"  keys not declared by the schema (typo, or missing schema field?): {keys}")
         return "\n".join(parts)
 
 
@@ -229,7 +231,7 @@ class TaskDataValidator:
         # (schemas are flat) while the server at runtime would never see it, so it is flagged.
         # Rows already in the migrated format (a task_data key) are exempt: top-level inside
         # task_data is the correct final position.
-        if self._legacy_fields and "task_data" not in row:
+        if self._legacy_fields and TASK_DATA_ROW_KEY not in row:
             nested = row.get(LEGACY_METADATA_KEY)
             nested_keys = set(nested) if isinstance(nested, dict) else set()
             for key in (row.keys() & self._legacy_fields) - nested_keys:

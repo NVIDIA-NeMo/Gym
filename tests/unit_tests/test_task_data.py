@@ -29,7 +29,10 @@ from nemo_gym.train_data_utils import TrainDataProcessor
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SCHEMA_FILES = sorted((REPO_ROOT / "resources_servers").glob("*/task_data.py"))
+SCHEMA_FILES = sorted(
+    list((REPO_ROOT / "resources_servers").glob("*/task_data.py"))
+    + list((REPO_ROOT / "responses_api_agents").glob("*/task_data.py"))
+)
 
 
 class TestNormalizeTaskFields:
@@ -59,6 +62,27 @@ class TestNormalizeTaskFields:
     def test_non_dict_verifier_metadata_is_kept_for_the_schema_to_reject(self):
         fields, _ = normalize_task_fields({"verifier_metadata": "oops"})
         assert fields == {"verifier_metadata": "oops"}
+
+    def test_splices_task_data_contents(self):
+        fields, conflicts = normalize_task_fields(
+            {"responses_create_params": {}, "task_data": {"expected_city": "Tokyo"}}
+        )
+        assert fields == {"expected_city": "Tokyo"}
+        assert conflicts == []
+
+    def test_empty_task_data_container_leaves_no_residue(self):
+        fields, conflicts = normalize_task_fields({"expected_city": "Tokyo", "task_data": {}})
+        assert fields == {"expected_city": "Tokyo"}
+        assert conflicts == []
+
+    def test_conflicting_task_data_duplicate_is_reported(self):
+        fields, conflicts = normalize_task_fields({"expected_city": "Paris", "task_data": {"expected_city": "Tokyo"}})
+        assert fields == {"expected_city": "Paris"}
+        assert conflicts == ["expected_city"]
+
+    def test_non_dict_task_data_is_kept_for_the_schema_to_reject(self):
+        fields, _ = normalize_task_fields({"task_data": "oops"})
+        assert fields == {"task_data": "oops"}
 
 
 class TestLoadTaskDataSchema:
@@ -141,10 +165,13 @@ class TestTaskDataValidator:
         v.validate_row(0, {"verifier_metadata": {"question": "q", "expected_answer": "a"}})
         assert v.report.clean
 
-    def test_unknown_keys_counted_not_errored(self):
+    def test_unknown_keys_counted_and_dirty_but_not_errored(self):
         v = self._validator()
         v.validate_row(0, {"question": "q", "expected_answer": "a", "difficulty": 3})
-        assert v.report.clean
+        # The row still validates (no error), but an undeclared key is likely a typo or a
+        # missing schema field, so the report is not clean.
+        assert v.report.error_rows == 0
+        assert not v.report.clean
         assert v.report.unknown_keys == {"difficulty": 1}
         assert "difficulty" in v.report.summary()
 
@@ -197,7 +224,7 @@ class TestOwningResourcesServerImpl:
 
 
 class TestShippedSchemas:
-    """CI enforcement for every committed resources_servers/*/task_data.py."""
+    """CI enforcement for every committed task_data.py (resources servers and agents)."""
 
     ALLOWED_IMPORT_PREFIXES = ("pydantic", "nemo_gym.task_data")
 
@@ -294,7 +321,9 @@ class TestUnionUnknownKeys:
         adapter = load_task_data_schema(tmp_path)
         v = TaskDataValidator(server_name="ruler2", adapter=adapter, dataset_fpath="d.jsonl")
         v.validate_row(0, {"eval_type": "string_match", "lenght": 5})
-        assert v.report.clean
+        # The typo is surfaced as an unknown key and dirties the report.
+        assert v.report.error_rows == 0
+        assert not v.report.clean
         assert v.report.unknown_keys == {"lenght": 1}
 
 
@@ -505,7 +534,11 @@ class TestRepoDataMatchesSchemas:
                             if not isinstance(d, dict) or not d.get("jsonl_fpath"):
                                 continue
                             if section == "resources_servers":
-                                rs = impl_key
+                                owner = ("resources_servers", impl_key)
+                            elif "resources_server" not in body:
+                                # Self-contained agent: its schema lives next to the agent
+                                # implementation, mirroring collate's fallback.
+                                owner = ("responses_api_agents", impl_key)
                             else:
                                 ref = body.get("resources_server") or {}
                                 name = ref.get("name") if isinstance(ref, dict) else None
@@ -521,14 +554,17 @@ class TestRepoDataMatchesSchemas:
                                     if isinstance(tgt, dict) and isinstance(tgt.get("resources_servers"), dict)
                                     else None
                                 )
-                            if rs and str(d["jsonl_fpath"]) in tracked:
-                                server_files.setdefault(rs, set()).add(str(d["jsonl_fpath"]))
+                                owner = ("resources_servers", rs) if rs else None
+                            if owner and str(d["jsonl_fpath"]) in tracked:
+                                server_files.setdefault(owner, set()).add(str(d["jsonl_fpath"]))
 
         assert len(server_files) > 50, "mapping looks broken: too few servers with committed data"
+        agent_owned = [o for o in server_files if o[0] == "responses_api_agents"]
+        assert len(agent_owned) >= 5, "mapping looks broken: self-contained agent datasets not found"
         failures = []
         rows_checked = 0
-        for server, files in sorted(server_files.items()):
-            server_dir = find_server_dir(server)
+        for (base_folder, server), files in sorted(server_files.items()):
+            server_dir = find_server_dir(server, base_folder=base_folder)
             adapter = load_task_data_schema(server_dir) if server_dir else None
             if adapter is None:
                 failures.append(f"{server}: no loadable schema")
