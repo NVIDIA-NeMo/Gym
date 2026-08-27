@@ -44,23 +44,30 @@ every instrumentation site stays a no-op through :mod:`nemo_gym.telemetry._fallb
 
 import logging
 import os
+import threading
 from typing import TYPE_CHECKING, Any, Optional, Union
 from uuid import uuid4
+
+from omegaconf import DictConfig, OmegaConf
+
+from nemo_gym.telemetry.config import TelemetryConfig
 
 
 if TYPE_CHECKING:
     from nemo.lens import TelemetryHandle
-
-    from nemo_gym.telemetry.config import TelemetryConfig
 
 
 logger = logging.getLogger(__name__)
 
 #: Process-global handle. One per process; ``None`` when lens is absent or telemetry is
 #: disabled. Guarded by ``_INITIALISED`` rather than by a ``None`` check so that a
-#: disabled run does not retry the whole setup on every call.
+#: disabled run does not retry the whole setup on every call. ``_INIT_LOCK`` makes the
+#: check-and-set atomic: without it, two threads can both observe ``_INITIALISED is
+#: False`` before either sets it and both call ``setup_telemetry``, which nemo-lens
+#: raises on for a second call in the same process.
 _TELEMETRY_HANDLE: Optional["TelemetryHandle"] = None
 _INITIALISED = False
+_INIT_LOCK = threading.Lock()
 
 #: ``NemoLensConfig.from_env`` reads ``NEMO_GYM_OTEL_<KEY>`` first, then ``NEMO_LENS_<KEY>``.
 #: The fallback is what makes the documented ``NEMO_LENS_ENABLED=1`` work unchanged.
@@ -75,9 +82,12 @@ _SERVICE_NAME_ENV = "OTEL_SERVICE_NAME"
 #: not mistake it for a server instance definition.
 TELEMETRY_KEY_NAME = "telemetry"
 
-#: ``TelemetryConfig`` field -> env var. ``service_name`` is handled separately because it
-#: maps to the standard unprefixed ``OTEL_SERVICE_NAME``, and the Gym-owned flags
-#: (``service_name_per_server``, ``instrument_aiohttp``) are not lens config fields.
+#: ``TelemetryConfig`` field -> env var. Consumed by :func:`configure_telemetry_env`, the
+#: function that actually connects a ``telemetry:`` YAML block (or any other
+#: ``TelemetryConfig``) to these env vars via ``setdefault`` — a user does not set them by
+#: hand. ``service_name`` is handled separately because it maps to the standard unprefixed
+#: ``OTEL_SERVICE_NAME``, and the Gym-owned flags (``service_name_per_server``,
+#: ``instrument_aiohttp``) are not lens config fields.
 _ENV_FIELD_MAP = {
     "enabled": f"{_OTEL_PREFIX}_ENABLED",
     "span_groups": f"{_OTEL_PREFIX}_SPAN_GROUPS",
@@ -117,14 +127,12 @@ def is_telemetry_env_enabled() -> bool:
     return False
 
 
-def telemetry_config_from_global_config(global_config_dict: Any) -> "TelemetryConfig":
+def telemetry_config_from_global_config(global_config_dict: Any) -> TelemetryConfig:
     """Build a :class:`TelemetryConfig` from Gym's merged global config dict.
 
     Reads the optional top-level ``telemetry:`` block. A run that never mentions
     telemetry gets the all-defaults config, which is disabled.
     """
-    from nemo_gym.telemetry.config import TelemetryConfig
-
     block: Any = None
     if global_config_dict is not None:
         try:
@@ -135,17 +143,12 @@ def telemetry_config_from_global_config(global_config_dict: Any) -> "TelemetryCo
         return TelemetryConfig()
 
     # OmegaConf nodes are Mapping-like but not dicts; resolve them before validating.
-    try:
-        from omegaconf import DictConfig, OmegaConf
-
-        if isinstance(block, DictConfig):
-            block = OmegaConf.to_container(block, resolve=True)
-    except ImportError:  # pragma: no cover - omegaconf is a hard Gym dependency
-        pass
+    if isinstance(block, DictConfig):
+        block = OmegaConf.to_container(block, resolve=True)
     return TelemetryConfig.model_validate(block)
 
 
-def configure_telemetry_env(telemetry_config: Union["TelemetryConfig", None]) -> Optional[str]:
+def configure_telemetry_env(telemetry_config: Union[TelemetryConfig, None]) -> Optional[str]:
     """Translate the ``telemetry:`` block into env vars for spawned server processes.
 
     Call once in the orchestrator, **before** spawning any server. ``os.environ`` is what
@@ -326,71 +329,77 @@ def init_telemetry(
         disabled. Never raises: a telemetry failure must not take a server down.
     """
     global _TELEMETRY_HANDLE, _INITIALISED
-    if _INITIALISED:
-        return _TELEMETRY_HANDLE
-    _INITIALISED = True
+    # The whole check-and-set plus the actual setup_telemetry() call is one critical
+    # section: without the lock, two threads can both observe `_INITIALISED is False`
+    # before either sets it and both call setup_telemetry, which nemo-lens raises on for
+    # a second call in the same process (or, depending on version, silently registers
+    # duplicate OTel providers).
+    with _INIT_LOCK:
+        if _INITIALISED:
+            return _TELEMETRY_HANDLE
+        _INITIALISED = True
 
-    # Checked before importing lens so a disabled process never pays the import.
-    if not is_telemetry_env_enabled():
-        return None
+        # Checked before importing lens so a disabled process never pays the import.
+        if not is_telemetry_env_enabled():
+            return None
 
-    try:
-        from nemo.lens import NemoLensConfig, setup_telemetry
-    except ImportError:
-        logger.debug("nemo-lens is not installed; telemetry stays disabled")
-        return None
-
-    from nemo_gym.telemetry.span_groups import GymSpanGroup
-
-    try:
-        config = NemoLensConfig.from_env(
-            prefix=_OTEL_PREFIX,
-            fallback_prefix=_OTEL_FALLBACK_PREFIX,
-            span_group_cls=GymSpanGroup,
-        )
-    except ValueError:
-        logger.warning("nemo-lens: invalid telemetry environment; telemetry disabled", exc_info=True)
-        return None
-
-    if not config.enabled:
-        return None
-
-    # service.name per server, so a backend's service map shows three named Gym services
-    # rather than three copies of one. The unsuffixed name is kept as a resource attribute
-    # so the fleet is still groupable.
-    service_group = config.service_name
-    if server_name and _env_flag(_ENV_FIELD_MAP["service_name_per_server"], True):
-        config.service_name = f"{service_group}/{server_name}"
-
-    attrs = _build_resource_attributes(server_name, server_type)
-    attrs["nemo.gym.service_group"] = service_group
-    if resource_attributes:
-        attrs.update(resource_attributes)
-
-    try:
-        handle = setup_telemetry(config, rank=rank, world_size=world_size, resource_attributes=attrs)
-    except Exception:
-        logger.warning("nemo-lens: telemetry setup failed; continuing without it", exc_info=True)
-        return None
-
-    _TELEMETRY_HANDLE = handle
-
-    if config.logs_enabled and handle.is_exporting:
         try:
-            from nemo.lens.logging_bridge import setup_logging_bridge
+            from nemo.lens import NemoLensConfig, setup_telemetry
+        except ImportError:
+            logger.debug("nemo-lens is not installed; telemetry stays disabled")
+            return None
 
-            setup_logging_bridge()
+        from nemo_gym.telemetry.span_groups import GymSpanGroup
+
+        try:
+            config = NemoLensConfig.from_env(
+                prefix=_OTEL_PREFIX,
+                fallback_prefix=_OTEL_FALLBACK_PREFIX,
+                span_group_cls=GymSpanGroup,
+            )
+        except ValueError:
+            logger.warning("nemo-lens: invalid telemetry environment; telemetry disabled", exc_info=True)
+            return None
+
+        if not config.enabled:
+            return None
+
+        # service.name per server, so a backend's service map shows three named Gym
+        # services rather than three copies of one. The unsuffixed name is kept as a
+        # resource attribute so the fleet is still groupable.
+        service_group = config.service_name
+        if server_name and _env_flag(_ENV_FIELD_MAP["service_name_per_server"], True):
+            config.service_name = f"{service_group}/{server_name}"
+
+        attrs = _build_resource_attributes(server_name, server_type)
+        attrs["nemo.gym.service_group"] = service_group
+        if resource_attributes:
+            attrs.update(resource_attributes)
+
+        try:
+            handle = setup_telemetry(config, rank=rank, world_size=world_size, resource_attributes=attrs)
         except Exception:
-            logger.warning("nemo-lens: failed to set up the logging bridge", exc_info=True)
+            logger.warning("nemo-lens: telemetry setup failed; continuing without it", exc_info=True)
+            return None
 
-    logger.info(
-        "nemo-lens telemetry initialised (service=%s, exporting=%s, run_id=%s, groups=%s)",
-        config.service_name,
-        handle.is_exporting,
-        config.run_id,
-        config.span_groups,
-    )
-    return handle
+        _TELEMETRY_HANDLE = handle
+
+        if config.logs_enabled and handle.is_exporting:
+            try:
+                from nemo.lens.logging_bridge import setup_logging_bridge
+
+                setup_logging_bridge()
+            except Exception:
+                logger.warning("nemo-lens: failed to set up the logging bridge", exc_info=True)
+
+        logger.info(
+            "nemo-lens telemetry initialised (service=%s, exporting=%s, run_id=%s, groups=%s)",
+            config.service_name,
+            handle.is_exporting,
+            config.run_id,
+            config.span_groups,
+        )
+        return handle
 
 
 def get_telemetry() -> Optional["TelemetryHandle"]:

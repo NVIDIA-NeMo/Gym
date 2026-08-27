@@ -1,0 +1,15 @@
+config_paths:
+  - responses_api_agents/nemo_fabric_agent/configs/nemo_fabric_agent.yaml
+
+nemo_fabric_codex:
+  _inherit_from: nemo_fabric_agent
+  responses_api_agents:
+    nemo_fabric_agent:
+      adapter_id: nvidia.fabric.codex
+      harness_settings:
+        config_overrides:
+          web_search: disabled
+          features:
+            multi_agent: false
+            code_mode: false
+      fabric_config: {}

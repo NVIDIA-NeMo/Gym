@@ -83,6 +83,21 @@ def reset_token_sink(token: Token) -> None:
     _CAPTURE_CONTEXT.reset(token)
 
 
+async def register_call_intent() -> None:
+    """Record that the captured call is about to be dispatched.
+
+    ``begin_call`` is an optional sink extension.
+    It lets a source detect a call whose entry was lost.
+    A failure happens before generation and must fail the model call.
+    """
+    context = _CAPTURE_CONTEXT.get()
+    if context is None or context.token_sink is None:
+        return
+    begin_call = getattr(context.token_sink, "begin_call", None)
+    if begin_call is not None:
+        await begin_call(context.rollout_id, context.model_call_id)
+
+
 async def capture_tokens(response: Any) -> None:
     """Record a ``TokenEntry`` from a complete model response.
 
