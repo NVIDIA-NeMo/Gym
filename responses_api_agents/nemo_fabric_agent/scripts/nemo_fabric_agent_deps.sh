@@ -17,7 +17,7 @@ install_portable_python
 install_nemo_gym_deps
 
 FABRIC_SPEC="${NEMO_FABRIC_SPEC:-nemo-fabric[mini-swe-agent]==0.2.0}"
-install_python_packages "$FABRIC_SPEC" "openai==${OPENAI_VERSION:-2.7.2}"
+install_python_packages "$FABRIC_SPEC"
 if portable_python_can_run; then
     "$DEPS_DIR/bin/python3" -c "from nemo_fabric import Fabric, FabricConfig; print('nemo-fabric OK')"
 fi
