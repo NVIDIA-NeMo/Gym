@@ -695,7 +695,8 @@ class RolloutCollectionHelper(BaseModel):
             num_repeats_add_seed=num_repeats_add_seed,
         )
         raw_rows = [
-            (idx, orjson.dumps(row, option=orjson.OPT_SORT_KEYS).decode(), row) for idx, row in enumerate(examples)
+            (idx, orjson.dumps(row, option=orjson.OPT_SORT_KEYS).decode(), row.copy())
+            for idx, row in enumerate(examples)
         ]
         rows = self._preprocess_raw_rows(raw_rows, config)
         if global_config_dict is not None:
