@@ -248,6 +248,11 @@ def _turns_used(output: dict[str, Any]) -> int:
     ):
         if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
             return value
+    messages = output.get("messages")
+    if isinstance(messages, list):
+        turns = sum(1 for message in messages if isinstance(message, dict) and message.get("role") in {"ai", "assistant"})
+        if turns:
+            return turns
     return 1
 
 

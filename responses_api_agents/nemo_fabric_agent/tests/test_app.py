@@ -445,3 +445,24 @@ def test_fabric_output_items_reads_openai_tool_call_shape() -> None:
     assert items[0]["name"] == "execute_code"
     assert items[0]["arguments"] == '{"code": "1+1"}'
     assert items[0]["call_id"] == items[1]["call_id"] == "c9"
+
+
+def test_turns_used_counts_assistant_messages_when_adapter_reports_none() -> None:
+    output = {
+        "messages": [
+            {"role": "human", "content": "q"},
+            {"role": "ai", "content": "", "tool_calls": [{"id": "c1", "name": "t", "args": {}}]},
+            {"role": "tool", "content": "r"},
+            {"role": "ai", "content": "done"},
+        ],
+        "usage": {"completion_tokens": 10, "prompt_tokens": 20},
+    }
+    assert _turns_used(output) == 2
+
+
+def test_turns_used_prefers_adapter_reported_count() -> None:
+    output = {
+        "api_calls": 4,
+        "messages": [{"role": "ai", "content": "x"}],
+    }
+    assert _turns_used(output) == 4
