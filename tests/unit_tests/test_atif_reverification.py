@@ -439,6 +439,21 @@ def test_manifest_batch_rejects_more_than_one_trajectory_for_a_rollout() -> None
         )
 
 
+def test_manifest_batch_rejects_one_source_path_mapped_to_distinct_rollouts() -> None:
+    indexed = index_materialized_inputs([_materialized_input(), _materialized_input() | {ROLLOUT_INDEX_KEY_NAME: 3}])
+    entries = [
+        AtifReverifyManifestEntry(
+            trajectory_path=_FIXTURE_PATH.name,
+            task_index=7,
+            rollout_index=rollout_index,
+        )
+        for rollout_index in (2, 3)
+    ]
+
+    with pytest.raises(AtifProjectionError, match="uses ATIF source path .* more than once"):
+        project_atif_manifest_entries(entries, indexed, manifest_directory=_FIXTURE_PATH.parent)
+
+
 def test_manifest_batch_accepts_distinct_trajectories_without_trajectory_ids(tmp_path: Path) -> None:
     first_data = _trajectory_data()
     first_data["trajectory_id"] = None
@@ -547,6 +562,42 @@ def test_observation_results_are_paired_by_source_call_id() -> None:
     ]
 
 
+def test_text_only_multipart_messages_and_tool_results_preserve_part_order() -> None:
+    data = _trajectory_data()
+    data["steps"][1]["observation"]["results"][0]["content"] = [
+        {"type": "text", "text": "first"},
+        {"type": "text", "text": "second"},
+    ]
+    data["steps"][-1]["message"] = [
+        {"type": "text", "text": "The answer "},
+        {"type": "text", "text": "is 4."},
+    ]
+
+    response = atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+    result = next(item for item in response.output if item.type == "function_call_output" and item.call_id == "call-b")
+    message = next(item for item in response.output if item.type == "message")
+
+    assert result.output == [
+        {"type": "input_text", "text": "first"},
+        {"type": "input_text", "text": "second"},
+    ]
+    assert [part.text for part in message.content] == ["The answer ", "is 4."]
+
+
+@pytest.mark.parametrize(("tool_result", "expected"), [("already text", "already text"), ([], "[]")])
+def test_relay_structured_tool_results_are_preserved(tool_result: Any, expected: str) -> None:
+    data = _trajectory_data()
+    data["steps"][1]["observation"]["results"][0] = {
+        "source_call_id": "call-b",
+        "extra": {"tool_result": tool_result},
+    }
+
+    response = atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+    outputs = {item.call_id: item.output for item in response.output if item.type == "function_call_output"}
+
+    assert outputs["call-b"] == expected
+
+
 @pytest.mark.parametrize("field", ["prompt_token_ids", "completion_token_ids", "logprobs"])
 def test_initial_scope_rejects_training_token_metadata(field: str) -> None:
     data = _trajectory_data()
@@ -554,6 +605,32 @@ def test_initial_scope_rejects_training_token_metadata(field: str) -> None:
 
     with pytest.raises(AtifProjectionError, match="training token metadata"):
         atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+
+
+def test_standard_atif_cost_metadata_does_not_block_stateless_reverification() -> None:
+    data = _trajectory_data()
+    data["steps"][1]["metrics"] = {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "cost_usd": 0.001,
+    }
+    data["steps"][2]["metrics"] = {
+        "prompt_tokens": 20,
+        "completion_tokens": 6,
+        "cost_usd": 0.002,
+    }
+    data["final_metrics"] = {
+        "total_prompt_tokens": 30,
+        "total_completion_tokens": 11,
+        "total_cost_usd": 0.003,
+        "total_steps": 3,
+    }
+
+    response = atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+
+    assert response.usage is not None
+    assert response.usage.input_tokens == 30
+    assert response.usage.output_tokens == 11
 
 
 @pytest.mark.parametrize(
@@ -640,48 +717,240 @@ def test_atif_usage_rejects_cached_tokens_greater_than_prompt_tokens(target: str
         atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
 
 
-def test_relay_usage_extension_restores_reasoning_tokens() -> None:
+def _relay_reasoning_extra(reasoning_tokens: int, total_tokens: int, shape: str) -> dict[str, Any]:
+    extra: dict[str, Any] = {"total_tokens": total_tokens}
+    if shape in ("top-level", "both"):
+        extra["reasoning_tokens"] = reasoning_tokens
+    if shape in ("nested", "both"):
+        extra["output_tokens_details"] = {"reasoning_tokens": reasoning_tokens}
+    if shape == "completion-nested":
+        extra["completion_tokens_details"] = {"reasoning_tokens": reasoning_tokens}
+    return extra
+
+
+def test_equivalent_relay_usage_extension_shapes_restore_usage_and_ids() -> None:
+    def response_for_shape(shape: str) -> NeMoGymResponse:
+        data = _trajectory_data()
+        data["trajectory_id"] = None
+        data["steps"][1]["metrics"] = {
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "extra": _relay_reasoning_extra(2, 15, shape),
+        }
+        data["steps"][2]["metrics"] = {
+            "prompt_tokens": 20,
+            "completion_tokens": 6,
+            "extra": _relay_reasoning_extra(3, 26, shape),
+        }
+        data["final_metrics"] = {"total_prompt_tokens": 30, "total_completion_tokens": 11}
+        return atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+
+    responses = {shape: response_for_shape(shape) for shape in ("top-level", "nested", "completion-nested", "both")}
+
+    for shape, response in responses.items():
+        assert response.usage is not None, shape
+        assert response.usage.output_tokens_details.reasoning_tokens == 5, shape
+        assert response.usage.total_tokens == 41, shape
+        assert response == responses["top-level"], shape
+
+
+def test_null_and_absent_relay_usage_extensions_generate_the_same_ids() -> None:
+    data = _trajectory_data()
+    data["trajectory_id"] = None
+    for step, prompt_tokens, completion_tokens in zip(data["steps"][1:], (10, 20), (5, 6), strict=True):
+        step["metrics"] = {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens}
+    data["final_metrics"] = {"total_prompt_tokens": 30, "total_completion_tokens": 11}
+    without_nulls = atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+
+    for step in data["steps"][1:]:
+        step["metrics"]["extra"] = {
+            "reasoning_tokens": None,
+            "total_tokens": None,
+            "output_tokens_details": {"reasoning_tokens": None},
+        }
+    with_nulls = atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+
+    assert with_nulls == without_nulls
+
+
+@pytest.mark.parametrize(("field_name", "value"), [("reasoning_tokens", 2), ("total_tokens", 15)])
+def test_partial_optional_relay_usage_extensions_do_not_claim_missing_extension_coverage(
+    field_name: str, value: int
+) -> None:
     data = _trajectory_data()
     data["steps"][1]["metrics"] = {
         "prompt_tokens": 10,
         "completion_tokens": 5,
-        "extra": {"output_tokens_details": {"reasoning_tokens": 2}, "total_tokens": 15},
+        "extra": {field_name: value},
     }
-    data["steps"][2]["metrics"] = {
-        "prompt_tokens": 20,
-        "completion_tokens": 6,
-        "extra": {"output_tokens_details": {"reasoning_tokens": 3}, "total_tokens": 26},
-    }
+    data["steps"][2]["metrics"] = {"prompt_tokens": 20, "completion_tokens": 6}
     data["final_metrics"] = {"total_prompt_tokens": 30, "total_completion_tokens": 11, "total_steps": 3}
 
     response = atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
 
     assert response.usage is not None
-    assert response.usage.output_tokens_details.reasoning_tokens == 5
+    assert response.usage.input_tokens == 30
+    assert response.usage.output_tokens == 11
+    assert response.usage.output_tokens_details.reasoning_tokens is None
     assert response.usage.total_tokens == 41
 
 
-def test_partial_per_step_usage_is_not_reported_as_a_complete_aggregate() -> None:
+def _step_usage(prompt: int, completion: int, **extra: Any) -> dict[str, Any]:
+    return {"prompt_tokens": prompt, "completion_tokens": completion, **extra}
+
+
+def _usage_rejection(
+    case_id: str,
+    match: str,
+    *,
+    first: dict[str, Any] | None = None,
+    second: dict[str, Any] | None = None,
+    final: dict[str, Any] | None | object = None,
+) -> Any:
+    return pytest.param(first, second, final, match, id=case_id)
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "final", "match"),
+    [
+        _usage_rejection(
+            "partial-step-usage",
+            "partial per-model-step token metrics",
+            first=_step_usage(10, 5),
+            final={"total_prompt_tokens": 10, "total_completion_tokens": 5, "total_steps": 3},
+        ),
+        *[
+            _usage_rejection(
+                f"extension-only-{name}",
+                "partial per-model-step token metrics",
+                first={"extra": extra},
+            )
+            for name, extra in (
+                ("reasoning", {"reasoning_tokens": 2}),
+                ("total", {"total_tokens": 15}),
+                ("output-details", {"output_tokens_details": {"reasoning_tokens": 2}}),
+                ("completion-details", {"completion_tokens_details": {"reasoning_tokens": 2}}),
+            )
+        ],
+        _usage_rejection(
+            "final-cache-without-standard-totals",
+            "total_cached_tokens without prompt and completion",
+            final={"total_cached_tokens": 4, "total_steps": 3},
+        ),
+        _usage_rejection(
+            "complete-steps-without-final-metrics",
+            "per-step token metrics without final_metrics",
+            first=_step_usage(10, 5),
+            second=_step_usage(20, 6),
+            final=...,
+        ),
+        _usage_rejection(
+            "complete-steps-without-final-token-totals",
+            "final_metrics omits token totals",
+            first=_step_usage(10, 5),
+            second=_step_usage(20, 6),
+            final={"total_steps": 3},
+        ),
+        _usage_rejection(
+            "output-token-details-not-object",
+            "output_tokens_details is not an object",
+            first=_step_usage(10, 5, extra={"output_tokens_details": "bad"}),
+        ),
+        *[
+            _usage_rejection(
+                f"invalid-{field}-{type(value).__name__}",
+                f"{field} metadata is not a non-negative integer",
+                first=_step_usage(10, 5, extra={field: value}),
+            )
+            for field, value in (("reasoning_tokens", True), ("reasoning_tokens", -1), ("total_tokens", 15.0))
+        ],
+        _usage_rejection(
+            "reasoning-exceeds-completion",
+            "reasoning_tokens metadata exceeds completion_tokens",
+            first=_step_usage(10, 5, extra={"reasoning_tokens": 6}),
+        ),
+        _usage_rejection(
+            "final-prompt-only",
+            "must provide both prompt and completion token totals",
+            final={"total_prompt_tokens": 42, "total_steps": 3},
+        ),
+        _usage_rejection(
+            "final-completion-only",
+            "must provide both prompt and completion token totals",
+            final={"total_completion_tokens": 7, "total_steps": 3},
+        ),
+        _usage_rejection(
+            "relay-prompt-only",
+            "partial per-model-step token metrics",
+            first={"prompt_tokens": 42},
+            final={"total_prompt_tokens": 42, "total_steps": 3},
+        ),
+        _usage_rejection(
+            "final-standard-total-mismatch",
+            "do not match the complete per-model-step metrics",
+            first=_step_usage(10, 5),
+            second=_step_usage(20, 6),
+            final={"total_prompt_tokens": 31, "total_completion_tokens": 11, "total_steps": 3},
+        ),
+        _usage_rejection(
+            "final-cache-total-mismatch",
+            "cached-token total does not match",
+            first=_step_usage(10, 5, cached_tokens=2),
+            second=_step_usage(20, 6, cached_tokens=3),
+            final={
+                "total_prompt_tokens": 30,
+                "total_completion_tokens": 11,
+                "total_cached_tokens": 6,
+                "total_steps": 3,
+            },
+        ),
+        _usage_rejection(
+            "total-smaller-than-prompt-plus-completion",
+            r"smaller than prompt_tokens \+ completion_tokens",
+            first=_step_usage(7, 5, extra={"total_tokens": 10}),
+        ),
+    ],
+)
+def test_incomplete_or_inconsistent_usage_is_rejected(
+    first: dict[str, Any] | None,
+    second: dict[str, Any] | None,
+    final: Any,
+    match: str,
+) -> None:
     data = _trajectory_data()
-    data["steps"][1]["metrics"] = {"prompt_tokens": 10, "completion_tokens": 5}
-    data["final_metrics"] = {"total_prompt_tokens": 10, "total_completion_tokens": 5, "total_steps": 3}
+    for step, metrics in zip(data["steps"][1:], (first, second), strict=True):
+        if metrics is not None:
+            step["metrics"] = metrics
+    if final is not ...:
+        data["final_metrics"] = final
 
-    response = atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
-
-    assert response.usage is None
-
-
-def test_final_usage_must_match_complete_per_step_usage() -> None:
-    data = _trajectory_data()
-    data["steps"][1]["metrics"] = {"prompt_tokens": 10, "completion_tokens": 5}
-    data["steps"][2]["metrics"] = {"prompt_tokens": 20, "completion_tokens": 6}
-    data["final_metrics"] = {"total_prompt_tokens": 31, "total_completion_tokens": 11, "total_steps": 3}
-
-    with pytest.raises(AtifProjectionError, match="do not match the complete per-model-step metrics"):
+    with pytest.raises(AtifProjectionError, match=match):
         atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
 
 
-def test_partial_relay_cached_token_total_is_not_reported_as_complete() -> None:
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"reasoning_tokens": 2, "output_tokens_details": {"reasoning_tokens": 3}},
+        {
+            "output_tokens_details": {"reasoning_tokens": 2},
+            "completion_tokens_details": {"reasoning_tokens": 3},
+        },
+    ],
+)
+def test_conflicting_relay_reasoning_token_extensions_are_rejected(extra: dict[str, Any]) -> None:
+    data = _trajectory_data()
+    data["steps"][1]["metrics"] = {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "extra": extra,
+    }
+
+    with pytest.raises(AtifProjectionError, match="reasoning_tokens metadata conflicts"):
+        atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+
+
+def test_partial_relay_cached_token_metrics_produce_an_unknown_aggregate() -> None:
     data = _trajectory_data()
     data["steps"][1]["metrics"] = {
         "prompt_tokens": 10,
@@ -709,14 +978,21 @@ def test_partial_relay_cached_token_total_is_not_reported_as_complete() -> None:
     assert response.usage.input_tokens_details.cached_tokens is None
 
 
-def test_tool_call_without_a_result_is_not_marked_completed() -> None:
+def test_final_cached_tokens_are_preserved_when_steps_omit_cache_metrics() -> None:
     data = _trajectory_data()
-    data["steps"][1]["observation"]["results"] = [
-        result for result in data["steps"][1]["observation"]["results"] if result["source_call_id"] != "call-b"
-    ]
+    data["steps"][1]["metrics"] = {"prompt_tokens": 10, "completion_tokens": 5}
+    data["steps"][2]["metrics"] = {"prompt_tokens": 20, "completion_tokens": 6}
+    data["final_metrics"] = {
+        "total_prompt_tokens": 30,
+        "total_completion_tokens": 11,
+        "total_cached_tokens": 4,
+        "total_steps": 3,
+    }
 
-    with pytest.raises(AtifProjectionError, match="no observation result.*call-b"):
-        atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+    response = atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+
+    assert response.usage is not None
+    assert response.usage.input_tokens_details.cached_tokens == 4
 
 
 def test_trajectory_may_end_with_a_correlated_tool_observation() -> None:
@@ -774,22 +1050,6 @@ def test_completed_empty_agent_answer_is_preserved_for_scoring() -> None:
     assert response.status == "completed"
 
 
-def test_empty_agent_content_part_list_is_rejected_as_ambiguous() -> None:
-    data = _trajectory_data()
-    data["steps"][-1]["message"] = []
-
-    with pytest.raises(AtifProjectionError, match="empty content-part list"):
-        atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
-
-
-def test_aggregated_llm_step_is_rejected_instead_of_flattened() -> None:
-    data = _trajectory_data()
-    data["steps"][1]["llm_call_count"] = 2
-
-    with pytest.raises(AtifProjectionError, match="aggregates 2 LLM calls"):
-        atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
-
-
 @pytest.mark.parametrize(
     ("field", "match"), [("tool_call_id", "blank tool_call_id"), ("function_name", "blank function_name")]
 )
@@ -803,31 +1063,22 @@ def test_canonical_tool_identity_must_not_be_whitespace_only(field: str, match: 
         atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
 
 
-@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
-def test_atif_loader_rejects_non_json_numeric_constants(constant: str, tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("raw_value", "match"),
+    [
+        ("NaN", "invalid ATIF trajectory"),
+        ("Infinity", "invalid ATIF trajectory"),
+        ("-Infinity", "invalid ATIF trajectory"),
+        ("1e400", "exceeds the finite float range"),
+        ("1e-999", "underflows the finite float range"),
+        ("0.10000000000000001", "cannot be represented without precision loss"),
+    ],
+)
+def test_atif_loader_rejects_unsafe_json_numbers(raw_value: str, match: str, tmp_path: Path) -> None:
     path = tmp_path / "trajectory.json"
-    payload = json.dumps(_trajectory_data()).replace('{"x": 2}', f'{{"x": {constant}}}')
-    path.write_text(payload)
+    path.write_text(json.dumps(_trajectory_data()).replace('{"x": 2}', f'{{"x": {raw_value}}}'))
 
-    with pytest.raises(AtifProjectionError, match="invalid ATIF trajectory"):
-        load_atif_trajectory(path)
-
-
-def test_atif_loader_rejects_float_overflow(tmp_path: Path) -> None:
-    path = tmp_path / "trajectory.json"
-    payload = json.dumps(_trajectory_data()).replace('{"x": 2}', '{"x": 1e400}')
-    path.write_text(payload)
-
-    with pytest.raises(AtifProjectionError, match="exceeds the finite float range"):
-        load_atif_trajectory(path)
-
-
-def test_atif_loader_rejects_nonzero_float_underflow(tmp_path: Path) -> None:
-    path = tmp_path / "trajectory.json"
-    payload = json.dumps(_trajectory_data()).replace('{"x": 2}', '{"x": 1e-999}')
-    path.write_text(payload)
-
-    with pytest.raises(AtifProjectionError, match="underflows the finite float range"):
+    with pytest.raises(AtifProjectionError, match=match):
         load_atif_trajectory(path)
 
 
@@ -840,6 +1091,16 @@ def test_atif_loader_accepts_true_zero_with_an_extreme_exponent(tmp_path: Path) 
 
     assert loaded.trajectory.steps[1].tool_calls is not None
     assert loaded.trajectory.steps[1].tool_calls[1].arguments["x"] == 0.0
+
+
+def test_atif_loader_rejects_an_observation_for_an_unknown_step_call(tmp_path: Path) -> None:
+    path = tmp_path / "trajectory.json"
+    data = _trajectory_data()
+    data["steps"][1]["observation"]["results"][0]["source_call_id"] = "call-missing"
+    path.write_text(json.dumps(data))
+
+    with pytest.raises(AtifProjectionError, match="observation references unknown tool call 'call-missing'"):
+        load_atif_trajectory(path)
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
@@ -886,6 +1147,10 @@ def test_atif_manifest_loader_rejects_duplicate_json_object_keys(tmp_path: Path)
         load_atif_manifest(path)
 
 
+def _strict_projection_case(case_id: str, mutate: Any, match: str) -> Any:
+    return pytest.param(mutate, match, id=case_id)
+
+
 @pytest.mark.parametrize(
     ("mutate", "match"),
     [
@@ -915,7 +1180,91 @@ def test_atif_manifest_loader_rejects_duplicate_json_object_keys(tmp_path: Path)
             ),
             "multimodal ATIF content",
         ),
+        (
+            lambda data: data["steps"][1]["observation"]["results"][0].update(
+                content=[{"type": "image", "source": {"media_type": "image/png", "path": "result.png"}}]
+            ),
+            "multimodal ATIF content",
+        ),
         (lambda data: data["steps"][1].update(timestamp="2026-08-24T12:00:00"), "timestamp has no timezone"),
+        _strict_projection_case(
+            "no-agent-output", lambda data: data.update(steps=data["steps"][:1]), "has no agent steps to score"
+        ),
+        _strict_projection_case(
+            "missing-source-call-id",
+            lambda data: data["steps"][1]["observation"]["results"][0].pop("source_call_id"),
+            "observation 0 has no source_call_id",
+        ),
+        _strict_projection_case(
+            "missing-tool-result",
+            lambda data: data["steps"][1]["observation"].update(
+                results=[
+                    result
+                    for result in data["steps"][1]["observation"]["results"]
+                    if result["source_call_id"] != "call-b"
+                ]
+            ),
+            "no observation result.*call-b",
+        ),
+        _strict_projection_case(
+            "empty-agent-content-parts",
+            lambda data: data["steps"][-1].update(message=[]),
+            "empty content-part list",
+        ),
+        _strict_projection_case(
+            "aggregated-llm-step", lambda data: data["steps"][1].update(llm_call_count=2), "aggregates 2 LLM calls"
+        ),
+        _strict_projection_case(
+            "tool-result-without-content",
+            lambda data: data["steps"][1]["observation"]["results"][0].pop("content"),
+            "neither content nor Relay extra.tool_result",
+        ),
+        _strict_projection_case(
+            "empty-tool-result-content",
+            lambda data: data["steps"][1]["observation"]["results"][0].update(content=[]),
+            "empty content-part list",
+        ),
+        _strict_projection_case(
+            "interactive-input-after-output",
+            lambda data: data["steps"].extend(
+                [
+                    {"step_id": 4, "source": "user", "message": "Try a different answer."},
+                    {"step_id": 5, "source": "agent", "message": "The answer is 5."},
+                ]
+            ),
+            "non-agent step 4 appears after agent output",
+        ),
+        _strict_projection_case(
+            "non-agent-observation",
+            lambda data: data["steps"][0].update(observation={"results": [{"content": "external event"}]}),
+            "non-agent step 1 contains an observation",
+        ),
+        _strict_projection_case(
+            "external-subagent-reference",
+            lambda data: data["steps"][1]["observation"]["results"][0].update(
+                subagent_trajectory_ref=[{"trajectory_path": "child-trajectory.json"}]
+            ),
+            "references a subagent trajectory",
+        ),
+        _strict_projection_case(
+            "message-and-tool-calls",
+            lambda data: data["steps"][1].update(message="I will call both tools."),
+            "both message text and tool calls",
+        ),
+        _strict_projection_case(
+            "standard-and-relay-tool-result",
+            lambda data: data["steps"][1]["observation"]["results"][0].update(
+                extra={"tool_result": {"value": "different"}}
+            ),
+            "contains both content and Relay extra.tool_result",
+        ),
+        _strict_projection_case(
+            "multiple-results-for-call",
+            lambda data: data["steps"][1]["observation"]["results"].append(
+                {"source_call_id": "call-b", "content": "second result"}
+            ),
+            "multiple outputs for tool call",
+        ),
     ],
 )
 def test_strict_initial_scope_rejects_unsupported_trajectories(mutate: Any, match: str) -> None:
@@ -935,39 +1284,6 @@ def test_parser_requires_the_exact_atif_v1_7_schema_version() -> None:
         AtifTrajectoryV1_7.model_validate(data)
 
 
-def test_tool_result_without_content_or_relay_extension_is_rejected() -> None:
-    data = _trajectory_data()
-    data["steps"][1]["observation"]["results"][0] = {"source_call_id": "call-b"}
-    trajectory = AtifTrajectoryV1_7.model_validate(data)
-
-    with pytest.raises(AtifProjectionError, match="neither content nor Relay extra.tool_result"):
-        atif_trajectory_to_response(trajectory)
-
-
-def test_empty_standard_tool_result_content_is_rejected_as_ambiguous() -> None:
-    data = _trajectory_data()
-    data["steps"][1]["observation"]["results"][0] = {
-        "source_call_id": "call-b",
-        "content": [],
-    }
-
-    with pytest.raises(AtifProjectionError, match="empty content-part list"):
-        atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
-
-
-def test_relay_empty_array_tool_result_is_preserved_from_the_structured_extension() -> None:
-    data = _trajectory_data()
-    data["steps"][1]["observation"]["results"][0] = {
-        "source_call_id": "call-b",
-        "extra": {"tool_result": []},
-    }
-
-    response = atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
-    outputs = {item.call_id: item.output for item in response.output if item.type == "function_call_output"}
-
-    assert outputs["call-b"] == "[]"
-
-
 @pytest.mark.parametrize(("trajectory_id", "session_id"), [(None, "run-1"), ("", ""), ("  ", "\t")])
 def test_missing_or_empty_atif_ids_use_a_deterministic_content_identity(
     trajectory_id: str | None,
@@ -985,36 +1301,6 @@ def test_missing_or_empty_atif_ids_use_a_deterministic_content_identity(
     assert [item.id for item in first.output] == [item.id for item in second.output]
 
 
-def test_interactive_input_after_agent_output_is_rejected_instead_of_dropped() -> None:
-    data = _trajectory_data()
-    data["steps"].append({"step_id": 4, "source": "user", "message": "Try a different answer."})
-    data["steps"].append({"step_id": 5, "source": "agent", "message": "The answer is 5."})
-    trajectory = AtifTrajectoryV1_7.model_validate(data)
-
-    with pytest.raises(AtifProjectionError, match="non-agent step 4 appears after agent output"):
-        atif_trajectory_to_response(trajectory)
-
-
-def test_non_agent_observation_is_rejected_instead_of_dropped() -> None:
-    data = _trajectory_data()
-    data["steps"][0]["observation"] = {"results": [{"content": "external event"}]}
-    trajectory = AtifTrajectoryV1_7.model_validate(data)
-
-    with pytest.raises(AtifProjectionError, match="non-agent step 1 contains an observation"):
-        atif_trajectory_to_response(trajectory)
-
-
-def test_external_subagent_reference_is_rejected_without_being_dropped() -> None:
-    data = _trajectory_data()
-    data["steps"][1]["observation"]["results"][0]["subagent_trajectory_ref"] = [
-        {"trajectory_path": "child-trajectory.json"}
-    ]
-    trajectory = AtifTrajectoryV1_7.model_validate(data)
-
-    with pytest.raises(AtifProjectionError, match="references a subagent trajectory"):
-        atif_trajectory_to_response(trajectory)
-
-
 def test_optional_producer_status_metadata_is_not_interpreted() -> None:
     data = _trajectory_data()
     canonical = atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
@@ -1026,31 +1312,6 @@ def test_optional_producer_status_metadata_is_not_interpreted() -> None:
     with_status_extras = atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
 
     assert with_status_extras == canonical
-
-
-def test_parser_rejects_negative_total_steps() -> None:
-    data = _trajectory_data()
-    data["final_metrics"] = {"total_steps": -1}
-
-    with pytest.raises(ValidationError, match="greater than or equal to 0"):
-        AtifTrajectoryV1_7.model_validate(data)
-
-
-def test_message_and_tool_calls_in_one_step_are_rejected_without_an_ordering_claim() -> None:
-    data = _trajectory_data()
-    data["steps"][1]["message"] = "I will call both tools."
-
-    with pytest.raises(AtifProjectionError, match="both message text and tool calls"):
-        atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
-
-
-def test_observation_cannot_carry_both_standard_content_and_relay_tool_result() -> None:
-    data = _trajectory_data()
-    result = data["steps"][1]["observation"]["results"][0]
-    result["extra"] = {"tool_result": {"value": "different"}}
-
-    with pytest.raises(AtifProjectionError, match="contains both content and Relay extra.tool_result"):
-        atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
 
 
 def test_duplicate_tool_call_id_across_steps_is_rejected() -> None:
@@ -1073,29 +1334,24 @@ def test_duplicate_tool_call_id_across_steps_is_rejected() -> None:
         atif_trajectory_to_response(trajectory)
 
 
-def test_multiple_agent_model_names_are_rejected_instead_of_collapsed() -> None:
+@pytest.mark.parametrize(
+    ("root_model", "step_models", "match"),
+    [
+        ("fixture-model", ("model-a", "model-b"), "multiple model names"),
+        ("fixture-model", (..., "model-b"), "multiple model names"),
+        (None, ("model-a", ...), "known and unknown model identity"),
+    ],
+)
+def test_conflicting_agent_model_identity_is_rejected(
+    root_model: str | None, step_models: tuple[Any, Any], match: str
+) -> None:
     data = _trajectory_data()
-    data["steps"][1]["model_name"] = "model-a"
-    data["steps"][2]["model_name"] = "model-b"
+    data["agent"]["model_name"] = root_model
+    for step, model_name in zip(data["steps"][1:], step_models, strict=True):
+        if model_name is not ...:
+            step["model_name"] = model_name
 
-    with pytest.raises(AtifProjectionError, match="multiple model names"):
-        atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
-
-
-def test_root_model_default_and_step_override_are_rejected_instead_of_collapsed() -> None:
-    data = _trajectory_data()
-    data["steps"][2]["model_name"] = "model-b"
-
-    with pytest.raises(AtifProjectionError, match="multiple model names"):
-        atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
-
-
-def test_known_and_unknown_agent_model_names_are_rejected_instead_of_collapsed() -> None:
-    data = _trajectory_data()
-    data["agent"]["model_name"] = None
-    data["steps"][1]["model_name"] = "model-a"
-
-    with pytest.raises(AtifProjectionError, match="known and unknown model identity"):
+    with pytest.raises(AtifProjectionError, match=match):
         atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
 
 
@@ -1108,15 +1364,6 @@ def test_uniform_step_model_names_are_preserved_without_a_root_default() -> None
     response = atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
 
     assert response.model == "model-a"
-
-
-def test_multiple_outputs_for_one_tool_call_are_rejected() -> None:
-    data = _trajectory_data()
-    data["steps"][1]["observation"]["results"].append({"source_call_id": "call-b", "content": "second result"})
-    trajectory = AtifTrajectoryV1_7.model_validate(data)
-
-    with pytest.raises(AtifProjectionError, match="multiple outputs for tool call"):
-        atif_trajectory_to_response(trajectory)
 
 
 def test_materialized_task_must_supply_responses_create_params() -> None:

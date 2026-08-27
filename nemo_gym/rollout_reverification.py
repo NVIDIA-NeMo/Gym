@@ -330,33 +330,6 @@ def _response_has_function_calls(row: Dict[str, Any]) -> bool:
     )
 
 
-def _guard_atif_tool_identity(payloads: List[Dict[str, Any]]) -> None:
-    """Validate ATIF routing and reject tool traffic that lacks required identity.
-
-    Routing is checked for every row before output paths are touched. Relay ATIF
-    can prove call/result correlation, but it does not currently carry Gym's
-    canonical ``(server_name, tool_name)`` provenance. An MCP-exposed resources
-    server may otherwise treat a colliding harness-facing name as one of its own
-    tools during verification.
-    """
-
-    server_client = setup_server_client()
-    selected_routes = _selected_atif_resources_server_routes(
-        server_client.global_config_dict,
-        payloads,
-    )
-    for row, resources_server_name in zip(payloads, selected_routes, strict=True):
-        if _response_has_function_calls(row) and _resources_server_exposes_tools_over_mcp(
-            server_client.global_config_dict, resources_server_name
-        ):
-            raise AtifProjectionError(
-                "Relay ATIF tool calls cannot be reverified against MCP-exposed resources server "
-                f"{resources_server_name!r}: ATIF proves call/result correlation but does not carry Gym's "
-                "canonical (server_name, tool_name) provenance. Use a non-MCP stateless verifier or a "
-                "text-only trajectory."
-            )
-
-
 # ---------------------------------------------------------------------------
 # Function used to summarize the debug information for a failed verification
 # ---------------------------------------------------------------------------
@@ -573,7 +546,16 @@ def _prepare_payloads(
             materialized_inputs_jsonl_fpath, rollouts_jsonl_fpath, limit=limit, rollout_predicate=rollout_predicate
         )
     ]
-    return _apply_reverify_cache(all_payloads, output_fpaths, resume_from_cache)
+    if resume_from_cache:
+        cache = _load_cache_keys_by_status(output_fpaths)
+        payloads = list(_drop_cache_from_payloads(all_payloads, cache))
+        summarize_cache_usage(cache, all_payloads, payloads)
+        prepared_payloads = payloads
+    else:
+        prepared_payloads = all_payloads
+    if not prepared_payloads:
+        print("WARNING: Nothing to be re-verified.")
+    return prepared_payloads
 
 
 def _prepare_atif_payloads(
@@ -627,23 +609,6 @@ def _prepare_atif_payloads(
         }
         for item in projected
     ]
-
-
-def _apply_reverify_cache(
-    all_payloads: List[Dict],
-    output_fpaths: OutputPaths,
-    resume_from_cache: bool,
-) -> List[Dict]:
-    if resume_from_cache:
-        cache = _load_cache_keys_by_status(output_fpaths)
-        payloads = list(_drop_cache_from_payloads(all_payloads, cache))
-        summarize_cache_usage(cache, all_payloads, payloads)
-        prepared_payloads = payloads
-    else:
-        prepared_payloads = all_payloads
-    if not prepared_payloads:
-        print("WARNING: Nothing to be re-verified.")
-    return prepared_payloads
 
 
 def _run_verification_payloads(
@@ -742,8 +707,8 @@ async def _guard_reverify_mode(config: RolloutReverificationConfig) -> Optional[
     )
 
 
-async def _guard_atif_reverify_mode(payloads: List[Dict[str, Any]]) -> None:
-    """Require STATELESS only for resource servers selected by this ATIF batch."""
+async def _guard_atif_preflight(payloads: List[Dict[str, Any]]) -> None:
+    """Validate selected routes before ATIF reverification touches output paths."""
 
     server_client = setup_server_client()
     selected_routes = _selected_atif_resources_server_routes(
@@ -757,6 +722,16 @@ async def _guard_atif_reverify_mode(payloads: List[Dict[str, Any]]) -> None:
             f"ATIF reverification requires stateless verifiers; resource server(s) {non_stateless_rs} "
             "reported reverify_mode=UNSUPPORTED or UNKNOWN."
         )
+    for row, resources_server_name in zip(payloads, selected_routes, strict=True):
+        if _response_has_function_calls(row) and _resources_server_exposes_tools_over_mcp(
+            server_client.global_config_dict, resources_server_name
+        ):
+            raise AtifProjectionError(
+                "Relay ATIF tool calls cannot be reverified against MCP-exposed resources server "
+                f"{resources_server_name!r}: ATIF proves call/result correlation but does not carry Gym's "
+                "canonical (server_name, tool_name) provenance. Use a non-MCP stateless verifier or a "
+                "text-only trajectory."
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -923,8 +898,7 @@ class RolloutReverificationHelper(BaseModel):
                 atif_manifest_jsonl_fpath,
                 config.limit,
             )
-            await _guard_atif_reverify_mode(payloads_to_reverify)
-            _guard_atif_tool_identity(payloads_to_reverify)
+            await _guard_atif_preflight(payloads_to_reverify)
             output_fpaths = _prepare_output_fpaths(
                 output_name_prefix,
                 config.output_jsonl_fpath,

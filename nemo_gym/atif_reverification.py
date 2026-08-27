@@ -112,8 +112,10 @@ class AtifReverifyManifestEntry(BaseModel):
 class ProjectedAtifVerifyPayload:
     """Verifier payload plus provenance that must survive result persistence.
 
-    ``projection_status`` covers canonical ATIF fields only. It does not attest
-    that a producer faithfully converted provider-native metadata in ``extra``.
+    ``projection_status="complete"`` means Gym built the bounded scoring payload
+    without guessing or dropping a field this adapter maps. It does not claim a
+    full-fidelity conversion of the ATIF document or producer metadata in
+    ``extra``; the source hashes preserve that provenance.
     """
 
     payload: dict[str, Any]
@@ -440,7 +442,6 @@ def _validate_supported_trajectory(trajectory: AtifTrajectoryV1_7) -> None:
     copied_steps = [step.step_id for step in trajectory.steps if step.is_copied_context]
     if copied_steps:
         raise AtifProjectionError(f"copied continuation context is not supported; copied step IDs: {copied_steps}")
-
     saw_agent_step = False
     for step in trajectory.steps:
         _reject_unsupported_training_metadata(step)
@@ -597,13 +598,17 @@ def _trajectory_content_sha256(trajectory: AtifTrajectoryV1_7) -> str:
         metrics_extra = metrics.get("extra")
         retained_metrics_extra: dict[str, Any] = {}
         if isinstance(metrics_extra, dict):
-            if "total_tokens" in metrics_extra:
-                retained_metrics_extra["total_tokens"] = metrics_extra["total_tokens"]
-            output_details = metrics_extra.get("output_tokens_details")
-            if isinstance(output_details, dict) and "reasoning_tokens" in output_details:
-                retained_metrics_extra["output_tokens_details"] = {
-                    "reasoning_tokens": output_details["reasoning_tokens"]
-                }
+            total_tokens = metrics_extra.get("total_tokens")
+            if total_tokens is not None:
+                retained_metrics_extra["total_tokens"] = total_tokens
+
+            reasoning_tokens = metrics_extra.get("reasoning_tokens")
+            for detail_name in ("output_tokens_details", "completion_tokens_details"):
+                details = metrics_extra.get(detail_name)
+                if reasoning_tokens is None and isinstance(details, dict):
+                    reasoning_tokens = details.get("reasoning_tokens")
+            if reasoning_tokens is not None:
+                retained_metrics_extra["reasoning_tokens"] = reasoning_tokens
         metrics["extra"] = retained_metrics_extra or None
 
     encoded = json.dumps(canonical, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
@@ -689,9 +694,14 @@ def _usage(trajectory: AtifTrajectoryV1_7) -> NeMoGymResponseUsage | None:
         for step in model_steps
     )
     reasoning_tokens, reported_total_tokens = _relay_usage_details(model_steps)
+    if has_step_usage and not has_complete_step_totals:
+        raise AtifProjectionError(
+            "ATIF contains partial per-model-step token metrics; every model step must provide "
+            "both prompt_tokens and completion_tokens"
+        )
     metrics = trajectory.final_metrics
     if metrics is None:
-        if has_step_usage and has_complete_step_totals:
+        if has_step_usage:
             raise AtifProjectionError("ATIF contains per-step token metrics without final_metrics")
         return None
 
@@ -705,18 +715,18 @@ def _usage(trajectory: AtifTrajectoryV1_7) -> NeMoGymResponseUsage | None:
         )
 
     if metrics.total_prompt_tokens is None and metrics.total_completion_tokens is None:
-        if has_step_usage and has_complete_step_totals:
+        if has_step_usage:
             raise AtifProjectionError("ATIF final_metrics omits token totals despite per-step token metrics")
+        if metrics.total_cached_tokens is not None:
+            raise AtifProjectionError(
+                "ATIF final_metrics cannot represent total_cached_tokens without prompt and completion token totals"
+            )
         return None
     if metrics.total_prompt_tokens is None or metrics.total_completion_tokens is None:
-        if has_step_usage and not has_complete_step_totals:
-            return None
         raise AtifProjectionError("ATIF final_metrics must provide both prompt and completion token totals")
 
     step_metrics = [step.metrics for step in model_steps]
     if has_step_usage:
-        if not has_complete_step_totals:
-            return None
         typed_step_metrics = [step_metric for step_metric in step_metrics if step_metric is not None]
         prompt_total = sum(step_metric.prompt_tokens or 0 for step_metric in typed_step_metrics)
         completion_total = sum(step_metric.completion_tokens or 0 for step_metric in typed_step_metrics)
@@ -724,17 +734,19 @@ def _usage(trajectory: AtifTrajectoryV1_7) -> NeMoGymResponseUsage | None:
             raise AtifProjectionError("ATIF final token totals do not match the complete per-model-step metrics")
 
         cached_values = [step_metric.cached_tokens for step_metric in typed_step_metrics]
-        cached_tokens = (
-            None
-            if any(value is None for value in cached_values)
-            else sum(value for value in cached_values if value is not None)
-        )
-        if (
-            cached_tokens is not None
-            and metrics.total_cached_tokens is not None
-            and cached_tokens != metrics.total_cached_tokens
-        ):
-            raise AtifProjectionError("ATIF final cached-token total does not match the per-model-step metrics")
+        steps_with_cached_tokens = sum(value is not None for value in cached_values)
+        if steps_with_cached_tokens == len(cached_values):
+            cached_tokens = sum(value for value in cached_values if value is not None)
+            if metrics.total_cached_tokens is not None and cached_tokens != metrics.total_cached_tokens:
+                raise AtifProjectionError("ATIF final cached-token total does not match the per-model-step metrics")
+        elif steps_with_cached_tokens == 0:
+            # With no per-step cache evidence, the aggregate is the only
+            # available measurement and can be preserved as reported.
+            cached_tokens = metrics.total_cached_tokens
+        else:
+            # A partially observed optional detail has no honest aggregate.
+            # Relay's final total is also a partial sum in this shape.
+            cached_tokens = None
     else:
         # Relay may emit only the final aggregate. With no partial step evidence,
         # the aggregate is the sole authoritative usage measurement.
@@ -743,10 +755,8 @@ def _usage(trajectory: AtifTrajectoryV1_7) -> NeMoGymResponseUsage | None:
         cached_tokens = metrics.total_cached_tokens
 
     computed_total_tokens = prompt_total + completion_total
-    if reported_total_tokens is not None and (
-        reported_total_tokens < prompt_total or reported_total_tokens < completion_total
-    ):
-        raise AtifProjectionError("ATIF total_tokens metadata is smaller than a component token count")
+    if reported_total_tokens is not None and reported_total_tokens < computed_total_tokens:
+        raise AtifProjectionError("ATIF total_tokens metadata is smaller than prompt_tokens + completion_tokens")
     if reasoning_tokens is not None and reasoning_tokens > completion_total:
         raise AtifProjectionError("ATIF reasoning_tokens metadata exceeds total completion tokens")
     return NeMoGymResponseUsage(
@@ -766,7 +776,15 @@ def _step_has_usage_counts(step: Any) -> bool:
         return True
     if not isinstance(metrics.extra, Mapping):
         return False
-    return "total_tokens" in metrics.extra or "output_tokens_details" in metrics.extra
+    if any(metrics.extra.get(field_name) is not None for field_name in ("reasoning_tokens", "total_tokens")):
+        return True
+    return any(
+        isinstance(details, Mapping) and details.get("reasoning_tokens") is not None
+        for details in (
+            metrics.extra.get("output_tokens_details"),
+            metrics.extra.get("completion_tokens_details"),
+        )
+    )
 
 
 def _relay_usage_details(agent_steps: list[Any]) -> tuple[int | None, int | None]:
@@ -779,24 +797,43 @@ def _relay_usage_details(agent_steps: list[Any]) -> tuple[int | None, int | None
     for step in agent_steps:
         metrics = step.metrics
         metric_extra = metrics.extra if metrics is not None and isinstance(metrics.extra, Mapping) else {}
-        output_details = metric_extra.get("output_tokens_details")
-        if (
-            "output_tokens_details" in metric_extra
-            and output_details is not None
-            and not isinstance(output_details, Mapping)
-        ):
-            raise AtifProjectionError(f"step {step.step_id} metrics.extra.output_tokens_details is not an object")
-        output_details = output_details if isinstance(output_details, Mapping) else {}
+        nested_details: list[tuple[str, Mapping[str, Any]]] = []
+        for detail_name in ("output_tokens_details", "completion_tokens_details"):
+            details = metric_extra.get(detail_name)
+            if detail_name in metric_extra and details is not None and not isinstance(details, Mapping):
+                raise AtifProjectionError(f"step {step.step_id} metrics.extra.{detail_name} is not an object")
+            if isinstance(details, Mapping):
+                nested_details.append((detail_name, details))
 
-        reasoning = _optional_nonnegative_count(output_details, "reasoning_tokens", step.step_id)
+        nested_reasoning_values = [
+            (detail_name, _optional_nonnegative_count(details, "reasoning_tokens", step.step_id))
+            for detail_name, details in nested_details
+        ]
+        present_nested_reasoning = [(name, value) for name, value in nested_reasoning_values if value is not None]
+        if len({value for _, value in present_nested_reasoning}) > 1:
+            raise AtifProjectionError(
+                f"step {step.step_id} ATIF reasoning_tokens metadata conflicts between nested token-detail fields"
+            )
+        nested_reasoning = present_nested_reasoning[0][1] if present_nested_reasoning else None
+        top_level_reasoning = _optional_nonnegative_count(metric_extra, "reasoning_tokens", step.step_id)
+        if (
+            nested_reasoning is not None
+            and top_level_reasoning is not None
+            and nested_reasoning != top_level_reasoning
+        ):
+            raise AtifProjectionError(
+                f"step {step.step_id} ATIF reasoning_tokens metadata conflicts between "
+                "metrics.extra.reasoning_tokens and a nested token-detail field"
+            )
+        reasoning = nested_reasoning if nested_reasoning is not None else top_level_reasoning
         reported_total = _optional_nonnegative_count(metric_extra, "total_tokens", step.step_id)
         if metrics is not None:
-            if reported_total is not None and any(
-                value is not None and value > reported_total
-                for value in (metrics.prompt_tokens, metrics.completion_tokens)
-            ):
+            known_component_total = sum(
+                value for value in (metrics.prompt_tokens, metrics.completion_tokens) if value is not None
+            )
+            if reported_total is not None and reported_total < known_component_total:
                 raise AtifProjectionError(
-                    f"step {step.step_id} ATIF total_tokens metadata is smaller than a component token count"
+                    f"step {step.step_id} ATIF total_tokens metadata is smaller than prompt_tokens + completion_tokens"
                 )
             if (
                 reasoning is not None
@@ -808,8 +845,8 @@ def _relay_usage_details(agent_steps: list[Any]) -> tuple[int | None, int | None
                 )
         reasoning_values.append(reasoning)
         total_values.append(reported_total)
-        saw_reasoning = saw_reasoning or "reasoning_tokens" in output_details
-        saw_total = saw_total or "total_tokens" in metric_extra
+        saw_reasoning = saw_reasoning or reasoning is not None
+        saw_total = saw_total or reported_total is not None
 
     reasoning_total = sum(value for value in reasoning_values if value is not None)
     if not saw_reasoning or any(value is None for value in reasoning_values):
