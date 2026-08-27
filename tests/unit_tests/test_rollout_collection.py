@@ -470,33 +470,26 @@ class TestRolloutCollection:
         assert returned_row is row
         assert result[NG_FAILURE_CLASS_KEY] == AGENT_REQUEST_FAILED_FAILURE_CLASS
         assert result[NG_NO_RESULT_KEY] is True
-        assert result["_ng_failure_stage"] == "agent_run"
-        assert result["_ng_failure_kind"] == "agent_http_error"
         assert result["_ng_failure_type"] == "ClientResponseError"
         assert result["_ng_failure_http_status"] == 500
         assert result["_ng_failure_response_body"] == '{"detail": "unhandled tool-call json"}'
         assert result["_ng_failure_delivery"] == "received"
-        assert result["_ng_failure_retryable"] is True
-        assert result["_ng_failure_method"] == "POST"
-        assert result["_ng_failure_endpoint"] == "my_agent/run"
-        assert result["_ng_failure_elapsed_s"] >= 0
         # No invented verifier output: no reward, no placeholder response, no token payload.
         assert "reward" not in result
         assert "response" not in result
         assert NG_TERMINAL_KEY not in result
 
-    @pytest.mark.parametrize(("status", "retryable"), [(401, False), (400, False), (429, True), (503, True)])
-    async def test_run_examples_records_retryability_per_status(
-        self, monkeypatch: pytest.MonkeyPatch, status: int, retryable: bool
+    @pytest.mark.parametrize("status", [401, 429, 503, 504])
+    async def test_run_examples_records_any_status_without_resending(
+        self, monkeypatch: pytest.MonkeyPatch, status: int
     ) -> None:
+        """No status is retried in place; the agent may already have run."""
         post = AsyncMock(return_value=FakeResponse(status))
         install_fake_server_client(monkeypatch, post)
 
         _, result = await next(RolloutCollectionHelper().run_examples([failing_row()], route_failures_to_sidecar=True))
 
         assert result["_ng_failure_http_status"] == status
-        assert result["_ng_failure_retryable"] is retryable
-        assert result["_ng_failure_replay_safe"] is False
         assert post.await_count == 1
 
     async def test_run_examples_records_connection_failure_as_a_failure_row(
@@ -509,10 +502,9 @@ class TestRolloutCollection:
         _, result = await next(RolloutCollectionHelper().run_examples([failing_row()], route_failures_to_sidecar=True))
 
         assert result[NG_FAILURE_CLASS_KEY] == AGENT_REQUEST_FAILED_FAILURE_CLASS
-        assert result["_ng_failure_kind"] == "agent_unreachable"
+        assert result["_ng_failure_type"] == "ClientConnectorError"
         assert result["_ng_failure_http_status"] is None
         assert result["_ng_failure_delivery"] == "not_delivered"
-        assert result["_ng_failure_replay_safe"] is True
 
     async def test_run_examples_never_replays_a_possibly_delivered_post(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A dropped connection may follow model, tool and sandbox side effects: do not resend."""
@@ -521,9 +513,7 @@ class TestRolloutCollection:
 
         _, result = await next(RolloutCollectionHelper().run_examples([failing_row()], route_failures_to_sidecar=True))
 
-        assert result["_ng_failure_kind"] == "agent_transport_error"
         assert result["_ng_failure_delivery"] == "possible"
-        assert result["_ng_failure_replay_safe"] is False
         assert post.await_count == 1
 
     async def test_run_examples_records_unreadable_response_as_a_failure_row(
@@ -539,7 +529,7 @@ class TestRolloutCollection:
 
         _, result = await next(RolloutCollectionHelper().run_examples([failing_row()], route_failures_to_sidecar=True))
 
-        assert result["_ng_failure_kind"] == "agent_response_unreadable"
+        assert result["_ng_failure_type"] == "JSONDecodeError"
         assert result["_ng_failure_delivery"] == "received"
 
     async def test_run_examples_raises_for_direct_callers(self, monkeypatch: pytest.MonkeyPatch) -> None:

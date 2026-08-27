@@ -25,7 +25,7 @@ from datetime import timedelta
 from difflib import get_close_matches
 from itertools import repeat
 from pathlib import Path
-from time import monotonic, time
+from time import time
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
@@ -640,25 +640,6 @@ _RUN_FAILURE_ERRORS = (ClientResponseError, ClientError, orjson.JSONDecodeError,
 _MAX_FAILURE_DETAIL_CHARS = 2000
 
 
-def _classify_run_failure(exc: BaseException) -> Tuple[str, Optional[int], str, bool]:
-    """Describe a failed agent `/run` call as (kind, http_status, delivery, retryable).
-
-    ``delivery`` is what we know about the server having received the request: ``received``
-    (it answered), ``not_delivered`` (the connection never came up), or ``possible`` (an
-    established connection failed, so the agent may already have called models, tools or
-    sandboxes). ``retryable`` says whether another attempt has a plausible chance; it does
-    not say that a retransmission is safe.
-    """
-    if isinstance(exc, ClientResponseError):
-        status = exc.status
-        return "agent_http_error", status, "received", status >= 500 or status in (408, 429)
-    if isinstance(exc, orjson.JSONDecodeError):
-        return "agent_response_unreadable", None, "received", True
-    if isinstance(exc, ClientConnectorError):
-        return "agent_unreachable", None, "not_delivered", True
-    return "agent_transport_error", None, "possible", True
-
-
 def _truncated_detail(value: Any) -> Optional[str]:
     if value is None:
         return None
@@ -666,35 +647,28 @@ def _truncated_detail(value: Any) -> Optional[str]:
     return text[:_MAX_FAILURE_DETAIL_CHARS]
 
 
-def _agent_request_failure_row(row: Dict[str, Any], exc: BaseException, elapsed_s: float) -> Dict[str, Any]:
-    """Build the failures-sidecar row for a `/run` call that produced no rollout result.
+def _agent_request_failure_row(exc: BaseException) -> Dict[str, Any]:
+    """One sidecar row for a `/run` call that came back without a result.
 
-    The row carries no reward and no synthetic response. An infrastructure failure is not a
-    verifier score of zero, and a placeholder response would read as real generation data to
-    token capture, aggregation and downstream trainers. The dispatcher writes this row to the
-    sidecar, where resume counts it as one attempt against NEMO_GYM_MAX_ROLLOUT_ATTEMPTS and
-    the aggregator never sees it.
-
-    ``_ng_failure_replay_safe`` describes retransmission by the transport layer alone. A
-    resume re-dispatch is a separate, bounded decision made by the caller with a fresh
-    attempt index, not an automatic replay of a possibly delivered POST.
+    No reward and no response: an infrastructure failure is not a verifier score of zero, and a
+    placeholder would read as real generation data to token capture, aggregation and trainers.
+    ``_ng_failure_delivery`` records whether the agent may already have run, which is what says
+    if the request is safe to send again.
     """
-    failure_kind, status, delivery, retryable = _classify_run_failure(exc)
+    if isinstance(exc, ClientConnectorError):
+        delivery = "not_delivered"
+    elif isinstance(exc, (ClientResponseError, orjson.JSONDecodeError)):
+        delivery = "received"
+    else:
+        delivery = "possible"
     return {
         NG_FAILURE_CLASS_KEY: AGENT_REQUEST_FAILED_FAILURE_CLASS,
         NG_NO_RESULT_KEY: True,
-        "_ng_failure_stage": "agent_run",
-        "_ng_failure_kind": failure_kind,
         "_ng_failure_type": type(exc).__name__,
         "_ng_failure_message": _truncated_detail(str(exc) or repr(exc)),
-        "_ng_failure_http_status": status,
+        "_ng_failure_http_status": exc.status if isinstance(exc, ClientResponseError) else None,
         "_ng_failure_response_body": _truncated_detail(getattr(exc, "response_content", None)),
         "_ng_failure_delivery": delivery,
-        "_ng_failure_retryable": retryable,
-        "_ng_failure_replay_safe": delivery == "not_delivered",
-        "_ng_failure_method": "POST",
-        "_ng_failure_endpoint": f"{(row.get(AGENT_REF_KEY_NAME) or {}).get('name')}/run",
-        "_ng_failure_elapsed_s": round(elapsed_s, 3),
     }
 
 
@@ -1567,11 +1541,9 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         but run-level knobs (``agent_map``, ``fan_out``, ``num_repeats``) are NOT applied — call
         ``preprocess_examples`` first if you need them.
 
-        ``route_failures_to_sidecar`` selects the failure contract. Managed collection
-        (``run_from_config``) sets it so an agent `/run` failure becomes a row-associated
-        failure record instead of ending every rollout still in flight. Direct callers such as
-        NeMo-RL leave it off and keep receiving the exception, so no policy changes underneath
-        them.
+        ``route_failures_to_sidecar`` is set by managed collection (``run_from_config``), where a
+        failed `/run` becomes a failure row instead of ending every rollout still in flight.
+        Direct callers such as NeMo-RL leave it off and keep receiving the exception.
         """
         server_client = self.setup_server_client(head_server_config)
         self.resolve_task_sources(examples, server_client.global_config_dict)
@@ -1580,26 +1552,25 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
 
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:
-                started = monotonic()
                 res = None
                 try:
                     res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
                     await raise_for_status(res)
                     return row, await get_response_json(res)
                 except Exception as e:
-                    if is_global_aiohttp_client_request_debug_enabled():
-                        print(
-                            "[rollout_collection] /run failed "
-                            f"status={getattr(res, 'status', None)} "
-                            f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
-                            flush=True,
-                        )
                     if not route_failures_to_sidecar or not isinstance(e, _RUN_FAILURE_ERRORS):
+                        if is_global_aiohttp_client_request_debug_enabled():
+                            print(
+                                "[rollout_collection] /run failed "
+                                f"status={getattr(res, 'status', None)} "
+                                f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
+                                flush=True,
+                            )
                         raise
-                    failure = _agent_request_failure_row(row, e, monotonic() - started)
+                    failure = _agent_request_failure_row(e)
                     print(
                         "[rollout_collection] /run failed, recording a failure row: "
-                        f"kind={failure['_ng_failure_kind']} status={failure['_ng_failure_http_status']} "
+                        f"type={failure['_ng_failure_type']} status={failure['_ng_failure_http_status']} "
                         f"delivery={failure['_ng_failure_delivery']} "
                         f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
                         flush=True,
