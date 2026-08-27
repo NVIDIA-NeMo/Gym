@@ -126,6 +126,15 @@ def test_sdk_import_helpers_and_retry_classification() -> None:
     assert opensandbox_provider._is_retryable_create_error(nonretryable_api_error) is False
     assert opensandbox_provider._is_retryable_create_error(SandboxException("gateway timeout")) is True
 
+    status_only_not_found = SandboxApiException("gone")
+    status_only_not_found.status_code = 404
+    assert opensandbox_provider._is_missing_sandbox_delete_error(status_only_not_found) is True
+    assert (
+        opensandbox_provider._is_missing_sandbox_delete_error(RuntimeError("[KUBERNETES::SANDBOX_NOT_FOUND]")) is True
+    )
+    assert opensandbox_provider._is_missing_sandbox_delete_error(RuntimeError("sandbox sandbox-1 not found")) is True
+    assert opensandbox_provider._is_missing_sandbox_delete_error(RuntimeError("http 500 boom")) is False
+
     retry_state = SimpleNamespace(
         outcome=SimpleNamespace(exception=lambda: RuntimeError("temporary")),
         next_action=SimpleNamespace(sleep=0.5),
@@ -1162,6 +1171,71 @@ async def test_provider_create_probe_and_close_error_paths(monkeypatch: pytest.M
                 raw=StopFailsCloseSucceedsRaw(),
             ),
         )
+
+
+async def test_close_treats_missing_sandbox_as_terminated_without_retry(caplog: pytest.LogCaptureFixture) -> None:
+    from opensandbox.exceptions import SandboxApiException  # noqa: PLC0415
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        probe={"command": None},
+        operations={"retries": 2, "retry_delay_s": 0, "retry_max_delay_s": 0},
+    )
+    not_found = SandboxApiException(
+        "Kill sandbox sandbox-1 failed: Sandbox 'sandbox-1' not found | "
+        "[KUBERNETES::SANDBOX_NOT_FOUND] Sandbox 'sandbox-1' not found"
+    )
+    not_found.status_code = 404
+    kill_calls = 0
+
+    class AlreadyGoneRaw:
+        async def kill(self) -> None:
+            nonlocal kill_calls
+            kill_calls += 1
+            raise not_found
+
+        async def close(self) -> None:
+            return None
+
+    with caplog.at_level(logging.DEBUG):
+        await provider.close(
+            opensandbox_provider.SandboxHandle(
+                sandbox_id="sandbox-1",
+                provider_name="opensandbox",
+                raw=AlreadyGoneRaw(),
+            ),
+        )
+
+    assert kill_calls == 1
+    assert any("already gone; treating terminate as success" in record.message for record in caplog.records)
+
+
+async def test_non_terminate_operation_still_raises_on_missing_sandbox() -> None:
+    from opensandbox.exceptions import SandboxApiException  # noqa: PLC0415
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        probe={"command": None},
+        operations={"retries": 2, "retry_delay_s": 0, "retry_max_delay_s": 0},
+    )
+    not_found = SandboxApiException("Get sandbox sandbox-1 failed: Sandbox 'sandbox-1' not found")
+    not_found.status_code = 404
+    get_info_calls = 0
+
+    class MissingRaw:
+        async def get_info(self) -> Any:
+            nonlocal get_info_calls
+            get_info_calls += 1
+            raise not_found
+
+    with pytest.raises(SandboxApiException, match="not found"):
+        await provider.status(
+            opensandbox_provider.SandboxHandle(
+                sandbox_id="sandbox-1",
+                provider_name="opensandbox",
+                raw=MissingRaw(),
+            ),
+        )
+
+    assert get_info_calls == 1
 
 
 async def test_create_once_and_connect_after_create_error_paths(

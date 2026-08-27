@@ -260,8 +260,15 @@ def _is_retryable_sdk_operation_error(exception: BaseException, seen: set[int] |
 
 
 def _is_missing_sandbox_delete_error(exception: BaseException) -> bool:
+    """Match kill errors meaning the sandbox is already gone (terminate's goal state).
+
+    Only the terminate path may treat this as success; other operations must
+    keep failing loudly on not-found.
+    """
+    if _exception_status_code(exception) == 404:
+        return True
     message = str(exception).lower()
-    return "sandbox" in message and "not found" in message
+    return "sandbox_not_found" in message or ("sandbox" in message and "not found" in message)
 
 
 def _log_create_retry(retry_state: Any) -> None:
@@ -1531,22 +1538,28 @@ class OpenSandboxProvider:
 
     async def close(self, handle: SandboxHandle) -> None:
         """Terminate the sandbox and close local SDK resources."""
+
+        async def kill_ignore_missing() -> None:
+            # Terminate is idempotent: not-found means the sandbox is already
+            # gone (double-termination race, or a previous run's leftover).
+            # Swallow it before the retry wrapper so the 404 is never retried.
+            try:
+                await handle.raw.kill()
+            except Exception as e:
+                if not _is_missing_sandbox_delete_error(e):
+                    raise
+                LOGGER.debug("OpenSandbox sandbox %r already gone; treating terminate as success", handle.sandbox_id)
+
         stop_error: Exception | None = None
         try:
             await self._await_sdk_operation(
-                lambda: handle.raw.kill(),
+                kill_ignore_missing,
                 operation="kill",
                 sandbox_id=handle.sandbox_id,
                 timeout_s=self._operations.close_timeout_s,
             )
         except Exception as e:
-            if not _is_missing_sandbox_delete_error(e):
-                stop_error = e
-            else:
-                LOGGER.info(
-                    "OpenSandbox sandbox %r was already deleted during close",
-                    handle.sandbox_id,
-                )
+            stop_error = e
 
         close_error: Exception | None = None
         try:

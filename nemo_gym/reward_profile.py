@@ -97,8 +97,15 @@ class RewardProfiler:
         results_by_key = self._index_by_rollout_key(results, "result")
         matched_keys = rows_by_key.keys() & results_by_key.keys()
 
-        expected_by_task = Counter(task_idx for task_idx, _ in rows_by_key)
-        completed_by_task = Counter(task_idx for task_idx, _ in matched_keys)
+        # Fan-out dispatches the same task to several agents, and those copies share a task index.
+        # Count completion per (task, agent) so one agent's missing rollouts don't hide behind
+        # another's completed ones. Without fan-out each task has one agent and this reduces to
+        # the plain per-task count.
+        def _group_of(key: Tuple[int, int]) -> Tuple[int, Optional[str]]:
+            return key[0], (rows_by_key[key].get(AGENT_REF_KEY_NAME) or {}).get("name")
+
+        expected_by_task = Counter(_group_of(key) for key in rows_by_key)
+        completed_by_task = Counter(_group_of(key) for key in matched_keys)
 
         complete_input_rows = 0
         partial_input_rows = 0
@@ -209,13 +216,31 @@ class RewardProfiler:
             rows, results, allow_partial_rollouts=allow_partial_rollouts
         )
 
+        # Under fan-out the same task index appears once per agent. Profile those copies as
+        # separate groups — one per (task, agent) — so each harness keeps its own reward/length
+        # stats. Runs where every task has a single agent keep the plain per-task grouping and
+        # byte-identical output.
+        # Tolerate rows without an agent_ref exactly as before: only matched rows ever required
+        # one, so the detection must not introduce a new failure on unmatched (partial) rows.
+        def _agent_name(row: Dict[str, Any]) -> Optional[str]:
+            return (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+
+        per_agent = len({(row[TASK_INDEX_KEY_NAME], _agent_name(row)) for row in rows}) > len(
+            {row[TASK_INDEX_KEY_NAME] for row in rows}
+        )
+
+        def _group_key(row: Dict[str, Any]) -> Any:
+            if per_agent:
+                return row[TASK_INDEX_KEY_NAME], _agent_name(row)
+            return row[TASK_INDEX_KEY_NAME]
+
         filtered_results: List[Dict] = []
-        task_idx_to_row: Dict[int, Dict] = dict()
-        task_idx_to_rollout_infos: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
-        expected_rollouts_by_task = Counter(row[TASK_INDEX_KEY_NAME] for row in rows)
+        task_idx_to_row: Dict[Any, Dict] = dict()
+        task_idx_to_rollout_infos: Dict[Any, List[Dict[str, Any]]] = defaultdict(list)
+        expected_rollouts_by_task = Counter(_group_key(row) for row in rows)
         for row, result in aligned_rows_and_results:
             task_idx, rollout_idx = _rollout_key(row)
-            task_idx_to_rollout_infos[task_idx].append(self.rollout_info_from_result(result))
+            task_idx_to_rollout_infos[_group_key(row)].append(self.rollout_info_from_result(result))
 
             # Add additional helpful information
             result = result | (result["response"].get("usage") or {})
@@ -233,26 +258,33 @@ class RewardProfiler:
                     numeric_result[k] = v
 
             filtered_results.append(numeric_result)
-            task_idx_to_row.setdefault(task_idx, row)
+            task_idx_to_row.setdefault(_group_key(row), row)
 
         if not filtered_results:
             return [], []
 
         df = DataFrame.from_records(filtered_results)
 
-        group_level_df = df.drop(columns=[ROLLOUT_INDEX_KEY_NAME, "agent_name"]).groupby(TASK_INDEX_KEY_NAME)
+        if per_agent:
+            group_level_df = df.drop(columns=[ROLLOUT_INDEX_KEY_NAME]).groupby([TASK_INDEX_KEY_NAME, "agent_name"])
+        else:
+            group_level_df = df.drop(columns=[ROLLOUT_INDEX_KEY_NAME, "agent_name"]).groupby(TASK_INDEX_KEY_NAME)
         group_level_metrics = self.calculate_metrics_single_df(group_level_df)
         for group_metrics in group_level_metrics:
-            task_idx = group_metrics[TASK_INDEX_KEY_NAME]
-            row = task_idx_to_row[task_idx]
+            if per_agent:
+                group_metrics[AGENT_REF_KEY_NAME] = {"name": group_metrics.pop("agent_name")}
+                group_key = (group_metrics[TASK_INDEX_KEY_NAME], group_metrics[AGENT_REF_KEY_NAME]["name"])
+            else:
+                group_key = group_metrics[TASK_INDEX_KEY_NAME]
+            row = task_idx_to_row[group_key]
 
             row = row.copy()
             row.pop(TASK_INDEX_KEY_NAME)
             row.pop(ROLLOUT_INDEX_KEY_NAME)
 
             group_metrics["sample"] = row
-            num_rollouts = len(task_idx_to_rollout_infos[task_idx])
-            expected_num_rollouts = expected_rollouts_by_task[task_idx]
+            num_rollouts = len(task_idx_to_rollout_infos[group_key])
+            expected_num_rollouts = expected_rollouts_by_task[group_key]
             group_metrics["num_rollouts"] = num_rollouts
             group_metrics["expected_num_rollouts"] = expected_num_rollouts
             group_metrics["missing_num_rollouts"] = expected_num_rollouts - num_rollouts
@@ -260,7 +292,7 @@ class RewardProfiler:
                 100.0 if expected_num_rollouts == 0 else 100.0 * num_rollouts / expected_num_rollouts
             )
             group_metrics["rollout_infos"] = sorted(
-                task_idx_to_rollout_infos[task_idx],
+                task_idx_to_rollout_infos[group_key],
                 key=lambda r: r[ROLLOUT_INDEX_KEY_NAME],
             )
 

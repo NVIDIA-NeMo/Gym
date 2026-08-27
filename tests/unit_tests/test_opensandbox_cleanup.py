@@ -393,7 +393,6 @@ def test_cleanup_rejects_invalid_domain() -> None:
 @pytest.mark.parametrize(
     "argv",
     [
-        ["--run-id", "job-7", "--user", "alice"],
         ["--connection-config", "env.yaml", "--user", "alice"],
         ["--connection-config", "env.yaml", "--run-id", "job-7"],
         ["--connection-config", "env.yaml", "--run-id", "", "--user", "alice"],
@@ -605,6 +604,8 @@ def read_sbatch_calls(path: Path) -> list[list[str]]:
 
 def test_slurm_launcher_submits_one_dependent_cpu_cleanup_job(tmp_path: Path) -> None:
     calls_path, env = install_sbatch_stub(tmp_path)
+    env["OPENSANDBOX_DOMAIN"] = "sandbox.example"
+    env["OPENSANDBOX_API_KEY"] = TEST_ACCESS_KEY
     result = subprocess.run(
         ["bash", str(SBATCH_SCRIPT), "--config", "benchmark.yaml", "--run-id", "attacker"],
         check=False,
@@ -622,13 +623,15 @@ def test_slurm_launcher_submits_one_dependent_cpu_cleanup_job(tmp_path: Path) ->
     assert "--parsable" in main_call
 
     submit_dir = str(Path.cwd().resolve())
-    cleanup_script = f"{submit_dir}/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py"
+    repo_root = SBATCH_SCRIPT.resolve().parents[2]
+    cleanup_script = f"{repo_root}/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py"
     assert cleanup_call == [
         "--parsable",
         "--dependency=afterany:7001",
         "--partition=cpu",
         "--qos=cpu-short",
         "--gres=none",
+        "--gpus-per-node=0",
         "--nodes=1",
         "--ntasks=1",
         "--cpus-per-task=1",
@@ -637,8 +640,12 @@ def test_slurm_launcher_submits_one_dependent_cpu_cleanup_job(tmp_path: Path) ->
         "--job-name=gym-cleanup-7001",
         f"--output={submit_dir}/slurm-logs/%j-gym-cleanup-7001.log",
         cleanup_script,
-        "--connection-config",
-        f"{submit_dir}/env.yaml",
+        "--domain",
+        "sandbox.example",
+        "--api-key",
+        TEST_ACCESS_KEY,
+        "--protocol",
+        "http",
         "--run-id",
         "7001",
         "--user",
@@ -682,9 +689,10 @@ def test_slurm_launcher_reports_cleanup_submission_failure(tmp_path: Path) -> No
         text=True,
     )
 
-    assert result.returncode == 1
-    assert result.stdout == ""
-    assert "Failed to submit cleanup job for batch job 7001; the batch job is still active" in result.stderr
+    assert result.returncode == 0
+    assert result.stdout.splitlines() == ["Submitted batch job 7001"]
+    assert "Failed to submit the sandbox-cleanup job for batch job 7001" in result.stderr
+    assert "its sandboxes will need reaping by hand" in result.stderr
     assert len(read_sbatch_calls(calls_path)) == 2
 
 
@@ -770,3 +778,156 @@ def test_slurm_batch_command_preserves_status_and_stops_server(
     )
     assert result.returncode == expected_status
     assert events.read_text().splitlines() == (["server-stop"] if first_step == "eval" else ["server-exit"])
+
+
+SANDBOX_ARGS = ["--domain", "sandbox.example", "--api-key", TEST_ACCESS_KEY]
+
+
+@pytest.mark.parametrize(("passed_protocol", "expected_protocol"), [(None, "http"), ("https", "https")])
+def test_cli_takes_the_connection_from_arguments(
+    monkeypatch: pytest.MonkeyPatch, passed_protocol: str | None, expected_protocol: str
+) -> None:
+    calls = []
+    argv = [*SANDBOX_ARGS, "--run-id", "job-7", "--user", "alice", "--reap"]
+    if passed_protocol:
+        argv += ["--protocol", passed_protocol]
+
+    async def record_cleanup(**kwargs: object) -> int:
+        calls.append(kwargs)
+        return 0
+
+    monkeypatch.setattr(cleanup_sandboxes, "cleanup_sandboxes", record_cleanup)
+    assert cleanup_sandboxes.main(argv) == 0
+    assert calls == [
+        {
+            "domain": "sandbox.example",
+            "protocol": expected_protocol,
+            "access_key": TEST_ACCESS_KEY,
+            "run_id": "job-7",
+            "user": "alice",
+            "reap": True,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--api-key", TEST_ACCESS_KEY, "--run-id", "job-7", "--user", "alice"],
+        ["--domain", "sandbox.example", "--run-id", "job-7", "--user", "alice"],
+        ["--domain", " ", "--api-key", TEST_ACCESS_KEY, "--run-id", "job-7", "--user", "alice"],
+        ["--domain", "sandbox.example", "--api-key", " ", "--run-id", "job-7", "--user", "alice"],
+        [*SANDBOX_ARGS, "--run-id", "job-7", "--user", "alice", "--protocol", "ftp"],
+    ],
+)
+def test_cli_requires_both_sandbox_parameters_without_a_config(argv: list[str]) -> None:
+    with pytest.raises(SystemExit, match="2"):
+        cleanup_sandboxes.main(argv)
+
+
+def test_cli_refuses_a_config_mixed_with_arguments(tmp_path: Path) -> None:
+    """One source for the connection, so neither can silently win."""
+    config = tmp_path / "env.yaml"
+    config.write_text("sandbox:\n  opensandbox:\n    connection:\n      domain: x\n      api_key: y\n")
+    with pytest.raises(SystemExit, match="2"):
+        cleanup_sandboxes.main(
+            ["--connection-config", str(config), *SANDBOX_ARGS, "--run-id", "job-7", "--user", "alice"]
+        )
+
+
+def test_cli_reports_a_failure_from_arguments(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    async def raise_cleanup_error(**_kwargs: object) -> int:
+        raise OSError("down")
+
+    monkeypatch.setattr(cleanup_sandboxes, "cleanup_sandboxes", raise_cleanup_error)
+    assert cleanup_sandboxes.main([*SANDBOX_ARGS, "--run-id", "job-7", "--user", "alice"]) == 1
+    stderr = capsys.readouterr().err
+    assert "OpenSandbox cleanup failed: down" in stderr
+    assert TEST_ACCESS_KEY not in stderr
+
+
+def test_slurm_launcher_takes_the_checkout_as_an_argument(tmp_path: Path) -> None:
+    """A caller running a copy of this script names the tree it came from."""
+    calls_path, env = install_sbatch_stub(tmp_path)
+    env["OPENSANDBOX_DOMAIN"] = "sandbox.example"
+    env["OPENSANDBOX_API_KEY"] = TEST_ACCESS_KEY
+
+    result = subprocess.run(
+        ["bash", str(SBATCH_SCRIPT), "--gym-root", "/elsewhere/Gym", "--config", "benchmark.yaml"],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    _main_call, cleanup_call = read_sbatch_calls(calls_path)
+    assert "/elsewhere/Gym/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py" in cleanup_call
+    # Consumed here, so gym eval still sees only the arguments meant for it.
+    eval_command = (tmp_path / "eval-command").read_text()
+    assert "--gym-root" not in eval_command
+    assert "--config benchmark.yaml" in eval_command
+
+
+def test_slurm_launcher_rejects_a_gym_root_without_a_path(tmp_path: Path) -> None:
+    _calls_path, env = install_sbatch_stub(tmp_path)
+    result = subprocess.run(
+        ["bash", str(SBATCH_SCRIPT), "--gym-root"],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert "--gym-root needs a path" in result.stderr
+
+
+def test_slurm_launcher_resolves_the_checkout_from_its_own_location(tmp_path: Path) -> None:
+    """The caller launches from a run directory that holds no Gym tree."""
+    calls_path, env = install_sbatch_stub(tmp_path)
+    env["OPENSANDBOX_DOMAIN"] = "sandbox.example"
+    env["OPENSANDBOX_API_KEY"] = TEST_ACCESS_KEY
+    elsewhere = tmp_path / "rundir"
+    elsewhere.mkdir()
+
+    result = subprocess.run(
+        ["bash", str(SBATCH_SCRIPT.resolve()), "--config", "benchmark.yaml"],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+        cwd=elsewhere,
+    )
+
+    assert result.returncode == 0, result.stderr
+    _main_call, cleanup_call = read_sbatch_calls(calls_path)
+    repo_root = SBATCH_SCRIPT.resolve().parents[2]
+    assert f"{repo_root}/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py" in cleanup_call
+    assert f"--output={elsewhere}/slurm-logs/%j-gym-cleanup-7001.log" in cleanup_call
+    assert cleanup_call[cleanup_call.index("--domain") + 1] == "sandbox.example"
+    assert cleanup_call[cleanup_call.index("--api-key") + 1] == TEST_ACCESS_KEY
+    assert cleanup_call[cleanup_call.index("--protocol") + 1] == "http"
+
+
+def test_slurm_launcher_falls_back_to_the_checkout_env_yaml(tmp_path: Path) -> None:
+    """No exported connection, so the checkout's own env.yaml is used."""
+    calls_path, env = install_sbatch_stub(tmp_path)
+    env.pop("OPENSANDBOX_DOMAIN", None)
+    env.pop("OPENSANDBOX_API_KEY", None)
+
+    result = subprocess.run(
+        ["bash", str(SBATCH_SCRIPT), "--config", "benchmark.yaml"],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    _main_call, cleanup_call = read_sbatch_calls(calls_path)
+    repo_root = SBATCH_SCRIPT.resolve().parents[2]
+    assert cleanup_call[cleanup_call.index("--connection-config") + 1] == f"{repo_root}/env.yaml"
+    assert "--domain" not in cleanup_call
+    assert "--api-key" not in cleanup_call
