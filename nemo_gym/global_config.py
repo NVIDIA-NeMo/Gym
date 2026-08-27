@@ -547,13 +547,12 @@ Duplicate config paths:
             if not isinstance(agents, DictConfig) or len(agents) != 1:
                 continue
             agent_type = str(next(iter(agents)))
-            instances.append(
-                _AgentInstance(
-                    name=str(name),
-                    agent_type=agent_type,
-                    server_config=agents[agent_type],
-                )
-            )
+            server_config = agents._get_node(agent_type)
+            # An unset block is read as a node rather than resolved: resolving raises MissingMandatoryValue,
+            # which is not a ConfigError, so the CLI would print a traceback instead of the usual report.
+            if not isinstance(server_config, DictConfig):
+                continue
+            instances.append(_AgentInstance(name=str(name), agent_type=agent_type, server_config=server_config))
         return instances
 
     @staticmethod

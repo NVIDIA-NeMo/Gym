@@ -2058,6 +2058,23 @@ class TestComposeUnboundAgent:
 
         assert self._composed_block(config, "no_model_server_agent")["model_server"]["name"] == "policy_model"
 
+    def test_skips_an_instance_whose_agent_block_is_unset(self) -> None:
+        # Resolving the block would raise MissingMandatoryValue, which is not a ConfigError, so the CLI
+        # would print a traceback instead of the usual missing-value report.
+        config = self._config(broken={"responses_api_agents": {"simple_agent": "???"}})
+
+        names = {instance.name for instance in GlobalConfigDictParser()._agent_instances(config)}
+
+        assert "broken" not in names
+
+    def test_parse_reports_an_unset_agent_block(self) -> None:
+        config = self._config(broken={"responses_api_agents": {"simple_agent": "???"}})
+
+        with raises(ConfigMissingValuesError) as exc_info:
+            self._parse(config)
+
+        assert "broken.responses_api_agents.simple_agent" in str(exc_info.value)
+
     def test_raises_when_two_instances_are_unbound(self) -> None:
         config = self._config(second_harness=self._harness())
 
