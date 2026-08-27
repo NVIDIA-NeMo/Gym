@@ -34,6 +34,7 @@ from nemo_gym.atif_reverification import (
     project_atif_manifest_entries,
     project_atif_manifest_entry,
 )
+from nemo_gym.atif_v1_7 import AtifTrajectoryV1_7
 from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
@@ -42,7 +43,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseFunctionToolCallForTraining,
     NeMoGymResponseOutputMessageForTraining,
 )
-from nemo_gym.relay_atif import AtifTrajectoryV1_7
 from nemo_gym.responses_converter import ResponsesConverter
 from nemo_gym.server_utils import ServerClient
 from resources_servers.mcqa.app import MCQAResourcesServer, MCQAResourcesServerConfig, MCQAVerifyRequest
@@ -112,6 +112,76 @@ def _materialized_input() -> dict[str, Any]:
         TASK_INDEX_KEY_NAME: 7,
         ROLLOUT_INDEX_KEY_NAME: 2,
         "expected_answer": "72 and sunny",
+    }
+
+
+def _raw_tool_response(
+    provider: str,
+    calls: list[tuple[str, str, dict[str, Any] | str]],
+) -> dict[str, Any]:
+    """Build the same provider-native tool shape used across rejection cases."""
+
+    if provider == "responses":
+        return {
+            "status": "completed",
+            "output": [
+                {
+                    "type": "function_call",
+                    "id": f"fc-{index}",
+                    "call_id": call_id,
+                    "name": name,
+                    "arguments": (
+                        arguments
+                        if isinstance(arguments, str)
+                        else json.dumps(arguments, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+                    ),
+                    "status": "completed",
+                }
+                for index, (call_id, name, arguments) in enumerate(calls)
+            ],
+        }
+    if provider == "chat":
+        return {
+            "choices": [
+                {
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": call_id,
+                                "type": "function",
+                                "function": {
+                                    "name": name,
+                                    "arguments": (
+                                        arguments
+                                        if isinstance(arguments, str)
+                                        else json.dumps(
+                                            arguments,
+                                            ensure_ascii=False,
+                                            separators=(",", ":"),
+                                            sort_keys=True,
+                                        )
+                                    ),
+                                },
+                            }
+                            for call_id, name, arguments in calls
+                        ],
+                    },
+                }
+            ]
+        }
+
+    assert provider == "anthropic"
+    assert all(isinstance(arguments, dict) for _, _, arguments in calls)
+    return {
+        "type": "message",
+        "role": "assistant",
+        "stop_reason": "tool_use",
+        "content": [
+            {"type": "tool_use", "id": call_id, "name": name, "input": arguments} for call_id, name, arguments in calls
+        ],
     }
 
 
@@ -1156,20 +1226,7 @@ def test_outer_relay_envelope_cannot_hide_output_in_a_completed_raw_response(
 
 def test_raw_responses_tool_calls_must_match_canonical_atif() -> None:
     data = _trajectory_data()
-    data["steps"][1]["extra"] = {
-        "llm_response": {
-            "status": "completed",
-            "output": [
-                {
-                    "type": "function_call",
-                    "id": "fc-a",
-                    "call_id": "call-a",
-                    "name": "lookup",
-                    "arguments": '{"q":"x"}',
-                }
-            ],
-        }
-    }
+    data["steps"][1]["extra"] = {"llm_response": _raw_tool_response("responses", [("call-a", "lookup", {"q": "x"})])}
 
     with pytest.raises(AtifProjectionError, match="raw provider tool calls do not match"):
         atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
@@ -1194,45 +1251,9 @@ def test_canonical_tool_identity_must_not_be_whitespace_only(field: str, match: 
 )
 def test_raw_provider_tool_identity_must_not_be_whitespace_only(provider: str, field: str, match: str) -> None:
     data = _trajectory_data()
-    if provider == "responses":
-        tool_call = {
-            "type": "function_call",
-            "id": "fc-a",
-            "call_id": "call-a",
-            "name": "lookup",
-            "arguments": '{"q":"x"}',
-            "status": "completed",
-        }
-        tool_call[field] = " \t "
-        raw_response = {"status": "completed", "output": [tool_call]}
-    elif provider == "chat":
-        tool_call = {
-            "id": "call-a",
-            "type": "function",
-            "function": {"name": "lookup", "arguments": '{"q":"x"}'},
-        }
-        if field == "call_id":
-            tool_call["id"] = " \t "
-        else:
-            tool_call["function"]["name"] = " \t "
-        raw_response = {
-            "choices": [
-                {
-                    "finish_reason": "tool_calls",
-                    "message": {"role": "assistant", "content": None, "tool_calls": [tool_call]},
-                }
-            ]
-        }
-    else:
-        tool_call = {"type": "tool_use", "id": "call-a", "name": "lookup", "input": {"q": "x"}}
-        tool_call["id" if field == "call_id" else "name"] = " \t "
-        raw_response = {
-            "type": "message",
-            "role": "assistant",
-            "stop_reason": "tool_use",
-            "content": [tool_call],
-        }
-    data["steps"][1]["extra"] = {"llm_response": raw_response}
+    call_id = " \t " if field == "call_id" else "call-a"
+    name = " \t " if field == "name" else "lookup"
+    data["steps"][1]["extra"] = {"llm_response": _raw_tool_response(provider, [(call_id, name, {"q": "x"})])}
 
     with pytest.raises(AtifProjectionError, match=match):
         atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
@@ -1245,47 +1266,7 @@ def test_raw_tool_argument_comparison_distinguishes_json_booleans_from_numbers(p
     tool_step["tool_calls"] = [{"tool_call_id": "call-b", "function_name": "calculate", "arguments": {"x": True}}]
     tool_step["observation"] = {"results": [{"source_call_id": "call-b", "content": "4"}]}
 
-    if provider == "responses":
-        raw_response = {
-            "status": "completed",
-            "output": [
-                {
-                    "type": "function_call",
-                    "id": "fc-b",
-                    "call_id": "call-b",
-                    "name": "calculate",
-                    "arguments": '{"x":1}',
-                    "status": "completed",
-                }
-            ],
-        }
-    elif provider == "chat":
-        raw_response = {
-            "choices": [
-                {
-                    "finish_reason": "tool_calls",
-                    "message": {
-                        "role": "assistant",
-                        "content": None,
-                        "tool_calls": [
-                            {
-                                "id": "call-b",
-                                "type": "function",
-                                "function": {"name": "calculate", "arguments": '{"x":1}'},
-                            }
-                        ],
-                    },
-                }
-            ]
-        }
-    else:
-        raw_response = {
-            "type": "message",
-            "role": "assistant",
-            "stop_reason": "tool_use",
-            "content": [{"type": "tool_use", "id": "call-b", "name": "calculate", "input": {"x": 1}}],
-        }
-    tool_step["extra"] = {"llm_response": raw_response}
+    tool_step["extra"] = {"llm_response": _raw_tool_response(provider, [("call-b", "calculate", {"x": 1})])}
 
     with pytest.raises(AtifProjectionError, match="raw provider tool calls do not match"):
         atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
@@ -1378,27 +1359,10 @@ def test_atif_manifest_loader_rejects_duplicate_json_object_keys(tmp_path: Path)
 def test_raw_tool_arguments_reject_non_json_numeric_constants(constant: str) -> None:
     data = _trajectory_data()
     data["steps"][1]["extra"] = {
-        "llm_response": {
-            "status": "completed",
-            "output": [
-                {
-                    "type": "function_call",
-                    "id": "fc-a",
-                    "call_id": "call-a",
-                    "name": "lookup",
-                    "arguments": f'{{"q":{constant}}}',
-                    "status": "completed",
-                },
-                {
-                    "type": "function_call",
-                    "id": "fc-b",
-                    "call_id": "call-b",
-                    "name": "calculate",
-                    "arguments": '{"x":2}',
-                    "status": "completed",
-                },
-            ],
-        }
+        "llm_response": _raw_tool_response(
+            "responses",
+            [("call-a", "lookup", f'{{"q":{constant}}}'), ("call-b", "calculate", {"x": 2})],
+        )
     }
 
     with pytest.raises(AtifProjectionError, match="invalid JSON arguments"):
@@ -1408,27 +1372,10 @@ def test_raw_tool_arguments_reject_non_json_numeric_constants(constant: str) -> 
 def test_raw_tool_arguments_reject_float_overflow() -> None:
     data = _trajectory_data()
     data["steps"][1]["extra"] = {
-        "llm_response": {
-            "status": "completed",
-            "output": [
-                {
-                    "type": "function_call",
-                    "id": "fc-a",
-                    "call_id": "call-a",
-                    "name": "lookup",
-                    "arguments": '{"q":1e400}',
-                    "status": "completed",
-                },
-                {
-                    "type": "function_call",
-                    "id": "fc-b",
-                    "call_id": "call-b",
-                    "name": "calculate",
-                    "arguments": '{"x":2}',
-                    "status": "completed",
-                },
-            ],
-        }
+        "llm_response": _raw_tool_response(
+            "responses",
+            [("call-a", "lookup", '{"q":1e400}'), ("call-b", "calculate", {"x": 2})],
+        )
     }
 
     with pytest.raises(AtifProjectionError, match="exceeds the finite float range"):
@@ -1438,57 +1385,39 @@ def test_raw_tool_arguments_reject_float_overflow() -> None:
 def test_raw_tool_arguments_reject_nonzero_float_underflow() -> None:
     data = _trajectory_data()
     data["steps"][1]["extra"] = {
-        "llm_response": {
-            "status": "completed",
-            "output": [
-                {
-                    "type": "function_call",
-                    "id": "fc-a",
-                    "call_id": "call-a",
-                    "name": "lookup",
-                    "arguments": '{"q":1e-999}',
-                    "status": "completed",
-                },
-                {
-                    "type": "function_call",
-                    "id": "fc-b",
-                    "call_id": "call-b",
-                    "name": "calculate",
-                    "arguments": '{"x":2}',
-                    "status": "completed",
-                },
-            ],
-        }
+        "llm_response": _raw_tool_response(
+            "responses",
+            [("call-a", "lookup", '{"q":1e-999}'), ("call-b", "calculate", {"x": 2})],
+        )
     }
 
     with pytest.raises(AtifProjectionError, match="underflows the finite float range"):
         atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
 
 
+def test_raw_tool_arguments_reject_float_precision_loss() -> None:
+    data = _trajectory_data()
+    data["steps"][1]["extra"] = {
+        "llm_response": _raw_tool_response(
+            "responses",
+            [
+                ("call-a", "lookup", '{"q":0.12345678901234567890123456789}'),
+                ("call-b", "calculate", {"x": 2}),
+            ],
+        )
+    }
+
+    with pytest.raises(AtifProjectionError, match="cannot be represented without precision loss"):
+        atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+
+
 def test_raw_tool_arguments_reject_duplicate_json_object_keys() -> None:
     data = _trajectory_data()
     data["steps"][1]["extra"] = {
-        "llm_response": {
-            "status": "completed",
-            "output": [
-                {
-                    "type": "function_call",
-                    "id": "fc-a",
-                    "call_id": "call-a",
-                    "name": "lookup",
-                    "arguments": '{"q":"x","q":"x"}',
-                    "status": "completed",
-                },
-                {
-                    "type": "function_call",
-                    "id": "fc-b",
-                    "call_id": "call-b",
-                    "name": "calculate",
-                    "arguments": '{"x":2}',
-                    "status": "completed",
-                },
-            ],
-        }
+        "llm_response": _raw_tool_response(
+            "responses",
+            [("call-a", "lookup", '{"q":"x","q":"x"}'), ("call-b", "calculate", {"x": 2})],
+        )
     }
 
     with pytest.raises(AtifProjectionError, match="duplicate object key 'q'"):
@@ -1500,27 +1429,10 @@ def test_raw_tool_arguments_preserve_arbitrary_size_json_integers() -> None:
     large_integer = 2**100
     data["steps"][1]["tool_calls"][1]["arguments"]["x"] = large_integer
     data["steps"][1]["extra"] = {
-        "llm_response": {
-            "status": "completed",
-            "output": [
-                {
-                    "type": "function_call",
-                    "id": "fc-a",
-                    "call_id": "call-a",
-                    "name": "lookup",
-                    "arguments": '{"q":"x"}',
-                    "status": "completed",
-                },
-                {
-                    "type": "function_call",
-                    "id": "fc-b",
-                    "call_id": "call-b",
-                    "name": "calculate",
-                    "arguments": f'{{"x":{large_integer}}}',
-                    "status": "completed",
-                },
-            ],
-        }
+        "llm_response": _raw_tool_response(
+            "responses",
+            [("call-a", "lookup", {"q": "x"}), ("call-b", "calculate", f'{{"x":{large_integer}}}')],
+        )
     }
 
     response = atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))

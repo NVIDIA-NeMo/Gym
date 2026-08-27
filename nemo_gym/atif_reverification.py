@@ -35,6 +35,8 @@ from openai.types.responses.response_function_call_output_item_list_param import
 from openai.types.responses.response_input_text_content_param import ResponseInputTextContentParam
 from pydantic import BaseModel, ConfigDict, Field
 
+from nemo_gym.atif_json import json_values_equal, strict_json_loads
+from nemo_gym.atif_v1_7 import ATIF_SCHEMA_VERSION, AtifTrajectoryV1_7
 from nemo_gym.config_types import ConfigError
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
@@ -51,10 +53,6 @@ from nemo_gym.openai_utils import (
     TokenIDLogProbMixin,
     training_variant_of,
 )
-from nemo_gym.relay_atif import AtifTrajectoryV1_7
-
-
-SUPPORTED_ATIF_VERSION = "ATIF-v1.7"
 
 
 # A native Gym response carries these request fields back alongside the model's
@@ -440,9 +438,9 @@ def atif_trajectory_to_response(trajectory: AtifTrajectoryV1_7) -> NeMoGymRespon
 def _validate_supported_trajectory(trajectory: AtifTrajectoryV1_7) -> None:
     _reject_nonfinite_json_numbers(trajectory.model_dump(mode="python"), "ATIF trajectory")
     _reject_declared_incomplete_gym_conversion(trajectory)
-    if trajectory.schema_version != SUPPORTED_ATIF_VERSION:
+    if trajectory.schema_version != ATIF_SCHEMA_VERSION:
         raise AtifProjectionError(
-            f"unsupported ATIF schema version {trajectory.schema_version!r}; expected {SUPPORTED_ATIF_VERSION!r}"
+            f"unsupported ATIF schema version {trajectory.schema_version!r}; expected {ATIF_SCHEMA_VERSION!r}"
         )
     if trajectory.continued_trajectory_ref is not None:
         raise AtifProjectionError("continued ATIF trajectories are not supported by the initial reverify adapter")
@@ -1271,49 +1269,11 @@ def _json_tool_calls_equal(
     if len(raw_calls) != len(canonical_calls):
         return False
     return all(
-        raw_id == canonical_id
-        and raw_name == canonical_name
-        and _json_values_equal(raw_arguments, canonical_arguments)
+        raw_id == canonical_id and raw_name == canonical_name and json_values_equal(raw_arguments, canonical_arguments)
         for (raw_id, raw_name, raw_arguments), (canonical_id, canonical_name, canonical_arguments) in zip(
             raw_calls, canonical_calls, strict=True
         )
     )
-
-
-def _json_values_equal(left: Any, right: Any) -> bool:
-    """Compare JSON values without Python's bool/int equality aliasing."""
-
-    if left is None or right is None:
-        return left is right
-    if isinstance(left, bool) or isinstance(right, bool):
-        return isinstance(left, bool) and isinstance(right, bool) and left == right
-    if isinstance(left, (int, float)) or isinstance(right, (int, float)):
-        return (
-            isinstance(left, (int, float))
-            and not isinstance(left, bool)
-            and isinstance(right, (int, float))
-            and not isinstance(right, bool)
-            and left == right
-        )
-    if isinstance(left, str) or isinstance(right, str):
-        return isinstance(left, str) and isinstance(right, str) and left == right
-    if isinstance(left, list) or isinstance(right, list):
-        return (
-            isinstance(left, list)
-            and isinstance(right, list)
-            and len(left) == len(right)
-            and all(
-                _json_values_equal(left_item, right_item) for left_item, right_item in zip(left, right, strict=True)
-            )
-        )
-    if isinstance(left, dict) or isinstance(right, dict):
-        return (
-            isinstance(left, dict)
-            and isinstance(right, dict)
-            and left.keys() == right.keys()
-            and all(_json_values_equal(left[key], right[key]) for key in left)
-        )
-    return False
 
 
 def _reject_nonfinite_json_numbers(value: Any, field_name: str) -> None:
@@ -1325,38 +1285,6 @@ def _reject_nonfinite_json_numbers(value: Any, field_name: str) -> None:
     elif isinstance(value, list):
         for index, nested_value in enumerate(value):
             _reject_nonfinite_json_numbers(nested_value, f"{field_name}[{index}]")
-
-
-def strict_json_loads(payload: str | bytes) -> Any:
-    """Decode RFC 8259 JSON without losing large integers or duplicate-key evidence."""
-
-    def reject_non_json_constant(value: str) -> Any:
-        raise ValueError(f"non-JSON numeric constant {value!r}")
-
-    def parse_finite_float(value: str) -> float:
-        parsed = float(value)
-        if not math.isfinite(parsed):
-            raise ValueError(f"JSON number {value!r} exceeds the finite float range")
-        if parsed == 0.0:
-            significand = value.lower().split("e", 1)[0]
-            if any(character in "123456789" for character in significand):
-                raise ValueError(f"JSON number {value!r} underflows the finite float range")
-        return parsed
-
-    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError(f"duplicate object key {key!r}")
-            result[key] = value
-        return result
-
-    return json.loads(
-        payload,
-        parse_constant=reject_non_json_constant,
-        parse_float=parse_finite_float,
-        object_pairs_hook=reject_duplicate_keys,
-    )
 
 
 def _created_at(agent_steps: list[Any]) -> float:

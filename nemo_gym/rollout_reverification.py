@@ -27,12 +27,12 @@ from pydantic import BaseModel, Field, TypeAdapter, ValidationError, model_valid
 from tqdm.asyncio import tqdm
 
 from nemo_gym import _resolve_under_cwd_or_install
+from nemo_gym.atif_json import strict_json_loads
 from nemo_gym.atif_reverification import (
     AtifProjectionError,
     index_materialized_inputs,
     load_atif_manifest,
     project_atif_manifest_entries,
-    strict_json_loads,
 )
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest, ReverifyMode
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError, UploadRolloutsConfigMixin

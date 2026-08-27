@@ -12,13 +12,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Strict models for the ATIF v1.7 subset emitted by NeMo Relay.
+"""Strict models for Gym's supported ATIF v1.7 subset.
 
 This is deliberately not a general ATIF implementation. It describes the
-serialized Relay exporter fields consumed by Gym reverification and rejects
-unknown structural fields so schema drift cannot silently alter what is scored.
-Provider payloads and extension metadata remain JSON objects at their declared
-extension points.
+fields consumed and produced by Gym's ATIF adapters and rejects unknown
+structural fields so schema drift cannot silently alter their behavior. Provider
+payloads and extension metadata remain JSON objects at their declared extension
+points.
 """
 
 from __future__ import annotations
@@ -30,16 +30,19 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-class _RelayAtifModel(BaseModel):
+ATIF_SCHEMA_VERSION = "ATIF-v1.7"
+
+
+class _AtifModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
-class AtifImageSource(_RelayAtifModel):
+class AtifImageSource(_AtifModel):
     media_type: Literal["image/jpeg", "image/png", "image/gif", "image/webp"]
     path: str
 
 
-class AtifContentPart(_RelayAtifModel):
+class AtifContentPart(_AtifModel):
     """Validated ATIF text or image content part."""
 
     type: Literal["text", "image"]
@@ -64,7 +67,7 @@ class AtifContentPart(_RelayAtifModel):
 AtifContent = str | list[AtifContentPart]
 
 
-class AtifAgent(_RelayAtifModel):
+class AtifAgent(_AtifModel):
     name: str
     version: str
     model_name: str | None = None
@@ -72,25 +75,25 @@ class AtifAgent(_RelayAtifModel):
     extra: dict[str, Any] | None = None
 
 
-class AtifToolCall(_RelayAtifModel):
+class AtifToolCall(_AtifModel):
     tool_call_id: str
     function_name: str
     arguments: dict[str, Any]
     extra: dict[str, Any] | None = None
 
 
-class AtifObservationResult(_RelayAtifModel):
+class AtifObservationResult(_AtifModel):
     source_call_id: str | None = None
     content: AtifContent | None = None
     subagent_trajectory_ref: list[dict[str, Any]] | None = None
     extra: dict[str, Any] | None = None
 
 
-class AtifObservation(_RelayAtifModel):
+class AtifObservation(_AtifModel):
     results: list[AtifObservationResult]
 
 
-class AtifStepMetrics(_RelayAtifModel):
+class AtifStepMetrics(_AtifModel):
     prompt_tokens: int | None = Field(default=None, ge=0, strict=True)
     completion_tokens: int | None = Field(default=None, ge=0, strict=True)
     cached_tokens: int | None = Field(default=None, ge=0, strict=True)
@@ -123,7 +126,7 @@ class AtifStepMetrics(_RelayAtifModel):
         return value
 
 
-class AtifFinalMetrics(_RelayAtifModel):
+class AtifFinalMetrics(_AtifModel):
     total_prompt_tokens: int | None = Field(default=None, ge=0, strict=True)
     total_completion_tokens: int | None = Field(default=None, ge=0, strict=True)
     total_cached_tokens: int | None = Field(default=None, ge=0, strict=True)
@@ -132,7 +135,7 @@ class AtifFinalMetrics(_RelayAtifModel):
     extra: dict[str, Any] | None = None
 
 
-class AtifStep(_RelayAtifModel):
+class AtifStep(_AtifModel):
     step_id: int = Field(ge=1, strict=True)
     source: Literal["system", "user", "agent"]
     message: AtifContent
@@ -181,8 +184,8 @@ class AtifStep(_RelayAtifModel):
         return self
 
 
-class AtifTrajectoryV1_7(_RelayAtifModel):
-    """The supported, version-gated subset of Relay-exported ATIF v1.7."""
+class AtifTrajectoryV1_7(_AtifModel):
+    """The version-gated ATIF v1.7 subset supported by Gym's adapters."""
 
     schema_version: str
     session_id: str | None = None
