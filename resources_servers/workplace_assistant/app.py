@@ -26,6 +26,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY
+from resources_servers.workplace_assistant.task_data import TaskData
 from resources_servers.workplace_assistant.utils import get_tools, is_correct
 
 
@@ -41,11 +42,8 @@ class WorkbenchResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
-class WorkbenchVerifyRequest(BaseVerifyRequest):
-    ground_truth: list[Dict[str, str]] | str
-    id: int
-    category: str
-    environment_name: str
+class WorkbenchVerifyRequest(TaskData, BaseVerifyRequest):
+    pass
 
 
 class WorkbenchVerifyResponse(BaseVerifyResponse):

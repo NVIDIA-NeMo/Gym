@@ -14,10 +14,10 @@
 # limitations under the License.
 import json
 import math
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from fastapi import FastAPI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -25,6 +25,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from resources_servers.circle_click.task_data import TaskData
 
 
 class CircleClickConfig(BaseResourcesServerConfig):
@@ -41,9 +42,8 @@ class ClickResponse(BaseModel):
     y: Any
 
 
-class CircleClickVerifyRequest(BaseVerifyRequest):
-    circles: List[Dict[str, Any]] = Field(default_factory=list)
-    target_color: str = ""
+class CircleClickVerifyRequest(TaskData, BaseVerifyRequest):
+    pass
 
 
 class CircleClickVerifyResponse(BaseVerifyResponse):

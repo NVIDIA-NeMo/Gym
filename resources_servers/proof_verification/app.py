@@ -28,6 +28,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import get_response_json
+from resources_servers.proof_verification.task_data import TaskData
 
 
 LOG = logging.getLogger(__name__)
@@ -166,11 +167,8 @@ class ProofVerificationResourcesServerConfig(BaseResourcesServerConfig):
     assert_think_end: bool = False
 
 
-class ProofVerificationVerifyRequest(BaseVerifyRequest):
-    problem: str = ""
-    proof: str = ""
-    ground_truth_judgement: str
-    ground_truth_verify_score: float
+class ProofVerificationVerifyRequest(TaskData, BaseVerifyRequest):
+    pass
 
 
 class ProofVerificationVerifyResponse(BaseVerifyResponse):

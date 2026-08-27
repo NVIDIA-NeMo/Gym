@@ -42,6 +42,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from resources_servers.swe_pivot.task_data import TaskData
 
 
 logger = logging.getLogger(__name__)
@@ -485,13 +486,8 @@ class SwePivotResourcesServerConfig(BaseResourcesServerConfig):
     diff_size_alpha: float = 0.1  # Max penalty for large edits
 
 
-class SwePivotRunRequest(BaseRunRequest):
+class SwePivotRunRequest(TaskData, BaseRunRequest):
     model_config = ConfigDict(extra="allow")
-
-    uuid: Optional[str | int] = None
-    expected_answer: Optional[str] = None
-    expected_action: Optional[dict[str, Any]] = None
-    metadata: Optional[dict[str, Any]] = None
 
 
 class SwePivotVerifyRequest(SwePivotRunRequest, BaseVerifyRequest):

@@ -56,6 +56,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from resources_servers.omniscience.task_data import TaskData
 
 
 # ---------------------------------------------------------------------------
@@ -152,12 +153,10 @@ class OmniscienceConfig(BaseResourcesServerConfig):
     )
 
 
-class OmniscienceRunRequest(BaseRunRequest):
+class OmniscienceRunRequest(TaskData, BaseRunRequest):
     model_config = ConfigDict(extra="allow")
 
     id: Optional[Union[int, str]] = None
-    domain: Optional[str] = None
-    topic: Optional[str] = None
     question: Optional[str] = None
     expected_answer: Optional[str] = None
 

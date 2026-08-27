@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import re
-from typing import Any, Dict, List, Optional
+from typing import Optional
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -21,15 +21,15 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from resources_servers.circle_count.task_data import TaskData
 
 
 class CircleCountConfig(BaseResourcesServerConfig):
     pass
 
 
-class CircleCountVerifyRequest(BaseVerifyRequest):
-    circles: List[Dict[str, Any]] = []
-    target_color: str = ""
+class CircleCountVerifyRequest(TaskData, BaseVerifyRequest):
+    pass
 
 
 class CircleCountVerifyResponse(BaseVerifyResponse):

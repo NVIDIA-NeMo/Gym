@@ -112,6 +112,7 @@ from nemo_gym.judge import judge_failsafe
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.server_utils import SESSION_ID_KEY
+from resources_servers.litmus_agent.task_data import TaskData
 
 
 # ---------------------------------------------------------------------------
@@ -294,24 +295,18 @@ class LitmusAgentConfig(BaseResourcesServerConfig):
 # ---------------------------------------------------------------------------
 
 
-class LitmusAgentRunRequest(BaseRunRequest):
+class LitmusAgentRunRequest(TaskData, BaseRunRequest):
     # extra="allow": domain-context fields (source_id, smiles, method, tier,
     # provenance, ...) pass through validated-but-untouched and are echoed back.
     model_config = ConfigDict(extra="allow")
 
-    expected_answer: Union[str, float, int]
     # Selects how the answer is parsed. Optional so legacy rows carrying only
     # ``property_type`` still resolve via _PROPERTY_TYPE_TO_ANSWER_TYPE.
-    answer_type: Optional[str] = None
     # Preferred parser: a regex string carried directly on the row (exactly one
     # capture group). When present it wins over ``answer_format``; see
     # extract_predicted_value for the full resolution order.
-    output_regex: Optional[str] = None
-    answer_format: Optional[str] = None
-    use_box_format: bool = False
     # Per-row reward-rule override: {"rule": <name>, **params}. When absent, the
     # default rule for the resolved answer_type (_DEFAULT_RULE) applies.
-    match: Optional[Dict[str, Any]] = None
 
 
 class LitmusAgentVerifyRequest(LitmusAgentRunRequest, BaseVerifyRequest):
@@ -815,7 +810,11 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
             await self._cleanup_session(request.session.get(SESSION_ID_KEY))
 
     async def verify(self, body: LitmusAgentVerifyRequest) -> LitmusAgentVerifyResponse:
-        extra = body.model_extra or {}
+        # property_type is a typed field now (task_data.py), so it no longer lands in
+        # model_extra; the legacy resolution path below still expects it in this dict.
+        extra = dict(body.model_extra or {})
+        if body.property_type is not None:
+            extra.setdefault("property_type", body.property_type)
         answer_type, parsing_answer_type, effective_match = _resolve_verification_policy(
             body.answer_type,
             extra,

@@ -47,6 +47,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyRequest,
     SimpleResourcesServer,
 )
+from resources_servers.example_tool_call_multireward.task_data import TaskData
 
 
 class ToolCallMultiRewardResourcesServerConfig(BaseResourcesServerConfig):
@@ -62,10 +63,10 @@ class GetWeatherResponse(BaseModel):
     weather_description: str
 
 
-class ToolCallMultiRewardVerifyRequest(BaseVerifyRequest):
+class ToolCallMultiRewardVerifyRequest(TaskData, BaseVerifyRequest):
+    pass
     # The single tool call the model is expected to make, e.g.
     # {"name": "get_weather", "arguments": {"city": "San Francisco"}}.
-    expected_call: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ToolCallMultiRewardVerifyResponse(BaseMultiRewardVerifyResponse):

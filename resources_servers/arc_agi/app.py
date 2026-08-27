@@ -25,17 +25,15 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from resources_servers.arc_agi.task_data import TaskData
 
 
 class ARCAGIResourcesServerConfig(BaseResourcesServerConfig):
     pass
 
 
-class ARCAGIRunRequest(BaseRunRequest):
-    train: List[dict] = []
-    test_input: List[List[int]] = []
-    expected_output: List[List[int]] = []
-    task_id: Optional[str] = None
+class ARCAGIRunRequest(TaskData, BaseRunRequest):
+    pass
 
 
 class ARCAGIVerifyRequest(ARCAGIRunRequest, BaseVerifyRequest):
