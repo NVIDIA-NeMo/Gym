@@ -36,6 +36,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeError, call_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -275,7 +276,6 @@ class TextToSqlResourcesServer(SimpleResourcesServer):
                 failure_reason = FailureCode.NO_SQL_EXTRACTED
                 reward = 0.0
             else:
-                # Run LLM judge evaluation
                 first_equal, first_eval = await self._generate_judge_evaluation(
                     sql_prompt=sql_prompt,
                     sql_context=sql_context,
@@ -312,6 +312,8 @@ class TextToSqlResourcesServer(SimpleResourcesServer):
                     failure_reason = FailureCode.JUDGE_EVALUATION_FAILED
                     reward = 0.0
 
+        except JudgeError:
+            raise
         except Exception as e:
             failure_reason = FailureCode.UNKNOWN_ERROR
             reward = 0.0
@@ -323,7 +325,7 @@ class TextToSqlResourcesServer(SimpleResourcesServer):
         payload.pop("sql_context", None)
         payload.pop("sql_prompt", None)
 
-        return TextToSqlVerifyResponse(
+        response = TextToSqlVerifyResponse(
             **payload,
             reward=reward,
             sql=expected_sql,
@@ -336,6 +338,7 @@ class TextToSqlResourcesServer(SimpleResourcesServer):
             failure_reason=failure_reason,
             judge_evaluations=judge_evaluations,
         )
+        return response
 
     async def _generate_judge_evaluation(
         self,
@@ -370,20 +373,14 @@ class TextToSqlResourcesServer(SimpleResourcesServer):
         ctx = self._judge_endpoint_max_concurrency or nullcontext()
         async with ctx:
             try:
-                response = await self.server_client.post(
+                judge_response = await call_judge(
+                    self.server_client,
                     server_name=cfg.judge_model_server.name,
                     url_path="/v1/responses",
                     json=responses_create_params,
+                    response_model=NeMoGymResponse,
                 )
 
-                judge_response = NeMoGymResponse.model_validate(await response.json())
-
-            except asyncio.TimeoutError:
-                print(
-                    "DEBUG: TextToSqlResourcesServer: Judge model server timeout",
-                    flush=True,
-                )
-                raise RuntimeError("Judge model server timeout")
             except Exception as e:
                 print(
                     f"DEBUG: TextToSqlResourcesServer: judge model server HTTP POST error: {type(e).__name__} {e}",

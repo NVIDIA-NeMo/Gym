@@ -15,52 +15,95 @@
 import asyncio
 import glob as glob_module
 import json
+import logging
 import os
 import warnings
 from asyncio import Future, Semaphore
-from collections import Counter
+from collections import Counter, defaultdict
 from contextlib import nullcontext
-from copy import deepcopy
+from datetime import timedelta
+from difflib import get_close_matches
 from itertools import repeat
 from pathlib import Path
+from time import time
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, Field, field_validator, model_validator
 from tqdm.asyncio import tqdm
-from wandb import Table
 
-from nemo_gym import PARENT_DIR
+from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.base_responses_api_model import (
     clear_model_call_captures_for_rollouts,
     merge_model_call_capture_into_record,
     model_call_capture_dirs_from_config,
 )
-from nemo_gym.config_types import BaseNeMoGymCLIConfig, BaseServerConfig, ConfigError, ConfigPathNotFoundError
+from nemo_gym.config_types import (
+    BaseNeMoGymCLIConfig,
+    BaseServerConfig,
+    ConfigError,
+    ConfigPathNotFoundError,
+    UploadRolloutsConfigMixin,
+)
+from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
+    ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
+    TASK_SOURCE_KEY_NAME,
+    agents_by_resources_server,
     get_global_config_dict,
-    get_wandb_run,
 )
+from nemo_gym.path_utils import failures_path_for
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
+from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+from nemo_gym.rollout_observability import (
+    AgentInvocation,
+    AgentObservationBundle,
+    ObservationGap,
+    ToolCallObservation,
+    TrajectoryModelCall,
+    TrajectoryRecord,
+    TrajectoryTokenStats,
+    TrajectoryToolCall,
+    TrajectoryTurn,
+)
+
+
+_failures_path_for = failures_path_for  # Backwards-compatible alias
 from nemo_gym.server_utils import (
-    GlobalAIOHTTPAsyncClientConfig,
     ServerClient,
     get_response_json,
     is_global_aiohttp_client_request_debug_enabled,
-    is_global_aiohttp_client_setup,
     raise_for_status,
-    set_global_aiohttp_client,
+)
+from nemo_gym.server_utils import (
+    setup_server_client as setup_server_client_utils,
 )
 from nemo_gym.skills import SkillsConfig, load_skill_directory
+from nemo_gym.token_id_capture import (
+    TokenCaptureStore,
+    TokenIdCaptureConfig,
+    clear_token_captures_for_rollouts,
+    installed_token_source,
+    token_id_capture_dirs_from_config,
+)
+from nemo_gym.token_id_capture.config import token_id_capture_enabled_for_agent
+from nemo_gym.token_id_capture.delivery import (
+    MASK_SAMPLE_KEY,
+    capture_build_can_retire,
+    finalize_rollout_token_capture,
+    retire_rollout_token_capture,
+)
 
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Failure-routing sentinels (set by agent servers, read by the dispatcher).
@@ -91,13 +134,253 @@ from nemo_gym.skills import SkillsConfig, load_skill_directory
 NG_FAILURE_CLASS_KEY = "_ng_failure_class"
 NG_NO_PERSIST_KEY = "_ng_no_persist"
 NG_TERMINAL_KEY = "_ng_failure_terminal"
-NG_SOFT_FAILED_KEY = "_ng_soft_failed"
-
-_TRANSIENT_RUN_STATUSES = (429, 503, 504)
-_MAX_TRANSIENT_RUN_RETRIES = 3
-_TRANSIENT_RUN_RETRY_DELAY_SECONDS = 5.0
+NG_TRAJECTORY_KEY = "ng_trajectory"
+_MODEL_CALL_PAYLOAD_KEYS = ("request", "response", "request_raw", "response_raw")
 
 _DEFAULT_MAX_ROLLOUT_ATTEMPTS = 3
+
+
+def _nonnegative_int(value: Any) -> Optional[int]:
+    return value if type(value) is int and value >= 0 else None
+
+
+def _has_observation_gap(result: dict[str, Any], code: str) -> bool:
+    for key in (NG_TRAJECTORY_KEY, "ng_agent_observations"):
+        observations = result.get(key)
+        gaps = observations.get("gaps") if isinstance(observations, dict) else None
+        if isinstance(gaps, list) and any(isinstance(gap, dict) and gap.get("code") == code for gap in gaps):
+            return True
+    return False
+
+
+def _trajectory_identity(row: dict[str, Any]) -> tuple[str, str]:
+    task_id = next(
+        (str(row[key]) for key in ("task_id", "problem_id", "instance_id") if row.get(key) is not None),
+        str(row[TASK_INDEX_KEY_NAME]),
+    )
+    rollout_id = maybe_rollout_id_from_run_body(row) or f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
+    return task_id, rollout_id
+
+
+def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> TrajectoryRecord:
+    task_id, rollout_id = _trajectory_identity(row)
+    gaps: list[ObservationGap] = []
+    invocations: list[AgentInvocation] = []
+    turns: list[TrajectoryTurn] = []
+    tools: list[TrajectoryToolCall] = []
+    model_calls: list[TrajectoryModelCall] = []
+
+    raw_trajectory = result.get(NG_TRAJECTORY_KEY)
+    if isinstance(raw_trajectory, dict):
+        try:
+            trajectory = TrajectoryRecord.model_validate(raw_trajectory)
+            mismatches = [
+                field
+                for field, producer, canonical in (
+                    ("task_id", trajectory.task_id, task_id),
+                    ("rollout_id", trajectory.rollout_id, rollout_id),
+                )
+                if producer != canonical
+            ]
+            if mismatches:
+                gaps.append(ObservationGap(code="producer_trajectory_identity_mismatch", detail=",".join(mismatches)))
+                turns = [
+                    turn.model_copy(update={"task_id": task_id, "rollout_id": rollout_id}) for turn in trajectory.turns
+                ]
+            else:
+                turns = trajectory.turns
+            gaps.extend(trajectory.gaps)
+            invocations = trajectory.invocations
+            tools = trajectory.tool_calls
+            model_calls = trajectory.model_calls
+        except Exception as exc:
+            gaps.append(ObservationGap(code="producer_trajectory_invalid", detail=type(exc).__name__))
+
+    raw_observations = result.get("ng_agent_observations")
+    if raw_observations is not None:
+        try:
+            observations = AgentObservationBundle.model_validate(raw_observations)
+            gaps.extend(observations.gaps)
+            observed_invocations = [record for record in observations.records if isinstance(record, AgentInvocation)]
+            producer_invocation_ids = {record.invocation_id for record in invocations}
+            invocations.extend(
+                record for record in observed_invocations if record.invocation_id not in producer_invocation_ids
+            )
+            observed_tools = [record for record in observations.records if isinstance(record, ToolCallObservation)]
+            if observed_tools:
+                outputs = {
+                    (invocation.invocation_id, item.call_id): item.output
+                    for invocation in invocations
+                    for item in invocation.conversation
+                    if getattr(item, "type", None) == "function_call_output"
+                }
+                positions = {(tool.invocation_id, tool.tool_call_id): index for index, tool in enumerate(tools)}
+                for observed in observed_tools:
+                    key = (observed.invocation_id, observed.tool_call_id)
+                    position = positions.get(key)
+                    existing = tools[position] if position is not None else None
+                    merged = existing.model_dump(mode="json") if existing is not None else {}
+                    update = observed.model_dump(mode="json", exclude_none=True)
+                    if existing is not None and observed.status == "unknown" and existing.status != "unknown":
+                        update.pop("status", None)
+                    merged.update(update)
+                    if key in outputs:
+                        merged["output"] = outputs[key]
+                    projected = TrajectoryToolCall.model_validate(merged)
+                    if position is None:
+                        positions[key] = len(tools)
+                        tools.append(projected)
+                    else:
+                        tools[position] = projected
+        except Exception as exc:
+            gaps.append(ObservationGap(code="agent_observations_invalid", detail=type(exc).__name__))
+
+    turns.sort(key=lambda turn: (turn.timestamp, turn.invocation_id, turn.turn_no))
+
+    capture = result.get("ng_model_call_capture")
+    capture = capture if isinstance(capture, dict) else {}
+    raw_calls = capture.get("calls") or []
+    model_call_positions = {
+        call.model_call_id: index for index, call in enumerate(model_calls) if call.model_call_id is not None
+    }
+    for raw_call in raw_calls:
+        if not isinstance(raw_call, dict):
+            continue
+        model_call_id = raw_call.get("model_call_id")
+        metadata = {
+            key: raw_call[key]
+            for key in (
+                "response_id",
+                "model_ref",
+                "model",
+                "dialect",
+                "status_code",
+                "response_status",
+                "finish_reason",
+                "error_category",
+                "latency_ttft_ms",
+            )
+            if raw_call.get(key) is not None
+        }
+        response = raw_call.get("response")
+        if isinstance(response, dict) and isinstance(response.get("status"), str):
+            metadata.setdefault("response_status", response["status"])
+        projected = TrajectoryModelCall(
+            model_call_id=model_call_id,
+            started_at=raw_call.get("started_at"),
+            completed_at=raw_call.get("completed_at"),
+            duration_ms=raw_call.get("latency_total_ms"),
+            request=raw_call.get("request") if raw_call.get("request") is not None else raw_call.get("request_raw"),
+            response=raw_call.get("response")
+            if raw_call.get("response") is not None
+            else raw_call.get("response_raw"),
+            response_metadata=metadata,
+            token_stats=TrajectoryTokenStats(
+                prompt_tokens=_nonnegative_int(raw_call.get("tokens_in")),
+                completion_tokens=_nonnegative_int(raw_call.get("tokens_out")),
+                reasoning_tokens=_nonnegative_int(raw_call.get("tokens_reasoning")),
+                total_tokens=_nonnegative_int(raw_call.get("tokens_total")),
+                cached_tokens=_nonnegative_int(raw_call.get("cached_tokens")),
+            ),
+        )
+        position = model_call_positions.pop(model_call_id, None) if model_call_id is not None else None
+        if position is None:
+            model_calls.append(projected)
+        else:
+            merged = model_calls[position].model_dump(mode="json")
+            update = projected.model_dump(mode="json", exclude_none=True)
+            for key in ("response_metadata", "token_stats"):
+                merged[key].update(update.pop(key))
+            merged.update(update)
+            projected = TrajectoryModelCall.model_validate(merged)
+            model_calls[position] = projected
+
+    for raw_gap in capture.get("gaps") or []:
+        if isinstance(raw_gap, dict):
+            try:
+                gaps.append(ObservationGap.model_validate(raw_gap))
+            except Exception:
+                gaps.append(ObservationGap(code="model_call_capture_gap_invalid"))
+    if not model_calls:
+        gaps.append(ObservationGap(code="model_calls_unavailable"))
+    if not turns:
+        gaps.append(ObservationGap(code="turns_unavailable"))
+    if not any(invocation.conversation for invocation in invocations):
+        gaps.append(ObservationGap(code="conversation_unavailable"))
+
+    return TrajectoryRecord(
+        task_id=task_id,
+        rollout_id=rollout_id,
+        invocations=invocations,
+        turns=turns,
+        model_calls=model_calls,
+        tool_calls=tools,
+        gaps=list({(gap.code, gap.invocation_id, gap.detail): gap for gap in gaps}.values()),
+    )
+
+
+def _strip_capture_payloads(result: dict[str, Any]) -> None:
+    capture = result.get("ng_model_call_capture")
+    calls = capture.get("calls") if isinstance(capture, dict) else None
+    for call in calls if isinstance(calls, list) else []:
+        if isinstance(call, dict):
+            for key in _MODEL_CALL_PAYLOAD_KEYS:
+                call.pop(key, None)
+
+
+def _rollout_for_export(result: dict[str, Any]) -> dict[str, Any]:
+    """Return an exporter view without the complete trajectory or raw capture payloads."""
+    sanitized = dict(result)
+    sanitized.pop(NG_TRAJECTORY_KEY, None)
+    sanitized.pop("ng_model_call_capture", None)
+    capture = result.get("ng_model_call_capture")
+    if isinstance(capture, dict):
+        sanitized_capture = dict(capture)
+        calls = capture.get("calls")
+        if isinstance(calls, list):
+            sanitized_capture["calls"] = [
+                {key: value for key, value in call.items() if key not in _MODEL_CALL_PAYLOAD_KEYS}
+                for call in calls
+                if isinstance(call, dict)
+            ]
+        else:
+            sanitized_capture.pop("calls", None)
+        sanitized["ng_model_call_capture"] = sanitized_capture
+    return sanitized
+
+
+def _attach_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> None:
+    try:
+        result[NG_TRAJECTORY_KEY] = _build_trajectory_record(row, result).model_dump(mode="json")
+    except Exception as exc:
+        result.pop(NG_TRAJECTORY_KEY, None)
+        logger.warning("Could not project standardized trajectory evidence.", exc_info=True)
+        gap = ObservationGap(code="trajectory_projection_failed", detail=type(exc).__name__).model_dump(
+            mode="json", exclude_none=True
+        )
+        target = result.get("ng_model_call_capture")
+        if not isinstance(target, dict):
+            target = result.get("ng_agent_observations")
+        gap_attached = False
+        if isinstance(target, dict):
+            gaps = target.setdefault("gaps", [])
+            if isinstance(gaps, list):
+                gaps.append(gap)
+                gap_attached = True
+        if not gap_attached:
+            try:
+                task_id, rollout_id = _trajectory_identity(row)
+                result[NG_TRAJECTORY_KEY] = TrajectoryRecord(
+                    task_id=task_id,
+                    rollout_id=rollout_id,
+                    gaps=[ObservationGap.model_validate(gap)],
+                ).model_dump(mode="json")
+            except Exception:
+                logger.warning("Could not retain the trajectory projection failure gap.", exc_info=True)
+    else:
+        # Raw capture payloads remain as a fallback on failure. After success,
+        # ng_trajectory owns them, so remove only the duplicate copies.
+        _strip_capture_payloads(result)
 
 
 def _get_max_rollout_attempts() -> int:
@@ -119,12 +402,13 @@ def _get_max_rollout_attempts() -> int:
         return _DEFAULT_MAX_ROLLOUT_ATTEMPTS
 
 
-def _failures_path_for(output_fpath: Path) -> Path:
-    """Sidecar path used by the dispatcher and ``_load_from_cache``."""
-    return output_fpath.with_name(output_fpath.stem + "_failures.jsonl")
+def _normalize_health_check_ignored_checks(value) -> List[str]:
+    from nemo_gym.rollout_health import normalize_ignored_checks
+
+    return list(normalize_ignored_checks(value))
 
 
-class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
+class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
     num_samples_in_parallel: Optional[int] = Field(
         default=None, description="Limit the number of concurrent samples running at once."
@@ -132,10 +416,6 @@ class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
     responses_create_params: Dict[str, Any] = Field(
         default_factory=dict,
         description="Overrides for the responses_create_params e.g. temperature, max_output_tokens, etc.",
-    )
-    upload_rollouts_to_wandb: bool = Field(
-        default=True,
-        description="Upload the rollouts to W&B. Sometimes this should be off because the rollouts are massive. Default: True",
     )
     disable_aggregation: bool = Field(
         default=False,
@@ -145,6 +425,25 @@ class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
             "afterward by `gym eval aggregate`."
         ),
     )
+    disable_health_check: bool = Field(
+        default=False,
+        description="Skip post-aggregation rollout quality verification and report writing.",
+    )
+    health_check_workers: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Number of rollout-health worker processes (defaults to min(cpus, 8)).",
+    )
+    health_check_ignored_checks: List[str] = Field(
+        default_factory=list,
+        description="Health-check IDs to exclude from execution and verdict derivation.",
+    )
+
+    @field_validator("health_check_ignored_checks", mode="before")
+    @classmethod
+    def _validate_health_check_ignored_checks(cls, value):
+        return _normalize_health_check_ignored_checks(value)
+
     rollout_collection_driver: Optional[str] = Field(
         default=None,
         description=(
@@ -153,14 +452,6 @@ class SharedRolloutCollectionConfig(BaseNeMoGymCLIConfig):
             "multi-pass run) while still producing the standard rollout + aggregate-metrics "
             "artifacts. The function is awaited with (rollout_collection_config, global_config_dict). "
             "When unset, the standard single-pass collection runs."
-        ),
-    )
-    soft_fail_run_errors: bool = Field(
-        default=False,
-        description=(
-            "Persist agent /run 5xx errors as reward=0 rollout rows instead of aborting the whole "
-            "collection. Transport-level failures (no HTTP response) still raise so resume can retry "
-            "them instead of scoring them."
         ),
     )
 
@@ -180,6 +471,21 @@ class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
 
     split: Union[Literal["train"], Literal["validation"], Literal["benchmark"]]
     reuse_existing_data_preparation: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_input_jsonl_fpath(cls, data):
+        # This config has no input_jsonl_fpath field, so pydantic would silently drop it and
+        # e2e collection would overwrite it with the prepared split path — the user's file
+        # would be ignored without any indication.
+        if isinstance(data, dict) and "input_jsonl_fpath" in data:
+            raise ConfigError(
+                "`input_jsonl_fpath` (-i/--input) is not supported when serving end-to-end: the input is "
+                "always the prepared dataset for the requested split. Either add --no-serve to collect "
+                "rollouts from your own input file against already-running servers, or drop -i/--input "
+                "to use the prepared data."
+            )
+        return data
 
 
 class RolloutCollectionConfig(SharedRolloutCollectionConfig):
@@ -201,7 +507,29 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
 
     agent_name: Optional[str] = Field(
         default=None,
-        description="The agent to collect rollouts from. If not specified, uses agent_ref from each data row.",
+        description=(
+            "The agent to collect rollouts from. Routes every row to this agent, overriding any "
+            "agent_ref already present in the data (a warning lists overridden values). "
+            "Shorthand for agent_map={_default: <agent_name>}."
+        ),
+    )
+    agent_map: Optional[Dict[str, str]] = Field(
+        default=None,
+        description=(
+            "Explicit per-agent re-routing, keyed by the agent_ref.name or task_source found in "
+            "the data (e.g. {old_agent: new_agent}). The special key '_default' applies to every "
+            "row with no specific entry, including rows with no agent_ref at all. "
+            "Precedence: agent_map[<row value>] > agent_map._default > row agent_ref > task_source resolution."
+        ),
+    )
+    fan_out: Optional[Dict[str, List[str]]] = Field(
+        default=None,
+        description=(
+            "Run each matching row once per listed agent (cross-product), keyed by the row's "
+            "agent_ref.name or task_source (e.g. {genrm_compare_resources_server: [agent_a, agent_b]}). "
+            "Each copy gets its own rollout index; outputs are tagged with the agent that produced them, "
+            "so per-agent metrics separate naturally. Composes with num_repeats (repeats apply per agent)."
+        ),
     )
     input_jsonl_fpath: str = Field(
         description="The input data source to use to collect rollouts, in the form of a file path to a jsonl file."
@@ -213,9 +541,11 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         default=1,
         description=(
             "How many times to repeat each example. Either an int (applied to every row) or a "
-            "dict keyed by agent_ref.name (e.g. {simple_agent: 32, swe_agent: 1}). In dict form, "
-            "every agent that appears in the input rows must have an entry, unless a special "
-            '"_default" key is provided as a fallback. Useful for mean@k.'
+            "dict keyed by the dispatched agent name or by the row's own routing key (its "
+            "agent_ref.name or task_source as written in the data, before any agent_map/fan_out "
+            "re-route); the dispatched agent wins when both have entries. In dict form, every row "
+            "must match an entry, unless a special '_default' key is provided as a fallback. "
+            "Useful for mean@k."
         ),
     )
     num_repeats_add_seed: bool = Field(
@@ -243,6 +573,20 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         return 1 if v is None else v
 
     @model_validator(mode="after")
+    def _fold_agent_name_into_agent_map(self) -> "RolloutCollectionConfig":
+        # agent_name is sugar for agent_map._default; fold it so downstream code has one knob.
+        if self.agent_name is None:
+            return self
+        existing_default = (self.agent_map or {}).get("_default")
+        if existing_default is not None and existing_default != self.agent_name:
+            raise ValueError(
+                f"agent_name={self.agent_name!r} conflicts with agent_map._default={existing_default!r}. "
+                "Set only one of them."
+            )
+        self.agent_map = {**(self.agent_map or {}), "_default": self.agent_name}
+        return self
+
+    @model_validator(mode="after")
     def _validate_num_repeats(self) -> "RolloutCollectionConfig":
         nr = self.num_repeats
         if isinstance(nr, int):
@@ -252,6 +596,22 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
             bad = {name: n for name, n in nr.items() if n < 1}
             if bad:
                 raise ValueError(f"num_repeats dict values must be >= 1, got {bad}")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_fan_out(self) -> "RolloutCollectionConfig":
+        for key, agents in (self.fan_out or {}).items():
+            if not agents:
+                raise ValueError(
+                    f"fan_out[{key!r}] is an empty list, which would silently drop every matching row "
+                    "(zero rollouts collected). Remove the key, or list at least one agent."
+                )
+            duplicates = sorted({a for a in agents if list(agents).count(a) > 1})
+            if duplicates:
+                raise ValueError(
+                    f"fan_out[{key!r}] lists the same agent more than once: {duplicates}. Each listed "
+                    "agent already runs every matching row; use num_repeats for repetition."
+                )
         return self
 
     @property
@@ -270,35 +630,6 @@ def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in summary.items() if v is not None}
 
 
-def _make_soft_failed_run_result(row: Dict[str, Any], exc: BaseException, status: int) -> Dict[str, Any]:
-    result = {
-        k: deepcopy(v)
-        for k, v in row.items()
-        if k not in (TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, AGENT_REF_KEY_NAME)
-    }
-    error_message = str(exc) or repr(exc)
-    result.update(
-        {
-            "reward": 0.0,
-            NG_SOFT_FAILED_KEY: True,
-            "_ng_soft_failure_stage": "agent_run",
-            "_ng_soft_failure_type": type(exc).__name__,
-            "_ng_soft_failure_message": error_message,
-            "_ng_soft_failure_http_status": status,
-            "response": {
-                "output": [],
-                "usage": None,
-                "error": {
-                    "type": type(exc).__name__,
-                    "message": error_message,
-                    "http_status": status,
-                },
-            },
-        }
-    )
-    return result
-
-
 class RolloutCollectionHelper(BaseModel):
     def _preprocess_rows_from_config(self, config: RolloutCollectionConfig) -> List[Dict]:
         range_iterator = repeat(0)
@@ -306,13 +637,81 @@ class RolloutCollectionHelper(BaseModel):
             range_iterator = range(config.limit)
             print(f"Limiting the number of rows to {config.limit}")
 
+        # Load prompt config if specified
+        prompt_cfg = None
+        if config.prompt_config:
+            prompt_cfg = load_prompt_config(config.prompt_config)
+            print(f"Using prompt config: {config.prompt_config}")
+
+        # Search NEMO_GYM_EXTRA_ROOTS, cwd, then the install root.
+        _input_path = _resolve_under_cwd_or_install(config.input_jsonl_fpath)
+        if not _input_path.exists():
+            raise ConfigPathNotFoundError(
+                f"Input file not found: '{config.input_jsonl_fpath}' (--input). Check the path is spelled correctly."
+            )
+        with open(_input_path) as input_file:
+            rows_iterator: Iterator[str] = tqdm(input_file, desc="Reading rows")
+            rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
+            raw_rows = [
+                (row_idx, row_str, loads_jsonl_line(row_str, _input_path, line_no))
+                for line_no, (row_idx, row_str) in enumerate(rows_iterator, 1)
+            ]
+
+        # Validate and apply prompt config before per-row processing
+        if prompt_cfg is not None:
+            validate_prompt_compatibility([row for _, _, row in raw_rows], prompt_cfg)
+            raw_rows = [(idx, s, apply_prompt_to_row(row, prompt_cfg)) for idx, s, row in raw_rows]
+
+        return RolloutCollectionHelper._preprocess_raw_rows(raw_rows, config)
+
+    def preprocess_examples(
+        self,
+        examples: List[Dict],
+        *,
+        agent_map: Optional[Dict[str, str]] = None,
+        fan_out: Optional[Dict[str, List[str]]] = None,
+        num_repeats: Union[int, Dict[str, int]] = 1,
+        num_repeats_add_seed: bool = False,
+        global_config_dict: Optional[DictConfig] = None,
+    ) -> List[Dict]:
+        """Apply run-level routing and repetition to caller-held rows.
+
+        Public entry point for direct ``run_examples`` callers (e.g. trainer integrations that
+        drive dispatch themselves): ``run_examples`` resolves task_sources and validates agent
+        names, but ``agent_map``, ``fan_out`` and ``num_repeats`` are applied only during
+        preprocessing. Call this first, then pass the returned rows to ``run_examples``.
+
+        Pass ``global_config_dict`` (the merged config) to also resolve task_source-only rows to
+        their agents here; leave it None to defer that to ``run_examples``, which does it against
+        the head server's config. Input rows are not mutated; the expanded, stamped copies are
+        returned.
+        """
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath="<in-memory>",
+            output_jsonl_fpath="<in-memory>",
+            agent_map=agent_map,
+            fan_out=fan_out,
+            num_repeats=num_repeats,
+            num_repeats_add_seed=num_repeats_add_seed,
+        )
+        raw_rows = [
+            (idx, orjson.dumps(row, option=orjson.OPT_SORT_KEYS).decode(), row.copy())
+            for idx, row in enumerate(examples)
+        ]
+        rows = self._preprocess_raw_rows(raw_rows, config)
+        if global_config_dict is not None:
+            self.resolve_task_sources(rows, global_config_dict)
+        return rows
+
+    @staticmethod
+    def _preprocess_raw_rows(raw_rows: List[Tuple[int, str, Dict]], config: RolloutCollectionConfig) -> List[Dict]:
         if config.num_repeats_add_seed:
             print(
                 "Adding unique `seed` values to each input via metadata.extra_body (only honored by vLLM model servers)"
             )
 
-        if config.agent_name:
-            print(f"Using `{config.agent_name}` for rows that do not already have an agent ref")
+        if config.agent_map:
+            print(f"Routing rows via agent_map {config.agent_map}")
 
         if config.responses_create_params:
             print(f"Overriding responses_create_params fields with {config.responses_create_params}")
@@ -334,12 +733,6 @@ class RolloutCollectionHelper(BaseModel):
             print(f"Per-agent num_repeats: {dict(config.num_repeats)}")
         agents_seen: set[str] = set()
 
-        # Load prompt config if specified
-        prompt_cfg = None
-        if config.prompt_config:
-            prompt_cfg = load_prompt_config(config.prompt_config)
-            print(f"Using prompt config: {config.prompt_config}")
-
         # Resolve skills once for the whole run (hash is content-derived, computed at startup).
         skills_ref_dict = None
         if config.skills:
@@ -351,44 +744,50 @@ class RolloutCollectionHelper(BaseModel):
                 f"{', '.join(s.name for s in skills_ref.skills)})"
             )
 
-        _input_path = Path(config.input_jsonl_fpath)
-        if not _input_path.is_absolute():
-            _cwd_path = Path.cwd() / _input_path
-            _input_path = _cwd_path if _cwd_path.exists() else PARENT_DIR / _input_path
-        if not _input_path.exists():
-            raise ConfigPathNotFoundError(
-                f"Input file not found: '{config.input_jsonl_fpath}' (--input). Check the path is spelled correctly."
-            )
-        with open(_input_path) as input_file:
-            rows_iterator: Iterator[str] = tqdm(input_file, desc="Reading rows")
-            rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
-            raw_rows = [
-                (row_idx, row_str, loads_jsonl_line(row_str, _input_path, line_no))
-                for line_no, (row_idx, row_str) in enumerate(rows_iterator, 1)
-            ]
-
-        # Validate and apply prompt config before per-row processing
-        if prompt_cfg is not None:
-            validate_prompt_compatibility([row for _, _, row in raw_rows], prompt_cfg)
-            raw_rows = [(idx, s, apply_prompt_to_row(row, prompt_cfg)) for idx, s, row in raw_rows]
-
         # For gym eval profile to match rollouts to tasks
         row_to_task_idx: Dict[str, int] = dict()
         task_idx_to_rollout_idx: Dict[int, int] = Counter()
         row_idxs_missing_agent_ref: List[int] = []
         agents_missing_from_num_repeats: set[str] = set()
         rows: List[Dict] = []
-        for row_idx, row_str, row in raw_rows:
-            # Resolve agent name. Missing agent_ref is a hard error reported in
-            # bulk after the loop; skip the row immediately so the rest of the
-            # body can assume agent_name is non-None.
-            if config.agent_name:
-                row.setdefault(AGENT_REF_KEY_NAME, {"name": config.agent_name})
+        overridden_agents: set[Tuple[str, str]] = set()
+        for row_idx, row_str, row in tqdm(raw_rows, desc="Preprocessing and repeating rows"):
+            # Routing basis: the name this row routes by — its agent_ref.name when present, else
+            # its task_source (resolved to an agent by resolve_task_sources once the merged config
+            # is in hand). agent_map[<basis>] > agent_map._default > row agent_ref > task_source.
             agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
-            if agent_name is None:
+            basis = agent_name if agent_name is not None else row.get(TASK_SOURCE_KEY_NAME)
+            if config.agent_map:
+                # A row may carry both an agent_ref and a task_source (derived artifacts do);
+                # a map entry for either re-routes it, the agent name taking precedence.
+                mapped = next(
+                    (
+                        config.agent_map[key]
+                        for key in (agent_name, row.get(TASK_SOURCE_KEY_NAME))
+                        if key is not None and key in config.agent_map
+                    ),
+                    None,
+                )
+                if mapped is None:
+                    mapped = config.agent_map.get("_default")
+                if mapped is not None:
+                    if agent_name is not None and agent_name != mapped:
+                        overridden_agents.add((agent_name, mapped))
+                    agent_name = mapped
+                    row[AGENT_REF_KEY_NAME] = {"name": agent_name}
+
+            # Fan-out: run this row once per listed agent (cross-product). Otherwise a single
+            # target — the row's agent when known, else deferred to task_source resolution.
+            targets: List[Optional[str]]
+            if config.fan_out and basis is not None and basis in config.fan_out:
+                targets = list(config.fan_out[basis])
+            elif agent_name is not None:
+                targets = [agent_name]
+            elif row.get(TASK_SOURCE_KEY_NAME) is not None:
+                targets = [None]
+            else:
                 row_idxs_missing_agent_ref.append(row_idx)
                 continue
-            agents_seen.add(agent_name)
 
             # Responses create params
             row[RESPONSES_CREATE_PARAMS_KEY_NAME] = (
@@ -407,42 +806,63 @@ class RolloutCollectionHelper(BaseModel):
             if TASK_INDEX_KEY_NAME not in row:
                 row[TASK_INDEX_KEY_NAME] = row_to_task_idx.setdefault(row_str, len(row_to_task_idx))
 
-            # Resolve num_repeats for this row, batching dict-form misses for
-            # one consolidated raise after the loop.
-            if fixed_num_repeats is not None:
-                row_num_repeats = fixed_num_repeats
-            elif agent_name in per_agent_repeats:
-                row_num_repeats = per_agent_repeats[agent_name]
-            elif default_repeats is not None:
-                row_num_repeats = default_repeats
-            else:
-                agents_missing_from_num_repeats.add(agent_name)
-                continue
+            base_row = row
+            for target in targets:
+                # num_repeats keys match either side of a re-route: the dispatched agent (the
+                # fan-out/agent_map target) or the row's original routing key (its agent_ref.name
+                # or task_source as written in the data). The dispatched agent wins when both have
+                # entries, so `agent_map={source: agent}` composes with `num_repeats={source: k}`.
+                # Dict-form misses batch into one consolidated raise after the loop.
+                repeat_keys = [k for k in dict.fromkeys((target, basis)) if k is not None]
+                agents_seen.update(repeat_keys)
+                if fixed_num_repeats is not None:
+                    row_num_repeats = fixed_num_repeats
+                elif (matched := next((k for k in repeat_keys if k in per_agent_repeats), None)) is not None:
+                    row_num_repeats = per_agent_repeats[matched]
+                elif default_repeats is not None:
+                    row_num_repeats = default_repeats
+                else:
+                    agents_missing_from_num_repeats.add(" / ".join(repeat_keys))
+                    continue
 
-            for _ in range(row_num_repeats):
-                row = deepcopy(row)
+                for _ in range(row_num_repeats):
+                    row = base_row.copy()
+                    # Restamp only when fan-out routes this copy somewhere else; otherwise keep
+                    # the row's agent_ref dict byte-for-byte (it may carry extra fields like type).
+                    if target is not None and (row.get(AGENT_REF_KEY_NAME) or {}).get("name") != target:
+                        row[AGENT_REF_KEY_NAME] = {"name": target}
 
-                # Resolve rollout index
-                row[ROLLOUT_INDEX_KEY_NAME] = task_idx_to_rollout_idx[row[TASK_INDEX_KEY_NAME]]
-                task_idx_to_rollout_idx[row[TASK_INDEX_KEY_NAME]] += 1
+                    # Resolve rollout index
+                    row[ROLLOUT_INDEX_KEY_NAME] = task_idx_to_rollout_idx[row[TASK_INDEX_KEY_NAME]]
+                    task_idx_to_rollout_idx[row[TASK_INDEX_KEY_NAME]] += 1
 
-                if config.num_repeats_add_seed:
-                    metadata = row[RESPONSES_CREATE_PARAMS_KEY_NAME].setdefault("metadata", {})
-                    extra_body = json.loads(metadata.get("extra_body", "{}"))
-                    extra_body["seed"] = row[ROLLOUT_INDEX_KEY_NAME]
-                    metadata["extra_body"] = json.dumps(extra_body)
+                    if config.num_repeats_add_seed:
+                        row[RESPONSES_CREATE_PARAMS_KEY_NAME] = row[RESPONSES_CREATE_PARAMS_KEY_NAME].copy()
+                        metadata = row[RESPONSES_CREATE_PARAMS_KEY_NAME].setdefault("metadata", {})
+                        extra_body = json.loads(metadata.get("extra_body", "{}"))
+                        extra_body["seed"] = row[ROLLOUT_INDEX_KEY_NAME]
+                        metadata["extra_body"] = json.dumps(extra_body)
 
-                rows.append(row)
+                    rows.append(row)
+
+        if overridden_agents:
+            warnings.warn(
+                "agent_map overrode agent_ref values already present in the data: "
+                f"{sorted(overridden_agents)}. Prior to this release, +agent_name only filled rows "
+                "missing an agent_ref; it now re-routes every row.",
+                stacklevel=2,
+            )
 
         if row_idxs_missing_agent_ref:
             raise ValueError(
-                f"No agent specified for rows {row_idxs_missing_agent_ref}. Either provide +agent_name config or include agent_ref in data."
+                f"No agent specified for rows {row_idxs_missing_agent_ref}. Provide +agent_name (or "
+                "+agent_map with a _default entry), or include agent_ref or task_source in the data."
             )
 
         if agents_missing_from_num_repeats:
             raise ValueError(
-                f"num_repeats dict has no entry for agents {sorted(agents_missing_from_num_repeats)} "
-                f"and no '_default' fallback. Listed agents: {sorted(per_agent_repeats)}"
+                f"num_repeats dict has no entry for routing keys {sorted(agents_missing_from_num_repeats)} "
+                f"and no '_default' fallback. Listed keys: {sorted(per_agent_repeats)}"
             )
 
         unknown_agents = set(per_agent_repeats) - agents_seen
@@ -459,9 +879,9 @@ class RolloutCollectionHelper(BaseModel):
         self, config: RolloutCollectionConfig
     ) -> Tuple[List[Dict], List[Dict], List[Dict], List[List[str]]]:
         with config.materialized_jsonl_fpath.open() as f:
-            original_input_rows = list(map(orjson.loads, f))
+            original_input_rows = list(map(orjson.loads, tqdm(f, desc="Reading materialized input rows")))
         with Path(config.output_jsonl_fpath).open("rb") as f:
-            result_strs = [[line.strip()] for line in f]
+            result_strs = [[line.strip()] for line in tqdm(f, desc="Reading existing output rows")]
         results = [orjson.loads(p[0]) for p in result_strs]
 
         get_key = lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
@@ -472,7 +892,7 @@ class RolloutCollectionHelper(BaseModel):
 
         # Sidecar: one row per non-kill_shaped failure attempt. Count attempts
         # per key + flag terminal rows so chain-hop 2 retries the right ones.
-        failures_fpath = _failures_path_for(Path(config.output_jsonl_fpath))
+        failures_fpath = failures_path_for(Path(config.output_jsonl_fpath))
         attempts_by_key: Counter = Counter()
         terminal_keys: set = set()
         if failures_fpath.exists():
@@ -520,6 +940,14 @@ class RolloutCollectionHelper(BaseModel):
 
     async def run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
+        failures_fpath = failures_path_for(output_fpath)
+
+        # Create the output directory up front: every artifact this run writes (materialized inputs,
+        # rollouts, failures sidecar, aggregate metrics) is derived from output_fpath and keeps its
+        # parent, and the materialized-inputs write below is the first one. Keep this above that
+        # write -- a user pointing --output at a not-yet-existing directory is the common case
+        # outside a git clone.
+        output_fpath.parent.mkdir(parents=True, exist_ok=True)
 
         if config.resume_from_cache and config.materialized_jsonl_fpath.exists() and output_fpath.exists():
             (
@@ -528,6 +956,8 @@ class RolloutCollectionHelper(BaseModel):
                 results,
                 result_strs,
             ) = self._load_from_cache(config)
+            persisted_rows = list(rows)
+            persisted_results = list(results)
         else:
             if config.resume_from_cache:
                 if not output_fpath.exists():
@@ -541,58 +971,158 @@ class RolloutCollectionHelper(BaseModel):
 
             rows: List[Dict] = []
             results: List[Dict] = []
-            result_strs: List[List[str]] = []
+            persisted_rows: List[Dict] = []
+            persisted_results: List[Dict] = []
 
             input_rows = self._preprocess_rows_from_config(config)
             # Returned rows are sorted by (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
 
+            # Resolve task_source rows to agents BEFORE the materialized write: materialized
+            # inputs are the run-scoped artifact and must carry the resolved agent_ref (custom
+            # drivers, e.g. gdpval's multistage orchestrator, read it from there). Guarded so
+            # legacy agent_ref-only runs never need the head server at this point.
+            if any(
+                (r.get(AGENT_REF_KEY_NAME) or {}).get("name") is None and r.get(TASK_SOURCE_KEY_NAME) is not None
+                for r in input_rows
+            ):
+                self.resolve_task_sources(input_rows, self.setup_server_client().global_config_dict)
+
             with config.materialized_jsonl_fpath.open("wb") as f:
-                for row in input_rows:
+                for row in tqdm(input_rows, desc="Writing materialized rows"):
                     f.write(orjson.dumps(row) + b"\n")
 
             output_fpath.unlink(missing_ok=True)
+            failures_fpath.unlink(missing_ok=True)
 
         semaphore = nullcontext()
         if config.num_samples_in_parallel:
             print(f"Querying with {config.num_samples_in_parallel} concurrent requests")
             semaphore = Semaphore(config.num_samples_in_parallel)
 
-        output_fpath.parent.mkdir(exist_ok=True, parents=True)
-        failures_fpath = _failures_path_for(output_fpath)
-
         # Resolve capture dirs once so each rollout's captured model calls can be folded
         # into its record below (uniform across agents; no-op when capture is off / dirs absent).
-        capture_dirs = model_call_capture_dirs_from_config(get_global_config_dict())
+        global_config = get_global_config_dict()
+        capture_dirs = model_call_capture_dirs_from_config(global_config)
+        # Resolve the training-token store directory once.
+        # Training capture is independent of evaluation capture.
+        # An empty result disables training-token capture.
+        token_capture_dirs = token_id_capture_dirs_from_config(global_config)
+        # The finalizer reads and freezes records through this source.
+        # The source is absent when capture or response rebuilding is disabled.
+        # A framework-owned transport may rebuild through its own source.
+        # The sink still records captures when Gym does not rebuild.
+        # Reruns still clear deterministic rollout ids before dispatch.
+        token_source = None
+        owned_token_source = None
+        token_capture_config = TokenIdCaptureConfig.model_validate(global_config)
+        if token_capture_config.enabled and token_capture_config.token_id_capture.rebuild_response:
+            token_source = installed_token_source()
+            if token_source is None and token_capture_dirs:
+                token_source = TokenCaptureStore(token_capture_dirs[0])
+            if isinstance(token_source, TokenCaptureStore):
+                owned_token_source = token_source
 
         # Clear only rows about to be dispatched, after resume has assigned retry suffixes. This also
         # removes a kill-shaped attempt's partial capture when its rollout-attempt id is reused.
         if capture_dirs:
             print("Clearing existing model-call captures for rollouts being dispatched")
             clear_model_call_captures_for_rollouts(input_rows, capture_dirs)
+        token_capture_rows = [
+            row
+            for row in input_rows
+            if token_id_capture_enabled_for_agent(global_config, (row.get(AGENT_REF_KEY_NAME) or {}).get("name"))
+        ]
+        if token_capture_config.token_id_capture.rebuild_response and token_capture_rows and token_source is None:
+            raise ValueError(
+                "Token capture response rebuilding requires a TokenSource in the rollout-collector process. "
+                "Call install_token_source before starting collection or configure token_id_capture.dir."
+            )
+        if token_capture_dirs and token_capture_rows:
+            # Token stores append under deterministic rollout ids.
+            # Clear stale records to avoid merging different attempts.
+            print("Clearing existing token captures for rollouts being dispatched")
+            clear_token_captures_for_rollouts(token_capture_rows, token_capture_dirs)
 
-        pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
+        # Stop a run that produces mostly masked captures.
+        finalized_count = 0
+        masked_count = 0
+        mask_reasons: Counter = Counter()
+        warned_malformed_rollout_id = False
+
+        # Intermediate status printing
+        pcts_to_print = list(range(1, 100)) + [99.5]
+        agent_name_to_metrics = defaultdict(Counter)
+        agent_name_to_counts = defaultdict(int)
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
+        start_time = time()
+
         results_file = output_fpath.open("ab")
         failures_file = failures_fpath.open("ab")
-        for future in self.run_examples(
-            input_rows,
-            semaphore=semaphore,
-            soft_fail_run_errors=config.soft_fail_run_errors,
-        ):
+        for future in self.run_examples(input_rows, semaphore=semaphore):
             row, result = await future
 
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
             result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
             result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
+            if TASK_SOURCE_KEY_NAME in row:
+                result[TASK_SOURCE_KEY_NAME] = row[TASK_SOURCE_KEY_NAME]
             if SKILLS_REF_KEY_NAME in row:
                 result[SKILLS_REF_KEY_NAME] = row[SKILLS_REF_KEY_NAME]
             if ATTEMPT_INDEX_KEY_NAME in row:
                 result[ATTEMPT_INDEX_KEY_NAME] = row[ATTEMPT_INDEX_KEY_NAME]
+            if ROLLOUT_ID_KEY_NAME in row:
+                # Capture readback recomputes the id from the finished record.
+                # Preserve an explicit id on the result just like the indices.
+                result[ROLLOUT_ID_KEY_NAME] = row[ROLLOUT_ID_KEY_NAME]
 
             # Fold this rollout's captured model calls into its record (uniform across agents; no-op
             # when capture is off). Never alters the harness output/reward already in `result`.
             if capture_dirs:
-                merge_model_call_capture_into_record(result, capture_dirs)
+                merge_model_call_capture_into_record(
+                    result,
+                    capture_dirs,
+                    include_payloads=not _has_observation_gap(result, "multimodal_history_redacted"),
+                )
+
+            if "ng_model_call_capture" in result or "ng_agent_observations" in result or NG_TRAJECTORY_KEY in result:
+                _attach_trajectory_record(row, result)
+
+            # Freeze and rebuild tokens only for participating agents.
+            # This step does not retire the frozen snapshot.
+            # It leaves harness output and reward unchanged.
+            # Direct callers of run_examples finalize each record themselves.
+            token_capture_build = None
+            if token_id_capture_enabled_for_agent(
+                global_config,
+                (row.get(AGENT_REF_KEY_NAME) or {}).get("name"),
+            ):
+                token_capture_build = await finalize_rollout_token_capture(result, token_source)
+                if token_capture_build is not None:
+                    finalized_count += 1
+                    if token_capture_build.get(MASK_SAMPLE_KEY):
+                        masked_count += 1
+                        # Aggregate available reasons for the abort message.
+                        build_metrics = token_capture_build.get("metrics") or {}
+                        if build_metrics.get("capture_incomplete"):
+                            mask_reasons["capture_incomplete"] += 1
+                        if build_metrics.get("unresolved_parent_calls"):
+                            mask_reasons["unresolved_parent_calls"] += 1
+                        build_error = token_capture_build.get("error") or build_metrics.get("error")
+                        if build_error:
+                            mask_reasons[str(build_error)] += 1
+                    settings = token_capture_config.token_id_capture
+                    if (
+                        settings.max_mask_fraction is not None
+                        and finalized_count >= settings.mask_fraction_min_samples
+                        and masked_count / finalized_count > settings.max_mask_fraction
+                    ):
+                        raise RuntimeError(
+                            f"{masked_count}/{finalized_count} finalized rollouts "
+                            f"({masked_count / finalized_count:.1%}) are masked, exceeding "
+                            f"token_id_capture.max_mask_fraction={settings.max_mask_fraction}. "
+                            f"Mask reasons: {dict(mask_reasons)}. Aborting instead of collecting "
+                            "mostly token-less data."
+                        )
 
             no_persist = bool(result.get(NG_NO_PERSIST_KEY))
             failure_class = result.get(NG_FAILURE_CLASS_KEY)
@@ -600,7 +1130,6 @@ class RolloutCollectionHelper(BaseModel):
             rows.append(row)
             results.append(result)
             serialized = orjson.dumps(result)
-            result_strs.append([serialized])
 
             if no_persist:
                 # kill_shaped: don't write anywhere. Set-difference on resume
@@ -615,35 +1144,87 @@ class RolloutCollectionHelper(BaseModel):
                 # Success → main jsonl.
                 results_file.write(serialized + b"\n")
                 results_file.flush()
+                persisted_rows.append(row)
+                persisted_results.append(result)
+                try:
+                    rollout_id = maybe_rollout_id_from_run_body(result)
+                except (TypeError, ValueError) as error:
+                    # Preserve capture evidence when the rollout id is invalid.
+                    rollout_id = None
+                    if not warned_malformed_rollout_id:
+                        warned_malformed_rollout_id = True
+                        warnings.warn(
+                            f"a result carries a malformed rollout id ({error}); "
+                            "its token capture will not be retired.",
+                            stacklevel=2,
+                        )
+                if rollout_id is not None and capture_build_can_retire(token_capture_build):
+                    os.fsync(results_file.fileno())
+                    await retire_rollout_token_capture(rollout_id, token_source, token_capture_build)
 
             counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
             if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
                 counts_left.pop(row[AGENT_REF_KEY_NAME]["name"])
+
+            agent_name = result["agent_ref"]["name"]
+            metrics = agent_name_to_metrics[agent_name]
+            metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float)) and not k.startswith("_")})
+            agent_name_to_counts[agent_name] += 1
 
             current_pct = 100 * len(results) / len(input_rows)
             if pcts_to_print and current_pct >= pcts_to_print[0]:
                 while pcts_to_print and current_pct >= pcts_to_print[0]:
                     pcts_to_print.pop(0)
 
-                top_left = counts_left.most_common(5)  # Fix to top 3 for now.
-                if top_left:
-                    top_left_str = "\n".join(f"{i + 1}. {k}: {v}" for i, (k, v) in enumerate(top_left))
-                    # Use tqdm.write here so we can print properly with tqdm being used.
-                    tqdm.write(f"Examples left:\n{top_left_str}")
+                time_taken_s = time() - start_time
+                time_taken = timedelta(seconds=int(time_taken_s))
+                rollouts_per_min = len(results) / (time_taken_s / 60)
+                print_str = f"Finished {len(results)} / {len(input_rows)} rollouts ({int(current_pct)}%) in {time_taken} ({rollouts_per_min:.2f} rollouts/min). "
+
+                top_left = counts_left.most_common()
+                top_left_str = "\n".join(f"{i + 1}. {k}: {v}" for i, (k, v) in enumerate(top_left))
+                print_str += f"""Examples left:
+{top_left_str}
+"""
+                for agent_name in sorted(agent_name_to_metrics):
+                    metrics = agent_name_to_metrics[agent_name]
+                    agent_total_samples = counts_left[agent_name] + agent_name_to_counts[agent_name]
+                    agent_sample_pct = 100 * agent_name_to_counts[agent_name] / agent_total_samples
+                    avg_metrics = {k: v / agent_name_to_counts[agent_name] for k, v in metrics.items()}
+                    print_str += f"""Found {agent_name_to_counts[agent_name]} / {agent_total_samples} ({agent_sample_pct:.2f}%) rollouts for `{agent_name}`.
+{json.dumps(avg_metrics, indent=4)}
+"""
+                # Use tqdm.write here so we can print properly with tqdm being used.
+                tqdm.write(print_str)
+
+                if get_exporters():
+                    step_metrics = {
+                        f"progress/{agent_name}/reward": round(
+                            100 * metrics["reward"] / agent_name_to_counts[agent_name], 2
+                        )
+                        for agent_name, metrics in agent_name_to_metrics.items()
+                    }
+
+                    export_metrics(step_metrics, step=int(current_pct))
 
         results_file.close()
         failures_file.close()
+        if owned_token_source is not None:
+            await owned_token_source.close()
 
-        if config.upload_rollouts_to_wandb and get_wandb_run():  # pragma: no cover
-            print("Uploading rollouts to W&B. This may take a few minutes if your data is large.")
-            get_wandb_run().log({"Rollouts": Table(data=result_strs, columns=["Rollout"])})
-        del result_strs
+        if config.upload_rollouts and get_exporters():  # pragma: no cover
+            print("Uploading rollouts. This may take a few minutes if your data is large.")
+            export_rollouts([_rollout_for_export(result) for result in results])
 
         print("Sorting results to ensure consistent ordering")
         rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
         results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
+        persisted_rows.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
+        persisted_results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
 
-        # Compute and write aggregate metrics via /aggregate_metrics on each agent server
+        # Compute and write aggregate metrics via /aggregate_metrics using only the
+        # rows written to the main rollouts jsonl so runtime aggregation matches
+        # `gym eval aggregate`.
         if config.disable_aggregation:
             print(
                 "Skipping aggregate-metrics computation because disable_aggregation=True. "
@@ -652,12 +1233,31 @@ class RolloutCollectionHelper(BaseModel):
             aggregate_metrics_fpath = None
         else:
             print("Computing aggregate metrics")
-            aggregate_metrics_fpath = await self._call_aggregate_metrics(results, rows, output_fpath)
+            aggregate_metrics_fpath = await self._call_aggregate_metrics(
+                persisted_results, persisted_rows, output_fpath
+            )
 
         print(f"""Finished rollout collection! View results at:
 Fully materialized inputs: {config.materialized_jsonl_fpath}
 Rollouts: {output_fpath}
 Aggregate metrics: {aggregate_metrics_fpath}""")
+
+        if not config.disable_aggregation and not config.disable_health_check:
+            from nemo_gym.rollout_health import format_health_report, run_health_checks
+
+            try:
+                health_result = await asyncio.to_thread(
+                    run_health_checks,
+                    output_fpath,
+                    workers=config.health_check_workers,
+                    ignored_checks=config.health_check_ignored_checks,
+                )
+            except Exception:
+                logger.exception(
+                    "Rollout health checks failed after collection; rollout artifacts are still available."
+                )
+            else:
+                print(format_health_report(health_result))
 
         return results
 
@@ -689,7 +1289,18 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
             # Strip heavyweight fields before sending, but preserve response.usage
             stripped = []
             for r in agent_result_list:
-                entry = {k: v for k, v in r.items() if k not in ("response", "responses_create_params")}
+                entry = {
+                    k: v
+                    for k, v in r.items()
+                    if k
+                    not in (
+                        "response",
+                        "responses_create_params",
+                        "ng_agent_observations",
+                        "ng_model_call_capture",
+                        NG_TRAJECTORY_KEY,
+                    )
+                }
                 usage = (r.get("response") or {}).get("usage")
                 if usage:
                     entry["response"] = {"usage": usage}
@@ -741,8 +1352,7 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
                 }
             )
 
-        if get_wandb_run():  # pragma: no cover
-            get_wandb_run().log(metrics_to_log)
+        export_metrics(metrics_to_log)
 
         # Write single file with all agents
         metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
@@ -750,59 +1360,146 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
 
         return metrics_fpath
 
+    @staticmethod
+    def resolve_task_sources(examples: List[Dict], global_config_dict: DictConfig) -> None:
+        """Stamp an agent_ref onto every row that carries only a task_source.
+
+        task_source names the config instance that declared the row's dataset. Resolution against
+        the merged config, first match wins:
+        - the instance is an agent (self-contained environment) -> route to it directly;
+        - the instance is a resources server -> route to the unique agent whose
+          resources_server.name edge points at it (inversion of the edge every agent
+          config already declares);
+        - zero or 2+ candidate agents, or an unknown/non-routable instance -> hard error
+          (2+ names +agent_map as the disambiguator).
+
+        Rows that already have an agent_ref are left untouched, so this is a no-op on legacy
+        datasets and on already-resolved (materialized) rows. Runs before any dispatch.
+        """
+        legacy_routed = sum(
+            1
+            for row in examples
+            if (row.get(AGENT_REF_KEY_NAME) or {}).get("name") is not None and row.get(TASK_SOURCE_KEY_NAME) is None
+        )
+        if legacy_routed:
+            warnings.warn(
+                f"{legacy_routed} rows routed via their baked-in agent_ref (no task_source). This "
+                "legacy path is deprecated: re-collate the dataset with current Gym to produce "
+                "task_source-routed rows, or re-route explicitly with +agent_map.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
+        unresolved = {
+            ts
+            for row in examples
+            if (row.get(AGENT_REF_KEY_NAME) or {}).get("name") is None
+            and (ts := row.get(TASK_SOURCE_KEY_NAME)) is not None
+        }
+        if not unresolved:
+            return
+
+        agents_by_rs = agents_by_resources_server(global_config_dict)
+
+        resolution: Dict[str, str] = {}
+        errors: List[str] = []
+        for ts in sorted(unresolved):
+            block = global_config_dict.get(ts)
+            if block is None:
+                close = get_close_matches(ts, list(global_config_dict.keys()), n=1)
+                errors.append(
+                    f"{ts!r}: not in the running config" + (f" (did you mean {close[0]!r}?)" if close else "")
+                )
+            elif not isinstance(block, DictConfig):
+                errors.append(f"{ts!r}: not a server instance")
+            elif "responses_api_agents" in block:
+                resolution[ts] = ts
+            elif "resources_servers" in block:
+                candidates = agents_by_rs.get(ts, [])
+                if len(candidates) == 1:
+                    resolution[ts] = candidates[0]
+                elif not candidates:
+                    errors.append(f"{ts!r}: no agent in the running config references this resources server")
+                else:
+                    errors.append(
+                        f"{ts!r}: {len(candidates)} agents reference this resources server "
+                        f"({sorted(candidates)}); pass +agent_map={{{ts}: <agent>}} to pick one"
+                    )
+            else:
+                errors.append(f"{ts!r}: instance is not an agent or resources server (datasets cannot route here)")
+
+        if errors:
+            raise ValueError("Cannot resolve task_source to an agent: " + "; ".join(errors))
+
+        for row in examples:
+            if (row.get(AGENT_REF_KEY_NAME) or {}).get("name") is None:
+                ts = row.get(TASK_SOURCE_KEY_NAME)
+                if ts is not None:
+                    row[AGENT_REF_KEY_NAME] = {"name": resolution[ts]}
+
+    @staticmethod
+    def _validate_agent_names(examples: List[Dict], global_config_dict: DictConfig) -> None:
+        """Fail before any dispatch when a row names an agent absent from the running config.
+
+        Without this, the first bad row dies mid-collection with a raw omegaconf ConfigKeyError
+        after valid rows have already been dispatched.
+        """
+        requested = {name for row in examples if (name := (row.get(AGENT_REF_KEY_NAME) or {}).get("name")) is not None}
+        available = {
+            str(name)
+            for name, block in global_config_dict.items()
+            if isinstance(block, DictConfig) and "responses_api_agents" in block
+        }
+        unknown = sorted(requested - available)
+        if not unknown:
+            return
+        hints = []
+        for name in unknown:
+            # Naming a non-agent instance (e.g. a resources server via agent_map) is as fatal as a
+            # typo: /run only exists on agent servers.
+            if name in global_config_dict:
+                hints.append(f"{name!r} (exists but is not an agent instance)")
+                continue
+            close = get_close_matches(name, available, n=1)
+            hints.append(f"{name!r}" + (f" (did you mean {close[0]!r}?)" if close else ""))
+        raise ValueError(
+            f"Rows reference agents not present in the running config: {', '.join(hints)}. "
+            "Include the agent's config in the run, or re-route with +agent_map/+agent_name."
+        )
+
     def run_examples(
         self,
         examples: List[Dict],
         head_server_config: Optional[BaseServerConfig] = None,
         semaphore: Optional[Semaphore] = None,
-        soft_fail_run_errors: bool = False,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
+
+        Rows are dispatched as given: task_sources are resolved and agent names validated here,
+        but run-level knobs (``agent_map``, ``fan_out``, ``num_repeats``) are NOT applied — call
+        ``preprocess_examples`` first if you need them.
         """
         server_client = self.setup_server_client(head_server_config)
+        self.resolve_task_sources(examples, server_client.global_config_dict)
+        self._validate_agent_names(examples, server_client.global_config_dict)
         semaphore = semaphore or nullcontext()
 
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:
-                transient_attempts = 0
-                while True:
-                    res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
-                    try:
-                        await raise_for_status(res)
-                    except Exception as e:
-                        status = getattr(res, "status", None)
-                        if is_global_aiohttp_client_request_debug_enabled():
-                            print(
-                                "[rollout_collection] /run failed "
-                                f"status={status} "
-                                f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
-                                flush=True,
-                            )
-                        if not soft_fail_run_errors or status is None:
-                            raise
-                        if status in _TRANSIENT_RUN_STATUSES and transient_attempts < _MAX_TRANSIENT_RUN_RETRIES:
-                            transient_attempts += 1
-                            delay = _TRANSIENT_RUN_RETRY_DELAY_SECONDS * 2 ** (transient_attempts - 1)
-                            print(
-                                "[rollout_collection] transient /run "
-                                f"status={status}, retry {transient_attempts}/{_MAX_TRANSIENT_RUN_RETRIES} "
-                                f"in {delay:.0f}s "
-                                f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
-                                flush=True,
-                            )
-                            await asyncio.sleep(delay)
-                            continue
-                        if status >= 500 or status in _TRANSIENT_RUN_STATUSES:
-                            print(
-                                "[rollout_collection] soft-failing /run "
-                                f"status={status} "
-                                f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
-                                flush=True,
-                            )
-                            return row, _make_soft_failed_run_result(row, e, status)
-                        raise
-                    return row, await get_response_json(res)
+                res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
+                try:
+                    await raise_for_status(res)
+                except Exception:
+                    if is_global_aiohttp_client_request_debug_enabled():
+                        print(
+                            "[rollout_collection] /run failed "
+                            f"status={getattr(res, 'status', None)} "
+                            f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
+                            flush=True,
+                        )
+                    raise
+                return row, await get_response_json(res)
 
         return tqdm.as_completed(
             map(_post_subroutine, examples),
@@ -815,15 +1512,7 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
     def setup_server_client(
         self, head_server_config: Optional[BaseServerConfig] = None
     ) -> ServerClient:  # pragma: no cover
-        server_client = ServerClient.load_from_global_config(head_server_config)
-
-        # We set this rollout global aiohttp client to use the same max connections as the underlying head server global config.
-        if not is_global_aiohttp_client_setup():
-            set_global_aiohttp_client(
-                cfg=GlobalAIOHTTPAsyncClientConfig.model_validate(server_client.global_config_dict)
-            )
-
-        return server_client
+        return setup_server_client_utils(head_server_config)
 
 
 class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
@@ -864,6 +1553,24 @@ class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
         default=True,
         description="Concatenate the matched shard JSONLs into output_jsonl_fpath alongside the metrics file.",
     )
+    disable_health_check: bool = Field(
+        default=False,
+        description="Skip post-aggregation rollout quality verification and report writing.",
+    )
+    health_check_workers: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Number of rollout-health worker processes (defaults to min(cpus, 8)).",
+    )
+    health_check_ignored_checks: List[str] = Field(
+        default_factory=list,
+        description="Health-check IDs to exclude from execution and verdict derivation.",
+    )
+
+    @field_validator("health_check_ignored_checks", mode="before")
+    @classmethod
+    def _validate_health_check_ignored_checks(cls, value):
+        return _normalize_health_check_ignored_checks(value)
 
 
 def loads_jsonl_line(raw, fpath, line_no: int):
@@ -927,6 +1634,24 @@ class RolloutAggregationHelper(BaseModel):
         print(f"""Finished rollout aggregation! View results at:
 Merged rollouts: {output_fpath if config.merge_shards else "<not merged>"}
 Aggregate metrics: {aggregate_metrics_fpath}""")
+
+        if not config.disable_health_check:
+            from nemo_gym.rollout_health import format_health_report, run_health_checks
+
+            try:
+                health_result = await asyncio.to_thread(
+                    run_health_checks,
+                    output_fpath if config.merge_shards else [Path(path) for path in input_paths],
+                    output_dir=output_fpath.parent,
+                    workers=config.health_check_workers,
+                    ignored_checks=config.health_check_ignored_checks,
+                )
+            except Exception:
+                logger.exception(
+                    "Rollout health checks failed after aggregation; aggregate artifacts are still available."
+                )
+            else:
+                print(format_health_report(health_result))
 
         return aggregate_metrics_fpath
 

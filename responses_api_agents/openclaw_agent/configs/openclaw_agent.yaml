@@ -27,4 +27,4 @@ openclaw_agent:
               - id: nvidia/meta/llama-3.3-70b-instruct
                 name: nvidia/meta/llama-3.3-70b-instruct
                 api: openai-completions
-      openclaw_version: 2026.6.10
+      openclaw_version: 2026.6.11

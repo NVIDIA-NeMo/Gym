@@ -37,11 +37,13 @@ spec = SandboxSpec(
     env={"GREETING": "hello"},
     files={"/sandbox/input.txt": "some seed content"},
     resources={"cpu": 2, "memory_mib": 4096},
+    ports=[8000],
 )
 
 with Sandbox({"docker": {}}, spec) as sandbox:
     sandbox.start()
     result = sandbox.exec("echo $GREETING && cat /sandbox/input.txt")
+    print(sandbox.endpoint(8000).endpoint)
     print(result.return_code, result.stdout)
     sandbox.upload("./local_script.sh", "/sandbox/script.sh")
     sandbox.download("/sandbox/result.txt", "./result.txt")
@@ -68,6 +70,7 @@ docker:
     read_only: true
     cap_drop: ["ALL"]
     pids_limit: 512
+    publish_host: 127.0.0.1
   exec:
     default_timeout_s: 180
     concurrency: 32
@@ -92,6 +95,7 @@ docker:
 | `pids_limit` | `None` | Cap the container's process count (`--pids-limit`). |
 | `extra_run_args` | `[]` | Extra raw flags appended to `docker run`. |
 | `apply_resource_limits` | `true` | Apply CPU/memory flags from `SandboxSpec.resources`. |
+| `publish_host` | `127.0.0.1` | Host address used for dynamic mappings declared by `SandboxSpec.ports`. |
 
 ### `exec` — `DockerExecConfig`
 
@@ -119,6 +123,7 @@ to skip. Same fields as the other providers: `command`, `expected_stdout`, `time
 | `files` | Seed files written in at `start()` (via the sandbox API's `upload`). |
 | `resources` | `cpu`→`--cpus`, `memory_mib`→`--memory` (+`--memory-swap`, hard cap), `gpu`→`--gpus <n>`. `disk_gib`/`gpu_type` ignored. |
 | `entrypoint` | Overrides the keep-alive: the container runs this as its main process instead. |
+| `ports` | Container TCP ports published on dynamic host ports and resolved with `sandbox.endpoint(port)`. |
 | `provider_options` | `volumes` (a `src:dst[:opts]` string or list → `-v` mounts) and `run_args` (extra `docker run` flags), applied per-sandbox. |
 | `ttl_s` | Max lifetime: the keep-alive `sleep`s for `ttl_s` and the container self-removes (`--rm`) on exit. Not enforced with a custom `entrypoint`. |
 

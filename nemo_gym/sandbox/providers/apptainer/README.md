@@ -72,13 +72,15 @@ async def run():
 
 ## Selecting and configuring the provider
 
-The provider config is a single-key mapping: `{"apptainer": {<kwargs>}}`. The kwargs are
-grouped into three optional sections, each of which accepts a plain mapping (e.g. from
-Hydra YAML) or the corresponding dataclass:
+The provider config is a single-key mapping: `{"apptainer": {<kwargs>}}`. `bin_path`
+optionally selects a directory containing a staged Apptainer installation. The remaining
+kwargs are grouped into three optional sections, each of which accepts a plain mapping
+(e.g. from Hydra YAML) or the corresponding dataclass:
 
 ```yaml
 # Provider config (the value passed as the sandbox provider)
 apptainer:
+  bin_path: /opt/apptainer/bin
   exec:
     fakeroot_for_root: true
     default_binds: ["/tmp"]

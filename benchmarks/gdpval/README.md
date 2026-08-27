@@ -67,11 +67,17 @@ the deliverable files (the same layout the Stirrup agent persists).
 ## Run multi-stage adaptive ELO (Best Practice - AA v2 Benchmark Method)
 
 Multi-stage ELO estimates the eval model's rating in a sequence of *stages*
-instead of judging every task against every reference. Each stage judges a
-sampled subset of tasks against an adaptively-chosen subset of references, fits
-an anchored Bradley-Terry MLE ELO, and uses that estimate to pick the references
-for the next stage (typically: fewer references but more tasks as the estimate
-sharpens). It runs through the **same** `gym eval run` pipeline and emits the
+instead of judging every task against every reference. Each stage samples `T`
+tasks (`T` is configurable per stage and **defaults to the full task set** — all
+220 GDPVal tasks) and assigns **each task a single reference model** drawn
+uniformly at random (every included reference weighted equally) from the stage's
+adaptively-chosen set of references. It then fits an anchored Bradley-Terry MLE
+ELO — pooling each reference's win/loss/tie counts over the tasks assigned to it
+— and uses that estimate to pick the references for the next stage (typically
+narrowing to fewer references closest to the estimate, and growing `T`, so each
+reference gets a larger share of tasks as the estimate sharpens). Within each
+judged comparison a panel judge is still sampled per trial with equal
+probability. It runs through the **same** `gym eval run` pipeline and emits the
 **same** artifacts as a normal run, so MLflow/nemo-evaluator picks it up
 unchanged.
 
@@ -86,18 +92,15 @@ gdpval_resources_server:
     gdpval:
       reward_mode: comparison
       reference_models:
-        claude_opus_4_8: {deliverables_dir: /gdpval/refs/claude_opus_4_8, elo: 1599}
-        glm5_2:          {deliverables_dir: /gdpval/refs/glm5_2,          elo: 1513}
-        minimax_m3:      {deliverables_dir: /gdpval/refs/minimax_m3,      elo: 1392}
-        deepseek_v4_pro: {deliverables_dir: /gdpval/refs/deepseek_v4_pro, elo: 1304}
-        qwen3_7_max:     {deliverables_dir: /gdpval/refs/qwen3_7_max,     elo: 1280}
-        kimi_k2_6:       {deliverables_dir: /gdpval/refs/kimi_k2_6,       elo: 1193}
-        nemotron_3_ultra: {deliverables_dir: /gdpval/refs/nemotron_3_ultra, elo: 1168}
-        human_gold:      {deliverables_dir: /gdpval/refs/human_gold,      elo: 1000}
-        qwen3_5_397b:    {deliverables_dir: /gdpval/refs/qwen3_5_397b,    elo: 956}
-        gemma4_31b:      {deliverables_dir: /gdpval/refs/gemma4_31b,      elo: 781}
-        gpt_oss_120b:    {deliverables_dir: /gdpval/refs/gpt_oss_120b,    elo: 775}
-        gpt_oss_20b:     {deliverables_dir: /gdpval/refs/gpt_oss_20b,     elo: 519}
+        deepseek_v4_pro:    {deliverables_dir: /gdpval/refs/deepseek_v4_pro,    elo: 1299}
+        glm51_fp8:          {deliverables_dir: /gdpval/refs/glm51_fp8,          elo: 1250}
+        kimi_k26:           {deliverables_dir: /gdpval/refs/kimi_k26,           elo: 1191}
+        nemotron3_ultra:    {deliverables_dir: /gdpval/refs/nemotron3_ultra,    elo: 1160}
+        qwen36_35b:         {deliverables_dir: /gdpval/refs/qwen36_35b,         elo: 1045}
+        qwen35_397b:        {deliverables_dir: /gdpval/refs/qwen35_397b,        elo: 960}
+        gptoss_120b:        {deliverables_dir: /gdpval/refs/gptoss_120b,        elo: 775}
+        gemma4_26b:         {deliverables_dir: /gdpval/refs/gemma4_26b,         elo: 752}
+        qwen3_30b_thinking: {deliverables_dir: /gdpval/refs/qwen3_30b_thinking, elo: 267}
 ```
 
 (or the equivalent `++gdpval_resources_server.resources_servers.gdpval.reference_models.<id>.{deliverables_dir,elo}=...`
@@ -115,21 +118,23 @@ gym eval run \
     --split benchmark \
     ++gdpval_resources_server.resources_servers.gdpval.reward_mode=comparison \
     ++multistage.enabled=true \
-    ++multistage.stages='[{num_tasks: 5}, {num_tasks: 88, num_models: 4}]'
+    ++multistage.stages='[{num_tasks: 45}, {num_tasks: 220, num_models: 4}]'
 ```
 
 The example above runs two stages:
 
-- **Stage 1** — `num_tasks: 5`, no `num_models` ⇒ judge 5 tasks against **all 12**
-  references for a rough ELO.
-- **Stage 2** — `num_tasks: 88`, `num_models: 4` ⇒ judge 88 tasks against the
-  **4 references closest** to the stage-1 ELO for a tight final estimate.
+- **Stage 1** — `num_tasks: 45`, no `num_models` ⇒ sample **45** tasks and
+  include **all 9** references; each task is judged against **one** randomly-assigned reference for a rough ELO.
+- **Stage 2** — `num_tasks: 220` and `num_models: 4` ⇒ the **full 220-task set** against only the **4 references closest** to the stage-1 ELO; each task is judged against one of those four, concentrating the larger task budget on the nearest anchors for a tight final estimate.
 
-For example, if Stage 1 places the eval model near **1168** (≈ Nemotron 3 Ultra),
-Stage 2 zooms in on the four nearest anchors — `kimi_k2_6` (1193),
-`qwen3_7_max` (1280), `deepseek_v4_pro` (1304), and `human_gold` (1000) — spending
-the saved judge budget on more tasks instead of distant references like
-`claude_opus_4_8` (1599) or `gpt_oss_20b` (519).
+For example, if Stage 1 places the eval model near **1170**,
+Stage 2 zooms in on the four nearest anchors — `nemotron3_ultra` (1160), `kimi_k26` (1191),
+`glm51_fp8` (1250), and `qwen36_35b` (1045) — spending
+the full task budget on those instead of distant references like
+`gptoss_120b` (775) or `qwen3_30b_thinking` (267).
+
+`num_tasks` is optional per stage; omit it to judge the full task distribution
+(the default). Every task is still compared against a single sampled reference.
 
 ### Fresh vs. cached deliverables
 
@@ -150,7 +155,7 @@ gym eval run \
     --output results/gdpval_multistage.jsonl \
     ++gdpval_resources_server.resources_servers.gdpval.reward_mode=comparison \
     ++multistage.enabled=true \
-    ++multistage.stages='[{num_tasks: 5}, {num_tasks: 88, num_models: 4}]'
+    ++multistage.stages='[{num_tasks: 45}, {num_models: 4}]'
 ```
 
   The cache must contain a `task_<id>/repeat_<n>/` dir for every repeat the run
@@ -159,8 +164,11 @@ gym eval run \
 
 ### Full run as a single stage
 
-The default (no `multistage.*`) is unchanged: all tasks vs. all references. To
-express the full run explicitly as a one-stage multi-stage run:
+The default (no `multistage.*`) is unchanged: all tasks vs. all references (each
+deliverable judged against every configured reference). A single **multi-stage**
+stage differs — it samples `T` tasks (defaulting to the full set) but assigns
+each task just one reference — so it is *not* equivalent to the non-multistage
+full run:
 
 ```bash
     ++multistage.enabled=true ++multistage.stages='[{num_tasks: 220}]'
@@ -170,12 +178,12 @@ express the full run explicitly as a one-stage multi-stage run:
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `stages` | *(required)* | List of `{num_tasks, num_models?, seed?}` (or `"N:M:seed"` strings). `num_models` omitted ⇒ all references. |
+| `stages` | *(required)* | List of `{num_tasks?, num_models?, seed?}` (or `"[num_tasks]:[num_models]:seed"` strings). `num_tasks` omitted ⇒ full task set; `num_models` omitted ⇒ all references. |
 | `column` | `[occupation]` | Dataset column(s) the task sample is drawn proportionally over. |
 | `distribution_path` | *(auto)* | Reuse/write the task-distribution JSON here; built from the dataset when absent. |
 | `dataset_path` | *(prepared dataset)* | Dataset the distribution is built from. |
-| `nested_tasks` | `false` | `true` makes each stage a superset of the previous; default samples stages independently (more information per stage). |
-| `seed` | *(none)* | Seed for reproducible task sampling and reference selection. |
+| `nested_tasks` | `false` | `true` makes each stage's task sample a superset of the previous; default samples each stage independently. |
+| `seed` | *(none)* | Seed for reproducible task sampling, per-task reference assignment, and reference selection. |
 | `reuse_cached_deliverables` | `true` | Judge a task's cached deliverable in later stages instead of re-running the policy. |
 
 ### Resuming an interrupted multi-stage run
@@ -185,10 +193,13 @@ original run) to resume a staged run that was cut short. A task whose deliverabl
 already **finished** on disk (marked by `finish_params.json`) skips the policy
 rollout and is judged from cache; a task that never finished is re-rolled. On top
 of that, `rerun_incomplete` reuses **cached judgements**: the verify cache is keyed
-by each stage's reference subset, so a resumed stage that reselects the same
-references returns its cached judgement instead of re-judging. Use the same
-`multistage.seed` so the stage task sampling — and therefore the reference subsets —
-are reproducible across the resumed run. See
+by each task's assigned reference, so a resumed stage that reassigns the same
+reference to a task returns its cached judgement instead of re-judging. Each
+stage's sampled tasks and per-task reference assignment are recorded in the stage
+journal (and re-derived deterministically from the stage seed when a recorded
+plan predates them), so they replay identically on resume; use the same
+`multistage.seed` so a fresh re-plan of any not-yet-started stage draws the same
+tasks and assignment. See
 [Task Re-run Mode](../../responses_api_agents/stirrup_agent/README.md#task-re-run-mode)
 for the full semantics.
 
