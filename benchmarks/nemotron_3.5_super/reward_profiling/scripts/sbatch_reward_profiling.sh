@@ -94,10 +94,9 @@ export SBATCH_GRES=${SBATCH_GRES:-gpu:4}
 # more than protection from preemption.
 export SBATCH_QOS=${SBATCH_QOS:-interactive}
 
-# nemo_gym.server_utils.DEFAULT_HEAD_SERVER_PORT. 36 environments starting from baked venvs took
-# well under a minute in testing; the ceiling is for a cold container that has to install.
-HEAD_SERVER_PORT=${HEAD_SERVER_PORT:-11000}
-HEAD_SERVER_TIMEOUT_S=${HEAD_SERVER_TIMEOUT_S:-900}
+# 63 servers came up in ~4 min from baked venvs; the ceiling is for a cold container that has to
+# install them at runtime.
+SERVERS_READY_TIMEOUT_S=${SERVERS_READY_TIMEOUT_S:-1800}
 SLURM_COMMENT="${SLURM_COMMENT:-}"
 
 # Fixed vLLM Port configurations
@@ -114,34 +113,41 @@ cd /opt/Gym
 
 # Serve every environment in the sweep from one deployment; rollout collection routes each row
 # to the agent named in its own agent_ref.
+env_start_log=$SWEEP_DIR/env_start.log
 gym env start --config $SWEEP_DIR/sweep_config.yaml \\
     +uv_venv_dir=/opt/uv_venvs \\
     +skip_venv_if_present=true \\
     ++use_absolute_ip=true \\
     ++policy_base_url=http://\$(getent hosts "\$ROUTER_NODE" | awk 'NR == 1 {print \$1}'):$ROUTER_SERVER_PORT/v1 \
     ++policy_api_key=dummy_api_key \\
-    ++policy_model_name=$MODEL &
+    ++policy_model_name=$MODEL > "\$env_start_log" 2>&1 &
 gym_servers_pid=\$!
 trap 'kill \$gym_servers_pid 2>/dev/null || true' EXIT
 
-# Wait for the head server before starting collection. gym env start backgrounds itself and 36
-# environments take a while to come up, so without this gym eval run --no-serve races it and dies
-# with "Could not connect to the head server at http://127.0.0.1:11000". Any HTTP response means
-# it is listening; the body does not matter.
-echo "waiting for the Gym head server on :$HEAD_SERVER_PORT ..."
-for _i in \$(seq 1 $((HEAD_SERVER_TIMEOUT_S / 10))); do
-    if curl -s -o /dev/null -m 3 "http://127.0.0.1:$HEAD_SERVER_PORT/"; then
-        echo "head server up after \$(( _i * 10 ))s"
+# Wait for the servers before collecting. gym env start backgrounds itself and 36 environments
+# take a while, so without this gym eval run --no-serve races it and dies with "Could not connect
+# to the head server".
+#
+# Match on the readiness line, not a port. use_absolute_ip=true binds servers to the node IP on
+# dynamically chosen ports -- nothing ever listens on 127.0.0.1:11000 -- so polling a fixed
+# address waits forever and then kills a perfectly healthy run. This is what bench_e2e.py has
+# always matched on.
+echo "waiting for Gym servers to come up (log: \$env_start_log) ..."
+for _i in \$(seq 1 $((SERVERS_READY_TIMEOUT_S / 10))); do
+    if grep -q "servers ready!" "\$env_start_log" 2>/dev/null; then
+        grep -m1 -oE "All [0-9]+ / [0-9]+ servers ready!" "\$env_start_log"
         break
     fi
     if ! kill -0 "\$gym_servers_pid" 2>/dev/null; then
-        echo "ERROR: gym env start exited before the head server came up" >&2
+        echo "ERROR: gym env start exited before the servers came up; see \$env_start_log" >&2
+        tail -30 "\$env_start_log" >&2 || true
         exit 1
     fi
     sleep 10
 done
-if ! curl -s -o /dev/null -m 3 "http://127.0.0.1:$HEAD_SERVER_PORT/"; then
-    echo "ERROR: head server never came up within ${HEAD_SERVER_TIMEOUT_S}s" >&2
+if ! grep -q "servers ready!" "\$env_start_log" 2>/dev/null; then
+    echo "ERROR: servers not ready within ${SERVERS_READY_TIMEOUT_S}s; see \$env_start_log" >&2
+    tail -30 "\$env_start_log" >&2 || true
     exit 1
 fi
 
