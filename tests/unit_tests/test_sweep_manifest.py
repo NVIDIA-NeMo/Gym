@@ -24,6 +24,7 @@ import pytest
 import yaml
 
 from nemo_gym.sweep.build import build_sweep, container_config
+from nemo_gym.sweep.shard import SweepShardError, merge_shards, reshard, shard_sweep
 from nemo_gym.sweep.split import SweepSplitError, split_sweep
 from nemo_gym.sweep.manifest import SweepValidationError, load_manifest, validate_manifest
 
@@ -649,3 +650,128 @@ def test_split_ignores_an_unknown_stamped_label(tmp_path):
     result = split_sweep(d)
     assert result.counts["alpha"].rollouts == 1
     assert not (result.out_dir / "renamed_since").exists()
+
+
+def _materialized(tmp_path, n_tasks, repeats=2, labels=("alpha", "beta")):
+    """A sweep dir shaped like materialize's output: global indices, stamped labels."""
+    d = tmp_path / "sweep"
+    d.mkdir(exist_ok=True)
+    rows = []
+    for task in range(n_tasks):
+        for rollout in range(repeats):
+            rows.append({
+                "_ng_task_index": task,
+                "_ng_rollout_index": rollout,
+                "_ng_sweep_label": labels[task % len(labels)],
+                "agent_ref": {"name": "shared_agent"},
+            })
+    (d / "rollouts_materialized_inputs.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in rows))
+    (d / "sweep_config.yaml").write_text("config_paths: []\n")
+    (d / "sweep_report.json").write_text(json.dumps({
+        "entries": {lab: {"task_index_range": [i, n_tasks - 1]} for i, lab in enumerate(labels[:1])}}))
+    return d, rows
+
+
+def test_shard_is_lossless_and_round_robin(tmp_path):
+    d, rows = _materialized(tmp_path, n_tasks=10, repeats=2)
+    result = shard_sweep(d, num_shards=3)
+
+    assert result.total_rows == len(rows)
+    # round-robin, so shard sizes differ by at most one -- no shard inherits a whole slow env
+    assert max(result.rows_per_shard) - min(result.rows_per_shard) <= 1
+
+    seen = []
+    for shard in result.shard_dirs:
+        for line in open(shard / "rollouts_materialized_inputs.jsonl"):
+            seen.append(json.loads(line))
+    assert len(seen) == len(rows)
+    assert {(r["_ng_task_index"], r["_ng_rollout_index"]) for r in seen} == \
+           {(r["_ng_task_index"], r["_ng_rollout_index"]) for r in rows}
+
+
+def test_each_shard_is_a_usable_sweep_dir(tmp_path):
+    """The launcher needs config + an empty rollouts.jsonl to complete the resume gate."""
+    d, _ = _materialized(tmp_path, n_tasks=6)
+    for shard in shard_sweep(d, num_shards=2).shard_dirs:
+        assert (shard / "sweep_config.yaml").is_file()
+        assert (shard / "sweep_report.json").is_file()
+        assert (shard / "rollouts.jsonl").is_file()
+        assert (shard / "rollouts.jsonl").read_text() == ""
+
+
+def test_merge_recovers_every_rollout_exactly_once(tmp_path):
+    d, rows = _materialized(tmp_path, n_tasks=8, repeats=2)
+    result = shard_sweep(d, num_shards=3)
+    # simulate each shard collecting its own inputs
+    for shard in result.shard_dirs:
+        (shard / "rollouts.jsonl").write_text(
+            (shard / "rollouts_materialized_inputs.jsonl").read_text())
+
+    merged = merge_shards(d / "shards")
+    assert merged.merged == len(rows)
+    assert merged.duplicates == 0
+    keys = [(json.loads(l)["_ng_task_index"], json.loads(l)["_ng_rollout_index"])
+            for l in open(merged.output_fpath)]
+    assert len(keys) == len(set(keys)) == len(rows)
+
+
+def test_merge_deduplicates_a_rerun_shard(tmp_path):
+    """A shard rerun after a walltime kill must not double-count."""
+    d, _ = _materialized(tmp_path, n_tasks=4, repeats=1)
+    result = shard_sweep(d, num_shards=2)
+    for shard in result.shard_dirs:
+        body = (shard / "rollouts_materialized_inputs.jsonl").read_text()
+        (shard / "rollouts.jsonl").write_text(body + body)  # collected twice
+
+    merged = merge_shards(d / "shards")
+    assert merged.merged == 4
+    assert merged.duplicates == 4
+
+
+def test_merge_reports_a_shard_that_collected_nothing(tmp_path):
+    d, _ = _materialized(tmp_path, n_tasks=4, repeats=1)
+    result = shard_sweep(d, num_shards=2)
+    (result.shard_dirs[0] / "rollouts.jsonl").write_text(
+        (result.shard_dirs[0] / "rollouts_materialized_inputs.jsonl").read_text())
+    merged = merge_shards(d / "shards")
+    assert result.shard_dirs[1].name in merged.shards_empty
+
+
+def test_reshard_to_a_different_count_is_lossless(tmp_path):
+    d, rows = _materialized(tmp_path, n_tasks=12, repeats=2)
+    shard_sweep(d, num_shards=3)
+    again = reshard(d, num_shards=5)
+    assert again.total_rows == len(rows)
+    assert len(again.shard_dirs) == 5
+
+
+def test_split_gives_the_same_answer_on_merged_as_unsharded(tmp_path):
+    """The property that makes sharding safe: global indices survive the round trip."""
+    d, rows = _materialized(tmp_path, n_tasks=6, repeats=2, labels=("alpha", "beta"))
+    (d / "rollouts.jsonl").write_text(
+        (d / "rollouts_materialized_inputs.jsonl").read_text())
+    direct = split_sweep(d, out_dir=tmp_path / "direct")
+
+    result = shard_sweep(d, num_shards=4)
+    for shard in result.shard_dirs:
+        (shard / "rollouts.jsonl").write_text(
+            (shard / "rollouts_materialized_inputs.jsonl").read_text())
+    merge_shards(d / "shards", output_fpath=d / "rollouts.jsonl")
+    via_shards = split_sweep(d, out_dir=tmp_path / "via_shards")
+
+    assert {k: v.rollouts for k, v in direct.counts.items()} == \
+           {k: v.rollouts for k, v in via_shards.counts.items()}
+
+
+def test_shard_rejects_a_bad_count(tmp_path):
+    d, _ = _materialized(tmp_path, n_tasks=2)
+    with pytest.raises(SweepShardError, match="at least 1"):
+        shard_sweep(d, num_shards=0)
+
+
+def test_shard_requires_materialized_inputs(tmp_path):
+    empty = tmp_path / "nothing"
+    empty.mkdir()
+    with pytest.raises(SweepShardError, match="materialize"):
+        shard_sweep(empty, num_shards=2)

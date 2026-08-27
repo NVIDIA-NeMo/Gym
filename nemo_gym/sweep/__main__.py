@@ -24,6 +24,7 @@ import yaml
 from nemo_gym.sweep.build import build_sweep, container_config, run_command
 from nemo_gym.sweep.manifest import DEFAULT_SAMPLE_ROWS, SweepValidationError, load_manifest, validate_manifest
 from nemo_gym.sweep.materialize import materialize
+from nemo_gym.sweep.shard import SweepShardError, merge_shards, shard_sweep
 from nemo_gym.sweep.split import SweepSplitError, split_sweep
 
 
@@ -82,6 +83,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     mat.add_argument("--skip-validate", action="store_true", help="Materialize without validating first.")
 
+    sh = sub.add_parser("shard", help="Deal a materialized sweep into N sibling sweep directories.")
+    sh.add_argument("sweep_dir", help="The <out-dir>/<nickname> directory materialize wrote.")
+    sh.add_argument("--num-shards", type=int, required=True, help="How many shards to deal into.")
+    sh.add_argument("--out-dir", default=None, help="Where shard_NNN directories go. Default <sweep_dir>/shards.")
+
+    mg = sub.add_parser("merge", help="Concatenate shard rollouts back into one file.")
+    mg.add_argument("shards_dir", help="Directory holding shard_NNN subdirectories.")
+    mg.add_argument("--output", default=None, help="Merged rollouts path. Default <shards_dir>/rollouts.jsonl.")
+
     sp = sub.add_parser(
         "split",
         help="Split a sweep's inputs and rollouts into one directory per manifest entry.",
@@ -99,6 +109,23 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        if args.command == "shard":
+            result = shard_sweep(args.sweep_dir, args.num_shards, args.out_dir)
+            for d, rows in zip(result.shard_dirs, result.rows_per_shard):
+                print(f"  {d.name}  {rows:>9,} rows  {d}")
+            print(f"dealt {result.total_rows:,} rows round-robin into {len(result.shard_dirs)} shards")
+            print("each shard directory is a valid SWEEP_DIR; run the launcher against each")
+            return 0
+
+        if args.command == "merge":
+            result = merge_shards(args.shards_dir, args.output)
+            print(f"merged {result.merged:,} rollouts from {result.shards_seen} shards -> {result.output_fpath}")
+            if result.duplicates:
+                print(f"dropped {result.duplicates:,} duplicate (task, rollout) keys")
+            if result.shards_empty:
+                print(f"no rollouts in: {', '.join(result.shards_empty)}")
+            return 0
+
         if args.command == "split":
             result = split_sweep(args.sweep_dir, args.out_dir)
             for label, counts in sorted(result.counts.items()):
@@ -188,7 +215,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 0
-    except (SweepValidationError, SweepSplitError) as exc:
+    except (SweepValidationError, SweepSplitError, SweepShardError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
 
