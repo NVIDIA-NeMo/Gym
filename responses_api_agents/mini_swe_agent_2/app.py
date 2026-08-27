@@ -49,7 +49,6 @@ from nemo_gym.openai_utils import (
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
 from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import (
-    ServerClient,
     get_first_server_config_dict,
 )
 
@@ -728,7 +727,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
     async def run(self, body: MiniSWEAgentRunRequest) -> MiniSWEAgentVerifyResponse:
         async with self.sem:
             model_server_name = self.config.model_server.name
-            global_config_dict = ServerClient.load_from_global_config().global_config_dict
+            global_config_dict = self.server_client.global_config_dict
 
             model_server_config = get_first_server_config_dict(
                 global_config_dict,

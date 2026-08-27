@@ -9,6 +9,7 @@ opencode_sandboxed_agent:
       model_server:
         type: responses_api_models
         name: policy_model
+      token_id_capture: true
 
       debug: false
 
