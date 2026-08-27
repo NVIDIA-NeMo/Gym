@@ -38,6 +38,9 @@ GPU-hours = total_rollouts / (aggregate_rate / GPUs_measured)
 | sandbox (4 envs) | 51,408 | 411,264 | 483/hr | **10,218** |
 | **total (all 3 lanes)** | | | | **23,178-24,409** |
 
+Superseded by the mixed-workload measurement below: **16,540 GPU-hours**. Summing lanes
+measured separately double-counts, because judge and sandbox rollouts hold no GPU while blocked.
+
 | nodes | GPUs | wall (all 3 lanes) |
 |---|---|---|
 | 12 | 48 | 20.1-21.2 days |
@@ -122,6 +125,44 @@ Sandbox lane, same caveat:
   `ds1_augmented`/`ds1_basic`, `tau_pivot`/`tau_pivot_aq_mms`. `comp_coding_nemotronx` averages
   688 KB/row against `comp_coding`'s 306, so its true rate is likely lower.
 
+
+## All 36 environments together, sharded (job 6602112/6602113, 2026-08-27)
+
+The first measurement of the whole manifest running as one mixed workload rather than lane by lane.
+
+| | |
+|---|---|
+| topology | 2 shards x (1 prefill + 1 decode) = **16 GPUs** |
+| `num_samples_in_parallel` | 512 per shard |
+| collected | 2,249 of 2,304 (97.6%), 0 failures |
+| collection window | ~24 min per shard, after ~16 min of vLLM load and server startup |
+| **aggregate** | **~5,620 rollouts/hr** (2,800 + 2,822) |
+
+Per GPU that is 351/hr, against 468/hr for the no-judge lane alone. The mixed run is slower per GPU
+because it includes the sandbox and judge environments, and the figure spans the tail -- the early
+rate was far higher and decayed as the slow environments came to dominate.
+
+**Sizing the full sweep from this**, which is the number to prefer over summing the lanes:
+
+```
+5,808,968 rollouts / 5,620 per hr = 1,034 h on 16 GPUs = 16,540 GPU-hours
+```
+
+| nodes | GPUs | wall |
+|---|---|---|
+| 24 | 96 | 7.2 days |
+| 48 | 192 | 3.6 days |
+| 96 | 384 | 1.8 days |
+
+That is well under the 23,178-24,409 GPU-hours the per-lane numbers implied, and the gap is the
+point of running them together: a judge rollout blocked on the gateway and a sandbox rollout
+blocked on uWSGI occupy no GPU while they wait, so they fill time the GPU-bound environments would
+have left idle. Summing lanes measured separately double-counts that.
+
+Caveats. One measurement, at one topology, and 512 concurrency against a single decode engine is
+still short of `max_num_seqs`. It includes the tail, so it understates steady-state and overstates
+what you get if you stop at 95%. The sandbox ran one node per shard with 32 uWSGI workers; sandbox
+capacity scales independently of GPUs and was not varied here.
 
 ## Tail behaviour (job 6563900, all 36 environments in one job)
 
