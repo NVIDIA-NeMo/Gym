@@ -304,6 +304,8 @@ class TestApp:
             ("resources", "/lookup"),
             ("model", "/ng-rollout/4-1/v1/responses"),
             ("resources", "/verify"),
+            # session_scope closes the session it seeded, whatever the episode did.
+            ("resources", "/close_session"),
         ]
 
         result_data = result.model_dump(mode="json")
@@ -399,6 +401,7 @@ class TestApp:
             "/seed_session",
             "/ng-rollout/0-0/v1/responses" if capture_enabled else "/v1/responses",
             "/verify",
+            "/close_session",
         ]
         assert "ng_trajectory" not in result.model_dump(mode="json")
 
@@ -970,6 +973,8 @@ class TestApp:
         assert [kwargs["url_path"] for kwargs in post_call_kwargs] == [
             "/seed_session",
             "/v1/responses",
+            # Skipping verification does not skip the release.
+            "/close_session",
         ]
         assert post_call_kwargs[0]["server_name"] == "my resources server"
         assert post_call_kwargs[1]["server_name"] == "simple_agent"
