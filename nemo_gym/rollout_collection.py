@@ -21,7 +21,6 @@ import warnings
 from asyncio import Future, Semaphore
 from collections import Counter, defaultdict
 from contextlib import nullcontext
-from copy import deepcopy
 from datetime import timedelta
 from difflib import get_close_matches
 from itertools import repeat
@@ -696,7 +695,7 @@ class RolloutCollectionHelper(BaseModel):
             num_repeats_add_seed=num_repeats_add_seed,
         )
         raw_rows = [
-            (idx, orjson.dumps(row, option=orjson.OPT_SORT_KEYS).decode(), deepcopy(row))
+            (idx, orjson.dumps(row, option=orjson.OPT_SORT_KEYS).decode(), row.copy())
             for idx, row in enumerate(examples)
         ]
         rows = self._preprocess_raw_rows(raw_rows, config)
@@ -752,7 +751,7 @@ class RolloutCollectionHelper(BaseModel):
         agents_missing_from_num_repeats: set[str] = set()
         rows: List[Dict] = []
         overridden_agents: set[Tuple[str, str]] = set()
-        for row_idx, row_str, row in raw_rows:
+        for row_idx, row_str, row in tqdm(raw_rows, desc="Preprocessing and repeating rows"):
             # Routing basis: the name this row routes by — its agent_ref.name when present, else
             # its task_source (resolved to an agent by resolve_task_sources once the merged config
             # is in hand). agent_map[<basis>] > agent_map._default > row agent_ref > task_source.
@@ -827,7 +826,7 @@ class RolloutCollectionHelper(BaseModel):
                     continue
 
                 for _ in range(row_num_repeats):
-                    row = deepcopy(base_row)
+                    row = base_row.copy()
                     # Restamp only when fan-out routes this copy somewhere else; otherwise keep
                     # the row's agent_ref dict byte-for-byte (it may carry extra fields like type).
                     if target is not None and (row.get(AGENT_REF_KEY_NAME) or {}).get("name") != target:
@@ -838,6 +837,7 @@ class RolloutCollectionHelper(BaseModel):
                     task_idx_to_rollout_idx[row[TASK_INDEX_KEY_NAME]] += 1
 
                     if config.num_repeats_add_seed:
+                        row[RESPONSES_CREATE_PARAMS_KEY_NAME] = row[RESPONSES_CREATE_PARAMS_KEY_NAME].copy()
                         metadata = row[RESPONSES_CREATE_PARAMS_KEY_NAME].setdefault("metadata", {})
                         extra_body = json.loads(metadata.get("extra_body", "{}"))
                         extra_body["seed"] = row[ROLLOUT_INDEX_KEY_NAME]
@@ -879,9 +879,9 @@ class RolloutCollectionHelper(BaseModel):
         self, config: RolloutCollectionConfig
     ) -> Tuple[List[Dict], List[Dict], List[Dict], List[List[str]]]:
         with config.materialized_jsonl_fpath.open() as f:
-            original_input_rows = list(map(orjson.loads, f))
+            original_input_rows = list(map(orjson.loads, tqdm(f, desc="Reading materialized input rows")))
         with Path(config.output_jsonl_fpath).open("rb") as f:
-            result_strs = [[line.strip()] for line in f]
+            result_strs = [[line.strip()] for line in tqdm(f, desc="Reading existing output rows")]
         results = [orjson.loads(p[0]) for p in result_strs]
 
         get_key = lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
@@ -988,7 +988,7 @@ class RolloutCollectionHelper(BaseModel):
                 self.resolve_task_sources(input_rows, self.setup_server_client().global_config_dict)
 
             with config.materialized_jsonl_fpath.open("wb") as f:
-                for row in input_rows:
+                for row in tqdm(input_rows, desc="Writing materialized rows"):
                     f.write(orjson.dumps(row) + b"\n")
 
             output_fpath.unlink(missing_ok=True)

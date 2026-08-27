@@ -77,6 +77,7 @@ class TestRunnerTemplate:
         # Must be syntactically valid Python and reference the agent class.
         compile(rendered, "<runner>", "exec")
         assert "HermesAgent(config=config" in rendered
+        assert 'Request({"type": "http", "path_params": {}})' in rendered
         assert 'object.__setattr__(agent, "resolve_model_base_url"' in rendered
 
     def test_response_is_written_back(self) -> None:
@@ -343,9 +344,22 @@ class TestSafeConfigJson:
         result = json.loads(_safe_config_json(cfg))
         assert result["sandbox_provider"]["opensandbox"]["connection"]["api_key"] == "***"
 
+    def test_token_count_fields_are_not_redacted(self, tmp_path: Path) -> None:
+        cfg = _make_instance_config(tmp_path, body=_make_body().model_copy(update={"max_output_tokens": 123}))
+        result = json.loads(_safe_config_json(cfg))
+        assert result["body"]["max_output_tokens"] == 123
+
     def test_agent_command_str_excluded(self, tmp_path: Path) -> None:
-        cfg = _make_instance_config(tmp_path, agent_command_str="/agent_deps_mount/bin/python ...")
-        assert "agent_command_str" not in json.loads(_safe_config_json(cfg))
+        cfg = _make_instance_config(
+            tmp_path,
+            agent_command_str="/agent_deps_mount/bin/python ...",
+            agent_runtime_source="https://example.test/runtime?token=secret",
+            agent_deps_url="https://example.test/runtime?token=secret",
+        )
+        result = json.loads(_safe_config_json(cfg))
+        assert "agent_command_str" not in result
+        assert "agent_runtime_source" not in result
+        assert "agent_deps_url" not in result
 
     def test_indent_produces_multiline(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(tmp_path)
@@ -642,6 +656,26 @@ class TestProcessSingleDatapoint:
         assert "/tmp/anyterminal-agent-deps.tar.gz" in uploaded
         stage_tests.assert_awaited_once()
         collect.assert_awaited_once()
+
+    async def test_remote_runtime_can_be_fetched_from_url(self, tmp_path: Path) -> None:
+        cfg = _make_instance_config(
+            tmp_path,
+            sandbox_provider={"opensandbox": {}},
+            agent_runtime_source="https://relay.example/runtime.tar.gz",
+            agent_deps_url="https://relay.example/runtime.tar.gz",
+        )
+        sandbox = SimpleNamespace(
+            exec=AsyncMock(return_value=_sandbox_result()),
+            upload=AsyncMock(),
+        )
+
+        await RunTerminalAgent(config=cfg)._stage_remote_runtime(sandbox, cfg)
+
+        uploaded = {call.args[1] for call in sandbox.upload.await_args_list}
+        assert "/tmp/anyterminal-agent-deps.tar.gz" not in uploaded
+        commands = [call.args[0] for call in sandbox.exec.await_args_list]
+        assert any("curl -fsSL" in command and "relay.example/runtime.tar.gz" in command for command in commands)
+        assert any("tar -xzf" in command for command in commands)
 
     async def test_stops_sandbox_even_on_eval_timeout(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(tmp_path)
