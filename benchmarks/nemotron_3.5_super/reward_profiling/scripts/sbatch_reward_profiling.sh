@@ -45,10 +45,11 @@ VLLM_CONFIG=${VLLM_CONFIG:-benchmarks/nemotron_3.5_super/vllm_configs/nemotron_3
 MOUNTS=${MOUNTS:-/lustre:/lustre}
 
 # Sandbox sidecar. Empty disables it, which is correct for the no-judge and judge lanes.
-# All job output lands under reward_profiling/outputs/, alongside the sweep dirs, so a run's
-# artifacts and its logs are in one gitignored place rather than three.
+# Logs live with the run they describe, inside SWEEP_DIR. A sharded run submits one job per shard
+# and each shard is its own SWEEP_DIR, so this keeps 16 jobs' logs separated by shard instead of
+# interleaved in one directory. Everything is still under the gitignored outputs/ tree.
 RP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LOG_DIR=${LOG_DIR:-$RP_DIR/outputs/slurm-logs}
+LOG_DIR=${LOG_DIR:-$SWEEP_DIR/slurm-logs}
 mkdir -p "$LOG_DIR"
 
 SANDBOX_CONTAINER=${SANDBOX_CONTAINER:-}
