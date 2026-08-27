@@ -1,15 +1,31 @@
 # Prompt used for text-to-SQL.
 
-system: Please reason step by step, and put your final answer within the tags "```sql" and "```".
+system: You are a data science expert. Below, you are provided with a database schema and a natural 
+        language question. Your task is to understand the schema and generate a valid SQL query to answer the question.
 
 user: |-
-  ### Question
+
+  ### Database Engine:
+  SQLite
+
+  ### Database Schema:
+  {sql_context}
+  This schema describes the database's structure, including tables, columns, primary keys, foreign keys, and any relevant relationships or constraints.
+
+  ### Question:
   {question}
 
-  The following is a SQL dump that describes the database and the tables in it.
-  {sql_context}
+  ### Instructions:
+  - Make sure you only output the information that is asked in the question. If the question asks for a specific column, make sure to only include that column in the SELECT clause, nothing more.
+  - The generated query should return all of the information asked in the question without any missing or extra information.
+  - Before generating the final SQL query, please think through the steps of how to write the query.
 
-  Convert the question above to a SQL query for the database given. Use the answer tags given.
-  If there is more than one set of tags, the last one will be taken as your final answer.
+  ### Output Format:
+  In your answer, please enclose the generated SQL query in a code block:
+  ```sql
+  -- Your SQL query
+  ```
 
-  ### Answer:
+  Only put a single SQL query inside a code block. You can, however, generate many SQL code during your reasoning. We will only use the final one.
+
+  Take a deep breath and think step by step to find the correct SQL query.
