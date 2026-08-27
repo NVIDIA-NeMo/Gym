@@ -1,0 +1,76 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# OpenShell SandboxPolicy for the secure-eval demo, passed to the gateway through
+#
+#   sandbox_spec.provider_options.policy: demos/openshell-secure-eval/egress-policy.yaml
+#
+# The gateway enforces this on every outbound connection the sandbox makes, so it holds
+# whether the egress comes from the model's own tool call, from a build script, or from a
+# transitive dependency the agent never looked at. Omit `policy` and OpenShell falls back
+# to whatever policy is baked into the sandbox image — for a benchmark image you did not
+# build, that is a policy you have not read.
+#
+# NO INTERPOLATION HERE. The provider loads this path with a plain `yaml.safe_load`, not
+# through Hydra/OmegaConf, so `${oc.env:VAR,default}` is NOT resolved — it would reach
+# protobuf as a literal string and fail the create. Values below are literals on purpose;
+# edit them directly, or inline the policy as a mapping under
+# `sandbox_spec.provider_options.policy` in the Hydra config if you want interpolation.
+#
+# Shape checked against openshell 0.0.92 (`openshell._proto.sandbox_pb2.SandboxPolicy`).
+# The provider parses this mapping with protobuf json_format, so an unknown FIELD fails
+# loudly at create time. Field *values* — `protocol`, `enforcement`, `access` — are plain
+# strings in the proto and are validated by the gateway, not here; those are the ones a
+# version skew can change quietly. Re-check the shape after a gateway or SDK bump:
+#
+#   .venv/bin/python -c "from openshell._proto import sandbox_pb2; \
+#     from google.protobuf import json_format; import yaml; \
+#     json_format.ParseDict(yaml.safe_load(open('demos/openshell-secure-eval/egress-policy.yaml')), \
+#                           sandbox_pb2.SandboxPolicy()); print('policy OK')"
+#
+# There is no `default_action: DENY` knob: OpenShell's network model is allowlist-by-
+# construction. Whatever is not named in `network_policies` has no route out. That is why
+# the interesting part of this file is how SHORT it is.
+# Integer, not a "v1" string — the proto field is numeric.
+version: 1
+
+network_policies:
+  # The one hole the harness itself requires: the Gym model server on the host.
+  #
+  # Worth saying out loud during the demo — this is NOT the model provider. The
+  # in-sandbox Hermes agent calls the Gym model server, and the Gym model server calls
+  # Nemotron 3.5 Lightning from the host. So a sandbox running unreviewed model-authored
+  # code needs no route to inference-api.nvidia.com, to your vLLM box, or to anything
+  # else outside this file. Host and port must match NEMO_GYM_SANDBOX_MODEL_BASE_URL as
+  # resolved from inside the sandbox (13909 is Gym's fixed model-server port).
+  gym-model-server:
+    name: gym-model-server
+    endpoints:
+      - host: host.docker.internal
+        ports: [13909]
+        protocol: http
+
+  # Package installs the SWE-bench task legitimately performs during repro. Delete this
+  # whole entry if your task images are already fully provisioned — then the allowlist is
+  # exactly one route, which is the version of this slide worth showing.
+  pypi:
+    name: pypi
+    endpoints:
+      - host: pypi.org
+        ports: [443]
+        protocol: https
+      - host: files.pythonhosted.org
+        ports: [443]
+        protocol: https
