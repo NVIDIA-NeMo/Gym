@@ -82,6 +82,10 @@ class MaterializeReport:
     task_index_ranges: Dict[str, Tuple[int, int]]
     nickname: str = ""
     shuffle_seed: int = 0
+    # Whether repeats were pre-expanded here or left to Gym at collection time. Consumers need it
+    # to choose num_repeats: pre-expanded inputs want 1, one-row-per-task inputs want the
+    # manifest's value, and getting it wrong silently collects one rollout per task instead of all.
+    expanded: bool = True
 
     @property
     def total_source_rows(self) -> int:
@@ -99,6 +103,7 @@ class MaterializeReport:
             "materialized_bytes": self.materialized_fpath.stat().st_size if self.materialized_fpath.exists() else None,
             "nickname": self.nickname,
             "shuffle_seed": self.shuffle_seed,
+            "expanded": self.expanded,
             "total_source_rows": self.total_source_rows,
             "total_materialized_rows": self.total_materialized_rows,
             "entries": {
@@ -274,6 +279,7 @@ def materialize(
         },
         nickname=manifest.nickname,
         shuffle_seed=shuffle_seed,
+        expanded=expand,
         rows_per_entry=rows_per_entry,
         materialized_per_entry=materialized_per_entry,
         num_repeats_per_entry=repeats_by_entry,

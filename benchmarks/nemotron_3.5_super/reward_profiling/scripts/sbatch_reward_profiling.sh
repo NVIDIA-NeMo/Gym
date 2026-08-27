@@ -114,6 +114,25 @@ SERVERS_READY_TIMEOUT_S=${SERVERS_READY_TIMEOUT_S:-1200}
 ENV_PORT_RANGE_LOW=${ENV_PORT_RANGE_LOW:-20000}
 ENV_PORT_RANGE_HIGH=${ENV_PORT_RANGE_HIGH:-30000}
 
+# prepare_sweep.sh defaults to --no-expand, which writes one row per task and leaves the repeats
+# to Gym. Pre-expanded inputs need ++num_repeats=1 or every rollout would be duplicated; unexpanded
+# inputs need the manifest's value or only one rollout per task is collected. The report records
+# which, so neither is guessed.
+NUM_REPEATS=${NUM_REPEATS:-$(python - "$SWEEP_DIR" <<'PY_REPEATS'
+import json, sys
+from pathlib import Path
+report = Path(sys.argv[1]) / "sweep_report.json"
+doc = json.loads(report.read_text())
+if doc.get("expanded", True):
+    print(1)
+else:
+    repeats = {e.get("num_repeats") for e in doc.get("entries", {}).values() if e.get("num_repeats")}
+    # Per-entry repeats are resolved by agent at collection time; a single shared value is the
+    # only thing expressible as one ++num_repeats override.
+    print(repeats.pop() if len(repeats) == 1 else 1)
+PY_REPEATS
+)}
+
 SLURM_COMMENT="${SLURM_COMMENT:-}"
 
 # Fixed vLLM Port configurations
@@ -182,11 +201,12 @@ done
 
 # --resume is load-bearing: Gym reads the pre-expanded inputs instead of re-expanding them
 # (~100 min single-threaded for a full sweep), and a walltime kill continues where it stopped.
-# num_repeats=1 because prepare_sweep.sh already expanded the repeats.
+# num_repeats comes from the sweep report: 1 when prepare pre-expanded, the manifest's value when
+# it did not.
 gym eval run --no-serve --resume \\
     --input $SWEEP_DIR/rollouts_materialized_inputs.jsonl \\
     --output $SWEEP_DIR/rollouts.jsonl \\
-    ++num_repeats=1 \\
+    ++num_repeats=$NUM_REPEATS \\
     ++num_samples_in_parallel=$NUM_SAMPLES_IN_PARALLEL \\
     +nemo_gym_log_dir=$SWEEP_DIR/logs \\
     +uv_venv_dir=/opt/uv_venvs \\
