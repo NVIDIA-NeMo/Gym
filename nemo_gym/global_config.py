@@ -556,11 +556,28 @@ Duplicate config paths:
         return instances
 
     @staticmethod
-    def _is_unbound_agent(server_config: DictConfig) -> bool:
+    def _resources_server_reference(server_config: DictConfig) -> Optional[DictConfig]:
+        """The agent's `resources_server` block, or None when it declares none.
+
+        Selected rather than indexed because a self-contained agent omits the key, which a struct-mode
+        config rejects outright.
+        """
+        reference = OmegaConf.select(server_config, "resources_server")
+        return reference if isinstance(reference, DictConfig) else None
+
+    def _runs_against_a_resources_server(self, server_config: DictConfig) -> bool:
+        """True when the agent has a task to hand over, so another agent can take its place.
+
+        Self-contained agents own their environment and declare no `resources_server`; swapping one out
+        would leave the incoming agent with nothing to bind to.
+        """
+        return self._resources_server_reference(server_config) is not None
+
+    def _is_unbound_agent(self, server_config: DictConfig) -> bool:
         """True when the agent declares a `resources_server` but leaves its name unset, marking it a swap source."""
         # Absent is not unset: self-contained agents omit the key entirely and must never match.
-        reference = server_config._get_node("resources_server")
-        return isinstance(reference, DictConfig) and OmegaConf.is_missing(reference, "name")
+        reference = self._resources_server_reference(server_config)
+        return reference is not None and OmegaConf.is_missing(reference, "name")
 
     def compose_unbound_agent(self, global_config_dict: DictConfig) -> None:
         """Rehost every other agent instance on the config's unbound agent, then drop that agent."""
@@ -577,7 +594,11 @@ Duplicate config paths:
             )
 
         source = sources[0]
-        targets = [instance for instance in instances if instance.name != source.name]
+        targets = [
+            instance
+            for instance in instances
+            if instance.name != source.name and self._runs_against_a_resources_server(instance.server_config)
+        ]
         if not targets:
             raise AgentCompositionError(
                 f"Agent instance '{source.name}' leaves its 'resources_server' unset, but the merged config "

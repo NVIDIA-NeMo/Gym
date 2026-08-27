@@ -2095,6 +2095,34 @@ class TestComposeUnboundAgent:
 
         assert self._composed_block(config, "no_model")["model_server"]["name"] == "policy_model"
 
+    def test_leaves_self_contained_agents_alone(self) -> None:
+        # A self-contained agent declares no resources server, so there is no task to hand the new agent.
+        self_contained = self._environment_agent("unused")
+        agents = self_contained["responses_api_agents"]
+        agents["tau2"] = agents.pop("simple_agent")
+        del agents["tau2"]["resources_server"]
+        config = self._config(tau2_benchmark_agent=self_contained)
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert list(config["tau2_benchmark_agent"]["responses_api_agents"]) == ["tau2"]
+        composed = self._composed_block(config, "gpqa_mcqa_simple_agent")
+        assert composed["resources_server"]["name"] == "gpqa_mcqa_resources_server"
+
+    def test_reads_a_self_contained_agent_from_a_struct_config(self) -> None:
+        # Hydra hands the command line over in struct mode, where reading the absent `resources_server`
+        # raises instead of reporting it missing.
+        self_contained = self._environment_agent("unused")
+        agents = self_contained["responses_api_agents"]
+        agents["tau2"] = agents.pop("simple_agent")
+        del agents["tau2"]["resources_server"]
+        config = self._config(tau2_benchmark_agent=self_contained)
+        OmegaConf.set_struct(config, True)
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert list(config["tau2_benchmark_agent"]["responses_api_agents"]) == ["tau2"]
+
     def test_raises_when_two_instances_are_unbound(self) -> None:
         config = self._config(second_harness=self._harness())
 
@@ -2120,17 +2148,18 @@ class TestComposeUnboundAgent:
         block = resolved["gpqa_mcqa_simple_agent"]["responses_api_agents"]["hermes_agent"]
         assert block["resources_server"]["name"] == "gpqa_mcqa_resources_server"
 
-    def test_parse_reports_binding_still_unbound_after_composition(self) -> None:
+    def test_raises_when_every_other_agent_is_self_contained(self) -> None:
+        # Self-contained agents are left alone, so there is nothing here for the selected agent to run.
         environment_agent = self._environment_agent("gpqa_mcqa_resources_server")
         environment_agent["responses_api_agents"]["simple_agent"].pop("resources_server")
         config = self._config()
         config.pop("gpqa_mcqa_simple_agent")
-        config["unbound_agent"] = environment_agent
+        config["self_contained_agent"] = environment_agent
 
-        with raises(ConfigMissingValuesError) as exc_info:
+        with raises(AgentCompositionError) as exc_info:
             self._parse(config)
 
-        assert "unbound_agent.responses_api_agents.hermes_agent.resources_server.name" in str(exc_info.value)
+        assert "no other agent instance to rehost it on" in str(exc_info.value)
 
     def test_real_benchmark_composes_onto_real_harness(self) -> None:
         resolved = self._parse_config_paths(
