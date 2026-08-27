@@ -185,6 +185,48 @@ def _raw_tool_response(
     }
 
 
+def _relay_hermes_wrapper(step: dict[str, Any]) -> dict[str, Any]:
+    """Mirror Relay's committed Hermes-wrapper exporter fixture."""
+
+    calls = step["tool_calls"]
+    return {
+        "assistant_message": {
+            "content": None,
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": call["tool_call_id"],
+                    "name": call["function_name"],
+                    "arguments": json.dumps(call["arguments"], separators=(",", ":")),
+                    "provider_data": {"trace_id": "provider-trace"},
+                }
+                for call in calls
+            ],
+        },
+        "raw_response": {
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": call["tool_call_id"],
+                                "type": "function",
+                                "function": {
+                                    "name": call["function_name"],
+                                    "arguments": json.dumps(call["arguments"], separators=(",", ":")),
+                                },
+                            }
+                            for call in calls
+                        ],
+                    }
+                }
+            ]
+        },
+        "usage": {"prompt_tokens": 14, "completion_tokens": 5},
+    }
+
+
 def test_relay_atif_parser_rejects_unknown_structural_fields() -> None:
     data = _trajectory_data()
     data["unknown_root_field"] = "would otherwise be silently ignored"
@@ -358,6 +400,7 @@ def test_prefixed_responses_item_id_orphan_shape_is_rejected() -> None:
     data = json.loads(_RESPONSES_FIXTURE_PATH.read_text())
     tool_step = data["steps"][1]
     tool_step["tool_calls"][0]["tool_call_id"] = "fc_56a9401eb39a449c982424abb3b0fdc2"
+    tool_step["extra"]["tool_invocations"][0]["invocation_id"] = "fc_56a9401eb39a449c982424abb3b0fdc2"
     tool_step.pop("observation")
     final_step = data["steps"][2]
     final_step["step_id"] = 4
@@ -370,6 +413,7 @@ def test_prefixed_responses_item_id_orphan_shape_is_rejected() -> None:
             "observation": {"results": [{"source_call_id": None, "content": "RELAY_ATIF_GYM_OK"}]},
         },
     )
+    data["final_metrics"]["total_steps"] = 4
 
     with pytest.raises(AtifProjectionError, match="raw provider tool calls do not match"):
         atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
@@ -830,6 +874,14 @@ def test_atif_metrics_reject_negative_counts_and_costs(target: str, field: str) 
         AtifTrajectoryV1_7.model_validate(data)
 
 
+def test_parser_requires_final_total_steps_to_match_the_trajectory() -> None:
+    data = _trajectory_data()
+    data["final_metrics"] = {"total_steps": 2}
+
+    with pytest.raises(ValidationError, match="total_steps must equal the number of trajectory steps"):
+        AtifTrajectoryV1_7.model_validate(data)
+
+
 @pytest.mark.parametrize("target", ("step", "final"))
 def test_atif_usage_rejects_cached_tokens_greater_than_prompt_tokens(target: str) -> None:
     data = _trajectory_data()
@@ -924,7 +976,7 @@ def test_gym_usage_extension_rejects_invalid_reasoning_counts(value: Any) -> Non
         atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
 
 
-def test_gym_usage_extension_rejects_inconsistent_total_tokens() -> None:
+def test_gym_usage_extension_preserves_provider_reported_total_tokens() -> None:
     data = _trajectory_data()
     data["steps"][1]["metrics"] = {
         "prompt_tokens": 10,
@@ -938,7 +990,41 @@ def test_gym_usage_extension_rejects_inconsistent_total_tokens() -> None:
     }
     data["final_metrics"] = {"total_prompt_tokens": 30, "total_completion_tokens": 11, "total_steps": 3}
 
-    with pytest.raises(AtifProjectionError, match="step 2 Gym total_tokens metadata does not match"):
+    response = atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+
+    assert response.usage is not None
+    assert response.usage.input_tokens == 30
+    assert response.usage.output_tokens == 11
+    assert response.usage.total_tokens == 42
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("total_tokens", 4, "smaller than a component token count"),
+        ("reasoning_tokens", 6, "reasoning_tokens metadata exceeds completion_tokens"),
+    ],
+)
+def test_gym_usage_extension_rejects_impossible_component_relationships(
+    field: str,
+    value: int,
+    match: str,
+) -> None:
+    data = _trajectory_data()
+    data["steps"][1]["metrics"] = {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "extra": {"nemo_gym": {"reasoning_tokens": 2, "total_tokens": 16}},
+    }
+    data["steps"][1]["metrics"]["extra"]["nemo_gym"][field] = value
+    data["steps"][2]["metrics"] = {
+        "prompt_tokens": 20,
+        "completion_tokens": 6,
+        "extra": {"nemo_gym": {"reasoning_tokens": 3, "total_tokens": 26}},
+    }
+    data["final_metrics"] = {"total_prompt_tokens": 30, "total_completion_tokens": 11, "total_steps": 3}
+
+    with pytest.raises(AtifProjectionError, match=match):
         atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
 
 
@@ -1156,6 +1242,14 @@ def test_completed_empty_agent_answer_is_preserved_for_scoring() -> None:
     assert response.status == "completed"
 
 
+def test_empty_agent_content_part_list_is_rejected_as_ambiguous() -> None:
+    data = _trajectory_data()
+    data["steps"][-1]["message"] = []
+
+    with pytest.raises(AtifProjectionError, match="empty content-part list"):
+        atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+
+
 def test_aggregated_llm_step_is_rejected_instead_of_flattened() -> None:
     data = _trajectory_data()
     data["steps"][1]["llm_call_count"] = 2
@@ -1220,7 +1314,85 @@ def test_outer_relay_envelope_cannot_hide_output_in_a_completed_raw_response(
         field_name: value,
     }
 
-    with pytest.raises(AtifProjectionError, match=rf"unsupported output field '{field_name}'"):
+    with pytest.raises(AtifProjectionError, match=rf"unsupported fields: '{field_name}'"):
+        atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+
+
+def test_current_relay_hermes_wrapper_projects_tool_calls_and_results() -> None:
+    data = json.loads(_RESPONSES_FIXTURE_PATH.read_text())
+    tool_step = data["steps"][1]
+    tool_step["extra"]["llm_response"] = _relay_hermes_wrapper(tool_step)
+
+    response = atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+
+    calls = [item for item in response.output if item.type == "function_call"]
+    results = [item for item in response.output if item.type == "function_call_output"]
+    assert [(call.call_id, call.name) for call in calls] == [
+        ("call-abab8ac6-3a43-46a2-9224-d14a2d380504", "exec_command")
+    ]
+    assert [result.call_id for result in results] == ["call-abab8ac6-3a43-46a2-9224-d14a2d380504"]
+
+
+@pytest.mark.parametrize(
+    ("mutate", "match"),
+    [
+        (
+            lambda step: step["extra"]["llm_response"]["assistant_message"].update(role="user"),
+            "assistant_message has a non-assistant role",
+        ),
+        (
+            lambda step: step["extra"]["llm_response"]["assistant_message"]["tool_calls"][0].update(
+                name="different-tool"
+            ),
+            "raw provider tool calls do not match",
+        ),
+        (
+            lambda step: step["extra"]["invocation"].pop("status"),
+            "non-terminal chat finish_reason",
+        ),
+        (
+            lambda step: step.pop("observation"),
+            "non-terminal chat finish_reason",
+        ),
+        (
+            lambda step: step["extra"]["llm_response"].update(choices=[]),
+            "response envelope contains unsupported fields",
+        ),
+        (
+            lambda step: step["extra"]["llm_response"].update(raw_response=None),
+            "raw_response is not a provider response object",
+        ),
+        (
+            lambda step: step["extra"]["llm_response"]["assistant_message"].update(refusal="hidden"),
+            "assistant_message contains unsupported fields",
+        ),
+    ],
+)
+def test_relay_hermes_wrapper_requires_corroborated_completion(
+    mutate: Any,
+    match: str,
+) -> None:
+    data = json.loads(_RESPONSES_FIXTURE_PATH.read_text())
+    tool_step = data["steps"][1]
+    tool_step["extra"]["llm_response"] = _relay_hermes_wrapper(tool_step)
+    mutate(tool_step)
+
+    with pytest.raises(AtifProjectionError, match=match):
+        atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("choices", [{"message": {"role": "assistant", "content": "hidden"}, "finish_reason": "stop"}]),
+        ("content", [{"type": "text", "text": "hidden"}]),
+    ],
+)
+def test_direct_provider_family_hybrids_are_rejected(field_name: str, value: Any) -> None:
+    data = json.loads(_RESPONSES_FIXTURE_PATH.read_text())
+    data["steps"][-1]["extra"]["llm_response"][field_name] = value
+
+    with pytest.raises(AtifProjectionError, match="mixes incompatible output families"):
         atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
 
 
@@ -1472,7 +1644,6 @@ def test_known_unprojected_responses_actions_are_rejected(item_type: str) -> Non
 @pytest.mark.parametrize(
     ("mutate", "match"),
     [
-        (lambda data: data.update(schema_version="ATIF-v1.6"), "unsupported ATIF schema version"),
         (lambda data: data.update(continued_trajectory_ref="next.json"), "continued ATIF trajectories"),
         (
             lambda data: data.update(
@@ -1509,6 +1680,14 @@ def test_strict_initial_scope_rejects_unsupported_trajectories(mutate: Any, matc
 
     with pytest.raises(AtifProjectionError, match=match):
         atif_trajectory_to_response(trajectory)
+
+
+def test_parser_requires_the_exact_atif_v1_7_schema_version() -> None:
+    data = _trajectory_data()
+    data["schema_version"] = "ATIF-v1.6"
+
+    with pytest.raises(ValidationError, match="Input should be 'ATIF-v1.7'"):
+        AtifTrajectoryV1_7.model_validate(data)
 
 
 def test_tool_result_without_content_or_relay_extension_is_rejected() -> None:
@@ -1596,11 +1775,26 @@ def test_external_subagent_reference_is_rejected_without_being_dropped() -> None
     [
         ({"invocation": {"status": "failed"}}, "non-completed Relay invocation status"),
         ({"invocation": {"status": "in_progress"}}, "non-completed Relay invocation status"),
-        ({"tool_invocations": [{"status": "timeout"}]}, "tool invocation 0 has non-completed status"),
+        ({"invocation": {"status": None}}, "non-completed Relay invocation status"),
         ({"llm_response": {"status": "incomplete"}}, "provider response status"),
         ({"llm_response": {"status": "queued"}}, "provider response status"),
-        ({"llm_response": {"choices": [{"finish_reason": "length"}]}}, "non-terminal chat finish_reason"),
-        ({"llm_response": {"stop_reason": "max_tokens"}}, "non-terminal Anthropic stop_reason"),
+        (
+            {
+                "llm_response": {
+                    "choices": [
+                        {
+                            "message": {"role": "assistant", "content": "The answer is 4."},
+                            "finish_reason": "length",
+                        }
+                    ]
+                }
+            },
+            "non-terminal chat finish_reason",
+        ),
+        (
+            {"llm_response": {"role": "assistant", "content": [], "stop_reason": "max_tokens"}},
+            "non-terminal Anthropic stop_reason",
+        ),
     ],
 )
 def test_known_failed_or_incomplete_outcomes_are_not_relabelled_completed(
@@ -1628,9 +1822,6 @@ def test_unknown_invocation_status_is_not_relabelled_completed() -> None:
     [
         ({"invocation": None}, "Relay invocation metadata is not an object"),
         ({"invocation": "failed"}, "Relay invocation metadata is not an object"),
-        ({"tool_invocations": None}, "Relay tool_invocations metadata is not a list"),
-        ({"tool_invocations": {"status": "failed"}}, "Relay tool_invocations metadata is not a list"),
-        ({"tool_invocations": [None]}, "Relay tool invocation 0 metadata is not an object"),
     ],
 )
 def test_malformed_relay_status_containers_are_not_silently_ignored(
@@ -1642,6 +1833,45 @@ def test_malformed_relay_status_containers_are_not_silently_ignored(
 
     with pytest.raises(AtifProjectionError, match=match):
         atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+
+
+@pytest.mark.parametrize(
+    ("tool_invocations", "match"),
+    [
+        (None, "Relay tool_invocations metadata is not a list"),
+        ({"status": "failed"}, "Relay tool_invocations metadata is not a list"),
+        ([None], "Relay tool invocation 0 metadata is not an object"),
+        ([], "tool_invocations metadata has 0 entries for 1 canonical tool calls"),
+        ([{"invocation_id": None, "status": "completed"}], "blank or invalid invocation_id"),
+        ([{"invocation_id": "different-call", "status": "completed"}], "does not match canonical tool call"),
+        (
+            [{"invocation_id": "call-abab8ac6-3a43-46a2-9224-d14a2d380504", "status": None}],
+            "tool invocation 0 has non-completed status",
+        ),
+        (
+            [{"invocation_id": "call-abab8ac6-3a43-46a2-9224-d14a2d380504", "status": "timeout"}],
+            "tool invocation 0 has non-completed status",
+        ),
+    ],
+)
+def test_malformed_relay_tool_invocation_metadata_is_not_silently_ignored(
+    tool_invocations: Any,
+    match: str,
+) -> None:
+    data = json.loads(_RESPONSES_FIXTURE_PATH.read_text())
+    data["steps"][1]["extra"]["tool_invocations"] = tool_invocations
+
+    with pytest.raises(AtifProjectionError, match=match):
+        atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+
+
+def test_relay_tool_invocation_status_may_be_absent() -> None:
+    data = json.loads(_RESPONSES_FIXTURE_PATH.read_text())
+    del data["steps"][1]["extra"]["tool_invocations"][0]["status"]
+
+    response = atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate(data))
+
+    assert response.status == "completed"
 
 
 def test_absent_optional_relay_status_metadata_remains_supported() -> None:

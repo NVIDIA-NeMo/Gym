@@ -36,7 +36,7 @@ from openai.types.responses.response_input_text_content_param import ResponseInp
 from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.atif_json import json_values_equal, strict_json_loads
-from nemo_gym.atif_v1_7 import ATIF_SCHEMA_VERSION, AtifTrajectoryV1_7
+from nemo_gym.atif_v1_7 import AtifTrajectoryV1_7
 from nemo_gym.config_types import ConfigError
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
@@ -120,6 +120,14 @@ class ProjectedAtifVerifyPayload:
     rollout_index: int
     schema_version: str
     projection_status: Literal["complete"] = "complete"
+
+
+@dataclass(frozen=True)
+class _ResolvedProviderResponse:
+    """A provider payload and its optional Relay/Hermes response envelope."""
+
+    provider: Mapping[str, Any]
+    envelope: Mapping[str, Any] | None = None
 
 
 def load_atif_trajectory(path: Path) -> LoadedAtifTrajectory:
@@ -438,10 +446,6 @@ def atif_trajectory_to_response(trajectory: AtifTrajectoryV1_7) -> NeMoGymRespon
 def _validate_supported_trajectory(trajectory: AtifTrajectoryV1_7) -> None:
     _reject_nonfinite_json_numbers(trajectory.model_dump(mode="python"), "ATIF trajectory")
     _reject_declared_incomplete_gym_conversion(trajectory)
-    if trajectory.schema_version != ATIF_SCHEMA_VERSION:
-        raise AtifProjectionError(
-            f"unsupported ATIF schema version {trajectory.schema_version!r}; expected {ATIF_SCHEMA_VERSION!r}"
-        )
     if trajectory.continued_trajectory_ref is not None:
         raise AtifProjectionError("continued ATIF trajectories are not supported by the initial reverify adapter")
     if trajectory.subagent_trajectories:
@@ -528,6 +532,8 @@ def _has_multimodal_content(trajectory: AtifTrajectoryV1_7) -> bool:
 def _text_parts(value: Any, field_name: str) -> list[str]:
     if isinstance(value, str):
         return [value] if value else []
+    if not value:
+        raise AtifProjectionError(f"{field_name} contains an empty content-part list")
 
     parts: list[str] = []
     for index, part in enumerate(value):
@@ -656,6 +662,141 @@ def _validate_routed_expert_types(value: Any, field_name: str) -> None:
         raise AtifProjectionError(f"{field_name} must contain only JSON integer indices")
 
 
+def _resolve_provider_response(step: Any) -> _ResolvedProviderResponse | None:
+    if not isinstance(step.extra, Mapping) or "llm_response" not in step.extra:
+        return None
+    llm_response = step.extra["llm_response"]
+    if not isinstance(llm_response, Mapping):
+        raise AtifProjectionError(
+            f"step {step.step_id} Relay llm_response is not a supported provider response object"
+        )
+    if "raw_response" not in llm_response:
+        return _ResolvedProviderResponse(provider=llm_response)
+    raw_response = llm_response["raw_response"]
+    if not isinstance(raw_response, Mapping):
+        raise AtifProjectionError(f"step {step.step_id} Relay raw_response is not a provider response object")
+    return _ResolvedProviderResponse(provider=raw_response, envelope=llm_response)
+
+
+def _provider_response_family(step: Any, response: Mapping[str, Any]) -> Literal["responses", "chat", "anthropic"]:
+    families: list[Literal["responses", "chat", "anthropic"]] = []
+    if "output" in response or "output_text" in response:
+        families.append("responses")
+    if "choices" in response:
+        families.append("chat")
+    if "content" in response:
+        families.append("anthropic")
+    if len(families) > 1:
+        raise AtifProjectionError(
+            f"step {step.step_id} provider response mixes incompatible output families: {', '.join(families)}"
+        )
+    if not families:
+        raise AtifProjectionError(
+            f"step {step.step_id} contains an unrecognized raw provider response shape; complete projection is unknown"
+        )
+
+    hidden_generic_fields = {
+        "actions",
+        "answer",
+        "assistant_message",
+        "message",
+        "tool_calls",
+    }
+    hidden = sorted(field for field in hidden_generic_fields if field in response)
+    if hidden:
+        raise AtifProjectionError(
+            f"step {step.step_id} provider response contains additional output fields: "
+            f"{', '.join(repr(field) for field in hidden)}"
+        )
+    return families[0]
+
+
+def _validate_relay_hermes_wrapper(step: Any, resolved: _ResolvedProviderResponse) -> str | None:
+    """Validate the exact response envelope emitted by Relay's Hermes integration."""
+
+    envelope = resolved.envelope
+    if envelope is None:
+        return None
+    _reject_unknown_provider_fields(
+        envelope,
+        {"assistant_message", "finish_reason", "raw_response", "usage"},
+        f"step {step.step_id} Relay response envelope",
+    )
+
+    assistant_message = envelope.get("assistant_message")
+    if not isinstance(assistant_message, Mapping):
+        raise AtifProjectionError(f"step {step.step_id} Relay assistant_message is not an object")
+    _reject_unknown_provider_fields(
+        assistant_message,
+        {"content", "role", "tool_calls"},
+        f"step {step.step_id} Relay assistant_message",
+    )
+    if assistant_message.get("role") != "assistant":
+        raise AtifProjectionError(f"step {step.step_id} Relay assistant_message has a non-assistant role")
+
+    content = assistant_message.get("content")
+    if content is None:
+        message_parts: list[str] = []
+    elif isinstance(content, str):
+        message_parts = [content] if content else []
+    else:
+        raise AtifProjectionError(f"step {step.step_id} Relay assistant_message content is not scalar text")
+
+    raw_tool_calls: list[tuple[str, str, dict[str, Any]]] = []
+    tool_calls = assistant_message.get("tool_calls")
+    if tool_calls is not None:
+        if not isinstance(tool_calls, list):
+            raise AtifProjectionError(f"step {step.step_id} Relay assistant_message tool_calls is not a list")
+        for index, call in enumerate(tool_calls):
+            if not isinstance(call, Mapping):
+                raise AtifProjectionError(
+                    f"step {step.step_id} Relay assistant_message tool call {index} is not an object"
+                )
+            _reject_unknown_provider_fields(
+                call,
+                {"arguments", "id", "name", "provider_data"},
+                f"step {step.step_id} Relay assistant_message tool call {index}",
+            )
+            raw_tool_calls.append(
+                _raw_tool_call(
+                    call_id=call.get("id"),
+                    name=call.get("name"),
+                    arguments=call.get("arguments"),
+                    field_name=f"step {step.step_id} Relay assistant_message tool call {index}",
+                )
+            )
+    _validate_raw_coverage(step, raw_message_parts=message_parts, raw_tool_calls=raw_tool_calls)
+
+    envelope_finish = envelope.get("finish_reason")
+    if envelope_finish is not None:
+        if envelope_finish not in {"stop", "tool_calls"}:
+            raise AtifProjectionError(
+                f"step {step.step_id} Relay response envelope has non-terminal finish_reason {envelope_finish!r}"
+            )
+        if raw_tool_calls and envelope_finish != "tool_calls":
+            raise AtifProjectionError(
+                f"step {step.step_id} Relay assistant_message tool calls conflict with "
+                f"finish_reason {envelope_finish!r}"
+            )
+        if not raw_tool_calls and envelope_finish == "tool_calls":
+            raise AtifProjectionError(
+                f"step {step.step_id} Relay response envelope has finish_reason='tool_calls' without tool calls"
+            )
+    return envelope_finish
+
+
+def _relay_wrapper_proves_completed_tool_call(step: Any) -> bool:
+    invocation = step.extra.get("invocation") if isinstance(step.extra, Mapping) else None
+    status = invocation.get("status") if isinstance(invocation, Mapping) else None
+    if not isinstance(status, str) or status.lower() != "completed":
+        return False
+    call_ids = {call.tool_call_id for call in step.tool_calls or []}
+    if not call_ids or step.observation is None:
+        return False
+    result_ids = [result.source_call_id for result in step.observation.results]
+    return len(result_ids) == len(call_ids) and set(result_ids) == call_ids
+
+
 def _reject_known_incomplete_or_failed_step(step: Any) -> None:
     for index, tool_call in enumerate(step.tool_calls or []):
         if not isinstance(tool_call.extra, Mapping) or "status" not in tool_call.extra:
@@ -671,32 +812,49 @@ def _reject_known_incomplete_or_failed_step(step: Any) -> None:
         invocation = step.extra["invocation"]
         if not isinstance(invocation, Mapping):
             raise AtifProjectionError(f"step {step.step_id} Relay invocation metadata is not an object")
-        status = invocation.get("status")
-        if status is not None and (not isinstance(status, str) or status.lower() != "completed"):
-            raise AtifProjectionError(f"step {step.step_id} has non-completed Relay invocation status {status!r}")
+        if "status" in invocation:
+            status = invocation["status"]
+            if not isinstance(status, str) or status.lower() != "completed":
+                raise AtifProjectionError(f"step {step.step_id} has non-completed Relay invocation status {status!r}")
 
     if "tool_invocations" in step.extra:
         tool_invocations = step.extra["tool_invocations"]
         if not isinstance(tool_invocations, list):
             raise AtifProjectionError(f"step {step.step_id} Relay tool_invocations metadata is not a list")
+        tool_calls = step.tool_calls or []
+        if len(tool_invocations) != len(tool_calls):
+            raise AtifProjectionError(
+                f"step {step.step_id} Relay tool_invocations metadata has {len(tool_invocations)} entries "
+                f"for {len(tool_calls)} canonical tool calls"
+            )
         for index, tool_invocation in enumerate(tool_invocations):
             if not isinstance(tool_invocation, Mapping):
                 raise AtifProjectionError(
                     f"step {step.step_id} Relay tool invocation {index} metadata is not an object"
                 )
-            status = tool_invocation.get("status")
-            if status is not None and (not isinstance(status, str) or status.lower() != "completed"):
+            invocation_id = tool_invocation.get("invocation_id")
+            if not isinstance(invocation_id, str) or not invocation_id.strip():
                 raise AtifProjectionError(
-                    f"step {step.step_id} tool invocation {index} has non-completed status {status!r}"
+                    f"step {step.step_id} Relay tool invocation {index} has a blank or invalid invocation_id"
                 )
+            if invocation_id != tool_calls[index].tool_call_id:
+                raise AtifProjectionError(
+                    f"step {step.step_id} Relay tool invocation {index} invocation_id {invocation_id!r} "
+                    f"does not match canonical tool call {tool_calls[index].tool_call_id!r}"
+                )
+            if "status" in tool_invocation:
+                status = tool_invocation["status"]
+                if not isinstance(status, str) or status.lower() != "completed":
+                    raise AtifProjectionError(
+                        f"step {step.step_id} tool invocation {index} has non-completed status {status!r}"
+                    )
 
-    llm_response = step.extra.get("llm_response")
-    if not isinstance(llm_response, Mapping):
+    resolved = _resolve_provider_response(step)
+    if resolved is None:
         return
-    response_layers = [llm_response]
-    raw_response = llm_response.get("raw_response")
-    if isinstance(raw_response, Mapping):
-        response_layers.append(raw_response)
+    response_layers = [resolved.provider]
+    if resolved.envelope is not None:
+        response_layers.insert(0, resolved.envelope)
     for response_layer in response_layers:
         response_status = response_layer.get("status")
         if response_status is not None and (
@@ -707,33 +865,13 @@ def _reject_known_incomplete_or_failed_step(step: Any) -> None:
             )
         if response_layer.get("error") is not None or response_layer.get("incomplete_details") is not None:
             raise AtifProjectionError(f"step {step.step_id} contains a failed or incomplete provider response")
-    provider_response = response_layers[-1]
-
-    choices = provider_response.get("choices")
-    if isinstance(choices, list):
-        for choice in choices:
-            finish_reason = choice.get("finish_reason") if isinstance(choice, Mapping) else None
-            if finish_reason not in {"stop", "tool_calls"}:
-                raise AtifProjectionError(f"step {step.step_id} has non-terminal chat finish_reason {finish_reason!r}")
-
-    content = provider_response.get("content")
-    if isinstance(content, list):
-        stop_reason = provider_response.get("stop_reason")
-        if stop_reason not in {"end_turn", "stop_sequence", "tool_use"}:
-            raise AtifProjectionError(f"step {step.step_id} has non-terminal Anthropic stop_reason {stop_reason!r}")
-    else:
-        stop_reason = provider_response.get("stop_reason")
-        if stop_reason is not None and stop_reason not in {"end_turn", "stop_sequence", "tool_use"}:
-            raise AtifProjectionError(f"step {step.step_id} has non-terminal Anthropic stop_reason {stop_reason!r}")
 
 
 def _responses_reasoning_items(trajectory: AtifTrajectoryV1_7, step: Any) -> list[NeMoGymResponseReasoningItem]:
     """Preserve reasoning items carried in Relay's raw OpenAI Responses extension."""
 
-    llm_response = step.extra.get("llm_response") if isinstance(step.extra, Mapping) else None
-    if isinstance(llm_response, Mapping) and isinstance(llm_response.get("raw_response"), Mapping):
-        llm_response = llm_response["raw_response"]
-    output = llm_response.get("output") if isinstance(llm_response, Mapping) else None
+    resolved = _resolve_provider_response(step)
+    output = resolved.provider.get("output") if resolved is not None else None
     if not isinstance(output, list):
         return []
 
@@ -810,25 +948,17 @@ def _reject_unknown_provider_parts(value: Any, allowed: set[str], field_name: st
 def _reject_unprojected_provider_outputs(step: Any) -> None:
     """Reject known raw provider items that the initial Responses projection would drop."""
 
-    if not isinstance(step.extra, Mapping) or "llm_response" not in step.extra:
+    resolved = _resolve_provider_response(step)
+    if resolved is None:
         return
-    llm_response = step.extra["llm_response"]
-    if not isinstance(llm_response, Mapping):
-        raise AtifProjectionError(
-            f"step {step.step_id} Relay llm_response is not a supported provider response object"
-        )
+    llm_response = resolved.provider
+    wrapper_finish_reason = _validate_relay_hermes_wrapper(step, resolved)
+    family = _provider_response_family(step, llm_response)
 
-    provider_response = llm_response.get("raw_response")
-    if isinstance(provider_response, Mapping):
-        for field_name in ("actions", "content"):
-            if llm_response.get(field_name) is not None:
-                raise AtifProjectionError(
-                    f"step {step.step_id} Relay response envelope contains unsupported output field {field_name!r}"
-                )
-        llm_response = provider_response
-
-    output = llm_response.get("output")
-    if isinstance(output, list):
+    if family == "responses" and "output" in llm_response:
+        output = llm_response["output"]
+        if not isinstance(output, list):
+            raise AtifProjectionError(f"step {step.step_id} Responses output is not a list")
         supported_item_types = {"reasoning", "function_call", "message", "output_text"}
         saw_non_reasoning_item = False
         for item_index, item in enumerate(output):
@@ -894,8 +1024,10 @@ def _reject_unprojected_provider_outputs(step: Any) -> None:
         _validate_responses_raw_coverage(step, output)
         return
 
-    output_text = llm_response.get("output_text")
-    if isinstance(output_text, str):
+    if family == "responses":
+        output_text = llm_response["output_text"]
+        if not isinstance(output_text, str):
+            raise AtifProjectionError(f"step {step.step_id} Responses output_text is not scalar text")
         response_status = llm_response.get("status")
         if not isinstance(response_status, str) or response_status.lower() != "completed":
             raise AtifProjectionError(
@@ -908,8 +1040,10 @@ def _reject_unprojected_provider_outputs(step: Any) -> None:
         )
         return
 
-    choices = llm_response.get("choices")
-    if isinstance(choices, list):
+    if family == "chat":
+        choices = llm_response["choices"]
+        if not isinstance(choices, list):
+            raise AtifProjectionError(f"step {step.step_id} chat choices is not a list")
         if len(choices) != 1:
             raise AtifProjectionError(
                 f"step {step.step_id} contains {len(choices)} chat choices; expected exactly one"
@@ -937,11 +1071,18 @@ def _reject_unprojected_provider_outputs(step: Any) -> None:
             raise AtifProjectionError(f"step {step.step_id} chat message contains non-empty annotations")
         if isinstance(choice, Mapping) and choice.get("logprobs"):
             raise AtifProjectionError(f"step {step.step_id} chat choice contains non-empty logprobs")
-        _validate_chat_raw_coverage(step, choice)
+        _validate_chat_raw_coverage(
+            step,
+            choice,
+            relay_hermes_wrapper=resolved.envelope is not None,
+            wrapper_finish_reason=wrapper_finish_reason,
+        )
         return
 
-    content = llm_response.get("content")
-    if isinstance(content, list):
+    if family == "anthropic":
+        content = llm_response["content"]
+        if not isinstance(content, list):
+            raise AtifProjectionError(f"step {step.step_id} Anthropic content is not a list")
         role = llm_response.get("role")
         if role != "assistant":
             raise AtifProjectionError(f"step {step.step_id} Anthropic message has non-assistant role {role!r}")
@@ -958,9 +1099,7 @@ def _reject_unprojected_provider_outputs(step: Any) -> None:
         _validate_anthropic_raw_coverage(step, content, stop_reason=llm_response.get("stop_reason"))
         return
 
-    raise AtifProjectionError(
-        f"step {step.step_id} contains an unrecognized raw provider response shape; complete projection is unknown"
-    )
+    raise AssertionError(f"unhandled provider response family: {family}")
 
 
 def _validate_responses_raw_coverage(step: Any, output: list[Any]) -> None:
@@ -1038,11 +1177,19 @@ def _validate_responses_raw_coverage(step: Any, output: list[Any]) -> None:
     _validate_raw_coverage(step, raw_message_parts=raw_message_parts, raw_tool_calls=raw_tool_calls)
 
 
-def _validate_chat_raw_coverage(step: Any, choice: Mapping[str, Any]) -> None:
+def _validate_chat_raw_coverage(
+    step: Any,
+    choice: Mapping[str, Any],
+    *,
+    relay_hermes_wrapper: bool = False,
+    wrapper_finish_reason: str | None = None,
+) -> None:
     message = choice.get("message")
     if not isinstance(message, Mapping):
         raise AtifProjectionError(f"step {step.step_id} chat choice has no message object")
     role = message.get("role")
+    if role is None and relay_hermes_wrapper:
+        role = "assistant"
     if role != "assistant":
         raise AtifProjectionError(f"step {step.step_id} chat message has non-assistant role {role!r}")
     _reject_unknown_provider_fields(
@@ -1136,6 +1283,17 @@ def _validate_chat_raw_coverage(step: Any, choice: Mapping[str, Any]) -> None:
             )
 
     finish_reason = choice.get("finish_reason")
+    if finish_reason is None:
+        finish_reason = wrapper_finish_reason
+    if (
+        finish_reason is None
+        and relay_hermes_wrapper
+        and raw_tool_calls
+        and _relay_wrapper_proves_completed_tool_call(step)
+    ):
+        finish_reason = "tool_calls"
+    if finish_reason not in {"stop", "tool_calls"}:
+        raise AtifProjectionError(f"step {step.step_id} has non-terminal chat finish_reason {finish_reason!r}")
     if raw_tool_calls and finish_reason != "tool_calls":
         raise AtifProjectionError(
             f"step {step.step_id} chat tool calls have inconsistent finish_reason {finish_reason!r}"
@@ -1147,6 +1305,8 @@ def _validate_chat_raw_coverage(step: Any, choice: Mapping[str, Any]) -> None:
 
 
 def _validate_anthropic_raw_coverage(step: Any, content: list[Any], *, stop_reason: Any) -> None:
+    if stop_reason not in {"end_turn", "stop_sequence", "tool_use"}:
+        raise AtifProjectionError(f"step {step.step_id} has non-terminal Anthropic stop_reason {stop_reason!r}")
     raw_message_parts: list[str] = []
     raw_tool_calls: list[tuple[str, str, dict[str, Any]]] = []
     for block_index, block in enumerate(content):
@@ -1388,16 +1548,18 @@ def _usage(trajectory: AtifTrajectoryV1_7) -> NeMoGymResponseUsage | None:
         cached_tokens = metrics.total_cached_tokens
 
     computed_total_tokens = prompt_total + completion_total
-    if reported_total_tokens is not None and reported_total_tokens != computed_total_tokens:
-        raise AtifProjectionError(
-            "Gym ATIF total_tokens metadata does not match total_prompt_tokens + total_completion_tokens"
-        )
+    if reported_total_tokens is not None and (
+        reported_total_tokens < prompt_total or reported_total_tokens < completion_total
+    ):
+        raise AtifProjectionError("Gym ATIF total_tokens metadata is smaller than a component token count")
+    if reasoning_tokens is not None and reasoning_tokens > completion_total:
+        raise AtifProjectionError("Gym ATIF reasoning_tokens metadata exceeds total completion tokens")
     return NeMoGymResponseUsage(
         input_tokens=prompt_total,
         input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=cached_tokens),
         output_tokens=completion_total,
         output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=reasoning_tokens),
-        total_tokens=computed_total_tokens,
+        total_tokens=reported_total_tokens if reported_total_tokens is not None else computed_total_tokens,
     )
 
 
@@ -1456,21 +1618,26 @@ def _nemo_gym_usage_details(agent_steps: list[Any]) -> tuple[int | None, int | N
             field_name="total_tokens",
             step_id=step.step_id,
         )
+        if metrics is not None:
+            if reported_total is not None and any(
+                value is not None and value > reported_total
+                for value in (metrics.prompt_tokens, metrics.completion_tokens)
+            ):
+                raise AtifProjectionError(
+                    f"step {step.step_id} ATIF total_tokens metadata is smaller than a component token count"
+                )
+            if (
+                reasoning is not None
+                and metrics.completion_tokens is not None
+                and reasoning > metrics.completion_tokens
+            ):
+                raise AtifProjectionError(
+                    f"step {step.step_id} ATIF reasoning_tokens metadata exceeds completion_tokens"
+                )
         reasoning_values.append(reasoning)
         total_values.append(reported_total)
         saw_reasoning = saw_reasoning or "reasoning_tokens" in namespace or "reasoning_tokens" in output_details
         saw_total = saw_total or "total_tokens" in namespace or "total_tokens" in metric_extra
-
-        if (
-            reported_total is not None
-            and metrics is not None
-            and metrics.prompt_tokens is not None
-            and metrics.completion_tokens is not None
-            and reported_total != metrics.prompt_tokens + metrics.completion_tokens
-        ):
-            raise AtifProjectionError(
-                f"step {step.step_id} Gym total_tokens metadata does not match prompt_tokens + completion_tokens"
-            )
 
     reasoning_total = sum(value for value in reasoning_values if value is not None)
     if not saw_reasoning or any(value is None for value in reasoning_values):

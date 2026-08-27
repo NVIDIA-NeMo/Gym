@@ -187,7 +187,7 @@ class AtifStep(_AtifModel):
 class AtifTrajectoryV1_7(_AtifModel):
     """The version-gated ATIF v1.7 subset supported by Gym's adapters."""
 
-    schema_version: str
+    schema_version: Literal["ATIF-v1.7"]
     session_id: str | None = None
     trajectory_id: str | None = None
     agent: AtifAgent
@@ -215,4 +215,11 @@ class AtifTrajectoryV1_7(_AtifModel):
                     raise ValueError(
                         f"step {step.step_id} observation references unknown tool call {result.source_call_id!r}"
                     )
+
+        if self.final_metrics is not None and self.final_metrics.total_steps is not None:
+            if self.final_metrics.total_steps != len(self.steps):
+                raise ValueError(
+                    "final_metrics.total_steps must equal the number of trajectory steps: "
+                    f"expected {len(self.steps)}, got {self.final_metrics.total_steps}"
+                )
         return self
