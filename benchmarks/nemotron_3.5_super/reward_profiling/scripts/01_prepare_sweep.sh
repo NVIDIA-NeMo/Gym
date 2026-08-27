@@ -37,6 +37,21 @@ args=(--out-dir "$OUT_DIR")
 [[ -n "$LIMIT_PER_ENTRY" ]] && args+=(--limit-per-entry "$LIMIT_PER_ENTRY")
 [[ "${OVERWRITE:-0}" == "1" ]] && args+=(--overwrite)
 
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+# nemo_gym needs its dependencies importable. Automatic inside the eval container, not on a login
+# node, where the failure is otherwise a bare ModuleNotFoundError from deep in the CLI.
+if ! python -c "import orjson, nemo_gym" >/dev/null 2>&1; then
+    if [[ -n "${GYM_SITE_PACKAGES:-}" ]]; then
+        export PYTHONPATH="$REPO_ROOT:$GYM_SITE_PACKAGES${PYTHONPATH:+:$PYTHONPATH}"
+    fi
+    if ! python -c "import orjson, nemo_gym" >/dev/null 2>&1; then
+        echo "ERROR: cannot import nemo_gym and its deps." >&2
+        echo "       Run inside the eval container, activate the Gym venv, or set" >&2
+        echo "       GYM_SITE_PACKAGES=<venv>/lib/python3.*/site-packages" >&2
+        exit 2
+    fi
+fi
+
 echo ">>> validating $MANIFEST"
 python -m nemo_gym.sweep validate "$MANIFEST"
 

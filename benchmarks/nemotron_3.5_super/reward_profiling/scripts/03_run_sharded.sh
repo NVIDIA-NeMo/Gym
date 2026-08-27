@@ -34,6 +34,22 @@ MAX_ROUNDS=${MAX_ROUNDS:-4}
 
 cd "$REPO_ROOT"
 
+# nemo_gym needs its dependencies importable. Inside the eval container that is automatic; on a
+# login node it is not, and the failure is otherwise a bare ModuleNotFoundError from deep inside
+# the CLI. GYM_SITE_PACKAGES points PYTHONPATH at a venv's site-packages if you are not in one.
+if ! python -c "import orjson, nemo_gym" >/dev/null 2>&1; then
+    if [[ -n "${GYM_SITE_PACKAGES:-}" ]]; then
+        export PYTHONPATH="$REPO_ROOT:$GYM_SITE_PACKAGES${PYTHONPATH:+:$PYTHONPATH}"
+    fi
+    if ! python -c "import orjson, nemo_gym" >/dev/null 2>&1; then
+        echo "ERROR: cannot import nemo_gym and its deps." >&2
+        echo "       Run inside the eval container, activate the Gym venv, or set" >&2
+        echo "       GYM_SITE_PACKAGES=<venv>/lib/python3.*/site-packages" >&2
+        exit 2
+    fi
+fi
+
+
 echo ">>> dealing $SWEEP_DIR into $NUM_SHARDS shards"
 python -m nemo_gym.sweep shard "$SWEEP_DIR" --num-shards "$NUM_SHARDS" --out-dir "$SHARDS_DIR"
 

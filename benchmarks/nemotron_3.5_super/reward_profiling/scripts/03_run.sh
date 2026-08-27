@@ -162,6 +162,12 @@ ROUTER_SERVER_PORT=8000
 WORKER_SERVER_PORT=8001
 
 eval_command=$(cat <<EOF
+# Drop any PYTHONPATH inherited from the submitting host. The container ships its own environment,
+# and a host PYTHONPATH -- the GYM_SITE_PACKAGES guard in the sharded runner exports one --
+# propagates through sbatch and shadows it. Job 6600989 died with "cannot import name
+# 'is_offline_mode' from huggingface_hub" because the host venv was imported inside the container.
+unset PYTHONPATH
+
 # Activate the container's Gym venv. SWEEP_DIR holds the artifacts 01_prepare_sweep.sh wrote.
 source /opt/Gym_venv/bin/activate
 cd /opt/Gym
