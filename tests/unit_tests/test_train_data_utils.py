@@ -1301,3 +1301,161 @@ class TestCollateSamples:
         assert list(write_filenames_to_mock.keys()) == [
             Path("example_metrics_conflict.json"),
         ]
+
+
+def _instance(name: str, server_type: str, impl: dict):
+    from omegaconf import OmegaConf
+
+    from nemo_gym.config_types import maybe_get_server_instance_config
+
+    cfg, err = maybe_get_server_instance_config(name, OmegaConf.create({server_type: {"impl": impl}}))
+    assert err is None, err
+    return cfg
+
+
+def _dataset(tmp_path: Path, name: str, rows: list) -> dict:
+    fpath = tmp_path / f"{name}.jsonl"
+    fpath.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    return {"name": name, "type": "example", "jsonl_fpath": str(fpath)}
+
+
+class TestCollateTaskSourceStamping:
+    """Pins the collate stamping contract (dataset-decoupling RFC): rows are stamped with
+    task_source (the declaring instance) and carry NO agent_ref — the agent is a run-time
+    choice, never part of the data. This is also the processed-format contract external
+    training frameworks consume."""
+
+    ROWS = [{"responses_create_params": {"input": []}, "question": "q1"}]
+
+    def _collate(self, tmp_path, monkeypatch, configs):
+        monkeypatch.chdir(tmp_path)
+        return TrainDataProcessor()._collate_samples_single_type(type="example", server_instance_configs=configs)
+
+    def _read(self, path: Path) -> list:
+        return [json.loads(line) for line in open(path)]
+
+    def test_rs_declared_dataset_stamps_task_source_only(self, tmp_path, monkeypatch) -> None:
+        rs = _instance(
+            "math_rs",
+            "resources_servers",
+            {"entrypoint": "app.py", "domain": "math", "datasets": [_dataset(tmp_path, "d1", self.ROWS)]},
+        )
+        paths = self._collate(tmp_path, monkeypatch, [rs])
+        rows = self._read(paths[0])
+        assert rows[0]["task_source"] == "math_rs"
+        assert "agent_ref" not in rows[0]
+
+    def test_agent_declared_dataset_also_stamps_task_source_only(self, tmp_path, monkeypatch) -> None:
+        agent = _instance(
+            "tau2_agent",
+            "responses_api_agents",
+            {"entrypoint": "app.py", "datasets": [_dataset(tmp_path, "d3", self.ROWS)]},
+        )
+        paths = self._collate(tmp_path, monkeypatch, [agent])
+        rows = self._read(paths[0])
+        assert rows[0]["task_source"] == "tau2_agent"
+        assert "agent_ref" not in rows[0]
+
+    def test_incoming_legacy_agent_ref_is_stripped_with_warning(self, tmp_path, monkeypatch) -> None:
+        legacy_rows = [
+            {"responses_create_params": {"input": []}, "agent_ref": {"type": "responses_api_agents", "name": "old"}}
+        ]
+        rs = _instance(
+            "math_rs",
+            "resources_servers",
+            {"entrypoint": "app.py", "domain": "math", "datasets": [_dataset(tmp_path, "d4", legacy_rows)]},
+        )
+        import pytest
+
+        with pytest.warns(DeprecationWarning, match="stripped legacy agent_ref from 1 rows"):
+            paths = self._collate(tmp_path, monkeypatch, [rs])
+        rows = self._read(paths[0])
+        assert "agent_ref" not in rows[0]
+        assert rows[0]["task_source"] == "math_rs"
+
+    def test_processed_format_contract(self, tmp_path, monkeypatch) -> None:
+        """The contract external consumers rely on: every collated row has task_source and
+        responses_create_params; agent_ref is never emitted. Guard against silent format drift."""
+        rs = _instance(
+            "math_rs",
+            "resources_servers",
+            {"entrypoint": "app.py", "domain": "math", "datasets": [_dataset(tmp_path, "d5", self.ROWS)]},
+        )
+        paths = self._collate(tmp_path, monkeypatch, [rs])
+        for row in self._read(paths[0]):
+            assert "responses_create_params" in row
+            assert isinstance(row["task_source"], str) and row["task_source"]
+            assert "agent_ref" not in row
+
+    def test_same_fpath_two_declarations_get_distinct_prepare_files(self, tmp_path, monkeypatch) -> None:
+        """Previously the second declaration silently truncated the first's prepared file."""
+        shared = _dataset(tmp_path, "shared", self.ROWS)
+        a = _instance("agent_a", "responses_api_agents", {"entrypoint": "app.py", "datasets": [dict(shared)]})
+        b = _instance("agent_b", "responses_api_agents", {"entrypoint": "app.py", "datasets": [dict(shared)]})
+        paths = self._collate(tmp_path, monkeypatch, [a, b])
+        assert len(paths) == len(set(paths)) == 2
+        stamps = [self._read(p)[0]["task_source"] for p in paths]
+        assert sorted(stamps) == ["agent_a", "agent_b"]
+
+    def test_same_fpath_repeated_within_one_instance_gets_distinct_prepare_files(self, tmp_path, monkeypatch) -> None:
+        """The instance-qualified fallback name alone collides when ONE instance declares the
+        same path several times; every declaration must still get its own prepared file."""
+        shared = _dataset(tmp_path, "shared", self.ROWS)
+        declarations = [dict(shared, name=f"decl_{i}") for i in range(3)]
+        a = _instance("agent_a", "responses_api_agents", {"entrypoint": "app.py", "datasets": declarations})
+        b = _instance("agent_b", "responses_api_agents", {"entrypoint": "app.py", "datasets": [dict(shared)]})
+        paths = self._collate(tmp_path, monkeypatch, [a, b])
+        assert len(paths) == len(set(paths)) == 4
+        stamps = sorted(self._read(p)[0]["task_source"] for p in paths)
+        assert stamps == ["agent_a", "agent_a", "agent_a", "agent_b"]
+
+    def test_same_fpath_same_dataset_name_repeated_gets_numbered_prepare_files(self, tmp_path, monkeypatch) -> None:
+        shared = _dataset(tmp_path, "shared", self.ROWS)
+        a = _instance(
+            "agent_a", "responses_api_agents", {"entrypoint": "app.py", "datasets": [dict(shared) for _ in range(4)]}
+        )
+        paths = self._collate(tmp_path, monkeypatch, [a])
+        assert len(paths) == len(set(paths)) == 4
+
+
+class TestDeclaringInstanceValidation:
+    def _validate(self, configs_dict):
+        from omegaconf import OmegaConf
+
+        cfg = TrainDataProcessorConfig(output_dirpath="out", mode="example_validation")
+        return TrainDataProcessor().load_and_validate_server_instance_configs(cfg, OmegaConf.create(configs_dict))
+
+    def test_rs_declared_datasets_are_in_scope(self, tmp_path) -> None:
+        d = _dataset(tmp_path, "d4", [{"responses_create_params": {"input": []}}])
+        out = self._validate(
+            {"my_rs": {"resources_servers": {"impl": {"entrypoint": "a.py", "domain": "math", "datasets": [d]}}}}
+        )
+        assert [c.name for c in out] == ["my_rs"]
+
+    def test_model_server_datasets_rejected(self, tmp_path) -> None:
+        d = _dataset(tmp_path, "d5", [{"responses_create_params": {"input": []}}])
+        with raises(ValueError, match="cannot be declared on model servers"):
+            self._validate({"my_model": {"responses_api_models": {"impl": {"entrypoint": "a.py", "datasets": [d]}}}})
+
+    def test_agent_declarations_do_not_warn_yet(self, tmp_path) -> None:
+        """Both declaration homes are equally supported until the config migration lands;
+        the deprecation warning ships with that PR (see NOTE(dataset-decoupling))."""
+        import warnings as _warnings
+
+        d = _dataset(tmp_path, "d6", [{"responses_create_params": {"input": []}}])
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("error", DeprecationWarning)
+            out = self._validate(
+                {
+                    "my_agent": {
+                        "responses_api_agents": {
+                            "impl": {
+                                "entrypoint": "a.py",
+                                "resources_server": {"type": "resources_servers", "name": "some_rs"},
+                                "datasets": [d],
+                            }
+                        }
+                    }
+                }
+            )
+        assert [c.name for c in out] == ["my_agent"]

@@ -15,6 +15,8 @@
 import asyncio
 import importlib
 import json
+import logging
+from collections.abc import Sequence
 from copy import deepcopy
 from multiprocessing import Pool
 from pathlib import Path
@@ -50,6 +52,9 @@ from nemo_gym.global_config import (
     get_first_server_config_dict,
     get_global_config_dict,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 # NOTE: `reward_profile`, `rollout_collection`, `rollout_reverification` and `train_data_utils` are imported lazily inside the run/aggregate/
@@ -378,6 +383,12 @@ def e2e_rollout_collection():  # pragma: no cover
     # ``rollout_collection_driver`` config field (a ``module.path:function``).
     # The default path runs the built-in single-pass helper.
     driver_path = e2e_rollout_collection_config.rollout_collection_driver
+    health_check_enabled = (
+        not rollout_collection_config.disable_aggregation and not rollout_collection_config.disable_health_check
+    )
+    # This E2E entry point prints health only after its server-shutdown phase.
+    # The no-serve entry point calls the collection helper directly.
+    rollout_collection_config.disable_health_check = True
 
     print(
         f"""Output artifacts:
@@ -387,6 +398,7 @@ def e2e_rollout_collection():  # pragma: no cover
 {f"Rollout collection driver: {driver_path}" if driver_path else ""}
 """
     )
+    collection_completed = False
     try:
         if driver_path:
             module_name, _, fn_name = driver_path.partition(":")
@@ -397,10 +409,25 @@ def e2e_rollout_collection():  # pragma: no cover
             asyncio.run(driver_fn(rollout_collection_config, resolved_config))
         else:
             asyncio.run(rch.run_from_config(rollout_collection_config))
+        collection_completed = True
     except KeyboardInterrupt:
         pass
     finally:
         rh.shutdown()
+
+    if health_check_enabled and collection_completed:
+        from nemo_gym.rollout_health import format_health_report, run_health_checks
+
+        try:
+            health_result = run_health_checks(
+                output_fpath,
+                workers=rollout_collection_config.health_check_workers,
+                ignored_checks=rollout_collection_config.health_check_ignored_checks,
+            )
+        except Exception:
+            logger.exception("Rollout health checks failed after collection; rollout artifacts are still available.")
+        else:
+            print(format_health_report(health_result))
 
 
 @exit_cleanly_on_config_error
@@ -417,10 +444,31 @@ def collect_rollouts():  # pragma: no cover
 def aggregate_rollouts():  # pragma: no cover
     from nemo_gym.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
 
-    config = RolloutAggregationConfig.model_validate(get_global_config_dict())
+    global_config = get_global_config_dict()
+    config = RolloutAggregationConfig.model_validate(global_config)
     rah = RolloutAggregationHelper()
 
     asyncio.run(rah.run_from_config(config))
+
+
+def health_check_rollouts(
+    run_dir: str | Path,
+    *,
+    rollout_file: str | Path | None = None,
+    workers: int | None = None,
+    ignored_checks: Sequence[str] = (),
+    json_output: bool = False,
+):
+    """Run rollout quality verification for an existing run directory."""
+    from nemo_gym.rollout_health import health_check_run_dir
+
+    return health_check_run_dir(
+        run_dir,
+        rollout_file=rollout_file,
+        workers=workers,
+        ignored_checks=ignored_checks,
+        json_output=json_output,
+    )
 
 
 @exit_cleanly_on_config_error

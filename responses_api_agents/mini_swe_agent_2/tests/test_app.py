@@ -150,11 +150,8 @@ def create_test_config(
     )
 
 
-def setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict):
-    mock_server_client_instance = MagicMock()
-    mock_server_client_instance.global_config_dict = {"policy_model_name": "test_model"}
-    mock_load_from_global_config.return_value = mock_server_client_instance
-
+def setup_server_client_mocks(mock_server_client, mock_get_first_server_config_dict):
+    mock_server_client.global_config_dict = {"policy_model_name": "test_model"}
     mock_get_first_server_config_dict.return_value = {
         "host": "0.0.0.0",
         "port": 8080,
@@ -710,7 +707,6 @@ class TestApp:
         with pytest.raises(ValueError, match="instance_dict"):
             _run_mini_swe_v2(**(params | {"instance_dict": None}))
 
-    @patch("responses_api_agents.mini_swe_agent_2.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.mini_swe_agent_2.app.get_first_server_config_dict")
     @patch("responses_api_agents.mini_swe_agent_2.app.get_config_path")
     @patch("responses_api_agents.mini_swe_agent_2.app.runner_ray_remote")
@@ -719,17 +715,16 @@ class TestApp:
         mock_runner_ray_remote,
         mock_get_config_path,
         mock_get_first_server_config_dict,
-        mock_load_from_global_config,
     ) -> None:
         """Test successful execution of the run method with mocked run_mini_swe."""
 
         config = create_test_config()
         mock_server_client = MagicMock(spec=ServerClient)
-        # The rollout prefix is only applied when model-call capture is enabled.
-        mock_server_client.global_config_dict = {"observability_enabled": True}
         server = MiniSWEAgent(config=config, server_client=mock_server_client)
 
-        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
+        setup_server_client_mocks(mock_server_client, mock_get_first_server_config_dict)
+        # The rollout prefix is only applied when model-call capture is enabled.
+        mock_server_client.global_config_dict["observability_enabled"] = True
         setup_config_path_mock(mock_get_config_path)
         setup_run_mini_swe_mock(mock_runner_ray_remote)
 
@@ -744,7 +739,6 @@ class TestApp:
         assert_run_mini_swe_called(mock_runner_ray_remote)
         assert mock_runner_ray_remote.remote.call_args.args[1]["base_url"] == ("http://0.0.0.0:8080/ng-rollout/2-1/v1")
 
-    @patch("responses_api_agents.mini_swe_agent_2.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.mini_swe_agent_2.app.get_first_server_config_dict")
     @patch("responses_api_agents.mini_swe_agent_2.app.get_config_path")
     @patch("responses_api_agents.mini_swe_agent_2.app.runner_ray_remote")
@@ -753,7 +747,6 @@ class TestApp:
         mock_runner_ray_remote,
         mock_get_config_path,
         mock_get_first_server_config_dict,
-        mock_load_from_global_config,
         tmp_path,
         monkeypatch,
     ) -> None:
@@ -771,7 +764,7 @@ class TestApp:
         mock_server_client = MagicMock(spec=ServerClient)
         server = MiniSWEAgent(config=config, server_client=mock_server_client)
 
-        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
+        setup_server_client_mocks(mock_server_client, mock_get_first_server_config_dict)
         setup_config_path_mock(mock_get_config_path)
         setup_run_mini_swe_mock(mock_runner_ray_remote)
 
@@ -807,7 +800,6 @@ class TestApp:
             "chat_template_kwargs": {"enable_thinking": True},
         }
 
-    @patch("responses_api_agents.mini_swe_agent_2.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.mini_swe_agent_2.app.get_first_server_config_dict")
     @patch("responses_api_agents.mini_swe_agent_2.app.get_config_path")
     @patch("responses_api_agents.mini_swe_agent_2.app.runner_ray_remote")
@@ -816,7 +808,6 @@ class TestApp:
         mock_runner_ray_remote,
         mock_get_config_path,
         mock_get_first_server_config_dict,
-        mock_load_from_global_config,
         tmp_path,
         monkeypatch,
     ) -> None:
@@ -826,8 +817,7 @@ class TestApp:
         mock_server_client = MagicMock(spec=ServerClient)
         server = MiniSWEAgent(config=config, server_client=mock_server_client)
 
-        mock_server_client_instance = MagicMock()
-        mock_server_client_instance.global_config_dict = {
+        mock_server_client.global_config_dict = {
             "policy_model_name": "test_model",
             "sandbox": {
                 "default_metadata": {"sandbox-api": "opensandbox-sdk"},
@@ -839,7 +829,6 @@ class TestApp:
                 },
             },
         }
-        mock_load_from_global_config.return_value = mock_server_client_instance
         mock_get_first_server_config_dict.return_value = {"host": "0.0.0.0", "port": 8080}
         setup_config_path_mock(mock_get_config_path)
         setup_run_mini_swe_mock(mock_runner_ray_remote)
@@ -857,7 +846,6 @@ class TestApp:
         # Provider default_metadata flows into the sandbox spec metadata.
         assert generated_config["environment"]["spec"]["metadata"]["sandbox-api"] == "opensandbox-sdk"
 
-    @patch("responses_api_agents.mini_swe_agent_2.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.mini_swe_agent_2.app.get_first_server_config_dict")
     @patch("responses_api_agents.mini_swe_agent_2.app.get_config_path")
     @patch("responses_api_agents.mini_swe_agent_2.app.runner_ray_remote")
@@ -866,7 +854,6 @@ class TestApp:
         mock_runner_ray_remote,
         mock_get_config_path,
         mock_get_first_server_config_dict,
-        mock_load_from_global_config,
     ) -> None:
         """Test run method when run_mini_swe fails."""
 
@@ -874,7 +861,7 @@ class TestApp:
         mock_server_client = MagicMock(spec=ServerClient)
         server = MiniSWEAgent(config=config, server_client=mock_server_client)
 
-        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
+        setup_server_client_mocks(mock_server_client, mock_get_first_server_config_dict)
         setup_config_path_mock(mock_get_config_path)
 
         # Awaiting the Ray result raises, standing in for a failed rollout task.
@@ -894,7 +881,6 @@ class TestApp:
 
         assert_run_mini_swe_called(mock_runner_ray_remote, instance_id="test_instance_456")
 
-    @patch("responses_api_agents.mini_swe_agent_2.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.mini_swe_agent_2.app.get_first_server_config_dict")
     @patch("responses_api_agents.mini_swe_agent_2.app.get_config_path")
     @patch("responses_api_agents.mini_swe_agent_2.app.runner_ray_remote")
@@ -903,13 +889,12 @@ class TestApp:
         mock_runner_ray_remote,
         mock_get_config_path,
         mock_get_first_server_config_dict,
-        mock_load_from_global_config,
     ) -> None:
         config = create_test_config()
         mock_server_client = MagicMock(spec=ServerClient)
         server = MiniSWEAgent(config=config, server_client=mock_server_client)
 
-        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
+        setup_server_client_mocks(mock_server_client, mock_get_first_server_config_dict)
         setup_config_path_mock(mock_get_config_path)
 
         mock_runner_ray_remote.remote.return_value = FakeObjectRef(error=FileNotFoundError("run_mini_swe not found"))
