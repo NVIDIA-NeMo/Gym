@@ -30,11 +30,22 @@ scripts/         numbered by run order; see below.
 | `02_shard.sh` | deal into N sweep dirs, one per job | only to exceed one job's node count |
 | `03_run.sh` | one job: vLLM + Gym + collect + profile | single-job runs, and what the sharded runner submits |
 | `03_run_sharded.sh` | submit + watch + resubmit N shards, then merge and profile | sharded runs |
-| `03_run_attached.sh` | collect against an already-running vLLM job | debugging against a warm endpoint |
+| `03_run_endpoint.sh` | collect against any OpenAI-compatible URL, no Slurm | an endpoint someone else is serving |
+| `03_run_attached.sh` | collect inside an already-running vLLM Slurm job | debugging against a warm allocation |
 | `04_merge_shards.sh` | unshard: merge rollouts back into the parent | after individually-launched shards, or before resharding |
 | `05_profile.sh` | split by entry, profile each and the whole sweep | mid-run, or after a merge |
 
+The `03_` variants differ on two axes, not one:
+
+| | serves the policy | jobs |
+|---|---|---|
+| `03_run.sh` | yes, its own P/D stack | 1 |
+| `03_run_sharded.sh` | yes, via `03_run.sh` | N |
+| `03_run_endpoint.sh` | no, you give it a URL | 0 -- no Slurm at all |
+| `03_run_attached.sh` | no, uses a running job's | 0 -- srun into yours |
+
 Single job: `01` then `03`. Sharded: `01`, `02`, `03_run_sharded` (which does `04` and `05` itself).
+Against an endpoint you already have: `01` then `03_run_endpoint`.
 `04` and `05` are separate because both are useful mid-run -- the profiler handles partial
 sweeps, so you can see per-entry rewards before a run finishes.
 

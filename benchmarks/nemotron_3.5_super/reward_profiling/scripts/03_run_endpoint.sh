@@ -1,0 +1,106 @@
+#!/bin/bash
+# Run a sweep against any OpenAI-compatible endpoint. No Slurm, no sbatch, no GPUs.
+#
+# The other 03_ scripts allocate and serve the policy themselves. This one takes a URL, so the
+# model is somebody else's problem -- a vLLM already running anywhere reachable, an internal
+# gateway, a hosted API. All that runs locally is the Gym servers and the collection driver, which
+# are CPU-only.
+#
+#   SWEEP_DIR=<outputs/sweeps>/<nickname> \
+#   POLICY_BASE_URL=http://host:8000/v1 \
+#   POLICY_MODEL_NAME=<model or checkpoint path> \
+#   POLICY_API_KEY=<key>                     \
+#   bash .../scripts/03_run_endpoint.sh
+#
+# Needs `gym` on PATH: run it inside the eval container, or with the Gym venv activated. It does
+# not shell out to srun, so there is nothing to schedule and nothing to wait for.
+#
+# For the sandbox entries (ns_tools, math_formal_lean) also set NEMO_SKILLS_SANDBOX_HOST/PORT at a
+# reachable nemo-skills sandbox. Without one those entries fail per rollout rather than at startup.
+set -euo pipefail
+
+SWEEP_DIR=${SWEEP_DIR:?set SWEEP_DIR to the <out-dir>/<nickname> directory 01_prepare_sweep.sh wrote}
+POLICY_BASE_URL=${POLICY_BASE_URL:?set POLICY_BASE_URL, e.g. http://host:8000/v1}
+POLICY_MODEL_NAME=${POLICY_MODEL_NAME:?set POLICY_MODEL_NAME to the served model}
+POLICY_API_KEY=${POLICY_API_KEY:-dummy_api_key}
+
+if ! command -v gym >/dev/null 2>&1; then
+    echo "ERROR: 'gym' is not on PATH. Run this inside the eval container, or activate the Gym venv." >&2
+    exit 2
+fi
+
+# Same incompatibility the Slurm launcher guards: --resume keys the materialized inputs on
+# (task, rollout) and an unexpanded row has no rollout index.
+sweep_expanded=$(python - "$SWEEP_DIR" <<'GUARD'
+import json, sys
+from pathlib import Path
+try:
+    print(json.loads((Path(sys.argv[1]) / "sweep_report.json").read_text()).get("expanded", True))
+except OSError:
+    print(True)
+GUARD
+)
+if [[ "$sweep_expanded" == "False" ]]; then
+    echo "ERROR: $SWEEP_DIR was materialized with --no-expand, which --resume cannot read." >&2
+    echo "       Re-run 01_prepare_sweep.sh without NO_EXPAND=1." >&2
+    exit 2
+fi
+
+NUM_SAMPLES_IN_PARALLEL=${NUM_SAMPLES_IN_PARALLEL:-128}
+SERVERS_READY_TIMEOUT_S=${SERVERS_READY_TIMEOUT_S:-1800}
+ENV_PORT_RANGE_LOW=${ENV_PORT_RANGE_LOW:-20000}
+ENV_PORT_RANGE_HIGH=${ENV_PORT_RANGE_HIGH:-30000}
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+cd "$REPO_ROOT"
+
+env_start_log=$SWEEP_DIR/env_start.log
+: > "$env_start_log"
+
+# No ++use_absolute_ip: it binds servers to the node IP, which puts the head server somewhere other
+# than where gym eval run --no-serve looks for it.
+gym env start --config "$SWEEP_DIR/sweep_config.yaml" \
+    +uv_venv_dir=/opt/uv_venvs \
+    +skip_venv_if_present=true \
+    ++port_range_low="$ENV_PORT_RANGE_LOW" \
+    ++port_range_high="$ENV_PORT_RANGE_HIGH" \
+    ++policy_base_url="$POLICY_BASE_URL" \
+    ++policy_api_key="$POLICY_API_KEY" \
+    ++policy_model_name="$POLICY_MODEL_NAME" > "$env_start_log" 2>&1 &
+gym_servers_pid=$!
+trap 'kill $gym_servers_pid 2>/dev/null || true' EXIT
+
+echo ">>> waiting for Gym servers (log: $env_start_log)"
+for _i in $(seq 1 $((SERVERS_READY_TIMEOUT_S / 10))); do
+    if grep -q "servers ready!" "$env_start_log" 2>/dev/null; then
+        grep -m1 -oE "All [0-9]+ / [0-9]+ servers ready!" "$env_start_log"
+        break
+    fi
+    if ! kill -0 "$gym_servers_pid" 2>/dev/null; then
+        echo "ERROR: gym env start exited before the servers came up:" >&2
+        tail -30 "$env_start_log" >&2 || true
+        exit 1
+    fi
+    sleep 10
+done
+if ! grep -q "servers ready!" "$env_start_log" 2>/dev/null; then
+    echo "ERROR: servers not ready within ${SERVERS_READY_TIMEOUT_S}s; see $env_start_log" >&2
+    tail -30 "$env_start_log" >&2 || true
+    exit 1
+fi
+
+# num_repeats=1 because 01_prepare_sweep.sh pre-expanded them; the guard above enforces that.
+echo ">>> collecting"
+gym eval run --no-serve --resume \
+    --input "$SWEEP_DIR/rollouts_materialized_inputs.jsonl" \
+    --output "$SWEEP_DIR/rollouts.jsonl" \
+    ++num_repeats=1 \
+    ++num_samples_in_parallel="$NUM_SAMPLES_IN_PARALLEL" \
+    +nemo_gym_log_dir="$SWEEP_DIR/logs" \
+    +uv_venv_dir=/opt/uv_venvs \
+    +skip_venv_if_present=true \
+    ++global_aiohttp_connector_limit_per_host=16384 \
+    ++port_range_low=63000 \
+    ++port_range_high=64000
+
+echo ">>> profiling"
+SWEEP_DIR="$SWEEP_DIR" bash "$(dirname "${BASH_SOURCE[0]}")/05_profile.sh"
