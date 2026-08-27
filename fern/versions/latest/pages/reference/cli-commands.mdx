@@ -784,7 +784,7 @@ Servers that report `unsupported` or `unknown` cause the command to abort unless
 | `--append` | With `--judge-failed-only`: append recovered rows to an existing `--output` instead of a fresh file. Mutually exclusive with `--overwrite`. |
 | `--disable-aggregation` | Skip aggregate-metrics computation (use when combining shards with `gym eval aggregate` afterward). |
 
-ATIF input requires a `stateless` resources server and rejects `--force`, `--resume`, `--judge-failed-only`, and `--append`. It fails closed on unsupported or lossy trajectory shapes, including tool-bearing trajectories routed to a resources server with `expose_tools_over_mcp: true`, and preserves source identity under `_ng_atif_provenance` without sending that metadata to the verifier.
+ATIF input requires a `stateless` resources server and rejects `--force`, `--resume`, `--judge-failed-only`, and `--append`. It fails closed on unsupported or lossy canonical trajectory shapes, including tool-bearing trajectories routed to a resources server with `expose_tools_over_mcp: true`, and preserves source identity under `_ng_atif_provenance` without sending that metadata to the verifier. Provider-native payloads and producer-private status records in optional ATIF `extra` metadata are not interpreted; their producer owns conversion into canonical ATIF fields. A terminal tool step is supported when every call has a correlated observation result.
 
 ```bash
 # Recompute rewards with an updated verifier config (no model server needed)
