@@ -27,8 +27,8 @@ swebench_resources_server:          # instance name — how agents/CLI refer to 
         provider_options:
           # Scheduling requests, kept below the limits so sandboxes pack densely.
           resource_requests:
-            cpu: 0.5
-            memory_mib: 512
+            cpu: 8
+            memory_mib: 16384
             disk_gib: 30
         metadata:
           benchmark: swebench-verified
