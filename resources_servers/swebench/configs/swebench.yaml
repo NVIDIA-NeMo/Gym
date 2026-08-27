@@ -19,7 +19,7 @@ swebench_resources_server:          # instance name — how agents/CLI refer to 
         ttl_s: 18000
         ready_timeout_s: 1200
         resources:
-          cpu: 4
+          cpu: 8
           memory_mib: 16384
           # 30 GiB works on every provider: within Fargate's 21-200 GiB ephemeral range
           # (an explicit 20 is rejected there) and fine as an ephemeral request elsewhere.
@@ -27,8 +27,8 @@ swebench_resources_server:          # instance name — how agents/CLI refer to 
         provider_options:
           # Scheduling requests, kept below the limits so sandboxes pack densely.
           resource_requests:
-            cpu: 0.5
-            memory_mib: 512
+            cpu: 8
+            memory_mib: 16384
             disk_gib: 30
         metadata:
           benchmark: swebench-verified
