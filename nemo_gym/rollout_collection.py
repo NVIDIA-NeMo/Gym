@@ -1733,6 +1733,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 "key_metrics": agg_result.key_metrics,
                 "group_level_metrics": agg_result.group_level_metrics,
                 "repeat_level_metrics": agg_result.repeat_level_metrics,
+                "per_agent_metrics": {
+                    agent_id: metrics.model_dump() for agent_id, metrics in agg_result.per_agent_metrics.items()
+                },
             }
             if agg_result.perf_summary is not None:
                 agent_entry["perf_summary"] = agg_result.perf_summary
@@ -1750,6 +1753,11 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             agent_name, _ = _rollout_target(agent_entry)
             key_metrics = agent_entry.get("key_metrics", {})
             print(f"\nKey metrics for {agent_name}:\n" + json.dumps(key_metrics, indent=4))
+            for participant_id, participant_metrics in agent_entry.get("per_agent_metrics", {}).items():
+                print(
+                    f"\nKey metrics for {agent_name}/{participant_id}:\n"
+                    + json.dumps(participant_metrics.get("key_metrics", {}), indent=4)
+                )
 
         primitive_types = (bool, int, float, str, type(None))
         metrics_to_log = dict()
@@ -1769,6 +1777,21 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     if isinstance(v, primitive_types)
                 }
             )
+            for participant_id, participant_metrics in agent_entry.get("per_agent_metrics", {}).items():
+                metrics_to_log.update(
+                    {
+                        f"{agent_name}/agents/{participant_id}/{k}": v
+                        for k, v in participant_metrics.get("metrics", {}).items()
+                        if isinstance(v, primitive_types)
+                    }
+                )
+                metrics_to_log.update(
+                    {
+                        f"key_metrics/{agent_name}/agents/{participant_id}/{k}": v
+                        for k, v in participant_metrics.get("key_metrics", {}).items()
+                        if isinstance(v, primitive_types)
+                    }
+                )
 
         export_metrics(metrics_to_log)
 
