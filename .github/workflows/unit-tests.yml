@@ -88,27 +88,23 @@ jobs:
           done
           exit 1
 
-      # Unconditional (not gated on run_full): this is what produces the coverage baseline the
-      # "Sandbox unit tests" step below gates on. A server-only-scoped PR still touches code
-      # inside the measured coverage surface (resources_servers/, responses_api_agents/ are not
-      # in [tool.coverage.run] omit), so skipping this here would silently exempt those PRs from
-      # the coverage gate — exactly the gap this pipeline exists to close.
-      - name: Core unit tests
-        run: ./scripts/ci/core_unit_tests.sh
-
-      - name: Setup public sandbox test environment
+      # Unconditional (not gated on run_full): a server-only-scoped PR still touches code inside
+      # the measured coverage surface (resources_servers/, responses_api_agents/ are not in
+      # [tool.coverage.run] omit), so skipping this would silently exempt those PRs from the
+      # coverage gate below — exactly the gap this pipeline exists to close.
+      #
+      # Core unit tests, sandbox env setup, and the coverage-gated sandbox test run all live in
+      # this ONE step (matching full-test-suite.yml's "Test" step) rather than separate steps.
+      # This is deliberate: split across steps, --cov-fail-under stopped actually failing the
+      # job on GitHub's runners (the step reported success despite printing the FAIL banner) for
+      # reasons that weren't fully diagnosable without a matching Linux environment to inspect.
+      # full-test-suite.yml's single-step form is the one we've observed reliably fail when it
+      # should, so pre-merge enforcement mirrors it exactly instead of re-splitting it apart.
+      - name: Core + sandbox unit tests (coverage gate)
         run: |
+          ./scripts/ci/core_unit_tests.sh
           source ./scripts/ci/setup_dev.sh
           uv sync --extra dev --extra sandbox --extra openshell
-
-      # Sandbox is public-GitHub-only and is intentionally outside scripts/ci contract v3.
-      # This is also the pre-merge coverage gate: it appends to the coverage data from
-      # "Core unit tests" and enforces the repo-wide fail_under threshold explicitly via
-      # --cov-fail-under (read from pyproject.toml, the single source of truth for the
-      # number — see scripts/ci/cov_fail_under.py), so a coverage regression fails this
-      # required PR check instead of only being reported after merge.
-      - name: Sandbox unit tests
-        run: |
           source .venv/bin/activate
           pytest --cov=. --cov-append --cov-report=term-missing \
             --cov-fail-under="$(python3 scripts/ci/cov_fail_under.py)" --durations=10 -m sandbox
