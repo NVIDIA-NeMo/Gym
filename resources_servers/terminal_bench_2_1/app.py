@@ -107,7 +107,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
 
         self._session_id_to_sandbox: Dict[str, Tuple[AsyncSandbox, SandboxPtySession]] = dict()
 
-    async def _patch_sandbox_provider_options_for_instances(
+    def _patch_sandbox_provider_options_for_instances(
         self, task_name: str, resources: SandboxResources, provider_options: Dict[str, Any]
     ) -> None:
         # TODO @bxyu-nvidia: These patches may not be necessary eventually, but for now we need them in order for the below instance golden patches to pass.
