@@ -284,6 +284,15 @@ model ids with the `JUDGE_GPT_MODEL`, `JUDGE_GEMINI_MODEL`, and
   eval-perspective win/loss/tie/trial counts per member), and each matchup's
   `trial_judges`.
 
+For final/reportable ELO runs, enable `strict_comparison_trials`. The resources
+server then rejects a comparison row unless every planned reference matchup
+returns exactly `num_comparison_trials` valid votes, with no skipped matchup or
+invalid verdict. The option defaults to `false` for backward compatibility; set
+it with
+`++gdpval_resources_server.resources_servers.gdpval.strict_comparison_trials=true`.
+Rejected rows remain retryable with the normal `--resume` workflow instead of
+silently contributing fewer votes to the ELO fit.
+
 ### Reproducibility
 
 Judge selection is seeded from a stable identity so a rerun of the same task

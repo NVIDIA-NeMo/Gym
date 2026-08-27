@@ -176,6 +176,26 @@ class JudgePanelMember(BaseModel):
     handles_video: bool = False
 
 
+def _strict_comparison_trial_failure(
+    *,
+    attempted_matchups: int,
+    num_trials: int,
+    total_judged: int,
+    total_invalid: int,
+    ref_errors: Dict[str, List[str]],
+) -> Optional[str]:
+    """Describe an incomplete strict comparison result, or return ``None``."""
+
+    expected_judged = num_trials * attempted_matchups
+    if attempted_matchups <= 0 or ref_errors or total_invalid != 0 or total_judged != expected_judged:
+        return (
+            f"matchups={attempted_matchups} judged={total_judged}/{expected_judged} "
+            f"invalid={total_invalid} "
+            f"reference_errors={sum(len(errors) for errors in ref_errors.values())}"
+        )
+    return None
+
+
 class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     reward_mode: Literal["rubric", "comparison"] = "rubric"
 
@@ -201,6 +221,12 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     # Pairwise judge trials per task. 4 is the historical default; alternates
     # swap/no-swap to debias position effects.
     num_comparison_trials: int = 4
+
+    # Fail the whole verify request unless every planned comparison trial
+    # produced a valid vote. This keeps incomplete panel responses out of
+    # Stirrup's resume cache and prevents a later multistage plan from being
+    # selected from fewer votes than the configured scientific contract.
+    strict_comparison_trials: bool = False
 
     # ELO assigned to the (legacy single) reference model in pairwise mode.
     # Ignored when ``reference_models`` is set (each carries its own ``elo``).
@@ -681,6 +707,10 @@ class GDPValResourcesServer(SimpleResourcesServer):
 
         if not ref_dirs_by_id:
             print(f"[gdpval] no reference deliverable for task {body.task_id}", flush=True)
+            if self.config.strict_comparison_trials:
+                raise RuntimeError(
+                    f"strict comparison trial contract failed for task {body.task_id}: reference_missing"
+                )
             # Not a model outcome: no reference deliverable exists, so no battle
             # can be scored. Stamped as a terminal failure rather than returned
             # as a zero-reward success -- a success row carrying no battle
@@ -703,6 +733,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
 
         if eval_task_dir is None or not task_attempted(str(eval_task_dir)):
             print(f"[gdpval] eval deliverable missing for task {body.task_id}", flush=True)
+            if self.config.strict_comparison_trials:
+                raise RuntimeError(f"strict comparison trial contract failed for task {body.task_id}: eval_missing")
             return GDPValVerifyResponse(
                 **body.model_dump(),
                 reward=0.0,
@@ -893,6 +925,15 @@ class GDPValResourcesServer(SimpleResourcesServer):
             )
 
         total_judged = total_wins + total_losses + total_ties
+        strict_failure = _strict_comparison_trial_failure(
+            attempted_matchups=attempted_matchups,
+            num_trials=self.config.num_comparison_trials,
+            total_judged=total_judged,
+            total_invalid=total_invalid,
+            ref_errors=ref_errors,
+        )
+        if self.config.strict_comparison_trials and strict_failure is not None:
+            raise RuntimeError(f"strict comparison trial contract failed for task {body.task_id}: {strict_failure}")
         if total_wins > total_losses:
             reward = 1.0
         elif total_losses > total_wins:
