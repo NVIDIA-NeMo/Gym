@@ -688,23 +688,36 @@ _PERF_SUMMARY_NUM_TURNS_STATS: Tuple[str, ...] = ("mean", "median", "std", "min"
 _PERF_SUMMARY_LATENCY_STATS: Tuple[str, ...] = ("p50", "p90", "p99", "mean")
 
 
-def compute_perf_summary(ng_perf_records: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def compute_perf_summary(ng_perf_records: List[Dict[str, Any]], total_rollouts: int) -> Optional[Dict[str, Any]]:
     """Aggregate per-rollout ``ng_perf`` dicts into the ``perf_summary`` block (RFC R3).
 
-    Returns ``None`` when no rollout in this batch carried ``ng_perf`` -- e.g. observability
-    was disabled for the whole run -- so ``perf_summary`` stays absent from
-    ``_aggregate_metrics.json`` entirely, mirroring ``ng_perf``'s own absent-not-null contract.
-    Each individual stat is likewise included only when at least one rollout reported the
+    ``total_rollouts`` is the full rollout count for this batch, including rollouts that never
+    produced ``ng_perf`` at all -- the denominator for ``overall_observability_coverage`` and
+    ``token_observability_coverage``.
+
+    Returns ``None`` when there are no rollouts at all, or when none of them carried ``ng_perf``
+    (observability off for the whole run, or on but nothing was collected) -- perf_summary is
+    absent rather than present with a 0.0 coverage either way; a coverage value, when present, is
+    always > 0. Every other stat is included only when at least one rollout reported the
     underlying field (a provider that never reports cache usage yields no
     ``mean_cached_prompt_tokens``, for example).
     """
-    if not ng_perf_records:
+    if total_rollouts <= 0 or not ng_perf_records:
         return None
 
     def _values(key: str) -> List[float]:
         return [record[key] for record in ng_perf_records if isinstance(record.get(key), (int, float))]
 
-    summary: Dict[str, Any] = {}
+    summary: Dict[str, Any] = {
+        "overall_observability_coverage": len(ng_perf_records) / total_rollouts,
+        "token_observability_coverage": sum(
+            1
+            for record in ng_perf_records
+            if isinstance(record.get("token_observability_coverage"), (int, float))
+            and record["token_observability_coverage"] > 0
+        )
+        / total_rollouts,
+    }
 
     for field in _PERF_SUMMARY_TOKEN_FIELDS:
         values = _values(field)
@@ -735,7 +748,7 @@ def compute_perf_summary(ng_perf_records: List[Dict[str, Any]]) -> Optional[Dict
         for stat in _PERF_SUMMARY_LATENCY_STATS:
             summary[f"total_latency_{stat}_ms"] = _stat(latency_values, stat)
 
-    return summary or None
+    return summary
 
 
 def compute_aggregate_metrics(
@@ -819,7 +832,7 @@ def compute_aggregate_metrics(
         group_level_metrics=serialized_group,
         agent_metrics=serialized_agent,
         key_metrics=key_metrics,
-        perf_summary=compute_perf_summary(ng_perf_records),
+        perf_summary=compute_perf_summary(ng_perf_records, total_rollouts=len(verify_responses)),
     )
 
 

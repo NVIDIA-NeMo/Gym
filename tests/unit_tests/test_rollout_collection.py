@@ -410,6 +410,7 @@ class TestRolloutCollection:
         assert ng_perf == {
             "num_turns": 2,
             "num_tool_calls": 3,
+            "token_observability_coverage": 1.0,
             "prompt_tokens": 150,
             "cached_prompt_tokens": 10,
             "completion_tokens": 25,
@@ -438,7 +439,7 @@ class TestRolloutCollection:
             "total_latency_ms",
         ):
             assert absent_key not in ng_perf
-        assert ng_perf == {"num_turns": 1, "num_tool_calls": 0}
+        assert ng_perf == {"num_turns": 1, "num_tool_calls": 0, "token_observability_coverage": 0.0}
 
     def test_build_ng_perf_dedupes_model_call_claimed_by_two_invocations(self) -> None:
         # Simulates a join_model_call_observations conflict: the losing invocation keeps an
@@ -466,6 +467,7 @@ class TestRolloutCollection:
         assert ng_perf["num_turns"] == 2
         assert ng_perf["prompt_tokens"] == 100
         assert ng_perf["completion_tokens"] == 10
+        assert ng_perf["token_observability_coverage"] == 0.5
 
     def test_ng_perf_matches_model_calls_by_response_id_pair_like_simple_agent(self) -> None:
         # Integration test: simple_agent sets result["ng_trajectory"] directly (see
@@ -584,6 +586,7 @@ class TestRolloutCollection:
 
         assert ng_perf["num_turns"] == 3
         assert ng_perf["completion_tokens"] == 30
+        assert ng_perf["token_observability_coverage"] == pytest.approx(1 / 3)
 
     def test_build_ng_perf_sums_turns_across_invocations_with_per_invocation_fallback(self) -> None:
         # Hybrid trajectory: "root" emits explicit TrajectoryTurn records (2 turns), "sub-a"
@@ -619,6 +622,7 @@ class TestRolloutCollection:
 
         assert ng_perf["num_turns"] == 7
         assert ng_perf["completion_tokens"] == 40
+        assert ng_perf["token_observability_coverage"] == pytest.approx(4 / 7)
 
     def test_attach_ng_perf_absent_when_observability_disabled(self) -> None:
         result = {
@@ -647,7 +651,12 @@ class TestRolloutCollection:
 
         _attach_ng_perf(result, observability_enabled=True)
 
-        assert result[NG_PERF_KEY] == {"num_turns": 1, "num_tool_calls": 0, "total_latency_ms": 42.0}
+        assert result[NG_PERF_KEY] == {
+            "num_turns": 1,
+            "num_tool_calls": 0,
+            "token_observability_coverage": 0.0,
+            "total_latency_ms": 42.0,
+        }
         assert "_ng_rollout_latency_ms" not in result
 
     def test_attach_ng_perf_swallows_build_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:

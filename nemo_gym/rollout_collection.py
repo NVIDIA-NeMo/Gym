@@ -403,6 +403,10 @@ def _build_ng_perf(result: dict[str, Any], *, rollout_latency_ms: Optional[float
     falling back to its owned model-call count (one assistant response per turn), then to 1
     (an invocation that ran had at least one turn) -- so hybrid trajectories where only some
     invocations report turns still count every conversation.
+
+    ``token_observability_coverage`` reports what fraction of those turns actually resolved to a
+    captured call: a turn whose ``ModelCallRef`` was unmatched or ambiguous silently loses its
+    tokens from the sums below, and this is the only signal that it happened.
     """
     raw_trajectory = result.get(NG_TRAJECTORY_KEY)
     if not isinstance(raw_trajectory, dict):
@@ -485,6 +489,7 @@ def _build_ng_perf(result: dict[str, Any], *, rollout_latency_ms: Optional[float
     ng_perf: dict[str, Any] = {
         "num_turns": num_turns,
         "num_tool_calls": num_tool_calls,
+        "token_observability_coverage": min(1.0, len(owned_calls) / num_turns),
     }
     for ng_perf_key, token_stats_attr in (
         ("prompt_tokens", "prompt_tokens"),

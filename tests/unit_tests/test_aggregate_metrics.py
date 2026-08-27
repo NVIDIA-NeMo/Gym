@@ -478,15 +478,46 @@ class TestAddAvgSampleStdDev:
 
 
 class TestComputePerfSummary:
-    def test_empty_input_returns_none(self) -> None:
-        assert compute_perf_summary([]) is None
+    def test_zero_total_rollouts_returns_none(self) -> None:
+        assert compute_perf_summary([], total_rollouts=0) is None
+
+    def test_zero_total_rollouts_returns_none_even_with_inconsistent_ng_perf_records(self) -> None:
+        # A caller could in principle pass ng_perf_records inconsistent with total_rollouts
+        # (never happens via compute_aggregate_metrics, which derives both from the same
+        # verify_responses list) -- this must return None rather than divide by zero.
+        assert compute_perf_summary([{"num_turns": 1}], total_rollouts=0) is None
+
+    def test_no_ng_perf_returns_none_even_with_nonzero_rollouts(self) -> None:
+        # No rollout in this batch carried ng_perf (observability off for the whole run, or on
+        # but nothing was collected) so perf_summary stays absent.
+        assert compute_perf_summary([], total_rollouts=10) is None
+
+    def test_overall_observability_coverage_counts_ng_perf_bearing_rollouts(self) -> None:
+        # 3 of 10 rollouts in this batch carried ng_perf at all.
+        ng_perf_records = [{"num_turns": 1}, {"num_turns": 1}, {"num_turns": 1}]
+
+        summary = compute_perf_summary(ng_perf_records, total_rollouts=10)
+
+        assert summary["overall_observability_coverage"] == 0.3
+
+    def test_token_observability_coverage_denominated_by_all_rollouts(self) -> None:
+        # Of 4 total rollouts: one has ng_perf with token data (coverage > 0), one has ng_perf
+        # but zero resolved token data, two have no ng_perf at all. Only the first counts.
+        ng_perf_records = [
+            {"num_turns": 1, "token_observability_coverage": 1.0},
+            {"num_turns": 1, "token_observability_coverage": 0.0},
+        ]
+
+        summary = compute_perf_summary(ng_perf_records, total_rollouts=4)
+
+        assert summary["token_observability_coverage"] == 0.25
 
     def test_percentiles_and_means_over_five_rollouts(self) -> None:
         # total_latency_ms = 100, 200, 300, 400, 500 -> exact quartile/percentile boundaries at
         # this size make the expected linear-interpolation values easy to hand-verify.
         ng_perf_records = [{"total_latency_ms": ms, "num_turns": 1} for ms in (100, 200, 300, 400, 500)]
 
-        summary = compute_perf_summary(ng_perf_records)
+        summary = compute_perf_summary(ng_perf_records, total_rollouts=len(ng_perf_records))
 
         assert summary["total_latency_mean_ms"] == 300.0
         assert summary["total_latency_p50_ms"] == 300.0
@@ -494,7 +525,7 @@ class TestComputePerfSummary:
         assert summary["total_latency_p99_ms"] == 496.0
 
     def test_single_rollout_std_is_zero_not_nan(self) -> None:
-        summary = compute_perf_summary([{"num_turns": 4}])
+        summary = compute_perf_summary([{"num_turns": 4}], total_rollouts=1)
 
         assert summary["mean_num_turns"] == 4.0
         assert summary["std_num_turns"] == 0.0
@@ -508,7 +539,7 @@ class TestComputePerfSummary:
             {"prompt_tokens": 300, "completion_tokens": 60, "num_turns": 4},
         ]
 
-        summary = compute_perf_summary(ng_perf_records)
+        summary = compute_perf_summary(ng_perf_records, total_rollouts=len(ng_perf_records))
 
         assert summary["total_prompt_tokens"] == 400
         assert summary["mean_prompt_tokens"] == 200.0
@@ -524,7 +555,7 @@ class TestComputePerfSummary:
         # surfaces cache usage) -- those stats must be missing, not present as 0 or None.
         ng_perf_records = [{"prompt_tokens": 100, "completion_tokens": 20, "num_turns": 2}]
 
-        summary = compute_perf_summary(ng_perf_records)
+        summary = compute_perf_summary(ng_perf_records, total_rollouts=len(ng_perf_records))
 
         for absent_key in (
             "mean_cached_prompt_tokens",
@@ -542,7 +573,7 @@ class TestComputePerfSummary:
             {"completion_tokens": 20, "num_turns": 2},
         ]
 
-        summary = compute_perf_summary(ng_perf_records)
+        summary = compute_perf_summary(ng_perf_records, total_rollouts=len(ng_perf_records))
 
         assert summary["mean_tokens_per_turn"] == 10.0
 
@@ -554,7 +585,7 @@ class TestComputePerfSummary:
             {"num_turns": 1},
         ]
 
-        summary = compute_perf_summary(ng_perf_records)
+        summary = compute_perf_summary(ng_perf_records, total_rollouts=len(ng_perf_records))
 
         assert summary["mean_cached_prompt_tokens"] == 40.0
         assert summary["total_cached_prompt_tokens"] == 40
@@ -562,6 +593,9 @@ class TestComputePerfSummary:
 
 class TestPerfSummaryInAggregateMetrics:
     def test_absent_when_no_rollout_carries_ng_perf(self) -> None:
+        # No rollout in this batch carried ng_perf -- observability off for the whole run, or on
+        # but nothing was collected, are indistinguishable here. Either way perf_summary stays
+        # absent rather than present with a 0.0 coverage.
         responses = [
             {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0, "response": {}},
         ]
@@ -588,3 +622,7 @@ class TestPerfSummaryInAggregateMetrics:
         assert result.perf_summary["mean_num_turns"] == 3.0
         assert result.perf_summary["total_prompt_tokens"] == 90
         assert result.perf_summary["total_latency_mean_ms"] == 1000.0
+        # 1 of 2 rollouts carried ng_perf at all; that one doesn't itself set
+        # token_observability_coverage (hand-built dict), so it doesn't count as token-covered.
+        assert result.perf_summary["overall_observability_coverage"] == 0.5
+        assert result.perf_summary["token_observability_coverage"] == 0.0
