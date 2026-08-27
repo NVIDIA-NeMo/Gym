@@ -818,6 +818,61 @@ async def test_aclose(fake_binary: str, monkeypatch: pytest.MonkeyPatch) -> None
     assert await provider.aclose() is None
 
 
+async def test_direct_exec_lifecycle_preserves_overlay_and_supports_io(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Exercise direct mode with a fake CLI that delegates to the requested shell."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_apptainer = bin_dir / "apptainer"
+    fake_apptainer.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" == exec ]]
+shift
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --bind|--env-file|--cpus|--memory|--home|--no-mount|--env) shift 2 ;;
+        --no-eval|--cleanenv|--writable-tmpfs|--pid|--contain|--containall|--nv) shift ;;
+        *) shift; exec "$@" ;;
+    esac
+done
+""",
+        encoding="utf-8",
+    )
+    fake_apptainer.chmod(0o755)
+
+    staging = tmp_path / "staging"
+    monkeypatch.setattr(apptainer_provider.tempfile, "mkdtemp", lambda prefix: str(staging.mkdir() or staging))
+    provider = apptainer_provider.ApptainerProvider(
+        bin_path=str(bin_dir),
+        create={"direct_exec": True, "mount_point": str(staging)},
+        exec={"fakeroot_for_root": False},
+    )
+
+    handle = await provider.create(SandboxSpec(image="unused.sif"))
+    assert await provider.status(handle) is SandboxStatus.RUNNING
+    assert handle.raw.direct_process is not None
+
+    first = await provider.exec(handle, "mkdir -p work && printf persistent > work/value", cwd=str(staging))
+    assert first.return_code == 0
+    second = await provider.exec(handle, "cat work/value", cwd=str(staging))
+    assert second.return_code == 0
+    assert second.stdout == "persistent"
+
+    with_env = await provider.exec(handle, "printf %s \"$DIRECT_VALUE\"", env={"DIRECT_VALUE": "hello world"})
+    assert with_env.stdout == "hello world"
+    with_stdin = await provider.exec(handle, "cat", stdin=b"stdin payload")
+    assert with_stdin.stdout == "stdin payload"
+    failed = await provider.exec(handle, "printf expected-error >&2; exit 7")
+    assert failed.return_code == 7
+    assert failed.stderr == "expected-error"
+
+    await provider.close(handle)
+    assert await provider.status(handle) is SandboxStatus.STOPPED
+    assert not staging.exists()
+
+
 # --------------------------------------------------------------------------- #
 # readiness probe
 # --------------------------------------------------------------------------- #

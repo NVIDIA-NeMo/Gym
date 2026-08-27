@@ -1,9 +1,11 @@
 # Apptainer Sandbox Provider
 
 A [NeMo Gym](../../../../README.md) sandbox provider backed by the local
-[Apptainer](https://apptainer.org/) (formerly Singularity) CLI. It runs each sandbox as
-a persistent Apptainer *instance* on the host and shells out to the `apptainer` binary —
-no daemon, no network service, no Kubernetes.
+[Apptainer](https://apptainer.org/) (formerly Singularity) CLI. By default it runs each
+sandbox as a persistent Apptainer *instance*. It can instead keep a foreground
+`apptainer exec ... bash` process alive on hosts where nested instance namespaces are
+unavailable. Both modes shell out to the `apptainer` binary — no daemon, no network
+service, no Kubernetes.
 
 Use it when you want lightweight, container-based isolation on a single machine or HPC
 node where Apptainer is already the supported container runtime (common on clusters
@@ -90,6 +92,8 @@ apptainer:
     start_timeout_s: 600
     extra_start_args: []
     apply_resource_limits: true
+    direct_exec: false
+    direct_shell: bash
   probe:
     command: printf apptainer-sandbox-ready
     expected_stdout: apptainer-sandbox-ready
@@ -106,6 +110,8 @@ Settings for starting the instance (`apptainer instance start`).
 | `start_timeout_s` | `600` | Max seconds to wait for `instance start` (`None` = no timeout). |
 | `extra_start_args` | `[]` | Extra raw flags appended to `instance start`. |
 | `apply_resource_limits` | `true` | Add CPU/memory cgroup flags from `SandboxSpec.resources`. |
+| `direct_exec` | `false` | Keep one foreground `apptainer exec ... <direct_shell>` process per sandbox instead of using `instance start`/`instance://`. Useful when Gym itself runs inside Pyxis. |
+| `direct_shell` | `bash` | Persistent shell used by direct mode. Bash is started without profile or rc files. |
 
 ### `exec` — `ApptainerExecConfig`
 
@@ -161,6 +167,28 @@ The spec is provider-neutral; the Apptainer provider uses these fields:
 
 Instances are named `nemo-gym-<uuid>` and persist across `exec` calls, so state written
 by one command is visible to the next — agents rely on this.
+
+### Direct exec mode for nested containers
+
+Some clusters run Gym inside a Pyxis/Enroot container. Apptainer may start an instance
+there but fail when `instance://` tries to re-enter its user namespace. Direct mode uses
+the same persistent foreground pattern as the GDPval and legacy SWE harnesses:
+
+```yaml
+apptainer:
+  create:
+    direct_exec: true
+    extra_start_args:
+      [--writable-tmpfs, --cleanenv, --pid, --no-mount, "home,tmp,bind-paths", --home, /root]
+  exec:
+    fakeroot_for_root: false
+```
+
+The provider sends framed commands through the shell's standard input and serializes
+commands within each sandbox. The same writable overlay remains live across calls.
+`create.extra_start_args` configures the foreground `apptainer exec`; per-command
+`exec.extra_exec_args` applies only to instance mode because direct mode does not launch
+a new Apptainer process for every command.
 
 ### Why `create` runs `instance start` in "daemonize" mode
 
