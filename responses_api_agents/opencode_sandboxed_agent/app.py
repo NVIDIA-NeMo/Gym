@@ -672,6 +672,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         observation_invocation_id = observation_invocation_id if isinstance(observation_invocation_id, str) else None
         collect_observations = observation_invocation_id is not None
         xdg_home_str = ""
+        remote_data_home = None
         if collect_observations:
             remote_data_home = f"/tmp/nemo-gym-opencode-{uuid4().hex}"
             xdg_home_str = f"XDG_DATA_HOME={remote_data_home}"
@@ -903,6 +904,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         await raise_for_status(verify_response)
 
         try:
+            await pty_session.close()
             await sandbox.stop()
         except Exception:
             print("Failed to stop sandbox", format_exc(), file=sys.stderr)
