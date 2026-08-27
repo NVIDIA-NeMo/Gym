@@ -74,6 +74,7 @@ def harbor_job_worker(job_config_dict: dict) -> str:
 
 class HarborAgentConfig(BaseResponsesAPIAgentConfig):
     harbor_jobs_dir: Path
+    harbor_debug: bool = Field(default=False)
     harbor_max_retries: int = Field(default=0)
     harbor_dataset: DatasetConfig = Field(default_factory=DatasetConfig)
     harbor_environment: EnvironmentConfig = Field(default_factory=EnvironmentConfig)
@@ -94,6 +95,7 @@ class HarborAgentConfig(BaseResponsesAPIAgentConfig):
             jobs_dir=self.harbor_jobs_dir,
             n_attempts=1,
             n_concurrent_trials=1,
+            debug=self.harbor_debug,
             retry=RetryConfig(max_retries=self.harbor_max_retries),
             datasets=[
                 self.harbor_dataset.model_copy(update={"task_names": [task_name]}),
