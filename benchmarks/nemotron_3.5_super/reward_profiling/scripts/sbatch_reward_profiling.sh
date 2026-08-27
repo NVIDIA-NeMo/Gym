@@ -97,6 +97,12 @@ export SBATCH_QOS=${SBATCH_QOS:-interactive}
 # 63 servers came up in ~4 min from baked venvs; the ceiling is for a cold container that has to
 # install them at runtime.
 SERVERS_READY_TIMEOUT_S=${SERVERS_READY_TIMEOUT_S:-1800}
+# No ++use_absolute_ip=true here, though upstream sets it. It binds every server to the node IP,
+# which puts the head server somewhere other than 127.0.0.1:11000 -- where gym eval run --no-serve
+# looks for it. Upstream gets away with it because it serves end-to-end and never has to discover
+# its own servers. Jobs 6563122 and 6563743 both died on "Could not connect to the head server"
+# because of this; bench_e2e.py has never passed it, which is why the same split works there.
+#
 # gym env start probes for a free port then binds, so 63 servers racing each other can lose the
 # port between probe and bind -- job 6563714 died with "lc_judge ... 19730: address already in
 # use" after lc_judge had already reported startup complete. Without these it uses a narrow
@@ -125,7 +131,6 @@ env_start_log=$SWEEP_DIR/env_start.log
 gym env start --config $SWEEP_DIR/sweep_config.yaml \\
     +uv_venv_dir=/opt/uv_venvs \\
     +skip_venv_if_present=true \\
-    ++use_absolute_ip=true \\
     ++port_range_low=$ENV_PORT_RANGE_LOW \\
     ++port_range_high=$ENV_PORT_RANGE_HIGH \\
     ++policy_base_url=http://\$(getent hosts "\$ROUTER_NODE" | awk 'NR == 1 {print \$1}'):$ROUTER_SERVER_PORT/v1 \
