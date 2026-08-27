@@ -27,6 +27,7 @@ import pytest
 
 import responses_api_agents.swe_agents.app as swe_app
 from nemo_gym.config_types import ModelServerRef, OmegaConf
+from nemo_gym.global_config import CACHE_DIR_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -81,6 +82,30 @@ def _cleanup_swebench_results():
     yield
     for d in SWE_AGENTS_DIR.glob("swebench_results_*"):
         shutil.rmtree(d, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_setup_root(monkeypatch, tmp_path_factory):
+    """Resolve setup trees under a throwaway cache root instead of the machine's.
+
+    `resolve_setup_dir` / `_openhands_setup_target` prefer a pre-staged
+    install-relative `swe_agents/swe_*_setup/` tree while the global `cache_dir`
+    is unset (the pre-`cache_dir` layout). A checkout that has one baked next to
+    the package therefore hijacks every test that builds a processor, and the
+    OpenHands path goes on to run a real `git checkout` of the dummy SHA these
+    tests configure, which fails. Configuring `cache_dir` opts out of that
+    fallback, so resolution takes the cache-root branch these tests assert on
+    regardless of what is staged locally.
+
+    Tests that cover pre-staged resolution itself re-patch
+    `maybe_get_global_config_dict` inside the test body, which shadows this.
+    """
+    cache_root = tmp_path_factory.mktemp("gym_cache")
+    monkeypatch.setattr(
+        swe_app,
+        "maybe_get_global_config_dict",
+        lambda: {CACHE_DIR_KEY_NAME: str(cache_root)},
+    )
 
 
 ########################################
