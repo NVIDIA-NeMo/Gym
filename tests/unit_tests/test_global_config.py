@@ -19,6 +19,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, PropertyMock
 
 from omegaconf import OmegaConf
+from omegaconf.errors import ConfigKeyError
 from pytest import LogCaptureFixture, MonkeyPatch, mark, raises
 
 import nemo_gym.global_config
@@ -33,6 +34,7 @@ from nemo_gym.config_types import (
     MalformedConfigPathsError,
     NoServerInstancesError,
     ServerRefNotFoundError,
+    UnsupportedAgentOverrideError,
     UnsupportedAgentPairingError,
     WANDBConfig,
 )
@@ -2407,3 +2409,92 @@ class TestComposeUnboundAgent:
         assert "max_steps" not in block
         assert OmegaConf.to_container(block["datasets"])[0]["num_repeats"] == 8
         assert "hermes_agent" not in resolved
+
+    def _cli_dict(self, config: dict) -> DictConfig:
+        """A command line dict as Hydra hands it over: struct, so an undeclared key is an error."""
+        dict_config = DictConfig(config)
+        OmegaConf.set_struct(dict_config, True)
+        return dict_config
+
+    def _cli_override(self, instance: str, **block) -> DictConfig:
+        """An override addressed to an instance's agent, as `++<instance>...=<value>` produces."""
+        return self._cli_dict({instance: {"responses_api_agents": {"hermes_agent": block}}})
+
+    def _parse_with_cli(self, config: DictConfig, cli: DictConfig, monkeypatch: MonkeyPatch) -> DictConfig:
+        monkeypatch.setattr(GlobalConfigDictParser, "parse_global_config_dict_from_cli", lambda self: cli)
+        return GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=OmegaConf.merge(
+                    GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT, config
+                ),
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+    def test_predicts_the_names_composition_will_produce(self) -> None:
+        names = GlobalConfigDictParser()._composed_instance_names(self._config())
+
+        assert names == {self._composed_name("gpqa_mcqa_simple_agent")}
+
+    def test_predicts_no_names_when_nothing_is_unbound(self) -> None:
+        config = self._config()
+        config.pop(self.HARNESS_INSTANCE)
+
+        assert GlobalConfigDictParser()._composed_instance_names(config) == set()
+
+    def test_applies_command_line_override_to_the_composed_agent(self, monkeypatch: MonkeyPatch) -> None:
+        renamed = self._composed_name("gpqa_mcqa_simple_agent")
+
+        resolved = self._parse_with_cli(self._config(), self._cli_override(renamed, max_turns=99), monkeypatch)
+
+        assert resolved[renamed]["responses_api_agents"]["hermes_agent"]["max_turns"] == 99
+
+    def test_command_line_override_outranks_the_carried_over_bindings(self, monkeypatch: MonkeyPatch) -> None:
+        # The override must carry only the fields the user set, leaving the environment's bindings intact.
+        config = self._config(
+            **{
+                self.HARNESS_INSTANCE: self._harness(
+                    model_server={"type": "responses_api_models", "name": "policy_model"}
+                )
+            }
+        )
+        renamed = self._composed_name("gpqa_mcqa_simple_agent")
+
+        resolved = self._parse_with_cli(config, self._cli_override(renamed, max_turns=99), monkeypatch)
+
+        block = resolved[renamed]["responses_api_agents"]["hermes_agent"]
+        assert block["resources_server"]["name"] == "gpqa_mcqa_resources_server"
+        assert block["max_turns"] == 99
+
+    def test_holds_back_only_the_names_composition_produces(self) -> None:
+        renamed = self._composed_name("gpqa_mcqa_simple_agent")
+        cli = self._cli_dict(
+            {
+                renamed: {"responses_api_agents": {"hermes_agent": {"max_turns": 99}}},
+                "some_other_server": {"responses_api_models": {"a_model": {"entrypoint": "app.py"}}},
+            }
+        )
+
+        held = GlobalConfigDictParser()._hold_back_composed_agent_overrides(cli, self._config())
+
+        assert list(held) == [renamed], "only the composed instance should be held back"
+        assert list(cli) == ["some_other_server"], "everything else must still reach the merge"
+
+    def test_rejects_an_override_naming_an_instance_that_never_appears(self, monkeypatch: MonkeyPatch) -> None:
+        # The names are predicted before inheritance runs, which can drop an instance a base defined. An
+        # override held for one of those would otherwise vanish without trace.
+        config = self._config(base_simple_agent=self._environment_agent("gpqa_mcqa_resources_server"))
+        config["gpqa_mcqa_simple_agent"]["_inherit_from"] = "base_simple_agent"
+        cli = self._cli_override(self._composed_name("base_simple_agent"), max_turns=99)
+
+        with raises(UnsupportedAgentOverrideError) as exc_info:
+            self._parse_with_cli(config, cli, monkeypatch)
+
+        assert self._composed_name("base_simple_agent") in str(exc_info.value)
+
+    def test_rejects_a_field_the_incoming_agent_does_not_declare(self, monkeypatch: MonkeyPatch) -> None:
+        renamed = self._composed_name("gpqa_mcqa_simple_agent")
+
+        with raises(ConfigKeyError):
+            self._parse_with_cli(self._config(), self._cli_override(renamed, no_such_field=1), monkeypatch)

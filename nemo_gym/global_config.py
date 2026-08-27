@@ -49,6 +49,7 @@ from nemo_gym.config_types import (
     NoServerInstancesError,
     ServerInstanceConfig,
     ServerRefNotFoundError,
+    UnsupportedAgentOverrideError,
     UnsupportedAgentPairingError,
     is_almost_server,
     is_server_ref,
@@ -586,8 +587,13 @@ Duplicate config paths:
         reference = self._resources_server_reference(server_config)
         return reference is not None and OmegaConf.is_missing(reference, "name")
 
-    def compose_unbound_agent(self, global_config_dict: DictConfig) -> None:
-        """Rehost every other agent instance on the config's unbound agent, then drop that agent."""
+    def compose_unbound_agent(
+        self, global_config_dict: DictConfig, held_agent_overrides: Optional[DictConfig] = None
+    ) -> None:
+        """Rehost every other agent instance on the config's unbound agent, then drop that agent.
+
+        `held_agent_overrides` are command line overrides keyed by the name each instance is renamed to.
+        """
         instances = self._agent_instances(global_config_dict)
         sources = [instance for instance in instances if self._is_unbound_agent(instance.server_config)]
         if not sources:
@@ -625,6 +631,9 @@ Duplicate config paths:
             for target in targets:
                 composed = deepcopy(source.server_config)
                 self._carry_over_agent_bindings(target.server_config, composed)
+                self._apply_held_agent_override(
+                    held_agent_overrides, renames[target.name], source.agent_type, composed
+                )
 
                 # extract the target instance, remove the old agent config, add the new agent
                 # and add the whole thing back to the config under the new name
@@ -635,6 +644,8 @@ Duplicate config paths:
                 global_config_dict[renames[target.name]] = instance
 
             self._repin_agents(global_config_dict, renames)
+
+        self._raise_on_unapplied_agent_overrides(held_agent_overrides, set(renames.values()))
 
     @staticmethod
     def _composed_instance_name(target: _AgentInstance, agent_type: str) -> str:
@@ -719,6 +730,61 @@ Duplicate config paths:
 
 {remedy} Or pass --allow-unsupported-pairing (or set {ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME}=1) to bypass \
 the check."""
+        )
+
+    def _composed_instance_names(self, config_dict: DictConfig) -> set:
+        """The instance names composition will produce, worked out before it runs."""
+        instances = self._agent_instances(config_dict)
+        sources = [instance for instance in instances if self._is_unbound_agent(instance.server_config)]
+        if len(sources) != 1:
+            return set()
+        return {
+            self._composed_instance_name(target, sources[0].agent_type)
+            for target in instances
+            if target.name != sources[0].name
+        }
+
+    def _hold_back_composed_agent_overrides(
+        self, cli_global_config_dict: DictConfig, config_dict: DictConfig
+    ) -> DictConfig:
+        """Take command line overrides naming an instance composition is about to create out of the dict.
+
+        That instance does not exist yet, so merging them now would build a partial server beside it.
+        Returned to be applied to the composed agent instead.
+        """
+        composed_names = self._composed_instance_names(config_dict)
+        held = OmegaConf.create({})
+        for name in list(cli_global_config_dict.keys()):
+            if name not in composed_names:
+                continue
+            with open_dict(cli_global_config_dict), open_dict(held):
+                held[name] = cli_global_config_dict.pop(name)
+        return held
+
+    @staticmethod
+    def _apply_held_agent_override(
+        held_agent_overrides: Optional[DictConfig], name: str, agent_type: str, composed: DictConfig
+    ) -> None:
+        """Merge the override held for `name` onto the composed agent, in place, after the bindings."""
+        if held_agent_overrides is None:
+            return
+        override = OmegaConf.select(held_agent_overrides, f"{name}.{AGENT_SERVER_TYPE_KEY_NAME}.{agent_type}")
+        if not isinstance(override, DictConfig):
+            return
+        # Struct mode is what makes a field the agent does not declare an error rather than a silent add.
+        OmegaConf.set_struct(composed, True)
+        composed.merge_with(override)
+
+    @staticmethod
+    def _raise_on_unapplied_agent_overrides(held_agent_overrides: Optional[DictConfig], composed_names: set) -> None:
+        """Report held overrides that named an instance composition did not produce."""
+        unapplied = sorted(name for name in (held_agent_overrides or {}) if name not in composed_names)
+        if not unapplied:
+            return
+        raise UnsupportedAgentOverrideError(
+            "Command line overrides name agent instances that do not exist:\n"
+            + "\n".join(f"  - {name}" for name in unapplied)
+            + "\nUse the instance name the composed config reports, e.g. from `gym env resolve`."
         )
 
     @staticmethod
@@ -871,13 +937,13 @@ For example, on the command line:
         if parse_config is None:
             parse_config = GlobalConfigDictParserConfig()
 
-        global_config_dict = (
+        cli_global_config_dict = (
             DictConfig(dict()) if parse_config.skip_load_from_cli else self.parse_global_config_dict_from_cli()
         )
 
         # Command line overrides function input.
         initial_global_config_dict = OmegaConf.create(parse_config.initial_global_config_dict or dict())
-        global_config_dict: DictConfig = OmegaConf.merge(initial_global_config_dict, global_config_dict)
+        global_config_dict: DictConfig = OmegaConf.merge(initial_global_config_dict, cli_global_config_dict)
 
         # Load the env.yaml config. We load it early so that people can use it to conveniently store config paths.
         # Search NEMO_GYM_EXTRA_ROOTS, cwd, then the install root.
@@ -911,7 +977,15 @@ Pass each config with --config (it builds the list for you), e.g.:
 
         # Merge config dicts
         # global_config_dict is the last config arg here since we want command line args to override everything else.
-        global_config_dict = OmegaConf.merge(*extra_configs, global_config_dict)
+        # An agent override naming an instance no config defines is addressed to one composition is about to
+        # create, so it is held back from this merge, which has nowhere to put it, and applied there instead.
+        held_agent_overrides = self._hold_back_composed_agent_overrides(
+            cli_global_config_dict, OmegaConf.merge(*extra_configs, initial_global_config_dict)
+        )
+        # Rebuilt rather than reused: the command line dict was trimmed after the early merge above.
+        global_config_dict = OmegaConf.merge(
+            *extra_configs, OmegaConf.merge(initial_global_config_dict, cli_global_config_dict)
+        )
 
         # Update the config paths after postprocessing
         if config_paths:
@@ -922,7 +996,7 @@ Pass each config with --config (it builds the list for you), e.g.:
 
         # Must run after the swap above (inherited bindings must exist to carry over) and before the
         # missing-value check below (it removes the unbound agent instance that still carries '???').
-        self.compose_unbound_agent(global_config_dict)
+        self.compose_unbound_agent(global_config_dict, held_agent_overrides)
 
         # Fail fast with one actionable error if any required value is still '???'. Runs *after*
         # _recursively_swap_keys so that _delete_key/_inherit_from/_copy have been applied first —

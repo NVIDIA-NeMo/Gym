@@ -188,6 +188,10 @@ class UnsupportedAgentPairingError(ConfigError, ValueError):
     """The selected agent is not one the environment's resources server declares support for."""
 
 
+class UnsupportedAgentOverrideError(ConfigError, ValueError):
+    """A command line override configures an agent that no instance ends up running."""
+
+
 ########################################
 # Dataset configs for handling and upload/download
 ########################################
