@@ -4,12 +4,12 @@
 1. [(Optional) Create a container](#01---optional-create-a-container)
 2. [Create a manifest](#02---create-a-manifest)
 3. [Run the reward profiling job](#03---run-the-reward-profiling-job)
-    a. [Sharding / Unsharding data](#03a---sharding--unsharding-data)
-    b. [Starting, resuming and monitoring a profiling job](#03b---starting-resuming-and-monitoring-a-profiling-job)
+   - a. [Sharding / Unsharding data](#03a---sharding--unsharding-data)
+   - b. [Starting, resuming and monitoring a profiling job](#03b---starting-resuming-and-monitoring-a-profiling-job)
 4. [Postprocess reward profiling outputs](#04---postprocess-reward-profiling-outputs)
-    a. [Collating finished / unfinished data](#04a---collating-finished--unfinished-data)
-    b. [Running ng_reward_profile](#04b---running-ng_reward_profile)
-    c. [Re-creating profiled data to input shapes with reward profiled information](#04c---re-creating-profiled-data-to-input-shapes-with-reward-profiled-information)
+   - a. [Collating finished / unfinished data](#04a---collating-finished--unfinished-data)
+   - b. [Running ng_reward_profile](#04b---running-ng_reward_profile)
+   - c. [Re-creating profiled data to input shapes with reward profiled information](#04c---re-creating-profiled-data-to-input-shapes-with-reward-profiled-information)
 
 
 ## 01 - (Optional) Create a container
