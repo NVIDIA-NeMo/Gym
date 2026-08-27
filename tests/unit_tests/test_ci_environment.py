@@ -9,11 +9,13 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CICD_MAIN_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "cicd-main.yml"
 CLASSIFY_CHANGES_ACTION = REPO_ROOT / ".github" / "actions" / "classify-changes" / "action.yml"
+IS_MAIN_OR_RELEASE_REF_ACTION = REPO_ROOT / ".github" / "actions" / "is-main-or-release-ref" / "action.yml"
 FULL_TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "full-test-suite.yml"
 GPU_E2E_CONFIG = REPO_ROOT / "tests" / "e2e" / "gpu_e2e.yaml"
 GPU_E2E_DATASET = REPO_ROOT / "tests" / "e2e" / "gpu_smoke.jsonl"
@@ -198,8 +200,13 @@ def test_cicd_main_wires_preflight_cpu_and_gpu_workflows() -> None:
     assert "      - main\n" in workflow
     assert '      - "pull-request/[0-9]+"\n' in workflow
     assert "deploy-release" not in workflow
-    assert "schedule:" not in workflow
-    assert "workflow_dispatch:" not in workflow
+    # container_build/gpu_e2e_tests/provider_e2e_tests run on a periodic
+    # schedule (or on-demand via workflow_dispatch) instead of on every PR
+    # push, since they compete for the shared, contention-prone
+    # nemo-ci-aws-gpu-x2 runner pool.
+    assert '    - cron: "0 */4 * * *"' in workflow
+    assert "  workflow_dispatch:" in workflow
+    assert "      send_notification:" in workflow
     assert "  contents: read\n" in workflow
     assert "  pull-requests: read\n" in workflow
     assert "id-token:" not in workflow
@@ -210,12 +217,12 @@ def test_cicd_main_wires_preflight_cpu_and_gpu_workflows() -> None:
     assert "base-ref: ${{ needs.pre-flight.outputs.base_ref }}" in workflow
     assert "needs: [pre-flight, classify_changes, unit_tests]" in workflow
     assert "needs: [pre-flight, classify_changes, unit_tests, container_build]" in workflow
-    # container_build and gpu_e2e_tests are temporarily disabled (if: false) while the
-    # nemo-ci-aws-gpu-x2 runner pool backlog is resolved, so only unit_tests and
-    # provider_e2e_tests still carry the docs-only condition.
-    assert workflow.count("if: needs.classify_changes.outputs.docs_only != 'true'") == 2
-    assert workflow.count("if: false") == 2
-    assert workflow.count("Temporarily disabled") == 2
+    # Only unit_tests still uses the plain docs-only gate; container_build/
+    # gpu_e2e_tests/provider_e2e_tests are schedule/workflow_dispatch-gated
+    # instead (checked in test_cicd_nightly_jobs_require_upstream_success).
+    assert workflow.count("if: needs.classify_changes.outputs.docs_only != 'true'") == 1
+    assert "if: false" not in workflow
+    assert "Temporarily disabled" not in workflow
     assert "needs.pre-flight.outputs.docs_only" not in workflow
     assert "runs-on: ${{ needs.pre-flight.outputs.runner_prefix }}" in workflow
     assert "matrix:" in workflow
@@ -257,16 +264,176 @@ def test_cicd_summary_accepts_only_expected_docs_only_skips() -> None:
     assert '"$PREFLIGHT_RESULT" != "success"' in workflow
     assert '"$CLASSIFY_RESULT" != "success"' in workflow
     assert '"$DOCS_ONLY" == "true"' in workflow
-    # Container build and GPU e2e are echoed but not gating while temporarily disabled.
-    assert 'echo "Container build: $CONTAINER_BUILD_RESULT (not gating - temporarily disabled)"' in workflow
-    assert 'echo "GPU E2E tests: $GPU_E2E_TEST_RESULT (not gating - temporarily disabled)"' in workflow
-    assert '"$CONTAINER_BUILD_RESULT" == "skipped"' not in workflow
-    assert '"$CONTAINER_BUILD_RESULT" == "success"' not in workflow
-    assert '"$UNIT_TEST_RESULT" == "success"' in workflow
+    assert '"$IS_NIGHTLY" == "true"' in workflow
     assert "PROVIDER_E2E_TEST_RESULT: ${{ needs.provider_e2e_tests.result }}" in workflow
-    assert 'echo "Provider E2E tests: $PROVIDER_E2E_TEST_RESULT (not gating)"' in workflow
-    assert '"$PROVIDER_E2E_TEST_RESULT" == "skipped"' not in workflow
-    assert '"$PROVIDER_E2E_TEST_RESULT" == "success"' not in workflow
+    assert '"$UNIT_TEST_RESULT" != "success" && "$UNIT_TEST_RESULT" != "skipped"' in workflow
+
+
+def _cicd_main_jobs() -> dict:
+    return yaml.safe_load(CICD_MAIN_WORKFLOW.read_text())["jobs"]
+
+
+def _run_step(job_name: str, step_name: str, env_overrides: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    steps = _cicd_main_jobs()[job_name]["steps"]
+    (script,) = (step["run"] for step in steps if step.get("name") == step_name)
+    env = os.environ.copy()
+    env.update(env_overrides)
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env)
+
+
+_ALL_SUCCESS_RESULTS = {
+    "PREFLIGHT_RESULT": "success",
+    "CLASSIFY_RESULT": "success",
+    "DOCS_ONLY": "false",
+    "UNIT_TEST_RESULT": "success",
+    "CONTAINER_BUILD_RESULT": "success",
+    "GPU_E2E_TEST_RESULT": "success",
+    "PROVIDER_E2E_TEST_RESULT": "success",
+}
+
+
+@pytest.mark.parametrize(
+    ("event_name", "overrides", "expect_success"),
+    [
+        # PR/push events never gate on the nightly-only jobs.
+        ("pull_request", {}, True),
+        ("pull_request", {"CONTAINER_BUILD_RESULT": "failure"}, True),
+        ("pull_request", {"UNIT_TEST_RESULT": "failure"}, False),
+        (
+            "pull_request",
+            {"DOCS_ONLY": "true", "UNIT_TEST_RESULT": "skipped"},
+            True,
+        ),
+        (
+            "pull_request",
+            {"DOCS_ONLY": "true", "UNIT_TEST_RESULT": "success"},
+            False,
+        ),
+        # Nightly/manual runs: docs_only no longer short-circuits the
+        # nightly-job check (the bug fixed in this PR).
+        ("schedule", {}, True),
+        ("schedule", {"CONTAINER_BUILD_RESULT": "failure"}, False),
+        ("schedule", {"GPU_E2E_TEST_RESULT": "failure"}, False),
+        ("schedule", {"PROVIDER_E2E_TEST_RESULT": "failure"}, False),
+        (
+            "schedule",
+            {"DOCS_ONLY": "true", "UNIT_TEST_RESULT": "skipped", "CONTAINER_BUILD_RESULT": "failure"},
+            False,
+        ),
+        (
+            "schedule",
+            {"DOCS_ONLY": "true", "UNIT_TEST_RESULT": "skipped"},
+            True,
+        ),
+        ("schedule", {"UNIT_TEST_RESULT": "failure"}, False),
+        ("workflow_dispatch", {"CONTAINER_BUILD_RESULT": "failure"}, False),
+        ("workflow_dispatch", {}, True),
+    ],
+)
+def test_nemo_cicd_test_gate_matches_event_and_job_results(
+    event_name: str, overrides: dict[str, str], expect_success: bool
+) -> None:
+    is_nightly = "true" if event_name in ("schedule", "workflow_dispatch") else "false"
+    env = {"EVENT_NAME": event_name, "IS_NIGHTLY": is_nightly, **_ALL_SUCCESS_RESULTS, **overrides}
+
+    result = _run_step("Nemo_CICD_Test", "Check test results", env)
+
+    assert (result.returncode == 0) == expect_success, result.stdout + result.stderr
+
+
+def test_cicd_nightly_jobs_require_upstream_success() -> None:
+    workflow = CICD_MAIN_WORKFLOW.read_text()
+
+    # A job's own `if:` replaces (not ANDs with) the implicit success()-of-
+    # needs check, so container_build/gpu_e2e_tests/provider_e2e_tests must
+    # explicitly check needs.*.result themselves. `is_nightly` is a single
+    # source of truth on classify_changes, referenced by three downstream
+    # jobs (container_build, gpu_e2e_tests, provider_e2e_tests) instead of
+    # each re-deriving github.event_name == 'schedule' || ... . notify-failure
+    # deliberately does NOT use it (see test_notify_failure_fires_even_if_
+    # classify_changes_is_skipped for why).
+    assert workflow.count("needs.classify_changes.outputs.is_nightly == 'true'") == 3
+    non_definition = workflow.replace(
+        "is_nightly: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}", ""
+    )
+    assert non_definition.count("github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'") == 1
+    assert "needs.pre-flight.result == 'success' &&" in workflow
+    assert workflow.count("needs.classify_changes.result == 'success' &&") == 3
+    assert "(needs.unit_tests.result == 'success' || needs.unit_tests.result == 'skipped')" in workflow
+    assert "needs.container_build.result == 'success'" in workflow
+
+
+@pytest.mark.parametrize(
+    ("ref", "allowed"),
+    [
+        ("main", "true"),
+        ("r0.5.1", "true"),
+        ("r0.5.10", "true"),
+        ("r1.0.0", "true"),
+        ("feature-branch", "false"),
+        ("gym-nightly-heavy-ci", "false"),
+        ("r0.5", "false"),
+    ],
+)
+def test_notify_failure_ref_check_allows_only_main_and_release_branches(
+    ref: str, allowed: str, tmp_path: Path
+) -> None:
+    action = yaml.safe_load(IS_MAIN_OR_RELEASE_REF_ACTION.read_text())
+    (script,) = (step["run"] for step in action["runs"]["steps"] if step.get("name") == "Check ref")
+
+    output_path = tmp_path / f"github_output_{ref}"
+    output_path.write_text("")
+    result = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "REF": ref, "GITHUB_OUTPUT": str(output_path)},
+    )
+
+    assert f"allowed={allowed}" in output_path.read_text(), (result.stdout, result.stderr)
+
+
+def test_notify_failure_uses_shared_ref_check_action() -> None:
+    for workflow_file in (CICD_MAIN_WORKFLOW, FULL_TEST_WORKFLOW):
+        jobs = yaml.safe_load(workflow_file.read_text())["jobs"]
+        steps = jobs["notify-failure"]["steps"]
+        (ref_check_step,) = (step for step in steps if step.get("name") == "Check ref is main or a release branch")
+
+        assert ref_check_step["uses"] == "./.github/actions/is-main-or-release-ref", workflow_file
+        assert any(step.get("name") == "Checkout repository" for step in steps), workflow_file
+
+
+def test_full_test_suite_runs_on_schedule_and_dispatch_not_push() -> None:
+    workflow = FULL_TEST_WORKFLOW.read_text()
+    on_block = workflow.split("\non:", 1)[1].split("\nconcurrency:", 1)[0]
+
+    assert '    - cron: "0 */4 * * *"' in on_block
+    assert "  workflow_dispatch:" in on_block
+    assert "      send_notification:" in on_block
+    assert "push:" not in on_block
+
+
+def test_notify_failure_respects_send_notification_input() -> None:
+    guard = "(github.event_name != 'workflow_dispatch' || inputs.send_notification)"
+    for workflow_file in (CICD_MAIN_WORKFLOW, FULL_TEST_WORKFLOW):
+        jobs = yaml.safe_load(workflow_file.read_text())["jobs"]
+        assert guard in jobs["notify-failure"]["if"], workflow_file
+
+
+def test_notify_failure_fires_even_if_classify_changes_is_skipped() -> None:
+    # classify_changes has no explicit `if:`, so it (and all its outputs,
+    # including literal ones like is_nightly) is skipped whenever pre-flight
+    # fails. notify-failure's *gating* condition must not depend on that
+    # output, or a pre-flight failure on a nightly run would silently
+    # suppress the alert; classify_changes may still appear in `needs:` for
+    # message content (its always()/!cancelled() `if:` doesn't require it
+    # to have succeeded).
+    jobs = yaml.safe_load(CICD_MAIN_WORKFLOW.read_text())["jobs"]
+    notify_if = jobs["notify-failure"]["if"]
+
+    assert "needs.classify_changes" not in notify_if
+    assert "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'" in notify_if
+    assert "always()" in notify_if
 
 
 def test_shared_change_classifier_matches_gym_docs_and_server_paths() -> None:
