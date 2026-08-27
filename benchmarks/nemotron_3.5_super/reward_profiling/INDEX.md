@@ -8,7 +8,7 @@
    - b. [Starting, resuming and monitoring a profiling job](#03b---starting-resuming-and-monitoring-a-profiling-job)
 4. [Postprocess reward profiling outputs](#04---postprocess-reward-profiling-outputs)
    - a. [Collating finished / unfinished data](#04a---collating-finished--unfinished-data)
-   - b. [Running ng_reward_profile](#04b---running-ng_reward_profile)
+   - b. [Running gym eval profile](#04b---running-gym-eval-profile)
    - c. [Re-creating profiled data to input shapes with reward profiled information](#04c---re-creating-profiled-data-to-input-shapes-with-reward-profiled-information)
 
 
@@ -224,9 +224,10 @@ per-label counts and names any label that collected nothing.
 
 Unfinished data needs no special handling: partial groups are kept and reported.
 
-### 04b - Running ng_reward_profile
+### 04b - Running gym eval profile
 
-`ng_reward_profile` is the legacy alias for `gym eval profile`. Either runs on a partial file:
+`ng_reward_profile` is the legacy alias and still works, but `gym eval profile` is the current
+name and what the scripts call. It runs on a partial file:
 
 ```bash
 gym eval profile --inputs <dir>/rollouts_materialized_inputs.jsonl \
