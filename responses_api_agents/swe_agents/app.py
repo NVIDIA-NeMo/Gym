@@ -2443,18 +2443,6 @@ def update_and_read_metrics(metrics_fpath: Path, update_dict: Dict[str, Any] | N
         return metrics
 
 
-# _TOOL_PARAM_BOOL_FIELDS_DEFAULT_FALSE = ("defer_loading",)
-
-
-# def _dump_tool_as_tool_param(tool: BaseModel) -> Dict[str, Any]:
-#     """Dump a response Tool pydantic model to a ToolParam-compatible dict."""
-#     data = tool.model_dump()
-#     for key in _TOOL_PARAM_BOOL_FIELDS_DEFAULT_FALSE:
-#         if data.get(key) is None:
-#             data[key] = False
-#     return data
-
-
 _PAGE_SIZE = os.sysconf("SC_PAGE_SIZE")
 
 
