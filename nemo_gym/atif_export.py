@@ -31,7 +31,6 @@ from pydantic import BaseModel, Field, TypeAdapter, ValidationError, field_valid
 from nemo_gym import __version__
 from nemo_gym.atif_json import json_values_equal as _json_values_equal
 from nemo_gym.atif_json import strict_json_loads as _strict_json_loads
-from nemo_gym.atif_provider_reconciliation import ProviderReconciliationError, reconcile_provider_model_call
 from nemo_gym.atif_v1_7 import (
     ATIF_SCHEMA_VERSION,
     AtifAgent,
@@ -55,7 +54,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseInputItem,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseReasoningItem,
-    TokenIDLogProbMixin,
 )
 from nemo_gym.rollout_observability import ModelCallRef, TrajectoryModelCall, TrajectoryRecord
 
@@ -155,56 +153,14 @@ def _preflight_model_call_refs(value: Any, *, path: str) -> None:
             _preflight_model_ref(reference.get("model_ref"), path=f"{path}[{index}].model_ref")
 
 
-def _preflight_integer_list(value: Any, *, path: str) -> None:
-    if not isinstance(value, list):
-        raise _path_error(path, "expected a JSON array of integers")
-    for index, item in enumerate(value):
-        if type(item) is not int or item < 0:
-            raise _path_error(
-                f"{path}[{index}]",
-                "expected a non-negative integer, not a boolean or coercible value",
-            )
-
-
-def _preflight_logprobs(value: Any, *, path: str) -> None:
-    if not isinstance(value, list):
-        raise _path_error(path, "expected a JSON array of finite numbers")
-    for index, item in enumerate(value):
-        if type(item) not in (int, float) or (isinstance(item, float) and not math.isfinite(item)):
-            raise _path_error(f"{path}[{index}]", "expected a finite number, not a boolean or coercible value")
-
-
-def _preflight_routed_experts(value: Any, *, path: str) -> None:
-    if value is None or isinstance(value, str):
-        return
-    if not isinstance(value, list):
-        raise _path_error(path, "expected an opaque string or a three-dimensional JSON integer array")
-    for token_index, layers in enumerate(value):
-        token_path = f"{path}[{token_index}]"
-        if not isinstance(layers, list):
-            raise _path_error(token_path, "expected an array of model layers")
-        for layer_index, experts in enumerate(layers):
-            layer_path = f"{token_path}[{layer_index}]"
-            if not isinstance(experts, list):
-                raise _path_error(layer_path, "expected an array of routed-expert indices")
-            for expert_index, expert in enumerate(experts):
-                if type(expert) is not int:
-                    raise _path_error(
-                        f"{layer_path}[{expert_index}]",
-                        "expected an integer, not a boolean or coercible value",
-                    )
-
-
 def _preflight_training_metadata(item: dict[Any, Any], *, path: str) -> None:
-    if not _TRAINING_METADATA_FIELDS.intersection(item):
-        return
-    for field_name in ("prompt_token_ids", "generation_token_ids"):
-        if field_name in item:
-            _preflight_integer_list(item[field_name], path=f"{path}.{field_name}")
-    if "generation_log_probs" in item:
-        _preflight_logprobs(item["generation_log_probs"], path=f"{path}.generation_log_probs")
-    if "routed_experts" in item:
-        _preflight_routed_experts(item["routed_experts"], path=f"{path}.routed_experts")
+    present = sorted(_TRAINING_METADATA_FIELDS.intersection(item))
+    if present:
+        raise _path_error(
+            path,
+            "training token IDs, log probabilities, and routed-expert metadata are outside the initial "
+            f"ATIF export profile (found: {', '.join(present)})",
+        )
 
 
 def _preflight_parts(value: Any, *, path: str, supported_fields: dict[str, frozenset[str]]) -> None:
@@ -459,20 +415,6 @@ def _reasoning_text(items: list[NeMoGymResponseReasoningItem], *, path: str) -> 
     return segments[0]
 
 
-def _training_metadata(items: list[Any], *, path: str) -> TokenIDLogProbMixin | None:
-    token_items = [item for item in items if isinstance(item, TokenIDLogProbMixin)]
-    if len(token_items) > 1:
-        raise _path_error(path, "more than one output item carries training token metadata")
-    if not token_items:
-        return None
-    if token_items[0] is not items[-1]:
-        raise _path_error(path, "training token metadata must be attached to the final model-generated output item")
-    metadata = token_items[0]
-    if len(metadata.generation_token_ids) != len(metadata.generation_log_probs):
-        raise _path_error(path, "generation token IDs and log probabilities must have the same length")
-    return metadata
-
-
 def _parse_arguments(call: NeMoGymResponseFunctionToolCall, *, path: str) -> dict[str, Any]:
     try:
         arguments = _strict_json_loads(call.arguments)
@@ -529,8 +471,6 @@ def _build_groups(trajectory: TrajectoryRecord, invocation: Any) -> tuple[list[A
                 raise _path_error(f"{item_path}.role", "copied assistant context is not supported")
             if seen_agent_output:
                 raise _path_error(item_path, "later system or user turns are not supported")
-            if isinstance(item, TokenIDLogProbMixin):
-                raise _path_error(item_path, "training token metadata is only supported on agent output")
             steps.append(
                 AtifStep(
                     step_id=len(steps) + 1,
@@ -771,29 +711,31 @@ def _apply_turns(trajectory: TrajectoryRecord, groups: list[_AgentGroup]) -> Non
         if call_index in used_calls:
             raise _path_error(f"{path}.model_calls[0]", "model call is referenced by more than one turn")
         used_calls.add(call_index)
-        try:
-            reconciliation = reconcile_provider_model_call(call, group.step, path=path)
-        except ProviderReconciliationError as exc:
-            raise AtifExportError(str(exc)) from exc
-        if call.response_metadata.response_status not in (None, "completed"):
-            raise _path_error(path, f"model call is {call.response_metadata.response_status!r}, not completed")
-        if call.response_metadata.error_category is not None:
+        metadata = call.response_metadata
+        if metadata.response_status not in (None, "completed"):
+            raise _path_error(path, f"model call is {metadata.response_status!r}, not completed")
+        if metadata.error_category is not None:
             raise _path_error(path, "model call contains provider error evidence")
-        if call.response_metadata.status_code is not None and not 200 <= call.response_metadata.status_code < 300:
-            raise _path_error(path, f"model call returned non-success status {call.response_metadata.status_code}")
-        finish_reason = reconciliation.finish_reason
+        if metadata.status_code is not None and not 200 <= metadata.status_code < 300:
+            raise _path_error(path, f"model call returned non-success status {metadata.status_code}")
+        if metadata.model is not None and not metadata.model.strip():
+            raise _path_error(f"{path}.model_calls[0].model", "cannot be blank")
+
+        finish_reason = metadata.finish_reason
+        if finish_reason is not None and not finish_reason.strip():
+            raise _path_error(f"{path}.model_calls[0].finish_reason", "cannot be blank")
         normalized_finish_reason = finish_reason.strip().lower() if finish_reason is not None else None
         if normalized_finish_reason in _KNOWN_INCOMPLETE_FINISH_REASONS:
             raise _path_error(path, f"finish reason {finish_reason!r} indicates an incomplete model response")
-        dialect = call.response_metadata.dialect
-        if call.response is not None and dialect == "chat":
+        dialect = metadata.dialect
+        if finish_reason is not None and dialect == "chat":
             allowed_chat_reasons = {"tool_calls", "function_call"} if group.step.tool_calls else {"stop"}
             if normalized_finish_reason not in allowed_chat_reasons:
                 raise _path_error(
                     path,
                     f"Chat finish reason {finish_reason!r} does not prove a completed response",
                 )
-        if call.response is not None and dialect == "messages":
+        if finish_reason is not None and dialect == "messages":
             allowed_messages_reasons = {"tool_use"} if group.step.tool_calls else {"end_turn", "stop_sequence"}
             if normalized_finish_reason not in allowed_messages_reasons:
                 raise _path_error(
@@ -809,13 +751,9 @@ def _apply_turns(trajectory: TrajectoryRecord, groups: list[_AgentGroup]) -> Non
             group.step.timestamp = datetime.fromtimestamp(turn.timestamp, UTC).isoformat().replace("+00:00", "Z")
         except (OverflowError, OSError, ValueError) as exc:
             raise _path_error(f"{path}.timestamp", "cannot be represented as an ISO 8601 timestamp") from exc
-        group.step.model_name = reconciliation.model_name
+        group.step.model_name = metadata.model
         group.step.llm_call_count = 1
-        stats = reconciliation.token_stats
-        training = _training_metadata(
-            [*group.reasoning, *group.answer],
-            path=f"{path}.answer",
-        )
+        stats = call.token_stats
         if stats.total_tokens is not None:
             for field_name, value in (
                 ("prompt_tokens", stats.prompt_tokens),
@@ -825,15 +763,6 @@ def _apply_turns(trajectory: TrajectoryRecord, groups: list[_AgentGroup]) -> Non
             ):
                 if value is not None and value > stats.total_tokens:
                     raise _path_error(path, f"model-call {field_name} exceeds total_tokens")
-            if (
-                stats.prompt_tokens is not None
-                and stats.completion_tokens is not None
-                and stats.total_tokens != stats.prompt_tokens + stats.completion_tokens
-            ):
-                raise _path_error(
-                    path,
-                    "model-call total_tokens does not match prompt_tokens + completion_tokens",
-                )
         if (
             stats.cached_tokens is not None
             and stats.prompt_tokens is not None
@@ -860,7 +789,6 @@ def _apply_turns(trajectory: TrajectoryRecord, groups: list[_AgentGroup]) -> Non
                 stats.reasoning_tokens,
                 stats.total_tokens,
                 stats.cached_tokens,
-                training,
             )
         ):
             extra = {
@@ -871,15 +799,10 @@ def _apply_turns(trajectory: TrajectoryRecord, groups: list[_AgentGroup]) -> Non
                 }.items()
                 if value is not None
             }
-            if training is not None and training.routed_experts is not None:
-                extra["routed_experts"] = training.routed_experts
             group.step.metrics = AtifStepMetrics(
                 prompt_tokens=stats.prompt_tokens,
                 completion_tokens=stats.completion_tokens,
                 cached_tokens=stats.cached_tokens,
-                prompt_token_ids=training.prompt_token_ids if training is not None else None,
-                completion_token_ids=training.generation_token_ids if training is not None else None,
-                logprobs=training.generation_log_probs if training is not None else None,
                 extra={"nemo_gym": extra} if extra else None,
             )
         source_items = _source_item_ids(group)

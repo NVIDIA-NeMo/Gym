@@ -20,7 +20,7 @@ from nemo_gym.atif_export import (
     export_rollouts_to_atif,
     gym_rollout_to_atif,
 )
-from nemo_gym.atif_v1_7 import AtifStepMetrics, AtifTrajectoryV1_7
+from nemo_gym.atif_v1_7 import AtifTrajectoryV1_7
 from nemo_gym.rollout_observability import TrajectoryRecord
 
 
@@ -217,144 +217,6 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     path.write_text("".join(f"{json.dumps(row)}\n" for row in rows), encoding="utf-8")
 
 
-def _matching_provider_response(
-    dialect: str,
-    *,
-    tool_step: bool,
-    response_id: str,
-    model: str,
-    token_stats: dict[str, int],
-) -> dict[str, Any]:
-    reasoning = "Read both records before comparing them." if tool_step else "The records agree."
-    text = None if tool_step else "Both records contain the same value."
-    calls = [
-        ("call-search", "search", {"query": "relay"}),
-        ("call-read", "read", {"path": "/tmp/record.txt"}),
-    ]
-    if dialect == "responses":
-        output: list[dict[str, Any]] = [
-            {
-                "id": "raw-reasoning",
-                "type": "reasoning",
-                "status": "completed",
-                "summary": [{"type": "summary_text", "text": reasoning}],
-            }
-        ]
-        if tool_step:
-            output.extend(
-                {
-                    "id": f"raw-{call_id}",
-                    "type": "function_call",
-                    "call_id": call_id,
-                    "name": name,
-                    "arguments": json.dumps(arguments, sort_keys=True),
-                    "status": "completed",
-                }
-                for call_id, name, arguments in calls
-            )
-        else:
-            output.append(
-                {
-                    "id": "raw-message",
-                    "type": "message",
-                    "role": "assistant",
-                    "status": "completed",
-                    "content": [{"type": "output_text", "text": text}],
-                }
-            )
-        return {
-            "id": response_id,
-            "model": model,
-            "status": "completed",
-            "output": output,
-            "usage": {
-                "input_tokens": token_stats["prompt_tokens"],
-                "output_tokens": token_stats["completion_tokens"],
-                "total_tokens": token_stats["total_tokens"],
-                "input_tokens_details": {"cached_tokens": token_stats["cached_tokens"]},
-                "output_tokens_details": {"reasoning_tokens": token_stats["reasoning_tokens"]},
-            },
-        }
-    if dialect == "chat":
-        message: dict[str, Any] = {
-            "role": "assistant",
-            "content": text,
-            "reasoning_content": reasoning,
-        }
-        if tool_step:
-            message["tool_calls"] = [
-                {
-                    "id": call_id,
-                    "type": "function",
-                    "function": {"name": name, "arguments": json.dumps(arguments, sort_keys=True)},
-                }
-                for call_id, name, arguments in calls
-            ]
-        return {
-            "id": response_id,
-            "model": model,
-            "choices": [{"index": 0, "finish_reason": "tool_calls" if tool_step else "stop", "message": message}],
-            "usage": {
-                "prompt_tokens": token_stats["prompt_tokens"],
-                "completion_tokens": token_stats["completion_tokens"],
-                "total_tokens": token_stats["total_tokens"],
-                "prompt_tokens_details": {"cached_tokens": token_stats["cached_tokens"]},
-                "completion_tokens_details": {"reasoning_tokens": token_stats["reasoning_tokens"]},
-            },
-        }
-    assert dialect == "messages"
-    content = [{"type": "thinking", "thinking": reasoning}]
-    if tool_step:
-        content.extend(
-            {"type": "tool_use", "id": call_id, "name": name, "input": arguments} for call_id, name, arguments in calls
-        )
-    else:
-        content.append({"type": "text", "text": text})
-    return {
-        "id": response_id,
-        "model": model,
-        "type": "message",
-        "role": "assistant",
-        "stop_reason": "tool_use" if tool_step else "end_turn",
-        "content": content,
-        "usage": {
-            "input_tokens": token_stats["prompt_tokens"] - token_stats["cached_tokens"] - 2,
-            "output_tokens": token_stats["completion_tokens"],
-            "cache_read_input_tokens": token_stats["cached_tokens"],
-            "cache_creation_input_tokens": 2,
-        },
-    }
-
-
-def _install_matching_provider_response(
-    rollout: dict[str, Any],
-    dialect: str,
-    *,
-    tool_step: bool,
-) -> dict[str, Any]:
-    model_call = rollout["ng_trajectory"]["model_calls"][0 if tool_step else 1]
-    metadata = model_call["response_metadata"]
-    response = _matching_provider_response(
-        dialect,
-        tool_step=tool_step,
-        response_id=metadata["response_id"],
-        model=metadata["model"],
-        token_stats=model_call["token_stats"],
-    )
-    model_call["response"] = response
-    metadata["dialect"] = dialect
-    metadata["response_status"] = "completed" if dialect == "responses" else None
-    metadata["finish_reason"] = {
-        ("responses", True): "tool_calls",
-        ("responses", False): None,
-        ("chat", True): "tool_calls",
-        ("chat", False): "stop",
-        ("messages", True): "tool_use",
-        ("messages", False): "end_turn",
-    }[(dialect, tool_step)]
-    return response
-
-
 def test_gym_rollout_to_atif_preserves_provenance_turns_metrics_and_tool_identity() -> None:
     rollout = _canonical_rollout()
     original = copy.deepcopy(rollout)
@@ -545,12 +407,22 @@ def test_strict_export_rejects_conflicting_optional_tool_record_evidence(
         gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
 
 
-def test_strict_export_rejects_inconsistent_model_call_total_tokens() -> None:
+def test_strict_export_preserves_total_tokens_without_assuming_component_accounting() -> None:
     rollout = _canonical_rollout()
     rollout["ng_trajectory"]["model_calls"][0]["token_stats"]["total_tokens"] = 999
 
-    with pytest.raises(AtifExportError, match=r"total_tokens does not match prompt_tokens \+ completion_tokens"):
-        gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
+    trajectory = gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
+
+    assert trajectory.steps[2].metrics.extra == {"nemo_gym": {"reasoning_tokens": 7, "total_tokens": 999}}
+
+
+def test_atif_v1_7_model_rejects_a_different_schema_version() -> None:
+    trajectory = gym_rollout_to_atif(_canonical_rollout(), session_id="evaluation-42", agent_version="2.3.1")
+    payload = trajectory.model_dump(mode="json", exclude_none=True)
+    payload["schema_version"] = "ATIF-v1.6"
+
+    with pytest.raises(ValidationError, match="schema_version"):
+        AtifTrajectoryV1_7.model_validate(payload)
 
 
 def test_strict_export_rejects_cached_tokens_greater_than_prompt_tokens() -> None:
@@ -697,186 +569,24 @@ def test_strict_export_rejects_unknown_null_fields_in_nested_server_references(l
         gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
 
 
-def test_strict_export_distinguishes_json_booleans_from_token_id_numbers_across_redundant_copies() -> None:
-    rollout = _canonical_rollout()
-    final_message = rollout["ng_trajectory"]["invocations"][0]["conversation"][-1]
-    final_message.update(
-        {
-            "prompt_token_ids": [1],
-            "generation_token_ids": [2],
-            "generation_log_probs": [-0.1],
-        }
-    )
-    turn_answer = copy.deepcopy(final_message)
-    turn_answer["prompt_token_ids"] = [True]
-    rollout["ng_trajectory"]["turns"][-1]["answer"] = [turn_answer]
-
-    with pytest.raises(AtifExportError, match="expected a non-negative integer, not a boolean"):
-        gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
-
-
-def test_gym_rollout_to_atif_preserves_training_token_metadata_independently_from_usage_counts() -> None:
-    rollout = _canonical_rollout()
-    final_message = rollout["ng_trajectory"]["invocations"][0]["conversation"][-1]
-    final_message.update(
-        {
-            "prompt_token_ids": [10, 11],
-            "generation_token_ids": [12, 13],
-            "generation_log_probs": [-0.25, -0.5],
-            "routed_experts": "nrlre1:uint16:2x1x1:AAAA",
-        }
-    )
-
-    trajectory = gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
-
-    assert trajectory.steps[3].metrics.model_dump(exclude_none=True) == {
-        "prompt_tokens": 131,
-        "completion_tokens": 13,
-        "cached_tokens": 8,
-        "prompt_token_ids": [10, 11],
-        "completion_token_ids": [12, 13],
-        "logprobs": [-0.25, -0.5],
-        "extra": {
-            "nemo_gym": {
-                "reasoning_tokens": 3,
-                "total_tokens": 144,
-                "routed_experts": "nrlre1:uint16:2x1x1:AAAA",
-            }
-        },
-    }
-
-
-@pytest.mark.parametrize("owner", ("reasoning", "earlier-parallel-call"))
-def test_strict_export_rejects_training_metadata_that_ingress_cannot_restore(owner: str) -> None:
-    rollout = _canonical_rollout()
-    conversation = rollout["ng_trajectory"]["invocations"][0]["conversation"]
-    item = conversation[7] if owner == "reasoning" else conversation[3]
-    item.update(
-        {
-            "prompt_token_ids": [10],
-            "generation_token_ids": [11],
-            "generation_log_probs": [-0.25],
-        }
-    )
-
-    with pytest.raises(AtifExportError, match="final model-generated output item"):
-        gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
-
-
-def test_gym_rollout_to_atif_accepts_training_metadata_on_the_final_parallel_call() -> None:
-    rollout = _canonical_rollout()
-    rollout["ng_trajectory"]["invocations"][0]["conversation"][4].update(
-        {
-            "prompt_token_ids": [10],
-            "generation_token_ids": [11, 12],
-            "generation_log_probs": [-1, 0],
-            "routed_experts": [[[1]], [[2]]],
-        }
-    )
-
-    trajectory = gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
-
-    metrics = trajectory.steps[2].metrics
-    assert metrics.prompt_token_ids == [10]
-    assert metrics.completion_token_ids == [11, 12]
-    assert metrics.logprobs == [-1.0, 0.0]
-    assert metrics.extra["nemo_gym"]["routed_experts"] == [[[1]], [[2]]]
-
-
-def test_strict_export_rejects_multiple_training_token_payloads_for_one_model_call() -> None:
-    rollout = _canonical_rollout()
-    for item in rollout["ng_trajectory"]["invocations"][0]["conversation"][-2:]:
-        item.update(
-            {
-                "prompt_token_ids": [10],
-                "generation_token_ids": [11],
-                "generation_log_probs": [-0.25],
-            }
-        )
-
-    with pytest.raises(AtifExportError, match="more than one output item carries training token metadata"):
-        gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
-
-
-def test_strict_export_rejects_misaligned_training_token_metadata() -> None:
-    rollout = _canonical_rollout()
-    rollout["ng_trajectory"]["invocations"][0]["conversation"][-1].update(
-        {
-            "prompt_token_ids": [10],
-            "generation_token_ids": [11, 12],
-            "generation_log_probs": [-0.25],
-        }
-    )
-
-    with pytest.raises(AtifExportError, match="token IDs and log probabilities must have the same length"):
-        gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
-
-
-def test_strict_export_rejects_training_token_metadata_on_source_messages() -> None:
-    rollout = _canonical_rollout()
-    rollout["ng_trajectory"]["invocations"][0]["conversation"][1].update(
-        {
-            "prompt_token_ids": [10],
-            "generation_token_ids": [11],
-            "generation_log_probs": [-0.25],
-        }
-    )
-
-    with pytest.raises(AtifExportError, match="training token metadata is only supported on agent output"):
-        gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
-
-
 @pytest.mark.parametrize(
-    ("field_name", "invalid_value", "message"),
+    ("field_name", "value"),
     [
-        ("prompt_token_ids", [True], "expected a non-negative integer"),
-        ("prompt_token_ids", ["10"], "expected a non-negative integer"),
-        ("generation_token_ids", [1.0], "expected a non-negative integer"),
-        ("generation_token_ids", [-1], "expected a non-negative integer"),
-        ("generation_log_probs", [False], "expected a finite number"),
-        ("generation_log_probs", ["-0.25"], "expected a finite number"),
-        ("routed_experts", [[[True]]], "expected an integer"),
-        ("routed_experts", [[["2"]]], "expected an integer"),
-        ("routed_experts", [[[1.5]]], "expected an integer"),
+        ("prompt_token_ids", [10]),
+        ("generation_token_ids", [11]),
+        ("generation_log_probs", [-0.25]),
+        ("routed_experts", "nrlre1:uint16:2x1x1:AAAA"),
     ],
 )
-def test_strict_export_rejects_coercible_training_numbers(
+def test_strict_export_rejects_training_metadata_outside_initial_profile(
     field_name: str,
-    invalid_value: Any,
-    message: str,
+    value: Any,
 ) -> None:
     rollout = _canonical_rollout()
-    final_message = rollout["ng_trajectory"]["invocations"][0]["conversation"][-1]
-    final_message.update(
-        {
-            "prompt_token_ids": [10],
-            "generation_token_ids": [11],
-            "generation_log_probs": [-0.25],
-            field_name: invalid_value,
-        }
-    )
+    rollout["ng_trajectory"]["invocations"][0]["conversation"][-1][field_name] = value
 
-    with pytest.raises(AtifExportError, match=message):
+    with pytest.raises(AtifExportError, match="outside the initial ATIF export profile"):
         gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
-
-
-@pytest.mark.parametrize(
-    ("field_name", "invalid_value", "message"),
-    [
-        ("prompt_token_ids", [True], "token IDs must be non-negative JSON integer arrays"),
-        ("completion_token_ids", ["11"], "token IDs must be non-negative JSON integer arrays"),
-        ("completion_token_ids", [-1], "token IDs must be non-negative JSON integer arrays"),
-        ("logprobs", [False], "log probabilities must be finite JSON number arrays"),
-        ("logprobs", ["-0.25"], "log probabilities must be finite JSON number arrays"),
-    ],
-)
-def test_atif_output_metrics_do_not_coerce_training_numbers(
-    field_name: str,
-    invalid_value: list[Any],
-    message: str,
-) -> None:
-    with pytest.raises(ValidationError, match=message):
-        AtifStepMetrics.model_validate({field_name: invalid_value})
 
 
 @pytest.mark.parametrize("item_index", (0, 2, 3, 5, 8))
@@ -1108,235 +818,73 @@ def test_strict_export_allows_legacy_missing_response_status_without_failure_evi
     assert trajectory.steps[2].extra["nemo_gym"]["model_call"]["response_metadata"]["status_code"] == 204
 
 
-@pytest.mark.parametrize(
-    ("dialect", "response"),
-    [
-        ("responses", {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}),
-        ("responses", {"status": "failed"}),
-        ("chat", {"choices": [{"finish_reason": "length"}]}),
-        ("messages", {"stop_reason": "max_tokens"}),
-        ("messages", {"stop_reason": "pause_turn"}),
-    ],
-)
-def test_strict_export_rejects_provider_native_incomplete_responses(
-    dialect: str,
-    response: dict[str, Any],
-) -> None:
+def test_raw_provider_response_is_opaque_provenance_and_does_not_change_projection() -> None:
     rollout = _canonical_rollout()
+    baseline = gym_rollout_to_atif(copy.deepcopy(rollout), session_id="evaluation-42", agent_version="2.3.1")
     model_call = rollout["ng_trajectory"]["model_calls"][1]
-    model_call["response"] = response
-    model_call["response_metadata"]["dialect"] = dialect
-    model_call["response_metadata"]["response_status"] = None
-    model_call["response_metadata"]["finish_reason"] = None
-
-    with pytest.raises(AtifExportError, match="not completed|indicates an incomplete model response"):
-        gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
-
-
-def test_strict_export_does_not_interpret_unknown_dialect_termination_fields() -> None:
-    rollout = _canonical_rollout()
-    model_call = rollout["ng_trajectory"]["model_calls"][1]
-    model_call["response"] = {"status": "domain_status", "choices": [{"finish_reason": "length"}]}
-    model_call["response_metadata"]["dialect"] = "custom"
-    model_call["response_metadata"]["response_status"] = None
-    model_call["response_metadata"]["finish_reason"] = None
+    raw_response = {
+        "status": "failed",
+        "choices": [{"finish_reason": "length", "message": {"content": "different"}}],
+        "usage": {"prompt_tokens": 999},
+        "vendor_extension": {"future": [1, 2, 3]},
+    }
+    model_call["response"] = raw_response
 
     trajectory = gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
 
-    assert trajectory.steps[3].extra["nemo_gym"]["model_call"]["response_metadata"]["dialect"] == "custom"
+    baseline_step = baseline.steps[3]
+    step = trajectory.steps[3]
+    for field_name in (
+        "source",
+        "message",
+        "timestamp",
+        "model_name",
+        "reasoning_content",
+        "metrics",
+        "llm_call_count",
+    ):
+        assert getattr(step, field_name) == getattr(baseline_step, field_name)
+    assert step.extra["nemo_gym"]["model_call"]["response"] == raw_response
 
 
 @pytest.mark.parametrize(
-    ("dialect", "response", "message"),
+    "dialect",
     [
-        ("chat", {"choices": [{"finish_reason": "vendor_truncated"}]}, "does not prove a completed response"),
-        ("messages", {"stop_reason": "vendor_truncated"}, "does not prove a completed response"),
+        "chat",
+        "messages",
     ],
 )
-def test_strict_export_rejects_unknown_provider_native_termination(
-    dialect: str,
-    response: dict[str, Any],
-    message: str,
-) -> None:
+def test_strict_export_rejects_unknown_typed_finish_reason_for_known_dialect(dialect: str) -> None:
     rollout = _canonical_rollout()
     model_call = rollout["ng_trajectory"]["model_calls"][1]
-    model_call["response"] = response
     metadata = model_call["response_metadata"]
     metadata["dialect"] = dialect
     metadata["response_status"] = None
     metadata["finish_reason"] = "vendor_truncated"
 
-    with pytest.raises(AtifExportError, match=message):
+    with pytest.raises(AtifExportError, match="does not prove a completed response"):
         gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
 
 
-@pytest.mark.parametrize("dialect", ("responses", "chat", "messages"))
-@pytest.mark.parametrize("tool_step", (False, True))
-def test_strict_export_accepts_provider_output_that_matches_canonical_atif(
-    dialect: str,
-    tool_step: bool,
-) -> None:
+def test_strict_export_preserves_explicit_empty_canonical_text() -> None:
     rollout = _canonical_rollout()
-    response = _install_matching_provider_response(rollout, dialect, tool_step=tool_step)
+    final_message = rollout["ng_trajectory"]["invocations"][0]["conversation"][-1]
+    final_message["content"][0]["text"] = ""
 
     trajectory = gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
 
-    step_index = 2 if tool_step else 3
-    assert trajectory.steps[step_index].extra["nemo_gym"]["model_call"]["response"] == response
+    assert [part.model_dump(exclude_none=True) for part in trajectory.steps[3].message] == [
+        {"type": "text", "text": ""}
+    ]
 
 
-@pytest.mark.parametrize("dialect", ("responses", "chat", "messages"))
-def test_strict_export_projects_raw_only_provider_model_and_usage(dialect: str) -> None:
+def test_strict_export_does_not_use_a_request_alias_as_the_response_model() -> None:
     rollout = _canonical_rollout()
-    response = _install_matching_provider_response(rollout, dialect, tool_step=False)
-    model_call = rollout["ng_trajectory"]["model_calls"][1]
-    model_call["response_metadata"]["model"] = None
-    model_call["token_stats"] = {}
-
-    trajectory = gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
-
-    step = trajectory.steps[3]
-    assert step.model_name == "model-a"
-    assert step.metrics is not None
-    assert step.metrics.prompt_tokens == 131
-    assert step.metrics.completion_tokens == 13
-    assert step.metrics.cached_tokens == 8
-    assert step.metrics.extra == {
-        "nemo_gym": {
-            **({"reasoning_tokens": 3} if dialect != "messages" else {}),
-            "total_tokens": 144,
-        }
-    }
-    assert step.extra["nemo_gym"]["model_call"]["response"] == response
-
-
-@pytest.mark.parametrize("dialect", ("responses", "chat", "messages"))
-def test_strict_export_does_not_compare_the_response_model_to_a_request_alias(dialect: str) -> None:
-    rollout = _canonical_rollout()
-    _install_matching_provider_response(rollout, dialect, tool_step=False)
     rollout["ng_trajectory"]["model_calls"][1]["request"] = {"model": "routing-alias"}
 
     trajectory = gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
 
     assert trajectory.steps[3].model_name == "model-a"
-
-
-@pytest.mark.parametrize("dialect", ("responses", "chat", "messages"))
-def test_strict_export_preserves_unmodeled_provider_metadata_in_provenance(dialect: str) -> None:
-    rollout = _canonical_rollout()
-    response = _install_matching_provider_response(rollout, dialect, tool_step=False)
-    response.update(
-        {
-            "service_tier": "default",
-            "system_fingerprint": "fp_123",
-            "created_at": 1_700_000_003,
-        }
-    )
-    response["usage"]["provider_extension"] = {"billable_units": 17}
-    if dialect == "responses":
-        response["output"][1]["content"][0]["annotations"] = [{"type": "url_citation", "url": "https://example.com"}]
-    elif dialect == "chat":
-        response["choices"][0]["message"]["annotations"] = [{"type": "url_citation", "url": "https://example.com"}]
-    else:
-        response["content"][0]["signature"] = "opaque"
-
-    trajectory = gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
-
-    assert trajectory.steps[3].extra["nemo_gym"]["model_call"]["response"] == response
-
-
-def test_strict_export_folds_anthropic_cache_read_and_creation_into_prompt_usage() -> None:
-    rollout = _canonical_rollout()
-    response = _install_matching_provider_response(rollout, "messages", tool_step=False)
-    model_call = rollout["ng_trajectory"]["model_calls"][1]
-    model_call["token_stats"] = {}
-    response["usage"] = {
-        "input_tokens": 100,
-        "output_tokens": 13,
-        "cache_read_input_tokens": 23,
-        "cache_creation_input_tokens": 8,
-    }
-
-    trajectory = gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
-
-    assert trajectory.steps[3].metrics == AtifStepMetrics(
-        prompt_tokens=131,
-        completion_tokens=13,
-        cached_tokens=23,
-        extra={"nemo_gym": {"total_tokens": 144}},
-    )
-
-
-@pytest.mark.parametrize(
-    ("usage", "expected_metrics"),
-    (
-        (
-            {
-                "output_tokens": 13,
-                "cache_read_input_tokens": 131,
-                "cache_creation_input_tokens": 0,
-            },
-            AtifStepMetrics(
-                prompt_tokens=131,
-                completion_tokens=13,
-                cached_tokens=131,
-                extra={"nemo_gym": {"total_tokens": 144}},
-            ),
-        ),
-        (
-            {
-                "output_tokens": 13,
-                "cache_read_input_tokens": 0,
-                "cache_creation_input_tokens": 0,
-            },
-            AtifStepMetrics(completion_tokens=13, cached_tokens=0),
-        ),
-    ),
-)
-def test_strict_export_handles_anthropic_usage_without_an_input_token_field(
-    usage: dict[str, int],
-    expected_metrics: AtifStepMetrics,
-) -> None:
-    rollout = _canonical_rollout()
-    response = _install_matching_provider_response(rollout, "messages", tool_step=False)
-    rollout["ng_trajectory"]["model_calls"][1]["token_stats"] = {}
-    response["usage"] = usage
-
-    trajectory = gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
-
-    assert trajectory.steps[3].metrics == expected_metrics
-
-
-def test_strict_export_translates_provider_reconciliation_failures() -> None:
-    rollout = _canonical_rollout()
-    response = _install_matching_provider_response(rollout, "responses", tool_step=False)
-    response["output"][1]["content"][0]["text"] = "different"
-
-    with pytest.raises(AtifExportError, match="raw provider message does not match"):
-        gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
-
-
-def test_strict_export_preserves_supported_chat_output_metadata_in_provenance() -> None:
-    rollout = _canonical_rollout()
-    response = _install_matching_provider_response(rollout, "chat", tool_step=False)
-    response["choices"][0]["message"].update(
-        {"refusal": "", "audio": None, "annotations": [{"type": "url_citation", "url": "https://example.com"}]}
-    )
-    response["choices"][0]["logprobs"] = {"content": [{"token": "Both", "logprob": -0.1}], "refusal": []}
-
-    trajectory = gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
-
-    assert trajectory.steps[3].extra["nemo_gym"]["model_call"]["response"] == response
-
-
-def test_strict_export_preserves_anthropic_thinking_signatures_in_provider_provenance() -> None:
-    rollout = _canonical_rollout()
-    response = _install_matching_provider_response(rollout, "messages", tool_step=False)
-    response["content"][0]["signature"] = "opaque"
-
-    trajectory = gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
-
-    assert trajectory.steps[3].extra["nemo_gym"]["model_call"]["response"] == response
 
 
 @pytest.mark.parametrize(

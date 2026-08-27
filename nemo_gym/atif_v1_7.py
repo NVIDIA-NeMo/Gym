@@ -187,7 +187,7 @@ class AtifStep(_AtifModel):
 class AtifTrajectoryV1_7(_AtifModel):
     """The version-gated ATIF v1.7 subset supported by Gym's adapters."""
 
-    schema_version: str
+    schema_version: Literal["ATIF-v1.7"]
     session_id: str | None = None
     trajectory_id: str | None = None
     agent: AtifAgent

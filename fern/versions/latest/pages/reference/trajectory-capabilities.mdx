@@ -37,15 +37,14 @@ Provider-native hosted tools, shell and patch calls, tool search, compaction rec
 remain outside the initial generic function-call profile and are rejected rather than flattened.
 
 The semantic profile maps ordered messages, reasoning, function calls and results, turn identity and resolution, tool timing,
-model identity, token counts, and available training prompt/completion token IDs and generation log probabilities when the
-source attaches them to the final model-generated item for that turn. Gym's routed-expert training metadata is retained under
-the ATIF metric extension namespace. Decoded provider request and response objects are retained under step-level
-`extra.nemo_gym.model_call` metadata because ATIF's standard step fields do not carry those provider-specific payloads.
-For known provider dialects, provider-reported identity, usage, completion state, text, reasoning, and function calls must
-agree with Gym's normalized record; conflicting copies fail conversion instead of producing a `complete` result. Gym's
-normalized model identity prefers the model returned by the provider and otherwise uses the requested model when available.
-Each agent step retains that recorded model identity. The root agent model is populated only when every model-backed step uses
-the same known model; routed or fallback trajectories keep their model identities on the individual steps instead.
+normalized model identity, and normalized token counts. Training token IDs, log probabilities, and routed-expert metadata are
+outside the initial profile and fail conversion rather than being copied into an extension. Captured provider request and
+response values are retained opaquely under step-level `extra.nemo_gym.model_call` metadata because ATIF's standard step
+fields do not carry those provider-specific payloads. The converter does not parse those raw payloads or use them to
+reconstruct the canonical trajectory; the producer-owned `response_metadata` and `token_stats` fields supply completion,
+model, and usage evidence. Each agent step retains the normalized model identity. The root agent model is populated only when
+every model-backed step uses the same known model; routed or fallback trajectories keep their model identities on the
+individual steps instead.
 
 The ATIF `agent.name` comes from each rollout row's `agent_ref.name`. The initial batch exporter accepts one agent identity
 per input file because the caller supplies one corresponding agent implementation version. Conversion provenance is kept under the ATIF root's
@@ -55,7 +54,7 @@ per input file because the caller supplies one corresponding agent implementatio
 | --- | --- | --- |
 | Exporter | NeMo Gym and its package version | Identifies the implementation that created the ATIF file. |
 | Source | Gym rollout and `ng_trajectory` schema version | Records the format that was converted. |
-| Conversion status | `complete` | Confirms that the supported semantic trajectory profile was mapped without omission. |
+| Conversion status | `complete` | Confirms that the supported normalized `ng_trajectory` profile was mapped without omission; it does not attest to the contents of opaque provider payloads. |
 | Conversion warnings | Not emitted by strict v1 | Reserved for a future best-effort mode that can describe information it could not represent. |
 
 The initial strict converter does not emit partial files or conversion warnings. Unsupported or lossy inputs fail validation.

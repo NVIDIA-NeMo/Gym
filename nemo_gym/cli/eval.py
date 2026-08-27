@@ -424,10 +424,10 @@ def aggregate_rollouts():  # pragma: no cover
 
 
 @exit_cleanly_on_config_error
-def export_rollouts_as_atif(cli_values: dict[str, Any] | None = None) -> None:  # pragma: no cover
+def export_rollouts_as_atif() -> None:  # pragma: no cover
     from nemo_gym.atif_export import ExportAtifConfig, export_rollouts_to_atif
 
-    config = ExportAtifConfig.model_validate(cli_values or {})
+    config = ExportAtifConfig.model_validate(get_global_config_dict())
     result = export_rollouts_to_atif(config)
     print(f"Exported {result.trajectory_count} ATIF trajectory file(s) to {result.output_dirpath}")
     print(f"Manifest: {result.manifest_fpath}")

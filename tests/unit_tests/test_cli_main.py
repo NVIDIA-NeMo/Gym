@@ -18,13 +18,11 @@ import os
 import sys
 import types
 from pathlib import Path
-from typing import Any
 
 import pytest
 from hydra.core.override_parser.overrides_parser import OverridesParser
 from pytest import MonkeyPatch
 
-import nemo_gym.cli.eval as cli_eval
 import nemo_gym.cli.main as cli_main
 import nemo_gym.global_config as gc
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, WORKING_DIR
@@ -261,20 +259,8 @@ class TestEvalRunFlags:
 
 
 class TestEvalExportFlags:
-    @staticmethod
-    def _run(monkeypatch: MonkeyPatch, argv: list[str]) -> dict[str, Any]:
-        captured: dict[str, Any] = {}
-
-        def fake_export(cli_values: dict[str, Any]) -> None:
-            captured.update(cli_values)
-
-        monkeypatch.setattr(cli_eval, "export_rollouts_as_atif", fake_export)
-        monkeypatch.setattr(sys, "argv", ["gym", *argv])
-        main()
-        return captured
-
-    def test_flags_map_to_atif_export_config(self, monkeypatch: MonkeyPatch) -> None:
-        cli_values = self._run(
+    def test_flags_dispatch_as_hydra_overrides(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
             monkeypatch,
             [
                 "eval",
@@ -292,76 +278,14 @@ class TestEvalExportFlags:
             ],
         )
 
-        assert cli_values == {
-            "format": "atif",
-            "rollouts_jsonl_fpath": "rollouts.jsonl",
-            "output_dirpath": "atif",
-            "session_id": "evaluation-42",
-            "agent_version": "2.3.1",
+        assert target == "nemo_gym.cli.eval:export_rollouts_as_atif"
+        assert set(overrides) == {
+            "+format=atif",
+            '+rollouts_jsonl_fpath="rollouts.jsonl"',
+            '+output_dirpath="atif"',
+            '+session_id="evaluation-42"',
+            '+agent_version="2.3.1"',
         }
-
-    def test_scalar_like_identity_values_remain_strings(self, monkeypatch: MonkeyPatch) -> None:
-        cli_values = self._run(
-            monkeypatch,
-            ["eval", "export", "--session-id", "123", "--agent-version", "1.0"],
-        )
-
-        assert cli_values["session_id"] == "123"
-        assert cli_values["agent_version"] == "1.0"
-
-    @pytest.mark.parametrize(
-        ("session_id", "agent_version"),
-        [
-            ("café 🧠", "版本-一"),
-            (r"C:\\runs\\relay", r"build\\candidate"),
-            ("line one\nline two", "version\nnext"),
-            ("${oc.env:HOME}", "${missing.value}"),
-        ],
-    )
-    def test_identity_values_remain_exact_without_hydra_interpolation(
-        self,
-        monkeypatch: MonkeyPatch,
-        session_id: str,
-        agent_version: str,
-    ) -> None:
-        cli_values = self._run(
-            monkeypatch,
-            ["eval", "export", "--session-id", session_id, "--agent-version", agent_version],
-        )
-
-        assert cli_values["session_id"] == session_id
-        assert cli_values["agent_version"] == agent_version
-
-    def test_hydra_overrides_are_rejected(self, monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-        monkeypatch.setattr(sys, "argv", ["gym", "eval", "export", "+session_id=from-override"])
-
-        with pytest.raises(SystemExit, match="2"):
-            main()
-
-        assert "export does not accept Hydra overrides" in capsys.readouterr().err
-
-    def test_verbose_flag_is_accepted(self, monkeypatch: MonkeyPatch) -> None:
-        cli_values = self._run(monkeypatch, ["eval", "export", "--verbose"])
-
-        assert cli_values == {}
-
-    @pytest.mark.parametrize(
-        ("flag_name", "field_name", "value"),
-        [
-            ("rollouts", "rollouts_jsonl_fpath", "123"),
-            ("output-dir", "output_dirpath", "${oc.env:HOME}/ATIF 🧠\\run"),
-        ],
-    )
-    def test_export_paths_remain_literal_strings(
-        self,
-        monkeypatch: MonkeyPatch,
-        flag_name: str,
-        field_name: str,
-        value: str,
-    ) -> None:
-        cli_values = self._run(monkeypatch, ["eval", "export", f"--{flag_name}", value])
-
-        assert cli_values[field_name] == value
 
 
 class TestEnvTestResourceServerFlag:
