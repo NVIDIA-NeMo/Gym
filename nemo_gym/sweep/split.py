@@ -20,8 +20,11 @@ individually.
 
 ``agent_ref`` cannot do this. Entries routinely share an agent -- the three ``ns_tools`` entries in
 the reward-profiling manifest all dispatch to ``ns_tools_simple_agent`` -- so splitting on it would
-merge them. ``_ng_task_index`` is exact: ``materialize`` records a ``task_index_range`` per entry
-and every row and rollout carries the index it came from.
+merge them.
+
+Rows carry ``_ng_sweep_label`` and that is used when present. Sweeps materialized before that key
+existed fall back to ``_ng_task_index`` against the ``task_index_range`` recorded per entry, which
+is equally exact; the label just makes a rollouts file self-describing on its own.
 """
 
 import json
@@ -35,6 +38,7 @@ ROLLOUTS_NAME = "rollouts.jsonl"
 REPORT_NAME = "sweep_report.json"
 SPLIT_REPORT_NAME = "split_report.json"
 TASK_INDEX_KEY = "_ng_task_index"
+SWEEP_LABEL_KEY = "_ng_sweep_label"
 
 
 class SweepSplitError(RuntimeError):
@@ -123,11 +127,16 @@ def _split_file(
                 if not line:
                     continue
                 try:
-                    task_index = json.loads(line).get(TASK_INDEX_KEY)
+                    row = json.loads(line)
                 except ValueError:
                     unmapped += 1
                     continue
-                label = _lookup(ranges, lows, task_index) if isinstance(task_index, int) else None
+                # Prefer the stamped label; fall back to the index ranges so sweeps materialized
+                # before the label existed still split.
+                label = row.get(SWEEP_LABEL_KEY)
+                if label not in counts:
+                    task_index = row.get(TASK_INDEX_KEY)
+                    label = _lookup(ranges, lows, task_index) if isinstance(task_index, int) else None
                 if label is None:
                     unmapped += 1
                     continue

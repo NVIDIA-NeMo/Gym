@@ -621,3 +621,31 @@ def test_split_rejects_overlapping_ranges(tmp_path):
     d = _sweep_dir_with_ranges(tmp_path, [("a", 0, 3), ("b", 2, 5)], inputs=[0], rollouts=[0])
     with pytest.raises(SweepSplitError, match="overlap"):
         split_sweep(d)
+
+
+def test_split_prefers_the_stamped_label_over_ranges(tmp_path):
+    """The stamped label wins, so a rollouts file is self-describing without its report."""
+    d = tmp_path / "sweep"
+    d.mkdir()
+    (d / "sweep_report.json").write_text(json.dumps(
+        {"entries": {"alpha": {"task_index_range": [0, 0]}, "beta": {"task_index_range": [1, 1]}}}))
+    (d / "rollouts_materialized_inputs.jsonl").write_text("")
+    # index says alpha, stamped label says beta -- the label must win
+    (d / "rollouts.jsonl").write_text(
+        json.dumps({"_ng_task_index": 0, "_ng_sweep_label": "beta", "reward": 1.0}) + "\n")
+    result = split_sweep(d)
+    assert result.counts["beta"].rollouts == 1
+    assert result.counts["alpha"].rollouts == 0
+
+
+def test_split_ignores_an_unknown_stamped_label(tmp_path):
+    """A label not in the report falls back to the range rather than creating a stray directory."""
+    d = tmp_path / "sweep"
+    d.mkdir()
+    (d / "sweep_report.json").write_text(json.dumps({"entries": {"alpha": {"task_index_range": [0, 0]}}}))
+    (d / "rollouts_materialized_inputs.jsonl").write_text("")
+    (d / "rollouts.jsonl").write_text(
+        json.dumps({"_ng_task_index": 0, "_ng_sweep_label": "renamed_since", "reward": 1.0}) + "\n")
+    result = split_sweep(d)
+    assert result.counts["alpha"].rollouts == 1
+    assert not (result.out_dir / "renamed_since").exists()
