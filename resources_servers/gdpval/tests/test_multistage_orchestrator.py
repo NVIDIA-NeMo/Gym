@@ -3197,3 +3197,46 @@ class TestReferenceMissingCoverage:
             _partial_stage_outcome(policy, stage_rows, successful, [], set(), [ref], 1200.0, 1)
             is None
         )
+
+
+class TestReferenceMissingIsTerminal:
+    """A missing reference deliverable can never be fixed by retrying.
+
+    The verify response stamps the generic ``_ng_failure_terminal`` flag rather
+    than teaching ``_is_terminal_failure`` a GDPVal-specific class name -- the
+    harness already honours that flag, so no change to nemo_gym is needed.
+    """
+
+    def test_generic_terminal_flag_is_honoured(self) -> None:
+        from nemo_gym.rollout_collection import (
+            NG_FAILURE_CLASS_KEY,
+            NG_TERMINAL_KEY,
+            _is_terminal_failure,
+        )
+        from resources_servers.gdpval.app import REFERENCE_MISSING_FAILURE_CLASS
+
+        row = {
+            NG_FAILURE_CLASS_KEY: REFERENCE_MISSING_FAILURE_CLASS,
+            NG_TERMINAL_KEY: True,
+        }
+        assert _is_terminal_failure(row) is True
+
+    def test_timeout_stays_retryable(self) -> None:
+        from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, _is_terminal_failure
+
+        assert _is_terminal_failure({NG_FAILURE_CLASS_KEY: "timeout_exceeded"}) is False
+
+    def test_reference_missing_row_is_not_a_success(self) -> None:
+        """The point of the change: it must not reach the success set, where the
+        non-final-stage coverage gate would reject it before any threshold."""
+        from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY
+        from resources_servers.gdpval.app import REFERENCE_MISSING_FAILURE_CLASS
+        from resources_servers.gdpval.multistage_orchestrator import _is_success_row
+
+        row = {
+            "task_id": "t1",
+            "reward": 0.0,
+            "judge_response": {"error": "reference_missing"},
+            NG_FAILURE_CLASS_KEY: REFERENCE_MISSING_FAILURE_CLASS,
+        }
+        assert _is_success_row(row) is False

@@ -50,11 +50,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
-from nemo_gym.rollout_collection import (
-    NG_FAILURE_CLASS_KEY,
-    NG_TERMINAL_KEY,
-    REFERENCE_MISSING_FAILURE_CLASS,
-)
+from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
 from nemo_gym.server_utils import get_server_url
 from resources_servers.gdpval.judge_panel import (
     ResolvedJudge,
@@ -313,6 +309,13 @@ class GDPValVerifyRequest(BaseVerifyRequest):
     # reference. Used by the multi-stage ELO driver to select a different set of
     # reference models per judgementstage without reconfiguring the server.
     reference_ids: Optional[List[str]] = None
+
+
+# The reference model has no deliverable for this task, so no battle can be
+# scored. An infrastructure gap, not a model outcome. Kept here rather than in
+# nemo_gym: the harness only needs the generic terminal flag, and the class name
+# is GDPVal vocabulary.
+REFERENCE_MISSING_FAILURE_CLASS = "reference_missing"
 
 
 class GDPValVerifyResponse(GDPValVerifyRequest, BaseVerifyResponse):
