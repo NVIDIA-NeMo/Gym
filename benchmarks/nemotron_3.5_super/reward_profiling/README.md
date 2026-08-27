@@ -19,8 +19,24 @@ Nemotron-specific.
 RATES.md         measured throughput and GPU-hour sizing. Read before allocating.
 manifests/       input: what to profile. Hand-edited.
 outputs/         everything a run produces: sweeps/<nickname>/ and slurm-logs/. Gitignored.
-scripts/         launchers. run_sharded.sh spreads one sweep over N jobs.
+scripts/         numbered by run order; see below.
 ```
+
+## Scripts, in order
+
+| | | |
+|---|---|---|
+| `01_prepare_sweep.sh` | manifest -> one materialized input | always |
+| `02_shard.sh` | deal into N sweep dirs, one per job | only to exceed one job's node count |
+| `03_run.sh` | one job: vLLM + Gym + collect + profile | single-job runs, and what the sharded runner submits |
+| `03_run_sharded.sh` | submit + watch + resubmit N shards, then merge and profile | sharded runs |
+| `03_run_attached.sh` | collect against an already-running vLLM job | debugging against a warm endpoint |
+| `04_merge_shards.sh` | unshard: merge rollouts back into the parent | after individually-launched shards, or before resharding |
+| `05_profile.sh` | split by entry, profile each and the whole sweep | mid-run, or after a merge |
+
+Single job: `01` then `03`. Sharded: `01`, `02`, `03_run_sharded` (which does `04` and `05` itself).
+`04` and `05` are separate because both are useful mid-run -- the profiler handles partial
+sweeps, so you can see per-entry rewards before a run finishes.
 
 ## Why one job instead of one job per environment
 
@@ -36,7 +52,7 @@ R=benchmarks/nemotron_3.5_super/reward_profiling
 
 # 1. validate + expand repeats in parallel. Once per (manifest, checkpoint).
 MANIFEST=$R/manifests/nemotron_3_ultra.yaml \
-bash $R/scripts/prepare_sweep.sh
+bash $R/scripts/01_prepare_sweep.sh
 
 # 2. one job: vLLM endpoint + Gym sweep driver + reward profile
 MODEL=<checkpoint-path> \
@@ -45,7 +61,7 @@ SWEEP_DIR=$R/outputs/sweeps/nemotron_3_ultra \
 NUM_PREFILL_NODES=1 NUM_DECODE_NODES=2 \
 CONTAINER=<reward-profiling sqsh> \
 SANDBOX_CONTAINER=<nemo-skills sandbox sqsh> \
-bash $R/scripts/sbatch_reward_profiling.sh
+bash $R/scripts/03_run.sh
 ```
 
 `SBATCH_ACCOUNT` defaults to `nemotron_n4_post` and `SBATCH_GRES` to `gpu:4`; both override.
@@ -53,14 +69,14 @@ bash $R/scripts/sbatch_reward_profiling.sh
 build works on NVL72, and there is one:
 `/lustre/fsw/portfolios/llmservice/users/igitman/images/nemo-skills-sandbox-0.7.1-arm64.sqsh`.
 
-`run_rollouts.sh` does the same collection against an **already-running** vLLM job
+`03_run_attached.sh` does the same collection against an **already-running** vLLM job
 (`VLLM_JOBID=<jobid>`), which is the faster loop when iterating against a warm endpoint.
 
-`prepare_sweep.sh` validates the manifest, then materializes it. Validation fails loudly if a
+`01_prepare_sweep.sh` validates the manifest, then materializes it. Validation fails loudly if a
 dataset's `agent_ref` disagrees with the agent its paired config declares, which is what stops a
 mispairing from silently scoring rollouts with the wrong verifier.
 
-`run_rollouts.sh` starts every Gym server for the sweep, collects rollouts resuming from the
+`03_run_attached.sh` starts every Gym server for the sweep, collects rollouts resuming from the
 materialized inputs, and runs `gym eval profile` at the end. It runs the driver on `nodes[1]` of
 the vLLM allocation, off the node serving prefill and the router.
 

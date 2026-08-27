@@ -4,7 +4,7 @@ Rates for sizing a run of `manifests/nemotron_3_ultra.yaml`. Measured on the P/D
 under Conditions.
 
 **Every number below was measured lane-by-lane through a bench harness, not through
-`scripts/sbatch_reward_profiling.sh`.** The launcher's first successful end-to-end run (job
+`scripts/03_run.sh`.** The launcher's first successful end-to-end run (job
 6563900, 2026-08-27) collected 259/288 rollouts across all 36 environments with zero failures, but
 at `num_samples_in_parallel=1024` against a 288-row input -- every row in flight at once, so it
 produced a burst rather than a rate and is not comparable. Its shape is still informative and is

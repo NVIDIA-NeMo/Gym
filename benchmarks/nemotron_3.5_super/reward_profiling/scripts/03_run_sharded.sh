@@ -8,7 +8,7 @@
 #
 #   MODEL=<checkpoint> CONTAINER=<sqsh> SWEEP_DIR=<out>/<nickname> NUM_SHARDS=16 \
 #   SANDBOX_CONTAINER=<sandbox sqsh> \
-#   bash benchmarks/nemotron_3.5_super/reward_profiling/scripts/run_sharded.sh
+#   bash benchmarks/nemotron_3.5_super/reward_profiling/scripts/03_run_sharded.sh
 #
 # Safe to re-run. Shards carry whatever the parent sweep has already collected, and merge
 # deduplicates on the same (task, rollout) key Gym resumes on, so a rerun resumes rather than
@@ -93,7 +93,7 @@ while :; do
         submit_output=$(
             EXPERIMENT_NAME="${EXPERIMENT_NAME:-rp}-$shard_name" \
             SWEEP_DIR="$shard_dir" \
-            bash "$RP_DIR/scripts/sbatch_reward_profiling.sh"
+            bash "$RP_DIR/scripts/03_run.sh"
         )
         job_id=$(grep -oE '[0-9]+$' <<<"$submit_output" | tail -1)
         live_jobs[$job_id]=$shard_name

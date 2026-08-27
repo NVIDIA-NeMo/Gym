@@ -26,7 +26,7 @@ once sharded.)
 
 ## Failure behaviour, measured against 16 shards
 
-Shards resume, so a dead shard is a delay rather than a loss, and `run_sharded.sh` resubmits it
+Shards resume, so a dead shard is a delay rather than a loss, and `03_run_sharded.sh` resubmits it
 automatically up to `MAX_ROUNDS`. What differs is what a *partial* profile looks like if you stop
 early:
 

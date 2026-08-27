@@ -2,7 +2,7 @@
 # Collect reward-profiling rollouts against an already-running vLLM endpoint.
 #
 # Starts every Gym server for the sweep, then resumes from the materialized inputs written by
-# prepare_sweep.sh. `--resume` is not optional: without it rollout collection clears the output
+# 01_prepare_sweep.sh. `--resume` is not optional: without it rollout collection clears the output
 # and re-expands from scratch, and a sweep this size will not finish inside one allocation.
 #
 #   VLLM_JOBID=<jobid> \
@@ -12,7 +12,7 @@
 set -euo pipefail
 
 VLLM_JOBID=${VLLM_JOBID:?set VLLM_JOBID to the running vLLM job}
-SWEEP_DIR=${SWEEP_DIR:?set SWEEP_DIR to <out-dir>/<nickname> from prepare_sweep.sh}
+SWEEP_DIR=${SWEEP_DIR:?set SWEEP_DIR to <out-dir>/<nickname> from 01_prepare_sweep.sh}
 POLICY_MODEL_NAME=${POLICY_MODEL_NAME:?set POLICY_MODEL_NAME to the served checkpoint path}
 CONTAINER=${CONTAINER:?set CONTAINER to the reward-profiling sqsh}
 GYM_CONFIG=${GYM_CONFIG:-sweep_config.yaml}

@@ -2,7 +2,7 @@
 # Reward profiling in one job: a vLLM prefill/decode endpoint plus the Gym sweep driver.
 #
 # Forked from ../sbatch_external_vllm.sh. The vLLM half is unchanged; the eval half runs the
-# sweep instead of a benchmark split. Run prepare_sweep.sh first to produce SWEEP_DIR.
+# sweep instead of a benchmark split. Run 01_prepare_sweep.sh first to produce SWEEP_DIR.
 
 set -euo pipefail
 
@@ -10,7 +10,7 @@ set -euo pipefail
 # Required:
 #   MODEL        served checkpoint path (also used as policy_model_name)
 #   CONTAINER    reward-profiling sqsh (built by ../../build_eval_container.sh with SKIP_PREPARE=1)
-#   SWEEP_DIR    <out-dir>/<nickname> written by prepare_sweep.sh
+#   SWEEP_DIR    <out-dir>/<nickname> written by 01_prepare_sweep.sh
 #
 # Optional, with defaults below. SBATCH_ACCOUNT / SBATCH_PARTITION / SBATCH_QOS / SBATCH_GRES are
 # read by sbatch itself from the environment, so they are exported rather than passed as flags.
@@ -114,7 +114,7 @@ SERVERS_READY_TIMEOUT_S=${SERVERS_READY_TIMEOUT_S:-1200}
 ENV_PORT_RANGE_LOW=${ENV_PORT_RANGE_LOW:-20000}
 ENV_PORT_RANGE_HIGH=${ENV_PORT_RANGE_HIGH:-30000}
 
-# prepare_sweep.sh defaults to --no-expand, which writes one row per task and leaves the repeats
+# 01_prepare_sweep.sh defaults to --no-expand, which writes one row per task and leaves the repeats
 # to Gym. Pre-expanded inputs need ++num_repeats=1 or every rollout would be duplicated; unexpanded
 # inputs need the manifest's value or only one rollout per task is collected. The report records
 # which, so neither is guessed.
@@ -143,7 +143,7 @@ ROUTER_SERVER_PORT=8000
 WORKER_SERVER_PORT=8001
 
 eval_command=$(cat <<EOF
-# Activate the container's Gym venv. SWEEP_DIR holds the artifacts prepare_sweep.sh wrote.
+# Activate the container's Gym venv. SWEEP_DIR holds the artifacts 01_prepare_sweep.sh wrote.
 source /opt/Gym_venv/bin/activate
 cd /opt/Gym
 
