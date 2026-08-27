@@ -685,6 +685,7 @@ How it works:
 
 - **Materialized inputs.** On the first run, the fully expanded input rows (after `--num-repeats`, `--limit`, `--prompt-config`, and any overrides) are written to a sidecar file next to your output. The path is derived from `--output` by appending `_materialized_inputs` to the stem — so `rollouts.jsonl` produces `rollouts_materialized_inputs.jsonl`.
 - **Incremental output.** Successful rollouts are flushed to the main output JSONL after each completion; retriable failures go to a `<stem>_failures.jsonl` sidecar, so partial progress survives a crash.
+- **Failed agent calls.** An agent `/run` call that returns an error, or never returns a readable result, is recorded in the same sidecar as one attempt with `_ng_failure_class: agent_request_failed` and no reward. Other rollouts keep running, the score is computed over completed rollouts only, and resume re-dispatches the row up to `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`.
 - **Matching.** On resume, completed work is matched by `(task_index, rollout_index)` against the materialized inputs, and already-completed rows are skipped. The run prints a summary such as the number of original input rows, rows already done, and rows that still need to be run.
 - **Fallback.** If either the materialized inputs or the output file is missing, resume is skipped and the run starts fresh. Without `--resume`, existing output is cleared before the run.
 

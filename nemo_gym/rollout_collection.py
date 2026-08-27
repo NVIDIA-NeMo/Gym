@@ -25,10 +25,11 @@ from datetime import timedelta
 from difflib import get_close_matches
 from itertools import repeat
 from pathlib import Path
-from time import time
+from time import monotonic, time
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
+from aiohttp import ClientConnectorError, ClientError, ClientResponseError
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, Field, field_validator, model_validator
 from tqdm.asyncio import tqdm
@@ -119,7 +120,9 @@ logger = logging.getLogger(__name__)
 # New contract:
 #   - Successes go to the main jsonl (``output_jsonl_fpath``).
 #   - Failures go to a sidecar (``<output_stem>_failures.jsonl``), one row
-#     per attempt, with ``_ng_failure_class`` set.
+#     per attempt, with ``_ng_failure_class`` set. Rows that carry no result
+#     at all (a `/run` call that never returned one) also set
+#     ``_ng_failure_no_result`` and hold no reward or response.
 #   - ``kill_shaped`` failures (Slurm SIGTERM, Ray actor died, OOM, ...) go
 #     NOWHERE: the absence of a row is the canonical signal. Resume's
 #     set-difference re-dispatches them naturally; per-task timeout bounds
@@ -134,6 +137,8 @@ logger = logging.getLogger(__name__)
 NG_FAILURE_CLASS_KEY = "_ng_failure_class"
 NG_NO_PERSIST_KEY = "_ng_no_persist"
 NG_TERMINAL_KEY = "_ng_failure_terminal"
+NG_NO_RESULT_KEY = "_ng_failure_no_result"
+AGENT_REQUEST_FAILED_FAILURE_CLASS = "agent_request_failed"
 NG_TRAJECTORY_KEY = "ng_trajectory"
 _MODEL_CALL_PAYLOAD_KEYS = ("request", "response", "request_raw", "response_raw")
 
@@ -630,6 +635,69 @@ def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in summary.items() if v is not None}
 
 
+# Request failures that are data, not bugs. Anything else still propagates.
+_RUN_FAILURE_ERRORS = (ClientResponseError, ClientError, orjson.JSONDecodeError, TimeoutError)
+_MAX_FAILURE_DETAIL_CHARS = 2000
+
+
+def _classify_run_failure(exc: BaseException) -> Tuple[str, Optional[int], str, bool]:
+    """Describe a failed agent `/run` call as (kind, http_status, delivery, retryable).
+
+    ``delivery`` is what we know about the server having received the request: ``received``
+    (it answered), ``not_delivered`` (the connection never came up), or ``possible`` (an
+    established connection failed, so the agent may already have called models, tools or
+    sandboxes). ``retryable`` says whether another attempt has a plausible chance; it does
+    not say that a retransmission is safe.
+    """
+    if isinstance(exc, ClientResponseError):
+        status = exc.status
+        return "agent_http_error", status, "received", status >= 500 or status in (408, 429)
+    if isinstance(exc, orjson.JSONDecodeError):
+        return "agent_response_unreadable", None, "received", True
+    if isinstance(exc, ClientConnectorError):
+        return "agent_unreachable", None, "not_delivered", True
+    return "agent_transport_error", None, "possible", True
+
+
+def _truncated_detail(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value)
+    return text[:_MAX_FAILURE_DETAIL_CHARS]
+
+
+def _agent_request_failure_row(row: Dict[str, Any], exc: BaseException, elapsed_s: float) -> Dict[str, Any]:
+    """Build the failures-sidecar row for a `/run` call that produced no rollout result.
+
+    The row carries no reward and no synthetic response. An infrastructure failure is not a
+    verifier score of zero, and a placeholder response would read as real generation data to
+    token capture, aggregation and downstream trainers. The dispatcher writes this row to the
+    sidecar, where resume counts it as one attempt against NEMO_GYM_MAX_ROLLOUT_ATTEMPTS and
+    the aggregator never sees it.
+
+    ``_ng_failure_replay_safe`` describes retransmission by the transport layer alone. A
+    resume re-dispatch is a separate, bounded decision made by the caller with a fresh
+    attempt index, not an automatic replay of a possibly delivered POST.
+    """
+    failure_kind, status, delivery, retryable = _classify_run_failure(exc)
+    return {
+        NG_FAILURE_CLASS_KEY: AGENT_REQUEST_FAILED_FAILURE_CLASS,
+        NG_NO_RESULT_KEY: True,
+        "_ng_failure_stage": "agent_run",
+        "_ng_failure_kind": failure_kind,
+        "_ng_failure_type": type(exc).__name__,
+        "_ng_failure_message": _truncated_detail(str(exc) or repr(exc)),
+        "_ng_failure_http_status": status,
+        "_ng_failure_response_body": _truncated_detail(getattr(exc, "response_content", None)),
+        "_ng_failure_delivery": delivery,
+        "_ng_failure_retryable": retryable,
+        "_ng_failure_replay_safe": delivery == "not_delivered",
+        "_ng_failure_method": "POST",
+        "_ng_failure_endpoint": f"{(row.get(AGENT_REF_KEY_NAME) or {}).get('name')}/run",
+        "_ng_failure_elapsed_s": round(elapsed_s, 3),
+    }
+
+
 class RolloutCollectionHelper(BaseModel):
     def _preprocess_rows_from_config(self, config: RolloutCollectionConfig) -> List[Dict]:
         range_iterator = repeat(0)
@@ -1058,7 +1126,8 @@ class RolloutCollectionHelper(BaseModel):
 
         results_file = output_fpath.open("ab")
         failures_file = failures_fpath.open("ab")
-        for future in self.run_examples(input_rows, semaphore=semaphore):
+        failure_counts: Counter = Counter()
+        for future in self.run_examples(input_rows, semaphore=semaphore, route_failures_to_sidecar=True):
             row, result = await future
 
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
@@ -1075,16 +1144,23 @@ class RolloutCollectionHelper(BaseModel):
                 # Preserve an explicit id on the result just like the indices.
                 result[ROLLOUT_ID_KEY_NAME] = row[ROLLOUT_ID_KEY_NAME]
 
+            no_persist = bool(result.get(NG_NO_PERSIST_KEY))
+            failure_class = result.get(NG_FAILURE_CLASS_KEY)
+            # A row with no result has nothing to merge, project or tokenize.
+            no_result = bool(result.get(NG_NO_RESULT_KEY))
+
             # Fold this rollout's captured model calls into its record (uniform across agents; no-op
             # when capture is off). Never alters the harness output/reward already in `result`.
-            if capture_dirs:
+            if capture_dirs and not no_result:
                 merge_model_call_capture_into_record(
                     result,
                     capture_dirs,
                     include_payloads=not _has_observation_gap(result, "multimodal_history_redacted"),
                 )
 
-            if "ng_model_call_capture" in result or "ng_agent_observations" in result or NG_TRAJECTORY_KEY in result:
+            if not no_result and (
+                "ng_model_call_capture" in result or "ng_agent_observations" in result or NG_TRAJECTORY_KEY in result
+            ):
                 _attach_trajectory_record(row, result)
 
             # Freeze and rebuild tokens only for participating agents.
@@ -1092,7 +1168,7 @@ class RolloutCollectionHelper(BaseModel):
             # It leaves harness output and reward unchanged.
             # Direct callers of run_examples finalize each record themselves.
             token_capture_build = None
-            if token_id_capture_enabled_for_agent(
+            if not no_result and token_id_capture_enabled_for_agent(
                 global_config,
                 (row.get(AGENT_REF_KEY_NAME) or {}).get("name"),
             ):
@@ -1124,9 +1200,6 @@ class RolloutCollectionHelper(BaseModel):
                             "mostly token-less data."
                         )
 
-            no_persist = bool(result.get(NG_NO_PERSIST_KEY))
-            failure_class = result.get(NG_FAILURE_CLASS_KEY)
-
             rows.append(row)
             results.append(result)
             serialized = orjson.dumps(result)
@@ -1138,6 +1211,7 @@ class RolloutCollectionHelper(BaseModel):
             elif failure_class is not None:
                 # Non-kill_shaped failure → sidecar. The aggregator only reads
                 # the main jsonl, so this keeps win-rate uncontaminated.
+                failure_counts[failure_class] += 1
                 failures_file.write(serialized + b"\n")
                 failures_file.flush()
             else:
@@ -1167,9 +1241,13 @@ class RolloutCollectionHelper(BaseModel):
                 counts_left.pop(row[AGENT_REF_KEY_NAME]["name"])
 
             agent_name = result["agent_ref"]["name"]
-            metrics = agent_name_to_metrics[agent_name]
-            metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float)) and not k.startswith("_")})
-            agent_name_to_counts[agent_name] += 1
+            if not no_result:
+                # An infrastructure failure is not a score of zero, and not a sample either.
+                metrics = agent_name_to_metrics[agent_name]
+                metrics.update(
+                    {k: v for k, v in result.items() if isinstance(v, (int, float)) and not k.startswith("_")}
+                )
+                agent_name_to_counts[agent_name] += 1
 
             current_pct = 100 * len(results) / len(input_rows)
             if pcts_to_print and current_pct >= pcts_to_print[0]:
@@ -1209,6 +1287,14 @@ class RolloutCollectionHelper(BaseModel):
 
         results_file.close()
         failures_file.close()
+
+        if failure_counts:
+            by_class = ", ".join(f"{name}={count}" for name, count in sorted(failure_counts.items()))
+            print(
+                f"Coverage: {len(persisted_results)} completed, {sum(failure_counts.values())} failed "
+                f"({by_class}) out of {len(input_rows)} dispatched. Failure rows: {failures_fpath}",
+                flush=True,
+            )
         if owned_token_source is not None:
             await owned_token_source.close()
 
@@ -1472,6 +1558,7 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         examples: List[Dict],
         head_server_config: Optional[BaseServerConfig] = None,
         semaphore: Optional[Semaphore] = None,
+        route_failures_to_sidecar: bool = False,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
@@ -1479,6 +1566,12 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         Rows are dispatched as given: task_sources are resolved and agent names validated here,
         but run-level knobs (``agent_map``, ``fan_out``, ``num_repeats``) are NOT applied — call
         ``preprocess_examples`` first if you need them.
+
+        ``route_failures_to_sidecar`` selects the failure contract. Managed collection
+        (``run_from_config``) sets it so an agent `/run` failure becomes a row-associated
+        failure record instead of ending every rollout still in flight. Direct callers such as
+        NeMo-RL leave it off and keep receiving the exception, so no policy changes underneath
+        them.
         """
         server_client = self.setup_server_client(head_server_config)
         self.resolve_task_sources(examples, server_client.global_config_dict)
@@ -1487,10 +1580,13 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
 
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:
-                res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
+                started = monotonic()
+                res = None
                 try:
+                    res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
                     await raise_for_status(res)
-                except Exception:
+                    return row, await get_response_json(res)
+                except Exception as e:
                     if is_global_aiohttp_client_request_debug_enabled():
                         print(
                             "[rollout_collection] /run failed "
@@ -1498,8 +1594,17 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
                             f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
                             flush=True,
                         )
-                    raise
-                return row, await get_response_json(res)
+                    if not route_failures_to_sidecar or not isinstance(e, _RUN_FAILURE_ERRORS):
+                        raise
+                    failure = _agent_request_failure_row(row, e, monotonic() - started)
+                    print(
+                        "[rollout_collection] /run failed, recording a failure row: "
+                        f"kind={failure['_ng_failure_kind']} status={failure['_ng_failure_http_status']} "
+                        f"delivery={failure['_ng_failure_delivery']} "
+                        f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
+                        flush=True,
+                    )
+                    return row, failure
 
         return tqdm.as_completed(
             map(_post_subroutine, examples),
