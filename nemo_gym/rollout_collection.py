@@ -67,6 +67,7 @@ from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
     AgentInvocation,
     AgentObservationBundle,
+    ModelCallRef,
     ObservationGap,
     ToolCallObservation,
     TrajectoryModelCall,
@@ -413,20 +414,55 @@ def _build_ng_perf(result: dict[str, Any], *, rollout_latency_ms: Optional[float
     if not trajectory.invocations:
         return None
 
-    calls_by_id = {call.model_call_id: call for call in trajectory.model_calls if call.model_call_id}
-    # De-duplicate by model_call_id rather than trusting each invocation's claim in isolation:
-    # join_model_call_observations leaves a conflicted ref attached to its losing invocation
-    # (unremoved, just gap-flagged), so if a ref ever carries a real model_call_id pre-join, two
-    # invocations could otherwise claim -- and double-count -- the same physical call.
-    seen_call_ids: set[str] = set()
+    # Index captured calls by both identities ModelCallRef supports, mirroring
+    # join_model_call_observations: a ref may carry model_call_id, or the exact
+    # (model_ref, response_id) pair.
+    calls_by_id: dict[str, list[int]] = {}
+    calls_by_response: dict[tuple[str, str, str], list[int]] = {}
+    for index, call in enumerate(trajectory.model_calls):
+        if call.model_call_id:
+            calls_by_id.setdefault(call.model_call_id, []).append(index)
+        call_model_ref = call.response_metadata.model_ref
+        call_response_id = call.response_metadata.response_id
+        if call_model_ref is not None and call_response_id:
+            calls_by_response.setdefault((call_model_ref.type, call_model_ref.name, call_response_id), []).append(
+                index
+            )
+
+    def _match_call_index(ref: ModelCallRef) -> Optional[int]:
+        if ref.model_call_id:
+            candidates = [
+                index
+                for index in calls_by_id.get(ref.model_call_id, [])
+                if (
+                    ref.model_ref is None or ref.model_ref == trajectory.model_calls[index].response_metadata.model_ref
+                )
+                and (
+                    ref.response_id is None
+                    or ref.response_id == trajectory.model_calls[index].response_metadata.response_id
+                )
+            ]
+        elif ref.model_ref is not None and ref.response_id:
+            candidates = calls_by_response.get((ref.model_ref.type, ref.model_ref.name, ref.response_id), [])
+        else:
+            candidates = []
+        return candidates[0] if len(candidates) == 1 else None
+
+    # De-duplicate by matched call *position* rather than model_call_id; the id is
+    # optional because a (model_ref, response_id)-only match has none. One physical call
+    # can't be claimed twice even if two invocations' refs both resolve to it (e.g. a
+    # join_model_call_observations conflict that left a ref attached to its losing
+    # invocation, unremoved, just gap-flagged).
+    seen_positions: set[int] = set()
     owned_calls = []
     owned_calls_by_invocation: Counter = Counter()
     for invocation in trajectory.invocations:
         for ref in invocation.model_calls:
-            if ref.model_call_id not in calls_by_id or ref.model_call_id in seen_call_ids:
+            index = _match_call_index(ref)
+            if index is None or index in seen_positions:
                 continue
-            seen_call_ids.add(ref.model_call_id)
-            owned_calls.append(calls_by_id[ref.model_call_id])
+            seen_positions.add(index)
+            owned_calls.append(trajectory.model_calls[index])
             owned_calls_by_invocation[invocation.invocation_id] += 1
     tool_calls_by_invocation = Counter(tool.invocation_id for tool in trajectory.tool_calls)
     num_tool_calls = sum(

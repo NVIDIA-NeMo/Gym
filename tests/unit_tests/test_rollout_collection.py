@@ -467,6 +467,93 @@ class TestRolloutCollection:
         assert ng_perf["prompt_tokens"] == 100
         assert ng_perf["completion_tokens"] == 10
 
+    def test_ng_perf_matches_model_calls_by_response_id_pair_like_simple_agent(self) -> None:
+        # Integration test: simple_agent sets result["ng_trajectory"] directly (see
+        # responses_api_agents/simple_agent/app.py), bypassing join_model_call_observations
+        # entirely -- so its ModelCallRef is never canonicalized with a model_call_id and only
+        # ever carries (model_ref, response_id). Token fields must still populate.
+        row = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+        result = {
+            NG_TRAJECTORY_KEY: {
+                "task_id": "0",
+                "rollout_id": "0-0",
+                "invocations": [
+                    {
+                        "invocation_id": "root",
+                        "model_calls": [
+                            {
+                                "model_ref": {"type": "responses_api_models", "name": "policy_model"},
+                                "response_id": "resp_123",
+                            }
+                        ],
+                    }
+                ],
+            },
+            "ng_model_call_capture": {
+                "calls": [
+                    {
+                        "model_call_id": "captured-1",
+                        "response_id": "resp_123",
+                        "model_ref": {"type": "responses_api_models", "name": "policy_model"},
+                        "tokens_in": 100,
+                        "tokens_out": 20,
+                    }
+                ]
+            },
+        }
+
+        _attach_trajectory_record(row, result)
+        ng_perf = _build_ng_perf(result, rollout_latency_ms=None)
+
+        assert ng_perf["prompt_tokens"] == 100
+        assert ng_perf["completion_tokens"] == 20
+
+    def test_ng_perf_does_not_guess_an_ambiguous_response_id_match(self) -> None:
+        # Two captured calls share the same (model_ref, response_id) pair -- the ref must
+        # resolve to no match rather than guessing either one, so its tokens stay uncounted.
+        row = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+        result = {
+            NG_TRAJECTORY_KEY: {
+                "task_id": "0",
+                "rollout_id": "0-0",
+                "invocations": [
+                    {
+                        "invocation_id": "root",
+                        "model_calls": [
+                            {
+                                "model_ref": {"type": "responses_api_models", "name": "policy_model"},
+                                "response_id": "resp_dup",
+                            }
+                        ],
+                    }
+                ],
+            },
+            "ng_model_call_capture": {
+                "calls": [
+                    {
+                        "model_call_id": "captured-1",
+                        "response_id": "resp_dup",
+                        "model_ref": {"type": "responses_api_models", "name": "policy_model"},
+                        "tokens_in": 100,
+                        "tokens_out": 20,
+                    },
+                    {
+                        "model_call_id": "captured-2",
+                        "response_id": "resp_dup",
+                        "model_ref": {"type": "responses_api_models", "name": "policy_model"},
+                        "tokens_in": 999,
+                        "tokens_out": 999,
+                    },
+                ]
+            },
+        }
+
+        _attach_trajectory_record(row, result)
+        ng_perf = _build_ng_perf(result, rollout_latency_ms=None)
+
+        assert "prompt_tokens" not in ng_perf
+        assert "completion_tokens" not in ng_perf
+
     def test_build_ng_perf_counts_explicit_turns_over_invocations(self) -> None:
         # simple_agent-style trajectory: the whole multi-turn loop runs under a single "root"
         # invocation with one TrajectoryTurn per step. num_turns must count the turns (3), not
