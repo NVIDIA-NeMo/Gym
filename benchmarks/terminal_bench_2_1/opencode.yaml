@@ -1,0 +1,21 @@
+config_paths:
+- responses_api_agents/opencode_sandboxed_agent/configs/opencode_agent.yaml
+- resources_servers/terminal_bench_2_1/configs/terminal_bench_2_1.yaml
+
+
+opencode_terminal_bench_2_1_resources_server:
+  _inherit_from: terminal_bench_2_1_resources_server
+
+opencode_sandboxed_agent_terminal_bench_2_1:
+  _inherit_from: opencode_sandboxed_agent
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      resources_server:
+        type: resources_servers
+        name: opencode_terminal_bench_2_1_resources_server
+      datasets:
+        - name: terminal_bench_2_1
+          type: benchmark
+          jsonl_fpath: benchmarks/terminal_bench_2_1/data/benchmark.jsonl
+          prepare_script: benchmarks/terminal_bench_2_1/prepare.py
+          num_repeats: 8
