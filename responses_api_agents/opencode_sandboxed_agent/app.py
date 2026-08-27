@@ -893,6 +893,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             run_result = self._sandbox_id_to_run_result.get(session_key, {})
             observations = run_result.pop("_ng_agent_observations", None)
 
+        await pty_session.detach()
+
         verify_request = OpenCodeSandboxedAgentVerifyRequest.model_validate(body.model_dump() | {"response": response})
 
         verify_response = await self.server_client.post(
