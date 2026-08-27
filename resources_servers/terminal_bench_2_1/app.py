@@ -179,8 +179,6 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         eval_sandbox, pty_session = await self._create_sandbox(body)
         self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = eval_sandbox, pty_session
 
-        await pty_session.detach()
-
         return TerminalBench21SeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)
 
     @contextmanager
