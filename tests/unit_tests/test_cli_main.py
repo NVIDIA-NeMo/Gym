@@ -162,6 +162,12 @@ class TestEvalRunFlags:
             (["--top-p", "1.0"], "+responses_create_params.top_p=1.0"),
             (["--max-output-tokens", "4096"], "+responses_create_params.max_output_tokens=4096"),
             (["--resume"], "+resume_from_cache=true"),
+            (["--no-health-check"], "+disable_health_check=true"),
+            (["--health-check-workers", "4"], "+health_check_workers=4"),
+            (
+                ["--health-check-ignore", "model_call_missing_token_counts,model_call_zero_completion_tokens"],
+                '+health_check_ignored_checks=["model_call_missing_token_counts","model_call_zero_completion_tokens"]',
+            ),
         ],
     )
     def test_flag_maps_to_single_override(self, monkeypatch: MonkeyPatch, flag_argv, expected_override) -> None:
@@ -469,10 +475,29 @@ class TestDatasetFlags:
 class TestEvalAggregateFlags:
     def test_aggregate_flags(self, monkeypatch: MonkeyPatch) -> None:
         target, overrides = _dispatch_for(
-            monkeypatch, ["eval", "aggregate", "-i", "results/rollouts-*.jsonl", "-o", "out.jsonl"]
+            monkeypatch,
+            [
+                "eval",
+                "aggregate",
+                "-i",
+                "results/rollouts-*.jsonl",
+                "-o",
+                "out.jsonl",
+                "--no-health-check",
+                "--health-check-workers",
+                "3",
+                "--health-check-ignore",
+                "model_call_missing_token_counts,model_call_zero_completion_tokens",
+            ],
         )
         assert target == "nemo_gym.cli.eval:aggregate_rollouts"
-        assert set(overrides) == {"+input_glob=results/rollouts-*.jsonl", "+output_jsonl_fpath=out.jsonl"}
+        assert set(overrides) == {
+            "+input_glob=results/rollouts-*.jsonl",
+            "+output_jsonl_fpath=out.jsonl",
+            "+disable_health_check=true",
+            "+health_check_workers=3",
+            '+health_check_ignored_checks=["model_call_missing_token_counts","model_call_zero_completion_tokens"]',
+        }
 
 
 class TestFriendlyValidationError:

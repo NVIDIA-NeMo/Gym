@@ -17,12 +17,12 @@ import sys
 from glob import glob
 from pathlib import Path
 from shutil import rmtree
-from time import time
+from time import monotonic, time
 from traceback import format_exc
 from typing import Any, Dict, Optional, Tuple
 
 from fastapi import Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from swebench.harness.run_evaluation import make_test_spec
 from swebench.harness.test_spec.test_spec import LATEST, TestSpec
 
@@ -36,6 +36,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.global_config import get_global_config_dict
+from nemo_gym.rollout_observability import SandboxObservation
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import SESSION_ID_KEY
@@ -105,6 +106,10 @@ class SWEBenchVerifyResponse(BaseVerifyResponse):
 
     log_dir: str
 
+    verifier_sandbox_observation: Optional[SandboxObservation] = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
 
 # @bxyu-nvidia: This is a wrapper that can be passed directly to a very lightly modified version of `run_instance`
 # The method is almost identical to the original, just with async awaits rather than sync.
@@ -114,6 +119,8 @@ class DockerContainer(BaseModel):
     instance_id: str
 
     _inner_container: AsyncSandbox
+    _eval_return_code: Optional[int] = None
+    _sandbox_error_type: Optional[str] = None
 
     async def exec_run(
         self,
@@ -121,11 +128,17 @@ class DockerContainer(BaseModel):
         workdir: Optional[str] = None,
         user: Optional[str] = None,
     ) -> ExecResult:
-        res = await self._inner_container.exec(
-            command=command,
-            cwd=workdir,
-            user=user,
-        )
+        try:
+            res = await self._inner_container.exec(
+                command=command,
+                cwd=workdir,
+                user=user,
+            )
+        except Exception as exc:
+            self._sandbox_error_type = self._sandbox_error_type or type(exc).__name__
+            raise
+        if res.error_type is not None:
+            self._sandbox_error_type = self._sandbox_error_type or res.error_type
 
         return ExecResult(
             exit_code=res.return_code,
@@ -143,6 +156,9 @@ class DockerContainer(BaseModel):
                 # AsyncSandbox.exec takes timeout_s, not docker-py's timeout.
                 timeout_s=timeout,
             )
+            self._eval_return_code = res.return_code if res.error_type is None else None
+            if res.error_type is not None:
+                self._sandbox_error_type = res.error_type
             timed_out = False
 
             stdout = res.stdout or ""
@@ -153,7 +169,11 @@ class DockerContainer(BaseModel):
         except TimeoutError:
             # Gym Sandbox API will throw a timeout error on actual timeout.
             timed_out = True
+            self._sandbox_error_type = "TimeoutError"
             test_output = ""
+        except Exception as exc:
+            self._sandbox_error_type = type(exc).__name__
+            raise
 
         return (test_output, timed_out, time() - start_time)
 
@@ -162,13 +182,40 @@ class DockerContainer(BaseModel):
             data = src.read_text()
             src.write_text(patch_swebench_multilingual_golden_patch_pass(data, self.instance_id))
 
-        await self._inner_container.upload(local_path=src, remote_path=str(dest))
+        try:
+            await self._inner_container.upload(local_path=src, remote_path=str(dest))
+        except Exception as exc:
+            self._sandbox_error_type = self._sandbox_error_type or type(exc).__name__
+            raise
 
     async def cleanup(self) -> None:
         try:
             await self._inner_container.stop()
-        except:
+        except Exception as exc:
+            self._sandbox_error_type = self._sandbox_error_type or type(exc).__name__
             print("Failed to stop verification sandbox", format_exc(), file=sys.stderr)
+
+    def observation(self, *, wall_time_s: float, evaluation_completed: bool) -> SandboxObservation:
+        handle = self._inner_container._handle
+        normalized_error = self._sandbox_error_type.lower() if isinstance(self._sandbox_error_type, str) else ""
+        if "timeout" in normalized_error:
+            outcome = "timeout"
+        elif self._sandbox_error_type is not None:
+            outcome = "sandbox_error"
+        elif evaluation_completed:
+            outcome = "completed"
+        else:
+            outcome = "failed"
+
+        return SandboxObservation(
+            role="verifier",
+            provider=handle.provider_name if handle is not None else None,
+            sandbox_id=handle.sandbox_id if handle is not None else None,
+            outcome=outcome,
+            exit_code=self._eval_return_code,
+            wall_time_s=wall_time_s,
+            error_type=self._sandbox_error_type,
+        )
 
 
 # TODO @bxyu-nvidia: Eventually once the sandbox server infra is ready, these seed_session types need to upgrade to pass a sandbox spec.
@@ -283,9 +330,9 @@ Stderr:
 
         test_spec = self._make_test_spec(body)
 
-        start_time = time()
+        verifier_sandbox_lifecycle_started_at = monotonic()
         eval_sandbox = await self._create_sandbox(test_spec)
-        eval_sandbox_start_time_taken = time() - start_time
+        eval_sandbox_start_time_taken = monotonic() - verifier_sandbox_lifecycle_started_at
 
         model_patch = ""
         if self.config.is_verifying_golden_patch:
@@ -323,6 +370,16 @@ Stderr:
             rewrite_reports=False,
         )
         patch_verification_time_taken = time() - start_time
+        verifier_sandbox_wall_time_s = monotonic() - verifier_sandbox_lifecycle_started_at
+
+        try:
+            verifier_sandbox_observation = mock_container.observation(
+                wall_time_s=verifier_sandbox_wall_time_s,
+                evaluation_completed=res["completed"],
+            )
+        except Exception:
+            verifier_sandbox_observation = None
+            print("Failed to build verification sandbox observation", format_exc(), file=sys.stderr)
 
         log_dir = Path(__file__).parent / "logs/run_evaluation" / run_id
 
@@ -347,6 +404,7 @@ Stderr:
             model_patch=model_patch or None,
             test_output=test_output,
             log_dir=str(log_dir),
+            verifier_sandbox_observation=verifier_sandbox_observation,
         )
 
 

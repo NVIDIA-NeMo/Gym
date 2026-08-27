@@ -210,7 +210,12 @@ def test_cicd_main_wires_preflight_cpu_and_gpu_workflows() -> None:
     assert "base-ref: ${{ needs.pre-flight.outputs.base_ref }}" in workflow
     assert "needs: [pre-flight, classify_changes, unit_tests]" in workflow
     assert "needs: [pre-flight, classify_changes, unit_tests, container_build]" in workflow
-    assert workflow.count("if: needs.classify_changes.outputs.docs_only != 'true'") == 4
+    # container_build and gpu_e2e_tests are temporarily disabled (if: false) while the
+    # nemo-ci-aws-gpu-x2 runner pool backlog is resolved, so only unit_tests and
+    # provider_e2e_tests still carry the docs-only condition.
+    assert workflow.count("if: needs.classify_changes.outputs.docs_only != 'true'") == 2
+    assert workflow.count("if: false") == 2
+    assert workflow.count("Temporarily disabled") == 2
     assert "needs.pre-flight.outputs.docs_only" not in workflow
     assert "runs-on: ${{ needs.pre-flight.outputs.runner_prefix }}" in workflow
     assert "matrix:" in workflow
@@ -252,10 +257,14 @@ def test_cicd_summary_accepts_only_expected_docs_only_skips() -> None:
     assert '"$PREFLIGHT_RESULT" != "success"' in workflow
     assert '"$CLASSIFY_RESULT" != "success"' in workflow
     assert '"$DOCS_ONLY" == "true"' in workflow
-    assert '"$CONTAINER_BUILD_RESULT" == "skipped"' in workflow
-    assert '"$CONTAINER_BUILD_RESULT" == "success"' in workflow
+    # Container build and GPU e2e are echoed but not gating while temporarily disabled.
+    assert 'echo "Container build: $CONTAINER_BUILD_RESULT (not gating - temporarily disabled)"' in workflow
+    assert 'echo "GPU E2E tests: $GPU_E2E_TEST_RESULT (not gating - temporarily disabled)"' in workflow
+    assert '"$CONTAINER_BUILD_RESULT" == "skipped"' not in workflow
+    assert '"$CONTAINER_BUILD_RESULT" == "success"' not in workflow
+    assert '"$UNIT_TEST_RESULT" == "success"' in workflow
     assert "PROVIDER_E2E_TEST_RESULT: ${{ needs.provider_e2e_tests.result }}" in workflow
-    assert 'echo "Provider E2E tests: $PROVIDER_E2E_TEST_RESULT"' in workflow
+    assert 'echo "Provider E2E tests: $PROVIDER_E2E_TEST_RESULT (not gating)"' in workflow
     assert '"$PROVIDER_E2E_TEST_RESULT" == "skipped"' not in workflow
     assert '"$PROVIDER_E2E_TEST_RESULT" == "success"' not in workflow
 
@@ -419,7 +428,7 @@ def test_provider_e2e_matrix_selects_config_model_and_secret_by_name() -> None:
     assert "E2E_MODEL" in script
     assert "MODEL_API_KEY" in script
     assert "--model-api-key" not in script
-    assert "resources_servers/example_single_tool_call/data/example.jsonl" in script
+    assert "tests/e2e/inference_provider_smoke.jsonl" in script
     assert "--max-output-tokens 4096" in script
 
     env_config = (REPO_ROOT / "tests" / "e2e" / "inference_provider_env.yaml").read_text()

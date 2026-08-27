@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Exact provider rate-limit counting.
 
-True 429s must be counted exactly (bc_frankie parity: `status_code == 429`),
+True 429s must be counted exactly (reference-harness parity: `status_code == 429`),
 never conflated with the other retryable statuses (500/502/503/504/520) that
 share the retry loop's RATE_LIMIT/RETRY policy buckets. Counts propagate from
 the client retry loops (via a task-local ContextVar) into the per-call metrics

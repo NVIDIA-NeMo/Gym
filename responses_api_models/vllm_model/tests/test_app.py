@@ -129,6 +129,13 @@ COMMON_RESPONSE_PARAMS = dict(
     status="completed",
     tool_choice="auto",
 )
+OPENAI_2_44_OPTIONAL_CHAT_FIELDS = {
+    "moderation",
+    "prompt_cache_key",
+    "prompt_cache_retention",
+    "safety_identifier",
+    "verbosity",
+}
 
 PARAMETERIZE_DATA = [
     # ----- EasyInputMessageParam: content as a list, id: "ez_list" -----
@@ -942,6 +949,7 @@ class TestApp:
                     "required": ["order_id"],
                 },
                 "description": "Get the current status for a given order",
+                "strict": True,
             },
             {
                 "name": "get_delivery_date",
@@ -956,6 +964,7 @@ class TestApp:
                     "required": ["order_id"],
                 },
                 "description": "Get the estimated delivery date for a given order",
+                "strict": True,
             },
         ]
         assert expected_sent_tools == actual_sent_tools
@@ -1412,6 +1421,7 @@ class TestApp:
                     },
                     "required": ["order_id", "date"],
                 },
+                "strict": True,
             }
         ]
         assert expected_sent_tools == actual_sent_tools
@@ -2679,7 +2689,8 @@ class TestVLLMConverter:
         )
 
         expected_chat_completion_create_params = NeMoGymChatCompletionCreateParamsNonStreaming(
-            **COMMON_RESPONSE_PARAMS,
+            parallel_tool_calls=COMMON_RESPONSE_PARAMS["parallel_tool_calls"],
+            tool_choice=COMMON_RESPONSE_PARAMS["tool_choice"],
             messages=[
                 {
                     "role": "user",
@@ -2958,7 +2969,7 @@ class TestVLLMConverter:
         )
 
         expected_output = test_data["expected_output"]
-        assert expected_output == chat_completion_create_params.model_dump()
+        assert expected_output == chat_completion_create_params.model_dump(exclude=OPENAI_2_44_OPTIONAL_CHAT_FIELDS)
 
     def test_round_trip_chat_completions_return_token_id_information(self) -> None:
         converter = VLLMConverter(return_token_id_information=True)
@@ -3064,7 +3075,7 @@ class TestVLLMConverter:
         )
 
         expected_output = test_data["expected_output_return_token_id_information"]
-        assert expected_output == chat_completion_create_params.model_dump()
+        assert expected_output == chat_completion_create_params.model_dump(exclude=OPENAI_2_44_OPTIONAL_CHAT_FIELDS)
 
     def test_whitespace_round_trip_chat_completions(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
@@ -5104,3 +5115,78 @@ class TestSamplingOverrides:
         server = self._server({"temperature": 1.0}, is_responses_native=True)
         body = {"model": "dummy_model", "temperature": 0.2}
         assert server._apply_sampling_overrides(body)["temperature"] == 1.0
+
+
+class TestEndpointFile:
+    def _make_server(self, tmp_path, **overrides) -> VLLMModel:
+        params = dict(
+            host="0.0.0.0",
+            port=8081,
+            base_url="http://placeholder:8712/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            entrypoint="",
+            name="safety_judge_model",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            endpoint_file=str(tmp_path / "endpoint.txt"),
+        )
+        params.update(overrides)
+        return VLLMModel(config=VLLMModelConfig(**params), server_client=MagicMock(spec=ServerClient))
+
+    def test_publish_rebinds_clients_and_clears_sessions(self, tmp_path) -> None:
+        (tmp_path / "endpoint.txt").write_text("http://new-host:8712/v1\n")
+        server = self._make_server(tmp_path, endpoint_check_interval_s=3600.0)
+        server._session_id_to_client["session-on-old-host"] = server._clients[0]
+
+        server._maybe_rebind_endpoint()
+
+        assert server.config.base_url == ["http://new-host:8712/v1"]
+        assert [client.base_url for client in server._clients] == ["http://new-host:8712/v1"]
+        # endpoint_file-backed clients are retry-bounded so in-flight calls
+        # against a dead host fail fast and re-enter through the rebound
+        # client; sessions re-resolve onto the new host.
+        assert server._clients[0].max_connection_retries == 8
+        assert not server._session_id_to_client
+        # Within endpoint_check_interval_s the filesystem is left alone, so a
+        # fresh publish is only seen once the window is over.
+        (tmp_path / "endpoint.txt").write_text("http://newer-host:8712/v1\n")
+        server._maybe_rebind_endpoint()
+        assert server.config.base_url == ["http://new-host:8712/v1"]
+        server._endpoint_last_check_at = None  # window over: the next call re-checks
+        server._maybe_rebind_endpoint()
+        assert server.config.base_url == ["http://newer-host:8712/v1"]
+        # Static base_url clients keep today's retry-forever behavior.
+        assert self._make_server(tmp_path, endpoint_file=None)._clients[0].max_connection_retries is None
+
+    def test_unpublished_endpoint_grace_lifecycle(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+        endpoint_file = tmp_path / "endpoint.txt"
+        server = self._make_server(tmp_path)  # grace defaults to 300s
+        now = 1000.0
+        monkeypatch.setattr("responses_api_models.vllm_model.app.monotonic", lambda: now)
+
+        server._maybe_rebind_endpoint()  # absent: the clock starts, last known-good client kept
+        assert server.config.base_url == ["http://placeholder:8712/v1"]
+        now = 1100.0
+        endpoint_file.write_text("")  # empty is as unpublished as missing: no clock reset
+        server._maybe_rebind_endpoint()
+        now = 1301.0  # past the grace COUNTED FROM 1000, proving the empty write reset nothing
+        with raises(RuntimeError, match="no longer published"):
+            server._maybe_rebind_endpoint()
+
+        endpoint_file.write_text("http://placeholder:8712/v1\n")  # republish on the SAME host
+        now = 1301.5  # within the check window: the publish is not seen yet, the raise stays loud
+        with raises(RuntimeError, match="no longer published"):
+            server._maybe_rebind_endpoint()
+        now = 1311.5  # next window: heals with no rebind needed
+        server._maybe_rebind_endpoint()
+        assert server._endpoint_missing_since is None
+
+        now = 1400.0
+        endpoint_file.unlink()
+        server._maybe_rebind_endpoint()  # a fresh absence starts a fresh clock
+        now = 1650.0
+        server._maybe_rebind_endpoint()  # 250s in: within grace, so the republish reset the clock
+        now = 1701.0
+        with raises(RuntimeError, match="no longer published"):
+            server._maybe_rebind_endpoint()

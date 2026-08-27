@@ -108,6 +108,32 @@ def _bool_flag(name: str, hydra_key: str, flag_help: str) -> Flag:
     )
 
 
+def _split_comma_separated(value: str) -> list[str]:
+    values = [item.strip() for item in value.split(",")]
+    if not all(values):
+        raise argparse.ArgumentTypeError("check IDs must be a comma-separated list without empty entries")
+    return values
+
+
+def _csv_list_flag(name: str, hydra_key: str, flag_help: str) -> Flag:
+    """A comma-separated CLI value translated to a Hydra list override."""
+    dest = name.replace("-", "_")
+    return Flag(
+        register=lambda p: p.add_argument(
+            f"--{name}",
+            dest=dest,
+            type=_split_comma_separated,
+            metavar="CHECK[,CHECK...]",
+            help=flag_help,
+        ),
+        translate_to_hydra=lambda args: (
+            [f"+{hydra_key}={json.dumps(getattr(args, dest), separators=(',', ':'))}"]
+            if getattr(args, dest) is not None
+            else []
+        ),
+    )
+
+
 # Shared flag: load Gym config files. Reused by every command that reads server/benchmark configs.
 CONFIG = Flag(
     register=lambda p: p.add_argument(
@@ -452,6 +478,26 @@ def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
     dispatch(target, overrides)
 
 
+def _eval_health_check(args: argparse.Namespace, overrides: list[str]) -> None:
+    expected_overrides = ["+verbose=true"] if args.verbose else []
+    if args.json:
+        expected_overrides.append("+json=true")
+    if overrides != expected_overrides:
+        args._parser.error("health-check does not accept Hydra overrides")
+    from nemo_gym.cli.eval import health_check_rollouts
+
+    try:
+        health_check_rollouts(
+            args.run_dir,
+            rollout_file=args.rollout_file,
+            workers=args.workers,
+            ignored_checks=args.ignore_checks or (),
+            json_output=args.json,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        args._parser.error(str(exc))
+
+
 def _has_override(overrides: list[str], key: str) -> bool:
     return any(override.lstrip("+").split("=", 1)[0] == key for override in overrides)
 
@@ -792,6 +838,13 @@ COMMANDS = {
                 "disable_aggregation",
                 "Skip post-run aggregate-metrics computation. Use with gym eval aggregate for sharded jobs.",
             ),
+            _bool_flag("no-health-check", "disable_health_check", "Skip post-run rollout health checks."),
+            _value_flag("health-check-workers", "health_check_workers", "Number of rollout-health worker processes."),
+            _csv_list_flag(
+                "health-check-ignore",
+                "health_check_ignored_checks",
+                "Comma-separated rollout-health check IDs to exclude from verdict derivation.",
+            ),
         ),
     ),
     "eval aggregate": Command(
@@ -811,6 +864,40 @@ COMMANDS = {
                 "Path for the merged rollouts and aggregate-metrics file.",
                 aliases=("-o",),
             ),
+            _bool_flag("no-health-check", "disable_health_check", "Skip post-aggregation rollout health checks."),
+            _value_flag("health-check-workers", "health_check_workers", "Number of rollout-health worker processes."),
+            _csv_list_flag(
+                "health-check-ignore",
+                "health_check_ignored_checks",
+                "Comma-separated rollout-health check IDs to exclude from verdict derivation.",
+            ),
+        ),
+    ),
+    "eval health-check": Command(
+        target=_eval_health_check,
+        summary="Verify rollout quality for an existing run directory.",
+        flags=(
+            Flag(register=lambda p: p.add_argument("run_dir", metavar="RUN_DIR")),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--rollouts-file",
+                    dest="rollout_file",
+                    type=Path,
+                    metavar="PATH",
+                    help="Rollout JSONL path; relative paths resolve under RUN_DIR (default: rollouts.jsonl).",
+                )
+            ),
+            Flag(register=lambda p: p.add_argument("--workers", type=int, help="Number of worker processes.")),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--ignore-checks",
+                    "--ignore",
+                    type=_split_comma_separated,
+                    metavar="CHECK[,CHECK...]",
+                    help="Comma-separated check IDs to exclude from verdict derivation.",
+                )
+            ),
+            JSON,
         ),
     ),
     "eval reverify": Command(
