@@ -15,29 +15,53 @@
 ## 01 - (Optional) Create a container
 The reward profiling container pre-installs all resources_servers and responses_api_agents needed for reward profiling.
 It follows the same flow from the [Super-v3.5 readme](../README.md), with one change:
-1. New container config: `benchmarks/nemotron_3.5_super/reward_profiling/configs/container_config.yaml`
+1. New container config, created from the manifests: `benchmarks/nemotron_3.5_super/reward_profiling/configs/container_config.yaml`
 
 ```bash
-INPUT_CONTAINER=<vllm sqsh> \
-OUTPUT_CONTAINER=<output sqsh> \
-MOUNTS=/lustre:/lustre \
+# 0. make container config
+python -m nemo_gym.sweep container-config manifests/*.yaml --out configs/container_config.yaml
+
+# 1. make vllm container
+mkdir results/vllm
+CONTAINER_IMAGE_PATH=vllm/vllm-openai:v0.27.1
+mkdir -p "$(dirname "$CONTAINER_IMAGE_PATH")"
+enroot import -o "results/$CONTAINER_IMAGE_PATH" "docker://${CONTAINER_IMAGE_PATH}"
+
+SLURM_ACCOUNT=nemotron_n3_post \
+SBATCH_PARTITION=batch \
+SBATCH_QOS=interactive \
+BASE_IMAGE=$(pwd)/results/vllm/vllm-openai:v0.27.1 \
+bash benchmarks/nemotron_3.5_super/build-super-vl-evals-v0271-thin.sh \
+    $(pwd)/results/vllm/vllm-openai:v0.27.1___tomer.sqsh
+
+# 2. make reward profiling container from vllm container
+SBATCH_ACCOUNT=nemotron_n3_post \
+SBATCH_PARTITION=batch \
+SBATCH_QOS=interactive \
+SBATCH_GRES=gpu:4 \
+INPUT_CONTAINER=$(pwd)/results/vllm/vllm-openai:v0.27.1___tomer.sqsh \
+OUTPUT_CONTAINER=$(pwd)/results/vllm/vllm-openai:v0.27.1___tomer_with_gym_all.sqsh \
+MOUNTS=$(pwd)/env.yaml:/opt/Gym/env.yaml:x-create=file \
 GYM_CONFIG=benchmarks/nemotron_3.5_super/reward_profiling/configs/container_config.yaml \
 SKIP_PREPARE=1 \
+NEMO_GYM_GIT_REF=main \
 sbatch benchmarks/nemotron_3.5_super/build_eval_container.sh
 ```
 
-`container_config.yaml` is generated from the manifests, so it cannot drift from them:
+Two things differ from the stock eval container build:
 
-```bash
-python -m nemo_gym.sweep container-config manifests/*.yaml --out configs/container_config.yaml
-```
+- **`GYM_CONFIG`** points at the generated `container_config.yaml`, not `eval_container_config.yaml`.
+  Step 0 unions every `config_paths` across the manifests *and* their `config_overlay`s, then adds
+  dummy `policy_*` / `nv_inference_api_key` values so the config resolves at build time without
+  secrets. The overlay part matters: the judge model servers exist only there, and a server with no
+  baked venv installs at runtime and hangs the run behind connection retries rather than failing.
+  Regenerate whenever an entry pulls in a new server; the file is reproducible from the manifest.
+- **`SKIP_PREPARE=1`** skips `gym eval prepare`, which downloads benchmark datasets. Reward
+  profiling supplies its own data via the manifest, so preparation would fail on environments that
+  have no registered benchmark split.
 
-It bakes one venv per server implementation the manifests reference. A server with no baked venv
-installs at runtime and hangs the run behind connection retries instead of failing, so regenerate
-this whenever you add an entry that pulls in a new server.
-
-`SKIP_PREPARE=1` skips `gym eval prepare`, which downloads benchmark datasets. Reward profiling
-supplies its own data via the manifest, so it is not needed.
+Building all three lanes' servers gives 63 baked venvs. Building only a subset and then running a
+manifest that needs more is the failure above -- it presents as a hang, not an error.
 
 You also need a **sandbox container** if any entry uses `ns_tools` or `math_formal_lean`. Only one
 arm64 build exists: `/lustre/fsw/portfolios/llmservice/users/igitman/images/nemo-skills-sandbox-0.7.1-arm64.sqsh`
