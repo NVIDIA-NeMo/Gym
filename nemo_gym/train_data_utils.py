@@ -88,15 +88,23 @@ class TrainDataProcessorConfig(BaseNeMoGymCLIConfig):
     overwrite_metrics_conflicts: bool = Field(
         default=False, description="Whether or not to overwrite metrics conflicts."
     )
-    task_data_validation: Literal["off", "warn", "error"] = Field(
-        default="warn",
+    task_data_validation: Literal["off", "warn", "error", "auto"] = Field(
+        default="auto",
         description=(
-            "Validate each dataset row against the owning resources server's task_data.py schema "
-            "during collation. 'warn' (default) prints a per-file report, 'error' fails collation "
-            "on schema violations, 'off' skips validation. Servers without a task_data.py are "
-            "always skipped."
+            "Validate each dataset row against the owning server's task_data.py schema during "
+            "collation. 'warn' prints a per-file report, 'error' fails collation on schema "
+            "violations, 'off' skips validation. The default 'auto' resolves to 'error' in "
+            "example_validation mode (the repo's PR gate, where all committed data is known "
+            "clean) and 'warn' in train_preparation mode (user datasets must not break "
+            "mid-pipeline). Servers without a task_data.py are always skipped."
         ),
     )
+
+    @property
+    def effective_task_data_validation(self) -> str:
+        if self.task_data_validation != "auto":
+            return self.task_data_validation
+        return "error" if self.mode == "example_validation" else "warn"
 
     @property
     def in_scope_dataset_types(self) -> List[DatasetType]:
@@ -923,7 +931,7 @@ This could be due to a change in how metrics are calculated, leading to outdated
             paths_to_collate = self._collate_samples_single_type(
                 type=type,
                 server_instance_configs=server_instance_configs,
-                task_data_validation=config.task_data_validation,
+                task_data_validation=config.effective_task_data_validation,
             )
             collated_fpath = parent / f"{type}.jsonl"
             with open(collated_fpath, "wb") as outfile:

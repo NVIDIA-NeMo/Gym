@@ -364,3 +364,179 @@ class TestSelfContainedAgentSchemaFallback:
         validator = TrainDataProcessor._task_data_validator_for(agent, self._dataset(), [agent, rs])
         assert validator is not None
         assert validator.report.server_name == "math_with_judge"
+
+
+class TestMisplacedLegacyFields:
+    def _adapter(self, tmp_path):
+        (tmp_path / "task_data.py").write_text(
+            "from pydantic import BaseModel, ConfigDict, Field\n"
+            "class TaskData(BaseModel):\n"
+            "    model_config = ConfigDict(extra='allow')\n"
+            "    expected_city: str = Field(\n"
+            "        default='Paris', json_schema_extra={'legacy_location': 'verifier_metadata'}\n"
+            "    )\n"
+        )
+        return load_task_data_schema(tmp_path)
+
+    def test_marked_field_found_only_top_level_is_flagged(self, tmp_path):
+        v = TaskDataValidator(server_name="s", adapter=self._adapter(tmp_path), dataset_fpath="d")
+        v.validate_row(0, {"expected_city": "Tokyo"})
+        assert not v.report.clean
+        assert v.report.misplaced_keys == {"expected_city": 1}
+        assert "the server will not see them" in v.report.summary()
+
+    def test_marked_field_in_verifier_metadata_is_correct(self, tmp_path):
+        v = TaskDataValidator(server_name="s", adapter=self._adapter(tmp_path), dataset_fpath="d")
+        v.validate_row(0, {"verifier_metadata": {"expected_city": "Tokyo"}})
+        assert v.report.clean
+
+    def test_duplicated_in_both_places_is_not_misplaced(self, tmp_path):
+        v = TaskDataValidator(server_name="s", adapter=self._adapter(tmp_path), dataset_fpath="d")
+        v.validate_row(0, {"expected_city": "Tokyo", "verifier_metadata": {"expected_city": "Tokyo"}})
+        assert v.report.clean
+
+    def test_migrated_row_format_is_exempt(self, tmp_path):
+        v = TaskDataValidator(server_name="s", adapter=self._adapter(tmp_path), dataset_fpath="d")
+        v.validate_row(0, {"expected_city": "Tokyo", "task_data": {}})
+        assert v.report.misplaced_keys == {}
+
+    def test_unmarked_top_level_fields_are_fine(self, tmp_path):
+        (tmp_path / "task_data.py").write_text(
+            "from pydantic import BaseModel, ConfigDict\n"
+            "class TaskData(BaseModel):\n"
+            "    model_config = ConfigDict(extra='allow')\n"
+            "    question: str\n"
+        )
+        v = TaskDataValidator(server_name="s", adapter=load_task_data_schema(tmp_path), dataset_fpath="d")
+        v.validate_row(0, {"question": "q"})
+        assert v.report.clean
+
+
+class TestAutoValidationMode:
+    def _config(self, mode, task_data_validation="auto"):
+        from nemo_gym.train_data_utils import TrainDataProcessorConfig
+
+        return TrainDataProcessorConfig(output_dirpath="out", mode=mode, task_data_validation=task_data_validation)
+
+    def test_auto_is_error_for_example_validation(self):
+        assert self._config("example_validation").effective_task_data_validation == "error"
+
+    def test_auto_is_warn_for_train_preparation(self):
+        assert self._config("train_preparation").effective_task_data_validation == "warn"
+
+    def test_explicit_setting_wins(self):
+        assert self._config("example_validation", "off").effective_task_data_validation == "off"
+        assert self._config("train_preparation", "error").effective_task_data_validation == "error"
+
+
+class TestSchemaPresence:
+    def test_every_resources_server_ships_a_schema(self):
+        missing = sorted(
+            d.name
+            for d in (REPO_ROOT / "resources_servers").iterdir()
+            if d.is_dir() and (d / "app.py").exists() and not (d / "task_data.py").exists()
+        )
+        assert not missing, (
+            f"resources servers without a task_data.py schema: {missing}. Every server must "
+            "describe its dataset rows (see nemo_gym/task_data.py for the protocol)."
+        )
+
+
+class TestRepoDataMatchesSchemas:
+    """The drift gate: every committed dataset row must validate against its server's schema.
+
+    Fails the PR that changes a schema without fixing the data, or commits data that no longer
+    matches the schema. Uses the same mapping collate uses: dataset declarations in tracked
+    configs (following config_paths chains and one _inherit_from hop) resolve to the declaring
+    resources server.
+    """
+
+    @staticmethod
+    def _merged_config(path, seen=None):
+        import yaml
+
+        seen = seen or set()
+        if path in seen:
+            return {}
+        seen.add(path)
+        try:
+            cfg = yaml.safe_load(open(path)) or {}
+        except Exception:
+            return {}
+        out = {}
+        for p in cfg.get("config_paths") or []:
+            out.update(TestRepoDataMatchesSchemas._merged_config(p, seen))
+        out.update({k: v for k, v in cfg.items() if k != "config_paths"})
+        return out
+
+    def test_all_committed_rows_validate(self, monkeypatch):
+        import subprocess
+
+        import yaml
+
+        monkeypatch.chdir(REPO_ROOT)
+        configs = [
+            c
+            for c in subprocess.run(["git", "ls-files", "*.yaml"], capture_output=True, text=True).stdout.split()
+            if c.split("/")[0] in ("resources_servers", "responses_api_agents", "benchmarks", "environments")
+        ]
+        tracked = set(subprocess.run(["git", "ls-files", "*.jsonl"], capture_output=True, text=True).stdout.split())
+
+        server_files = {}
+        for cf in configs:
+            try:
+                local = yaml.safe_load(open(cf)) or {}
+            except Exception:
+                continue
+            if not isinstance(local, dict):
+                continue
+            full = self._merged_config(cf)
+            for _inst, v in local.items():
+                if not isinstance(v, dict):
+                    continue
+                for section in ("resources_servers", "responses_api_agents"):
+                    sec = v.get(section)
+                    if not isinstance(sec, dict):
+                        continue
+                    for impl_key, body in sec.items():
+                        if not isinstance(body, dict):
+                            continue
+                        for d in body.get("datasets") or []:
+                            if not isinstance(d, dict) or not d.get("jsonl_fpath"):
+                                continue
+                            if section == "resources_servers":
+                                rs = impl_key
+                            else:
+                                ref = body.get("resources_server") or {}
+                                name = ref.get("name") if isinstance(ref, dict) else None
+                                tgt = full.get(name) if name else None
+                                if (
+                                    isinstance(tgt, dict)
+                                    and "resources_servers" not in tgt
+                                    and tgt.get("_inherit_from")
+                                ):
+                                    tgt = full.get(tgt["_inherit_from"]) or tgt
+                                rs = (
+                                    next(iter(tgt["resources_servers"]))
+                                    if isinstance(tgt, dict) and isinstance(tgt.get("resources_servers"), dict)
+                                    else None
+                                )
+                            if rs and str(d["jsonl_fpath"]) in tracked:
+                                server_files.setdefault(rs, set()).add(str(d["jsonl_fpath"]))
+
+        assert len(server_files) > 50, "mapping looks broken: too few servers with committed data"
+        failures = []
+        rows_checked = 0
+        for server, files in sorted(server_files.items()):
+            server_dir = find_server_dir(server)
+            adapter = load_task_data_schema(server_dir) if server_dir else None
+            if adapter is None:
+                failures.append(f"{server}: no loadable schema")
+                continue
+            for f in sorted(files):
+                report = validate_jsonl_rows(server, adapter, f, open(f).read().splitlines())
+                rows_checked += report.rows
+                if not report.clean:
+                    failures.append(report.summary())
+        assert rows_checked > 500, "sweep looks broken: too few rows checked"
+        assert not failures, "\n".join(failures)

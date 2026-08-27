@@ -13,10 +13,13 @@ end-state shape: the fields as they will appear inside the unified ``task_data``
 the row-format migration. Framework-owned keys (see ``RESERVED_ROW_KEYS``) are never part of
 ``TaskData``, and neither is a ``verifier_metadata`` wrapper: rows that still carry one have its
 contents spliced up by ``normalize_task_fields`` before validation, so one flat schema validates
-both today's rows and post-migration ``task_data`` contents. Fields that live inside
-``verifier_metadata`` on today's wire should be annotated
+both today's rows and post-migration ``task_data`` contents. Fields that today's wire reads
+EXCLUSIVELY from inside ``verifier_metadata`` should be annotated
 ``Field(..., json_schema_extra={"legacy_location": "verifier_metadata"})`` — that reverse map is
-what the row-format migration and the dispatch compatibility shim consume.
+what the row-format migration and the dispatch compatibility shim consume, and validation flags
+rows that carry such a field only top-level (the server would not see it). Servers whose wire
+accepts both placements (e.g. via a before-validator that nests top-level fields itself) must
+not carry the marker.
 
 This module is a dependency-light leaf: it may import only the standard library and Pydantic, and
 per-server ``task_data.py`` modules may import only the standard library, Pydantic, this module,
@@ -159,12 +162,13 @@ class TaskDataValidationReport:
     errors: List[str] = field(default_factory=list)
     unknown_keys: Dict[str, int] = field(default_factory=dict)
     conflicting_keys: Dict[str, int] = field(default_factory=dict)
+    misplaced_keys: Dict[str, int] = field(default_factory=dict)
 
     MAX_RECORDED_ERRORS = 5
 
     @property
     def clean(self) -> bool:
-        return self.error_rows == 0 and not self.conflicting_keys
+        return self.error_rows == 0 and not self.conflicting_keys and not self.misplaced_keys
 
     def summary(self) -> str:
         parts = [
@@ -177,10 +181,37 @@ class TaskDataValidationReport:
         if self.conflicting_keys:
             keys = ", ".join(f"{k} ({n} rows)" for k, n in sorted(self.conflicting_keys.items()))
             parts.append(f"  keys with DIFFERENT values top-level vs verifier_metadata (ambiguous): {keys}")
+        if self.misplaced_keys:
+            keys = ", ".join(f"{k} ({n} rows)" for k, n in sorted(self.misplaced_keys.items()))
+            parts.append(
+                f"  keys this server's wire reads from verifier_metadata but found top-level "
+                f"(the server will not see them): {keys}"
+            )
         if self.unknown_keys:
             keys = ", ".join(f"{k} ({n} rows)" for k, n in sorted(self.unknown_keys.items()))
             parts.append(f"  keys not declared by the schema (passed through unvalidated): {keys}")
         return "\n".join(parts)
+
+
+def legacy_metadata_fields(adapter: TypeAdapter) -> frozenset:
+    """Schema fields annotated ``legacy_location: verifier_metadata`` (today's wire reads them there)."""
+    from typing import get_args
+
+    def models_of(tp, out):
+        if isinstance(tp, type) and issubclass(tp, BaseModel):
+            out.append(tp)
+            return out
+        for arg in get_args(tp):
+            models_of(arg, out)
+        return out
+
+    names = set()
+    for model in models_of(getattr(adapter, "_type", None), []):
+        for field_name, info in model.model_fields.items():
+            extra = info.json_schema_extra
+            if isinstance(extra, dict) and extra.get("legacy_location") == LEGACY_METADATA_KEY:
+                names.add(field_name)
+    return frozenset(names)
 
 
 class TaskDataValidator:
@@ -188,10 +219,21 @@ class TaskDataValidator:
 
     def __init__(self, server_name: str, adapter: TypeAdapter, dataset_fpath: str):
         self._adapter = adapter
+        self._legacy_fields = legacy_metadata_fields(adapter)
         self.report = TaskDataValidationReport(server_name=server_name, dataset_fpath=dataset_fpath)
 
     def validate_row(self, row_index: int, row: Dict[str, Any]) -> None:
         self.report.rows += 1
+        # Misplacement: the schema says today's wire reads this field from inside
+        # verifier_metadata, but the row carries it only top-level. Validation would accept it
+        # (schemas are flat) while the server at runtime would never see it, so it is flagged.
+        # Rows already in the migrated format (a task_data key) are exempt: top-level inside
+        # task_data is the correct final position.
+        if self._legacy_fields and "task_data" not in row:
+            nested = row.get(LEGACY_METADATA_KEY)
+            nested_keys = set(nested) if isinstance(nested, dict) else set()
+            for key in (row.keys() & self._legacy_fields) - nested_keys:
+                self.report.misplaced_keys[key] = self.report.misplaced_keys.get(key, 0) + 1
         subject, conflicts = normalize_task_fields(row)
         for key in conflicts:
             self.report.conflicting_keys[key] = self.report.conflicting_keys.get(key, 0) + 1
