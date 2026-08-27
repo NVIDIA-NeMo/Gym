@@ -2,7 +2,7 @@
 title: "New Environment"
 description: ""
 ---
-An environment defines the tasks, verification, and interaction surface being measured. A Gym config composes that environment with an agent server and model server and supplies the runtime wiring. Those execution components are not the environment itself, although an integration profile can make specific agent behavior part of the measurement.
+An environment includes the dataset, agent harness, verifier, and state. The model is external to the environment. A Gym config connects these components and supplies the runtime wiring.
 
 The onboarding flow below covers a complete environment or benchmark. A resources server may be a reusable scoring, tool, or state component, or it may ship a runnable composition and data. Manifest-backed onboarding currently writes canonical workloads under `environments/` and `benchmarks/`; runnable configs still colocated under `resources_servers/` remain visible as `no-manifest` migration entries.
 
