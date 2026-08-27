@@ -37,12 +37,16 @@ from nemo_gym.rollout_collection import (
     _DEFAULT_MAX_ROLLOUT_ATTEMPTS,
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
+    NG_PERF_KEY,
+    NG_TRAJECTORY_KEY,
     E2ERolloutCollectionConfig,
     RolloutAggregationConfig,
     RolloutAggregationHelper,
     RolloutCollectionConfig,
     RolloutCollectionHelper,
+    _attach_ng_perf,
     _attach_trajectory_record,
+    _build_ng_perf,
     _build_trajectory_record,
     _expand_input_glob,
     _failures_path_for,
@@ -340,6 +344,331 @@ class TestRolloutCollection:
             sanitized = _rollout_for_export(malformed_result)
             assert b"secret" not in orjson.dumps(sanitized)
 
+    def test_build_ng_perf_absent_without_trajectory(self) -> None:
+        assert _build_ng_perf({}, rollout_latency_ms=12.0) is None
+        assert _build_ng_perf({NG_TRAJECTORY_KEY: "not-a-dict"}, rollout_latency_ms=12.0) is None
+
+    def test_build_ng_perf_absent_when_trajectory_invalid(self) -> None:
+        result = {NG_TRAJECTORY_KEY: {"invocations": [{"invocation_id": "root"}, {"invocation_id": "root"}]}}
+        assert _build_ng_perf(result, rollout_latency_ms=12.0) is None
+
+    def test_build_ng_perf_absent_without_invocations(self) -> None:
+        result = {NG_TRAJECTORY_KEY: {"task_id": "t", "rollout_id": "t-0", "invocations": []}}
+        assert _build_ng_perf(result, rollout_latency_ms=12.0) is None
+
+    def test_build_ng_perf_sums_owned_calls_and_matched_tool_calls(self) -> None:
+        result = {
+            NG_TRAJECTORY_KEY: {
+                "task_id": "t",
+                "rollout_id": "t-0",
+                "invocations": [
+                    {
+                        "invocation_id": "root",
+                        "model_calls": [{"model_call_id": "call-1"}],
+                    },
+                    {
+                        "invocation_id": "sub",
+                        "model_calls": [{"model_call_id": "call-2"}, {"model_call_id": "unresolved-response"}],
+                    },
+                ],
+                "tool_calls": [
+                    {"invocation_id": "root", "tool_call_id": "t1"},
+                    {"invocation_id": "sub", "tool_call_id": "t2"},
+                    {"invocation_id": "sub", "tool_call_id": "t3"},
+                    # Orphaned: no invocation in this trajectory owns "ghost".
+                    {"invocation_id": "ghost", "tool_call_id": "t4"},
+                ],
+                "model_calls": [
+                    {
+                        "model_call_id": "call-1",
+                        "token_stats": {
+                            "prompt_tokens": 100,
+                            "completion_tokens": 20,
+                            "cached_tokens": 10,
+                        },
+                    },
+                    {
+                        "model_call_id": "call-2",
+                        "token_stats": {
+                            "prompt_tokens": 50,
+                            "completion_tokens": 5,
+                            "reasoning_tokens": 3,
+                        },
+                    },
+                    # Present in raw capture but never referenced by any invocation's
+                    # model_calls (e.g. compaction-owned, or unjoined) -- must not be summed.
+                    {
+                        "model_call_id": "unowned",
+                        "token_stats": {"prompt_tokens": 999, "completion_tokens": 999},
+                    },
+                ],
+            }
+        }
+
+        ng_perf = _build_ng_perf(result, rollout_latency_ms=1234.5)
+
+        assert ng_perf == {
+            "num_turns": 2,
+            "num_tool_calls": 3,
+            "token_observability_coverage": 1.0,
+            "prompt_tokens": 150,
+            "cached_prompt_tokens": 10,
+            "completion_tokens": 25,
+            "reasoning_tokens": 3,
+            "total_latency_ms": 1234.5,
+        }
+
+    def test_build_ng_perf_omits_absent_token_fields_and_latency(self) -> None:
+        # No model_calls/tool_calls at all on the trajectory, and no independent latency
+        # measurement, so every optional ng_perf field must be *absent*, not present-as-None.
+        result = {
+            NG_TRAJECTORY_KEY: {
+                "task_id": "t",
+                "rollout_id": "t-0",
+                "invocations": [{"invocation_id": "root"}],
+            }
+        }
+
+        ng_perf = _build_ng_perf(result, rollout_latency_ms=None)
+
+        for absent_key in (
+            "prompt_tokens",
+            "cached_prompt_tokens",
+            "completion_tokens",
+            "reasoning_tokens",
+            "total_latency_ms",
+        ):
+            assert absent_key not in ng_perf
+        assert ng_perf == {"num_turns": 1, "num_tool_calls": 0, "token_observability_coverage": 0.0}
+
+    def test_build_ng_perf_dedupes_model_call_claimed_by_two_invocations(self) -> None:
+        # Simulates a join_model_call_observations conflict: the losing invocation keeps an
+        # unresolved ref pointing at a model_call_id another invocation already claimed. Tokens
+        # for that call must be counted once, not twice.
+        result = {
+            NG_TRAJECTORY_KEY: {
+                "task_id": "t",
+                "rollout_id": "t-0",
+                "invocations": [
+                    {"invocation_id": "root", "model_calls": [{"model_call_id": "shared"}]},
+                    {"invocation_id": "sub", "model_calls": [{"model_call_id": "shared"}]},
+                ],
+                "model_calls": [
+                    {"model_call_id": "shared", "token_stats": {"prompt_tokens": 100, "completion_tokens": 10}},
+                ],
+            }
+        }
+
+        ng_perf = _build_ng_perf(result, rollout_latency_ms=None)
+
+        # Token dedup must not erase the losing invocation from the turn count: the shared
+        # call contributes one owned-call turn to "root", and "sub" -- a real conversation
+        # left with no owned calls -- still counts as at least one turn.
+        assert ng_perf["num_turns"] == 2
+        assert ng_perf["prompt_tokens"] == 100
+        assert ng_perf["completion_tokens"] == 10
+        assert ng_perf["token_observability_coverage"] == 0.5
+
+    def test_ng_perf_matches_model_calls_by_response_id_pair_like_simple_agent(self) -> None:
+        # Integration test: simple_agent sets result["ng_trajectory"] directly (see
+        # responses_api_agents/simple_agent/app.py), bypassing join_model_call_observations
+        # entirely -- so its ModelCallRef is never canonicalized with a model_call_id and only
+        # ever carries (model_ref, response_id). Token fields must still populate.
+        row = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+        result = {
+            NG_TRAJECTORY_KEY: {
+                "task_id": "0",
+                "rollout_id": "0-0",
+                "invocations": [
+                    {
+                        "invocation_id": "root",
+                        "model_calls": [
+                            {
+                                "model_ref": {"type": "responses_api_models", "name": "policy_model"},
+                                "response_id": "resp_123",
+                            }
+                        ],
+                    }
+                ],
+            },
+            "ng_model_call_capture": {
+                "calls": [
+                    {
+                        "model_call_id": "captured-1",
+                        "response_id": "resp_123",
+                        "model_ref": {"type": "responses_api_models", "name": "policy_model"},
+                        "tokens_in": 100,
+                        "tokens_out": 20,
+                    }
+                ]
+            },
+        }
+
+        _attach_trajectory_record(row, result)
+        ng_perf = _build_ng_perf(result, rollout_latency_ms=None)
+
+        assert ng_perf["prompt_tokens"] == 100
+        assert ng_perf["completion_tokens"] == 20
+
+    def test_ng_perf_does_not_guess_an_ambiguous_response_id_match(self) -> None:
+        # Two captured calls share the same (model_ref, response_id) pair -- the ref must
+        # resolve to no match rather than guessing either one, so its tokens stay uncounted.
+        row = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+        result = {
+            NG_TRAJECTORY_KEY: {
+                "task_id": "0",
+                "rollout_id": "0-0",
+                "invocations": [
+                    {
+                        "invocation_id": "root",
+                        "model_calls": [
+                            {
+                                "model_ref": {"type": "responses_api_models", "name": "policy_model"},
+                                "response_id": "resp_dup",
+                            }
+                        ],
+                    }
+                ],
+            },
+            "ng_model_call_capture": {
+                "calls": [
+                    {
+                        "model_call_id": "captured-1",
+                        "response_id": "resp_dup",
+                        "model_ref": {"type": "responses_api_models", "name": "policy_model"},
+                        "tokens_in": 100,
+                        "tokens_out": 20,
+                    },
+                    {
+                        "model_call_id": "captured-2",
+                        "response_id": "resp_dup",
+                        "model_ref": {"type": "responses_api_models", "name": "policy_model"},
+                        "tokens_in": 999,
+                        "tokens_out": 999,
+                    },
+                ]
+            },
+        }
+
+        _attach_trajectory_record(row, result)
+        ng_perf = _build_ng_perf(result, rollout_latency_ms=None)
+
+        assert "prompt_tokens" not in ng_perf
+        assert "completion_tokens" not in ng_perf
+
+    def test_build_ng_perf_counts_explicit_turns_over_invocations(self) -> None:
+        # simple_agent-style trajectory: the whole multi-turn loop runs under a single "root"
+        # invocation with one TrajectoryTurn per step. num_turns must count the turns (3), not
+        # the invocations (1) -- otherwise tokens-per-turn degenerates into total tokens.
+        result = {
+            NG_TRAJECTORY_KEY: {
+                "task_id": "t",
+                "rollout_id": "t-0",
+                "invocations": [{"invocation_id": "root", "model_calls": [{"model_call_id": "call-1"}]}],
+                "turns": [
+                    {
+                        "invocation_id": "root",
+                        "task_id": "t",
+                        "rollout_id": "t-0",
+                        "turn_no": turn_no,
+                        "timestamp": 1.0,
+                        "step_count": 0,
+                    }
+                    for turn_no in (1, 2, 3)
+                ],
+                "model_calls": [
+                    {"model_call_id": "call-1", "token_stats": {"prompt_tokens": 100, "completion_tokens": 30}},
+                ],
+            }
+        }
+
+        ng_perf = _build_ng_perf(result, rollout_latency_ms=None)
+
+        assert ng_perf["num_turns"] == 3
+        assert ng_perf["completion_tokens"] == 30
+        assert ng_perf["token_observability_coverage"] == pytest.approx(1 / 3)
+
+    def test_build_ng_perf_sums_turns_across_invocations_with_per_invocation_fallback(self) -> None:
+        # Hybrid trajectory: "root" emits explicit TrajectoryTurn records (2 turns), "sub-a"
+        # emits none but owns 4 resolved model calls, "sub-b" emits nothing at all. Each
+        # invocation contributes its own best turn count: 2 + 4 + 1 = 7.
+        result = {
+            NG_TRAJECTORY_KEY: {
+                "task_id": "t",
+                "rollout_id": "t-0",
+                "invocations": [
+                    {"invocation_id": "root"},
+                    {"invocation_id": "sub-a", "model_calls": [{"model_call_id": f"call-{i}"} for i in range(4)]},
+                    {"invocation_id": "sub-b"},
+                ],
+                "turns": [
+                    {
+                        "invocation_id": "root",
+                        "task_id": "t",
+                        "rollout_id": "t-0",
+                        "turn_no": turn_no,
+                        "timestamp": 1.0,
+                        "step_count": 0,
+                    }
+                    for turn_no in (1, 2)
+                ],
+                "model_calls": [
+                    {"model_call_id": f"call-{i}", "token_stats": {"completion_tokens": 10}} for i in range(4)
+                ],
+            }
+        }
+
+        ng_perf = _build_ng_perf(result, rollout_latency_ms=None)
+
+        assert ng_perf["num_turns"] == 7
+        assert ng_perf["completion_tokens"] == 40
+        assert ng_perf["token_observability_coverage"] == pytest.approx(4 / 7)
+
+    def test_attach_ng_perf_absent_when_observability_disabled(self) -> None:
+        result = {
+            "_ng_rollout_latency_ms": 42.0,
+            NG_TRAJECTORY_KEY: {
+                "task_id": "t",
+                "rollout_id": "t-0",
+                "invocations": [{"invocation_id": "root"}],
+            },
+        }
+
+        _attach_ng_perf(result, observability_enabled=False)
+
+        assert NG_PERF_KEY not in result
+        assert "_ng_rollout_latency_ms" not in result
+
+    def test_attach_ng_perf_sets_ng_perf_when_enabled(self) -> None:
+        result = {
+            "_ng_rollout_latency_ms": 42.0,
+            NG_TRAJECTORY_KEY: {
+                "task_id": "t",
+                "rollout_id": "t-0",
+                "invocations": [{"invocation_id": "root"}],
+            },
+        }
+
+        _attach_ng_perf(result, observability_enabled=True)
+
+        assert result[NG_PERF_KEY] == {
+            "num_turns": 1,
+            "num_tool_calls": 0,
+            "token_observability_coverage": 0.0,
+            "total_latency_ms": 42.0,
+        }
+        assert "_ng_rollout_latency_ms" not in result
+
+    def test_attach_ng_perf_swallows_build_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # An unexpected assembly failure must never take down rollout collection over an observability side-channel.
+        result = {"_ng_rollout_latency_ms": 42.0, NG_TRAJECTORY_KEY: {}}
+        monkeypatch.setattr(nemo_gym.rollout_collection, "_build_ng_perf", MagicMock(side_effect=ValueError))
+
+        _attach_ng_perf(result, observability_enabled=True)
+
+        assert NG_PERF_KEY not in result
+        assert "_ng_rollout_latency_ms" not in result
+
     @pytest.mark.parametrize("request_debug_enabled", [True, False])
     async def test_run_examples_logs_failed_run_when_request_debug_enabled(
         self,
@@ -390,6 +719,25 @@ class TestRolloutCollection:
             assert "do not log this" not in captured.out
         else:
             assert "[rollout_collection] /run failed" not in captured.out
+
+    async def test_run_examples_stamps_independent_rollout_latency(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        row = {AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+        response = MagicMock()
+        response.status = 200
+
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(return_value=response)
+        mock_server_client.global_config_dict = OmegaConf.create({"my_agent": {"responses_api_agents": {"impl": {}}}})
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
+        )
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"response": {}}))
+
+        _, result = await next(RolloutCollectionHelper().run_examples([row]))
+
+        assert isinstance(result["_ng_rollout_latency_ms"], float)
+        assert result["_ng_rollout_latency_ms"] >= 0
 
     def test_preprocess_rows_with_prompt_config(self, tmp_path: Path) -> None:
         """prompt_config builds responses_create_params.input from template."""
@@ -902,6 +1250,7 @@ class TestRolloutCollection:
                 },
                 "key_metrics": {"mean/abc usage": 1.0},
                 "group_level_metrics": actual_aggregate_metrics[0]["group_level_metrics"],
+                "perf_summary": None,
             }
         ]
         assert expected_aggregate_metrics == actual_aggregate_metrics
@@ -1565,6 +1914,64 @@ class TestRolloutCollection:
             assert "ng_model_call_capture" not in item
             assert "ng_trajectory" not in item
             assert "usage" in item["response"]
+
+    async def test_call_aggregate_metrics_includes_perf_summary_when_present(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """perf_summary must survive _call_aggregate_metrics' hand-picked agent_entry dict --
+        it's easy to add a field to AggregateMetrics and forget this call site only forwards an
+        explicit allowlist rather than the whole model."""
+        agg = AggregateMetrics(
+            agent_metrics={"mean/reward": 0.5},
+            key_metrics={"mean/reward": 0.5},
+            group_level_metrics=[{"mean/reward": 1.0}],
+            perf_summary={"mean_num_turns": 3.0, "total_latency_mean_ms": 1000.0},
+        )
+
+        mock_response = AsyncMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.read = AsyncMock(return_value=orjson.dumps(agg.model_dump()))
+        mock_response.status = 200
+
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(return_value=mock_response)
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
+        )
+        helper = RolloutCollectionHelper()
+
+        rows = [{AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}]
+        results = [{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0}]
+
+        metrics_fpath = await helper._call_aggregate_metrics(results, rows, tmp_path / "output.jsonl")
+
+        written = json.loads(metrics_fpath.read_text())
+        assert written[0]["perf_summary"] == {"mean_num_turns": 3.0, "total_latency_mean_ms": 1000.0}
+
+    async def test_call_aggregate_metrics_omits_perf_summary_when_absent(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        agg = AggregateMetrics(agent_metrics={"mean/reward": 0.5}, key_metrics={"mean/reward": 0.5})
+
+        mock_response = AsyncMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.read = AsyncMock(return_value=orjson.dumps(agg.model_dump()))
+        mock_response.status = 200
+
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(return_value=mock_response)
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
+        )
+        helper = RolloutCollectionHelper()
+
+        rows = [{AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}]
+        results = [{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0}]
+
+        metrics_fpath = await helper._call_aggregate_metrics(results, rows, tmp_path / "output.jsonl")
+
+        written = json.loads(metrics_fpath.read_text())
+        assert "perf_summary" not in written[0]
 
     async def test_call_aggregate_metrics_multiple_agents(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

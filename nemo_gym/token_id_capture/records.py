@@ -40,7 +40,7 @@ TOKEN_FIELDS = ("prompt_token_ids", "generation_token_ids", "generation_log_prob
 # Readers must reject unsupported newer records.
 # ``extra="allow"`` otherwise hides unknown fields.
 #
-#   1  rollout and call identity, the token arrays, the output items and their carrier index
+#   1  rollout and call identity, token arrays, output items, their carrier index, and the response id
 TOKEN_ENTRY_RECORD_SCHEMA_VERSION = 1
 
 
@@ -71,6 +71,9 @@ class TokenEntry(BaseModel):
     # This index identifies the item that carried token arrays.
     # ``None`` means no item carried them.
     token_item_index: int | None = None
+    # The response id returned to the client for this model call.
+    # Terminal attribution uses it to match the agent's final response to these captured tokens.
+    response_id: str | None = None
     # This non-semantic timestamp helps diagnose retries and sibling branches.
     created_at: float = 0.0
 

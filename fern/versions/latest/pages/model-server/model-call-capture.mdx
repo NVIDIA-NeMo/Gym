@@ -258,6 +258,34 @@ Each `SandboxObservation` covers one sandbox execution. Usage fields contain mea
 configured limits. A tool observation can reference its enclosing `sandbox_id`, but overlapping tool
 calls cannot share sandbox-level CPU or memory usage as if it were per-call usage.
 
+## Performance summary: `ng_perf` and `perf_summary`
+
+When observability is enabled and at least one agent invocation was observed, `rollout_collection`
+assembles a per-rollout `ng_perf` field from `ng_trajectory`: reasoning-turn count, tool-call count,
+prompt/completion/reasoning/cached-prompt token totals (summed only over calls owned by a reasoning
+turn, excluding compaction), and an independently measured wall-clock `total_latency_ms`. Like
+`ng_model_call_capture`, each field is present only when the underlying data was collected; `ng_perf`
+itself is entirely absent, not null, when observability is disabled.
+
+```json
+{
+  "ng_perf": {
+    "num_turns": 7,
+    "num_tool_calls": 15,
+    "prompt_tokens": 4210,
+    "cached_prompt_tokens": 2100,
+    "completion_tokens": 1820,
+    "reasoning_tokens": 0,
+    "total_latency_ms": 22100
+  }
+}
+```
+
+`_aggregate_metrics.json` includes a matching `perf_summary` block per agent, aggregated across every
+rollout's `ng_perf`: mean/median/total token stats, mean/median tokens-per-turn, a
+mean/median/std/min/p90/max distribution for `num_turns`, and p50/p90/p99/mean `total_latency_ms`.
+`perf_summary` is absent when no rollout in the run carried `ng_perf`.
+
 ## Limitations
 
 The model-server boundary observes model HTTP requests and responses. It can record tool calls,
