@@ -134,7 +134,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             if self.config.debug:
                 print(f"Running golden patch for {body.task_name}", file=stderr)
             golden_patch_result = await eval_sandbox.pty.exec(
-                f"bash {cwd}/solve.sh", session=pty_session, timeout_s=self.config.evaluation_timeout
+                f"bash {cwd}/solve.sh", session=pty_session, timeout_s=self.config.evaluation_timeout, detach=True
             )
             # assert golden_patch_result.return_code == 0, (
             #     f"Failed to apply golden patch for {body.task_name}: {golden_patch_result}"
