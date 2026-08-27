@@ -251,6 +251,21 @@ class TestStrictComparisonTrials:
         assert response.reward == 0.0
         assert response.judge_response == {"error": f"{missing}_missing"}
 
+    @pytest.mark.parametrize("strict", [True, False])
+    @pytest.mark.asyncio
+    async def test_missing_reference_strictness_contract(self, tmp_path, strict) -> None:
+        server, body = self._missing_artifact_server_and_body(tmp_path, missing="reference", strict=strict)
+
+        if strict:
+            with pytest.raises(RuntimeError, match="reference_missing"):
+                await server.verify(body)
+            return
+
+        response = await server.verify(body)
+        dumped = response.model_dump()
+        assert dumped["_ng_failure_class"] == "reference_missing"
+        assert dumped["_ng_failure_terminal"] is True
+
     @pytest.mark.asyncio
     async def test_default_is_non_strict_for_backward_compatibility(self, tmp_path) -> None:
         server, body = self._comparison_server_and_body(tmp_path, strict=None)
@@ -603,6 +618,12 @@ class TestApp:
         assert resp.reward == 0.0
         assert resp.verify_mode == "comparison"
         assert resp.judge_response == {"error": "reference_missing"}
+        # Stamped as a terminal failure, not returned as a zero-reward success:
+        # a success row carrying no battle evidence is rejected outright by the
+        # non-final-stage coverage gate, which no policy setting can relax.
+        dumped = resp.model_dump()
+        assert dumped["_ng_failure_class"] == "reference_missing"
+        assert dumped["_ng_failure_terminal"] is True
 
     @pytest.mark.asyncio
     async def test_verify_comparison_iterates_all_ref_repeats(self, tmp_path) -> None:
@@ -1255,6 +1276,9 @@ class TestMultiReference:
 
         assert resp.reward == 0.0
         assert resp.judge_response == {"error": "reference_missing"}
+        dumped = resp.model_dump()
+        assert dumped["_ng_failure_class"] == "reference_missing"
+        assert dumped["_ng_failure_terminal"] is True
 
     @staticmethod
     def _two_ref_server_and_body(tmp_path):
