@@ -1,0 +1,31 @@
+name: primevul
+version: 0.1.0
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: coding
+description: Paired binary vulnerability classification over PrimeVul C/C++ functions
+modality: text
+licensing: MIT
+authors:
+- Bogdan Kostić
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: primevul
+agent_server: simple_agent
+model_server: policy_model
+datasets:
+- name: primevul
+  type: benchmark
+  jsonl_fpath: benchmarks/primevul/data/primevul_benchmark.jsonl
+  prepare_script: benchmarks/primevul/prepare.py
+  prompt_config: benchmarks/primevul/prompt.yaml
+  num_repeats: 1
+rollout_driver: null
+grading_mode: null
+canonical_split: test
+standard_prompt_config: benchmarks/primevul/prompt.yaml
+lifecycle: active
