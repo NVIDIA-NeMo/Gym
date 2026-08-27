@@ -319,17 +319,16 @@ entries:
     data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/structured_outputs_v3/ds3_citation_train.jsonl
     owner: jkyi
 
-
-  # ==========================================================================
-  # Other (0)
-  #   Uncategorised. Put new entries here until they have an obvious home.
-  # ==========================================================================
-
   # ==========================================================================
   # Security (0)
   #   Safety, jailbreak, and over-refusal environments. All currently need an LLM judge
   #   (e.g. Nemotron-Content-Safety-Reasoning-4B), so they live in the judge lane until
   #   judge hosting is settled.
+  # ==========================================================================
+
+  # ==========================================================================
+  # Other (0)
+  #   Uncategorised. Put new entries here until they have an obvious home.
   # ==========================================================================
 
   # --- judge-scored ------------------------------------------------------------------------

@@ -106,10 +106,41 @@ ENV_OVERRIDES=""
 ENV_OVERRIDES+=$(_override port_range_low "$ENV_PORT_RANGE_LOW")
 ENV_OVERRIDES+=$(_override port_range_high "$ENV_PORT_RANGE_HIGH")
 
+# Settings the manifest declared for this command, rendered as ++ overrides. An env var of the same
+# name in upper case wins, so precedence is manifest -> env var -> anything you add on the command
+# line. num_samples_in_parallel is excluded: the launcher computes it from the job's shape below.
+MANIFEST_OVERRIDES=$(python - "$SWEEP_DIR" <<'PY_MANIFEST'
+import json, os, sys
+from pathlib import Path
+try:
+    doc = json.loads((Path(sys.argv[1]) / "sweep_report.json").read_text())
+except OSError:
+    doc = {}
+out = []
+for key, value in (doc.get("gym_eval_run") or {}).items():
+    if key == "num_samples_in_parallel":
+        continue
+    if os.environ.get(key.upper()):
+        continue  # an explicit env var overrides the manifest
+    out.append(f"++{key}={value}")
+print(" ".join(out))
+PY_MANIFEST
+)
+
 # num_samples_in_parallel is the exception: it depends on the job's shape, which only the launcher
 # knows. 512 per decode engine matches max_num_seqs in the vLLM config. An explicit env var still
 # wins over the computed value.
-NUM_SAMPLES_IN_PARALLEL=${NUM_SAMPLES_IN_PARALLEL:-$((MAX_NUM_SEQS_PER_DECODE_ENGINE * NUM_DECODE_NODES))}
+_manifest_concurrency=$(python - "$SWEEP_DIR" <<'PY_CONC'
+import json, sys
+from pathlib import Path
+try:
+    doc = json.loads((Path(sys.argv[1]) / "sweep_report.json").read_text())
+except OSError:
+    doc = {}
+print((doc.get("gym_eval_run") or {}).get("num_samples_in_parallel", ""))
+PY_CONC
+)
+NUM_SAMPLES_IN_PARALLEL=${NUM_SAMPLES_IN_PARALLEL:-${_manifest_concurrency:-$((MAX_NUM_SEQS_PER_DECODE_ENGINE * NUM_DECODE_NODES))}}
 
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-reward-profiling}"
 
@@ -256,6 +287,7 @@ gym eval run --no-serve --resume \\
     --output $SWEEP_DIR/rollouts.jsonl \\
     ++num_repeats=$NUM_REPEATS \\
     ++num_samples_in_parallel=$NUM_SAMPLES_IN_PARALLEL \\
+    $MANIFEST_OVERRIDES \\
     +nemo_gym_log_dir=$SWEEP_DIR/logs \\
     +uv_venv_dir=/opt/uv_venvs \\
     +skip_venv_if_present=true \\

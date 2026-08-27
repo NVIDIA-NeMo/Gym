@@ -30,7 +30,7 @@ import json
 import os
 import shutil
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -86,6 +86,10 @@ class MaterializeReport:
     # to choose num_repeats: pre-expanded inputs want 1, one-row-per-task inputs want the
     # manifest's value, and getting it wrong silently collects one rollout per task instead of all.
     expanded: bool = True
+    # Settings the manifest declared for the collection command, for a launcher to pass as ++
+    # overrides. Carried here rather than in sweep_config.yaml because that file configures
+    # gym env start, and these belong to gym eval run.
+    gym_eval_run: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def total_source_rows(self) -> int:
@@ -104,6 +108,7 @@ class MaterializeReport:
             "nickname": self.nickname,
             "shuffle_seed": self.shuffle_seed,
             "expanded": self.expanded,
+            "gym_eval_run": self.gym_eval_run,
             "total_source_rows": self.total_source_rows,
             "total_materialized_rows": self.total_materialized_rows,
             "entries": {
@@ -281,6 +286,7 @@ def materialize(
         nickname=manifest.nickname,
         shuffle_seed=shuffle_seed,
         expanded=expand,
+        gym_eval_run=manifest.gym_eval_run.overrides(),
         rows_per_entry=rows_per_entry,
         materialized_per_entry=materialized_per_entry,
         num_repeats_per_entry=repeats_by_entry,
