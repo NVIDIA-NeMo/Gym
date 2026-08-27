@@ -37,20 +37,15 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # ``routed_experts`` is optional for MoE backends.
 TOKEN_FIELDS = ("prompt_token_ids", "generation_token_ids", "generation_log_probs", "routed_experts")
 
-# Increment this version when a field or its meaning changes.
+# Keep this at version 1 while the initial record contract is under development.
 # Writers and readers may run in different processes or repositories.
 # Records may outlive a deployment.
 # Readers must reject unsupported newer records.
 # ``extra="allow"`` otherwise hides unknown fields.
-#
-#   1  rollout and call identity, token arrays, output items, their carrier index, and the response id
-#   2  parent_call_id, cum_len and digest, added when calls began being linked to their parent
-#   3  parent resolution and compact continuation lookup metadata
-TOKEN_ENTRY_RECORD_SCHEMA_VERSION = 3
+TOKEN_ENTRY_RECORD_SCHEMA_VERSION = 1
 
-# Records below schema 3 never left development.
-# Current records always carry a request-time parent decision.
-TOKEN_ENTRY_MIN_SCHEMA_VERSION = 3
+# Version 1 is the only supported initial schema.
+TOKEN_ENTRY_MIN_SCHEMA_VERSION = 1
 
 # Increment this version when the digest encoding changes.
 # A stale digest must fail verification.
@@ -129,7 +124,7 @@ class TokenEntry(BaseModel):
     # This non-semantic timestamp helps diagnose retries and sibling branches.
     created_at: float = 0.0
 
-    # These fields were added with parent resolution in schema version 2.
+    # These fields preserve parent resolution within the initial schema.
     # A missing parent call ID triggers strict token-prefix matching.
     #
     # A parent link identifies the exact call retained by the harness.
@@ -141,8 +136,8 @@ class TokenEntry(BaseModel):
     cum_len: int | None = None
     # This is ``compute_digest(prompt_token_ids + generation_token_ids)``.
     digest: str | None = None
-    # New records distinguish a valid root from a missing parent.
-    # ``None`` is reserved for records written before schema version 3.
+    # A request-time decision distinguishes a valid root from a missing parent.
+    # ``None`` is reserved for compatibility callers that do not provide one.
     parent_resolution: ParentResolutionStatus | None = None
     # These fields make a committed entry visible to request-time resolution.
     # The fingerprint identifies the model-authored output.

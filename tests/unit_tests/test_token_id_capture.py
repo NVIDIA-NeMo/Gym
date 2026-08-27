@@ -598,6 +598,23 @@ def _both_enabled(tmp_path) -> dict:
     }
 
 
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("/v1/responses", {"input": "hi"}),
+        ("/v1/chat/completions", {"messages": [{"role": "user", "content": "hi"}]}),
+    ],
+)
+def test_disabled_capture_does_not_serialize_request_messages(path, body):
+    client = TestClient(_server({}).setup_webserver())
+    with patch(
+        "nemo_gym.base_responses_api_model._request_messages",
+        side_effect=AssertionError("disabled capture serialized request messages"),
+    ):
+        response = client.post(path, json=body)
+    assert response.status_code == 200
+
+
 def test_responses_call_captures_tokens_joined_to_eval_record(tmp_path):
     client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
     resp = client.post("/ng-rollout/task0-roll0/training-token-capture/v1/responses", json={"input": "hi"})
@@ -1052,6 +1069,7 @@ def test_commit_entry_records_a_call_with_no_token_fields_on_the_response(instal
 
 def test_records_carry_a_schema_version():
     """Writer and reader are different processes and may be different repositories."""
+    assert TOKEN_ENTRY_RECORD_SCHEMA_VERSION == 1
     entry = TokenEntry(
         rollout_id="r",
         model_call_id="c",

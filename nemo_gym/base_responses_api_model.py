@@ -71,6 +71,7 @@ from nemo_gym.server_utils import (
 from nemo_gym.token_id_capture import (
     CaptureContext,
     capture_tokens,
+    current_capture_context,
     installed_lineage_store,
     installed_token_sink,
     register_call_intent,
@@ -275,9 +276,12 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # all of them.
         # Resolve the parent from the received request before dispatch.
         # Exact prefix supply and capture share this decision.
-        request_messages = _request_messages(params)
-        await resolve_parent(request_messages)
-        await register_call_intent()
+        if current_capture_context() is not None:
+            request_messages = _request_messages(params)
+            await resolve_parent(request_messages)
+            await register_call_intent()
+        else:
+            request_messages = None
         if "request" in inspect.signature(self.chat_completions).parameters:
             completion = await self.chat_completions(request=request, body=params)
         else:
@@ -316,9 +320,12 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # all of them.
         # Resolve the parent from the received request before dispatch.
         # Exact prefix supply and capture share this decision.
-        request_messages = _request_messages(params)
-        await resolve_parent(request_messages)
-        await register_call_intent()
+        if current_capture_context() is not None:
+            request_messages = _request_messages(params)
+            await resolve_parent(request_messages)
+            await register_call_intent()
+        else:
+            request_messages = None
         if "request" in inspect.signature(self.responses).parameters:
             response = await self.responses(request=request, body=params)
         else:
