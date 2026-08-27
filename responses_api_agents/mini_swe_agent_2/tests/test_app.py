@@ -839,7 +839,6 @@ class TestApp:
         mock_runner_ray_remote,
         mock_get_config_path,
         mock_get_first_server_config_dict,
-        mock_load_from_global_config,
         tmp_path,
         monkeypatch,
     ) -> None:
@@ -854,9 +853,10 @@ class TestApp:
                 "create": {"template": "base"},
             }
         }
-        server = MiniSWEAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        mock_server_client = MagicMock(spec=ServerClient)
+        server = MiniSWEAgent(config=config, server_client=mock_server_client)
 
-        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
+        setup_server_client_mocks(mock_server_client, mock_get_first_server_config_dict)
         setup_config_path_mock(mock_get_config_path)
         setup_run_mini_swe_mock(mock_runner_ray_remote)
 
@@ -869,7 +869,6 @@ class TestApp:
         assert generated_provider["e2b"]["connection"] == {"api_url": "https://gateway.example"}
         assert generated_provider["e2b"]["create"] == {"template": "base"}
 
-    @patch("responses_api_agents.mini_swe_agent_2.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.mini_swe_agent_2.app.get_first_server_config_dict")
     @patch("responses_api_agents.mini_swe_agent_2.app.get_config_path")
     @patch("responses_api_agents.mini_swe_agent_2.app.runner_ray_remote")
