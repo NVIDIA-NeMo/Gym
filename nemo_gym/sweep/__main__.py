@@ -24,6 +24,7 @@ import yaml
 from nemo_gym.sweep.build import build_sweep, container_config, run_command
 from nemo_gym.sweep.manifest import DEFAULT_SAMPLE_ROWS, SweepValidationError, load_manifest, validate_manifest
 from nemo_gym.sweep.materialize import materialize
+from nemo_gym.sweep.split import SweepSplitError, split_sweep
 
 
 def _add_shared(parser: argparse.ArgumentParser) -> None:
@@ -81,6 +82,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     mat.add_argument("--skip-validate", action="store_true", help="Materialize without validating first.")
 
+    sp = sub.add_parser(
+        "split",
+        help="Split a sweep's inputs and rollouts into one directory per manifest entry.",
+    )
+    sp.add_argument("sweep_dir", help="The <out-dir>/<nickname> directory materialize wrote.")
+    sp.add_argument("--out-dir", default=None, help="Where per-label directories go. Default <sweep_dir>/by_label.")
+
     cc = sub.add_parser(
         "container-config",
         help="Union several manifests' config_paths into one config for building a container.",
@@ -91,6 +99,21 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        if args.command == "split":
+            result = split_sweep(args.sweep_dir, args.out_dir)
+            for label, counts in sorted(result.counts.items()):
+                print(f"  {label:<32} {counts.inputs:>7,} inputs  {counts.rollouts:>7,} rollouts")
+            print(f"wrote {len(result.counts)} label directories under {result.out_dir}")
+            if result.labels_without_rollouts:
+                missing = ", ".join(result.labels_without_rollouts)
+                print(f"no rollouts for {len(result.labels_without_rollouts)}: {missing}")
+            if result.unmapped_inputs or result.unmapped_rollouts:
+                print(
+                    f"warn: {result.unmapped_inputs:,} inputs and {result.unmapped_rollouts:,} rollouts "
+                    "had no task index in any entry range and were dropped."
+                )
+            return 0
+
         if args.command == "container-config":
             manifests = [load_manifest(m) for m in args.manifests]
             doc = container_config(manifests)
@@ -165,7 +188,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 0
-    except SweepValidationError as exc:
+    except (SweepValidationError, SweepSplitError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
 

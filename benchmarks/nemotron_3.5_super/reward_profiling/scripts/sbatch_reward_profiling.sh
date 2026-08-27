@@ -194,7 +194,24 @@ gym eval run --no-serve --resume \\
     ++port_range_low=63000 \\
     ++port_range_high=64000
 
-# Per-task reward summary. allow_partial_rollouts so a walltime kill still yields a profile.
+# Split back out to one directory per manifest entry, then profile each separately. agent_ref
+# cannot do this -- the three ns_tools entries share ns_tools_simple_agent -- so the split keys on
+# _ng_task_index against the task_index_range materialize recorded per entry.
+python -m nemo_gym.sweep split $SWEEP_DIR
+
+for _label_dir in $SWEEP_DIR/by_label/*/; do
+    _label=\$(basename "\$_label_dir")
+    [ -s "\$_label_dir/rollouts.jsonl" ] || { echo "skipping \$_label: no rollouts"; continue; }
+    echo "=== profiling \$_label ==="
+    gym eval profile \\
+        --inputs "\$_label_dir/rollouts_materialized_inputs.jsonl" \\
+        --rollouts "\$_label_dir/rollouts.jsonl" \\
+        ++allow_partial_rollouts=True > "\$_label_dir/profile.txt" 2>&1 \
+        || echo "  profile failed for \$_label; see \$_label_dir/profile.txt" >&2
+    tail -5 "\$_label_dir/profile.txt" || true
+done
+
+# Sweep-wide summary as well. allow_partial_rollouts so a walltime kill still yields a profile.
 gym eval profile \\
     --inputs $SWEEP_DIR/rollouts_materialized_inputs.jsonl \\
     --rollouts $SWEEP_DIR/rollouts.jsonl \\

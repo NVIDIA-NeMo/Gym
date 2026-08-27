@@ -24,6 +24,7 @@ import pytest
 import yaml
 
 from nemo_gym.sweep.build import build_sweep, container_config
+from nemo_gym.sweep.split import SweepSplitError, split_sweep
 from nemo_gym.sweep.manifest import SweepValidationError, load_manifest, validate_manifest
 
 
@@ -567,3 +568,56 @@ def test_container_config_includes_overlay_declared_servers(tmp_path):
     )
     cfg = container_config([manifest])
     assert cfg["judge_model"]["responses_api_models"]["openai_model"]["entrypoint"] == "app.py"
+
+
+def _sweep_dir_with_ranges(tmp_path, ranges, inputs, rollouts):
+    d = tmp_path / "sweep"
+    d.mkdir()
+    (d / "sweep_report.json").write_text(json.dumps({
+        "entries": {label: {"task_index_range": [lo, hi]} for label, lo, hi in ranges}
+    }))
+    (d / "rollouts_materialized_inputs.jsonl").write_text(
+        "".join(json.dumps({"_ng_task_index": i, "x": 1}) + "\n" for i in inputs))
+    (d / "rollouts.jsonl").write_text(
+        "".join(json.dumps({"_ng_task_index": i, "reward": 1.0}) + "\n" for i in rollouts))
+    return d
+
+
+def test_split_separates_entries_that_share_an_agent(tmp_path):
+    """agent_ref cannot do this: ns_tools entries share one agent, task_index_range does not."""
+    d = _sweep_dir_with_ranges(
+        tmp_path,
+        [("math_tir", 0, 1), ("stem_mcqa", 2, 3), ("stem_openqa", 4, 4)],
+        inputs=[0, 1, 2, 3, 4],
+        rollouts=[0, 0, 2, 4],
+    )
+    result = split_sweep(d)
+    assert {k: (v.inputs, v.rollouts) for k, v in result.counts.items()} == {
+        "math_tir": (2, 2), "stem_mcqa": (2, 1), "stem_openqa": (1, 1),
+    }
+    written = json.loads((result.out_dir / "math_tir" / "rollouts.jsonl").read_text().splitlines()[0])
+    assert written["_ng_task_index"] == 0
+
+
+def test_split_reports_labels_that_collected_nothing(tmp_path):
+    """A label with no rollouts must show as zero, not vanish -- that silence is the finding."""
+    d = _sweep_dir_with_ranges(
+        tmp_path, [("ran", 0, 0), ("silent", 1, 1)], inputs=[0, 1], rollouts=[0])
+    result = split_sweep(d)
+    assert result.labels_without_rollouts == ["silent"]
+    assert result.counts["silent"].inputs == 1
+    report = json.loads((result.out_dir / "split_report.json").read_text())
+    assert report["labels_without_rollouts"] == ["silent"]
+
+
+def test_split_counts_rows_outside_every_range(tmp_path):
+    d = _sweep_dir_with_ranges(tmp_path, [("only", 0, 0)], inputs=[0, 7], rollouts=[9])
+    result = split_sweep(d)
+    assert result.unmapped_inputs == 1
+    assert result.unmapped_rollouts == 1
+
+
+def test_split_rejects_overlapping_ranges(tmp_path):
+    d = _sweep_dir_with_ranges(tmp_path, [("a", 0, 3), ("b", 2, 5)], inputs=[0], rollouts=[0])
+    with pytest.raises(SweepSplitError, match="overlap"):
+        split_sweep(d)
