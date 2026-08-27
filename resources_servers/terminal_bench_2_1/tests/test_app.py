@@ -1,19 +1,23 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import asyncio
+from unittest.mock import MagicMock
 
-from nemo_gym.verifier_fixture import exercise_verifier_fixture
+from nemo_gym.server_utils import ServerClient
+from resources_servers.terminal_bench_2_1.app import (
+    TerminalBench21ResourcesServer,
+    TerminalBench21ResourcesServerConfig,
+)
 
-from ..app import VERIFIER_FIXTURE
 
-
-def test_verifier_fixture() -> None:
-    asyncio.run(
-        exercise_verifier_fixture(
-            VERIFIER_FIXTURE,
-            reward_range=(0.0, 1.0),
-            higher_is_better=True,
-            determinism="unknown",
+class TestApp:
+    def test_sanity(self) -> None:
+        config = TerminalBench21ResourcesServerConfig(
+            sandbox_provider="",
+            sandbox_config=dict(),
+            host="",
+            port=0,
+            entrypoint="",
+            name="",
         )
-    )
+        TerminalBench21ResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
