@@ -90,6 +90,20 @@ claude_code_agent:
 
 Both the run-wide `enabled` setting and the agent opt-in are required. To capture every configured agent, set `token_id_capture.all_agents: true` instead of setting the flag on each agent.
 
+Some harnesses probe optional model-server endpoints such as `/v1/models`. Gym does not need to implement or predict these endpoints, and no per-harness route configuration is required. An unimplemented request that returns 404 or 405 cannot contribute policy-generated text and does not make capture incomplete. Any other response from an unrecognized route fails closed because its content could enter a later prompt; the rollout is marked with `mask_sample: true`.
+
+If a custom model server implements a successful metadata, health, or tokenization route whose response cannot contain policy-generated content, declare the exact method and path once on that model server:
+
+```yaml
+responses_api_models:
+  custom_model:
+    token_id_capture_non_generating_requests:
+      - method: GET
+        path: /custom/metadata
+```
+
+Declarations belong to the model server because the server owns the route and its response semantics. Gym rejects wildcards, query strings, non-string methods, and paths without a leading slash. Do not declare title generation, summarization, compaction, or another endpoint that can return policy-generated text. Unknown redirects, server errors, exceptions, and requests that finish without starting a response all mark the rollout incomplete.
+
 <Note>
 Native Gym agents normally leave `token_id_capture` disabled because their responses already contain the token ids needed for training.
 </Note>

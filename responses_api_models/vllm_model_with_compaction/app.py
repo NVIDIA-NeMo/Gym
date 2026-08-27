@@ -4,7 +4,7 @@
 """vLLM model server with exact-prefix context-compaction support."""
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 
 from fastapi import Body, Request
 from fastapi.exceptions import RequestValidationError
@@ -52,6 +52,7 @@ def _validate_context_compaction_params(body: Dict[str, Any]) -> VLLMContextComp
 class VLLMModelWithCompaction(VLLMModel):
     """Dedicated vLLM adapter for context-compacted generation."""
 
+    non_generating_model_routes: ClassVar[frozenset[tuple[str, str]]] = frozenset({("POST", "/tokenize")})
     _TOKENIZE_CHAT_FIELDS = (*VLLMModel._TOKENIZE_CHAT_FIELDS, "required_prefix_token_ids")
 
     def setup_webserver(self):
