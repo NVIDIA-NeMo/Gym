@@ -3856,7 +3856,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         # 4) Memory watchdog killed the agent container (OOM).
         # 5) Memory watchdog killed the eval container.
         persisted_metrics = SWEBenchMetrics.model_validate(update_and_read_metrics(params.metrics_fpath))
-        resolved_now = metrics_to_update.get("resolved", False)
         agent_error_kind = persisted_metrics.agent_error_kind
         eval_timed_out = bool(persisted_metrics.eval_timed_out)
         agent_timed_out = bool(persisted_metrics.agent_timed_out)
