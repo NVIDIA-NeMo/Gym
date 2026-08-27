@@ -5,7 +5,109 @@ position: 4
 ---
 
 <AccordionGroup>
-<Accordion title="v0.5.0" defaultOpen>
+<Accordion title="v0.6.0" defaultOpen>
+
+### Release Summary
+
+NeMo Gym v0.6.0 expands evaluation and training workflows with mixed-agent rollout routing, token-ID capture for external agent harnesses, multi-node vLLM orchestration, richer sandbox lifecycle controls, and new benchmark and agent integrations.
+
+Highlights:
+
+- Route tasks from one run to different agents and datasets with `task_source`, `agent_map`, and run-level fan-out
+- Capture training token IDs from external agent harnesses and rebuild multi-call trajectories into a single training response
+- Scale evaluation across multiple vLLM instances and nodes with `gym eval submit`
+- Check rollout artifacts automatically with `gym eval health-check` and structured quality reports
+- Run long-lived sandbox commands through interactive or detached PTY sessions, with run-scoped OpenSandbox cleanup
+- Export evaluation results to MLflow and add optional OpenTelemetry instrumentation through NeMo Lens
+- New environments for software engineering, tool use, long-context reasoning, spatial reasoning, social bias, finance, multimodal evaluation, and agentic math
+
+### Command Line Interface
+
+- `gym eval submit` supports multiple vLLM instances on one node or across multiple nodes
+- Evaluation runs can route tasks to different agents with an `agent_map`; invalid agent mappings fail before dispatch
+- Resources servers can declare datasets, and collated rows retain their `task_source` for run-level dataset fan-out
+- Environment manifests add static validation, profile-aware scaffolding, and onboarding catalog commands
+- Verification can be skipped when collecting rollouts for workflows that score results separately
+- Results and cache roots are configurable, including the artifacts and setup trees used by SWE environments
+
+### Infrastructure and Extensibility
+
+- A stable top-level `nemo_gym` API exposes server extension classes, request and response contracts, clients, configuration, and metrics types without requiring imports from internal modules
+- Model endpoint checks catch unavailable inference backends before a run starts
+- Optional OpenTelemetry instrumentation through NeMo Lens and MLflow export complement existing run observability
+
+### Evaluation and Training
+
+- External agent harnesses can return exact training token IDs; multi-call episodes are chained into one response and rebuilt trajectories are delivered safely to training consumers
+- `gym eval health-check` evaluates stored `ng_trajectory` records for missing turns, failed or inconsistent model calls, token-count mismatches, and runaway generation; evaluation and aggregation run the checks automatically and write structured quality reports
+- Verifier responses can include a structured `failure_reason`, and judge endpoints retry transient failures
+- Agent observations now cover OpenClaw, Hermes, Pi, OpenCode, and SWE agents
+
+### Sandboxing and Orchestration
+
+- Interactive PTY sessions support terminal-based agents, while detached PTY execution runs long commands without holding an HTTP connection open
+- OpenSandbox adds configurable network policy, run-scoped cleanup, bounded background-status polling, and an OpenSandbox backend for OSWorld
+- Experimental Slurm orchestration supports environment variables, container mounts, and output parameters
+- The Apptainer provider accepts a custom binary path
+
+### Configure Agent Harnesses
+
+- **OpenCode Sandboxed Agent** runs OpenCode against SWE-Bench tasks through the Gym sandbox interface
+- **Cline** integrates the Cline CLI as a Gym agent harness
+- **Prime Agent** adds Prime Intellect's agent for reasoning and math environments
+- **Strands Agent** adds a lightweight tool-using agent harness
+- **Simple Agent with Compaction** adds context compaction for long-running agent sessions
+- **Image Tools Agent** supports visual inspection trajectories and PivotRL action verification
+- **VCQA Agent** evaluates read-only code investigation on real repository snapshots
+- OpenClaw can run through AnyTerminal and preserves partial traces when a timeout cuts a run short
+
+### Configure Models
+
+- **LiteLLM Model** connects Gym to providers supported by LiteLLM
+- **Switchyard Model** supports router-backed evaluations and records the selected condition as provenance
+- vLLM serving supports vLLM 0.25.1, video inputs, pinned on-policy sampling parameters, and multiple instances per evaluation job
+- Hermes accepts `max_tokens`, configurable API keys, and custom chat-template arguments
+
+### New Environments and Benchmarks
+
+- **Coding and agentic:** SWE-Bench Verified and Multilingual with OpenCode, Verified Code QA, synthetic conversational tool use, Vals Finance Agent v2, and a local full-text backend for Finance SEC Search
+- **Long context and knowledge:** LongMemEval, RULER v2, Citation IF, and an HLE vision variant
+- **Reasoning and spatial:** SpartQA, agentic math environments across multiple harnesses, and four Aviary environments for BBH, BixBench, GSM8K, and HotpotQA
+- **Safety and instruction following:** BBQ-style social-bias comparative QA with answer and explanation-quality judges
+- **Science and networking:** Litmus ADME benchmark profiles and OpenAir 5G congestion control
+- **Multimodal and tool use:** image-tool PivotRL verification with parallel tool-call argument comparison
+
+See the [Available Environments](https://github.com/NVIDIA-NeMo/Gym#-available-environments) table for the full list.
+
+### Deprecation Notices
+
+- `upload_rollouts_to_wandb` is deprecated in favor of the exporter-neutral `upload_rollouts`; the old setting continues to work with a warning
+- Incompatible parent OpenAI SDK versions now fail during configuration unless `allow_openai_version_skew: true` is set explicitly
+- Finance Agent v2 now uses the shared `finance_agent` harness; custom configurations or imports that reference the removed `finance_agent_v2` harness must migrate
+
+### Bug Fixes
+
+- Preserved structured function outputs, reasoning effort, unknown usage fields, and hosted-tool output items across Responses and Chat Completions conversions
+- Added Chat Completions conversion support for audio, files, custom tools, and omitted tool lists; fixed several malformed and parallel tool-call conversion cases
+- Fixed recursive `config_paths` overrides and preserved sibling order when flattening global configuration
+- Made dry runs fail when server environment setup fails and improved errors for unresolved interpolation and catalog lookup failures
+- Fixed OpenSandbox authentication on proxied execution routes, startup races, dead backends, out-of-memory reporting, and repeated termination
+- Added non-root Docker runtime support and kept generated OpenShell sandbox names routable
+- Preferred inline token metadata over prompt re-tokenization in vLLM and preserved per-episode HTTP affinity in Harbor
+- Fixed OpenHands output-token forwarding and build-retry exit handling, plus OpenCode and SWE-Bench sandbox hardening
+- Prevented fresh runs from retaining stale failure sidecars or rewriting unchanged dataset-metrics sidecars
+- Fixed SciCode execution with large generated programs, EvalPlus handling of non-picklable MBPP outputs, and LongMT cache placement
+- Preserved HTTP error details across process boundaries and fixed AnyTerminal secret redaction corrupting unrelated configuration fields
+
+### Documentation
+
+- Added recipes for common evaluation and training workflows
+- Documented training on rollouts produced by an external agent harness
+- Expanded verifier guidance for equivalence matching and single-step tool-use environments
+
+</Accordion>
+
+<Accordion title="v0.5.0">
 
 ### Release Summary
 
