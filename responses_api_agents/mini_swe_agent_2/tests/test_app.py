@@ -67,6 +67,8 @@ from responses_api_agents.mini_swe_agent_2.app import (
 )
 
 
+ROLLOUT_ID = "123e4567-e89b-42d3-a456-426614174000"
+
 DEFAULT_RUN_MINI_SWE_RESULT = {
     "test_instance_123": {
         "input_messages": [
@@ -212,6 +214,7 @@ def create_run_request(
         instance_id=instance_id,
         subset=subset,
         split=split,
+        **{"_ng_rollout_id": ROLLOUT_ID},
         responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
             temperature=temperature,
             top_p=top_p,
@@ -725,7 +728,7 @@ class TestApp:
         setup_server_client_mocks(mock_server_client, mock_get_first_server_config_dict)
         # The rollout prefix is only applied when model-call capture is enabled.
         mock_server_client.global_config_dict["observability_enabled"] = True
-        rollout_id = "123e4567-e89b-42d3-a456-426614174000"
+        rollout_id = ROLLOUT_ID
         setup_config_path_mock(mock_get_config_path)
         setup_run_mini_swe_mock(mock_runner_ray_remote)
 

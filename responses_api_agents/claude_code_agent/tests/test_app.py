@@ -47,6 +47,9 @@ from responses_api_agents.claude_code_agent.app import (
 from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations
 
 
+ROLLOUT_ID = "123e4567-e89b-42d3-a456-426614174000"
+
+
 def _write_skill_dir(root: Path, name: str = "cot_enhanced") -> Path:
     skills_dir = root / "variant_a"
     skill = skills_dir / name
@@ -300,6 +303,7 @@ class TestRunForwardsSkillsPath:
             {
                 "responses_create_params": {"input": []},
                 SKILLS_REF_KEY_NAME: {"path": "skills/variant_a/", "hash": "abc123", "skills": []},
+                "_ng_rollout_id": ROLLOUT_ID,
             }
         )
 
@@ -312,7 +316,9 @@ class TestRunForwardsSkillsPath:
         run_claude_code = AsyncMock(
             return_value=([], "claude-sonnet-4-6", {"status": "incomplete", "error_type": "result_missing"})
         )
-        body = ClaudeCodeAgentRunRequest.model_validate({"responses_create_params": {"input": []}})
+        body = ClaudeCodeAgentRunRequest.model_validate(
+            {"responses_create_params": {"input": []}, "_ng_rollout_id": ROLLOUT_ID}
+        )
 
         result = self._run(agent, body, run_claude_code)
 
@@ -368,6 +374,7 @@ class TestObservability:
                 "responses_create_params": {"input": "solve"},
                 "_ng_task_index": 1,
                 "_ng_rollout_index": 2,
+                "_ng_rollout_id": ROLLOUT_ID,
             }
         )
         with patch.object(ClaudeCodeAgent, "_run_claude_code", run_claude_code):
@@ -741,6 +748,7 @@ class TestRolloutMCPConfig:
         body = ClaudeCodeAgentRunRequest(
             responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="use the weather tool"),
             expected_city="Paris",
+            **{"_ng_rollout_id": ROLLOUT_ID},
         )
 
         result = asyncio.run(agent.run(request, body))
@@ -797,6 +805,7 @@ class TestRolloutMCPConfig:
         body = ClaudeCodeAgentRunRequest(
             responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="use the weather tool"),
             verifier_metadata={"expected_city": "Paris"},
+            **{"_ng_rollout_id": ROLLOUT_ID},
         )
 
         asyncio.run(agent.run(request, body))

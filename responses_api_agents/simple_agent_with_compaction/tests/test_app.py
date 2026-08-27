@@ -690,6 +690,7 @@ class TestApp:
             context_compaction_task_id="task-run",
             context_compaction_rollout_index=2,
             context_compaction_attempt_index=1,
+            **{"_ng_rollout_id": "123e4567-e89b-42d3-a456-426614174000"},
         )
 
         verified_base_response = NeMoGymResponse.model_validate(compacted.model_dump())

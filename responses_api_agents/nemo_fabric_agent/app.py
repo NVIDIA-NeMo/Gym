@@ -290,7 +290,7 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
                 request=RunRequest(
                     input=request_input,
                     request_id=rollout_id or f"request-{uuid4().hex}",
-                    context={"nemo_gym_rollout_id": rollout_id} if rollout_id else {},
+                    context={"nemo_gym_rollout_id": rollout_id},
                 ),
             )
 

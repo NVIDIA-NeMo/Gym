@@ -19,7 +19,6 @@ import pytest
 from fastapi import Body, FastAPI
 from fastapi.responses import JSONResponse
 from omegaconf import OmegaConf
-from pydantic import ConfigDict
 from starlette.testclient import TestClient
 
 import nemo_gym.server_utils
@@ -103,7 +102,7 @@ class _JudgeResourcesServer(SimpleResourcesServer):
 
 
 class _AgentRunRequest(BaseRunRequest):
-    model_config = ConfigDict(extra="allow")
+    pass
 
 
 class _Agent(SimpleResponsesAPIAgent):

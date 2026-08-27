@@ -472,7 +472,8 @@ class TestApp:
         request_mock = MagicMock()
         request_mock.cookies = {}
         body = BrowsecompAgentRunRequest(
-            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "q"}])
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "q"}]),
+            **{"_ng_rollout_id": "123e4567-e89b-42d3-a456-426614174000"},
         )
         result = await agent.run(request_mock, body)
 

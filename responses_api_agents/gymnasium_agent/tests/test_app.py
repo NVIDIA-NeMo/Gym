@@ -23,6 +23,9 @@ from nemo_gym.server_utils import ServerClient
 from responses_api_agents.gymnasium_agent.app import GymnasiumAgent, GymnasiumAgentConfig, GymnasiumAgentRunRequest
 
 
+ROLLOUT_ID = "123e4567-e89b-42d3-a456-426614174000"
+
+
 def _make_agent(max_steps=10, observability=True):
     config = GymnasiumAgentConfig(
         host="",
@@ -144,7 +147,7 @@ class TestRun:
     @pytest.mark.asyncio
     async def test_terminates_on_first_step(self):
         agent = _make_agent()
-        rollout_id = "123e4567-e89b-42d3-a456-426614174000"
+        rollout_id = ROLLOUT_ID
         model_path = f"/ng-rollout/{rollout_id}/v1/responses"
         payloads = {
             "/reset": [{"observation": "go", "info": {}}],
@@ -208,7 +211,10 @@ class TestRun:
         agent.server_client.post = AsyncMock(side_effect=_post)
         req = MagicMock()
         req.cookies = {}
-        body = GymnasiumAgentRunRequest(responses_create_params={"input": [{"role": "user", "content": "play"}]})
+        body = GymnasiumAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "play"}]},
+            **{"_ng_rollout_id": ROLLOUT_ID},
+        )
 
         result = await agent.run(req, body)
 
@@ -233,7 +239,7 @@ class TestRun:
         req.cookies = {}
         body = GymnasiumAgentRunRequest(
             responses_create_params={"input": [{"role": "user", "content": "play"}]},
-            **{TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0},
+            **{TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0, "_ng_rollout_id": ROLLOUT_ID},
         )
         result = await agent.run(req, body)
         assert result.terminated is True
@@ -260,7 +266,10 @@ class TestRun:
         )
         req = MagicMock()
         req.cookies = {}
-        body = GymnasiumAgentRunRequest(responses_create_params={"input": [{"role": "user", "content": "play"}]})
+        body = GymnasiumAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "play"}]},
+            **{"_ng_rollout_id": ROLLOUT_ID},
+        )
         result = await agent.run(req, body)
         assert result.reward == 1.0
         assert result.terminated is True
@@ -301,7 +310,10 @@ class TestRun:
         )
         req = MagicMock()
         req.cookies = {}
-        body = GymnasiumAgentRunRequest(responses_create_params={"input": [{"role": "user", "content": "x"}]})
+        body = GymnasiumAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "x"}]},
+            **{"_ng_rollout_id": ROLLOUT_ID},
+        )
         result = await agent.run(req, body)
         assert result.truncated is True
         assert result.terminated is False
@@ -325,7 +337,10 @@ class TestRun:
         agent.server_client.post = AsyncMock(side_effect=_post)
         req = MagicMock()
         req.cookies = {}
-        body = GymnasiumAgentRunRequest(responses_create_params={"input": [{"role": "user", "content": "x"}]})
+        body = GymnasiumAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "x"}]},
+            **{"_ng_rollout_id": ROLLOUT_ID},
+        )
 
         with pytest.raises(RuntimeError, match="model server unavailable"):
             await agent.run(req, body)
@@ -357,7 +372,10 @@ class TestRun:
         agent.server_client.post = AsyncMock(side_effect=_post)
         req = MagicMock()
         req.cookies = {}
-        body = GymnasiumAgentRunRequest(responses_create_params={"input": [{"role": "user", "content": "x"}]})
+        body = GymnasiumAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "x"}]},
+            **{"_ng_rollout_id": ROLLOUT_ID},
+        )
 
         with pytest.raises(Exception):
             await agent.run(req, body)
@@ -382,7 +400,10 @@ class TestRun:
         agent.server_client.post = AsyncMock(side_effect=_post)
         req = MagicMock()
         req.cookies = {"session": "existing-cookie"}
-        body = GymnasiumAgentRunRequest(responses_create_params={"input": [{"role": "user", "content": "x"}]})
+        body = GymnasiumAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "x"}]},
+            **{"_ng_rollout_id": ROLLOUT_ID},
+        )
 
         with pytest.raises(RuntimeError, match="model server unavailable"):
             await agent.run(req, body)
@@ -413,7 +434,10 @@ class TestRun:
         )
         req = MagicMock()
         req.cookies = {}
-        body = GymnasiumAgentRunRequest(responses_create_params={"input": [{"role": "user", "content": "x"}]})
+        body = GymnasiumAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "x"}]},
+            **{"_ng_rollout_id": ROLLOUT_ID},
+        )
         result = await agent.run(req, body)
         # usage summed across both turns
         assert result.response.usage.input_tokens == 16

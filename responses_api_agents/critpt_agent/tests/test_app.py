@@ -97,6 +97,7 @@ def _make_run_body(
         ),
         problem_id=problem_id,
         code_template=code_template,
+        **{"_ng_rollout_id": "123e4567-e89b-42d3-a456-426614174000"},
     )
 
 

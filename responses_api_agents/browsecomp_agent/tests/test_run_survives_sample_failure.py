@@ -153,6 +153,7 @@ def _run_body() -> BrowsecompAgentRunRequest:
         {
             "responses_create_params": {"input": [{"role": "user", "content": "Q?"}]},
             "question": "Q?",
+            "_ng_rollout_id": "123e4567-e89b-42d3-a456-426614174000",
         }
     )
 

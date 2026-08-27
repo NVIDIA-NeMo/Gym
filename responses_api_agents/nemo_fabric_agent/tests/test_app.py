@@ -32,6 +32,9 @@ from responses_api_agents.nemo_fabric_agent.app import (
 )
 
 
+ROLLOUT_ID = "123e4567-e89b-42d3-a456-426614174000"
+
+
 def _config(**kwargs) -> NeMoFabricAgentConfig:
     kwargs.setdefault("resources_server", ResourcesServerRef(type="resources_servers", name="resources"))
     kwargs.setdefault("model_server", ModelServerRef(type="responses_api_models", name="policy_model"))
@@ -329,6 +332,7 @@ def test_run_preserves_fabric_result_and_verifies(
             SKILLS_REF_KEY_NAME: None,
             TASK_INDEX_KEY_NAME: 3,
             ROLLOUT_INDEX_KEY_NAME: 7,
+            "_ng_rollout_id": ROLLOUT_ID,
         }
     )
     request = MagicMock()
@@ -351,8 +355,8 @@ def test_run_preserves_fabric_result_and_verifies(
     assert result.response.usage.output_tokens == 4
     called_config = fabric.run.call_args.args[0].to_mapping()
     called_request = fabric.run.call_args.kwargs["request"]
-    assert called_request.request_id == "3-7"
-    assert called_request.context == {"nemo_gym_rollout_id": "3-7"}
+    assert called_request.request_id == ROLLOUT_ID
+    assert called_request.context == {"nemo_gym_rollout_id": ROLLOUT_ID}
     dynamic = called_config["mcp"]["servers"]["resources"]
     assert dynamic["transport"] == "streamable-http"
     assert dynamic["custom_headers"] == {"X-NeMo-Gym-Session-Token": "token"}

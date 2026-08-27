@@ -46,6 +46,9 @@ from responses_api_agents.codex_agent.app import (
 )
 
 
+ROLLOUT_ID = "123e4567-e89b-42d3-a456-426614174000"
+
+
 def _write_skill_dir(root: Path, name: str = "cot_enhanced") -> Path:
     skills_dir = root / "variant_a"
     skill = skills_dir / name
@@ -316,6 +319,7 @@ class TestRunForwardsSkillsPath:
             {
                 "responses_create_params": {"input": []},
                 SKILLS_REF_KEY_NAME: {"path": "skills/variant_a/", "hash": "abc123", "skills": []},
+                "_ng_rollout_id": ROLLOUT_ID,
             }
         )
 
@@ -326,7 +330,9 @@ class TestRunForwardsSkillsPath:
     def test_no_skills_ref_forwards_none(self) -> None:
         agent = _make_agent()
         run_codex = AsyncMock(return_value=("", "codex-default"))
-        body = CodexAgentRunRequest.model_validate({"responses_create_params": {"input": []}})
+        body = CodexAgentRunRequest.model_validate(
+            {"responses_create_params": {"input": []}, "_ng_rollout_id": ROLLOUT_ID}
+        )
 
         self._run(agent, body, run_codex)
 
@@ -529,6 +535,7 @@ class TestRolloutMCPServers:
         body = CodexAgentRunRequest(
             responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="use the weather tool"),
             expected_city="Paris",
+            **{"_ng_rollout_id": ROLLOUT_ID},
         )
 
         result = asyncio.run(agent.run(request, body))
@@ -572,6 +579,7 @@ class TestRolloutMCPServers:
         body = CodexAgentRunRequest(
             responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="use the weather tool"),
             verifier_metadata={"expected_city": "Paris"},
+            **{"_ng_rollout_id": ROLLOUT_ID},
         )
 
         asyncio.run(agent.run(request, body))

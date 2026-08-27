@@ -17,7 +17,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Optional
 
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 if TYPE_CHECKING:
@@ -86,6 +86,8 @@ class BaseResourcesServer(BaseServer):
 
 
 class BaseRunRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
 
 

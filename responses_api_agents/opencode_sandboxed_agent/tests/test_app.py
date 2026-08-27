@@ -501,6 +501,7 @@ class TestOpenCodeSandboxedAgent:
                 "responses_create_params": {"input": [{"role": "user", "content": "solve"}]},
                 "_ng_task_index": 7,
                 "_ng_rollout_index": 2,
+                "_ng_rollout_id": ROLLOUT_ID,
             }
         )
 

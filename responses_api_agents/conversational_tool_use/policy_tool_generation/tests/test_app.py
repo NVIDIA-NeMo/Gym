@@ -143,6 +143,7 @@ def run_body() -> PolicyToolGenerationRunRequest:
         responses_create_params={"input": []},
         profile="general",
         domain={"name": "Order Support", "applications": [{"raw": True}]},
+        **{"_ng_rollout_id": "123e4567-e89b-42d3-a456-426614174000"},
     )
 
 
@@ -168,7 +169,10 @@ async def test_internal_run_uses_message_only_chat_calls_and_converts_final_comp
     assert [call["server_name"] for call in client.calls] == ["policy_generation_model"] * 4 + [
         "policy_tool_judge_model"
     ] * 7
-    assert all(call["url_path"] == "/v1/chat/completions" for call in client.calls)
+    assert all(
+        call["url_path"] == "/ng-rollout/123e4567-e89b-42d3-a456-426614174000/v1/chat/completions"
+        for call in client.calls
+    )
     assert all(set(call["json"]) == {"messages"} for call in client.calls)
     assert all(
         call["json"]["messages"][0]["role"] == "user" and isinstance(call["json"]["messages"][0]["content"], str)

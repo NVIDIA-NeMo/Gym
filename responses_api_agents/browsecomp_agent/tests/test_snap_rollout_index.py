@@ -109,6 +109,7 @@ async def test_run_seeds_rollout_index_metadata(tmp_path) -> None:
         responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "q"}]),
         _ng_task_index=7,
         _ng_rollout_index=2,
+        _ng_rollout_id="123e4567-e89b-42d3-a456-426614174000",
     )
     await agent.run(request_mock, body)
 
