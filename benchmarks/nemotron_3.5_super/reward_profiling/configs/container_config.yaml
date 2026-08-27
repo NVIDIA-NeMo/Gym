@@ -35,6 +35,8 @@ policy_model:
   responses_api_models:
     vllm_model:
       num_workers: 16
+port_range_low: 20000
+port_range_high: 30000
 math_judge_model: &id001
   responses_api_models:
     openai_model:

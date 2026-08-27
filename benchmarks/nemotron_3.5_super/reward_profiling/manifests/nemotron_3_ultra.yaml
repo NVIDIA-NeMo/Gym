@@ -24,6 +24,13 @@ gym_env_start:
       vllm_model:
         num_workers: 16
 
+  # 63 servers probe for a free port and then bind, so they can lose the race in between. Gym's
+  # default range is narrow enough that this recurred -- job 6606945 lost math_judge_model on
+  # :19729 after reporting startup complete. A wide range clear of the ephemeral range
+  # (32768-60999) makes it unlikely; 03_run.sh also retries spin-up.
+  port_range_low: 20000
+  port_range_high: 30000
+
   config_paths:
     - responses_api_models/vllm_model/configs/vllm_model.yaml
 
