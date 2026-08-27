@@ -94,6 +94,9 @@ export SBATCH_GRES=${SBATCH_GRES:-gpu:4}
 # more than protection from preemption.
 export SBATCH_QOS=${SBATCH_QOS:-interactive}
 
+# 63 servers came up in ~4 min from baked venvs; the ceiling is for a cold container that has to
+# install them at runtime.
+SERVERS_READY_TIMEOUT_S=${SERVERS_READY_TIMEOUT_S:-1800}
 SLURM_COMMENT="${SLURM_COMMENT:-}"
 
 # Fixed vLLM Port configurations
@@ -108,27 +111,56 @@ eval_command=$(cat <<EOF
 source /opt/Gym_venv/bin/activate
 cd /opt/Gym
 
-# One command serves every environment and collects against it. gym eval run dispatches to
-# e2e_rollout_collection without --no-serve (nemo_gym/cli/main.py:451) and waits for its own
-# servers internally, so there is no second process to race and no readiness gate to get wrong.
-#
-# The earlier shape here backgrounded gym env start and collected with --no-serve. That split
-# cost two runs: 6563122 raced the servers and died on "Could not connect to the head server",
-# and the port-poll gate added to fix it killed the healthy 6563167 because use_absolute_ip=true
-# binds to the node IP on dynamic ports, so 127.0.0.1:11000 never listens. Not splitting removes
-# both failure modes rather than guarding against them.
-#
-# --resume is load-bearing: Gym reads the pre-expanded inputs instead of re-expanding them
-# (~100 min single-threaded for a full sweep), and a walltime kill continues where it stopped.
-# num_repeats=1 because prepare_sweep.sh already expanded the repeats.
-gym eval run --resume \\
-    --config $SWEEP_DIR/sweep_config.yaml \\
-    --input $SWEEP_DIR/rollouts_materialized_inputs.jsonl \\
-    --output $SWEEP_DIR/rollouts.jsonl \\
+# Serve every environment in the sweep from one deployment; rollout collection routes each row
+# to the agent named in its own agent_ref.
+env_start_log=$SWEEP_DIR/env_start.log
+gym env start --config $SWEEP_DIR/sweep_config.yaml \\
+    +uv_venv_dir=/opt/uv_venvs \\
+    +skip_venv_if_present=true \\
     ++use_absolute_ip=true \\
     ++policy_base_url=http://\$(getent hosts "\$ROUTER_NODE" | awk 'NR == 1 {print \$1}'):$ROUTER_SERVER_PORT/v1 \
     ++policy_api_key=dummy_api_key \\
-    ++policy_model_name=$MODEL \\
+    ++policy_model_name=$MODEL > "\$env_start_log" 2>&1 &
+gym_servers_pid=\$!
+trap 'kill \$gym_servers_pid 2>/dev/null || true' EXIT
+
+# --no-serve is not optional here. Serving end-to-end rejects -i/--input outright
+# (rollout_collection.py:455: "the input is always the prepared dataset for the requested split"),
+# and supplying our own materialized input is the whole point of the sweep. So the servers have to
+# be started separately, which means this wait is structural rather than something to design away.
+#
+# gym env start backgrounds itself and 36 environments take a while, so without this
+# gym eval run --no-serve races it and dies with "Could not connect to the head server".
+#
+# Match on the readiness line, not a port. use_absolute_ip=true binds servers to the node IP on
+# dynamically chosen ports -- nothing ever listens on 127.0.0.1:11000 -- so polling a fixed
+# address waits forever and then kills a perfectly healthy run. This is what bench_e2e.py has
+# always matched on.
+echo "waiting for Gym servers to come up (log: \$env_start_log) ..."
+for _i in \$(seq 1 $((SERVERS_READY_TIMEOUT_S / 10))); do
+    if grep -q "servers ready!" "\$env_start_log" 2>/dev/null; then
+        grep -m1 -oE "All [0-9]+ / [0-9]+ servers ready!" "\$env_start_log"
+        break
+    fi
+    if ! kill -0 "\$gym_servers_pid" 2>/dev/null; then
+        echo "ERROR: gym env start exited before the servers came up; see \$env_start_log" >&2
+        tail -30 "\$env_start_log" >&2 || true
+        exit 1
+    fi
+    sleep 10
+done
+if ! grep -q "servers ready!" "\$env_start_log" 2>/dev/null; then
+    echo "ERROR: servers not ready within ${SERVERS_READY_TIMEOUT_S}s; see \$env_start_log" >&2
+    tail -30 "\$env_start_log" >&2 || true
+    exit 1
+fi
+
+# --resume is load-bearing: Gym reads the pre-expanded inputs instead of re-expanding them
+# (~100 min single-threaded for a full sweep), and a walltime kill continues where it stopped.
+# num_repeats=1 because prepare_sweep.sh already expanded the repeats.
+gym eval run --no-serve --resume \\
+    --input $SWEEP_DIR/rollouts_materialized_inputs.jsonl \\
+    --output $SWEEP_DIR/rollouts.jsonl \\
     ++num_repeats=1 \\
     ++num_samples_in_parallel=$NUM_SAMPLES_IN_PARALLEL \\
     +nemo_gym_log_dir=$SWEEP_DIR/logs \\
