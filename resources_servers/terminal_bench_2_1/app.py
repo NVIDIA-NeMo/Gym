@@ -241,6 +241,8 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             evaluation_completed = False
             reward = 0.0
 
+        await eval_sandbox.stop()
+
         return TerminalBench21VerifyResponse(
             **body.model_dump(),
             evaluation_completed=evaluation_completed,
