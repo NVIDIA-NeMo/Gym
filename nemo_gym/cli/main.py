@@ -176,7 +176,13 @@ RESOURCES_SERVER = Flag(
 # Shared flag: emit machine-readable JSON instead of human output. Reused by reporting commands (version, list,
 # env status). Each command reads the reserved `json` config key ad hoc via
 # global_config_dict.get(JSON_OUTPUT_KEY_NAME) (see general.py, eval.py, env.py).
-JSON = _bool_flag("json", "json", "Output as machine-readable JSON.")
+# SUPPRESS so an absent trailing `--json` can't overwrite one given before the subcommand (see build_parser).
+JSON = Flag(
+    register=lambda p: p.add_argument(
+        "--json", action="store_true", default=argparse.SUPPRESS, help="Output as machine-readable JSON."
+    ),
+    translate_to_hydra=lambda args: ["+json=true"] if getattr(args, "json", False) else [],
+)
 
 # `gym list <type> [<name>]`: an optional component name. When given, the listing command inspects that one
 # component (surfaced as the reserved `component_name` config key) instead of listing all.
@@ -786,9 +792,9 @@ COMMANDS = {
             _bool_flag("outdated", "outdated", "List only outdated packages."),
             Flag(
                 register=lambda p: p.add_argument(
-                    "--json", action="store_true", help="Output the package list as JSON."
+                    "--json", action="store_true", default=argparse.SUPPRESS, help="Output the package list as JSON."
                 ),
-                translate_to_hydra=lambda args: ["+format=json"] if args.json else [],
+                translate_to_hydra=lambda args: ["+format=json"] if getattr(args, "json", False) else [],
             ),
         ),
     ),
@@ -1029,6 +1035,10 @@ COMMANDS = {
 }
 
 
+def _accepts_json(parser: argparse.ArgumentParser) -> bool:
+    return any("--json" in action.option_strings for action in parser._actions)
+
+
 def _add_leaf(subparsers: argparse._SubParsersAction, name: str, command: Command) -> None:
     leaf = subparsers.add_parser(name, help=command.summary, description=command.summary)
     # `_parser=leaf` so error reporting (and flag "did you mean?" hints) uses this command's own options/prog.
@@ -1045,7 +1055,10 @@ def build_parser() -> argparse.ArgumentParser:
     # _GymArgumentParser propagates to every subparser (argparse defaults parser_class to type(self)).
     parser = _GymArgumentParser(prog="gym", add_help=True)
     parser.add_argument("--version", action="store_true", help="Show the NeMo Gym version and exit.")
-    parser.add_argument("--json", action="store_true", help="With --version, output as JSON.")
+    # Also registered on every command that emits JSON, so `--json` is accepted before or after the subcommand.
+    parser.add_argument(
+        "--json", action="store_true", help="Output as machine-readable JSON (--version and reporting commands)."
+    )
     # Also registered on every leaf, so `-v` is accepted before or after the subcommand.
     parser.add_argument("-v", "--verbose", action="store_true", help="Set logging level to DEBUG.")
     parser.set_defaults(_parser=parser)
@@ -1169,6 +1182,14 @@ def main() -> None:
         if command is None:
             args._parser.print_help()
             sys.exit(1)
+
+        # A pre-subcommand `--json` reaches commands that emit no JSON, where it would otherwise be dropped
+        # without a word. Reject it instead of pretending it applied.
+        if getattr(args, "json", False) and not _accepts_json(args._parser):
+            args._parser.error(
+                "--json is not supported by this command; it applies to --version and to reporting commands "
+                "such as `gym list benchmarks`, `gym search`, and `gym env status`"
+            )
 
         try:
             translated = [token for flag in command.flags for token in flag.translate_to_hydra(args)]

@@ -68,7 +68,7 @@ These options are shared across many commands.
 | `--resources-server NAME` | Select a registered resources server by name. |
 | `--model-type NAME` | Select a registered model server type by name (such as `openai_model` or `vllm_model`). |
 | `--search-dir DIR` | Extra root directory to search for components and configs. Repeatable. Applies everywhere Gym resolves paths — discovery, the `--<component>` selectors, `config_paths`, prompt configs, and data files — and is inherited by spawned servers. Equivalent to the `NEMO_GYM_EXTRA_ROOTS` environment variable; see [Configuration](/reference/configuration). |
-| `--json` | Emit machine-readable JSON instead of human-readable output (reporting commands only). |
+| `--json` | Emit machine-readable JSON instead of human-readable output (reporting commands only). Accepted before or after the subcommand; commands that emit no JSON reject it. |
 | `-v`, `--verbose` | Set the logging level to DEBUG. Flows through to spun-up servers. |
 | `-h`, `--help` | Show help for any group or command. |
 

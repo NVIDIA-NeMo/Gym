@@ -920,6 +920,36 @@ class TestJsonFlag:
         _, overrides = _dispatch_for(monkeypatch, ["list", "benchmarks"])
         assert overrides == ["+catalog_kind=benchmark"]
 
+    @pytest.mark.parametrize(
+        "argv, expected_target",
+        [
+            (["--json", "list", "benchmarks"], "nemo_gym.cli.env:list_environments"),
+            (["--json", "list", "agents"], "nemo_gym.cli.agents:list_agents"),
+            (["--json", "env", "status"], "nemo_gym.cli.env:status"),
+            (["--json", "search", "math"], "nemo_gym.cli.env:list_environments"),
+        ],
+    )
+    def test_json_before_subcommand_applies(self, monkeypatch: MonkeyPatch, argv, expected_target) -> None:
+        # `gym --json list benchmarks` must behave like `gym list benchmarks --json`, not drop the flag.
+        target, overrides = _dispatch_for(monkeypatch, argv)
+        assert target == expected_target
+        assert "+json=true" in overrides
+
+    def test_json_before_subcommand_matches_trailing_form(self, monkeypatch: MonkeyPatch) -> None:
+        leading = _dispatch_for(monkeypatch, ["--json", "list", "benchmarks"])
+        trailing = _dispatch_for(monkeypatch, ["list", "benchmarks", "--json"])
+        assert leading == trailing
+
+    def test_json_rejected_for_command_without_json_output(self, monkeypatch: MonkeyPatch) -> None:
+        # Silently dropping it is what made this a bug; a command with no JSON output must say so.
+        with pytest.raises(SystemExit) as exc_info:
+            _dispatch_for(monkeypatch, ["--json", "env", "start", "--resources-server", "mcqa"])
+        assert exc_info.value.code == 2
+
+    def test_json_still_applies_to_version(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["--version", "--json"])
+        assert overrides == ["+json=true"]
+
 
 class TestSearch:
     def test_search_query_only_defaults_to_unified_environment_catalog(self, monkeypatch: MonkeyPatch) -> None:
