@@ -239,6 +239,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         else:
             # Re-use the original sandbox
             eval_sandbox, pty_session = self._session_id_to_sandbox.pop(request.session[SESSION_ID_KEY])
+            pty_session = await eval_sandbox.pty.attach(session_id=pty_session.session_id, takeover=True)
             golden_patch_output = None
 
         if self.config.debug:
