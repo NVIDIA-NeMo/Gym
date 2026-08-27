@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import sys
+import warnings
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -318,7 +319,7 @@ _ASSETS = {
     "environment": ("environments", "", "config"),
     "resources-server": ("resources_servers", "configs", None),
     "model-type": ("responses_api_models", "configs", None),
-    "agent": ("responses_api_agents", "configs", None),
+    "agent-type": ("responses_api_agents", "configs", None),
 }
 
 
@@ -434,26 +435,48 @@ ENVIRONMENT = _asset_selector("environment")
 RESOURCES_SERVER_CONFIG = _asset_selector("resources-server")
 MODEL_TYPE = _asset_selector("model-type")
 
-AGENT = _asset_selector("agent")
-
-# Resolves per mode (see `_eval_run`): with --no-serve the value names an already-running instance to collect
-# rollouts from, otherwise it loads the named agent's config to compose. The modes are mutually exclusive.
-EVAL_RUN_AGENT = Flag(
+AGENT_TYPE = Flag(
     register=lambda p: p.add_argument(
-        "--agent",
-        "-a",
+        "--agent-type",
         metavar="NAME",
-        help="Agent to run. With --no-serve: the name of an already-running agent instance. Otherwise: the "
-        "agent (NAME or NAME/FLAVOR) to compose with the selected environment or benchmark.",
+        help="Agent (NAME or NAME/FLAVOR) to run the selected environment or benchmark.",
     ),
-    translate_to_hydra=lambda args: (
-        []
-        if not args.agent
-        else [f"+agent_name={args.agent}"]
-        if args.no_serve
-        else [f"+config_paths=[{_asset_config_path('agent', args.agent)}]"]
-    ),
+    translate_to_hydra=lambda args: _translate_agent_type(args),
 )
+
+AGENT_INSTANCE = _value_flag("agent-instance", "agent_name", "Name of the agent instance to collect rollouts with.")
+
+DEPRECATED_AGENT = Flag(
+    register=lambda p: p.add_argument("--agent", "-a", dest="agent", help=argparse.SUPPRESS),
+    translate_to_hydra=lambda args: _translate_deprecated_agent(args),
+)
+
+
+def _translate_agent_type(args: argparse.Namespace) -> list[str]:
+    """`--agent-type` picks the harness to compose, which is already fixed once the servers are up."""
+    name = getattr(args, "agent_type", None)
+    if not name:
+        return []
+    if getattr(args, "no_serve", False):
+        raise ValueError(
+            "`--agent-type` chooses which agent runs the task, which is settled once the servers are "
+            "running, so it cannot be combined with `--no-serve`. Use `--agent-instance` to name one of them."
+        )
+    return [f"+config_paths=[{_asset_config_path('agent-type', name)}]"]
+
+
+def _translate_deprecated_agent(args: argparse.Namespace) -> list[str]:
+    """`--agent` named the instance to collect rollouts with; `--agent-instance` says so unambiguously."""
+    name = getattr(args, "agent", None)
+    if not name:
+        return []
+    warnings.warn(
+        "`--agent` is deprecated and will be removed; use `--agent-instance` instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return [f"+agent_name={name}"]
+
 
 # `--search-dir`: extra component-search roots. `main()` folds these into the `NEMO_GYM_EXTRA_ROOTS` env
 # var before dispatch (see there), so a single register-only flag suffices for every command — the roots
@@ -752,7 +775,7 @@ COMMANDS = {
             ENVIRONMENT,
             RESOURCES_SERVER_CONFIG,
             MODEL_TYPE,
-            AGENT,
+            AGENT_TYPE,
             SEARCH_DIR,
             MODEL,
             MODEL_URL,
@@ -800,7 +823,7 @@ COMMANDS = {
             ENVIRONMENT,
             RESOURCES_SERVER_CONFIG,
             MODEL_TYPE,
-            AGENT,
+            AGENT_TYPE,
             SEARCH_DIR,
             MODEL,
             MODEL_URL,
@@ -816,7 +839,7 @@ COMMANDS = {
             ENVIRONMENT,
             RESOURCES_SERVER_CONFIG,
             MODEL_TYPE,
-            AGENT,
+            AGENT_TYPE,
             SEARCH_DIR,
         ),
     ),
@@ -844,7 +867,9 @@ COMMANDS = {
                 )
             ),
             _bool_flag("resume", "resume_from_cache", "Resume from cached rollouts instead of recollecting."),
-            EVAL_RUN_AGENT,
+            AGENT_TYPE,
+            AGENT_INSTANCE,
+            DEPRECATED_AGENT,
             _value_flag("input", "input_jsonl_fpath", "Input tasks JSONL file.", aliases=("-i",)),
             _value_flag("output", "output_jsonl_fpath", "Output rollouts JSONL file.", aliases=("-o",)),
             _value_flag("limit", "limit", "Maximum number of tasks to run."),
