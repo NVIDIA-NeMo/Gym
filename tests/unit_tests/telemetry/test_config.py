@@ -100,6 +100,39 @@ def test_config_is_translated_into_env_for_spawned_servers(clean_otel_env):
     assert os.environ["OTEL_SERVICE_NAME"] == "my-gym"
 
 
+def test_otlp_destination_is_translated_into_the_standard_sdk_env_vars(clean_otel_env):
+    """The OTLP endpoint/protocol/headers must reach the standard (unprefixed) OTel SDK
+    vars, since that's what the exporter itself reads — not the NEMO_GYM_OTEL_* scheme."""
+    configure_telemetry_env(
+        TelemetryConfig(
+            enabled=True,
+            otlp_endpoint="https://api.honeycomb.io",
+            otlp_protocol="http/protobuf",
+            otlp_headers="x-honeycomb-team=abc123",
+        )
+    )
+    assert os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] == "https://api.honeycomb.io"
+    assert os.environ["OTEL_EXPORTER_OTLP_PROTOCOL"] == "http/protobuf"
+    assert os.environ["OTEL_EXPORTER_OTLP_HEADERS"] == "x-honeycomb-team=abc123"
+
+
+def test_otlp_destination_env_wins_over_yaml(clean_otel_env):
+    """Same precedence as every other field: a raw env var beats the YAML block."""
+    clean_otel_env.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "https://set-by-hand.example")
+
+    configure_telemetry_env(TelemetryConfig(enabled=True, otlp_endpoint="https://from-yaml.example"))
+
+    assert os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] == "https://set-by-hand.example"
+
+
+def test_unset_otlp_fields_write_nothing(clean_otel_env):
+    """The default (None) must not clobber a collector/backend default with an empty string."""
+    configure_telemetry_env(TelemetryConfig(enabled=True))
+    assert "OTEL_EXPORTER_OTLP_ENDPOINT" not in os.environ
+    assert "OTEL_EXPORTER_OTLP_PROTOCOL" not in os.environ
+    assert "OTEL_EXPORTER_OTLP_HEADERS" not in os.environ
+
+
 def test_booleans_are_translated_as_1_and_0(clean_otel_env):
     configure_telemetry_env(TelemetryConfig(enabled=True, logs_enabled=False, metrics_enabled=True))
     assert os.environ["NEMO_GYM_OTEL_ENABLED"] == "1"

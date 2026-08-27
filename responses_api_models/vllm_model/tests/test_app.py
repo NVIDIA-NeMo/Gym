@@ -12,7 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import json
+import logging
 from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
 
@@ -53,6 +55,14 @@ from nemo_gym.openai_utils import (
     NeMoGymSummary,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.token_id_capture import (
+    CaptureContext,
+    InMemoryLineageStore,
+    TokenCaptureStore,
+    reset_token_sink,
+    resolve_parent,
+    set_token_sink,
+)
 from responses_api_models.vllm_model.app import (
     VLLMConverter,
     VLLMModel,
@@ -66,6 +76,12 @@ from responses_api_models.vllm_model.app import (
 # Used for mocking created_at timestamp generation
 FIXED_TIME = 1691418000
 FIXED_UUID = "123"
+
+_TEST_LINEAGE = InMemoryLineageStore()
+
+
+def lineage_index():
+    return _TEST_LINEAGE.index
 
 
 def test_transport_io_writer_keeps_full_payload(monkeypatch: MonkeyPatch, tmp_path) -> None:
@@ -5190,3 +5206,632 @@ class TestEndpointFile:
         now = 1701.0
         with raises(RuntimeError, match="no longer published"):
             server._maybe_rebind_endpoint()
+
+
+class TestPrefixSupply:
+    """Supply a verified parent's exact tokens to the engine.
+
+    Re-rendering can tokenize an assistant turn differently from generation.
+    A reasoning template can also omit earlier thinking.
+    Either case breaks the token chain.
+    """
+
+    @staticmethod
+    def _server(monkeypatch: MonkeyPatch, *, enabled: bool) -> VLLMModel:
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            base_url="http://api.openai.com/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            entrypoint="",
+            name="",
+            return_token_id_information=enabled,
+            uses_reasoning_parser=False,
+            supply_prefix_token_ids=enabled,
+        )
+        get_global_config_dict_mock = MagicMock(return_value={})
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
+        return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+
+    @staticmethod
+    def _armed(rollout_id: str, tmp_path) -> CaptureContext:
+        return CaptureContext(
+            rollout_id=rollout_id,
+            model_call_id="call-x",
+            token_sink=TokenCaptureStore(tmp_path),
+            lineage_store=_TEST_LINEAGE,
+        )
+
+    def test_requires_token_information_for_generation_proof(self) -> None:
+        with raises(ValueError, match="return_token_id_information=true"):
+            VLLMModelConfig(
+                host="0.0.0.0",
+                port=8081,
+                base_url="http://api.openai.com/v1",
+                api_key="dummy_key",  # pragma: allowlist secret
+                model="dummy_model",
+                entrypoint="",
+                name="",
+                return_token_id_information=False,
+                uses_reasoning_parser=False,
+                supply_prefix_token_ids=True,
+            )
+
+    def test_rejects_completions_api_prefix_supply(self) -> None:
+        with raises(ValueError, match="not supported with use_completions_api=true"):
+            VLLMModelConfig(
+                host="0.0.0.0",
+                port=8081,
+                base_url="http://api.openai.com/v1",
+                api_key="dummy_key",  # pragma: allowlist secret
+                model="dummy_model",
+                entrypoint="",
+                name="",
+                return_token_id_information=True,
+                uses_reasoning_parser=False,
+                supply_prefix_token_ids=True,
+                use_completions_api=True,
+            )
+
+    def test_supplies_the_parents_cumulative_tokens(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        server = self._server(monkeypatch, enabled=True)
+        first_turn = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+        lineage_index().for_rollout("sup-0").record("parent", first_turn, [1, 2, 3, 4], "d")
+
+        token = set_token_sink(self._armed("sup-0", tmp_path))
+        try:
+            asyncio.run(resolve_parent(first_turn + [{"role": "user", "content": "next"}]))
+            out = server._apply_prefix_supply({"messages": first_turn + [{"role": "user", "content": "next"}]})
+        finally:
+            reset_token_sink(token)
+
+        assert out["required_prefix_token_ids"] == [1, 2, 3, 4]
+
+    def test_off_by_default(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        server = self._server(monkeypatch, enabled=False)
+        turn = [{"role": "assistant", "content": "hello"}]
+        lineage_index().for_rollout("sup-1").record("parent", turn, [1, 2], "d")
+
+        token = set_token_sink(self._armed("sup-1", tmp_path))
+        try:
+            asyncio.run(resolve_parent(turn))
+            out = server._apply_prefix_supply({"messages": turn})
+        finally:
+            reset_token_sink(token)
+
+        assert "required_prefix_token_ids" not in out
+
+    def test_uncorrelated_call_is_left_alone(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._server(monkeypatch, enabled=True)
+        asyncio.run(resolve_parent([{"role": "assistant", "content": "hello"}]))
+        out = server._apply_prefix_supply({"messages": [{"role": "assistant", "content": "hello"}]})
+        assert "required_prefix_token_ids" not in out
+
+    def test_fingerprint_miss_falls_back_rather_than_supplying_something_wrong(
+        self, monkeypatch: MonkeyPatch, tmp_path
+    ) -> None:
+        """Leave a rewritten history untouched.
+
+        The backend trusts the supplied prefix.
+        A wrong prefix would generate from a conversation that the harness never requested.
+        """
+        server = self._server(monkeypatch, enabled=True)
+        lineage_index().for_rollout("sup-2").record("parent", [{"role": "assistant", "content": "hello"}], [1, 2], "d")
+
+        token = set_token_sink(self._armed("sup-2", tmp_path))
+        try:
+            asyncio.run(resolve_parent([{"role": "assistant", "content": "a summary"}]))
+            out = server._apply_prefix_supply({"messages": [{"role": "assistant", "content": "a summary"}]})
+        finally:
+            reset_token_sink(token)
+
+        assert "required_prefix_token_ids" not in out
+
+    def test_ambiguous_parent_is_not_supplied(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        server = self._server(monkeypatch, enabled=True)
+        turn = [{"role": "assistant", "content": "same"}]
+        lineage = lineage_index().for_rollout("sup-3")
+        lineage.record("a", turn, [1, 2], "da")
+        lineage.record("b", turn, [3, 4], "db")
+
+        token = set_token_sink(self._armed("sup-3", tmp_path))
+        try:
+            asyncio.run(resolve_parent(turn))
+            out = server._apply_prefix_supply({"messages": turn})
+        finally:
+            reset_token_sink(token)
+
+        assert "required_prefix_token_ids" not in out
+
+    def test_a_fork_gets_the_parents_prefix_not_the_previous_calls(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        """Give each branch the verified parent's cumulative tokens.
+
+        A running cursor would include the first branch's generation in the second branch.
+        The backend would then generate from a conversation that never happened.
+        """
+        server = self._server(monkeypatch, enabled=True)
+        shared = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "plan"}]
+        lineage = lineage_index().for_rollout("sup-4")
+        lineage.record("parent", shared, [1, 2, 3], "dp")
+        lineage.record(
+            "branch-a",
+            shared + [{"role": "user", "content": "a"}, {"role": "assistant", "content": "A"}],
+            [1, 2, 3, 9, 9],
+            "da",
+        )
+
+        token = set_token_sink(self._armed("sup-4", tmp_path))
+        try:
+            asyncio.run(resolve_parent(shared + [{"role": "user", "content": "b"}]))
+            out = server._apply_prefix_supply({"messages": shared + [{"role": "user", "content": "b"}]})
+        finally:
+            reset_token_sink(token)
+
+        assert out["required_prefix_token_ids"] == [1, 2, 3]
+
+    def test_reasoning_stripped_history_still_supplies_the_real_tokens(
+        self, monkeypatch: MonkeyPatch, tmp_path
+    ) -> None:
+        """Restore reasoning tokens omitted from the rendered history.
+
+        A reasoning template can drop earlier thinking from a later prompt.
+        The rendered prompt then cannot extend the previous generation.
+        The verified parent's recorded tokens restore the chain.
+        """
+        server = self._server(monkeypatch, enabled=True)
+        # The recorded turn included reasoning.
+        # The history returned by the harness does not.
+        recorded_turn = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "answer"}]
+        real_tokens_including_reasoning = [1, 2, 3, 4, 5, 6, 7]
+        lineage_index().for_rollout("sup-5").record("parent", recorded_turn, real_tokens_including_reasoning, "d")
+
+        token = set_token_sink(self._armed("sup-5", tmp_path))
+        try:
+            asyncio.run(resolve_parent(recorded_turn + [{"role": "user", "content": "next"}]))
+            out = server._apply_prefix_supply({"messages": recorded_turn + [{"role": "user", "content": "next"}]})
+        finally:
+            reset_token_sink(token)
+
+        assert out["required_prefix_token_ids"] == real_tokens_including_reasoning
+
+
+class TestPrefixSupplyAccounting:
+    """Distinguish requested prefixes from prefixes proven to be applied.
+
+    Contiguous chains do not prove that supply fired.
+    ``prefix_requested`` records intent only.
+    ``prefix_supplied`` records generation-time proof.
+    A lock protects the diagnostic counters.
+    """
+
+    def test_supplied_call_is_only_requested_until_generation_proves_it(
+        self, monkeypatch: MonkeyPatch, tmp_path
+    ) -> None:
+        server = TestPrefixSupply._server(monkeypatch, enabled=True)
+        turn = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}]
+        lineage_index().for_rollout("acct-0").record("parent", turn, [1, 2, 3], "d")
+
+        ctx = CaptureContext(
+            rollout_id="acct-0",
+            model_call_id="c",
+            token_sink=TokenCaptureStore(tmp_path),
+            lineage_store=_TEST_LINEAGE,
+        )
+        token = set_token_sink(ctx)
+        try:
+            asyncio.run(resolve_parent(turn + [{"role": "user", "content": "next"}]))
+            out = server._apply_prefix_supply({"messages": turn + [{"role": "user", "content": "next"}]})
+        finally:
+            reset_token_sink(token)
+
+        assert out["required_prefix_token_ids"] == [1, 2, 3]
+        assert ctx.prefix_requested is True
+        assert ctx.prefix_supplied is False
+        # A resolved parent makes this call eligible.
+        # Generation proof has not landed yet.
+        assert server._prefix_supply_counts == [0, 1, 1]
+
+    def test_fallback_counts_in_total_but_not_as_eligible(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
+        server = TestPrefixSupply._server(monkeypatch, enabled=True)
+        lineage_index().for_rollout("acct-1").record("parent", [{"role": "assistant", "content": "a"}], [1, 2], "d")
+
+        ctx = CaptureContext(
+            rollout_id="acct-1",
+            model_call_id="c",
+            token_sink=TokenCaptureStore(tmp_path),
+            lineage_store=_TEST_LINEAGE,
+        )
+        token = set_token_sink(ctx)
+        try:
+            # A rewritten history has no unique verified parent.
+            # Prefix supply must decline.
+            asyncio.run(resolve_parent([{"role": "assistant", "content": "rewritten"}]))
+            out = server._apply_prefix_supply({"messages": [{"role": "assistant", "content": "rewritten"}]})
+        finally:
+            reset_token_sink(token)
+
+        assert "required_prefix_token_ids" not in out
+        assert ctx.prefix_supplied is False
+        # A call without a resolved parent is not eligible.
+        assert server._prefix_supply_counts == [0, 0, 1]
+
+
+class TestPrefixSupplyReachesTokenize:
+    """Require generation-time proof for supplied prefixes.
+
+    The generation request carries ``required_prefix_token_ids``.
+    A supplied request skips the separate tokenize call.
+    The generation response must return the actual ``prompt_token_ids``.
+    Those token IDs prove whether the backend applied the requested prefix.
+    """
+
+    @staticmethod
+    def _model() -> VLLMModel:
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="vllm_model",
+            base_url="http://localhost:9999/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            return_token_id_information=True,
+            uses_reasoning_parser=False,
+            uses_interleaved_reasoning=False,
+            supply_prefix_token_ids=True,
+        )
+        return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+
+    def test_supplied_prefix_uses_generation_prompt_proof(self, tmp_path) -> None:
+        model = self._model()
+        app = model.setup_webserver()
+
+        turn = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+        lineage_index().for_rollout("tok-0").record("parent", turn, [11, 12, 13], "d")
+
+        chat_kwargs: dict[str, Any] = {}
+        tokenize_kwargs: dict[str, Any] = {}
+
+        async def mock_create_chat_completion(**kwargs):
+            chat_kwargs.update(kwargs)
+            return {
+                "id": "c",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "dummy_model",
+                "prompt_token_ids": [11, 12, 13, 77],
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "token_ids": [77],
+                        "message": {"role": "assistant", "content": "ok"},
+                        "logprobs": {
+                            "content": [{"token": "token_id:77", "logprob": -0.5, "bytes": None, "top_logprobs": []}]
+                        },
+                    }
+                ],
+            }
+
+        async def mock_create_tokenize(**kwargs):
+            tokenize_kwargs.update(kwargs)
+            return {"tokens": [11, 12, 13, 77]}
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        mock_client.create_tokenize = AsyncMock(side_effect=mock_create_tokenize)
+        model._clients = [mock_client]
+
+        sink = set_token_sink(
+            CaptureContext(
+                rollout_id="tok-0",
+                model_call_id="call-y",
+                token_sink=TokenCaptureStore(tmp_path),
+                lineage_store=_TEST_LINEAGE,
+            )
+        )
+        try:
+            client = TestClient(app)
+            response = client.post(
+                "/v1/chat/completions",
+                json={"messages": turn + [{"role": "user", "content": "next"}]},
+            )
+        finally:
+            reset_token_sink(sink)
+
+        assert response.status_code == 200
+        assert chat_kwargs["required_prefix_token_ids"] == [11, 12, 13]
+        assert tokenize_kwargs == {}
+        assert mock_client.create_tokenize.await_count == 0
+
+    def _supply_and_return_prompt(
+        self, tmp_path, prompt_tokens: list[int] | None, rollout: str
+    ) -> tuple[CaptureContext, RuntimeError | None]:
+        """Run one supplied call against an engine that returns ``prompt_tokens``."""
+        model = self._model()
+        app = model.setup_webserver()
+
+        turn = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+        lineage_index().for_rollout(rollout).record("parent", turn, [11, 12, 13], "d")
+
+        async def mock_create_chat_completion(**kwargs):
+            return {
+                "id": "c",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "dummy_model",
+                "prompt_token_ids": prompt_tokens,
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "token_ids": [77],
+                        "message": {"role": "assistant", "content": "ok"},
+                        "logprobs": {
+                            "content": [{"token": "token_id:77", "logprob": -0.5, "bytes": None, "top_logprobs": []}]
+                        },
+                    }
+                ],
+            }
+
+        async def mock_create_tokenize(**kwargs):
+            return {"tokens": prompt_tokens}
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        mock_client.create_tokenize = AsyncMock(side_effect=mock_create_tokenize)
+        model._clients = [mock_client]
+
+        context = CaptureContext(
+            rollout_id=rollout,
+            model_call_id="call-v",
+            token_sink=TokenCaptureStore(tmp_path),
+            lineage_store=_TEST_LINEAGE,
+        )
+        sink = set_token_sink(context)
+        error = None
+        try:
+            response = TestClient(app).post(
+                "/v1/chat/completions",
+                json={"messages": turn + [{"role": "user", "content": "next"}]},
+            )
+        except RuntimeError as caught:
+            error = caught
+            response = None
+        finally:
+            reset_token_sink(sink)
+        if response is not None:
+            assert response.status_code == 200
+        return context, error
+
+    def test_a_backend_that_ignores_the_prefix_is_recorded_as_not_supplied(self, tmp_path, caplog) -> None:
+        """Treat a requested prefix as intent until the generation response proves application.
+
+        A backend can ignore an unsupported request field and answer normally.
+        Only generation-time prompt_token_ids can detect that behavior.
+        """
+        with caplog.at_level(logging.ERROR):
+            context, error = self._supply_and_return_prompt(tmp_path, [900, 901, 77], "ver-ignored")
+        assert error is not None
+        assert context.prefix_supplied is False
+        assert "do not start with required_prefix_token_ids" in str(error)
+
+    def test_a_backend_that_applies_the_prefix_is_recorded_as_supplied(self, tmp_path) -> None:
+        """Record supply when generation-time prompt_token_ids start with the requested prefix."""
+        context, error = self._supply_and_return_prompt(tmp_path, [11, 12, 13, 77], "ver-applied")
+        assert error is None
+        assert context.prefix_supplied is True
+
+    def test_a_backend_without_generation_prompt_proof_fails_closed(self, tmp_path) -> None:
+        context, error = self._supply_and_return_prompt(tmp_path, None, "ver-unproved")
+        assert error is not None
+        assert "did not include prompt_token_ids" in str(error)
+        assert context.prefix_supplied is False
+
+    def test_tokenize_body_omits_the_prefix_when_supply_did_not_fire(self, tmp_path) -> None:
+        """Omit the prefix when no verified parent was resolved."""
+        model = self._model()
+        app = model.setup_webserver()
+
+        tokenize_kwargs: dict[str, Any] = {}
+
+        async def mock_create_chat_completion(**kwargs):
+            return {
+                "id": "c",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "dummy_model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "ok"},
+                        "logprobs": {
+                            "content": [{"token": "token_id:77", "logprob": -0.5, "bytes": None, "top_logprobs": []}]
+                        },
+                    }
+                ],
+            }
+
+        async def mock_create_tokenize(**kwargs):
+            tokenize_kwargs.update(kwargs)
+            return {"tokens": [5]}
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        mock_client.create_tokenize = AsyncMock(side_effect=mock_create_tokenize)
+        model._clients = [mock_client]
+
+        sink = set_token_sink(
+            CaptureContext(
+                rollout_id="tok-unknown",
+                model_call_id="call-z",
+                token_sink=TokenCaptureStore(tmp_path),
+                lineage_store=_TEST_LINEAGE,
+            )
+        )
+        try:
+            client = TestClient(app)
+            response = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
+        finally:
+            reset_token_sink(sink)
+
+        assert response.status_code == 200
+        assert "required_prefix_token_ids" not in tokenize_kwargs
+
+
+class TestPrefixSupplyUsesTheRequestAsReceived:
+    """Resolve the parent before request conversion or preprocessing.
+
+    Responses-to-Chat conversion and preprocessing can reshape the request body.
+    The lineage index records the request as received.
+    Resolving from the reshaped body could miss a verified parent.
+    """
+
+    def test_supply_does_not_fire_without_a_resolved_parent(self, monkeypatch, tmp_path):
+        server = TestPrefixSupply._server(monkeypatch, enabled=True)
+        turn = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+        lineage_index().for_rollout("sup-x").record("parent", turn, [1, 2, 3], "d")
+
+        token = set_token_sink(TestPrefixSupply._armed("sup-x", tmp_path))
+        try:
+            # No parent resolution proved that this request continues another call.
+            out = server._apply_prefix_supply({"messages": turn})
+        finally:
+            reset_token_sink(token)
+
+        assert "required_prefix_token_ids" not in out
+
+    def test_a_body_reshaped_after_resolution_still_supplies(self, monkeypatch, tmp_path):
+        """Preserve a verified parent decision across later request reshaping."""
+        server = TestPrefixSupply._server(monkeypatch, enabled=True)
+        original = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+        lineage_index().for_rollout("sup-y").record("parent", original, [7, 8, 9], "d")
+
+        token = set_token_sink(TestPrefixSupply._armed("sup-y", tmp_path))
+        try:
+            asyncio.run(resolve_parent(original))
+            # Conversion reshaped the messages before prefix supply ran.
+            out = server._apply_prefix_supply(
+                {"messages": [{"role": "user", "content": "reshaped beyond recognition"}]}
+            )
+        finally:
+            reset_token_sink(token)
+
+        assert out["required_prefix_token_ids"] == [7, 8, 9]
+
+
+class TestGenerationProofAcceptsBundleShape:
+    """Read generation-time prompt tokens from every supported response shape.
+
+    A backend can return prompt token IDs in a message-level bundle or a top-level transport field.
+    Prefix verification uses the same priority order as token capture.
+    """
+
+    def test_a_backend_returning_a_message_bundle_passes_verification(self, tmp_path) -> None:
+        model = TestPrefixSupplyReachesTokenize._model()
+        app = model.setup_webserver()
+
+        turn = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+        lineage_index().for_rollout("bundle-0").record("parent", turn, [11, 12, 13], "d")
+
+        async def mock_create_chat_completion(**kwargs):
+            return {
+                "id": "c",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "dummy_model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": "ok",
+                            "prompt_token_ids": [11, 12, 13, 77],
+                            "generation_token_ids": [77],
+                            "generation_log_probs": [-0.5],
+                        },
+                    }
+                ],
+            }
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        mock_client.create_tokenize = AsyncMock()
+        model._clients = [mock_client]
+
+        context = CaptureContext(
+            rollout_id="bundle-0",
+            model_call_id="call-b",
+            token_sink=TokenCaptureStore(tmp_path),
+            lineage_store=_TEST_LINEAGE,
+        )
+        sink = set_token_sink(context)
+        try:
+            response = TestClient(app).post(
+                "/v1/chat/completions",
+                json={"messages": turn + [{"role": "user", "content": "next"}]},
+            )
+        finally:
+            reset_token_sink(sink)
+
+        assert response.status_code == 200
+        assert context.prefix_supplied is True
+        assert mock_client.create_tokenize.await_count == 0
+
+    def _verify(self, tmp_path, response: dict) -> CaptureContext:
+        model = TestPrefixSupplyReachesTokenize._model()
+        context = CaptureContext(
+            rollout_id="bundle-1",
+            model_call_id="call-b",
+            token_sink=TokenCaptureStore(tmp_path),
+            lineage_store=_TEST_LINEAGE,
+        )
+        context.prefix_requested = True
+        token = set_token_sink(context)
+        try:
+            result = model._verify_generation_prefix({"required_prefix_token_ids": [11, 12, 13]}, response)
+        finally:
+            reset_token_sink(token)
+        assert result is None  # The proof has no consumer; the function returns nothing.
+        return context
+
+    def test_message_level_prompt_token_ids_outrank_top_level(self, tmp_path) -> None:
+        context = self._verify(
+            tmp_path,
+            {
+                "prompt_token_ids": [900, 901],
+                "choices": [{"index": 0, "message": {"role": "assistant", "prompt_token_ids": [11, 12, 13, 77]}}],
+            },
+        )
+        assert context.prefix_supplied is True
+
+    def test_top_level_prompt_token_ids_remain_a_valid_source(self, tmp_path) -> None:
+        context = self._verify(
+            tmp_path,
+            {
+                "prompt_token_ids": [11, 12, 13, 77],
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}}],
+            },
+        )
+        assert context.prefix_supplied is True
+
+
+class TestPrefixSupplyRejectsResponsesNative:
+    def test_rejected_at_construction(self) -> None:
+        with raises(ValueError, match="not supported with is_responses_native=true"):
+            VLLMModelConfig(
+                host="0.0.0.0",
+                port=8081,
+                base_url="http://api.openai.com/v1",
+                api_key="dummy_key",  # pragma: allowlist secret
+                model="dummy_model",
+                entrypoint="",
+                name="",
+                return_token_id_information=True,
+                uses_reasoning_parser=False,
+                supply_prefix_token_ids=True,
+                is_responses_native=True,
+            )

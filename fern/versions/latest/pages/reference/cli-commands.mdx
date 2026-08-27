@@ -40,7 +40,7 @@ gym env init                  # scaffold a resources server, environment, or ben
 gym env resolve               # resolve and print the final merged config
 gym env validate              # validate a manifest-backed workload or legacy config without services
 gym env packages              # list packages in a server's virtual environment
-gym env test                  # exercise a workload verifier or run resources-server tests
+gym env test                  # run resources-server tests
 gym env publish               # finalize readiness and confirm registry discovery
 gym env start                 # start the servers
 gym env status                # show running servers
@@ -68,7 +68,7 @@ These options are shared across many commands.
 | `--resources-server NAME` | Select a registered resources server by name. |
 | `--model-type NAME` | Select a registered model server type by name (such as `openai_model` or `vllm_model`). |
 | `--search-dir DIR` | Extra root directory to search for components and configs. Repeatable. Applies everywhere Gym resolves paths — discovery, the `--<component>` selectors, `config_paths`, prompt configs, and data files — and is inherited by spawned servers. Equivalent to the `NEMO_GYM_EXTRA_ROOTS` environment variable; see [Configuration](/reference/configuration). |
-| `--json` | Emit machine-readable JSON instead of human-readable output (reporting commands only). |
+| `--json` | Emit machine-readable JSON instead of human-readable output (reporting commands only). Accepted before or after the subcommand; commands that emit no JSON reject it. |
 | `-v`, `--verbose` | Set the logging level to DEBUG. Flows through to spun-up servers. |
 | `-h`, `--help` | Show help for any group or command. |
 
@@ -492,7 +492,8 @@ Exercise a manifest-backed workload's verifier fixture in its resources-server e
 | `--kind environment\|benchmark` | Resolve an ambiguous catalog name. |
 | `--update-expected` | Atomically update fixture rewards after every behavioral check passes. |
 | `--json` | Output the verifier report as JSON. |
-| `--resources-server NAME` | Resources server to test. Omit to test all servers. |
+| `--resources-server NAME` | Resources server to test. |
+| `--all` | Test every resources server. Slow: builds one venv per server, so it must be requested explicitly. |
 | `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 
 ```bash
@@ -502,8 +503,8 @@ gym env test my_eval
 # Test a single server
 gym env test --resources-server example_single_tool_call
 
-# Test all servers
-gym env test
+# Test all servers. Slow: builds one venv per server, so it needs an explicit opt-in.
+gym env test --all
 ```
 
 ### `gym env publish`
@@ -685,6 +686,8 @@ How it works:
 
 - **Materialized inputs.** On the first run, the fully expanded input rows (after `--num-repeats`, `--limit`, `--prompt-config`, and any overrides) are written to a sidecar file next to your output. The path is derived from `--output` by appending `_materialized_inputs` to the stem — so `rollouts.jsonl` produces `rollouts_materialized_inputs.jsonl`.
 - **Incremental output.** Successful rollouts are flushed to the main output JSONL after each completion; retriable failures go to a `<stem>_failures.jsonl` sidecar, so partial progress survives a crash.
+- **Failed agent calls.** An agent `/run` call that returns an error, or never returns a readable result, is recorded in the same sidecar as one attempt, with no reward. The class says whether the rollout ran: `agent_run_error` when the agent itself answered, since a NeMo Gym agent returns 500 when its handler raises, and `agent_request_failed` for a gateway status (429, 502, 503, 504) or no usable reply, neither of which says anything about the rollout. Other rollouts keep running, the score is computed over completed rollouts only, and resume re-dispatches the row up to `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`. A run in which nothing produced a result fails instead of reporting an empty score.
+- **Counting failures in the score.** Metrics are computed over completed rollouts only. `+count_failure_classes_as_zero=[<class>]` includes the named sidecar rows in `/aggregate_metrics` so they land in the denominator: `[agent_run_error]` counts the rollouts that reached the agent and broke, which is what a model emitting unparsable tool calls looks like from here. A row that carries no reward is scored zero for the metric input only, so neither the sidecar nor the rollouts JSONL records a verdict that no verifier gave. It works the same in `gym eval run` and `gym eval aggregate`.
 - **Matching.** On resume, completed work is matched by `(task_index, rollout_index)` against the materialized inputs, and already-completed rows are skipped. The run prints a summary such as the number of original input rows, rows already done, and rows that still need to be run.
 - **Fallback.** If either the materialized inputs or the output file is missing, resume is skipped and the run starts fresh. Without `--resume`, existing output is cleared before the run.
 
@@ -751,6 +754,16 @@ gym eval profile \
     --inputs materialized_inputs.jsonl \
     --rollouts rollouts.jsonl
 ```
+
+Writes three files next to the rollouts, named from its stem:
+
+| File | Contents |
+| --- | --- |
+| `<rollouts>_reward_profiling.jsonl` | One row per task. |
+| `<rollouts>_agent_metrics.json` | One entry per agent. |
+| `<rollouts>_repeat_level_metrics.json` | One entry per repeat. |
+
+See [Repeat-Level Metrics](/evaluation/aggregate-metrics#repeat-level-metrics) for the full field list and how to read the variability statistics.
 
 ### `gym eval reverify`
 
@@ -850,7 +863,7 @@ Use the tables below to find their `gym` replacement and update your scripts and
 | `ng_pip_list` | `gym env packages` |
 | `ng_init_resources_server` | `gym env init` |
 | `ng_test` | `gym env test` |
-| `ng_test_all` | `gym env test` (no `--resources-server`) |
+| `ng_test_all` | `gym env test --all` |
 | `ng_prepare_benchmark` | `gym eval prepare` |
 | `ng_e2e_collect_rollouts` | `gym eval run` |
 | `ng_collect_rollouts` | `gym eval run --no-serve` |

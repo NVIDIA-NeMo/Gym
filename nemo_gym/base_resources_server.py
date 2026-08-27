@@ -17,7 +17,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Optional
 
 from fastapi import FastAPI
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 if TYPE_CHECKING:
@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from nemo_gym.mcp_auto_exposure import MCPTool
 
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.global_config import ROLLOUT_ID_KEY_NAME
 from nemo_gym.judge import judge_failsafe
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
@@ -34,6 +35,7 @@ from nemo_gym.openai_utils import (
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.rollout_correlation import RolloutContextMiddleware
 from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
+from nemo_gym.telemetry.endpoints import traced_verify_endpoint
 
 
 NEMO_GYM_MCP_SESSION_TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
@@ -86,9 +88,14 @@ class BaseResourcesServer(BaseServer):
 
 
 class BaseRunRequest(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(serialize_by_alias=True)
 
+    ng_rollout_id: str | None = Field(default=None, alias=ROLLOUT_ID_KEY_NAME, exclude_if=lambda value: value is None)
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
+
+    @property
+    def _ng_rollout_id(self) -> str | None:
+        return self.ng_rollout_id
 
 
 class BaseVerifyRequest(BaseRunRequest):
@@ -146,7 +153,13 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         app.add_middleware(RolloutContextMiddleware)
 
         app.post("/seed_session")(self.seed_session)
-        app.post("/verify")(judge_failsafe(self.verify))
+        # Wrapped outside judge_failsafe so the span covers the failsafe's own handling too.
+        app.post("/verify")(
+            traced_verify_endpoint(
+                judge_failsafe(self.verify),
+                static_attributes={"nemo.gym.server.name": self.config.name},
+            )
+        )
         app.post("/aggregate_metrics")(self.aggregate_metrics)
         app.get("/reverify_mode")(self.get_reverify_mode)
 
