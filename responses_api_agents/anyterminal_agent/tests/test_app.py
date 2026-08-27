@@ -23,7 +23,7 @@ constructing the agent.
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, PropertyMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
 
@@ -32,11 +32,13 @@ from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox.providers.apptainer import ApptainerProvider
 from nemo_gym.sandbox.providers.apptainer import provider as apptainer_provider
 from nemo_gym.sandbox.providers.docker import DockerProvider
+from nemo_gym.server_utils import ServerClient
 from responses_api_agents.anyterminal_agent.app import (
     _RUNNER_TEMPLATE,
     AnyTerminalAgent,
     AnyTerminalAgentConfig,
     AnyTerminalInstanceConfig,
+    AnyTerminalServerConfig,
     GymAgentHarnessProcessor,
     RunTerminalAgent,
     _build_provider,
@@ -161,8 +163,10 @@ class TestExampleData:
 # ── helpers ───────────────────────────────────────────────────────────────────────
 
 
-def _make_body(content: str = "solve this") -> NeMoGymResponseCreateParamsNonStreaming:
-    return NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": content}], model="test-model")
+def _make_body(content: str = "solve this", **kwargs) -> NeMoGymResponseCreateParamsNonStreaming:
+    return NeMoGymResponseCreateParamsNonStreaming(
+        input=[{"role": "user", "content": content}], model="test-model", **kwargs
+    )
 
 
 def _make_instance_config(tmp_path: Path, **overrides) -> AnyTerminalInstanceConfig:
@@ -228,6 +232,50 @@ class TestReadTaskMeta:
         result = _read_task_meta(tmp_path)
         assert result.get("agent_timeout_sec") is None
         assert result.get("verifier_timeout_sec") is None
+
+
+# ── AnyTerminalAgent._setup_params ──────────────────────────────────────────────────
+
+
+def _make_setup_agent(tmp_path: Path, **config_overrides) -> AnyTerminalAgent:
+    # model_post_init has heavy side effects (deps install, provider resolution) that
+    # _setup_params doesn't touch, so bypass it and set only what _setup_params reads.
+    with patch.object(AnyTerminalAgent, "model_post_init", lambda self, context: None):
+        agent = AnyTerminalAgent(config=_config(**config_overrides), server_client=MagicMock(spec=ServerClient))
+    agent._server = AnyTerminalServerConfig(
+        run_session_id="test_session",
+        base_results_dir=tmp_path / "results",
+        model_server_url="",
+        nemo_gym_root=PARENT_DIR,
+        agent_deps_dir=tmp_path,
+    )
+    return agent
+
+
+class TestSetupParams:
+    def test_uses_per_task_timeout_by_default(self, tmp_path: Path) -> None:
+        agent = _make_setup_agent(tmp_path)
+        body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path), "agent_timeout_sec": "900"})
+
+        params = agent._setup_params(body)
+
+        assert params.tb_agent_timeout == 900
+
+    def test_global_agent_timeout_overrides_per_task_timeout(self, tmp_path: Path) -> None:
+        agent = _make_setup_agent(tmp_path, global_agent_timeout=7200)
+        body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path), "agent_timeout_sec": "900"})
+
+        params = agent._setup_params(body)
+
+        assert params.tb_agent_timeout == 7200
+
+    def test_global_agent_timeout_applies_without_per_task_timeout(self, tmp_path: Path) -> None:
+        agent = _make_setup_agent(tmp_path, global_agent_timeout=7200)
+        body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path)})
+
+        params = agent._setup_params(body)
+
+        assert params.tb_agent_timeout == 7200
 
 
 # ── _instruction_from_input ───────────────────────────────────────────────────────
