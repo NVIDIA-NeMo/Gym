@@ -3138,10 +3138,7 @@ class TestReferenceMissingCoverage:
 
     @staticmethod
     def _rows(n: int, ref: str):
-        return [
-            {TASK_INDEX_KEY_NAME: i, ROLLOUT_INDEX_KEY_NAME: 0, "reference_ids": [ref]}
-            for i in range(n)
-        ]
+        return [{TASK_INDEX_KEY_NAME: i, ROLLOUT_INDEX_KEY_NAME: 0, "reference_ids": [ref]} for i in range(n)]
 
     def _outcome(self, *, judged: int, planned: int, ref: str = "r1"):
         from resources_servers.gdpval.multistage_elo import PartialStagePolicy
@@ -3159,9 +3156,7 @@ class TestReferenceMissingCoverage:
             min_successful_rows_per_reference=1,
             waivable_failure_classes=("timeout_exceeded", "transient"),
         )
-        return _partial_stage_outcome(
-            policy, stage_rows, successful, [], set(), [ref], 1200.0, 1
-        )
+        return _partial_stage_outcome(policy, stage_rows, successful, [], set(), [ref], 1200.0, 1)
 
     def test_terminal_omission_is_accepted_without_being_waivable(self) -> None:
         # 19 of 20 judged: the missing one is the reference_missing row. It is
@@ -3193,10 +3188,7 @@ class TestReferenceMissingCoverage:
             min_per_reference_success_fraction=0.5,
             min_successful_rows_per_reference=1,
         )
-        assert (
-            _partial_stage_outcome(policy, stage_rows, successful, [], set(), [ref], 1200.0, 1)
-            is None
-        )
+        assert _partial_stage_outcome(policy, stage_rows, successful, [], set(), [ref], 1200.0, 1) is None
 
 
 class TestReferenceMissingIsTerminal:
