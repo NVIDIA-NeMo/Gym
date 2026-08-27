@@ -14,7 +14,7 @@
 # limitations under the License.
 import re
 import unicodedata
-from typing import Any, Literal, Optional
+from typing import Optional
 
 from fastapi import FastAPI
 
@@ -25,22 +25,15 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from resources_servers.string_match.task_data import TaskData
 
 
 class StringMatchResourcesServerConfig(BaseResourcesServerConfig):
     pass
 
 
-class StringMatchRunRequest(BaseRunRequest):
-    expected_answer: str
-    extraction_mode: Literal[
-        "boxed",
-        "final_answer",
-        "last_line",
-        "full_response",
-    ] = "final_answer"
-    case_sensitive: bool = False
-    metadata: Optional[dict[str, Any]] = None
+class StringMatchRunRequest(TaskData, BaseRunRequest):
+    pass
 
 
 class StringMatchVerifyRequest(StringMatchRunRequest, BaseVerifyRequest):

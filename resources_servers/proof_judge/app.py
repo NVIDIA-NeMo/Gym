@@ -38,6 +38,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import get_response_json
+from resources_servers.proof_judge.task_data import TaskData
 
 
 LOG = logging.getLogger(__name__)
@@ -202,8 +203,8 @@ class ProofWithJudgeResourcesServerConfig(BaseResourcesServerConfig):
             raise ValueError("expected_group_size must be > 0 when zero_reward_incorrect_groups is enabled")
 
 
-class ProofWithJudgeVerifyRequest(BaseVerifyRequest):
-    problem: str = ""
+class ProofWithJudgeVerifyRequest(TaskData, BaseVerifyRequest):
+    pass
 
 
 class ProofWithJudgeVerifyResponse(BaseVerifyResponse):

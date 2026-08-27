@@ -35,6 +35,7 @@ from resources_servers.swerl_gen.eval.process_patch import (
 from resources_servers.swerl_gen.eval.singularity_utils import (
     compute_score,
 )
+from resources_servers.swerl_gen.task_data import TaskData
 
 
 class SWEGenResourcesServerConfig(BaseResourcesServerConfig):
@@ -44,15 +45,8 @@ class SWEGenResourcesServerConfig(BaseResourcesServerConfig):
     relaxed_formatting: bool = False
 
 
-class SWEGenRunRequest(BaseRunRequest):
-    instance: dict[
-        str, Any
-    ]  ## dictionary keys: instance_id, repo, setup_script, test_script, regression_script, PASS_TO_PASS, FAIL_TO_PASS, patch
-    dataset_name: Optional[str] = None
-    dataset_split: Optional[str] = None
-    metadata: dict[str, Any] = {}  ## keys: relevant_file_contents, remove_repo_name, image
-    partial_similarity: Optional[bool] = None
-    mode: str = "eval"  ## eval or repro-gen
+class SWEGenRunRequest(TaskData, BaseRunRequest):
+    pass
 
 
 class SWEGenVerifyRequest(SWEGenRunRequest, BaseVerifyRequest):

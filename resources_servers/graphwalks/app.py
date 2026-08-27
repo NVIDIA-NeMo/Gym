@@ -46,17 +46,16 @@ from nemo_gym.reward_profile import (
     compute_subset_metrics,
     highest_k_metrics,
 )
+from resources_servers.graphwalks.task_data import TaskData
 
 
 class GraphWalksResourcesServerConfig(BaseResourcesServerConfig):
     pass
 
 
-class GraphWalksVerifyRequest(BaseVerifyRequest):
+class GraphWalksVerifyRequest(TaskData, BaseVerifyRequest):
     expected_answer: str
-    problem_type: str
     n_tokens: Optional[int] = None
-    prompt_chars: Optional[int] = None
 
 
 class GraphWalksVerifyResponse(GraphWalksVerifyRequest, BaseVerifyResponse):

@@ -25,6 +25,7 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.judge import JudgeError, call_judge
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from resources_servers.aalcr.task_data import TaskData
 
 
 LEGACY_JUDGE_PROTOCOL = "legacy_v1_0"
@@ -60,19 +61,8 @@ class AalcrResourcesServerConfig(BaseResourcesServerConfig):
     judge_responses_create_params_overrides: Dict[str, Any]
 
 
-class AALCRVerifyRequest(BaseVerifyRequest):
-    document_category: str
-    document_set_id: str
-    question_id: int
-    question: str
-    answer: str
-    data_source_filenames: str
-    data_source_urls: str
-    input_tokens: int
-    input_tokens_band: str
-    aa_lcr_version: str = "1.0.0"
-    aa_lcr_dataset_revision: str = V1_0_DATASET_REVISION
-    aa_lcr_judge_protocol: JudgeProtocol = LEGACY_JUDGE_PROTOCOL
+class AALCRVerifyRequest(TaskData, BaseVerifyRequest):
+    pass
 
 
 class AALCRVerifyResponse(AALCRVerifyRequest, BaseVerifyResponse):

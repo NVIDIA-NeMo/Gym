@@ -49,6 +49,7 @@ from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from resources_servers.genrm_compare.task_data import TaskData
 from resources_servers.genrm_compare.utils import (
     GenRMOutputParseError,
     aggregate_scores,
@@ -144,8 +145,12 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
     genrm_parse_retry_sleep_s: float = 0.2
 
 
-class GenRMCompareVerifyRequest(BaseVerifyRequest):
-    """Verify request with optional principle for cohort-based GenRM comparison."""
+class GenRMCompareVerifyRequest(TaskData, BaseVerifyRequest):
+    """Verify request with optional principle for cohort-based GenRM comparison.
+
+    The fields below are injected by the agent at verify time, not carried by dataset rows,
+    so they stay declared here rather than on TaskData.
+    """
 
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import re
-from typing import Any, Literal, Optional
+from typing import Any, Optional
 
 from fastapi import FastAPI
 
@@ -24,20 +24,15 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from resources_servers.swerl_llm_judge.task_data import TaskData
 
 
 class SWEJudgeResourcesServerConfig(BaseResourcesServerConfig):
     pass
 
 
-class SWEJudgeRunRequest(BaseRunRequest):
-    instance_id: Optional[str] = None
-    dataset_name: Optional[str] = None
-    dataset_split: Optional[str] = None
-    expected_answer: Optional[str | list[str]] = None
-    options: Optional[list[dict[str, str]]] = None
-    metadata: Optional[dict[str, Any]] = None
-    grading_mode: Literal["lenient", "strict"] = "lenient"
+class SWEJudgeRunRequest(TaskData, BaseRunRequest):
+    pass
 
 
 class SWEJudgeVerifyRequest(SWEJudgeRunRequest, BaseVerifyRequest):

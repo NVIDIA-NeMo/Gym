@@ -29,6 +29,7 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
 from resources_servers.competitive_coding_challenges.ccc_eval import CCCEvaluator
+from resources_servers.competitive_coding_challenges.task_data import TaskData
 
 
 LOG = logging.getLogger(__name__)
@@ -36,14 +37,8 @@ LOG = logging.getLogger(__name__)
 LOG_JSONL_PATH = os.environ.get("CCC_LOG_JSONL_PATH", None)
 
 
-class CompetitiveCodingChallengesVerifyRequest(BaseVerifyRequest):
+class CompetitiveCodingChallengesVerifyRequest(TaskData, BaseVerifyRequest):
     model_config = ConfigDict(extra="allow")
-
-    competition_id: Optional[str] = None
-    problem_id: str
-    subtask: Optional[str] = None
-    name: Optional[str] = None
-    subtask_score: Optional[float] = None
 
 
 class CompetitiveCodingChallengesVerifyResponse(BaseVerifyResponse):

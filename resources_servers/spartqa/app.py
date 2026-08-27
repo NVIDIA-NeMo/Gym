@@ -39,7 +39,7 @@ import re
 import string
 from typing import Any, Dict, List, Optional
 
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -49,6 +49,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.openai_utils import NeMoGymResponse
+from resources_servers.spartqa.task_data import TaskData
 
 
 PROMPT = """\
@@ -233,7 +234,7 @@ class SpartqaResourcesServerConfig(BaseResourcesServerConfig):
     name: str = "spartqa"
 
 
-class SpartqaRunRequest(BaseRunRequest):
+class SpartqaRunRequest(TaskData, BaseRunRequest):
     model_config = ConfigDict(extra="allow")
 
     # ``target`` is the single gold CO label; ``options`` are the two story
@@ -243,8 +244,6 @@ class SpartqaRunRequest(BaseRunRequest):
     # (``options`` never arrives that way). The options therefore also ride in
     # ``verifier_metadata``, which the driver forwards intact; verify() falls
     # back to it so the full candidate set is always available.
-    target: str = ""
-    options: List[str] = Field(default_factory=list)
     verifier_metadata: Optional[Dict[str, Any]] = None
 
 

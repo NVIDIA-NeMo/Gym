@@ -43,6 +43,7 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
+from resources_servers.verifif.task_data import LLMJudgeItem, TaskData
 
 
 # Per-request collector for judge failures. A ContextVar is shared by reference
@@ -151,40 +152,8 @@ class TuringVIFResourcesServerConfig(BaseResourcesServerConfig):
 # ============================================================================
 
 
-class InstructionItem(BaseModel):
-    """A single instruction with its parameters."""
-
-    instruction_id: str
-    # Additional kwargs are captured via model_extra
-    model_config = {"extra": "allow"}
-
-
-class LLMJudgeItem(BaseModel):
-    """A custom LLM judge question."""
-
-    uid: int
-    content: str
-    pass_criteria: Literal["YES", "NO"] = Field(
-        default="YES",
-        description="Expected verdict from judge for the response to pass. 'YES' means judge must say YES for pass, 'NO' means judge must say NO for pass.",
-    )
-    source: Literal["user", "system"]
-    is_misalignment_check: bool
-
-
-class TuringVIFRunRequest(BaseRunRequest):
+class TuringVIFRunRequest(TaskData, BaseRunRequest):
     """Request model for the VerifIF resource server."""
-
-    id: int = Field(default=0, description="Request identifier")
-    instructions: List[Dict[str, Any]] = Field(
-        default_factory=list, description="List of instruction objects with instruction_id and kwargs"
-    )
-    llm_judge: List[LLMJudgeItem] = Field(default_factory=list, description="List of custom LLM judge questions")
-    prompt: Optional[str] = Field(default=None, description="The original user prompt")
-    language: str = Field(
-        default="en",
-        description="Language code for multi-language validation (e.g., 'en', 'es', 'ja', 'zh', 'hi', 'ar')",
-    )
 
 
 class TuringVIFVerifyRequest(TuringVIFRunRequest, BaseVerifyRequest):

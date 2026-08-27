@@ -56,6 +56,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.openai_utils import NeMoGymResponse
+from resources_servers.ragtruth.task_data import TaskData
 
 
 LOG = logging.getLogger(__name__)
@@ -169,13 +170,11 @@ class RagtruthResourcesServerConfig(BaseResourcesServerConfig):
     think_tag: str = "think"
 
 
-class RagtruthRunRequest(BaseRunRequest):
+class RagtruthRunRequest(TaskData, BaseRunRequest):
     model_config = ConfigDict(extra="allow")
 
     # Gold "does this case contain a hallucination?" label, precomputed at prep
     # time as ``bool(labels)`` from the upstream RAGTruth annotations.
-    is_halu: bool = False
-    task_type: str = ""
 
 
 class RagtruthVerifyRequest(RagtruthRunRequest, BaseVerifyRequest):

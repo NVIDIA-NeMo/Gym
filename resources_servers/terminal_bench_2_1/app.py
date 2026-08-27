@@ -12,7 +12,6 @@ from traceback import format_exc
 from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
 from fastapi import Request
-from pydantic import BaseModel
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import (
@@ -28,6 +27,7 @@ from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import SESSION_ID_KEY
+from resources_servers.terminal_bench_2_1.task_data import TaskData
 
 
 class TerminalBench21ResourcesServerConfig(BaseResourcesServerConfig):
@@ -47,10 +47,8 @@ class TerminalBench21SeedSessionResponse(BaseSeedSessionResponse):
     sandbox_handle: str  # @bxyu-nvidia: Just a plain string URI for now for OpenSandbox backend.
 
 
-class TerminalBench21SeedSessionRequest(BaseModel):
-    task_name: str
-    docker_image: str
-    task_folder: str
+class TerminalBench21SeedSessionRequest(TaskData):
+    pass
 
 
 class TerminalBench21VerifyRequest(TerminalBench21SeedSessionRequest, BaseVerifyRequest):

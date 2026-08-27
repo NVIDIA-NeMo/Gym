@@ -23,13 +23,16 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from resources_servers.format_verification.task_data import TaskData
 
 
 class FormatVerificationResourcesServerConfig(BaseResourcesServerConfig):
     pass
 
 
-class FormatVerificationVerifyRequest(BaseVerifyRequest):
+class FormatVerificationVerifyRequest(TaskData, BaseVerifyRequest):
+    # Redeclared: verify() dispatches on verifier.get("type") and reads it as a plain dict,
+    # so the task_data union types must not replace it on the wire.
     verifier: Dict[str, Any]
 
 

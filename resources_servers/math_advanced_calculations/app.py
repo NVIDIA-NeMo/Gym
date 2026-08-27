@@ -39,6 +39,7 @@ from resources_servers.math_advanced_calculations.math_advanced_calculations_too
     sin,
     subtract,
 )
+from resources_servers.math_advanced_calculations.task_data import TaskData
 
 
 class MultiVerseMathHardResourcesServerConfig(BaseResourcesServerConfig):
@@ -56,11 +57,8 @@ class MultiVerseMathHardResponse(BaseModel):
     solution: float
 
 
-class MultiVerseMathHardVerifyRequest(BaseVerifyRequest):
-    ground_truth: list[float] | str
-    id: int
-    depth: int
-    breadth: int
+class MultiVerseMathHardVerifyRequest(TaskData, BaseVerifyRequest):
+    pass
 
 
 class MultiVerseMathHardVerifyResponse(BaseVerifyResponse):

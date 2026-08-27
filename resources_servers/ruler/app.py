@@ -21,16 +21,15 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from resources_servers.ruler.task_data import TaskData
 
 
 class RulerResourcesServerConfig(BaseResourcesServerConfig):
     pass
 
 
-class RulerVerifyRequest(BaseVerifyRequest):
-    outputs: List[str]
-    length: int
-    subset: str
+class RulerVerifyRequest(TaskData, BaseVerifyRequest):
+    pass
 
 
 class RulerVerifyResponse(RulerVerifyRequest, BaseVerifyResponse):

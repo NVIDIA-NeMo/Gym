@@ -28,13 +28,17 @@ from resources_servers.single_step_tool_use_with_argument_comparison.common.veri
     StepRewardCategory,
     ToolCallComparatorConfig,
 )
+from resources_servers.single_step_tool_use_with_argument_comparison.task_data import TaskData
 
 
 class SingleStepToolUseArgumentComparisonResourcesServerConfig(BaseResourcesServerConfig):
     tool_call_comparator_config: ToolCallComparatorConfig
 
 
-class SingleStepToolUseArgumentComparisonRunRequest(BaseRunRequest):
+class SingleStepToolUseArgumentComparisonRunRequest(TaskData, BaseRunRequest):
+    # Redeclared to keep the verification_utils action classes on the wire: the comparators
+    # isinstance-check and pattern-match those exact classes, so the task_data mirror types
+    # must not replace them here.
     expected_action: ExpectedAction
 
 

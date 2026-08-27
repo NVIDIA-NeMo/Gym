@@ -12,6 +12,7 @@ from typing import Any, ClassVar, Optional
 
 from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from resources_servers.bunsenbench_chemistry_mcq.task_data import TaskData
 from resources_servers.mcqa.app import (
     MCQAResourcesServer,
     MCQAResourcesServerConfig,
@@ -27,12 +28,8 @@ class BunsenChemResourcesServerConfig(MCQAResourcesServerConfig):
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.UNKNOWN
 
 
-class BunsenChemVerifyRequest(MCQAVerifyRequest):
-    bunsen_id: Optional[str] = None
-    choices: Optional[list[str | dict[str, Any]]] = None
-    source: Optional[str] = None
-    bct_field: Optional[str] = None
-    bct_subfield: Optional[str] = None
+class BunsenChemVerifyRequest(TaskData, MCQAVerifyRequest):
+    pass
 
 
 class BunsenChemVerifyResponse(MCQAVerifyResponse):

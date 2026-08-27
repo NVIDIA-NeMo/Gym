@@ -25,6 +25,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from resources_servers.example_multi_step.task_data import TaskData
 
 
 class ExampleMultiStepResourcesServerConfig(BaseResourcesServerConfig):
@@ -47,12 +48,8 @@ class ExtractSynonymValuesResponse(BaseModel):
     success: bool
 
 
-class ExampleMultiStepRunRequest(BaseRunRequest):
-    id: int
-    expected_synonym_values: List[int]
-    expected_synonyms: List[str]
-    minefield_label: str
-    minefield_label_value: int
+class ExampleMultiStepRunRequest(TaskData, BaseRunRequest):
+    pass
 
 
 class ExampleMultiStepVerifyRequest(ExampleMultiStepRunRequest, BaseVerifyRequest):

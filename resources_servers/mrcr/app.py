@@ -40,17 +40,15 @@ from nemo_gym.reward_profile import (
     compute_subset_metrics,
     highest_k_metrics,
 )
+from resources_servers.mrcr.task_data import TaskData
 
 
 class MRCRResourcesServerConfig(BaseResourcesServerConfig):
     pass
 
 
-class MRCRVerifyRequest(BaseVerifyRequest):
-    expected_answer: str
-    random_string_to_prepend: str
-    n_needles: int
-    n_tokens: int
+class MRCRVerifyRequest(TaskData, BaseVerifyRequest):
+    pass
 
 
 class MRCRVerifyResponse(MRCRVerifyRequest, BaseVerifyResponse):

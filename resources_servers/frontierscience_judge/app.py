@@ -60,6 +60,7 @@ from nemo_gym.reward_profile import (
     compute_subset_metrics,
     highest_k_metrics,
 )
+from resources_servers.frontierscience_judge.task_data import TaskData
 
 
 _DEFAULT_JUDGE_PROMPT_PATH = str(Path(__file__).parent / "prompts" / "judge.yaml")
@@ -208,14 +209,12 @@ class FrontierScienceJudgeConfig(BaseResourcesServerConfig):
     )
 
 
-class FrontierScienceJudgeRunRequest(BaseRunRequest):
+class FrontierScienceJudgeRunRequest(TaskData, BaseRunRequest):
     model_config = ConfigDict(extra="allow")
 
     id: Optional[Union[int, str]] = None
-    subject: Optional[str] = None
     question: Optional[str] = None
     expected_answer: Optional[str] = None
-    rubric: Optional[str] = None
 
 
 class FrontierScienceJudgeVerifyRequest(FrontierScienceJudgeRunRequest, BaseVerifyRequest):
