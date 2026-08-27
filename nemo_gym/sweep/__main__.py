@@ -174,7 +174,7 @@ def main(argv: list[str] | None = None) -> int:
                 check_data=not args.skip_data,
             )
             print(f"OK: {len(manifest.entries)} entries, {len(manifest.config_paths())} distinct configs")
-            print(f"num_repeats: {manifest.num_repeats()}")
+            print(f"num_repeats: {manifest.num_repeats_by_agent()}")
             for warning in warnings:
                 print(f"warn: {warning}")
             return 0

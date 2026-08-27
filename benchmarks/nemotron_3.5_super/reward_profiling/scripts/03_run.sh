@@ -78,9 +78,39 @@ fi
 # semaphore rather than the GPUs as the limit. Stays under the 16k per-host aiohttp connector cap
 # set below until roughly D32. Lower it if the driver process becomes the bottleneck.
 MAX_NUM_SEQS_PER_DECODE_ENGINE=${MAX_NUM_SEQS_PER_DECODE_ENGINE:-512}
+# Settings layer, lowest to highest: manifest defaults -> these env vars -> anything you add on
+# the gym command line. Each is unset by default, so nothing here overrides what the manifest
+# declared unless you ask for it; if the manifest is silent too, Gym's own default applies.
+#
+# A ++ override beats a config file, so passing one unconditionally -- which this used to do --
+# silently ignores the manifest. Set a variable and it wins; leave it and the manifest wins.
+GLOBAL_AIOHTTP_CONNECTOR_LIMIT_PER_HOST=${GLOBAL_AIOHTTP_CONNECTOR_LIMIT_PER_HOST:-}
+RUN_PORT_RANGE_LOW=${RUN_PORT_RANGE_LOW:-}
+RUN_PORT_RANGE_HIGH=${RUN_PORT_RANGE_HIGH:-}
+ENV_PORT_RANGE_LOW=${ENV_PORT_RANGE_LOW:-}
+ENV_PORT_RANGE_HIGH=${ENV_PORT_RANGE_HIGH:-}
+ALLOW_PARTIAL_ROLLOUTS=${ALLOW_PARTIAL_ROLLOUTS:-True}
+
+# Returns 0 either way: under `set -e` a bare [[ -n "" ]] would abort the script.
+_override() {
+    if [[ -n "$2" ]]; then printf ' ++%s=%s' "$1" "$2"; fi
+    return 0
+}
+
+RUN_OVERRIDES=""
+RUN_OVERRIDES+=$(_override global_aiohttp_connector_limit_per_host "$GLOBAL_AIOHTTP_CONNECTOR_LIMIT_PER_HOST")
+RUN_OVERRIDES+=$(_override port_range_low "$RUN_PORT_RANGE_LOW")
+RUN_OVERRIDES+=$(_override port_range_high "$RUN_PORT_RANGE_HIGH")
+
+ENV_OVERRIDES=""
+ENV_OVERRIDES+=$(_override port_range_low "$ENV_PORT_RANGE_LOW")
+ENV_OVERRIDES+=$(_override port_range_high "$ENV_PORT_RANGE_HIGH")
+
+# num_samples_in_parallel is the exception: it depends on the job's shape, which only the launcher
+# knows. 512 per decode engine matches max_num_seqs in the vLLM config. An explicit env var still
+# wins over the computed value.
 NUM_SAMPLES_IN_PARALLEL=${NUM_SAMPLES_IN_PARALLEL:-$((MAX_NUM_SEQS_PER_DECODE_ENGINE * NUM_DECODE_NODES))}
 
-# Names the job and its slurm log only; there is no serve-only mode here.
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-reward-profiling}"
 
 WALLTIME=${WALLTIME:-04:00:00}
@@ -180,8 +210,7 @@ for _attempt in \$(seq 1 $ENV_START_ATTEMPTS); do
     gym env start --config $SWEEP_DIR/sweep_config.yaml \\
         +uv_venv_dir=/opt/uv_venvs \\
         +skip_venv_if_present=true \\
-        ++port_range_low=$ENV_PORT_RANGE_LOW \\
-        ++port_range_high=$ENV_PORT_RANGE_HIGH \\
+       $ENV_OVERRIDES \\
         ++policy_base_url=http://\$(getent hosts "\$ROUTER_NODE" | awk 'NR == 1 {print \$1}'):$ROUTER_SERVER_PORT/v1 \
         ++policy_api_key=dummy_api_key \\
         ++policy_model_name=$MODEL > "\$env_start_log" 2>&1 &
@@ -230,9 +259,7 @@ gym eval run --no-serve --resume \\
     +nemo_gym_log_dir=$SWEEP_DIR/logs \\
     +uv_venv_dir=/opt/uv_venvs \\
     +skip_venv_if_present=true \\
-    ++global_aiohttp_connector_limit_per_host=16384 \\
-    ++port_range_low=63000 \\
-    ++port_range_high=64000
+    $RUN_OVERRIDES
 
 # Split back out to one directory per manifest entry, then profile each separately. agent_ref
 # cannot do this -- the three ns_tools entries share ns_tools_simple_agent -- so the split keys on
@@ -246,7 +273,7 @@ for _label_dir in $SWEEP_DIR/by_label/*/; do
     gym eval profile \\
         --inputs "\$_label_dir/rollouts_materialized_inputs.jsonl" \\
         --rollouts "\$_label_dir/rollouts.jsonl" \\
-        ++allow_partial_rollouts=True > "\$_label_dir/profile.txt" 2>&1 \
+        ++allow_partial_rollouts=$ALLOW_PARTIAL_ROLLOUTS > "\$_label_dir/profile.txt" 2>&1 \
         || echo "  profile failed for \$_label; see \$_label_dir/profile.txt" >&2
     tail -5 "\$_label_dir/profile.txt" || true
 done
@@ -255,7 +282,7 @@ done
 gym eval profile \\
     --inputs $SWEEP_DIR/rollouts_materialized_inputs.jsonl \\
     --rollouts $SWEEP_DIR/rollouts.jsonl \\
-    ++allow_partial_rollouts=True
+    ++allow_partial_rollouts=$ALLOW_PARTIAL_ROLLOUTS
 EOF
 )
 

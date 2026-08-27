@@ -48,7 +48,8 @@ def _write_data(tmp_path, name, agent, rows=3, missing_ref=False):
 
 
 def _manifest(tmp_path, entries, defaults=None, config_overlay=None):
-    doc = {"nickname": "testrun", "defaults": defaults or {"num_repeats": 8}, "entries": entries}
+    # `defaults` kept as the helper's parameter name; the manifest field is now top-level.
+    doc = {"nickname": "testrun", **(defaults or {"num_repeats": 8}), "entries": entries}
     if config_overlay is not None:
         doc["config_overlay"] = config_overlay
     path = tmp_path / "manifest.yaml"
@@ -77,7 +78,7 @@ def test_num_repeats_global_default_with_local_override(tmp_path):
             {"label": "two", "agent": "agent_b", "configs": ["b.yaml"], "data": "y.jsonl", "num_repeats": 4},
         ],
     )
-    assert manifest.num_repeats() == {"_default": 8, "agent_b": 4}
+    assert manifest.num_repeats_by_agent() == {"_default": 8, "agent_b": 4}
 
 
 def test_duplicate_labels_rejected(tmp_path):

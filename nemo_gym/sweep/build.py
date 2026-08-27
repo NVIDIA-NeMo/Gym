@@ -126,7 +126,7 @@ def build_sweep(
     report.num_shards = len(sinks)
 
     report.config_paths = manifest.config_paths()
-    report.num_repeats = manifest.num_repeats()
+    report.num_repeats = manifest.num_repeats_by_agent()
 
     with open(config_yaml, "w") as handle:
         yaml.safe_dump(

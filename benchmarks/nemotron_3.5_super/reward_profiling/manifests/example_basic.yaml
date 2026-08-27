@@ -2,8 +2,7 @@
 
 nickname: example_basic
 
-defaults:
-  num_repeats: 8
+num_repeats: 8
 
 extra_configs:
   - responses_api_models/vllm_model/configs/vllm_model.yaml

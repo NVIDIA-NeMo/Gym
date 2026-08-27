@@ -14,8 +14,7 @@
 
 ## 01 - (Optional) Create a container
 The reward profiling container pre-installs all resources_servers and responses_api_agents needed for reward profiling.
-It follows the same flow from the [Super-v3.5 readme](../README.md), with one change:
-1. New container config, created from the manifests: `benchmarks/nemotron_3.5_super/reward_profiling/configs/container_config.yaml`
+It follows the same flow from the [Super-v3.5 readme](../README.md), with one change: new container config, created from the manifests: `benchmarks/nemotron_3.5_super/reward_profiling/configs/container_config.yaml`
 
 ```bash
 # 0. make container config
@@ -70,17 +69,24 @@ arm64 build exists: `/lustre/fsw/portfolios/llmservice/users/igitman/images/nemo
 The manifest is the highest-level config of what environments are being profiled, and parameterizes any judge, sandbox, or config overrides needed.
 1. nickname: name of the reward profiling jobs
     - becomes the output directory: artifacts land in `<OUT_DIR>/<nickname>/`
-2. defaults: set any reward profiling defaults.
-    - can set: `num_repeats` (rollouts per task; the variance across these is the profile)
-3. extra_configs: any other configs to be loaded
+2. num_repeats: rollouts per task; the variance across these is the profile
+    - a named field rather than config, because `materialize` consumes it to decide how many
+      copies of each row to write
+3. settings: sweep-wide Gym config, committed with the manifest
+    - anything Gym takes, e.g. `num_samples_in_parallel`, `responses_create_params.temperature`
+    - precedence, lowest to highest: **manifest `settings` -> script env var -> command line**.
+      A launcher only passes a `++` override when you set its env var, so these are defaults
+      rather than something silently clobbered. `num_samples_in_parallel` is the exception: the
+      launcher computes `512 x decode_nodes` because only it knows the job's shape
+4. extra_configs: any other configs to be loaded
     - sweep-wide config paths, merged after every entry's own `configs`, so they win on conflict.
       Usually just the model server, e.g. `responses_api_models/vllm_model/configs/vllm_model.yaml`
-4. config_overlay: Gym config written inline, spliced into the generated `sweep_config.yaml`
+5. config_overlay: Gym config written inline, scoped to a specific server, spliced into the generated `sweep_config.yaml`
     - a config overrides anything its own `config_paths` pulled in, so these beat every file
     - this is how we route different judge models to one gym_env_start server
     - use it instead of editing upstream configs: the container is built from a Gym ref and does
       not contain this repo, so a repo-relative config path will not resolve inside it
-5. entries: the environments to be profiled.
+6. entries: the environments to be profiled.
     - label (required): nickname of profiled env
     - agent (required): agent_ref of the data
     - configs (optional but effectively required): gym configs defining the agent and its

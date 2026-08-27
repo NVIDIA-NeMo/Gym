@@ -37,14 +37,6 @@ class SweepValidationError(Exception):
     """Raised when a manifest is internally inconsistent or disagrees with its data."""
 
 
-class SweepDefaults(BaseModel):
-    """Sweep-wide settings that individual entries may override."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    num_repeats: int = Field(default=1, ge=1)
-
-
 class SweepEntry(BaseModel):
     """One (dataset, config) pair.
 
@@ -81,12 +73,20 @@ class SweepManifest(BaseModel):
     # Identifies this run and scopes every artifact it writes, so profiling the same blend
     # against a different checkpoint never collides. Mirrors NICKNAME in the pre-sweep scripts,
     # which scoped `rollouts/$NICKNAME/<env>/`.
+    # Consumed by materialize, which writes this many copies of each row, so it is a named field
+    # rather than free-form config: the expander cannot look it up in an arbitrary dict.
+    num_repeats: int = Field(default=1, ge=1)
+
+    # Sweep-wide Gym config, committed with the manifest. Emitted into the generated
+    # sweep_config.yaml, so a launcher's ++ override beats it and Gym's own default applies when
+    # both are silent: manifest -> script env var -> command line, lowest to highest.
+    settings: Dict[str, Any] = Field(default_factory=dict)
+
     nickname: str
     # Split the concatenated input into N files. Leave unset (the default) to emit one file and
     # run the sweep as a single invocation; set it only when the driver process cannot hold every
     # materialized row at once, since rollout collection keeps them all resident.
     num_shards: Optional[int] = Field(default=None, ge=1)
-    defaults: SweepDefaults = Field(default_factory=SweepDefaults)
     # Sweep-wide configs merged ahead of every entry's: the model server the agents reference,
     # plus optional judge and sandbox bindings. Entry configs declare agents and verifiers; they
     # do not declare the policy, so without at least a model-server config here the composed
@@ -131,14 +131,14 @@ class SweepManifest(BaseModel):
             seen[config] = None
         return list(seen)
 
-    def num_repeats(self) -> Dict[str, int]:
+    def num_repeats_by_agent(self) -> Dict[str, int]:
         """A ``num_repeats`` mapping for ``gym eval run``.
 
         Keyed by agent because that is what rollout collection resolves against, so entries
         sharing an agent necessarily share a repeat count. ``resolve_conflicts`` reports those
         collisions rather than silently letting the last entry win.
         """
-        repeats: Dict[str, int] = {"_default": self.defaults.num_repeats}
+        repeats: Dict[str, int] = {"_default": self.num_repeats}
         for entry in self.entries:
             if entry.num_repeats is not None:
                 repeats[entry.effective_agent] = entry.num_repeats

@@ -195,7 +195,7 @@ def materialize(
         raise SweepValidationError(f"{materialized_fpath} already exists. Pass overwrite=True to replace it.")
 
     repeats_by_entry = {
-        entry.label: (entry.num_repeats if entry.num_repeats is not None else manifest.defaults.num_repeats)
+        entry.label: (entry.num_repeats if entry.num_repeats is not None else manifest.num_repeats)
         for entry in manifest.entries
     }
 
@@ -263,7 +263,12 @@ def materialize(
     config_fpath = out_dir / CONFIG_NAME
     with open(config_fpath, "w") as handle:
         yaml.safe_dump(
-            {"config_paths": manifest.config_paths(), **manifest.config_overlay},
+            # settings first so config_overlay can still override them for a specific server
+            {
+                "config_paths": manifest.config_paths(),
+                **manifest.settings,
+                **manifest.config_overlay,
+            },
             handle,
             default_flow_style=False,
             sort_keys=False,
