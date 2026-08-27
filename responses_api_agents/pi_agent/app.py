@@ -684,7 +684,6 @@ class PiAgent(SimpleResponsesAPIAgent):
             await raise_for_status(seed_resp)
             cookies = seed_resp.cookies
 
-            rollout_id = self.rollout_id_from_run(body)
             agent_resp = await self.server_client.post(
                 server_name=self.config.name,
                 url_path=self.url_path_for_run("/v1/responses", body),
@@ -694,11 +693,11 @@ class PiAgent(SimpleResponsesAPIAgent):
             await raise_for_status(agent_resp)
             cookies = agent_resp.cookies
             agent_resp_json = await get_response_json(agent_resp)
-            raw_observations = (
-                agent_resp_json.pop(_INTERNAL_OBSERVATIONS_KEY, None) if rollout_id is not None else None
-            )
+            raw_observations = agent_resp_json.pop(_INTERNAL_OBSERVATIONS_KEY, None)
             observations = (
-                AgentObservationBundle.model_validate(raw_observations) if isinstance(raw_observations, dict) else None
+                AgentObservationBundle.model_validate(raw_observations)
+                if self._model_call_capture_enabled() and isinstance(raw_observations, dict)
+                else None
             )
 
             verify_resp = await self.server_client.post(

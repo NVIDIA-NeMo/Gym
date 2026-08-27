@@ -171,6 +171,7 @@ def run_request() -> ScenarioGenerationRunRequest:
         policy="Authenticate before changing an order.\n",
         tools=[],
         responses_create_params={"input": []},
+        **{"_ng_rollout_id": "123e4567-e89b-42d3-a456-426614174000"},
     )
 
 
@@ -292,7 +293,10 @@ async def test_run_launches_exactly_twenty_message_only_calls(
     assert client.max_active == 20
     assert len(client.calls) == 20
     assert all(call["server_name"] == "scenario_generation_model" for call in client.calls)
-    assert all(call["url_path"] == "/v1/chat/completions" for call in client.calls)
+    assert all(
+        call["url_path"] == "/ng-rollout/123e4567-e89b-42d3-a456-426614174000/v1/chat/completions"
+        for call in client.calls
+    )
     assert all(set(call["json"]) == {"messages"} for call in client.calls)
     assert all(len(call["json"]["messages"]) == 2 for call in client.calls)
     assert sum("does not cover" in call["json"]["messages"][0]["content"] for call in client.calls) == 10

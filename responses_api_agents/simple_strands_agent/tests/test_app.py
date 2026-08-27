@@ -90,6 +90,7 @@ def test_trajectory_preserves_reasoning_and_tools() -> None:
 
 @pytest.mark.asyncio
 async def test_run_skips_verification() -> None:
+    rollout_id = "123e4567-e89b-42d3-a456-426614174000"
     config = SimpleStrandsAgentConfig(
         host="0.0.0.0",
         port=8080,
@@ -120,14 +121,17 @@ async def test_run_skips_verification() -> None:
 
     result = await agent.run(
         SimpleNamespace(cookies={}),
-        SimpleStrandsAgentRunRequest(responses_create_params={"input": []}),
+        SimpleStrandsAgentRunRequest(
+            responses_create_params={"input": []},
+            **{"_ng_rollout_id": rollout_id},
+        ),
     )
 
     assert result.reward == 0.25
     assert result.model_extra["verification_skipped"] is True
     assert [call.kwargs["url_path"] for call in client.post.call_args_list] == [
         "/seed_session",
-        "/v1/responses",
+        f"/ng-rollout/{rollout_id}/v1/responses",
     ]
 
 

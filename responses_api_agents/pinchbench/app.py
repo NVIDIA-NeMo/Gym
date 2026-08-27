@@ -240,7 +240,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             env["BRAVE_API_KEY"] = self.config.brave_api_key
         if self.config.tavily_api_key:
             env["TAVILY_API_KEY"] = self.config.tavily_api_key
-        if rollout_id is not None:
+        if self._model_call_capture_enabled():
             env["NEMO_GYM_OBSERVABILITY_ENABLED"] = "1"
         return env
 
@@ -859,7 +859,7 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         non_clean_exit_rc: int | None = None
         observations: Optional[AgentObservationBundle] = None
         rollout_id = self.rollout_id_from_run(body)
-        observe = rollout_id is not None
+        observe = self._model_call_capture_enabled()
         try:
             async with self._sem:
                 non_clean_exit_rc = await self._run_in_sandbox(task_id, out_dir, rollout_id=rollout_id)

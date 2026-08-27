@@ -455,6 +455,7 @@ class TestRolloutObservability:
         assert tool.status == "incomplete"
 
     def test_run_uses_prefixed_response_boundary(self) -> None:
+        rollout_id = "123e4567-e89b-42d3-a456-426614174000"
         agent = _make_agent()
         agent.server_client.global_config_dict = {"observability_enabled": True}
         agent._run_pi = AsyncMock(return_value=([], {"input_tokens": 0, "output_tokens": 0}, "model", []))
@@ -466,7 +467,7 @@ class TestRolloutObservability:
 
         async def post(server_name, url_path, json=None, cookies=None, **kwargs):
             if url_path.endswith("/v1/responses"):
-                agent_response = await agent.responses(MagicMock(path_params={"rollout_id": "1-2"}), json)
+                agent_response = await agent.responses(MagicMock(path_params={"rollout_id": rollout_id}), json)
                 return response(agent_response.model_dump(mode="json"))
             if url_path == "/verify":
                 return response(json | {"reward": 1.0})
@@ -478,14 +479,17 @@ class TestRolloutObservability:
                 "responses_create_params": {"input": "solve"},
                 "_ng_task_index": 1,
                 "_ng_rollout_index": 2,
+                "_ng_rollout_id": rollout_id,
             }
         )
 
         result = asyncio.run(agent.run(MagicMock(cookies={}), body))
 
         assert result.ng_agent_observations is not None
-        assert agent.server_client.post.await_args_list[1].kwargs["url_path"] == "/ng-rollout/1-2/v1/responses"
-        assert agent._run_pi.await_args.kwargs["rollout_id"] == "1-2"
+        assert agent.server_client.post.await_args_list[1].kwargs["url_path"] == (
+            f"/ng-rollout/{rollout_id}/v1/responses"
+        )
+        assert agent._run_pi.await_args.kwargs["rollout_id"] == rollout_id
         verify_json = agent.server_client.post.await_args_list[2].kwargs["json"]
         assert "_ng_agent_observations" not in verify_json["response"]
 

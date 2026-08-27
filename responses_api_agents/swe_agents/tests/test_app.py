@@ -2767,10 +2767,10 @@ class TestSWEBenchWrapperRun:
     @pytest.mark.parametrize(
         ("model_call_capture_enabled", "token_id_capture_enabled", "expected_rollout_id"),
         [
-            (False, False, None),
-            (True, False, "7-2-a1"),
-            (False, True, "7-2-a1"),
-            (True, True, "7-2-a1"),
+            (False, False, "123e4567-e89b-42d3-a456-426614174000"),
+            (True, False, "123e4567-e89b-42d3-a456-426614174000"),
+            (False, True, "123e4567-e89b-42d3-a456-426614174000"),
+            (True, True, "123e4567-e89b-42d3-a456-426614174000"),
         ],
         ids=("disabled", "observability-only", "token-capture-only", "both"),
     )
@@ -2831,12 +2831,13 @@ class TestSWEBenchWrapperRun:
                 _ng_task_index=7,
                 _ng_rollout_index=2,
                 _ng_attempt_index=1,
+                _ng_rollout_id=expected_rollout_id,
             )
 
             result = await wrapper.run(body)
             assert isinstance(result, SWEBenchVerifyResponse)
             assert result.reward == 1.0
-            assert result.ng_agent_observations == (observations if expected_rollout_id is not None else None)
+            assert result.ng_agent_observations == (observations if model_call_capture_enabled else None)
             assert responses_mock.await_args.args[1] == expected_rollout_id
             assert responses_mock.await_args.kwargs == {
                 "token_id_capture_enabled": token_id_capture_enabled,
@@ -2875,7 +2876,8 @@ class TestSWEBenchWrapperRun:
                         "split": "test",
                         "instance_dict": "{}",
                     },
-                )
+                ),
+                _ng_rollout_id="123e4567-e89b-42d3-a456-426614174000",
             )
 
             result = await wrapper.run(body)

@@ -53,6 +53,9 @@ from responses_api_agents.opencode_sandboxed_agent.app import (
 )
 
 
+ROLLOUT_ID = "123e4567-e89b-42d3-a456-426614174000"
+
+
 class TestOpenCodeSandboxedAgent:
     def test_import_does_not_load_standalone_opencode_agent(self) -> None:
         code = (
@@ -307,10 +310,18 @@ class TestOpenCodeSandboxedAgent:
     @mark.parametrize(
         ("observability_enabled", "token_capture_enabled", "expected_base_url"),
         [
-            (False, False, "http://model-server/v1"),
-            (True, False, "http://model-server/ng-rollout/7-2/v1"),
-            (False, True, "http://model-server/ng-rollout/7-2/training-token-capture/v1"),
-            (True, True, "http://model-server/ng-rollout/7-2/training-token-capture/v1"),
+            (False, False, f"http://model-server/ng-rollout/{ROLLOUT_ID}/v1"),
+            (True, False, f"http://model-server/ng-rollout/{ROLLOUT_ID}/v1"),
+            (
+                False,
+                True,
+                f"http://model-server/ng-rollout/{ROLLOUT_ID}/training-token-capture/v1",
+            ),
+            (
+                True,
+                True,
+                f"http://model-server/ng-rollout/{ROLLOUT_ID}/training-token-capture/v1",
+            ),
         ],
         ids=("disabled", "observability-only", "token-capture-only", "both"),
     )
@@ -337,6 +348,7 @@ class TestOpenCodeSandboxedAgent:
                 "responses_create_params": {"input": "solve"},
                 "_ng_task_index": 7,
                 "_ng_rollout_index": 2,
+                "_ng_rollout_id": ROLLOUT_ID,
             }
         )
 

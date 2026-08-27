@@ -41,6 +41,7 @@ from responses_api_agents.conversational_tool_use.domain_generation.assets impor
 
 INITIAL_PROMPT = "Generate domains."
 PACKAGE_DIR = Path(__file__).resolve().parents[1]
+ROLLOUT_ID = "123e4567-e89b-42d3-a456-426614174000"
 
 
 class FakeHttpResponse:
@@ -107,7 +108,11 @@ def make_agent(
 def run_request() -> DomainGenerationRunRequest:
     return DomainGenerationRunRequest(
         responses_create_params={"input": [{"role": "user", "content": INITIAL_PROMPT}]},
-        **{TASK_INDEX_KEY_NAME: 7, ROLLOUT_INDEX_KEY_NAME: 0},
+        **{
+            TASK_INDEX_KEY_NAME: 7,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            "_ng_rollout_id": ROLLOUT_ID,
+        },
     )
 
 
@@ -169,7 +174,7 @@ async def test_run_makes_exactly_two_message_only_chat_completions() -> None:
 
     calls = agent.server_client.post.await_args_list
     assert len(calls) == 2
-    expected_path = "/ng-rollout/7-0/v1/chat/completions"
+    expected_path = f"/ng-rollout/{ROLLOUT_ID}/v1/chat/completions"
     assert [call.kwargs["url_path"] for call in calls] == [expected_path, expected_path]
     assert [call.kwargs["server_name"] for call in calls] == ["domain_model", "domain_model"]
 
@@ -251,8 +256,8 @@ async def test_parse_failure_returns_empty_batch_and_still_runs_followup() -> No
     assert result.generation_trace.phases[0].parse_error
     calls = agent.server_client.post.await_args_list
     assert [call.kwargs["url_path"] for call in calls] == [
-        "/v1/chat/completions",
-        "/v1/chat/completions",
+        f"/ng-rollout/{ROLLOUT_ID}/v1/chat/completions",
+        f"/ng-rollout/{ROLLOUT_ID}/v1/chat/completions",
     ]
     followup_request = calls[1].kwargs["json"].model_dump(exclude_unset=True)
     assert "Previously brainstormed domains: []" in followup_request["messages"][0]["content"]

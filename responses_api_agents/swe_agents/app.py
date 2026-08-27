@@ -3927,7 +3927,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             if "subagent_trajectories" in metadata:
                 subagent_trajectories = json.loads(metadata["subagent_trajectories"])
             observations = None
-            if rollout_id is not None and "agent_observations" in metadata:
+            if self._model_call_capture_enabled() and "agent_observations" in metadata:
                 observations = AgentObservationBundle.model_validate_json(metadata["agent_observations"])
 
             return SWEBenchVerifyResponse(

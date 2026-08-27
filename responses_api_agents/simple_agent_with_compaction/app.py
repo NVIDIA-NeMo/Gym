@@ -507,10 +507,8 @@ class SimpleAgentWithCompaction(SimpleResponsesAPIAgent):
 
         trajectory = None
         expected_rollout_id = self.rollout_id_from_run(body)
-        raw_trajectory = (
-            model_response_json.pop(_INTERNAL_TRAJECTORY_KEY, None) if expected_rollout_id is not None else None
-        )
-        if isinstance(raw_trajectory, dict):
+        raw_trajectory = model_response_json.pop(_INTERNAL_TRAJECTORY_KEY, None)
+        if self._model_call_capture_enabled() and isinstance(raw_trajectory, dict):
             trajectory = TrajectoryRecord.model_validate(raw_trajectory)
             extra = body.model_extra or {}
             task_id = next(

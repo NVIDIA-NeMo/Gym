@@ -909,7 +909,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             0, {"content": opencode_system_prompt, "role": "system"}
         )
 
-        if rollout_id is not None:
+        if self._model_call_capture_enabled():
             if observations is None:
                 observations = AgentObservationBundle(
                     source="opencode",
