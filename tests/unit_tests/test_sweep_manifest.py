@@ -817,3 +817,27 @@ def test_shard_unshard_reshard_loses_nothing(tmp_path):
 def test_shard_with_no_prior_rollouts_carries_nothing(tmp_path):
     d, _ = _materialized(tmp_path, n_tasks=4)
     assert shard_sweep(d, num_shards=2).carried_rollouts == 0
+
+
+def test_carry_works_when_inputs_are_unexpanded(tmp_path):
+    """--no-expand inputs have no rollout index; collected rollouts do. The carry must still route."""
+    d = tmp_path / "sweep"
+    d.mkdir()
+    # one row per task, no _ng_rollout_index -- what materialize --no-expand writes
+    (d / "rollouts_materialized_inputs.jsonl").write_text(
+        "".join(json.dumps({"_ng_task_index": i, "agent_ref": {"name": "a"}}) + "\n" for i in range(6)))
+    # rollouts carry (task, 0..1) as Gym stamps them at collection time
+    (d / "rollouts.jsonl").write_text(
+        "".join(json.dumps({"_ng_task_index": i, "_ng_rollout_index": r, "reward": 1.0}) + "\n"
+                for i in range(6) for r in range(2)))
+    (d / "sweep_config.yaml").write_text("config_paths: []\n")
+    (d / "sweep_report.json").write_text(json.dumps({"entries": {"e": {"task_index_range": [0, 5]}}}))
+
+    result = shard_sweep(d, num_shards=3)
+    assert result.carried_rollouts == 12, "every rollout must route despite the missing rollout index"
+    # and each shard's rollouts must belong to tasks it owns
+    for shard in result.shard_dirs:
+        owned = {json.loads(l)["_ng_task_index"]
+                 for l in open(shard / "rollouts_materialized_inputs.jsonl")}
+        for line in open(shard / "rollouts.jsonl"):
+            assert json.loads(line)["_ng_task_index"] in owned

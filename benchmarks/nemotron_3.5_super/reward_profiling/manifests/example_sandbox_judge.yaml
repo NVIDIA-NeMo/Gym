@@ -1,0 +1,52 @@
+# Example manifest for a judge-scored environment
+
+nickname: example_sandbox_judge
+
+nickname: nemotron_3_ultra
+
+defaults:
+  num_repeats: 8
+
+extra_configs:
+  - responses_api_models/vllm_model/configs/vllm_model.yaml
+
+config_overlay:
+
+  math_judge_model: &gateway_judge
+    responses_api_models:
+      openai_model:
+        entrypoint: app.py
+        openai_base_url: https://inference-api.nvidia.com/v1
+        openai_model: nvidia/qwen/qwen-235b
+        openai_api_key: ${nv_inference_api_key}
+        max_concurrent_requests: 64
+
+  # The shipped ns_tools.yaml registers only math_with_judge. Our rows carry per-row verifier_type
+  # of mcqa and equivalence_llm_judge, and an unregistered name is a hard failure --
+  # "ValueError: Unknown verifier: mcqa" surfaces to the driver as a bare 500 from the agent.
+  # Registering all three is what lets the three ns_tools entries share one agent.
+  ns_tools:
+    resources_servers:
+      ns_tools:
+        verifiers:
+          math_with_judge:
+            type: resources_servers
+            name: math_with_judge
+          mcqa:
+            type: resources_servers
+            name: mcqa
+          equivalence_llm_judge:
+            type: resources_servers
+            name: equivalence_llm_judge
+        # Carried over from the pre-sweep configs, which note it improves stability: after a
+        # sandbox worker restarts, replaying the session is what tends to wedge the tool call.
+        disable_session_restore: true
+
+
+entries:
+  - label: lean
+    agent: math_formal_lean_refinement_agent
+    configs:
+      - resources_servers/math_formal_lean/configs/math_formal_lean_multi_turn.yaml
+    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/lean/nemotron_math_proofs_10k_with_pass_rate_1000.jsonl
+    owner: igitman

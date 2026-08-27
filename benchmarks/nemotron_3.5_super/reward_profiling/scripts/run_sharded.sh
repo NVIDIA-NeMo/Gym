@@ -29,53 +29,92 @@ RP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_ROOT="$(cd "$RP_DIR/../../.." && pwd)"
 # Poll rather than `wait`: sbatch returns immediately, so there is no child to wait on.
 POLL_S=${POLL_S:-60}
+# Bounds resubmission of a shard that keeps dying for a permanent reason.
+MAX_ROUNDS=${MAX_ROUNDS:-4}
 
 cd "$REPO_ROOT"
 
 echo ">>> dealing $SWEEP_DIR into $NUM_SHARDS shards"
 python -m nemo_gym.sweep shard "$SWEEP_DIR" --num-shards "$NUM_SHARDS" --out-dir "$SHARDS_DIR"
 
-job_ids=()
-for shard_dir in "$SHARDS_DIR"/shard_*/; do
-    [[ -d "$shard_dir" ]] || continue
-    shard_name="$(basename "$shard_dir")"
-    remaining=$(python - "$shard_dir" <<'PY'
+# Outstanding rollouts for a shard: inputs whose work is not yet in its rollouts.jsonl. With
+# --no-expand an input row carries no rollout index and stands for num_repeats rollouts, so
+# completeness is judged per task rather than per (task, rollout) pair.
+shard_outstanding() {
+    python - "$1" <<'INNER'
 import json, sys
 from pathlib import Path
+
 d = Path(sys.argv[1])
-key = lambda r: (r.get("_ng_task_index"), r.get("_ng_rollout_index"))
-done = {key(json.loads(l)) for l in open(d / "rollouts.jsonl") if l.strip()}
-todo = sum(1 for l in open(d / "rollouts_materialized_inputs.jsonl")
-           if l.strip() and key(json.loads(l)) not in done)
-print(todo)
-PY
-)
-    if [[ "$remaining" -eq 0 ]]; then
-        echo "    $shard_name already complete; not submitting"
+done_pairs, done_tasks = set(), set()
+for line in open(d / "rollouts.jsonl"):
+    if line.strip():
+        r = json.loads(line)
+        done_pairs.add((r.get("_ng_task_index"), r.get("_ng_rollout_index")))
+        done_tasks.add(r.get("_ng_task_index"))
+
+outstanding = 0
+for line in open(d / "rollouts_materialized_inputs.jsonl"):
+    if not line.strip():
         continue
+    r = json.loads(line)
+    task, rollout = r.get("_ng_task_index"), r.get("_ng_rollout_index")
+    if rollout is None:
+        # unexpanded: this row stands for every repeat of the task
+        outstanding += task not in done_tasks
+    else:
+        outstanding += (task, rollout) not in done_pairs
+print(outstanding)
+INNER
+}
+
+declare -A shard_rounds
+round=0
+while :; do
+    round=$((round + 1))
+    unset live_jobs; declare -A live_jobs=()
+    submitted=0
+
+    for shard_dir in "$SHARDS_DIR"/shard_*/; do
+        [[ -d "$shard_dir" ]] || continue
+        shard_name="$(basename "$shard_dir")"
+        outstanding=$(shard_outstanding "$shard_dir")
+
+        if [[ "$outstanding" -eq 0 ]]; then
+            echo "    $shard_name complete"
+            continue
+        fi
+        attempts=${shard_rounds[$shard_name]:-0}
+        if [[ "$attempts" -ge "$MAX_ROUNDS" ]]; then
+            echo "    $shard_name still has $outstanding outstanding after $attempts attempts; giving up" >&2
+            continue
+        fi
+
+        submit_output=$(
+            EXPERIMENT_NAME="${EXPERIMENT_NAME:-rp}-$shard_name" \
+            SWEEP_DIR="$shard_dir" \
+            bash "$RP_DIR/scripts/sbatch_reward_profiling.sh"
+        )
+        job_id=$(grep -oE '[0-9]+$' <<<"$submit_output" | tail -1)
+        live_jobs[$job_id]=$shard_name
+        shard_rounds[$shard_name]=$((attempts + 1))
+        submitted=$((submitted + 1))
+        echo "    $shard_name -> job $job_id (attempt $((attempts + 1)), $outstanding outstanding)"
+    done
+
+    if [[ "$submitted" -eq 0 ]]; then
+        echo ">>> round $round: nothing left to submit"
+        break
     fi
 
-    submit_output=$(
-        EXPERIMENT_NAME="${EXPERIMENT_NAME:-rp}-$shard_name" \
-        SWEEP_DIR="$shard_dir" \
-        bash "$RP_DIR/scripts/sbatch_reward_profiling.sh"
-    )
-    job_id=$(grep -oE '[0-9]+$' <<<"$submit_output" | tail -1)
-    job_ids+=("$job_id")
-    echo "    $shard_name -> job $job_id ($remaining rollouts outstanding)"
-done
-
-if [[ ${#job_ids[@]} -eq 0 ]]; then
-    echo ">>> nothing to run; every shard was already complete"
-else
-    echo ">>> waiting on ${#job_ids[@]} jobs: ${job_ids[*]}"
+    echo ">>> round $round: waiting on $submitted job(s)"
     while :; do
-        live=$(squeue -h -j "$(IFS=,; echo "${job_ids[*]}")" -o "%i" 2>/dev/null | wc -l)
+        live=$(squeue -h -j "$(IFS=,; echo "${!live_jobs[*]}")" -o "%i" 2>/dev/null | wc -l)
         [[ "$live" -eq 0 ]] && break
-        echo "    $live/${#job_ids[@]} still running"
         sleep "$POLL_S"
     done
-fi
+    echo ">>> round $round done; rechecking for shards that died with work outstanding"
+done
 
 echo ">>> merging shard rollouts back into $SWEEP_DIR"
 python -m nemo_gym.sweep merge "$SHARDS_DIR" --output "$SWEEP_DIR/rollouts.jsonl"

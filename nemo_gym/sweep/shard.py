@@ -110,7 +110,12 @@ def shard_sweep(sweep_dir: str | Path, num_shards: int, out_dir: Optional[str | 
                     row = json.loads(line)
                 except ValueError:
                     continue
+                # Key on both, plus task alone. With --no-expand there is one row per task and no
+                # rollout index, so a collected rollout's (task, 0..n) never matches the input's
+                # (task, None) -- the task-only entry is what routes it. With expanded inputs the
+                # repeats of one task are dealt to different shards, so the exact pair must win.
                 owner_of_key[(row.get(TASK_INDEX_KEY), row.get(ROLLOUT_INDEX_KEY))] = index
+                owner_of_key.setdefault((row.get(TASK_INDEX_KEY), None), index)
     finally:
         for handle in handles:
             handle.close()
@@ -171,6 +176,8 @@ def _carry_existing_rollouts(
                 except ValueError:
                     continue
                 index = owner_of_key.get((row.get(TASK_INDEX_KEY), row.get(ROLLOUT_INDEX_KEY)))
+                if index is None:
+                    index = owner_of_key.get((row.get(TASK_INDEX_KEY), None))
                 if index is None:
                     # A rollout whose input is not in this sweep; dropping it is correct, and
                     # merge would have deduplicated it against nothing anyway.

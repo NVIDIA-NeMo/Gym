@@ -20,7 +20,13 @@ mkdir -p "$OUT_DIR"
 JOBS=${JOBS:-}
 LIMIT_PER_ENTRY=${LIMIT_PER_ENTRY:-}
 
+# Default to one row per task and let Gym expand num_repeats at collection time. It writes 8x
+# fewer rows (34 GB rather than 291.5 GB for this manifest, 682s rather than 2087s), and keeps a
+# task's repeats together so they share a vLLM prefix cache on an identical prompt -- which matters
+# once sharded, since dealing expanded rows round-robin scatters repeats across jobs. Set EXPAND=1
+# to pre-expand instead.
 args=(--out-dir "$OUT_DIR")
+[[ "${EXPAND:-0}" == "1" ]] || args+=(--no-expand)
 [[ -n "$JOBS" ]] && args+=(--jobs "$JOBS")
 [[ -n "$LIMIT_PER_ENTRY" ]] && args+=(--limit-per-entry "$LIMIT_PER_ENTRY")
 [[ "${OVERWRITE:-0}" == "1" ]] && args+=(--overwrite)

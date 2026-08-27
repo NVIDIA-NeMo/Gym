@@ -1,0 +1,17 @@
+# Example manifest for basic environment without judge or sandbox.
+
+nickname: example_basic
+
+defaults:
+  num_repeats: 8
+
+extra_configs:
+  - responses_api_models/vllm_model/configs/vllm_model.yaml
+
+entries:
+  - label: tau_pivot
+    agent: single_step_tool_use_with_argument_comparison_agent
+    configs:
+      - resources_servers/single_step_tool_use_with_argument_comparison/configs/single_step_tool_use_with_argument_comparison.yaml
+    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/tau_pivot/super_row_54_1000_synthetic_tau_all_rollouts_leq_60_passrate.jsonl
+    owner: jkyi

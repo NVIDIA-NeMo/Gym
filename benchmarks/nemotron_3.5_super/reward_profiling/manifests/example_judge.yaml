@@ -1,0 +1,35 @@
+# Example manifest for a judge-scored environment
+
+nickname: example_judge
+
+defaults:
+  num_repeats: 8
+
+extra_configs:
+  - responses_api_models/vllm_model/configs/vllm_model.yaml
+
+config_overlay:
+
+  math_judge_model: &gateway_judge
+    responses_api_models:
+      openai_model:
+        entrypoint: app.py
+        openai_base_url: https://inference-api.nvidia.com/v1
+        openai_model: nvidia/qwen/qwen-235b
+        openai_api_key: ${nv_inference_api_key}
+        max_concurrent_requests: 64
+
+  lc_judge:
+    resources_servers:
+      equivalence_llm_judge:
+        judge_model_server:
+          type: responses_api_models
+          name: math_judge_model
+
+  # --- judge-scored ------------------------------------------------------------------------
+  - label: long_context
+    agent: lc_judge_simple_agent
+    configs:
+      - resources_servers/equivalence_llm_judge/configs/lc_judge.yaml
+    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/long_context/0123_chengping_qwenlong_v3b_profiled.jsonl
+    owner: fjia
