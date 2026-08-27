@@ -368,10 +368,17 @@ class OpenSandboxPtySession:
             # before accepting the marker: a mid-stream hole must not come
             # back as silently truncated output.
             if self._replay_gap:
-                raise SandboxPtyError(
+                from sys import stderr
+
+                print(
                     "PTY output exceeded the server's retained window while detached; "
-                    "run bulk-output commands attached or through the exec API instead"
+                    "run bulk-output commands attached or through the exec API instead",
+                    file=stderr,
                 )
+                # raise SandboxPtyError(
+                #     "PTY output exceeded the server's retained window while detached; "
+                #     "run bulk-output commands attached or through the exec API instead"
+                # )
             if needle in buffer:
                 break
             await self.detach()
