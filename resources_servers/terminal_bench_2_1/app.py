@@ -240,7 +240,6 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             # Re-use the original sandbox
             eval_sandbox, pty_session = self._session_id_to_sandbox.pop(request.session[SESSION_ID_KEY])
             golden_patch_output = None
-            raise NotImplementedError
 
         if self.config.debug:
             print(f"Running tests for {body.task_name}", file=stderr)
