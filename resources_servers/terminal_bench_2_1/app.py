@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from contextlib import contextmanager
 from glob import glob
 from pathlib import Path
 from sys import stderr
@@ -60,6 +61,43 @@ class TerminalBench21VerifyResponse(BaseVerifyResponse):
     golden_patch_output: Optional[str]
 
 
+GOLDEN_PATCH_SOLVE_SH_PATCHES = {
+    "terminal-bench/build-cython-ext": [
+        (
+            "pip install setuptools==80.9.0 cython==3.1.3",
+            "pip install setuptools==80.9.0 cython==3.1.3 planarity==0.6",
+        ),
+    ],
+    "terminal-bench/build-pov-ray": [
+        ("wget=1.21.4-1ubuntu4.1", "wget"),
+        ("ncompress=5.0-1", "ncompress"),
+        (
+            "wget https://www.povray.org/ftp/pub/povray/Old-Versions/Official-2.2/POVDOC.TAR.Z",
+            "wget --tries=5 --timeout=60 --output-document=POVDOC.TAR.Z "
+            "http://grumbeer.dyndns.org/ftp/cdroms/freebsd/freebsd-2.1.7-2/ports/distfiles/povdoc.tar.Z",
+        ),
+        (
+            "wget https://www.povray.org/ftp/pub/povray/Old-Versions/Official-2.2/POVSCN.TAR.Z",
+            "wget --tries=5 --timeout=60 --output-document=POVSCN.TAR.Z "
+            "http://grumbeer.dyndns.org/ftp/cdroms/freebsd/freebsd-2.1.7-2/ports/distfiles/povscn.tar.Z",
+        ),
+        (
+            "wget https://www.povray.org/ftp/pub/povray/Old-Versions/Official-2.2/POVSRC.TAR.Z",
+            """wget --tries=5 --timeout=60 --output-document=POVSRC.TAR.Z \\
+  http://grumbeer.dyndns.org/ftp/cdroms/freebsd/freebsd-2.1.7-2/ports/distfiles/povsrc.tar.Z
+cat <<'EOF' | sha256sum --check -
+e70e44d1fe8835c4dff7c7a55bd6629b15e6a15b2ab7f2f49ee9e2dc016cc470  POVDOC.TAR.Z
+4272e2d4724d8dfd916d68827194577221d17b733d99e84e7040f3a9f7eb92a7  POVSCN.TAR.Z
+4d8a7073fadaca82827f1354428393cd13e4d3f71a5a3149fd7d6fffd77293d4  POVSRC.TAR.Z
+EOF""",
+        ),
+    ],
+    "terminal-bench/mcmc-sampling-stan": [
+        ("sudo apt-get install -y \\\n    gfortran", "sudo apt-get install -y \\\n    cmake \\\n    gfortran"),
+    ],
+}
+
+
 class TerminalBench21ResourcesServer(SimpleResourcesServer):
     config: TerminalBench21ResourcesServerConfig
 
@@ -107,7 +145,26 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
 
         return TerminalBench21SeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)
 
-    async def _upload_folder(self, sandbox: AsyncSandbox, local_dirpath: Path, target_dirpath: str) -> None:
+    @contextmanager
+    def _patch_golden_patch_solve_sh(self, task_name: str, local_fpath: Path):
+        if task_name not in GOLDEN_PATCH_SOLVE_SH_PATCHES:
+            yield local_fpath
+            return
+
+        content = local_fpath.read_text()
+        for old, new in GOLDEN_PATCH_SOLVE_SH_PATCHES[task_name]:
+            content = content.replace(old, new)
+
+        temp_file = NamedTemporaryFile(mode="w+", suffix=".sh", delete_on_close=False)
+        temp_file.write(content)
+
+        yield temp_file.name
+
+        temp_file.close()
+
+    async def _upload_folder(
+        self, sandbox: AsyncSandbox, local_dirpath: Path, target_dirpath: str, task_name: Optional[str] = None
+    ) -> None:
         if not local_dirpath.is_absolute():
             local_dirpath = PARENT_DIR / local_dirpath
 
@@ -119,7 +176,9 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             target_fpath = f"{target_dirpath}/{file}"
             mkdir_result = await sandbox.exec(f"mkdir -p {Path(target_fpath).parent}")
             assert mkdir_result.return_code == 0, mkdir_result
-            await sandbox.upload(local_path=local_fpath, remote_path=target_fpath)
+
+            with self._patch_golden_patch_solve_sh(task_name, local_fpath) as new_local_fpath:
+                await sandbox.upload(local_path=new_local_fpath, remote_path=target_fpath)
 
     async def verify(self, request: Request, body: TerminalBench21VerifyRequest) -> TerminalBench21VerifyResponse:
         task_folder = Path(body.task_folder)
@@ -129,7 +188,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                 print(f"Creating eval sandbox for {body.task_name}", file=stderr)
             eval_sandbox, pty_session = await self._create_sandbox(body)
             cwd = (await eval_sandbox.exec("pwd")).stdout.strip()
-            await self._upload_folder(eval_sandbox, task_folder / "solution", cwd)
+            await self._upload_folder(eval_sandbox, task_folder / "solution", cwd, task_name=body.task_name)
 
             if self.config.debug:
                 print(f"Running golden patch for {body.task_name}", file=stderr)
