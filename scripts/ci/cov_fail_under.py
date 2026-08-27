@@ -18,7 +18,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 def main() -> None:
     pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     fail_under = pyproject["tool"]["coverage"]["report"]["fail_under"]
-    print(int(fail_under))
+    # Preserve the fractional part (e.g. 95.9) instead of truncating to an int, while printing
+    # whole-number thresholds (e.g. 96.0) without a trailing ".0".
+    print(int(fail_under) if fail_under == int(fail_under) else fail_under)
 
 
 if __name__ == "__main__":
