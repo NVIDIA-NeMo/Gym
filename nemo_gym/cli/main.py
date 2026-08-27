@@ -524,6 +524,8 @@ def _env_test(args: argparse.Namespace, overrides: list[str]) -> None:
     manifest_options = any(_has_override(overrides, key) for key in ("catalog_kind", "update_expected", "json"))
     if manifest_selected and legacy_selected:
         args._parser.error("select a workload name or --resources-server, not both")
+    if args.all and (manifest_selected or legacy_selected):
+        args._parser.error("--all tests every resources server, so it cannot be combined with a named target")
     if manifest_options and not manifest_selected:
         args._parser.error("--kind, --update-expected, and --json require a workload name")
     if manifest_selected:
@@ -532,9 +534,15 @@ def _env_test(args: argparse.Namespace, overrides: list[str]) -> None:
 
     # Run a single server's tests if +entrypoint was passed. No need to check for
     # --resources-server because it is translated to +entrypoint in the flag definition.
-    dispatch(
-        "nemo_gym.cli.env:test" if _has_override(overrides, "entrypoint") else "nemo_gym.cli.env:test_all", overrides
-    )
+    if _has_override(overrides, "entrypoint"):
+        dispatch("nemo_gym.cli.env:test", overrides)
+        return
+
+    if not args.all:
+        args._parser.error(
+            "requires a target: a workload name, --resources-server NAME, or --all to test every resources server."
+        )
+    dispatch("nemo_gym.cli.env:test_all", overrides)
 
 
 def _dataset_upload(args: argparse.Namespace, overrides: list[str]) -> None:
@@ -761,6 +769,13 @@ COMMANDS = {
             JSON,
             RESOURCES_SERVER,
             SEARCH_DIR,
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--all",
+                    action="store_true",
+                    help="Test every resources server. Slow: builds one venv per server.",
+                )
+            ),
         ),
     ),
     "env publish": Command(
