@@ -28,3 +28,4 @@ terminal_bench_2_1_resources_server:          # instance name — how agents/CLI
             disk_gib: 30
         metadata:
           benchmark: terminal-bench-2.1
+          nemo.nvidia.com/resources: custom
