@@ -448,6 +448,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             print("Creating new sandbox since one wasn't provided", file=sys.stderr)
 
         resources = SandboxResources.from_mapping(self.config.sandbox_config.get("resources", {}))
+        # TODO @bxyu-nvidia: Refactor this after swapping to PTY as this should be set on the SWE Bench resources server side
         env = cpu_cap_env(resources.cpu) if self.config.sandbox_config.get("derive_cpu_env", True) else {}
 
         # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
