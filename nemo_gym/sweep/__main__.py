@@ -120,6 +120,13 @@ def main(argv: list[str] | None = None) -> int:
             for d, rows in zip(result.shard_dirs, result.rows_per_shard):
                 print(f"  {d.name}  {rows:>9,} rows  {d}")
             print(f"dealt {result.total_rows:,} rows round-robin into {len(result.shard_dirs)} shards")
+            if result.absorbed_rollouts:
+                print(f"absorbed {result.absorbed_rollouts:,} rollouts from the previous layout into the parent")
+            if result.snapshot_dir:
+                print(f"snapshot before resharding: {result.snapshot_dir}")
+            if result.removed_stale:
+                print(f"removed {len(result.removed_stale)} stale shard dir(s) from a wider layout: "
+                      f"{', '.join(result.removed_stale)}")
             if result.carried_rollouts:
                 print(f"carried {result.carried_rollouts:,} already-collected rollouts into the new layout")
             print("each shard directory is a valid SWEEP_DIR; run the launcher against each")

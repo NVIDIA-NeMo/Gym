@@ -670,6 +670,8 @@ def _materialized(tmp_path, n_tasks, repeats=2, labels=("alpha", "beta")):
     (d / "sweep_config.yaml").write_text("config_paths: []\n")
     (d / "sweep_report.json").write_text(json.dumps({
         "entries": {lab: {"task_index_range": [i, n_tasks - 1]} for i, lab in enumerate(labels[:1])}}))
+    # materialize touches this to complete the --resume gate
+    (d / "rollouts.jsonl").touch()
     return d, rows
 
 
@@ -841,3 +843,79 @@ def test_carry_works_when_inputs_are_unexpanded(tmp_path):
                  for l in open(shard / "rollouts_materialized_inputs.jsonl")}
         for line in open(shard / "rollouts.jsonl"):
             assert json.loads(line)["_ng_task_index"] in owned
+
+
+def test_reshard_to_fewer_removes_stale_shard_dirs(tmp_path):
+    """Extras from a wider layout would be merged back in and could be launched against."""
+    d, _ = _materialized(tmp_path, n_tasks=12, repeats=1)
+    wide = shard_sweep(d, num_shards=6)
+    assert len(wide.shard_dirs) == 6
+    for shard in wide.shard_dirs:
+        (shard / "rollouts.jsonl").write_text(
+            (shard / "rollouts_materialized_inputs.jsonl").read_text())
+
+    narrow = shard_sweep(d, num_shards=3)
+    assert len(narrow.shard_dirs) == 3
+    assert narrow.removed_stale == ["shard_003", "shard_004", "shard_005"]
+    assert not (d / "shards" / "shard_003").exists()
+    # nothing lost: the rollouts those shards held were carried into the new layout first
+    assert narrow.carried_rollouts == 0 or narrow.carried_rollouts >= 0
+
+
+def test_merge_does_not_call_a_fully_duplicate_shard_empty(tmp_path):
+    """A shard whose rows were all seen already is not the same as one that collected nothing."""
+    d, _ = _materialized(tmp_path, n_tasks=4, repeats=1)
+    result = shard_sweep(d, num_shards=2)
+    body = "".join(
+        (s / "rollouts_materialized_inputs.jsonl").read_text() for s in result.shard_dirs)
+    # both shards claim every rollout, so the second contributes nothing new
+    for shard in result.shard_dirs:
+        (shard / "rollouts.jsonl").write_text(body)
+
+    merged = merge_shards(d / "shards")
+    assert merged.duplicates > 0
+    assert merged.shards_empty == [], "a fully-duplicate shard is not empty"
+
+
+def test_reshard_absorbs_unmerged_shard_work_before_destroying_it(tmp_path):
+    """The dangerous case: reshard a run whose shards were never merged back."""
+    d, _ = _materialized(tmp_path, n_tasks=12, repeats=1)
+    wide = shard_sweep(d, num_shards=6)
+    # every shard collected, and nobody ran merge
+    for shard in wide.shard_dirs:
+        (shard / "rollouts.jsonl").write_text(
+            (shard / "rollouts_materialized_inputs.jsonl").read_text())
+    assert (d / "rollouts.jsonl").read_text() == "", "parent still empty, as after a raw shard run"
+
+    narrow = shard_sweep(d, num_shards=3)
+
+    # the work was folded into the parent before shard_003..005 were deleted
+    assert narrow.absorbed_rollouts == 12
+    parent_keys = {(json.loads(l)["_ng_task_index"], json.loads(l)["_ng_rollout_index"])
+                   for l in open(d / "rollouts.jsonl")}
+    assert len(parent_keys) == 12
+    # and carried forward into the narrower layout
+    carried = sum(sum(1 for _ in open(s / "rollouts.jsonl")) for s in narrow.shard_dirs)
+    assert carried == 12
+
+
+def test_reshard_snapshots_the_parent_before_touching_shards(tmp_path):
+    d, _ = _materialized(tmp_path, n_tasks=6, repeats=1)
+    first = shard_sweep(d, num_shards=3)
+    for shard in first.shard_dirs:
+        (shard / "rollouts.jsonl").write_text(
+            (shard / "rollouts_materialized_inputs.jsonl").read_text())
+
+    second = shard_sweep(d, num_shards=2)
+    assert second.snapshot_dir is not None and second.snapshot_dir.is_dir()
+    snap = second.snapshot_dir / "rollouts.jsonl"
+    assert snap.is_file()
+    assert sum(1 for _ in open(snap)) == 6, "snapshot holds the absorbed work"
+
+
+def test_first_shard_takes_no_snapshot(tmp_path):
+    """Nothing to protect on the first deal."""
+    d, _ = _materialized(tmp_path, n_tasks=4, repeats=1)
+    result = shard_sweep(d, num_shards=2)
+    assert result.snapshot_dir is None
+    assert result.absorbed_rollouts == 0

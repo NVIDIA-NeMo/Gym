@@ -32,6 +32,7 @@ shards finish early and idle.
 
 import json
 import shutil
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -41,6 +42,7 @@ ROLLOUTS_NAME = "rollouts.jsonl"
 CONFIG_NAME = "sweep_config.yaml"
 REPORT_NAME = "sweep_report.json"
 SHARD_REPORT_NAME = "shard_report.json"
+SNAPSHOTS_DIR = "snapshots"
 TASK_INDEX_KEY = "_ng_task_index"
 ROLLOUT_INDEX_KEY = "_ng_rollout_index"
 
@@ -54,6 +56,9 @@ class ShardResult:
     shard_dirs: List[Path] = field(default_factory=list)
     rows_per_shard: List[int] = field(default_factory=list)
     carried_rollouts: int = 0
+    removed_stale: List[str] = field(default_factory=list)
+    absorbed_rollouts: int = 0
+    snapshot_dir: Optional[Path] = None
 
     @property
     def total_rows(self) -> int:
@@ -95,6 +100,54 @@ def shard_sweep(sweep_dir: str | Path, num_shards: int, out_dir: Optional[str | 
     for d in shard_dirs:
         d.mkdir(parents=True, exist_ok=True)
 
+    # Anything the previous layout collected is folded back into the parent first, and the parent
+    # is snapshotted, before a single shard directory is touched. Resharding is destructive --
+    # shard directories are rewritten and extras removed -- so the only safe order is to make the
+    # parent authoritative first. Without this, resharding a run whose shards were never merged
+    # would delete the only copy of that work.
+    absorbed = 0
+    snapshot_dir: Optional[Path] = None
+    if any(out_dir.glob("shard_*/" + ROLLOUTS_NAME)):
+        merged_here = merge_shards(out_dir, output_fpath=out_dir / "_premerge.jsonl")
+        parent_rollouts = sweep_dir / ROLLOUTS_NAME
+        seen_parent: Set[Tuple[object, object]] = set()
+        if parent_rollouts.is_file():
+            with open(parent_rollouts) as reader:
+                for line in reader:
+                    if line.strip():
+                        row = json.loads(line)
+                        seen_parent.add((row.get(TASK_INDEX_KEY), row.get(ROLLOUT_INDEX_KEY)))
+        with open(parent_rollouts, "a") as sink, open(out_dir / "_premerge.jsonl") as reader:
+            for line in reader:
+                line = line.strip()
+                if not line:
+                    continue
+                row = json.loads(line)
+                if (row.get(TASK_INDEX_KEY), row.get(ROLLOUT_INDEX_KEY)) in seen_parent:
+                    continue
+                sink.write(line + "\n")
+                absorbed += 1
+        (out_dir / "_premerge.jsonl").unlink()
+
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        snapshot_dir = sweep_dir / SNAPSHOTS_DIR / stamp
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        if parent_rollouts.is_file():
+            shutil.copy2(parent_rollouts, snapshot_dir / ROLLOUTS_NAME)
+        for name in (REPORT_NAME, SHARD_REPORT_NAME):
+            src = sweep_dir / name if name == REPORT_NAME else out_dir / name
+            if src.is_file():
+                shutil.copy2(src, snapshot_dir / name)
+
+    # Resharding to fewer shards would otherwise strand the extras. They still hold rows and
+    # rollouts from the old layout, so merge would union them back in (dedup saves correctness,
+    # but only by accident) and a job launched against one would redo work that now belongs
+    # elsewhere. Their rollouts are already carried into the new layout below, so dropping them
+    # loses nothing.
+    stale = sorted(d for d in out_dir.glob("shard_*") if d.is_dir() and d not in set(shard_dirs))
+    for d in stale:
+        shutil.rmtree(d)
+
     counts = [0] * num_shards
     owner_of_key: Dict[Tuple[object, object], int] = {}
     handles = [open(d / INPUTS_NAME, "w") for d in shard_dirs]
@@ -133,7 +186,12 @@ def shard_sweep(sweep_dir: str | Path, num_shards: int, out_dir: Optional[str | 
     # starts with an empty rollouts.jsonl, so --resume finds nothing and recollects from scratch.
     carried = _carry_existing_rollouts(sweep_dir, shard_dirs, owner_of_key)
 
-    result = ShardResult(shard_dirs=shard_dirs, rows_per_shard=counts, carried_rollouts=carried)
+    result = ShardResult(
+        shard_dirs=shard_dirs, rows_per_shard=counts, carried_rollouts=carried,
+        removed_stale=[d.name for d in stale],
+        absorbed_rollouts=absorbed,
+        snapshot_dir=snapshot_dir,
+    )
     (out_dir / SHARD_REPORT_NAME).write_text(
         json.dumps(
             {
@@ -143,6 +201,9 @@ def shard_sweep(sweep_dir: str | Path, num_shards: int, out_dir: Optional[str | 
                 "rows_per_shard": {d.name: c for d, c in zip(shard_dirs, counts)},
                 "total_rows": sum(counts),
                 "carried_rollouts": carried,
+                "removed_stale": [d.name for d in stale],
+                "absorbed_rollouts": absorbed,
+                "snapshot_dir": str(snapshot_dir) if snapshot_dir else None,
             },
             indent=2,
         )
@@ -210,6 +271,7 @@ def merge_shards(shards_dir: str | Path, output_fpath: Optional[str | Path] = No
         for d in shard_dirs:
             src = d / ROLLOUTS_NAME
             rows_here = 0
+            saw_any = False
             if not src.is_file():
                 result.shards_empty.append(d.name)
                 continue
@@ -222,6 +284,7 @@ def merge_shards(shards_dir: str | Path, output_fpath: Optional[str | Path] = No
                         row = json.loads(line)
                     except ValueError:
                         continue
+                    saw_any = True
                     key = (row.get(TASK_INDEX_KEY), row.get(ROLLOUT_INDEX_KEY))
                     if key in seen:
                         result.duplicates += 1
@@ -230,7 +293,7 @@ def merge_shards(shards_dir: str | Path, output_fpath: Optional[str | Path] = No
                     sink.write(line + "\n")
                     result.merged += 1
                     rows_here += 1
-            if rows_here == 0:
+            if rows_here == 0 and not saw_any:
                 result.shards_empty.append(d.name)
 
     return result

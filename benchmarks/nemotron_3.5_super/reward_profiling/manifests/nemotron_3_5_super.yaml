@@ -1,0 +1,411 @@
+# The reward-profiling sweep: every environment, one Gym deployment, one input file.
+#
+# Rows carry their own agent_ref and rollout collection dispatches per row, so 36 environments
+# across judge / sandbox / neither run as one job rather than 36. That is the whole point of the
+# sweep abstraction -- the pre-sweep infrastructure ran ~110 separate sbatch jobs for this.
+#
+# Requires SANDBOX_CONTAINER (ns_tools, math_formal_lean) and env.yaml (the judge entries). Without
+# a sandbox those environments fail per rollout rather than at startup, so check the launcher's
+# /health gate rather than waiting on the rollout count.
+#
+# Provenance: data_gym/ultra_v3_sets/260603_ultra_v3_set_final.
+
+nickname: nemotron_3_ultra
+
+defaults:
+  num_repeats: 8
+
+extra_configs:
+  - responses_api_models/vllm_model/configs/vllm_model.yaml
+
+config_overlay:
+
+  math_judge_model: &gateway_judge
+    responses_api_models:
+      openai_model:
+        entrypoint: app.py
+        openai_base_url: https://inference-api.nvidia.com/v1
+        openai_model: nvidia/qwen/qwen-235b
+        openai_api_key: ${nv_inference_api_key}
+        max_concurrent_requests: 64
+
+  # The pre-sweep scripts pointed abstention and inverse_if at a separately named judge instance.
+  # Kept distinct so the two can be repointed without touching the math judge.
+  nl2bash_judge_model: *gateway_judge
+
+  # Names the shipped configs already reference: abstention declares genrm_model and inverse_if
+  # declares judge_model, and nothing else defines them, so the composed config fails to resolve
+  # without these. Defining them also avoids depending on merge order to rebind.
+  genrm_model: *gateway_judge
+  judge_model: *gateway_judge
+
+  # math_with_judge verifies symbolically via math-verify by default; the judge is the fallback and
+  # has to be switched on explicitly.
+  math_with_judge:
+    resources_servers:
+      math_with_judge:
+        should_use_judge: true
+        judge_model_server:
+          type: responses_api_models
+          name: math_judge_model
+
+  lc_judge:
+    resources_servers:
+      equivalence_llm_judge:
+        judge_model_server:
+          type: responses_api_models
+          name: math_judge_model
+
+  equivalence_llm_judge:
+    resources_servers:
+      equivalence_llm_judge:
+        judge_model_server:
+          type: responses_api_models
+          name: math_judge_model
+
+  multichallenge:
+    resources_servers:
+      multichallenge:
+        judge_model_server:
+          type: responses_api_models
+          name: math_judge_model
+
+  abstention:
+    resources_servers:
+      abstention:
+        judge_model_server:
+          type: responses_api_models
+          name: nl2bash_judge_model
+        judge_responses_create_params:
+          # Paired with the rebind above, not an independent change. Upstream points abstention at
+          # genrm_model -- a GenRM scorer, served locally on its own GPUs -- and nothing here
+          # defines that name. We serve judges from the gateway instead, so it has to be a chat
+          # judge, and a chat judge grading against app.py's A/B/C prompt needs room for more than
+          # a bare letter.
+          #
+          # 64 is enough for a compliant "A", so this may never bind. It matters because failure is
+          # silent: parse_judge_grade (resources_servers/abstention/app.py:218) falls back to "B"
+          # (INCORRECT) on anything it cannot parse, so a judge truncated before its letter scores
+          # the rollout wrong rather than erroring. 8192 matches what the ultra-3 branch runs.
+          max_output_tokens: 8192
+
+  inverse_if:
+    resources_servers:
+      inverse_if:
+        judge_model_server:
+          type: responses_api_models
+          name: nl2bash_judge_model
+
+
+  # The shipped ns_tools.yaml registers only math_with_judge. Our rows carry per-row verifier_type
+  # of mcqa and equivalence_llm_judge, and an unregistered name is a hard failure --
+  # "ValueError: Unknown verifier: mcqa" surfaces to the driver as a bare 500 from the agent.
+  # Registering all three is what lets the three ns_tools entries share one agent.
+  ns_tools:
+    resources_servers:
+      ns_tools:
+        verifiers:
+          math_with_judge:
+            type: resources_servers
+            name: math_with_judge
+          mcqa:
+            type: resources_servers
+            name: mcqa
+          equivalence_llm_judge:
+            type: resources_servers
+            name: equivalence_llm_judge
+        # Carried over from the pre-sweep configs, which note it improves stability: after a
+        # sandbox worker restarts, replaying the session is what tends to wedge the tool call.
+        disable_session_restore: true
+
+
+entries:
+
+  # ==========================================================================
+  # Agentic / tool use (9)
+  # ==========================================================================
+  - label: tau_pivot
+    agent: single_step_tool_use_with_argument_comparison_agent
+    configs:
+      - resources_servers/single_step_tool_use_with_argument_comparison/configs/single_step_tool_use_with_argument_comparison.yaml
+    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/tau_pivot/super_row_54_1000_synthetic_tau_all_rollouts_leq_60_passrate.jsonl
+    owner: jkyi
+
+  - label: tau_pivot_aq_mms
+    agent: single_step_tool_use_with_argument_comparison_agent
+    configs:
+      - resources_servers/single_step_tool_use_with_argument_comparison/configs/single_step_tool_use_with_argument_comparison.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/tau2_afterquery/pivot_datasets/evaluator_rollouts_260507_1057_mixed_rewards_pivot.jsonl
+    owner: jkyi
+
+  - label: swe_pivot
+    agent: swe_pivot_single_step_tool_use_with_argument_comparison_agent
+    configs:
+      - resources_servers/single_step_tool_use_with_argument_comparison/configs/swe_pivot_single_step_tool_use_with_argument_comparison.yaml
+    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/swe_pivot/sugam_reasoning_minimax_128k_super_yian3_mixed_agent_ref_swe.jsonl
+    owner: sdevare
+
+  - label: search_pivot
+    agent: search_pivot_single_step_tool_use_with_argument_comparison_agent
+    configs:
+      - resources_servers/single_step_tool_use_with_argument_comparison/configs/search_pivot_single_step_tool_use_with_argument_comparison.yaml
+    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jkyi/current/nemo/data_gym/search_pivot/260331_search_pivot_updated.jsonl
+    owner: rgala
+
+  - label: droid_pivot_v1
+    agent: droid_pivot_single_step_tool_use_with_argument_comparison_agent
+    configs:
+      - resources_servers/single_step_tool_use_with_argument_comparison/configs/droid_pivot_single_step_tool_use_with_argument_comparison.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/ultra_v3_sets/260501_ultra_v3_set/droid_pivot_v1/droid_pivot_v1_260501_20k.jsonl
+    owner: jkyi, mengxiw
+
+  - label: gdpval_pivot_v1
+    agent: gdpval_single_step_tool_use_with_argument_comparison_agent
+    configs:
+      - /lustre/fsw/portfolios/llmservice/users/jkyi/research-scratch/260511_gdpval/data/pivot_datasets/gdpval_single_step_tool_use_with_argument_comparison.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/jkyi/research-scratch/260511_gdpval/data/pivot_datasets/afterquery_sft_GLM51_20260509_002133_pivot.jsonl
+    owner: venkats
+
+  - label: terminal_pivot
+    agent: terminus_judge_string_only_simple_agent
+    configs:
+      - resources_servers/terminus_judge/configs/terminus_judge_string_only.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/charlwang/cluster/tb/data/trainset/260327_ultra_pivot_aq2k_aq5k_t08_cap3_k02_k12_r16_stringonly_nemotron3_maxseq49152/train.jsonl
+    owner: charlwang, kbhardwaj
+
+  - label: workbench
+    agent: workplace_assistant_simple_agent
+    configs:
+      - resources_servers/workplace_assistant/configs/workplace_assistant.yaml
+    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/workbench/workplace_assistant_out.jsonl
+    owner: abhibhag
+
+  - label: calendar_v2
+    agent: calendar_simple_agent
+    configs:
+      - resources_servers/calendar/configs/calendar.yaml
+    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/calendar_v2/calendar_out.jsonl
+    owner: ???
+
+
+  # ==========================================================================
+  # Reasoning (7)
+  # ==========================================================================
+  - label: comp_coding
+    agent: code_gen_simple_agent
+    configs:
+      - resources_servers/code_gen/configs/code_gen.yaml
+    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/comp_coding/comp_coding_out.jsonl
+    owner: ???
+
+  - label: comp_coding_nemotronx
+    agent: code_gen_simple_agent
+    configs:
+      - resources_servers/code_gen/configs/code_gen.yaml
+    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/comp_coding/nemotronx_code_out.jsonl
+    owner: ???
+
+  - label: stem_mcqa_ultra_0
+    agent: mcqa_simple_agent
+    configs:
+      - resources_servers/mcqa/configs/mcqa.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/ultra_v3_sets/260501_ultra_v3_set/stem_mcqa_ultra_0/stem_mcqa_ultra_0_260501.jsonl
+    owner: ???
+
+  - label: reasoning_gym
+    agent: reasoning_gym_simple_agent
+    configs:
+      - resources_servers/reasoning_gym/configs/reasoning_gym.yaml
+    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/reasoning_gym/reasoning_gym_out.jsonl
+    owner: ???
+
+  - label: nvarc_inductive
+    agent: nvarc_inductive_simple_agent
+    configs:
+      - resources_servers/nvarc/configs/inductive.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/jiaqiz/data/gym/nvarc/python_inductive/train.jsonl
+    owner: ???
+
+  - label: nvarc_transductive
+    agent: nvarc_transductive_simple_agent
+    configs:
+      - resources_servers/nvarc/configs/transductive.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/jiaqiz/data/gym/nvarc/transductive/train.jsonl
+    owner: ???
+
+  - label: ether0
+    agent: ether0_simple_agent
+    configs:
+      - resources_servers/ether0/configs/ether0.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/jiaqiz/data/gym/ether0/train_curriculum_10k.jsonl
+    owner: ???
+
+
+  # ==========================================================================
+  # Long context (1)
+  # ==========================================================================
+  - label: equivalence_rule
+    agent: lc_equivalence_rule_simple_agent
+    configs:
+      - resources_servers/equivalence_rule/configs/lc.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/fjia/rl/nano_v3/data/mrcr/processed_p67_sampled_10pct_shuf_rl_fmt.train.jsonl
+    owner: fjia
+
+
+  # ==========================================================================
+  # Usability / format adherence (9)
+  # ==========================================================================
+  - label: instruction_following
+    agent: instruction_following_simple_agent
+    configs:
+      - resources_servers/instruction_following/configs/instruction_following.yaml
+    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/instruction_following/instruction_following_out.jsonl
+    owner: ???
+
+  - label: toolcall_schema
+    agent: toolcall_schema_single_step_tool_use_with_argument_comparison_agent
+    configs:
+      - resources_servers/single_step_tool_use_with_argument_comparison/configs/toolcall_schema_single_step_tool_use_with_argument_comparison.yaml
+    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/toolcall_schema_following/single-step-bfcl-30k-processed-balanced_depth-train.jsonl
+    owner: jkyi
+
+  - label: structured_outputs
+    agent: structured_outputs_simple_agent
+    configs:
+      - resources_servers/structured_outputs/configs/structured_outputs_json.yaml
+    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/structured_outputs/structured_outputs_out.jsonl
+    owner: jkyi
+
+  - label: structured_outputs_v2
+    agent: structured_outputs_simple_agent
+    configs:
+      - resources_servers/structured_outputs/configs/structured_outputs_json_yaml_xml_v1.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/jiaqiz/data/gym/structured_output_v2/train.jsonl
+    owner: jkyi
+
+  - label: structured_outputs_v4
+    agent: structured_outputs_v4_simple_agent
+    configs:
+      - resources_servers/structured_outputs/configs/structured_outputs_v4.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/structured_outputs_v4/structured_outputs_v4_tool_call.jsonl
+    owner: jkyi
+
+  - label: ds1_augmented
+    agent: structured_outputs_v3_simple_agent
+    configs:
+      - resources_servers/structured_outputs/configs/structured_outputs_v3.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/structured_outputs_v3/ds1_augmented_train.jsonl
+    owner: jkyi
+
+  - label: ds1_basic
+    agent: structured_outputs_v3_simple_agent
+    configs:
+      - resources_servers/structured_outputs/configs/structured_outputs_v3.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/structured_outputs_v3/ds1_basic_train.jsonl
+    owner: jkyi
+
+  - label: ds2_freeform
+    agent: freeform_formatting_simple_agent
+    configs:
+      - resources_servers/format_verification/configs/freeform_formatting.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/structured_outputs_v3/ds2_freeform_train.jsonl
+    owner: jkyi
+
+  - label: ds3_citation
+    agent: citation_format_simple_agent
+    configs:
+      - resources_servers/format_verification/configs/citation_format.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/structured_outputs_v3/ds3_citation_train.jsonl
+    owner: jkyi
+
+
+  # ==========================================================================
+  # Other (0)
+  #   Uncategorised. Put new entries here until they have an obvious home.
+  # ==========================================================================
+
+  # ==========================================================================
+  # Security (0)
+  #   Safety, jailbreak, and over-refusal environments. All currently need an LLM judge
+  #   (e.g. Nemotron-Content-Safety-Reasoning-4B), so they live in the judge lane until
+  #   judge hosting is settled.
+  # ==========================================================================
+
+  # --- judge-scored ------------------------------------------------------------------------
+
+  - label: math_cot
+    agent: math_with_judge_simple_agent
+    configs:
+      - resources_servers/math_with_judge/configs/math_with_judge.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/ultra_v3_sets/260501_ultra_v3_set/math_cot/math_cot_260501.jsonl
+    owner: igitman
+
+  - label: long_context
+    agent: lc_judge_simple_agent
+    configs:
+      - resources_servers/equivalence_llm_judge/configs/lc_judge.yaml
+    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/long_context/0123_chengping_qwenlong_v3b_profiled.jsonl
+    owner: fjia
+
+  - label: multichallenge
+    agent: multichallenge_simple_agent
+    configs:
+      - resources_servers/multichallenge/configs/multichallenge.yaml
+    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/multichallenge/vanilla_and_advanced_reward_profiled.jsonl
+    owner: ???
+
+  - label: stem_openqa_ultra_0
+    agent: equivalence_llm_judge_simple_agent
+    configs:
+      - resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/jiaqiz/data/gym/science_rl_rima/subsampled/openq-hard-moderate-cot.jsonl
+    owner: ???
+
+  - label: abstention
+    agent: abstention_simple_agent
+    configs:
+      - resources_servers/abstention/configs/abstention.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/jiaqiz/data/gym/abstention/all4_combined_train.jsonl
+    owner: ???
+
+  - label: inverse_if
+    agent: inverse_if_simple_agent
+    configs:
+      - resources_servers/inverse_if/configs/inverse_if.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/ultra_v3_sets/260501_ultra_v3_set/inverse_if/inverse_if.jsonl
+    owner: ???
+
+  # --- sandbox-backed ----------------------------------------------------------------------
+
+  - label: math_tir
+    agent: ns_tools_simple_agent
+    configs:
+      - resources_servers/ns_tools/configs/ns_tools.yaml
+      - resources_servers/math_with_judge/configs/math_with_judge.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/ultra_v3_sets/260501_ultra_v3_set/math_tir/math_tir_260501.jsonl
+    owner: igitman
+
+  - label: stem_mcqa_tools_ultra_0
+    agent: ns_tools_simple_agent
+    configs:
+      - resources_servers/ns_tools/configs/ns_tools.yaml
+      - resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml
+      - resources_servers/mcqa/configs/mcqa.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/science_rl_rima/subsampled/stem0417_tools_mcq_converted_subsampled_20k.jsonl
+    owner: ???
+
+  - label: stem_openqa_tools_ultra_0
+    agent: ns_tools_simple_agent
+    configs:
+      - resources_servers/ns_tools/configs/ns_tools.yaml
+      - resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml
+      - resources_servers/mcqa/configs/mcqa.yaml
+    data: /lustre/fsw/portfolios/llmservice/users/jiaqiz/data/gym/science_rl_rima/subsampled/openq-hard-moderate-tools.jsonl
+    owner: ???
+
+  - label: lean
+    agent: math_formal_lean_refinement_agent
+    configs:
+      - resources_servers/math_formal_lean/configs/math_formal_lean_multi_turn.yaml
+    data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/lean/nemotron_math_proofs_10k_with_pass_rate_1000.jsonl
+    owner: igitman
