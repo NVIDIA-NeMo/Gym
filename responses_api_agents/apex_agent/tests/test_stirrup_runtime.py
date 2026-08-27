@@ -16,6 +16,42 @@ def test_stirrup_repackages_image_tool_responses_for_chat_completions() -> None:
     assert "text_only_tool_responses=True" in source
 
 
+def test_text_only_model_replaces_tool_images_and_preserves_other_content() -> None:
+    class FakeImage:
+        pass
+
+    other_block = object()
+    content = ["extracted text", FakeImage(), other_block, FakeImage()]
+
+    result = stirrup_runtime.replace_tool_images_for_text_only_model(
+        content,
+        supports_vision=False,
+        image_content_type=FakeImage,
+    )
+
+    assert result == [
+        "extracted text",
+        other_block,
+        "[2 image(s) not shown: model does not support vision]",
+    ]
+
+
+def test_vision_model_keeps_tool_images_unchanged() -> None:
+    class FakeImage:
+        pass
+
+    content = ["extracted text", FakeImage()]
+
+    assert (
+        stirrup_runtime.replace_tool_images_for_text_only_model(
+            content,
+            supports_vision=True,
+            image_content_type=FakeImage,
+        )
+        is content
+    )
+
+
 def test_tool_output_uses_head_and_tail_excerpt() -> None:
     text = "H" * 20_000 + "removed" * 11_000 + "T" * 5_000
 

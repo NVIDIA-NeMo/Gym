@@ -35,7 +35,12 @@ def _body() -> ApexAgentRunRequest:
     )
 
 
-def _agent(*, image: str = "registry.example/archipelago@sha256:1234", auto_build: bool = False) -> ApexAgent:
+def _agent(
+    *,
+    image: str = "registry.example/archipelago@sha256:1234",
+    auto_build: bool = False,
+    supports_vision: bool = True,
+) -> ApexAgent:
     config = ApexAgentConfig(
         host="0.0.0.0",
         port=8080,
@@ -61,6 +66,7 @@ def _agent(*, image: str = "registry.example/archipelago@sha256:1234", auto_buil
         edgar_user_agent=None,
         max_turns=200,
         max_output_tokens=32_768,
+        supports_vision=supports_vision,
         temperature=1.0,
         top_p=1.0,
         max_snapshot_bytes=None,
@@ -166,6 +172,7 @@ def test_sandbox_config_never_contains_verifier_secrets() -> None:
     assert runner["policy_model"] == "moonshotai/Kimi-K3"
     assert runner["max_turns"] == 200
     assert runner["max_output_tokens"] == 32_768
+    assert runner["supports_vision"] is True
     assert "tokenizer_path" not in runner
     assert "context_window_tokens" not in runner
     assert "max_tool_output_tokens" not in runner
@@ -174,6 +181,13 @@ def test_sandbox_config_never_contains_verifier_secrets() -> None:
     assert "CODE_EXEC_RUN_AS_USER" not in spec.env
     assert "/app/apex-gym/stirrup_runtime.py" in spec.files
     assert "FOUNDRY_LOCAL_ROOT" not in spec.env
+
+
+def test_sandbox_config_propagates_text_only_model_capability() -> None:
+    spec = _agent(supports_vision=False)._sandbox_spec(_body(), "Do the work")
+    runner = json.loads(spec.files["/app/apex-gym/runner_config.json"])
+
+    assert runner["supports_vision"] is False
 
 
 def test_sandbox_runner_uses_archipelago_gateway_and_stirrup() -> None:

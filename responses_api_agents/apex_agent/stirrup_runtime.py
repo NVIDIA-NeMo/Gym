@@ -66,6 +66,31 @@ def mcp_call_arguments(params: Any) -> dict[str, Any]:
     return params.model_dump(exclude_none=True)
 
 
+def replace_tool_images_for_text_only_model(
+    content: Any,
+    *,
+    supports_vision: bool,
+    image_content_type: type[Any],
+) -> Any:
+    """Preserve tool text while replacing images for models without vision support."""
+    if supports_vision:
+        return content
+
+    if isinstance(content, image_content_type):
+        return "[1 image(s) not shown: model does not support vision]"
+    if not isinstance(content, list):
+        return content
+
+    image_count = sum(isinstance(block, image_content_type) for block in content)
+    if image_count == 0:
+        return content
+    non_image_content = [block for block in content if not isinstance(block, image_content_type)]
+    return [
+        *non_image_content,
+        f"[{image_count} image(s) not shown: model does not support vision]",
+    ]
+
+
 def _clear_root(root: Path) -> None:
     root.mkdir(parents=True, exist_ok=True)
     for child in root.iterdir():
@@ -296,7 +321,7 @@ async def run_stirrup_rollout(config: dict[str, Any], gateway_url: str) -> dict[
     from pydantic import BaseModel, Field
     from stirrup import Agent
     from stirrup.clients.chat_completions_client import ChatCompletionsClient
-    from stirrup.core.models import Tool, ToolProvider, ToolResult, ToolUseCountMetadata
+    from stirrup.core.models import ImageContentBlock, Tool, ToolProvider, ToolResult, ToolUseCountMetadata
     from stirrup.tools.mcp import MCPConfig, MCPToolProvider, StreamableHttpServerConfig
 
     class ToolNameParams(BaseModel):
@@ -412,6 +437,11 @@ async def run_stirrup_rollout(config: dict[str, Any], gateway_url: str) -> dict[
                             success=False,
                             metadata=ToolUseCountMetadata(),
                         )
+                    content = replace_tool_images_for_text_only_model(
+                        content,
+                        supports_vision=bool(config.get("supports_vision", True)),
+                        image_content_type=ImageContentBlock,
+                    )
                     result = ToolResult(content=content, metadata=ToolUseCountMetadata())
                     content = result.content
                     if isinstance(content, str):

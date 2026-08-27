@@ -46,6 +46,7 @@ apex_agent:
       edgar_user_agent: ${oc.select:apex_edgar_user_agent,"Mercor APEX-Agents apex@mercor.com"}
       max_turns: ${oc.select:apex_agent_max_turns,200}
       max_output_tokens: ${oc.select:apex_agent_max_output_tokens,32768}
+      supports_vision: ${oc.select:apex_agent_supports_vision,true}
       temperature: ${oc.select:apex_agent_temperature,1.0}
       top_p: ${oc.select:apex_agent_top_p,1.0}
       max_snapshot_bytes: ${oc.select:apex_agent_max_snapshot_bytes,null}

@@ -67,6 +67,7 @@ class ApexAgentConfig(BaseResponsesAPIAgentConfig):
     edgar_user_agent: Optional[str]
     max_turns: int = Field(gt=0, le=200)
     max_output_tokens: int = Field(gt=0)
+    supports_vision: bool
     temperature: float = Field(ge=0.0)
     top_p: float = Field(gt=0.0, le=1.0)
 
@@ -269,6 +270,7 @@ class ApexAgent(SimpleResponsesAPIAgent):
             "model_base_url": self._model_base_url(body),
             "policy_model": policy_model,
             "max_turns": self.config.max_turns,
+            "supports_vision": self.config.supports_vision,
             "max_output_tokens": (
                 body.responses_create_params.max_output_tokens
                 if body.responses_create_params.max_output_tokens is not None
