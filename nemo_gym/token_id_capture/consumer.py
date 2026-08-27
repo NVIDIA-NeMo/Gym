@@ -100,14 +100,6 @@ def _assemble(
     verified_response: dict | None = None,
     explicit_terminal_call_id: str | None = None,
 ) -> dict:
-    if builder == "per_request":
-        # Single-response delivery cannot represent multiple trajectories.
-        return _failed_build(
-            rollout_id,
-            builder,
-            "per_request returns multiple trajectories and is not supported by single-response delivery",
-            n_calls=len(entries),
-        )
     # Attribute the verified terminal before building.
     # ``verified_response`` is the scored response from the /run result.
     # Attribution anchors chain selection; its absence falls back to the
@@ -194,12 +186,7 @@ def _assemble(
         # No attribution: the strict single-chain policy applies.
         # A retry of the final call can leave two plausible generations.
         # Mask the rollout when the client-selected generation is unknown.
-        mask = (
-            bool(unresolved)
-            or bool(notes.unresolved_parent_calls)
-            or notes.roots != 1
-            or notes.chains != 1
-        )
+        mask = bool(unresolved) or bool(notes.unresolved_parent_calls) or notes.roots != 1 or notes.chains != 1
     # An empty delivery must never be trainable, whatever produced it.
     mask = mask or not any(item.get("generation_token_ids") for item in response.get("output", []))
     return {

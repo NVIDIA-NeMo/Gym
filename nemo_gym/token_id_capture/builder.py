@@ -464,7 +464,6 @@ def prefix_merging(entries: list[TokenEntry], terminal_call_id: str | None = Non
 
 
 _BUILDERS: dict[str, Callable[..., BuildOutput]] = {
-    "per_request": per_request,
     "prefix_merging": prefix_merging,
 }
 
@@ -477,7 +476,6 @@ def run_builder(
     """Chain frozen snapshot entries with the named strategy.
 
     ``terminal_call_id`` anchors chain selection for ``prefix_merging``.
-    ``per_request`` has no chain selection and ignores it.
     """
     if builder not in _BUILDERS:
         raise ValueError(f"unknown builder {builder!r}; known: {sorted(_BUILDERS)}")
