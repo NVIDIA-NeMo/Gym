@@ -87,6 +87,21 @@ class TestListBenchmarks:
         config_path.write_text(text)
         assert _is_benchmark_config(config_path) is is_benchmark
 
+    def test_prefilter_rejects_a_multi_benchmark_suite(self, tmp_path) -> None:
+        # A config declaring several benchmark datasets is an eval suite: it has no single name, agent, or
+        # repeat count, so it is not a valid `--benchmark` argument and must not reach the catalog.
+        from nemo_gym.benchmarks import _benchmark_config_paths
+
+        (tmp_path / "single").mkdir()
+        (tmp_path / "single" / "config.yaml").write_text("x:\n  datasets:\n  - name: a\n    type: benchmark\n")
+        (tmp_path / "suite").mkdir()
+        (tmp_path / "suite" / "config.yaml").write_text(
+            "x:\n  datasets:\n  - name: a\n    type: benchmark\ny:\n  datasets:\n  - name: b\n    type: benchmark\n"
+        )
+
+        found = {str(p.relative_to(tmp_path)) for p in _benchmark_config_paths(tmp_path)}
+        assert found == {"single/config.yaml"}
+
     def test_prefilter_keeps_unparseable_yaml_as_candidate(self, tmp_path) -> None:
         # A file we can't parse can't be classified, so it is kept as a candidate for the resolve step to
         # diagnose rather than silently dropped.
@@ -209,6 +224,20 @@ class TestDiscoverBenchmarksInDir:
         assert set(result) == {"good"}
         err = capsys.readouterr().err
         assert "Warning" in err and "bad" in err
+
+    def test_suite_resolving_to_many_benchmarks_is_skipped_not_aliased(self, tmp_path: Path, capsys) -> None:
+        # Resolving `config_paths` can surface several benchmark datasets even when the file itself declares
+        # one. Reporting the first would publish the suite under another benchmark's name, agent, and repeat
+        # count, so `--benchmark <suite>` would silently run that other benchmark instead.
+        from nemo_gym.benchmarks import BenchmarkConfig
+
+        # Chains two real benchmarks the way `benchmarks/nemotron_3.5_super/` chains its eval suite.
+        suite = tmp_path / "suite.yaml"
+        suite.write_text("config_paths:\n- benchmarks/gpqa/config.yaml\n- benchmarks/aime24/config.yaml\n")
+
+        assert BenchmarkConfig.from_config_path(suite, strict=False) is None
+        err = capsys.readouterr().err
+        assert "2 benchmark datasets" in err and "eval suite" in err
 
     def test_every_repo_benchmark_appears_in_listing(self, capsys) -> None:
         # Every config that declares a `type: benchmark` dataset must surface as its own listing entry —
