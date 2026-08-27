@@ -194,7 +194,8 @@ class TestOpenCodeSandboxedAgent:
             ]
         )
         sandbox_mock.download = AsyncMock()
-        monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox_mock})
+        pty_mock = AsyncMock()
+        monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": (sandbox_mock, pty_mock)})
         monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value=dict()))
 
         monkeypatch.setattr(
