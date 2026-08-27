@@ -1050,7 +1050,7 @@ class RolloutCollectionHelper(BaseModel):
         warned_malformed_rollout_id = False
 
         # Intermediate status printing
-        pcts_to_print = list(range(1, 100)) + [99.5]
+        pcts_to_print = list(range(1, 100)) + [99.5, 100]
         agent_name_to_metrics = defaultdict(Counter)
         agent_name_to_counts = defaultdict(int)
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
