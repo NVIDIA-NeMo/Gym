@@ -19,7 +19,7 @@ Health verification is read-only with respect to collection outputs. It does not
 metrics, model servers, or agent behavior. It writes two additional report files next to the evaluation artifacts.
 </Info>
 
-## When health checks run
+## When Health Checks Run
 
 `gym eval run` runs health checks after rollout collection and aggregate-metrics computation. `gym eval aggregate` runs health checks
 after aggregating the selected shards. Both commands print a short report:
@@ -50,12 +50,12 @@ gym eval health-check results/my-run \
 A relative `--rollouts-file` path resolves under the run directory. An absolute path is used as written. Reports from the
 standalone command are always written in the run directory.
 
-See the [`gym eval` CLI reference](/main/reference/cli-commands#gym-eval-health-check) for all flags.
+Refer to the [`gym eval` CLI reference](/main/reference/cli-commands#gym-eval-health-check) for all flags.
 
-## Required evidence
+## Required Evidence
 
 Health checks read each rollout record and its standard `ng_trajectory` attachment. `ng_trajectory` combines the agent turns,
-model-call evidence, explicit model-call references, and observation gaps produced during collection. See the
+model-call evidence, explicit model-call references, and observation gaps produced during collection. Refer to the
 [trajectory capability matrix](/main/reference/trajectory-capabilities) for producer coverage and
 [model-call capture](/main/model-server/model-call-capture) for collection configuration.
 
@@ -69,7 +69,7 @@ from disagreeing. Rollouts collected before `ng_trajectory` was introduced can s
 are unobserved instead of being evaluated from inferred historical formats.
 </Note>
 
-## Findings and verdicts
+## Findings and Verdicts
 
 A **finding** is evidence emitted by one check. Checks do not emit verdicts. After all enabled rollout-level checks run, the
 runner derives one verdict for each rollout using this priority:
@@ -85,7 +85,7 @@ can be correct according to its reward and still be unhealthy, or incorrect acco
 
 Task-level checks add flags to the task summary after rollout verdicts are derived. Tasks do not receive a separate verdict.
 
-## Check catalog
+## Check Catalog
 
 Check IDs identify both the evidence being evaluated and the condition detected. Rollout-level checks create findings in
 `rollout_verdicts.jsonl`; task-level checks create flags in `quality_summary.json`.
@@ -106,7 +106,7 @@ Check IDs identify both the evidence being evaluated and the condition detected.
 | `task_consistently_unhealthy` | Task | At least two repeats are computable and every computable repeat is unhealthy. Unobserved repeats do not prevent the flag. |
 | `task_no_successful_model_calls` | Task | Every repeat has at least one policy-model-call reference, every reference resolves to exactly one captured call, and none of the matched calls completed successfully. |
 
-### What counts as agent activity
+### What Counts as Agent Activity
 
 The turn checks read `ng_trajectory.turns`. Non-empty answer text, reasoning content, or a tool call counts as agent activity.
 Reasoning-only turns are not hollow. A model-call reference also establishes activity for `rollout_missing_agent_turns`, although
@@ -115,7 +115,7 @@ Reasoning-only turns are not hollow. A model-call reference also establishes act
 Agent logic that advances a rollout without calling the policy model has no bound model call and is outside model-call checks.
 The runner does not infer a special dispatch marker from sampling parameters or request metadata.
 
-### Binding turns to policy-model calls
+### Binding Turns to Policy-Model Calls
 
 An evaluation can contain calls to the policy model and to auxiliary models such as a judge or user simulator. Model-call checks
 must therefore establish which calls belong to policy-model turns before evaluating them.
@@ -135,14 +135,14 @@ auxiliary model.
   trajectory contains an unowned list of model calls.
 </Note>
 
-### Length-limited responses
+### Length-Limited Responses
 
 `model_call_runaway_generation` needs one provider-independent definition of an empty saved response. The check recognizes
 non-empty text, content, output text, answer, encrypted reasoning content, reasoning, or reasoning summaries in OpenAI Responses,
 Chat Completions, and Messages-style responses. If any supported content is present, a length-limited response is not classified
 as an empty runaway generation.
 
-## How health checks interpret existing observation gaps
+## How Health Checks Interpret Existing Observation Gaps
 
 During rollout collection, Gym's observability layer writes an `ObservationGap` to `ng_trajectory.gaps` when it cannot collect,
 normalize, or correlate evidence exactly. The health runner does not create these gaps. It maps each persisted gap code to health
@@ -162,7 +162,7 @@ Other gap codes affect health only when a check defines an explicit rule for the
 This distinction keeps absent evidence separate from contradictory evidence: missing input reduces coverage, while an explicit
 conflict produces a finding.
 
-## Task-level reduction
+## Task-Level Reduction
 
 `task_consistently_unhealthy` considers a repeat computable when its rollout verdict is `healthy` or `unhealthy`. It requires at
 least two computable repeats and flags the task when all of them are unhealthy. An additional unobserved repeat does not erase
@@ -176,7 +176,7 @@ Duplicate persisted records are kept in the per-rollout report and counted at ru
 rollout indices count as one repeat during task-level reduction. This prevents copied records from appearing to be independent
 attempts.
 
-## Report files
+## Report Files
 
 Health verification writes two files without changing the selected rollout JSONL or aggregate-metrics file.
 
@@ -282,7 +282,7 @@ If a rollout line is unreadable, its real identity is unavailable. The report as
 `__unreadable_record__:input-0:line-42`, uses `_ng_rollout_index: 0`, and records the source file and physical line in the finding
 locator. Other checks are unobserved for that line.
 
-## Selecting or disabling checks
+## Selecting or Disabling Checks
 
 All registered checks are enabled by default. To skip health verification entirely after a run or aggregation:
 
@@ -313,7 +313,7 @@ Ignoring a check weakens the meaning of `healthy`. Use it for a deliberate compa
 compare reports only when they use the same enabled check set.
 </Warning>
 
-## Execution and failure handling
+## Execution and Failure Handling
 
 The runner indexes non-empty JSONL lines by byte offset, then processes each line independently in a process pool. It uses at most
 eight workers by default, bounded by the available CPU count. `--workers` and `--health-check-workers` set an explicit limit.
@@ -327,7 +327,7 @@ These choices favor completing verification and preserving evidence over failing
 have already completed. The report makes degraded execution and missing evidence visible rather than silently treating them as
 healthy.
 
-## Implementation reference
+## Implementation Reference
 
 - [`TrajectoryRecord`, `TrajectoryTurn`, `ObservationGap`, and `ModelCallRef`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/rollout_observability.py) define the standard evidence consumed by health checks.
 - [`CheckSpec`, `Finding`, and `RolloutDigest`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/health/types.py) define the health data contracts.
