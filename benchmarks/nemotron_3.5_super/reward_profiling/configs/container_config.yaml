@@ -31,6 +31,10 @@ config_paths:
 - resources_servers/ns_tools/configs/ns_tools.yaml
 - resources_servers/math_formal_lean/configs/math_formal_lean_multi_turn.yaml
 - responses_api_models/vllm_model/configs/vllm_model.yaml
+policy_model:
+  responses_api_models:
+    vllm_model:
+      num_workers: 16
 math_judge_model: &id001
   responses_api_models:
     openai_model:

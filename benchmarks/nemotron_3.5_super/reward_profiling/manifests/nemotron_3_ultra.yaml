@@ -14,6 +14,16 @@ nickname: nemotron_3_ultra
 
 # Becomes sweep_config.yaml, passed to `gym env start --config` (was ng_run).
 gym_env_start:
+  # Gym's FastAPI servers default to a single worker (server_utils.py:595), and every rollout goes
+  # through the policy server on its way to vLLM -- at 512+ concurrency that one worker is the
+  # bottleneck regardless of GPU capacity. The stock eval container sets 16 for the same reason.
+  # Note server_utils.py:159 divides the aiohttp connector limit by the worker count, so the two
+  # are meant to be tuned together.
+  policy_model:
+    responses_api_models:
+      vllm_model:
+        num_workers: 16
+
   config_paths:
     - responses_api_models/vllm_model/configs/vllm_model.yaml
 
