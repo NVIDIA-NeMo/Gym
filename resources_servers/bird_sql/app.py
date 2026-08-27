@@ -61,14 +61,12 @@ def extract_sql_from_response(text: Optional[str]) -> str:
     - No ` ```sql ``` ` block found → return ``"SELECT 1"`` as a no-op filler
       that executes harmlessly but mismatches almost any BIRD gold query.
     - Multiple blocks → use the LAST one.
-    - Strip SQL comments (``--...``, ``/*...*/``) with ``re.DOTALL`` and no
-      ``re.MULTILINE``: ``--.*?$`` therefore eats to end-of-string, so a
-      ``--``-style comment line inside the block swallows the rest.
-      Intentional (matches the established BIRD evaluator rule); downstream
-      execution will fail on the empty SQL and the reward is 0.
-    - Collapse whitespace and drop a leading ``**bold**`` header that some
-      models emit before the query.
-    - Post-strip empty output is returned as ``""`` rather than the filler.
+    - SQL comments (``--...``, ``/*...*/``) are left as-is: SQLite's parser
+      ignores them natively, so stripping them before execution is unnecessary.
+      Internal newlines are preserved (only leading/trailing whitespace is
+      trimmed) so a ``--`` line comment can't merge onto the same line as
+      the SQL that follows it.
+    - Drop a leading ``**bold**`` header that some models emit before the query.
     """
     if not text:
         return _NO_ANSWER_FILLER
@@ -77,9 +75,7 @@ def extract_sql_from_response(text: Optional[str]) -> str:
     if not matches:
         return _NO_ANSWER_FILLER
 
-    ans = matches[-1]
-    ans = re.sub(r"--.*?$|/\*.*?\*/", "", ans, flags=re.DOTALL)
-    ans = re.sub(r"\s+", " ", ans)
+    ans = matches[-1].strip()
     ans = re.sub(r"^\*\*.*\*\*", "", ans).strip()
     return ans
 

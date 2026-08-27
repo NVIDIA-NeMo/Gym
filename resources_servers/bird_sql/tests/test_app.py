@@ -136,28 +136,28 @@ class TestExtractSqlFromResponse:
         text = "```sql\nSELECT 1\n```\nthen\n```sql\nSELECT 2\n```"
         assert extract_sql_from_response(text) == "SELECT 2"
 
-    def test_inline_block_comment_stripped(self):
+    def test_inline_block_comment_not_stripped(self):
+        # SQLite's parser ignores comments natively, so we no longer strip them
+        # (stripping was the source of a bug that ate whole SQL statements).
         text = "```sql\nSELECT 1 /* inline */ FROM t\n```"
-        assert extract_sql_from_response(text) == "SELECT 1 FROM t"
+        assert extract_sql_from_response(text) == "SELECT 1 /* inline */ FROM t"
 
-    def test_line_comment_eats_to_eos(self):
-        # Comment-strip uses DOTALL and no MULTILINE, so `--.*?$` consumes to
-        # end-of-string: a `--`-style comment inside the block swallows the
-        # rest. Execution then fails on the empty SQL and the reward is 0.
+    def test_line_comment_preserved_on_own_line(self):
+        # Only leading/trailing whitespace is trimmed; internal newlines are
+        # preserved so a `--` comment can't merge onto the same line as the
+        # SQL that follows it (which would silently comment out everything).
         text = "```sql\n-- comment\nSELECT 1 FROM t\n```"
-        assert extract_sql_from_response(text) == ""
+        assert extract_sql_from_response(text) == "-- comment\nSELECT 1 FROM t"
 
     def test_strips_leading_bold_header(self):
-        # The `^\*\*.*\*\*` anchor requires ** at position 0 after whitespace
-        # collapse, so no space-before-** either.
         text = "```sql**Answer** SELECT 1 FROM t```"
         assert extract_sql_from_response(text) == "SELECT 1 FROM t"
 
-    def test_bold_header_not_stripped_when_preceded_by_whitespace(self):
-        # A newline before ** pushes it past position 0, so the bold marker
-        # survives the strip.
+    def test_strips_leading_bold_header_preceded_by_whitespace(self):
+        # Leading/trailing whitespace is trimmed before the bold-header check,
+        # so a newline before ** no longer lets the header escape stripping.
         text = "```sql\n**Answer** SELECT 1 FROM t\n```"
-        assert extract_sql_from_response(text) == "**Answer** SELECT 1 FROM t"
+        assert extract_sql_from_response(text) == "SELECT 1 FROM t"
 
     def test_requires_alpha_inside_block(self):
         # The extraction regex requires at least one a-z letter inside the fenced block.
