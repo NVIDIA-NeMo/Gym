@@ -146,6 +146,8 @@ opencode_sandboxed_agent:
       sandbox_config:
         ttl_s: 18000
         ready_timeout_s: 1200
+        # cpu also derives parallelism-cap env vars (OMP_NUM_THREADS etc.)
+        # injected into the sandbox; derive_cpu_env: false disables.
         resources:
           cpu: 2
           memory_mib: 8192
