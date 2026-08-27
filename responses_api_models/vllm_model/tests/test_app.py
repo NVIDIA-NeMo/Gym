@@ -63,6 +63,7 @@ from nemo_gym.token_id_capture import (
     resolve_parent,
     set_token_sink,
 )
+from nemo_gym.token_id_capture.staging.digest import compute_chain_hash, hash_token_ids
 from nemo_gym.token_id_capture.staging.records import CaptureAdmission
 from responses_api_models.vllm_model.app import (
     VLLMConverter,
@@ -865,6 +866,9 @@ class TestApp:
                 "delta_len": 3,
                 "cum_len": 3,
                 "ledger_request_uid": "minf-17",
+                "chain_hash": compute_chain_hash(None, [10, 11, 12]),
+                "cumulative_hash": hash_token_ids([10, 11, 12]),
+                "response_id": "minf-17",
                 "logical_request_id": "logical-1",
                 "admitted_at": 1.5,
             }

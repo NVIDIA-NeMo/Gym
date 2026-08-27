@@ -30,6 +30,7 @@ from nemo_gym.token_id_capture.sink import (
     mark_external_ledger_capture_recorded,
     mark_external_staging_committed,
 )
+from nemo_gym.token_id_capture.staging.digest import compute_chain_hash, hash_token_ids
 from nemo_gym.token_id_capture.staging.records import CaptureAdmission, CommitCoords
 
 
@@ -300,6 +301,10 @@ class MegatronLedgerCaptureHandler(_BaseExternalCaptureHandler):
         pending = self._adapter.pending_capture(response_payload, admission)
         response_items, _ = strip_token_fields(response_to_output_items(response_payload))
         cumulative = list(pending.cumulative_token_ids)
+        chain_hash = compute_chain_hash(
+            admission.parent_chain_hash,
+            pending.token_ids_delta,
+        )
         await ledger.record(
             context.rollout_id,
             context.model_call_id,
@@ -316,6 +321,9 @@ class MegatronLedgerCaptureHandler(_BaseExternalCaptureHandler):
             or (str(response_payload["id"]) if response_payload.get("id") else None),
             admitted_at=context.admitted_at,
             ledger_request_uid=pending.request_uid,
+            chain_hash=chain_hash,
+            cumulative_hash=hash_token_ids(cumulative),
+            response_id=pending.request_uid,
         )
         mark_external_ledger_capture_recorded(
             rollout_id=context.rollout_id,

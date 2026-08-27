@@ -149,6 +149,9 @@ def _pending_columns(
     mode: str | None,
     logical_request_id: str | None,
     admitted_at: float | None,
+    chain_hash: str | None,
+    cumulative_hash: str | None,
+    response_id: str | None,
 ) -> dict:
     """Return deferred MInf-ledger columns, or no columns for a normal row."""
     if ledger_request_uid is None:
@@ -162,6 +165,9 @@ def _pending_columns(
         "mode": mode,
         "logical_request_id": logical_request_id,
         "admitted_at": admitted_at,
+        "chain_hash": chain_hash,
+        "cumulative_hash": cumulative_hash,
+        "response_id": response_id,
     }
 
 
@@ -237,6 +243,9 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
                     ledger_request_uid=str(row["ledger_request_uid"]),
                     logical_request_id=row.get("logical_request_id"),
                     admitted_at=row.get("admitted_at"),
+                    chain_hash=str(row["chain_hash"]),
+                    cumulative_hash=str(row["cumulative_hash"]),
+                    response_id=str(row["response_id"]),
                 )
             )
     manifest = RolloutManifest(
@@ -651,6 +660,9 @@ class InMemoryLineageStore:
             mode,
             logical_request_id,
             admitted_at,
+            chain_hash,
+            cumulative_hash,
+            response_id,
         )
         if custody and pending:
             raise ValueError("a lineage row cannot be both staged and pending")
@@ -848,6 +860,9 @@ class FileLineageStore:
             mode,
             logical_request_id,
             admitted_at,
+            chain_hash,
+            cumulative_hash,
+            response_id,
         )
         if custody and pending:
             raise ValueError("a lineage row cannot be both staged and pending")

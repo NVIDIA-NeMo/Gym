@@ -113,8 +113,8 @@ class CaptureLedger(LineageStore, Protocol):
     ``staging_chain``, ``chain_hash``, ``cumulative_hash``, ``response_id``,
     ``output_fingerprint``, ``continuation_fingerprint``,
     ``fingerprint_version``), or
-    a deferred MInf reference (``ledger_request_uid`` plus its lineage and
-    length columns),
+    a deferred MInf reference (``ledger_request_uid`` plus its lineage,
+    content hashes, served ``response_id``, and length columns),
     poison rows are
     appended with ``record_failure``, and the framework reads the rollout back
     token-free through ``manifest``.

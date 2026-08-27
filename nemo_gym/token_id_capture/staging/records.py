@@ -218,8 +218,7 @@ class CommitCoords(_DigestWireModel):
         if self.disposition == "staged":
             if any(value is None for value in staged_payload):
                 raise ValueError(
-                    "staged coordinates require digest, extras_digest, staging_key, "
-                    "chain_hash, and cumulative_hash"
+                    "staged coordinates require digest, extras_digest, staging_key, chain_hash, and cumulative_hash"
                 )
             if self.delta_len == 0:
                 raise ValueError("staged coordinates require a non-empty delta")
@@ -292,6 +291,9 @@ class PendingCallRecord(_WireModel):
     delta_len: NonNegativeInt
     cum_len: NonNegativeInt
     ledger_request_uid: Identifier
+    chain_hash: DigestHex
+    cumulative_hash: DigestHex
+    response_id: Identifier
     logical_request_id: Identifier | None = None
     admitted_at: StrictFloat | None = None
 
