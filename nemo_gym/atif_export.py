@@ -763,6 +763,12 @@ def _apply_turns(trajectory: TrajectoryRecord, groups: list[_AgentGroup]) -> Non
             ):
                 if value is not None and value > stats.total_tokens:
                     raise _path_error(path, f"model-call {field_name} exceeds total_tokens")
+            if (
+                stats.prompt_tokens is not None
+                and stats.completion_tokens is not None
+                and stats.prompt_tokens + stats.completion_tokens > stats.total_tokens
+            ):
+                raise _path_error(path, "model-call prompt_tokens plus completion_tokens exceeds total_tokens")
         if (
             stats.cached_tokens is not None
             and stats.prompt_tokens is not None
@@ -803,7 +809,9 @@ def _apply_turns(trajectory: TrajectoryRecord, groups: list[_AgentGroup]) -> Non
                 prompt_tokens=stats.prompt_tokens,
                 completion_tokens=stats.completion_tokens,
                 cached_tokens=stats.cached_tokens,
-                extra={"nemo_gym": extra} if extra else None,
+                # Match Relay's ATIF extension shape so Gym's importer and
+                # other consumers can recover normalized usage details.
+                extra=extra or None,
             )
         source_items = _source_item_ids(group)
         group.step.extra = {

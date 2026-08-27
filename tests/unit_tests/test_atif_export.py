@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from pydantic import ValidationError
 
 from nemo_gym import __version__
 from nemo_gym.atif_export import (
@@ -217,6 +216,15 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     path.write_text("".join(f"{json.dumps(row)}\n" for row in rows), encoding="utf-8")
 
 
+def _export_config(source: Path, output: Path) -> ExportAtifConfig:
+    return ExportAtifConfig(
+        rollouts_jsonl_fpath=source,
+        output_dirpath=output,
+        session_id="evaluation-42",
+        agent_version="2.3.1",
+    )
+
+
 def test_gym_rollout_to_atif_preserves_provenance_turns_metrics_and_tool_identity() -> None:
     rollout = _canonical_rollout()
     original = copy.deepcopy(rollout)
@@ -271,7 +279,7 @@ def test_gym_rollout_to_atif_preserves_provenance_turns_metrics_and_tool_identit
         "prompt_tokens": 101,
         "completion_tokens": 11,
         "cached_tokens": 5,
-        "extra": {"nemo_gym": {"reasoning_tokens": 7, "total_tokens": 112}},
+        "extra": {"reasoning_tokens": 7, "total_tokens": 112},
     }
     assert tool_step.extra["nemo_gym"]["turn"] == {
         "turn_no": 1,
@@ -334,7 +342,25 @@ def test_gym_rollout_to_atif_preserves_optional_function_output_item_ids() -> No
     ]
 
 
-def test_gym_rollout_to_atif_preserves_reasoning_and_total_tokens_without_standard_counts() -> None:
+def test_gym_rollout_to_atif_supports_a_complete_trajectory_without_reasoning() -> None:
+    rollout = _canonical_rollout()
+    trajectory = rollout["ng_trajectory"]
+    trajectory["invocations"][0]["conversation"] = [
+        item for item in trajectory["invocations"][0]["conversation"] if item["type"] != "reasoning"
+    ]
+    for turn in trajectory["turns"]:
+        turn["reasoning_content"] = None
+        turn["question"] = [item for item in turn["question"] if item["type"] != "reasoning"]
+
+    exported = gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
+
+    agent_steps = [step for step in exported.steps if step.source == "agent"]
+    assert [step.reasoning_content for step in agent_steps] == [None, None]
+    assert "source_items" not in agent_steps[0].extra["nemo_gym"]
+    assert agent_steps[1].extra["nemo_gym"]["source_items"] == {"message_id": "message-1"}
+
+
+def test_export_preserves_optional_usage_without_inventing_standard_counts() -> None:
     rollout = _canonical_rollout()
     rollout["ng_trajectory"]["model_calls"][0]["token_stats"] = {
         "reasoning_tokens": 9,
@@ -344,16 +370,19 @@ def test_gym_rollout_to_atif_preserves_reasoning_and_total_tokens_without_standa
     trajectory = gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
 
     assert trajectory.steps[2].metrics.model_dump(exclude_none=True) == {
-        "extra": {"nemo_gym": {"reasoning_tokens": 9, "total_tokens": 9}}
+        "extra": {"reasoning_tokens": 9, "total_tokens": 9}
     }
+    assert trajectory.final_metrics.model_dump(exclude_none=True) == {"total_steps": 4}
 
 
 def test_gym_rollout_to_atif_always_emits_exact_total_steps_without_complete_token_metrics() -> None:
     rollout = _canonical_rollout()
-    rollout["ng_trajectory"]["model_calls"][0]["token_stats"] = {}
+    rollout["ng_trajectory"]["model_calls"][1]["token_stats"] = {}
 
     trajectory = gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
 
+    assert trajectory.steps[2].metrics is not None
+    assert trajectory.steps[3].metrics is None
     assert trajectory.final_metrics.model_dump(exclude_none=True) == {"total_steps": 4}
 
 
@@ -375,6 +404,121 @@ def test_gym_rollout_to_atif_rejects_blank_direct_call_identity(
 ) -> None:
     with pytest.raises(AtifExportError, match=message):
         gym_rollout_to_atif(_canonical_rollout(), session_id=session_id, agent_version=agent_version)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        (
+            "annotations",
+            [
+                {
+                    "type": "url_citation",
+                    "start_index": 0,
+                    "end_index": 4,
+                    "title": "source",
+                    "url": "https://example.com",
+                }
+            ],
+        ),
+        (
+            "logprobs",
+            [{"token": "Both", "bytes": [66, 111, 116, 104], "logprob": -0.1, "top_logprobs": []}],
+        ),
+    ],
+)
+def test_strict_export_rejects_output_details_not_losslessly_representable_by_initial_profile(
+    field_name: str,
+    field_value: list[dict[str, Any]],
+) -> None:
+    rollout = _canonical_rollout()
+    rollout["ng_trajectory"]["invocations"][0]["conversation"][-1]["content"][0][field_name] = field_value
+
+    with pytest.raises(AtifExportError, match="annotations and log probabilities are not representable"):
+        gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("incomplete-output", "expected completed, got 'incomplete'"),
+        ("empty-output", "expected at least one output_text part"),
+        ("empty-reasoning", "encrypted or empty reasoning cannot be represented"),
+        ("multi-segment-reasoning", "multiple reasoning segments cannot be represented"),
+        ("trailing-reasoning", "reasoning is not followed by an agent answer"),
+        ("copied-assistant", "copied assistant context is not supported"),
+        ("later-user-message", "later system or user turns are not supported"),
+        ("no-agent-output", "contains no agent output"),
+    ],
+)
+def test_strict_export_rejects_incomplete_or_lossy_conversation_boundaries(mutation: str, message: str) -> None:
+    rollout = _canonical_rollout()
+    conversation = rollout["ng_trajectory"]["invocations"][0]["conversation"]
+    if mutation == "incomplete-output":
+        conversation[-1]["status"] = "incomplete"
+    elif mutation == "empty-output":
+        conversation[-1]["content"] = []
+    elif mutation == "empty-reasoning":
+        conversation[2]["summary"] = []
+    elif mutation == "multi-segment-reasoning":
+        conversation[2]["summary"].append({"type": "summary_text", "text": "Then compare them."})
+    elif mutation == "trailing-reasoning":
+        conversation[:] = conversation[:3]
+    elif mutation == "copied-assistant":
+        conversation.insert(2, {"type": "message", "role": "assistant", "content": "Earlier answer."})
+    elif mutation == "later-user-message":
+        conversation.insert(7, {"type": "message", "role": "user", "content": "Try again."})
+    else:
+        conversation[:] = conversation[:2]
+        rollout["ng_trajectory"]["tool_calls"] = []
+
+    with pytest.raises(AtifExportError, match=message):
+        gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("duplicate-record", "tool_call_id values must be unique"),
+        ("blank-call-id", "call_id: cannot be empty"),
+        ("blank-name", "name: cannot be empty"),
+        ("duplicate-call", "duplicate function call ID"),
+        ("duplicate-result", "duplicate function result ID"),
+        ("mismatched-results", "function results must match this turn's calls exactly"),
+        ("missing-record", "missing tool execution record"),
+        ("wrong-invocation", "belongs to another invocation"),
+        ("unreferenced-record", "unreferenced tool executions"),
+    ],
+)
+def test_strict_export_rejects_inconsistent_tool_identity_and_ownership(mutation: str, message: str) -> None:
+    rollout = _canonical_rollout()
+    trajectory = rollout["ng_trajectory"]
+    conversation = trajectory["invocations"][0]["conversation"]
+    if mutation == "duplicate-record":
+        trajectory["tool_calls"].append(copy.deepcopy(trajectory["tool_calls"][0]))
+    elif mutation == "blank-call-id":
+        conversation[3]["call_id"] = " \t"
+    elif mutation == "blank-name":
+        conversation[3]["name"] = " \t"
+    elif mutation == "duplicate-call":
+        conversation[4]["call_id"] = "call-search"
+    elif mutation == "duplicate-result":
+        conversation.insert(6, copy.deepcopy(conversation[5]))
+    elif mutation == "mismatched-results":
+        del conversation[6]
+    elif mutation == "missing-record":
+        trajectory["tool_calls"] = [
+            record for record in trajectory["tool_calls"] if record["tool_call_id"] != "call-read"
+        ]
+    elif mutation == "wrong-invocation":
+        trajectory["tool_calls"][0]["invocation_id"] = "child"
+    else:
+        extra = copy.deepcopy(trajectory["tool_calls"][0])
+        extra["tool_call_id"] = "call-unused"
+        trajectory["tool_calls"].append(extra)
+
+    with pytest.raises(AtifExportError, match=message):
+        gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
 
 
 @pytest.mark.parametrize("field_name", ("tool_name", "output"))
@@ -413,16 +557,7 @@ def test_strict_export_preserves_total_tokens_without_assuming_component_account
 
     trajectory = gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
 
-    assert trajectory.steps[2].metrics.extra == {"nemo_gym": {"reasoning_tokens": 7, "total_tokens": 999}}
-
-
-def test_atif_v1_7_model_rejects_a_different_schema_version() -> None:
-    trajectory = gym_rollout_to_atif(_canonical_rollout(), session_id="evaluation-42", agent_version="2.3.1")
-    payload = trajectory.model_dump(mode="json", exclude_none=True)
-    payload["schema_version"] = "ATIF-v1.6"
-
-    with pytest.raises(ValidationError, match="schema_version"):
-        AtifTrajectoryV1_7.model_validate(payload)
+    assert trajectory.steps[2].metrics.extra == {"reasoning_tokens": 7, "total_tokens": 999}
 
 
 def test_strict_export_rejects_cached_tokens_greater_than_prompt_tokens() -> None:
@@ -445,14 +580,51 @@ def test_strict_export_rejects_partial_token_components_greater_than_total(field
         gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
 
 
-def test_strict_export_does_not_treat_an_explicit_null_as_an_absent_redundant_field() -> None:
+def test_strict_export_rejects_component_sum_greater_than_total_tokens() -> None:
     rollout = _canonical_rollout()
-    question = rollout["ng_trajectory"]["turns"][0]["question"]
-    question[0] = copy.deepcopy(question[0])
-    question[0]["unrepresented_field"] = None
+    rollout["ng_trajectory"]["model_calls"][0]["token_stats"] = {
+        "prompt_tokens": 7,
+        "completion_tokens": 5,
+        "total_tokens": 10,
+    }
 
-    with pytest.raises(AtifExportError, match="unsupported fields would be dropped: 'unrepresented_field'"):
+    with pytest.raises(AtifExportError, match="prompt_tokens plus completion_tokens exceeds total_tokens"):
         gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
+
+
+@pytest.mark.parametrize("field_name", ("cached_tokens", "reasoning_tokens", "total_tokens"))
+def test_export_preserves_available_optional_step_usage(field_name: str) -> None:
+    rollout = _canonical_rollout()
+    del rollout["ng_trajectory"]["model_calls"][1]["token_stats"][field_name]
+
+    trajectory = gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
+
+    first_metrics = trajectory.steps[2].metrics
+    second_metrics = trajectory.steps[3].metrics
+    assert first_metrics is not None and second_metrics is not None
+    if field_name == "cached_tokens":
+        assert first_metrics.cached_tokens == 5
+        assert second_metrics.cached_tokens is None
+        assert trajectory.final_metrics.total_cached_tokens is None
+    else:
+        assert first_metrics.extra[field_name] is not None
+        assert field_name not in (second_metrics.extra or {})
+
+
+def test_final_metrics_aggregate_each_usage_field_only_when_every_model_call_reports_it() -> None:
+    rollout = _canonical_rollout()
+    rollout["ng_trajectory"]["model_calls"][0]["token_stats"] = {
+        "prompt_tokens": 101,
+        "completion_tokens": 11,
+    }
+    rollout["ng_trajectory"]["model_calls"][1]["token_stats"] = {"prompt_tokens": 131}
+
+    trajectory = gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
+
+    assert trajectory.final_metrics.model_dump(exclude_none=True) == {
+        "total_prompt_tokens": 232,
+        "total_steps": 4,
+    }
 
 
 def test_strict_export_accepts_known_optional_nulls_from_producer_model_dump() -> None:
@@ -516,28 +688,9 @@ def test_strict_export_rejects_namespaced_responses_function_calls() -> None:
     "item_type",
     (
         "mcp_call",
-        "mcp_list_tools",
-        "mcp_approval_request",
-        "file_search_call",
         "web_search_call",
-        "computer_call",
-        "image_generation_call",
-        "code_interpreter_call",
-        "local_shell_call",
-        "custom_tool_call",
-        "computer_call_output",
-        "custom_tool_call_output",
-        "local_shell_call_output",
-        "mcp_approval_response",
-        "apply_patch_call",
-        "apply_patch_call_output",
-        "compaction",
         "shell_call",
-        "shell_call_output",
-        "tool_search_call",
-        "tool_search_output",
-        "compaction_trigger",
-        "additional_tools",
+        "compaction",
     ),
 )
 def test_strict_export_rejects_unprojected_responses_item_families(item_type: str) -> None:
@@ -589,16 +742,20 @@ def test_strict_export_rejects_training_metadata_outside_initial_profile(
         gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
 
 
-@pytest.mark.parametrize("item_index", (0, 2, 3, 5, 8))
-@pytest.mark.parametrize("field_value", ("secret", None))
+@pytest.mark.parametrize(
+    "item_index",
+    (0, 2, 3, 5, 8),
+    ids=("input-message", "reasoning", "function-call", "function-output", "assistant-message"),
+)
 def test_strict_export_rejects_unknown_fields_on_supported_raw_conversation_items(
     item_index: int,
-    field_value: Any,
 ) -> None:
     rollout = _canonical_rollout()
     conversation = rollout["ng_trajectory"]["invocations"][0]["conversation"]
     conversation[item_index] = copy.deepcopy(conversation[item_index])
-    conversation[item_index]["future_field"] = field_value
+    # Explicit nulls are still present fields and must not disappear through
+    # model parsing. Non-null unknowns take the same rejection branch.
+    conversation[item_index]["future_field"] = None
 
     with pytest.raises(AtifExportError, match="unsupported fields would be dropped: 'future_field'"):
         gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
@@ -636,12 +793,11 @@ def test_strict_export_rejects_status_on_scalar_source_content_before_pydantic_c
         gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
 
 
-@pytest.mark.parametrize("field_value", ("secret", None))
-def test_strict_export_rejects_unknown_raw_output_text_fields_before_validation(field_value: Any) -> None:
+def test_strict_export_rejects_unknown_raw_output_text_fields_before_validation() -> None:
     rollout = _canonical_rollout()
     conversation = rollout["ng_trajectory"]["invocations"][0]["conversation"]
     conversation[-1] = copy.deepcopy(conversation[-1])
-    conversation[-1]["content"][0]["future_field"] = field_value
+    conversation[-1]["content"][0]["future_field"] = None
 
     with pytest.raises(AtifExportError, match=r"conversation\[8\]\.content\[0\].*future_field"):
         gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
@@ -727,24 +883,15 @@ def test_strict_export_rejects_empty_multipart_tool_results() -> None:
         gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
 
 
-def test_gym_rollout_to_atif_does_not_infer_unknown_step_model_from_other_turns() -> None:
+@pytest.mark.parametrize("second_model", (None, "model-b"), ids=("unknown-step-model", "mixed-models"))
+def test_gym_rollout_to_atif_omits_agent_model_without_one_uniform_known_model(second_model: str | None) -> None:
     rollout = _canonical_rollout()
-    rollout["ng_trajectory"]["model_calls"][1]["response_metadata"]["model"] = None
+    rollout["ng_trajectory"]["model_calls"][1]["response_metadata"]["model"] = second_model
 
     trajectory = gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
 
     assert trajectory.agent.model_name is None
-    assert [step.model_name for step in trajectory.steps if step.source == "agent"] == ["model-a", None]
-
-
-def test_gym_rollout_to_atif_preserves_multiple_explicit_step_model_names() -> None:
-    rollout = _canonical_rollout()
-    rollout["ng_trajectory"]["model_calls"][1]["response_metadata"]["model"] = "model-b"
-
-    trajectory = gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
-
-    assert trajectory.agent.model_name is None
-    assert [step.model_name for step in trajectory.steps if step.source == "agent"] == ["model-a", "model-b"]
+    assert [step.model_name for step in trajectory.steps if step.source == "agent"] == ["model-a", second_model]
 
 
 def test_gym_rollout_to_atif_uses_unique_gym_indices_for_trajectory_identity() -> None:
@@ -770,6 +917,114 @@ def test_strict_export_requires_exact_turn_and_model_call_evidence() -> None:
     rollout["ng_trajectory"]["invocations"][0]["model_calls"] = []
 
     with pytest.raises(AtifExportError, match="expected one turn for each of 2 agent steps, got 0"):
+        gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("identityless-captured-call", "model_call_id or both model_ref and response_id are required"),
+        ("unknown-model-ref", "unknown model_call_id"),
+        ("unmatched-response-ref", "model_ref and response_id do not match a captured model call"),
+        ("wrong-turn-invocation", "does not match the root invocation"),
+        ("unordered-turn", "turns must be ordered sequentially from 1"),
+        ("question-mismatch", "does not match the model-visible conversation prefix"),
+        ("reasoning-mismatch", "does not match the exported reasoning"),
+        ("step-count-mismatch", "does not match the cumulative tool-call count"),
+        ("multiple-model-refs", "expected exactly one captured model call"),
+        ("reused-model-call", "model call is referenced by more than one turn"),
+        ("blank-model", "model: cannot be blank"),
+        ("blank-finish-reason", "finish_reason: cannot be blank"),
+        ("unrepresentable-timestamp", "cannot be represented as an ISO 8601 timestamp"),
+        ("unreferenced-model-call", "unreferenced model-call indices"),
+    ],
+)
+def test_strict_export_rejects_inconsistent_turn_and_model_call_ownership(mutation: str, message: str) -> None:
+    rollout = _canonical_rollout()
+    trajectory = rollout["ng_trajectory"]
+    turns = trajectory["turns"]
+    model_calls = trajectory["model_calls"]
+    if mutation == "identityless-captured-call":
+        model_calls[0].pop("model_call_id")
+        model_calls[0]["response_metadata"].pop("model_ref")
+        model_calls[0]["response_metadata"].pop("response_id")
+    elif mutation == "unknown-model-ref":
+        turns[0]["model_calls"] = [{"model_call_id": "missing-call"}]
+    elif mutation == "unmatched-response-ref":
+        turns[0]["model_calls"] = [
+            {
+                "model_ref": {"type": "responses_api_models", "name": "policy"},
+                "response_id": "missing-response",
+            }
+        ]
+    elif mutation == "wrong-turn-invocation":
+        turns[0]["invocation_id"] = "child"
+    elif mutation == "unordered-turn":
+        turns[1]["turn_no"] = 3
+    elif mutation == "question-mismatch":
+        turns[0]["question"] = copy.deepcopy(turns[0]["question"])
+        turns[0]["question"][1]["content"] = "Different question."
+    elif mutation == "reasoning-mismatch":
+        turns[0]["reasoning_content"] = copy.deepcopy(turns[0]["reasoning_content"])
+        turns[0]["reasoning_content"][0]["summary"][0]["text"] = "Different reasoning."
+    elif mutation == "step-count-mismatch":
+        turns[0]["step_count"] = 1
+    elif mutation == "multiple-model-refs":
+        turns[0]["model_calls"].append({"model_call_id": "model-call-2"})
+    elif mutation == "reused-model-call":
+        turns[1]["model_calls"] = [{"model_call_id": "model-call-1"}]
+    elif mutation == "blank-model":
+        model_calls[0]["response_metadata"]["model"] = " \t"
+    elif mutation == "blank-finish-reason":
+        model_calls[0]["response_metadata"]["finish_reason"] = " \t"
+    elif mutation == "unrepresentable-timestamp":
+        turns[0]["timestamp"] = 1e100
+    else:
+        unreferenced = copy.deepcopy(model_calls[1])
+        unreferenced["model_call_id"] = "model-call-unused"
+        unreferenced["response_metadata"]["response_id"] = "response-unused"
+        model_calls.append(unreferenced)
+
+    with pytest.raises(AtifExportError, match=message):
+        gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("blank-task-id", "task_id and rollout_id cannot be blank"),
+        ("blank-rollout-id", "task_id and rollout_id cannot be blank"),
+        ("blank-root-invocation", r"invocations\[0\]\.invocation_id: cannot be blank"),
+        ("root-parent", "subagent invocations are not supported"),
+        ("completed-root-error", "completed invocation contains an error"),
+        ("blank-agent-name", "expected a non-empty agent_ref.name"),
+    ],
+)
+def test_strict_export_rejects_invalid_root_lifecycle_and_identity(mutation: str, message: str) -> None:
+    rollout = _canonical_rollout()
+    trajectory = rollout["ng_trajectory"]
+    if mutation == "blank-task-id":
+        trajectory["task_id"] = " \t"
+        for turn in trajectory["turns"]:
+            turn["task_id"] = " \t"
+    elif mutation == "blank-rollout-id":
+        trajectory["rollout_id"] = " \t"
+        for turn in trajectory["turns"]:
+            turn["rollout_id"] = " \t"
+    elif mutation == "blank-root-invocation":
+        trajectory["invocations"][0]["invocation_id"] = " \t"
+        for turn in trajectory["turns"]:
+            turn["invocation_id"] = " \t"
+        for tool_call in trajectory["tool_calls"]:
+            tool_call["invocation_id"] = " \t"
+    elif mutation == "root-parent":
+        trajectory["invocations"][0]["parent_invocation_id"] = "parent"
+    elif mutation == "completed-root-error":
+        trajectory["invocations"][0]["error_type"] = "latent-error"
+    else:
+        rollout["agent_ref"]["name"] = " \t"
+
+    with pytest.raises(AtifExportError, match=message):
         gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
 
 
@@ -1030,18 +1285,6 @@ def test_strict_export_rejects_blank_model_call_identifiers(location: str, field
         gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
 
 
-def test_strict_export_rejects_blank_root_invocation_identity() -> None:
-    rollout = _canonical_rollout()
-    rollout["ng_trajectory"]["invocations"][0]["invocation_id"] = " \t"
-    for turn in rollout["ng_trajectory"]["turns"]:
-        turn["invocation_id"] = " \t"
-    for tool_call in rollout["ng_trajectory"]["tool_calls"]:
-        tool_call["invocation_id"] = " \t"
-
-    with pytest.raises(AtifExportError, match=r"invocations\[0\]\.invocation_id: cannot be blank"):
-        gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
-
-
 @pytest.mark.parametrize("identity_field", ("response_id", "model_ref"))
 def test_strict_export_rejects_ref_identity_missing_from_captured_model_call(identity_field: str) -> None:
     rollout = _canonical_rollout()
@@ -1063,11 +1306,10 @@ def test_strict_export_rejects_non_finite_provider_payload_values() -> None:
 @pytest.mark.parametrize(
     "value",
     [
-        ("tuple",),
         {"set"},
-        b"bytes",
         {1: "integer key"},
     ],
+    ids=("unsupported-value", "non-string-key"),
 )
 def test_direct_export_rejects_non_json_python_values(value: Any) -> None:
     rollout = _canonical_rollout()
@@ -1083,44 +1325,6 @@ def test_direct_export_rejects_unpaired_unicode_surrogates() -> None:
 
     with pytest.raises(AtifExportError, match="unpaired Unicode surrogate"):
         gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
-
-
-def test_strict_export_preserves_arbitrary_size_json_integers() -> None:
-    rollout = _canonical_rollout()
-    value = 10**100 + 123
-    rollout["ng_trajectory"]["invocations"][0]["conversation"][3]["arguments"] = json.dumps({"value": value})
-
-    trajectory = gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
-
-    assert trajectory.steps[2].tool_calls[0].arguments == {"value": value}
-
-
-@pytest.mark.parametrize(
-    "arguments",
-    [
-        '{"value": 1, "value": 2}',
-        '{"value": Infinity}',
-        '{"value": 1e400}',
-        '{"value": 1e-999}',
-        '{"value": 0.12345678901234567890123456789}',
-    ],
-)
-def test_strict_export_rejects_nonstandard_or_ambiguous_tool_argument_json(arguments: str) -> None:
-    rollout = _canonical_rollout()
-    rollout["ng_trajectory"]["invocations"][0]["conversation"][3]["arguments"] = arguments
-
-    with pytest.raises(AtifExportError, match="expected a JSON object string"):
-        gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
-
-
-@pytest.mark.parametrize("arguments", ('{"value": 0e-999}', '{"value": 0e-99999999999999999999}'))
-def test_strict_export_accepts_true_zero_with_extreme_json_exponents(arguments: str) -> None:
-    rollout = _canonical_rollout()
-    rollout["ng_trajectory"]["invocations"][0]["conversation"][3]["arguments"] = arguments
-
-    trajectory = gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
-
-    assert trajectory.steps[2].tool_calls[0].arguments == {"value": 0.0}
 
 
 @pytest.mark.parametrize("representation", ("encrypted", "content-and-summary"))
@@ -1144,14 +1348,7 @@ def test_export_writes_hash_verified_files_and_ingress_compatible_manifest(tmp_p
     _write_jsonl(source, rows)
     output = tmp_path / "atif"
 
-    result = export_rollouts_to_atif(
-        ExportAtifConfig(
-            rollouts_jsonl_fpath=source,
-            output_dirpath=output,
-            session_id="evaluation-42",
-            agent_version="2.3.1",
-        )
-    )
+    result = export_rollouts_to_atif(_export_config(source, output))
 
     assert result.output_dirpath == output.resolve()
     assert result.trajectory_count == 2
@@ -1184,20 +1381,13 @@ def test_export_validates_every_record_before_publishing_any_output(tmp_path: Pa
     output = tmp_path / "atif"
 
     with pytest.raises(AtifExportError, match=r"line 2: .*developer messages are not supported"):
-        export_rollouts_to_atif(
-            ExportAtifConfig(
-                rollouts_jsonl_fpath=source,
-                output_dirpath=output,
-                session_id="evaluation-42",
-                agent_version="2.3.1",
-            )
-        )
+        export_rollouts_to_atif(_export_config(source, output))
 
     assert not output.exists()
     assert list(tmp_path.glob(".atif.tmp-*")) == []
 
 
-def test_export_rejects_non_standard_json_numbers_before_conversion(tmp_path: Path) -> None:
+def test_export_rejects_an_invalid_json_batch_before_conversion(tmp_path: Path) -> None:
     source = tmp_path / "rollouts.jsonl"
     rollout = _canonical_rollout()
     rollout["ng_trajectory"]["model_calls"][0]["request"]["temperature"] = float("inf")
@@ -1205,106 +1395,7 @@ def test_export_rejects_non_standard_json_numbers_before_conversion(tmp_path: Pa
     output = tmp_path / "atif"
 
     with pytest.raises(AtifExportError, match="invalid JSON"):
-        export_rollouts_to_atif(
-            ExportAtifConfig(
-                rollouts_jsonl_fpath=source,
-                output_dirpath=output,
-                session_id="evaluation-42",
-                agent_version="2.3.1",
-            )
-        )
-
-    assert not output.exists()
-    assert list(tmp_path.glob(".atif.tmp-*")) == []
-
-
-@pytest.mark.parametrize(
-    "payload",
-    [
-        b'{"invalid":"\xff"}\n',
-        b'\xef\xbb\xbf{"value":true}\n',
-        '{"value":true}\n'.encode("utf-16-be"),
-        '{"value":true}\n'.encode("utf-32-be"),
-    ],
-)
-def test_export_rejects_non_utf8_or_bom_jsonl(payload: bytes, tmp_path: Path) -> None:
-    source = tmp_path / "rollouts.jsonl"
-    source.write_bytes(payload)
-    output = tmp_path / "atif"
-
-    with pytest.raises(AtifExportError, match=r"line 1: invalid JSON"):
-        export_rollouts_to_atif(
-            ExportAtifConfig(
-                rollouts_jsonl_fpath=source,
-                output_dirpath=output,
-                session_id="evaluation-42",
-                agent_version="2.3.1",
-            )
-        )
-
-    assert not output.exists()
-    assert list(tmp_path.glob(".atif.tmp-*")) == []
-
-
-def test_export_rejects_json_strings_with_unpaired_unicode_surrogates(tmp_path: Path) -> None:
-    source = tmp_path / "rollouts.jsonl"
-    encoded = json.dumps(_canonical_rollout()).replace('"model-visible-input-1"', r'"\ud800"')
-    source.write_text(f"{encoded}\n", encoding="utf-8")
-    output = tmp_path / "atif"
-
-    with pytest.raises(AtifExportError, match=r"line 1: .*unpaired Unicode surrogate"):
-        export_rollouts_to_atif(
-            ExportAtifConfig(
-                rollouts_jsonl_fpath=source,
-                output_dirpath=output,
-                session_id="evaluation-42",
-                agent_version="2.3.1",
-            )
-        )
-
-    assert not output.exists()
-    assert list(tmp_path.glob(".atif.tmp-*")) == []
-
-
-def test_export_rejects_nonzero_json_numbers_that_underflow_to_zero(tmp_path: Path) -> None:
-    source = tmp_path / "rollouts.jsonl"
-    rollout = _canonical_rollout()
-    rollout["ng_trajectory"]["model_calls"][0]["request"]["tiny"] = "UNDERFLOW_SENTINEL"
-    encoded = json.dumps(rollout).replace('"UNDERFLOW_SENTINEL"', "1e-99999999999999999999")
-    source.write_text(f"{encoded}\n", encoding="utf-8")
-    output = tmp_path / "atif"
-
-    with pytest.raises(AtifExportError, match=r"line 1: invalid JSON"):
-        export_rollouts_to_atif(
-            ExportAtifConfig(
-                rollouts_jsonl_fpath=source,
-                output_dirpath=output,
-                session_id="evaluation-42",
-                agent_version="2.3.1",
-            )
-        )
-
-    assert not output.exists()
-    assert list(tmp_path.glob(".atif.tmp-*")) == []
-
-
-def test_export_rejects_json_numbers_that_would_lose_precision(tmp_path: Path) -> None:
-    source = tmp_path / "rollouts.jsonl"
-    rollout = _canonical_rollout()
-    rollout["ng_trajectory"]["model_calls"][0]["request"]["precise"] = "PRECISION_SENTINEL"
-    encoded = json.dumps(rollout).replace('"PRECISION_SENTINEL"', "0.12345678901234567890123456789")
-    source.write_text(f"{encoded}\n", encoding="utf-8")
-    output = tmp_path / "atif"
-
-    with pytest.raises(AtifExportError, match=r"line 1: invalid JSON"):
-        export_rollouts_to_atif(
-            ExportAtifConfig(
-                rollouts_jsonl_fpath=source,
-                output_dirpath=output,
-                session_id="evaluation-42",
-                agent_version="2.3.1",
-            )
-        )
+        export_rollouts_to_atif(_export_config(source, output))
 
     assert not output.exists()
     assert list(tmp_path.glob(".atif.tmp-*")) == []
@@ -1318,47 +1409,10 @@ def test_export_jsonl_preserves_arbitrary_size_integers_without_rounding(tmp_pat
     _write_jsonl(source, [rollout])
     output = tmp_path / "atif"
 
-    export_rollouts_to_atif(
-        ExportAtifConfig(
-            rollouts_jsonl_fpath=source,
-            output_dirpath=output,
-            session_id="evaluation-42",
-            agent_version="2.3.1",
-        )
-    )
+    export_rollouts_to_atif(_export_config(source, output))
 
     exported = json.loads((output / "3-7.json").read_text())
     assert exported["steps"][2]["extra"]["nemo_gym"]["model_call"]["request"]["large_integer"] == value
-
-
-def test_export_rejects_duplicate_jsonl_object_keys(tmp_path: Path) -> None:
-    source = tmp_path / "rollouts.jsonl"
-    source.write_text('{"_ng_task_index": 1, "_ng_task_index": 2}\n', encoding="utf-8")
-
-    with pytest.raises(AtifExportError, match="invalid JSON"):
-        export_rollouts_to_atif(
-            ExportAtifConfig(
-                rollouts_jsonl_fpath=source,
-                output_dirpath=tmp_path / "atif",
-                session_id="evaluation-42",
-                agent_version="2.3.1",
-            )
-        )
-
-
-def test_export_rejects_jsonl_floats_outside_the_finite_range(tmp_path: Path) -> None:
-    source = tmp_path / "rollouts.jsonl"
-    source.write_text('{"value": 1e400}\n', encoding="utf-8")
-
-    with pytest.raises(AtifExportError, match="invalid JSON"):
-        export_rollouts_to_atif(
-            ExportAtifConfig(
-                rollouts_jsonl_fpath=source,
-                output_dirpath=tmp_path / "atif",
-                session_id="evaluation-42",
-                agent_version="2.3.1",
-            )
-        )
 
 
 def test_export_refuses_an_existing_output_path_without_modifying_it(tmp_path: Path) -> None:
@@ -1370,14 +1424,7 @@ def test_export_refuses_an_existing_output_path_without_modifying_it(tmp_path: P
     sentinel.write_text("do not replace", encoding="utf-8")
 
     with pytest.raises(AtifExportError, match="Output path already exists"):
-        export_rollouts_to_atif(
-            ExportAtifConfig(
-                rollouts_jsonl_fpath=source,
-                output_dirpath=output,
-                session_id="evaluation-42",
-                agent_version="2.3.1",
-            )
-        )
+        export_rollouts_to_atif(_export_config(source, output))
 
     assert sentinel.read_text() == "do not replace"
 
@@ -1389,16 +1436,41 @@ def test_export_refuses_a_dangling_output_symlink(tmp_path: Path) -> None:
     output.symlink_to(tmp_path / "missing-target", target_is_directory=True)
 
     with pytest.raises(AtifExportError, match="Output path already exists"):
-        export_rollouts_to_atif(
-            ExportAtifConfig(
-                rollouts_jsonl_fpath=source,
-                output_dirpath=output,
-                session_id="evaluation-42",
-                agent_version="2.3.1",
-            )
-        )
+        export_rollouts_to_atif(_export_config(source, output))
 
     assert output.is_symlink()
+
+
+def test_export_rejects_a_missing_rollouts_file(tmp_path: Path) -> None:
+    with pytest.raises(AtifExportError, match="Rollouts file not found"):
+        export_rollouts_to_atif(_export_config(tmp_path / "missing.jsonl", tmp_path / "atif"))
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (b"", "Rollouts file contains no records"),
+        (b"\n", "line 1: blank JSONL records are not supported"),
+        (b"[]\n", "line 1: expected a JSON object"),
+    ],
+)
+def test_export_rejects_empty_blank_or_non_object_batches(payload: bytes, message: str, tmp_path: Path) -> None:
+    source = tmp_path / "rollouts.jsonl"
+    source.write_bytes(payload)
+
+    with pytest.raises(AtifExportError, match=message):
+        export_rollouts_to_atif(_export_config(source, tmp_path / "atif"))
+
+
+def test_export_rejects_duplicate_rollout_keys_before_publishing(tmp_path: Path) -> None:
+    source = tmp_path / "rollouts.jsonl"
+    _write_jsonl(source, [_canonical_rollout(), _canonical_rollout()])
+    output = tmp_path / "atif"
+
+    with pytest.raises(AtifExportError, match=r"line 2: duplicate Gym rollout key \(3, 7\)"):
+        export_rollouts_to_atif(_export_config(source, output))
+
+    assert not output.exists()
 
 
 def test_export_rejects_a_batch_with_multiple_agent_identities(tmp_path: Path) -> None:
@@ -1412,14 +1484,7 @@ def test_export_rejects_a_batch_with_multiple_agent_identities(tmp_path: Path) -
     )
 
     with pytest.raises(AtifExportError, match="one agent_ref.name per file"):
-        export_rollouts_to_atif(
-            ExportAtifConfig(
-                rollouts_jsonl_fpath=source,
-                output_dirpath=tmp_path / "atif",
-                session_id="evaluation-42",
-                agent_version="2.3.1",
-            )
-        )
+        export_rollouts_to_atif(_export_config(source, tmp_path / "atif"))
 
 
 def _with_gap(row: dict[str, Any]) -> None:

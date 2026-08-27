@@ -22,9 +22,9 @@ provider-reported details are preserved when available.
 ## ATIF export
 
 `gym eval export --format atif` converts the supported `ng_trajectory` version `1.0` subset into ATIF v1.7 without loading
-NeMo Relay. The initial converter accepts a completed root invocation with one initial system/user input phase, exactly
-one-model-call-per-turn evidence, text-only output (including ordered multipart tool results), and unambiguous function-call
-and function-result relationships. Model calls may be joined by `model_call_id` or by a unique `(model_ref, response_id)`
+NeMo Relay. The initial converter accepts a completed root invocation with one initial system/user input phase, exactly one
+captured model call per turn, text-only output (including ordered multipart tool results), and unambiguous function-call and
+function-result relationships. Model calls may be joined by `model_call_id` or by a unique `(model_ref, response_id)`
 pair. It rejects later user/system turns and source records when their status, evidence gaps, content type, invocation
 structure, tool correlation, or provider completion evidence would require dropping or guessing information. This strict
 boundary means an accepted conversion is complete for the supported source profile; it does not claim that the original
@@ -42,9 +42,15 @@ outside the initial profile and fail conversion rather than being copied into an
 response values are retained opaquely under step-level `extra.nemo_gym.model_call` metadata because ATIF's standard step
 fields do not carry those provider-specific payloads. The converter does not parse those raw payloads or use them to
 reconstruct the canonical trajectory; the producer-owned `response_metadata` and `token_stats` fields supply completion,
-model, and usage evidence. Each agent step retains the normalized model identity. The root agent model is populated only when
+model, and usage evidence. Per-step token fields are preserved when available. Final prompt, completion, and cached-token
+totals are emitted only when every model call provides the corresponding field, so unavailable values are never counted as
+zero. Each agent step retains the normalized model identity. The root agent model is populated only when
 every model-backed step uses the same known model; routed or fallback trajectories keep their model identities on the
 individual steps instead.
+
+The strict ATIF reverify path additionally requires complete prompt and completion counts when any supported usage is
+present because one Gym response cannot represent partial standard usage. A partial-metric export remains valid ATIF for
+other consumers, but Gym reverify rejects it instead of dropping the known counts or reporting a false complete aggregate.
 
 The ATIF `agent.name` comes from each rollout row's `agent_ref.name`. The initial batch exporter accepts one agent identity
 per input file because the caller supplies one corresponding agent implementation version. Conversion provenance is kept under the ATIF root's
