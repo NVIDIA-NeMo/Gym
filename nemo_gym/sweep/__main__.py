@@ -114,6 +114,8 @@ def main(argv: list[str] | None = None) -> int:
             for d, rows in zip(result.shard_dirs, result.rows_per_shard):
                 print(f"  {d.name}  {rows:>9,} rows  {d}")
             print(f"dealt {result.total_rows:,} rows round-robin into {len(result.shard_dirs)} shards")
+            if result.carried_rollouts:
+                print(f"carried {result.carried_rollouts:,} already-collected rollouts into the new layout")
             print("each shard directory is a valid SWEEP_DIR; run the launcher against each")
             return 0
 

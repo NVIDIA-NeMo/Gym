@@ -775,3 +775,45 @@ def test_shard_requires_materialized_inputs(tmp_path):
     empty.mkdir()
     with pytest.raises(SweepShardError, match="materialize"):
         shard_sweep(empty, num_shards=2)
+
+
+def test_reshard_carries_collected_work_into_the_new_layout(tmp_path):
+    """Resharding a half-finished run must resume, not recollect from scratch."""
+    d, rows = _materialized(tmp_path, n_tasks=12, repeats=2)
+    # half the work already done
+    done = [json.loads(l) for l in open(d / "rollouts_materialized_inputs.jsonl")][: len(rows) // 2]
+    (d / "rollouts.jsonl").write_text("".join(json.dumps(r) + "\n" for r in done))
+
+    result = shard_sweep(d, num_shards=5)
+    assert result.carried_rollouts == len(done)
+
+    # every carried rollout must land in the shard that owns its input row
+    for shard in result.shard_dirs:
+        owned = {(json.loads(l)["_ng_task_index"], json.loads(l)["_ng_rollout_index"])
+                 for l in open(shard / "rollouts_materialized_inputs.jsonl")}
+        for line in open(shard / "rollouts.jsonl"):
+            r = json.loads(line)
+            assert (r["_ng_task_index"], r["_ng_rollout_index"]) in owned
+
+
+def test_shard_unshard_reshard_loses_nothing(tmp_path):
+    """shard -> merge -> reshard -> merge is the round trip for changing job count mid-run."""
+    d, rows = _materialized(tmp_path, n_tasks=20, repeats=2)
+    done = [json.loads(l) for l in open(d / "rollouts_materialized_inputs.jsonl")][:17]
+    (d / "rollouts.jsonl").write_text("".join(json.dumps(r) + "\n" for r in done))
+    before = {(r["_ng_task_index"], r["_ng_rollout_index"]) for r in done}
+
+    shard_sweep(d, num_shards=3, out_dir=tmp_path / "a")
+    merge_shards(tmp_path / "a", output_fpath=d / "rollouts.jsonl")
+    shard_sweep(d, num_shards=7, out_dir=tmp_path / "b")
+    merged = merge_shards(tmp_path / "b", output_fpath=tmp_path / "final.jsonl")
+
+    after = {(json.loads(l)["_ng_task_index"], json.loads(l)["_ng_rollout_index"])
+             for l in open(merged.output_fpath)}
+    assert after == before
+    assert merged.duplicates == 0
+
+
+def test_shard_with_no_prior_rollouts_carries_nothing(tmp_path):
+    d, _ = _materialized(tmp_path, n_tasks=4)
+    assert shard_sweep(d, num_shards=2).carried_rollouts == 0

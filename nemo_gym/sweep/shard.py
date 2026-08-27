@@ -19,11 +19,11 @@ rack is 18 nodes, and a single driver at ``512 x decode_nodes`` concurrency woul
 aiohttp per-host connector limit long before the GPUs saturated. Several identical jobs over
 disjoint slices of the same input is the shape that scales.
 
-This is safe because ``materialize`` stamps ``_ng_task_index`` and ``_ng_sweep_label`` **before**
-any sharding, and Gym never rewrites either -- only ``global_config`` names the index, and nothing
-in rollout collection assigns it. Indices therefore stay globally unique across shards, so shard
-rollouts concatenate without renumbering and ``split`` gives the same answer on the merged file as
-on an unsharded run.
+This is safe because ``materialize`` stamps ``_ng_task_index`` **before** any sharding and Gym
+preserves it through collection -- it is a reserved key, present on 100% of rollouts measured.
+Indices therefore stay globally unique across shards, so shard rollouts concatenate without
+renumbering and ``split`` gives the same answer on the merged file as on an unsharded run.
+(``_ng_sweep_label`` is stamped too but most agents drop it; see materialize.)
 
 Rows are dealt round-robin rather than sliced into contiguous blocks. A contiguous slice would hand
 one shard an entire slow environment -- ``lean`` and ``math_cot`` dominate the tail -- while other
@@ -53,6 +53,7 @@ class SweepShardError(RuntimeError):
 class ShardResult:
     shard_dirs: List[Path] = field(default_factory=list)
     rows_per_shard: List[int] = field(default_factory=list)
+    carried_rollouts: int = 0
 
     @property
     def total_rows(self) -> int:
@@ -71,10 +72,13 @@ class MergeResult:
 def shard_sweep(sweep_dir: str | Path, num_shards: int, out_dir: Optional[str | Path] = None) -> ShardResult:
     """Deal a materialized input into ``num_shards`` sibling sweep directories.
 
-    Each shard directory is itself a valid SWEEP_DIR -- it carries the same ``sweep_config.yaml``
-    and ``sweep_report.json`` and an empty ``rollouts.jsonl`` -- so the launcher runs against one
-    with no special handling. The report is copied unchanged because ``task_index_range`` refers to
-    global indices, which sharding does not disturb.
+    Each shard directory is itself a valid SWEEP_DIR -- same ``sweep_config.yaml`` and
+    ``sweep_report.json``, plus a ``rollouts.jsonl`` -- so the launcher runs against one with no
+    special handling. The report is copied unchanged because ``task_index_range`` refers to global
+    indices, which sharding does not disturb.
+
+    If the parent sweep has already collected rollouts, they are routed into whichever shard now
+    owns each row, so resharding a half-finished run resumes rather than recollecting.
     """
     sweep_dir = Path(sweep_dir)
     if num_shards < 1:
@@ -92,6 +96,7 @@ def shard_sweep(sweep_dir: str | Path, num_shards: int, out_dir: Optional[str | 
         d.mkdir(parents=True, exist_ok=True)
 
     counts = [0] * num_shards
+    owner_of_key: Dict[Tuple[object, object], int] = {}
     handles = [open(d / INPUTS_NAME, "w") for d in shard_dirs]
     try:
         with open(inputs) as reader:
@@ -101,6 +106,11 @@ def shard_sweep(sweep_dir: str | Path, num_shards: int, out_dir: Optional[str | 
                 index = position % num_shards
                 handles[index].write(line if line.endswith("\n") else line + "\n")
                 counts[index] += 1
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                owner_of_key[(row.get(TASK_INDEX_KEY), row.get(ROLLOUT_INDEX_KEY))] = index
     finally:
         for handle in handles:
             handle.close()
@@ -113,6 +123,12 @@ def shard_sweep(sweep_dir: str | Path, num_shards: int, out_dir: Optional[str | 
         # Completes the --resume gate, exactly as materialize does for an unsharded sweep.
         (d / ROLLOUTS_NAME).touch()
 
+    # Carry any work the parent sweep already collected into the shard that now owns those rows.
+    # Without this, resharding a half-finished run silently discards every rollout: each shard
+    # starts with an empty rollouts.jsonl, so --resume finds nothing and recollects from scratch.
+    carried = _carry_existing_rollouts(sweep_dir, shard_dirs, owner_of_key)
+
+    result = ShardResult(shard_dirs=shard_dirs, rows_per_shard=counts, carried_rollouts=carried)
     (out_dir / SHARD_REPORT_NAME).write_text(
         json.dumps(
             {
@@ -121,12 +137,50 @@ def shard_sweep(sweep_dir: str | Path, num_shards: int, out_dir: Optional[str | 
                 "strategy": "round_robin",
                 "rows_per_shard": {d.name: c for d, c in zip(shard_dirs, counts)},
                 "total_rows": sum(counts),
+                "carried_rollouts": carried,
             },
             indent=2,
         )
         + "\n"
     )
-    return ShardResult(shard_dirs=shard_dirs, rows_per_shard=counts)
+    return result
+
+
+def _carry_existing_rollouts(
+    sweep_dir: Path, shard_dirs: List[Path], owner_of_key: Dict[Tuple[object, object], int]
+) -> int:
+    """Route rollouts the parent already has into whichever shard now owns each row.
+
+    Keyed on (task, rollout), the same pair Gym resumes on, so a shard sees exactly the work
+    already done for its own rows and recollects only the remainder.
+    """
+    existing = sweep_dir / ROLLOUTS_NAME
+    if not existing.is_file() or existing.stat().st_size == 0:
+        return 0
+
+    carried = 0
+    handles = [open(d / ROLLOUTS_NAME, "w") for d in shard_dirs]
+    try:
+        with open(existing) as reader:
+            for line in reader:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                index = owner_of_key.get((row.get(TASK_INDEX_KEY), row.get(ROLLOUT_INDEX_KEY)))
+                if index is None:
+                    # A rollout whose input is not in this sweep; dropping it is correct, and
+                    # merge would have deduplicated it against nothing anyway.
+                    continue
+                handles[index].write(line + "\n")
+                carried += 1
+    finally:
+        for handle in handles:
+            handle.close()
+    return carried
 
 
 def merge_shards(shards_dir: str | Path, output_fpath: Optional[str | Path] = None) -> MergeResult:
@@ -179,8 +233,8 @@ def reshard(sweep_dir: str | Path, num_shards: int, out_dir: Optional[str | Path
     """Re-deal the original materialized input into a different shard count.
 
     Always works from the parent sweep's input rather than from the existing shards, so changing
-    the count is not lossy and does not compound rounding. Any rollouts already collected stay
-    valid: they are keyed by global task index, so merging after a reshard still deduplicates
-    correctly against work done under the previous layout.
+    the count is not lossy and does not compound rounding. Merge the old shards back into the
+    parent first: ``shard_sweep`` carries the parent's rollouts into the new layout, so the work
+    survives the change of count only if it is in the parent when you reshard.
     """
     return shard_sweep(sweep_dir, num_shards, out_dir=out_dir)
