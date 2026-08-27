@@ -22,9 +22,11 @@ individually.
 the reward-profiling manifest all dispatch to ``ns_tools_simple_agent`` -- so splitting on it would
 merge them.
 
-Rows carry ``_ng_sweep_label`` and that is used when present. Sweeps materialized before that key
-existed fall back to ``_ng_task_index`` against the ``task_index_range`` recorded per entry, which
-is equally exact; the label just makes a rollouts file self-describing on its own.
+``_ng_task_index`` against the ``task_index_range`` recorded per entry is the ground truth, and is
+what attributes almost every rollout. ``_ng_sweep_label`` is checked first only as a shortcut: it
+is stamped on every materialized input, but survives collection for just the handful of agents that
+copy the input row rather than rebuilding it (376 of 2,468 rollouts on job 6564684). Both routes
+resolve to the same entry, so the fallback is not a degradation.
 """
 
 import json
@@ -131,8 +133,8 @@ def _split_file(
                 except ValueError:
                     unmapped += 1
                     continue
-                # Prefer the stamped label; fall back to the index ranges so sweeps materialized
-                # before the label existed still split.
+                # Label first as a shortcut, but most agents drop it during collection, so the
+                # index range does the real work here.
                 label = row.get(SWEEP_LABEL_KEY)
                 if label not in counts:
                     task_index = row.get(TASK_INDEX_KEY)

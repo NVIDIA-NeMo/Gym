@@ -45,9 +45,14 @@ TASK_INDEX_KEY = "_ng_task_index"
 ROLLOUT_INDEX_KEY = "_ng_rollout_index"
 # Which manifest entry a row came from. Rows already carry agent_ref, but entries routinely share
 # an agent -- math_tir, stem_mcqa_tools_ultra_0 and stem_openqa_tools_ultra_0 all dispatch to
-# ns_tools_simple_agent -- so agent_ref cannot identify the entry. Without this a rollouts file is
-# not self-describing: separated from sweep_report.json there is no way to tell which environment
-# a row belongs to.
+# ns_tools_simple_agent -- so agent_ref cannot identify the entry.
+#
+# This is reliable on the materialized inputs and NOT on the rollouts. Gym preserves the reserved
+# _ng_task_index and _ng_rollout_index through collection, but an arbitrary key survives only if
+# that agent copies the input row rather than rebuilding it. Measured on job 6564684: 376 of 2,468
+# rollouts kept it, all from ns_tools_simple_agent and inverse_if_simple_agent; the other 34 agents
+# dropped it. So treat it as a convenience on the inputs, and use task_index_range as the ground
+# truth for attributing rollouts -- which is what split does.
 SWEEP_LABEL_KEY = "_ng_sweep_label"
 
 
