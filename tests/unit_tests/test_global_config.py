@@ -2094,7 +2094,8 @@ class TestComposeUnboundAgent:
 
         GlobalConfigDictParser().compose_unbound_agent(config)
 
-        assert self._composed_block(config, "no_model")["model_server"]["name"] == "policy_model"
+        harness_model = self._harness()["responses_api_agents"]["hermes_agent"]["model_server"]["name"]
+        assert self._composed_block(config, "no_model")["model_server"]["name"] == harness_model
 
     def test_leaves_self_contained_agents_alone(self) -> None:
         # A self-contained agent declares no resources server, so there is no task to hand the new agent.
