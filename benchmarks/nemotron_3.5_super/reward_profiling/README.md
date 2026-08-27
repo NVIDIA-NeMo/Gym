@@ -16,6 +16,7 @@ The sweep machinery itself is generic and lives in `nemo_gym/sweep/`. Only these
 Nemotron-specific.
 
 ```
+RATES.md         measured throughput and GPU-hour sizing. Read before allocating.
 manifests/       input: what to profile. Hand-edited.
 outputs/         everything a run produces: sweeps/<nickname>/ and slurm-logs/. Gitignored.
 scripts/         launchers.
