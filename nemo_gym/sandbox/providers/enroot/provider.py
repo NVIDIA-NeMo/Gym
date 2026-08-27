@@ -442,7 +442,7 @@ class EnrootProvider:
         """Import/create the rootfs, launch a detached init, and return a ready handle."""
         if spec.ttl_s is not None:
             LOGGER.warning("ttl_s is not supported by the enroot provider; it will be ignored.")
-        resources = spec.resources
+        resources = spec.resource_limits
         if resources.cpu is not None or resources.memory_mib is not None or resources.disk_gib is not None:
             LOGGER.warning(
                 "cpu/memory_mib/disk_gib are not enforced by standalone enroot (that is pyxis/Slurm's job); "

@@ -227,10 +227,12 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
         provider_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config)
 
         current_task_id = task_id(task)
-        resources = task_sandbox_resources(task, phase=phase)
-        resources["cpu"] *= self.config.task_cpu_multiplier
-        resources["memory_mib"] = ceil(resources["memory_mib"] * self.config.task_memory_multiplier)
-        resources.update(self.config.sandbox_config.get("resources", {}))
+        resource_limits = task_sandbox_resources(task, phase=phase)
+        resource_limits["cpu"] *= self.config.task_cpu_multiplier
+        resource_limits["memory_mib"] = ceil(resource_limits["memory_mib"] * self.config.task_memory_multiplier)
+        resource_limits.update(
+            self.config.sandbox_config.get("resource_limits", self.config.sandbox_config.get("resources", {}))
+        )
         spec = SandboxSpec(
             image=task_image(task),
             ttl_s=self.config.sandbox_config.get("ttl_s"),
@@ -246,7 +248,10 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 "deepswe-phase": phase,
                 "nemo_gym_agent": self.config.name or "deepswe",
             },
-            resources=SandboxResources.from_mapping(resources),
+            resource_limits=SandboxResources.from_mapping(resource_limits),
+            # Deprecated alias, folded into resource_limits above; passed through so
+            # SandboxSpec emits its deprecation warning.
+            resources=self.config.sandbox_config.get("resources"),
             provider_options=self._provider_options(phase=phase),
         )
         sandbox = AsyncSandbox(provider)

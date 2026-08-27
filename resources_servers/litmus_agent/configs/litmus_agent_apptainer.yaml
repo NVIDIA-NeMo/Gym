@@ -46,7 +46,7 @@ litmus_agent:
         # if the compute node has no outbound network.
         image: ${oc.env:LITMUS_AGENT_SANDBOX_IMAGE,docker://python:3.12-slim}
         workdir: /sandbox
-        resources:
+        resource_limits:
           cpu: 2
           memory_mib: 4096
         # ttl_s intentionally omitted: Apptainer has no native auto-expiry and

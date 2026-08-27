@@ -721,7 +721,9 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
             env=dict(spec.pop("env", {})),
             files=files,
             metadata=dict(spec.pop("metadata", {})),
-            resources=SandboxResources.from_mapping(spec.pop("resources", {})),
+            resource_limits=SandboxResources.from_mapping(spec.pop("resource_limits", {})),
+            # Deprecated alias; SandboxSpec warns and maps it onto resource_limits.
+            resources=spec.pop("resources", None),
             entrypoint=spec.pop("entrypoint", None),
             provider_options=dict(spec.pop("provider_options", {})),
         )

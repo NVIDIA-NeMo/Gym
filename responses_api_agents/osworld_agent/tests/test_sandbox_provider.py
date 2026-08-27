@@ -48,7 +48,7 @@ def test_build_spec_mounts_read_only_snapshot_and_requests_runtime(tmp_path, mon
         {
             "image": "docker://osworld@sha256:abc",
             "ports": None,
-            "resources": {"cpu": 4, "memory_mib": 16384},
+            "resource_limits": {"cpu": 4, "memory_mib": 16384},
             "provider_options": {"run_args": ["--security-opt", "label=disable"]},
         },
     )
@@ -60,7 +60,7 @@ def test_build_spec_mounts_read_only_snapshot_and_requests_runtime(tmp_path, mon
     assert spec.entrypoint == list(osworld_sandbox.OSWORLD_IMAGE_ENTRYPOINT)
     assert spec.env["HEADLESS"] == "Y"
     assert spec.env["KVM"] == "Y"
-    assert spec.resources.cpu == 4
+    assert spec.resource_limits.cpu == 4
     assert f"{vm_path.resolve()}:/System.qcow2:ro" in spec.provider_options["volumes"]
     assert osworld_sandbox._has_option(spec.provider_options["run_args"], "--cap-add", "NET_ADMIN")
     assert osworld_sandbox._has_option(spec.provider_options["run_args"], "--device", "/dev/kvm")
@@ -133,7 +133,7 @@ def test_build_spec_uses_sdk_compatibility_image_for_opensandbox_pool(monkeypatc
             "image": "busybox:1.36",
             "entrypoint": ["/run/entry.sh"],
             "env": {"KVM": "Y"},
-            "resources": {"cpu": 4, "memory_mib": 16384},
+            "resource_limits": {"cpu": 4, "memory_mib": 16384},
             "provider_options": {
                 "skip_health_check": True,
                 "extensions": {"poolRef": "osworld-kvm"},
@@ -158,7 +158,7 @@ def test_build_spec_uses_sdk_compatibility_image_for_opensandbox_pool(monkeypatc
     assert spec.metadata["run-id"] == "opensandbox-run"
     assert spec.entrypoint is None
     assert spec.env == {}
-    assert spec.resources.cpu is None
+    assert spec.resource_limits.cpu is None
 
 
 def test_build_spec_rejects_invalid_opensandbox_pool_spec() -> None:

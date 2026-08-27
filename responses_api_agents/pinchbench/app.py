@@ -251,7 +251,9 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             ttl_s=cfg.get("ttl_s"),
             ready_timeout_s=cfg.get("ready_timeout_s"),
             workdir=cfg.get("workdir"),
-            resources=SandboxResources.from_mapping(cfg.get("resources", {})),
+            resource_limits=SandboxResources.from_mapping(cfg.get("resource_limits", {})),
+            # Deprecated alias; SandboxSpec warns and maps it onto resource_limits.
+            resources=cfg.get("resources"),
             provider_options=cfg.get("provider_options", {}),
             env=self._task_env(task_id, rollout_id),
             metadata={"task_id": task_id},

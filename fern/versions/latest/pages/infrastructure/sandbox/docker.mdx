@@ -87,7 +87,7 @@ sandbox_spec:
 | `env` | Passed as `--env KEY=VALUE` at `docker run` and re-applied on each `exec()`. |
 | `workdir` | `-w` at `docker run` (created if absent) and the default `exec()` working directory. |
 | `files` | Seed files uploaded before the first command. |
-| `resources` | Mapped to CPU, memory, and GPU flags (see Resource Mapping). |
+| `resource_limits` | Mapped to CPU, memory, and GPU flags (see Resource Mapping). |
 | `entrypoint` | Overrides the keep-alive: the container runs this as its main process instead. |
 | `provider_options` | `volumes` and `run_args`, applied per-sandbox. |
 | `ttl_s` | Max lifetime: the keep-alive sleeps for `ttl_s` and the container self-removes (`--rm`) on exit. Ignored when a custom `entrypoint` owns the container lifetime. |
@@ -129,7 +129,7 @@ Docker containers share the host kernel. This is process and namespace isolation
 
 - Never run with `--privileged` and never mount the Docker socket into the sandbox; either grants host root.
 - Networking is on by default because most tasks need egress (pip, git). Set `network: none` to cut it entirely, or `network: <name>` to attach a locked-down internal network.
-- Harden with `read_only: true`, `cap_drop: ["ALL"]`, `security_opt: ["no-new-privileges"]`, and `pids_limit: <n>` as a fork-bomb guard. Enforce `resources` so one sandbox cannot starve the host.
+- Harden with `read_only: true`, `cap_drop: ["ALL"]`, `security_opt: ["no-new-privileges"]`, and `pids_limit: <n>` as a fork-bomb guard. Enforce `resource_limits` so one sandbox cannot starve the host.
 - Rootless Docker narrows the blast radius (container root is not host root) and is recommended for shared machines; `docker cp` ownership and some `--user` behaviors differ under it.
 - Every container is labeled `nemo-gym.sandbox=1`. Reap leaks from an unclean shutdown with `docker rm -f $(docker ps -aq --filter label=nemo-gym.sandbox=1)`.
 

@@ -20,7 +20,7 @@ uv pip install boto3
 
 ## Provider Configuration
 
-NeMo Gym ships this provider config at `nemo_gym/sandbox/providers/ecs_fargate/configs/ecs_fargate.yaml`. It defines a top-level `sandbox` block that an agent selects with `sandbox_provider: sandbox`. Region-only is enough; everything else auto-discovers from SSM (explicit YAML always wins), and task cpu/memory/disk come from the agent's `sandbox_spec.resources`:
+NeMo Gym ships this provider config at `nemo_gym/sandbox/providers/ecs_fargate/configs/ecs_fargate.yaml`. It defines a top-level `sandbox` block that an agent selects with `sandbox_provider: sandbox`. Region-only is enough; everything else auto-discovers from SSM (explicit YAML always wins), and task cpu/memory/disk come from the agent's `sandbox_spec.resource_limits`:
 
 ```yaml
 sandbox:
@@ -91,7 +91,7 @@ spec = SandboxSpec(
     image="python:3.13.14-slim",
     ttl_s=1800,
     ready_timeout_s=300,
-    resources=SandboxResources(cpu=2, memory_mib=8192),
+    resource_limits=SandboxResources(cpu=2, memory_mib=8192),
 )
 
 

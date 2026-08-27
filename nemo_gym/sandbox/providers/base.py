@@ -14,8 +14,9 @@
 
 """Provider-facing sandbox protocol."""
 
+import warnings
 from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -63,7 +64,7 @@ class SandboxEndpoint:
 
 @dataclass(frozen=True)
 class SandboxResources:
-    """Provider-neutral resource request."""
+    """Provider-neutral resource quantities (used for both limits and requests)."""
 
     cpu: float | None = None
     memory_mib: int | None = None
@@ -101,14 +102,28 @@ class SandboxSpec:
     env: dict[str, str] = field(default_factory=dict)
     files: dict[str, str] = field(default_factory=dict)
     metadata: dict[str, str] = field(default_factory=dict)
-    resources: SandboxResources | Mapping[str, Any] = field(default_factory=SandboxResources)
+    resource_limits: SandboxResources | Mapping[str, Any] = field(default_factory=SandboxResources)
     entrypoint: list[str] | None = None
     provider_options: dict[str, Any] = field(default_factory=dict)
     ports: tuple[int, ...] | list[int] = field(default_factory=tuple)
+    # Deprecated alias for resource_limits, accepted for one deprecation cycle.
+    resources: InitVar[SandboxResources | Mapping[str, Any] | None] = None
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.resources, SandboxResources):
-            object.__setattr__(self, "resources", SandboxResources.from_mapping(self.resources))
+    def __post_init__(self, resources: SandboxResources | Mapping[str, Any] | None) -> None:
+        if not isinstance(self.resource_limits, SandboxResources):
+            object.__setattr__(self, "resource_limits", SandboxResources.from_mapping(self.resource_limits))
+        if resources is not None:
+            warnings.warn(
+                "`SandboxSpec.resources` is deprecated; use `resource_limits` (the values are the "
+                "Kubernetes-style resource limits, matching the existing OpenSandbox `resource_requests`).",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            # An explicit `resource_limits` wins, so callers can migrate without removing the old key.
+            if self.resource_limits == SandboxResources():
+                if not isinstance(resources, SandboxResources):
+                    resources = SandboxResources.from_mapping(resources)
+                object.__setattr__(self, "resource_limits", resources)
         if not isinstance(self.ports, (list, tuple)):
             raise TypeError("Sandbox ports must be a list or tuple of TCP port numbers")
         normalized_ports: list[int] = []

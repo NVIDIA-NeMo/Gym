@@ -556,8 +556,8 @@ class OpenSandboxProviderOptions:
     volumes: tuple[Mapping[str, Any], ...] = ()
     skip_health_check: bool | None = None
     extensions: Mapping[str, str] = field(default_factory=dict)
-    # Scheduling requests (same keys as SandboxSpec.resources, which become the
-    # limits). Unset, the server applies the single resources map as both.
+    # Scheduling requests (same keys as SandboxSpec.resource_limits). Unset,
+    # the server applies the single limits map as both.
     resource_requests: Mapping[str, Any] | None = None
 
     @classmethod
@@ -1055,7 +1055,7 @@ class OpenSandboxProvider:
         kwargs: dict[str, Any] = {
             "env": spec.env,
             "metadata": spec.metadata,
-            "resource": _resource_map(spec.resources),
+            "resource": _resource_map(spec.resource_limits),
             "extensions": self._resolve_extensions(options.extensions),
             "connection_config": self._connection_config(request_timeout_s=self._create.request_timeout_s),
         }

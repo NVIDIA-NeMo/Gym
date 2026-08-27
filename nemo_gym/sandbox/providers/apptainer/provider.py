@@ -389,7 +389,7 @@ class ApptainerProvider:
            name = INSTANCE_NAME_PREFIX + uuid4().hex.
         4. Build argv: [binary, "instance", "start", <--bind staging:mount_point>,
            <config default_binds>, <spec.provider_options["binds"]>, <--env-file ...>,
-           _resource_flags(spec.resources), <extra_start_args>, image, name].
+           _resource_flags(spec.resource_limits), <extra_start_args>, image, name].
         5. await self._run(argv, timeout_s=self._create_config.start_timeout_s);
            on non-zero return, clean up the staging dir and raise
            ApptainerCreateError(stderr).
@@ -430,7 +430,7 @@ class ApptainerProvider:
         for bind in extra_binds:
             argv += ["--bind", bind]
         start_args = list(self._create_config.extra_start_args)
-        resource_limit_flags = _resource_limit_flags(spec.resources)
+        resource_limit_flags = _resource_limit_flags(spec.resource_limits)
         if resource_limit_flags and self._create_config.apply_resource_limits:
             if "--fakeroot" in start_args:
                 LOGGER.warning(
@@ -438,7 +438,7 @@ class ApptainerProvider:
                 )
             else:
                 argv += resource_limit_flags
-        argv += _resource_passthrough_flags(spec.resources)
+        argv += _resource_passthrough_flags(spec.resource_limits)
         argv += start_args
 
         # start the instance; clean up the staging dir on any failure.

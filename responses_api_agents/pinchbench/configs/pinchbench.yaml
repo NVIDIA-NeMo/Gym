@@ -22,7 +22,7 @@ pinchbench_agent:
       sandbox_spec:
         image: ${sandbox_image}
         ready_timeout_s: 600
-        resources:
+        resource_limits:
           cpu: 4
           memory_mib: 8192
       task_timeout_s: 1800

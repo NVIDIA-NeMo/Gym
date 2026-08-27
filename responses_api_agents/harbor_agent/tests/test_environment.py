@@ -151,8 +151,8 @@ class TestStartStop:
         assert spec.image == "docker.io/example/task:1.0"
         assert spec.ttl_s == 1234
         assert spec.ready_timeout_s == 56
-        assert spec.resources.cpu == 4.0
-        assert spec.resources.memory_mib == 8192
+        assert spec.resource_limits.cpu == 4.0
+        assert spec.resource_limits.memory_mib == 8192
         assert spec.metadata["harbor-session"] == "example-task__trial-1"
         assert spec.metadata["harbor-task"] == "example-task"
         assert spec.metadata["harbor-benchmark"] == "tb-2-1"
@@ -177,7 +177,7 @@ class TestStartStop:
         # keeps the task's own smaller limits and disk-heavy tasks get evicted.
         env = _make_environment(tmp_path, override_cpus=8, override_memory_mb=16384, override_storage_mb=30720)
         await env.start(force_build=False)
-        resources = _provider().created_specs[0].resources
+        resources = _provider().created_specs[0].resource_limits
         assert resources.cpu == 8.0
         assert resources.memory_mib == 16384
         assert resources.disk_gib == 30

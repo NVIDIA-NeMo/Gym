@@ -21,6 +21,6 @@ sandbox:
   ecs_fargate:
     # Region-only: cluster / subnets / security-groups / roles and the SSH-sidecar key ARNs
     # auto-discover from SSM (/<ssm_project>/ecs-sandbox/config; ssm_project defaults to harbor).
-    # Task cpu / memory / disk come from the agent's sandbox_spec.resources (mapped onto the
+    # Task cpu / memory / disk come from the agent's sandbox_spec.resource_limits (mapped onto the
     # Fargate task); set cpu / memory / ephemeral_storage_gib here only to change the defaults.
     region: ${oc.env:AWS_REGION}

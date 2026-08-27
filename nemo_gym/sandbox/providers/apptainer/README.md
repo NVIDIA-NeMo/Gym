@@ -38,7 +38,7 @@ spec = SandboxSpec(
     workdir="/sandbox",
     env={"GREETING": "hello"},
     files={"/sandbox/input.txt": "some seed content"},
-    resources={"cpu": 2, "memory_mib": 4096},
+    resource_limits={"cpu": 2, "memory_mib": 4096},
 )
 
 with Sandbox({"apptainer": {}}, spec) as sandbox:
@@ -107,7 +107,7 @@ Settings for starting the instance (`apptainer instance start`).
 | `mount_point` | `/sandbox` | Absolute path inside the container where the host staging dir is bind-mounted. Powers the file-transfer fast path. |
 | `start_timeout_s` | `600` | Max seconds to wait for `instance start` (`None` = no timeout). |
 | `extra_start_args` | `[]` | Extra raw flags appended to `instance start`. |
-| `apply_resource_limits` | `true` | Add CPU/memory cgroup flags from `SandboxSpec.resources`. |
+| `apply_resource_limits` | `true` | Add CPU/memory cgroup flags from `SandboxSpec.resource_limits`. |
 
 ### `exec` — `ApptainerExecConfig`
 

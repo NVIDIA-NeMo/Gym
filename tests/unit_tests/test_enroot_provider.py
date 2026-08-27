@@ -300,7 +300,7 @@ async def test_create_builds_argv_and_runs_probe(
     spec = SandboxSpec(
         image="ubuntu:22.04",
         env={"FOO": "bar"},
-        resources={"cpu": 2, "memory_mib": 1024, "gpu": 1, "disk_gib": 50},
+        resource_limits={"cpu": 2, "memory_mib": 1024, "gpu": 1, "disk_gib": 50},
         ttl_s=60,
         provider_options={"mounts": ["/host/a:/code/a"]},
     )

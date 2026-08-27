@@ -241,9 +241,11 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         global_config_dict = get_global_config_dict()
         resolved_sandbox_provider = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
         provider_default_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
-        resources = dict(self.config.sandbox_config.get("resources", {}))
+        resource_limits = dict(
+            self.config.sandbox_config.get("resource_limits", self.config.sandbox_config.get("resources", {}))
+        )
 
-        patch_swebench_multilingual_resources_request(resources, test_spec.instance_id)
+        patch_swebench_multilingual_resources_request(resource_limits, test_spec.instance_id)
 
         eval_sandbox_spec = SandboxSpec(
             image=test_spec.instance_image_key,
@@ -258,7 +260,10 @@ class SwebenchResourcesServer(SimpleResourcesServer):
                 "nemo_gym_agent": self.config.name,
                 "instance_id": test_spec.instance_id[:63],
             },
-            resources=SandboxResources.from_mapping(resources),
+            resource_limits=SandboxResources.from_mapping(resource_limits),
+            # Deprecated alias, folded into resource_limits above; passed through so
+            # SandboxSpec emits its deprecation warning.
+            resources=self.config.sandbox_config.get("resources"),
             entrypoint=None,
             provider_options=self.config.sandbox_config.get("provider_options", {}),
         )

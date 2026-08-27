@@ -60,8 +60,8 @@ The public API is part of `nemo-gym`. Runtime backends can have optional depende
 | --- | --- |
 | `AsyncSandbox` | Async facade for FastAPI servers, async agents, and rollout code. Use this inside async code. |
 | `Sandbox` | Sync facade for synchronous harnesses. It owns a private event loop and rejects calls from an already-running async loop. |
-| `SandboxSpec` | Provider-neutral sandbox creation request. Includes image, TTL, working directory, files, metadata, resources, entrypoint, and provider options. |
-| `SandboxResources` | Typed resource request with CPU, memory, disk, and GPU fields. |
+| `SandboxSpec` | Provider-neutral sandbox creation request. Includes image, TTL, working directory, files, metadata, resource limits, entrypoint, and provider options. |
+| `SandboxResources` | Typed resource quantities with CPU, memory, disk, and GPU fields. |
 | `SandboxExecResult` | Command result with `stdout`, `stderr`, `return_code`, and optional `error_type`. |
 | `SandboxStatus` | Provider-neutral lifecycle status: `starting`, `running`, `stopped`, `error`, or `unknown`. |
 | `SandboxCreateError` | Base create-time failure for provider allocation and readiness errors. |
@@ -87,7 +87,7 @@ spec = SandboxSpec(
     files={
         "/sandbox/hello.py": "print('hello from sandbox')\n",
     },
-    resources=SandboxResources(cpu=1, memory_mib=1024, disk_gib=5),
+    resource_limits=SandboxResources(cpu=1, memory_mib=1024, disk_gib=5),
     metadata={"example": "first-run"},
 )
 
@@ -134,7 +134,7 @@ mini_swe_agent_2:
     mini_swe_agent_2:
       sandbox_provider: sandbox
       sandbox_spec:
-        resources:
+        resource_limits:
           cpu: 2
           memory_mib: 8192
         provider_options:
@@ -176,7 +176,7 @@ spec = SandboxSpec(
     ttl_s=18000,
     ready_timeout_s=1200,
     workdir="/workspace",
-    resources=SandboxResources(cpu=2, memory_mib=8192, disk_gib=20),
+    resource_limits=SandboxResources(cpu=2, memory_mib=8192, disk_gib=20),
     metadata={"benchmark": "my-benchmark", "task_id": "task-001"},
 )
 
@@ -223,16 +223,16 @@ Do not call `Sandbox` from FastAPI handlers, async resources servers, or async a
 | `env` | Environment variables injected into the sandbox. Forward only values required by the task. |
 | `files` | Text files to upload at startup, keyed by remote target path. |
 | `metadata` | String metadata for tracing, debugging, and backend labels. Providers may normalize values for their runtime. |
-| `resources` | `SandboxResources` or a mapping with `cpu`, `memory_mib`, `disk_gib`, `gpu`, and `gpu_type`. |
+| `resource_limits` | `SandboxResources` or a mapping with `cpu`, `memory_mib`, `disk_gib`, `gpu`, and `gpu_type`. `resources` is a deprecated alias accepted for one release. |
 | `entrypoint` | Optional container entrypoint override. |
 | `provider_options` | Provider-specific options that do not fit the common schema. |
 
-You can pass resources as either a `SandboxResources` instance or a mapping:
+You can pass resource limits as either a `SandboxResources` instance or a mapping:
 
 ```python
 spec = SandboxSpec(
     image="ghcr.io/example/eval-image:py312",
-    resources={
+    resource_limits={
         "cpu": 2,
         "memory_mib": 8192,
         "disk_gib": 20,

@@ -264,11 +264,11 @@ def test_conversion_helpers_and_config_validation(fake_daytona_sdk: None) -> Non
 
     assert daytona_provider._to_resources({}) is None
     assert daytona_provider._to_resources({"gpu": "1"}).kwargs == {"gpu": 1}
-    assert daytona_provider._to_resources(SandboxSpec(resources={"memory_mib": 2048}).resources).kwargs == {
-        "memory": 2
-    }
+    assert daytona_provider._to_resources(
+        SandboxSpec(resource_limits={"memory_mib": 2048}).resource_limits
+    ).kwargs == {"memory": 2}
     with pytest.raises(ValueError, match="gpu_type"):
-        daytona_provider._to_resources(SandboxSpec(resources={"gpu_type": "a100"}).resources)
+        daytona_provider._to_resources(SandboxSpec(resource_limits={"gpu_type": "a100"}).resource_limits)
     assert daytona_provider._to_sandbox_status("creating") == SandboxStatus.STARTING
     assert daytona_provider._to_sandbox_status("deleted") == SandboxStatus.STOPPED
     assert daytona_provider._to_sandbox_status("failed") == SandboxStatus.ERROR
@@ -303,7 +303,7 @@ def test_snapshot_creation_rejects_ignored_resources(fake_daytona_sdk: None) -> 
     provider = daytona_provider.DaytonaProvider(probe={"command": None})
     spec = SandboxSpec(
         provider_options={"snapshot_id": "snapshot-1"},
-        resources={"cpu": 2},
+        resource_limits={"cpu": 2},
     )
 
     with pytest.raises(ValueError, match="snapshot creation does not support resource overrides"):
@@ -315,7 +315,7 @@ def test_image_creation_keeps_resource_overrides(fake_daytona_sdk: None) -> None
     params = provider._to_create_params(
         SandboxSpec(
             image="python:3.12",
-            resources={"cpu": 2, "memory_mib": 2048, "disk_gib": 9},
+            resource_limits={"cpu": 2, "memory_mib": 2048, "disk_gib": 9},
         )
     )
 

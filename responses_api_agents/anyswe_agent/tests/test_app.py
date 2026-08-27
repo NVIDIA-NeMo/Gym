@@ -147,7 +147,7 @@ class TestSandboxAPI:
             sandbox_spec={
                 "ttl_s": 600,
                 "ready_timeout_s": 300,
-                "resources": {"cpu": 2, "memory_mib": 4096},
+                "resource_limits": {"cpu": 2, "memory_mib": 4096},
                 "provider_options": {"platform": {"arch": "amd64"}},
             },
             sandbox_default_metadata={"sandbox-api": "opensandbox-sdk"},
@@ -159,7 +159,7 @@ class TestSandboxAPI:
         spec = AnySweAgent._sandbox_spec(params, files={"/tmp/input": "data"})
         assert spec.image == "image:tag"
         assert spec.ttl_s == 600
-        assert spec.resources.cpu == 2
+        assert spec.resource_limits.cpu == 2
         assert spec.metadata["sandbox-api"] == "opensandbox-sdk"
         assert spec.provider_options == {"platform": {"arch": "amd64"}}
         assert spec.files == {"/tmp/input": "data"}

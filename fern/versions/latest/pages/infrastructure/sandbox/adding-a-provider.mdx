@@ -128,7 +128,7 @@ async def create(self, spec: SandboxSpec) -> SandboxHandle:
     ...
 ```
 
-This keeps common fields such as `image`, `env`, `files`, `metadata`, and `resources` portable while still giving a provider room for runtime-specific behavior.
+This keeps common fields such as `image`, `env`, `files`, `metadata`, and `resource_limits` portable while still giving a provider room for runtime-specific behavior.
 
 ## Registry
 

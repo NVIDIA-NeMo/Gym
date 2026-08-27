@@ -459,7 +459,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             | {
                 "nemo_gym_agent": self.config.name,
             },
-            resources=SandboxResources.from_mapping(self.config.sandbox_config.get("resources", {})),
+            resource_limits=SandboxResources.from_mapping(self.config.sandbox_config.get("resource_limits", {})),
+            # Deprecated alias; SandboxSpec warns and maps it onto resource_limits.
+            resources=self.config.sandbox_config.get("resources"),
             entrypoint=None,
             provider_options=self.config.sandbox_config.get("provider_options", {}),
         )
