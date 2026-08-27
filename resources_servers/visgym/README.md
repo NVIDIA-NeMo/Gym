@@ -291,20 +291,73 @@ TOML parse error ... duplicate normalized extra name `classic-control`
 ```
 
 pip still accepts them, so the pinned revision is built into a wheel once and
-`requirements.txt` installs that wheel:
+`requirements.txt` installs that wheel.
+
+### Building the VisGym wheel
+
+`vendor_wheels/` holds build output and is gitignored, so **a fresh clone has
+no wheel** and the server cannot start until one is built. There is no wheel to
+download: VisGym is not on PyPI, and the whole reason this script exists is
+that the published source cannot be installed by `uv` at all. What is
+distributed is the script plus the pinned revision, and the wheel is
+reproduced from those.
+
+Most users never run this by hand. The NeMo-RL launcher
+(`examples/nemo_gym/nemotron-3-super-omni/visgym_launch.sh`) checks for the
+wheel and builds it when it is missing, into the code snapshot the job runs
+from. To build it explicitly:
 
 ```bash
 resources_servers/visgym/scripts/build_visgym_wheel.sh
 ```
 
-Set `VISGYM_REPO_ROOT` to build from an existing checkout instead of cloning
-the pin. Once VisGym drops the duplicate extras, the wheel step can go away and
+That clones `https://github.com/visgym/VIsGym.git` at the revision pinned in
+the script and runs `pip wheel --no-deps`, leaving
+`vendor_wheels/gymnasium-1.1.1-py3-none-any.whl`. The package is named
+`gymnasium` because VisGym is a fork of it.
+
+Two prerequisites are worth checking first, because both fail on machines that
+otherwise look fine:
+
+- **A `python3` that has pip.** `uv` cannot substitute here -- it is the tool
+  that cannot parse the project in the first place. The script exits with
+  status 2 and says so if pip is absent; point `PYTHON_BIN` at an interpreter
+  that has it.
+- **Outbound access to `github.com`**, unless you supply the source yourself.
+
+On a cluster without network access, clone VisGym somewhere that has it, copy
+the tree over, and build against it:
+
+```bash
+VISGYM_REPO_ROOT=/path/to/VIsGym \
+  resources_servers/visgym/scripts/build_visgym_wheel.sh
+```
+
+`VISGYM_REV`, `VISGYM_URL`, `OUT_DIR` and `PYTHON_BIN` override the pin, the
+remote, the output directory and the interpreter. Confirm the result with:
+
+```bash
+ls resources_servers/visgym/vendor_wheels/gymnasium-*.whl
+```
+
+Copying an already-built wheel between machines also works -- it is a pure
+Python wheel with no compiled extensions -- but prefer rebuilding from the pin,
+since a stray wheel carries no record of which revision produced it.
+
+Once VisGym drops the duplicate extras, the wheel step can go away and
 `requirements.txt` can name the git revision directly.
 
 The robotics (`fetch_*`) and `refcoco_plus` tasks need two more forked
 packages; they live in `requirements-robotics.txt` and are built by
-`scripts/build_vendor_wheels.sh`. Every purely rendered task, including the
-maze curriculum, runs without them.
+`scripts/build_vendor_wheels.sh`, which takes a VisGym checkout as its first
+argument because both sources live inside that tree:
+
+```bash
+resources_servers/visgym/scripts/build_vendor_wheels.sh /path/to/VIsGym
+```
+
+Every purely rendered task, including the maze curriculum and the blended
+ten-environment manifest, runs without them.
 
 For source-checkout development, set `VISGYM_REPO_ROOT` before importing the
 server. The path is inserted before importing `gymnasium`.

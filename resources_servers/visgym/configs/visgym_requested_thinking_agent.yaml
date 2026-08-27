@@ -41,7 +41,12 @@ visgym_agent:
       # per-task cap is what ends an episode rather than this backstop.
       max_steps: 22
       # A turn that runs out of tokens mid-thought costs a retry at a larger
-      # budget, not the whole episode.
+      # budget, not the whole episode. Nothing here cuts the trace off and
+      # demands an action: a coerced action is not a sample of the policy being
+      # trained, so it would teach the output format rather than let the policy
+      # learn to deliberate less. The system prompt asks for a short trace and
+      # says that running out of room scores nothing for the whole episode;
+      # reward is what should teach brevity.
       done_if_no_boxed_answer: false
       max_no_boxed_truncation_retries: 1
       no_boxed_truncation_retry_factor: 1.5
@@ -57,15 +62,26 @@ visgym_agent:
         restate the instructions. Close with </think>. On the last line, write
         \boxed{ immediately followed by exactly one legal action tuple, then
         write }. Nothing may follow the action. An action is mandatory on every
-        turn, even when uncertain. The episode is only scored when you end it:
-        as soon as the task looks solved, emit ('stop', 'stop') instead of
-        another action. Continuing to act after solving it scores nothing.
+        turn, even when uncertain.
+        Keep the trace short. You have a limited token budget each turn, and a
+        turn that runs out of room before you write the action scores nothing
+        at all -- for the whole episode, not just that turn. Spending fewer
+        words is therefore worth more than being sure: commit to your first
+        reading of the image, and if two readings seem possible pick the more
+        likely one and act. Do not re-examine, do not second-guess, and do not
+        write "wait", "actually" or "let me reconsider". You get a fresh image
+        and another turn after every action, so a quick imperfect action beats
+        a careful one you never finish.
+        The episode is only scored when you end it: as soon as the task looks
+        solved, emit ('stop', 'stop') instead of another action. Continuing to
+        act after solving it scores nothing.
       re_emit_rules_each_turn: true
       rules_summary_template: |-
-        Use at most 25 words inside <think> about only the next action. Close
-        with </think>. On the last line write \boxed{, one legal action tuple,
-        and }. Nothing may follow it. If the task already looks solved, the
-        correct action is ('stop', 'stop').
+        Use at most 25 words inside <think> about only the next action. Commit
+        to your first reading; do not reconsider. Close with </think>. On the
+        last line write \boxed{, one legal action tuple, and }. Nothing may
+        follow it. If the task already looks solved, the correct action is
+        ('stop', 'stop').
       datasets:
         - name: requested_envs_smoke
           type: example
