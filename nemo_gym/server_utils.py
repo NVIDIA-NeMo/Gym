@@ -238,12 +238,20 @@ async def request(
     # Gate first: a disabled site costs one frozenset lookup and nothing else. Gym runs at
     # 16k+ concurrency, so this is a hot path (kb/knowledge/conventions/hot-path-overhead.md).
     if is_span_group_enabled(GymSpanGroup.HTTP_CLIENT):
-        return await _traced_request(method, url, _internal=_internal, **kwargs)
-    return await _request_with_retries(method, url, _internal=_internal, **kwargs)
+        return await _traced_request(
+            method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+        )
+    return await _request_with_retries(
+        method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+    )
 
 
 async def _traced_request(
-    method: str, url: str, _internal: bool = False, **kwargs: Unpack[_RequestOptions]
+    method: str,
+    url: str,
+    _internal: bool = False,
+    _max_connection_retries: Optional[int] = None,
+    **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """`_request_with_retries` wrapped in a CLIENT span, with `traceparent` injected.
 
@@ -277,7 +285,9 @@ async def _traced_request(
             }
             safe_set_span_attributes(span, attributes)
 
-        response = await _request_with_retries(method, url, _internal=_internal, **kwargs)
+        response = await _request_with_retries(
+            method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+        )
 
         if span is not None:
             safe_set_span_attributes(span, {"http.response.status_code": response.status})
@@ -294,7 +304,11 @@ def _redacted_url(url: str) -> str:
 
 
 async def _request_with_retries(
-    method: str, url: str, _internal: bool = False, **kwargs: Unpack[_RequestOptions]
+    method: str,
+    url: str,
+    _internal: bool = False,
+    _max_connection_retries: Optional[int] = None,
+    **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     client = get_global_aiohttp_client()
     num_tries = 1
