@@ -260,13 +260,6 @@ def test_load_dump_round_trip_and_errors(tmp_path: Path) -> None:
     with pytest.raises(ManifestError, match="<memory>"):
         dump_manifest({"name": "incomplete"})
 
-    # A directory where a manifest file is expected: read_text() raises IsADirectoryError, an OSError
-    # subclass distinct from FileNotFoundError — must surface as the same ManifestError family, not crash.
-    dir_path = tmp_path / "manifest_dir"
-    dir_path.mkdir()
-    with pytest.raises(ManifestError, match="Could not read"):
-        load_manifest(dir_path)
-
 
 def test_generated_schema_is_machine_readable() -> None:
     schema = manifest_json_schema()

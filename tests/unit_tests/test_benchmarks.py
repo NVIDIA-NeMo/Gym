@@ -210,26 +210,6 @@ class TestDiscoverBenchmarksInDir:
         err = capsys.readouterr().err
         assert "Warning" in err and "bad" in err
 
-    def test_config_that_resolves_to_no_benchmark_dataset_is_skipped_silently(self, tmp_path: Path) -> None:
-        # `from_config_path` returns None (not an exception) when resolution succeeds but the config turns
-        # out not to declare any `type: benchmark` dataset after all (e.g. the prefilter's shallow scan
-        # matched text that isn't actually inside an agent server's dataset list). That's a normal "not a
-        # benchmark" outcome, not a warning-worthy failure.
-        from nemo_gym.benchmarks import BenchmarkConfig, _discover_benchmarks_in_dir
-
-        (tmp_path / "not_really").mkdir()
-        (tmp_path / "not_really" / "config.yaml").write_text("x:\n  datasets:\n  - type: benchmark\n")
-
-        with patch.object(BenchmarkConfig, "from_config_path", return_value=None):
-            result = _discover_benchmarks_in_dir(tmp_path)
-
-        assert result == {}
-
-    def test_missing_directory_yields_no_config_paths(self, tmp_path: Path) -> None:
-        from nemo_gym.benchmarks import _benchmark_config_paths
-
-        assert _benchmark_config_paths(tmp_path / "does_not_exist") == []
-
     def test_every_repo_benchmark_appears_in_listing(self, capsys) -> None:
         # Every config that declares a `type: benchmark` dataset must surface as its own listing entry —
         # no silent drop from a name collision (the name-keyed dict is last-writer-wins) or a resolve

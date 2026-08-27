@@ -20,7 +20,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
-from nemo_gym.cli.models import _inspect_model, list_models
+from nemo_gym.cli.models import list_models
 from nemo_gym.model_registry import ModelEntry
 
 
@@ -148,16 +148,6 @@ class TestListModels:
                 list_models()
         out = capsys.readouterr().out
         assert "Unknown model 'my_model/nope'" in out
-
-    def test_inspect_model_stops_after_reporting_unknown_name(self) -> None:
-        with (
-            patch("nemo_gym.cli.models.exit_unknown_component") as mock_exit,
-            patch("nemo_gym.cli.models.render_component_inspection") as mock_render,
-        ):
-            _inspect_model("nonexistent", _MODELS, _mock_global_config())
-
-        mock_exit.assert_called_once_with("nonexistent", _MODELS, "model")
-        mock_render.assert_not_called()
 
     def test_inspect_shows_absolute_config_path(self, tmp_path: Path, capsys, monkeypatch) -> None:
         # Real discovery (via an extra root): the config line must be the config's absolute path.

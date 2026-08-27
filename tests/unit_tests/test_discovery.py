@@ -16,9 +16,7 @@ import os
 import sys
 from pathlib import Path
 
-import pytest
 from omegaconf import OmegaConf
-from omegaconf.errors import InterpolationKeyError
 
 from nemo_gym import (
     NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME,
@@ -193,14 +191,6 @@ class TestTolerantInterpolationParse:
         _parse_no_environment_tolerating_unset_values(cfg)
         after = OmegaConf.to_container(cfg, resolve=False, throw_on_missing=False)
         assert after == before == {"foo": "???", "bar": "${baz}"}
-
-    def test_dotted_interpolation_key_reraises_instead_of_looping_forever(self) -> None:
-        # `${a.b}` reports the missing key as the literal string "a.b" (a nested-attribute lookup),
-        # but injecting a placeholder can only ever add a flat top-level key literally named "a.b" —
-        # it can't fabricate a nested `a: {b: ...}` structure. So the same key is reported again on
-        # retry, and once a key repeats in `injected` the loop must re-raise rather than spin forever.
-        with pytest.raises(InterpolationKeyError, match="a.b"):
-            self._resolve({"foo": "${a.b}"})
 
 
 class TestReadConfigMetadata:

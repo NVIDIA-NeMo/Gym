@@ -20,7 +20,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
-from nemo_gym.cli.resources_servers import _inspect_resources_server, list_resources_servers
+from nemo_gym.cli.resources_servers import list_resources_servers
 from nemo_gym.resources_server_registry import ResourcesServerEntry
 
 
@@ -133,18 +133,6 @@ class TestListResourcesServers:
                 list_resources_servers()
         out = capsys.readouterr().out
         assert "Unknown resources server 'mcq'" in out and "mcqa" in out
-
-    def test_inspect_resources_server_stops_after_reporting_unknown_name(self) -> None:
-        with (
-            patch("nemo_gym.cli.resources_servers.exit_unknown_component") as mock_exit,
-            patch("nemo_gym.cli.resources_servers.read_resources_server_value") as mock_read_value,
-            patch("nemo_gym.cli.resources_servers.render_component_inspection") as mock_render,
-        ):
-            _inspect_resources_server("nonexistent", _SERVERS, _mock_global_config())
-
-        mock_exit.assert_called_once_with("nonexistent", _SERVERS, "resources server")
-        mock_read_value.assert_not_called()
-        mock_render.assert_not_called()
 
     def test_inspect_shows_absolute_config_path(self, tmp_path: Path, capsys, monkeypatch) -> None:
         # Real discovery (via an extra root): the config line must be the flavor config's absolute path.

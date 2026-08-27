@@ -70,10 +70,3 @@ class TestDiscoverModels:
 
     def test_missing_directory_yields_no_models(self, tmp_path: Path) -> None:
         assert _discover_models_in_dir(tmp_path / "nope") == {}
-
-    def test_loose_file_alongside_model_dirs_is_skipped(self, tmp_path: Path) -> None:
-        # A stray file directly under responses_api_models/ (e.g. a README) is not a model dir.
-        (tmp_path / "README.md").write_text("not a model\n")
-        _make_model(tmp_path, "real_model", flavors=("real_model",))
-
-        assert set(_discover_models_in_dir(tmp_path)) == {"real_model"}

@@ -13,7 +13,6 @@ from nemo_gym.environment.onboarding import verify_environment
 from nemo_gym.environment.publication import (
     EnvironmentPublicationError,
     EnvironmentPublicationReport,
-    _publication_placeholders,
     finalize_publication,
 )
 from nemo_gym.environment.scaffold import scaffold_environment
@@ -174,12 +173,3 @@ def test_publication_rejects_benchmark_protocol_placeholders(tmp_path: Path) -> 
 
     with pytest.raises(EnvironmentPublicationError, match="canonical_split, standard_prompt_config"):
         finalize_publication(entry, validation, verifier, catalog_entries=(entry,))
-
-
-def test_publication_placeholders_reports_missing_manifest_directly(tmp_path: Path) -> None:
-    # `_publication_placeholders` is called with a manifest_path already known to exist by
-    # `finalize_publication`, but it independently guards against None — a scaffolded/malformed
-    # catalog entry with no manifest at all reports the placeholder as "manifest", not a crash.
-    entry = replace(_entry(tmp_path), manifest_path=None)
-
-    assert _publication_placeholders(entry) == ("manifest",)

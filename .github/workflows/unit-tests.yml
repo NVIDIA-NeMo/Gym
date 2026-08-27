@@ -88,18 +88,8 @@ jobs:
           done
           exit 1
 
-      # Unconditional (not gated on run_full): a server-only-scoped PR still touches code inside
-      # the measured coverage surface (resources_servers/, responses_api_agents/ are not in
-      # [tool.coverage.run] omit), so skipping this would silently exempt those PRs from the
-      # coverage gate below — exactly the gap this pipeline exists to close.
-      #
-      # Core unit tests, sandbox env setup, and the coverage-gated sandbox test run all live in
-      # this ONE step (matching full-test-suite.yml's "Test" step) rather than separate steps.
-      # This is deliberate: split across steps, --cov-fail-under stopped actually failing the
-      # job on GitHub's runners (the step reported success despite printing the FAIL banner) for
-      # reasons that weren't fully diagnosable without a matching Linux environment to inspect.
-      # full-test-suite.yml's single-step form is the one we've observed reliably fail when it
-      # should, so pre-merge enforcement mirrors it exactly instead of re-splitting it apart.
+      # Unconditional (not gated on run_full) and merged into one step, matching
+      # full-test-suite.yml's "Test" step, so the coverage gate below runs on every PR.
       - name: Core + sandbox unit tests (coverage gate)
         run: |
           ./scripts/ci/core_unit_tests.sh
