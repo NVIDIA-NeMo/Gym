@@ -133,6 +133,25 @@ else:
 PY_REPEATS
 )}
 
+# --resume cannot read unexpanded inputs: _load_from_cache keys on (task, rollout) and an
+# unexpanded row has no rollout index, so collection dies with KeyError '_ng_rollout_index' about
+# 90 seconds in (job 6597590). Fail at submit instead.
+sweep_expanded=$(python - "$SWEEP_DIR" <<'GUARD'
+import json, sys
+from pathlib import Path
+report = Path(sys.argv[1]) / "sweep_report.json"
+try:
+    print(json.loads(report.read_text()).get("expanded", True))
+except OSError:
+    print(True)
+GUARD
+)
+if [[ "$sweep_expanded" == "False" ]]; then
+    echo "ERROR: $SWEEP_DIR was materialized with --no-expand, which --resume cannot read." >&2
+    echo "       Re-run 01_prepare_sweep.sh without NO_EXPAND=1." >&2
+    exit 2
+fi
+
 SLURM_COMMENT="${SLURM_COMMENT:-}"
 
 # Fixed vLLM Port configurations

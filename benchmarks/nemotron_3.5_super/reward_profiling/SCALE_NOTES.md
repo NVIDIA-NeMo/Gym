@@ -3,16 +3,35 @@
 Whole manifest, no `LIMIT_PER_ENTRY`. Login node, Lustre fs1, 36 workers.
 Source: 36.9 GB across 36 entries, `num_repeats: 8`.
 
-| | `--no-expand` (default) | `EXPAND=1` |
+| | `NO_EXPAND=1` | default |
 |---|---|---|
 | rows written | 726,121 | 5,808,968 |
 | size | **34 GB** | 291.5 GB |
 | wall time | **682 s** | 2,087 s |
 | after sharding x16 | ~68 GB | ~583 GB |
 
-Both are one-time per (manifest, checkpoint); later jobs resume from the result.
+Both are one-time per (manifest, checkpoint); later jobs resume from the result -- which is
+exactly what `--no-expand` gives up.
 
-## Why `--no-expand` is the default
+## Why `--no-expand` is NOT the default
+
+It cannot be collected with `--resume`. `_load_from_cache` keys the materialized inputs on
+`(_ng_task_index, _ng_rollout_index)` (`rollout_collection.py:740`) and an unexpanded row has only
+the task index, so collection dies about 90 seconds in:
+
+```
+KeyError: '_ng_rollout_index'          job 6597590
+```
+
+`--resume` is what skips preprocessing on restart and what makes a walltime kill recoverable, so
+losing it costs more than the disk saves. `03_run.sh` now refuses an unexpanded sweep at submit
+rather than letting the job discover this.
+
+The savings below are real and it stays available via `NO_EXPAND=1` for a first run that will not
+need resume -- or if Gym ever keys the resume cache on task index alone, at which point it should
+become the default.
+
+## What `--no-expand` would buy
 
 `materialize` writes one row per task and Gym expands `num_repeats` at collection time
 (`rollout_collection.py:828`), honouring the `_ng_task_index` stamped here. That expansion is the

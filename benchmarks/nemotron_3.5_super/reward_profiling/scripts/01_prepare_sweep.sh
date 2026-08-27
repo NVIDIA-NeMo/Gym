@@ -20,13 +20,19 @@ mkdir -p "$OUT_DIR"
 JOBS=${JOBS:-}
 LIMIT_PER_ENTRY=${LIMIT_PER_ENTRY:-}
 
-# Default to one row per task and let Gym expand num_repeats at collection time. It writes 8x
-# fewer rows (34 GB rather than 291.5 GB for this manifest, 682s rather than 2087s), and keeps a
-# task's repeats together so they share a vLLM prefix cache on an identical prompt -- which matters
-# once sharded, since dealing expanded rows round-robin scatters repeats across jobs. Set EXPAND=1
-# to pre-expand instead.
+# Pre-expand by default. NO_EXPAND=1 writes 8x fewer rows (34 GB rather than 291.5 GB here, 682s
+# rather than 2087s) and keeps a task's repeats in one shard so they share a vLLM prefix cache --
+# but it cannot be collected with --resume, which the launcher relies on:
+#
+#   rollout_collection.py:740  get_key = lambda r: (r[TASK_INDEX], r[ROLLOUT_INDEX])
+#   KeyError: '_ng_rollout_index'          (job 6597590)
+#
+# _load_from_cache keys the materialized inputs on both indices, and unexpanded rows have only the
+# task index. Losing --resume means re-preprocessing every restart and no recovery from a walltime
+# kill, which costs more than the disk saves. Left available for a first run that does not need
+# resume, or once Gym can key the cache on task index alone.
 args=(--out-dir "$OUT_DIR")
-[[ "${EXPAND:-0}" == "1" ]] || args+=(--no-expand)
+[[ "${NO_EXPAND:-0}" == "1" ]] && args+=(--no-expand)
 [[ -n "$JOBS" ]] && args+=(--jobs "$JOBS")
 [[ -n "$LIMIT_PER_ENTRY" ]] && args+=(--limit-per-entry "$LIMIT_PER_ENTRY")
 [[ "${OVERWRITE:-0}" == "1" ]] && args+=(--overwrite)
