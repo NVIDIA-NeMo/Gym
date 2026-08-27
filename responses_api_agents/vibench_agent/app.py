@@ -50,7 +50,6 @@ from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_me
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
     get_response_json,
-    get_server_url,
     is_nemo_gym_fastapi_entrypoint,
     raise_for_status,
 )
@@ -85,6 +84,16 @@ def _origin(url: str) -> str:
     """Strip a trailing slash or ``/v1`` so callers can always append ``/v1``."""
     url = url.rstrip("/")
     return url[:-3].rstrip("/") if url.endswith("/v1") else url
+
+
+def _path_suffix(url: str) -> str:
+    """The path portion of a model URL, e.g. ``/ng-rollout/<id>/v1``.
+
+    Preserved verbatim so an explicit ``sandbox_model_base_url`` cannot drop the run's
+    token-capture path.
+    """
+    parsed = urlparse(url)
+    return parsed.path or "/v1"
 
 
 def rewrite_loopback_url_for_docker(url: str, gateway_host: str = DOCKER_HOST_GATEWAY) -> str:
@@ -131,23 +140,28 @@ class VibenchAgent(OpenCodeSandboxedAgent):
             return False
         return "docker" in provider_cfg
 
-    def _sandbox_reachable_model_url(self) -> str:
+    async def _create_opencode_config(self, request: Request) -> Dict[str, Any]:
+        """Rewrite only the *host* of the parent's model URL.
+
+        The parent builds this through ``base_url_for_run``, so the URL carries the run's
+        rollout prefix and token-capture path. Rebuilding it from ``get_server_url`` would
+        silently discard both. Only the host is wrong from inside a bridged sandbox --
+        loopback there is the container itself, and the harness then makes zero LLM calls and
+        exports an empty app with nothing logged, which no failure field reports because the
+        build technically succeeded.
+        """
+        config = await super()._create_opencode_config(request)
+        options = ((config.get("provider") or {}).get("nemo_gym") or {}).get("options")
+        if not isinstance(options, dict) or not isinstance(options.get("baseURL"), str):
+            return config
+
         override = (self.config.sandbox_model_base_url or "").strip()
         if override:
-            return _origin(override)
-        url = get_server_url(self.config.model_server.name)
-        if self._uses_docker_provider():
-            return rewrite_loopback_url_for_docker(url)
-        return _origin(url)
-
-    def _create_opencode_config(self) -> Dict[str, Any]:
-        # Parent bakes the *host* model URL into OpenCode's in-container config. Rewrite it
-        # to an address the sandbox can actually route to, otherwise the harness talks to
-        # itself and exports an empty app with no error.
-        config = super()._create_opencode_config()
-        options = ((config.get("provider") or {}).get("nemo_gym") or {}).get("options")
-        if isinstance(options, dict):
-            options["baseURL"] = f"{self._sandbox_reachable_model_url()}/v1"
+            # An explicit address (OpenSandbox and friends) replaces the origin outright,
+            # but the run's path suffix still has to survive.
+            options["baseURL"] = _origin(override) + _path_suffix(options["baseURL"])
+        elif self._uses_docker_provider():
+            options["baseURL"] = rewrite_loopback_url_for_docker(options["baseURL"]) + "/v1"
         return config
 
     async def _create_build_sandbox(self, prd_text: str, asset_paths: list[str]) -> AsyncSandbox:

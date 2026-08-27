@@ -47,6 +47,13 @@ def make_agent(tmp_path: Path, **overrides) -> VibenchAgent:
     return VibenchAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
 
+class _FakeRequest:
+    """Minimal stand-in: the parent only awaits request.json()."""
+
+    async def json(self):
+        return {}
+
+
 class _FakeExec:
     def __init__(self, return_code=0, stdout="", stderr=""):
         self.return_code = return_code
@@ -285,40 +292,76 @@ class TestSandboxModelUrl:
     def test_leaves_a_routable_host_alone(self):
         assert rewrite_loopback_url_for_docker("http://10.0.0.8:9000") == "http://10.0.0.8:9000"
 
-    def test_override_wins_over_host_loopback(self, tmp_path, monkeypatch):
-        agent = make_agent(tmp_path, sandbox_model_base_url="http://opensandbox.internal:8080/v1")
-        monkeypatch.setattr(
-            "responses_api_agents.vibench_agent.app.get_server_url", lambda name: "http://127.0.0.1:9000"
-        )
-
-        assert agent._sandbox_reachable_model_url() == "http://opensandbox.internal:8080"
-
-    def test_docker_provider_rewrites_get_server_url(self, tmp_path, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_opencode_config_rewrites_only_the_host(self, tmp_path, monkeypatch):
+        """Loopback is the container itself inside a bridged sandbox."""
         agent = make_agent(tmp_path)
-        monkeypatch.setattr(
-            "responses_api_agents.vibench_agent.app.get_server_url", lambda name: "http://127.0.0.1:9000"
-        )
         monkeypatch.setattr(agent, "_uses_docker_provider", lambda: True)
-
-        assert agent._sandbox_reachable_model_url() == "http://host.docker.internal:9000"
-
-    def test_non_docker_provider_keeps_get_server_url(self, tmp_path, monkeypatch):
-        agent = make_agent(tmp_path)
-        monkeypatch.setattr(
-            "responses_api_agents.vibench_agent.app.get_server_url", lambda name: "http://127.0.0.1:9000"
-        )
-        monkeypatch.setattr(agent, "_uses_docker_provider", lambda: False)
-
-        assert agent._sandbox_reachable_model_url() == "http://127.0.0.1:9000"
-
-    def test_opencode_config_uses_the_sandbox_reachable_url(self, tmp_path, monkeypatch):
-        agent = make_agent(tmp_path)
-        monkeypatch.setattr(agent, "_sandbox_reachable_model_url", lambda: "http://host.docker.internal:9000")
         monkeypatch.setattr(
             "responses_api_agents.opencode_sandboxed_agent.app.get_server_url",
             lambda name: "http://127.0.0.1:9000",
         )
 
-        config = agent._create_opencode_config()
+        config = await agent._create_opencode_config(_FakeRequest())
 
         assert config["provider"]["nemo_gym"]["options"]["baseURL"] == "http://host.docker.internal:9000/v1"
+
+    @pytest.mark.asyncio
+    async def test_the_runs_capture_path_survives_the_rewrite(self, tmp_path, monkeypatch):
+        """The parent builds this through base_url_for_run, so the URL carries the rollout
+        prefix. Rebuilding it from get_server_url would silently disable token capture."""
+        agent = make_agent(tmp_path)
+        monkeypatch.setattr(agent, "_uses_docker_provider", lambda: True)
+        monkeypatch.setattr(
+            "responses_api_agents.opencode_sandboxed_agent.app.get_server_url",
+            lambda name: "http://127.0.0.1:9000",
+        )
+        monkeypatch.setattr(
+            type(agent), "base_url_for_run", lambda self, base_url, body: f"{base_url}/ng-rollout/abc123"
+        )
+
+        config = await agent._create_opencode_config(_FakeRequest())
+
+        assert (
+            config["provider"]["nemo_gym"]["options"]["baseURL"]
+            == "http://host.docker.internal:9000/ng-rollout/abc123/v1"
+        )
+
+    @pytest.mark.asyncio
+    async def test_explicit_override_replaces_the_origin_but_keeps_the_path(self, tmp_path, monkeypatch):
+        """sandbox_model_base_url is for providers whose boxes have their own address."""
+        agent = make_agent(tmp_path, sandbox_model_base_url="http://sandbox-gw:7000/v1")
+        monkeypatch.setattr(
+            "responses_api_agents.opencode_sandboxed_agent.app.get_server_url",
+            lambda name: "http://127.0.0.1:9000",
+        )
+        monkeypatch.setattr(type(agent), "base_url_for_run", lambda self, base_url, body: f"{base_url}/ng-rollout/xyz")
+
+        config = await agent._create_opencode_config(_FakeRequest())
+
+        assert config["provider"]["nemo_gym"]["options"]["baseURL"] == "http://sandbox-gw:7000/ng-rollout/xyz/v1"
+
+    @pytest.mark.asyncio
+    async def test_non_docker_provider_leaves_the_url_alone(self, tmp_path, monkeypatch):
+        agent = make_agent(tmp_path)
+        monkeypatch.setattr(agent, "_uses_docker_provider", lambda: False)
+        monkeypatch.setattr(
+            "responses_api_agents.opencode_sandboxed_agent.app.get_server_url",
+            lambda name: "http://10.0.0.5:9000",
+        )
+
+        config = await agent._create_opencode_config(_FakeRequest())
+
+        assert config["provider"]["nemo_gym"]["options"]["baseURL"] == "http://10.0.0.5:9000/v1"
+
+    def test_signature_matches_the_parent(self, tmp_path):
+        """This override broke once when the parent gained a request argument; a mismatch
+        means the URL rewrite silently never runs and the harness talks to itself."""
+        import inspect
+
+        from responses_api_agents.opencode_sandboxed_agent.app import OpenCodeSandboxedAgent
+
+        mine = inspect.signature(VibenchAgent._create_opencode_config)
+        base = inspect.signature(OpenCodeSandboxedAgent._create_opencode_config)
+        assert list(mine.parameters) == list(base.parameters)
+        assert inspect.iscoroutinefunction(VibenchAgent._create_opencode_config)
