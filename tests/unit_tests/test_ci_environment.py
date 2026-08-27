@@ -359,9 +359,7 @@ def test_cicd_nightly_jobs_require_upstream_success() -> None:
     assert non_definition.count("github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'") == 1
     assert "needs.pre-flight.result == 'success' &&" in workflow
     assert workflow.count("needs.classify_changes.result == 'success' &&") == 3
-    assert (
-        "(needs.unit_tests.result == 'success' || needs.unit_tests.result == 'skipped')" in workflow
-    )
+    assert "(needs.unit_tests.result == 'success' || needs.unit_tests.result == 'skipped')" in workflow
     assert "needs.container_build.result == 'success'" in workflow
 
 
