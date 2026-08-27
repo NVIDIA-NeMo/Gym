@@ -1,0 +1,5 @@
+{"responses_create_params": {"input": [{"role": "user", "content": "What is 6 x 7? Reply with only the answer."}]}, "expected_answer": "42"}
+{"responses_create_params": {"input": [{"role": "user", "content": "What is 6 x 7? Reply with only the answer."}]}, "expected_answer": "42"}
+{"responses_create_params": {"input": [{"role": "user", "content": "What is 6 x 7? Reply with only the answer."}]}, "expected_answer": "42"}
+{"responses_create_params": {"input": [{"role": "user", "content": "What is 6 x 7? Reply with only the answer."}]}, "expected_answer": "42"}
+{"responses_create_params": {"input": [{"role": "user", "content": "What is 6 x 7? Reply with only the answer."}]}, "expected_answer": "42"}
