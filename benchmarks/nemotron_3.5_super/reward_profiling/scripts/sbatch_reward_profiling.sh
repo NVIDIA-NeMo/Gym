@@ -108,6 +108,8 @@ SERVERS_READY_TIMEOUT_S=${SERVERS_READY_TIMEOUT_S:-1800}
 # use" after lc_judge had already reported startup complete. Without these it uses a narrow
 # default (observed 18000-19700). A wide range well clear of the Linux ephemeral range
 # (32768-60999) makes the collision unlikely rather than merely unlucky.
+ENV_START_ATTEMPTS=${ENV_START_ATTEMPTS:-4}
+SERVERS_READY_TIMEOUT_S=${SERVERS_READY_TIMEOUT_S:-1200}
 ENV_PORT_RANGE_LOW=${ENV_PORT_RANGE_LOW:-20000}
 ENV_PORT_RANGE_HIGH=${ENV_PORT_RANGE_HIGH:-30000}
 
@@ -128,47 +130,54 @@ cd /opt/Gym
 # Serve every environment in the sweep from one deployment; rollout collection routes each row
 # to the agent named in its own agent_ref.
 env_start_log=$SWEEP_DIR/env_start.log
-gym env start --config $SWEEP_DIR/sweep_config.yaml \\
-    +uv_venv_dir=/opt/uv_venvs \\
-    +skip_venv_if_present=true \\
-    ++port_range_low=$ENV_PORT_RANGE_LOW \\
-    ++port_range_high=$ENV_PORT_RANGE_HIGH \\
-    ++policy_base_url=http://\$(getent hosts "\$ROUTER_NODE" | awk 'NR == 1 {print \$1}'):$ROUTER_SERVER_PORT/v1 \
-    ++policy_api_key=dummy_api_key \\
-    ++policy_model_name=$MODEL > "\$env_start_log" 2>&1 &
-gym_servers_pid=\$!
-trap 'kill \$gym_servers_pid 2>/dev/null || true' EXIT
 
-# --no-serve is not optional here. Serving end-to-end rejects -i/--input outright
-# (rollout_collection.py:455: "the input is always the prepared dataset for the requested split"),
-# and supplying our own materialized input is the whole point of the sweep. So the servers have to
-# be started separately, which means this wait is structural rather than something to design away.
-#
-# gym env start backgrounds itself and 36 environments take a while, so without this
-# gym eval run --no-serve races it and dies with "Could not connect to the head server".
-#
-# Match on the readiness line, not a port. use_absolute_ip=true binds servers to the node IP on
-# dynamically chosen ports -- nothing ever listens on 127.0.0.1:11000 -- so polling a fixed
-# address waits forever and then kills a perfectly healthy run. This is what bench_e2e.py has
-# always matched on.
-echo "waiting for Gym servers to come up (log: \$env_start_log) ..."
-for _i in \$(seq 1 $((SERVERS_READY_TIMEOUT_S / 10))); do
-    if grep -q "servers ready!" "\$env_start_log" 2>/dev/null; then
-        grep -m1 -oE "All [0-9]+ / [0-9]+ servers ready!" "\$env_start_log"
+# Retry the whole spin-up. Gym probes for a free port and then binds, so 63 servers coming up at
+# once occasionally lose the race: 6563714 lost lc_judge on :19730 and 6563785 lost
+# abstention_simple_agent on :22661, both immediately after reporting startup complete. It is
+# stochastic -- 6563167 brought all 63 up on the same config -- so a retry converts an occasional
+# hard failure into a slower start, which is the right trade for a multi-hour sweep.
+for _attempt in \$(seq 1 $ENV_START_ATTEMPTS); do
+    : > "\$env_start_log"
+    gym env start --config $SWEEP_DIR/sweep_config.yaml \\
+        +uv_venv_dir=/opt/uv_venvs \\
+        +skip_venv_if_present=true \\
+        ++port_range_low=$ENV_PORT_RANGE_LOW \\
+        ++port_range_high=$ENV_PORT_RANGE_HIGH \\
+        ++policy_base_url=http://\$(getent hosts "\$ROUTER_NODE" | awk 'NR == 1 {print \$1}'):$ROUTER_SERVER_PORT/v1 \
+        ++policy_api_key=dummy_api_key \\
+        ++policy_model_name=$MODEL > "\$env_start_log" 2>&1 &
+    gym_servers_pid=\$!
+    trap 'kill \$gym_servers_pid 2>/dev/null || true' EXIT
+
+    echo "attempt \$_attempt/$ENV_START_ATTEMPTS: waiting for Gym servers (log: \$env_start_log) ..."
+    servers_up=0
+    for _i in \$(seq 1 $((SERVERS_READY_TIMEOUT_S / 10))); do
+        if grep -q "servers ready!" "\$env_start_log" 2>/dev/null; then
+            grep -m1 -oE "All [0-9]+ / [0-9]+ servers ready!" "\$env_start_log"
+            servers_up=1
+            break
+        fi
+        if ! kill -0 "\$gym_servers_pid" 2>/dev/null; then
+            echo "gym env start exited on attempt \$_attempt:" >&2
+            grep -E "address already in use|finished unexpectedly" "\$env_start_log" | tail -3 >&2 || true
+            break
+        fi
+        sleep 10
+    done
+
+    if (( servers_up )); then
         break
     fi
-    if ! kill -0 "\$gym_servers_pid" 2>/dev/null; then
-        echo "ERROR: gym env start exited before the servers came up; see \$env_start_log" >&2
+    kill "\$gym_servers_pid" 2>/dev/null || true
+    wait "\$gym_servers_pid" 2>/dev/null || true
+    if (( _attempt == $ENV_START_ATTEMPTS )); then
+        echo "ERROR: servers never came up in $ENV_START_ATTEMPTS attempts; see \$env_start_log" >&2
         tail -30 "\$env_start_log" >&2 || true
         exit 1
     fi
+    echo "retrying spin-up ..." >&2
     sleep 10
 done
-if ! grep -q "servers ready!" "\$env_start_log" 2>/dev/null; then
-    echo "ERROR: servers not ready within ${SERVERS_READY_TIMEOUT_S}s; see \$env_start_log" >&2
-    tail -30 "\$env_start_log" >&2 || true
-    exit 1
-fi
 
 # --resume is load-bearing: Gym reads the pre-expanded inputs instead of re-expanding them
 # (~100 min single-threaded for a full sweep), and a walltime kill continues where it stopped.
