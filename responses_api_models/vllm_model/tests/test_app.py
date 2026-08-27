@@ -4679,6 +4679,83 @@ class TestTopLogprobsHandling:
 
         assert result["return_token_ids"] is True
 
+    def test_capture_path_derives_required_prefix_from_latest_assistant(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        messages = [
+            {"role": "user", "content": "first"},
+            {
+                "role": "assistant",
+                "content": "old",
+                "prompt_token_ids": [1],
+                "generation_token_ids": [2],
+                "generation_log_probs": [-0.1],
+            },
+            {"role": "user", "content": "second"},
+            {
+                "role": "assistant",
+                "content": "new",
+                "prompt_token_ids": [3, 4],
+                "generation_token_ids": [5, 6],
+                "generation_log_probs": [-0.2, -0.3],
+            },
+            {"role": "user", "content": "third"},
+        ]
+
+        result = model._preprocess_chat_completion_create_params(
+            MagicMock(), {"model": "dummy_model", "messages": messages}
+        )
+
+        assert result["required_prefix_token_ids"] == [3, 4, 5, 6]
+
+    def test_capture_path_preserves_explicit_prefix_and_first_turn_omits_it(
+        self,
+    ) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        prior_assistant = {
+            "role": "assistant",
+            "content": "answer",
+            "prompt_token_ids": [1],
+            "generation_token_ids": [2],
+            "generation_log_probs": [-0.1],
+        }
+
+        explicit = model._preprocess_chat_completion_create_params(
+            MagicMock(),
+            {
+                "model": "dummy_model",
+                "messages": [prior_assistant],
+                "required_prefix_token_ids": [9, 8],
+            },
+        )
+        first_turn = model._preprocess_chat_completion_create_params(
+            MagicMock(),
+            {
+                "model": "dummy_model",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+
+        assert explicit["required_prefix_token_ids"] == [9, 8]
+        assert "required_prefix_token_ids" not in first_turn
+
+    def test_capture_path_rejects_partial_assistant_token_bundle(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True)
+
+        with raises(RuntimeError, match="partial token metadata"):
+            model._preprocess_chat_completion_create_params(
+                MagicMock(),
+                {
+                    "model": "dummy_model",
+                    "messages": [
+                        {
+                            "role": "assistant",
+                            "content": "answer",
+                            "prompt_token_ids": [1],
+                        }
+                    ],
+                },
+            )
+
     def test_capture_path_rejects_multiple_choices(self) -> None:
         model = _make_top_logprobs_model(return_token_id_information=True)
 
