@@ -32,6 +32,19 @@ from nemo_gym import __version__
 from nemo_gym.atif_json import json_values_equal as _json_values_equal
 from nemo_gym.atif_json import strict_json_loads as _strict_json_loads
 from nemo_gym.atif_provider_reconciliation import ProviderReconciliationError, reconcile_provider_model_call
+from nemo_gym.atif_v1_7 import (
+    ATIF_SCHEMA_VERSION,
+    AtifAgent,
+    AtifContent,
+    AtifContentPart,
+    AtifFinalMetrics,
+    AtifObservation,
+    AtifObservationResult,
+    AtifStep,
+    AtifStepMetrics,
+    AtifToolCall,
+    AtifTrajectoryV1_7,
+)
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError
 from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
@@ -43,18 +56,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseReasoningItem,
     TokenIDLogProbMixin,
-)
-from nemo_gym.relay_atif import (
-    AtifAgent,
-    AtifContent,
-    AtifContentPart,
-    AtifFinalMetrics,
-    AtifObservation,
-    AtifObservationResult,
-    AtifStep,
-    AtifStepMetrics,
-    AtifToolCall,
-    AtifTrajectoryV1_7,
 )
 from nemo_gym.rollout_observability import ModelCallRef, TrajectoryModelCall, TrajectoryRecord
 
@@ -983,7 +984,7 @@ def gym_rollout_to_atif(rollout: dict[str, Any], *, session_id: str, agent_versi
         next(iter(known_model_names)) if len(known_model_names) == 1 and None not in step_model_names else None
     )
     return AtifTrajectoryV1_7(
-        schema_version="ATIF-v1.7",
+        schema_version=ATIF_SCHEMA_VERSION,
         session_id=session_id,
         trajectory_id=f"{session_id}:{task_index}:{rollout_index}",
         agent=AtifAgent(name=agent_name, version=agent_version, model_name=model_name),

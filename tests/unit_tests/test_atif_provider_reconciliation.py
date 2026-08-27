@@ -15,7 +15,7 @@ from nemo_gym.atif_provider_reconciliation import (
     ReconciledTokenStats,
     reconcile_provider_model_call,
 )
-from nemo_gym.relay_atif import AtifStep
+from nemo_gym.atif_v1_7 import AtifStep
 from nemo_gym.rollout_observability import TrajectoryModelCall
 
 
@@ -129,6 +129,8 @@ def _call(
     finish_reason: str | None = None,
     response_status: str | None = None,
     token_stats: dict[str, int] | None = None,
+    model: str | None = None,
+    response_id: str | None = None,
 ) -> TrajectoryModelCall:
     return TrajectoryModelCall.model_validate(
         {
@@ -137,6 +139,8 @@ def _call(
                 "dialect": dialect,
                 "finish_reason": finish_reason,
                 "response_status": response_status,
+                "model": model,
+                "response_id": response_id,
             },
             "token_stats": token_stats or {},
         }
@@ -177,6 +181,31 @@ def _assert_rejected(
 ) -> None:
     with pytest.raises(ProviderReconciliationError, match=message):
         _reconcile(dialect, response, step=step)
+
+
+def _assert_call_rejected(
+    dialect: str | None,
+    response: Any,
+    message: str,
+    *,
+    finish_reason: str | None = None,
+    response_status: str | None = None,
+    token_stats: dict[str, int] | None = None,
+    model: str | None = None,
+    response_id: str | None = None,
+    step: AtifStep | None = None,
+) -> None:
+    call = _call(
+        dialect,
+        response,
+        finish_reason=finish_reason,
+        response_status=response_status,
+        token_stats=token_stats,
+        model=model,
+        response_id=response_id,
+    )
+    with pytest.raises(ProviderReconciliationError, match=message):
+        reconcile_provider_model_call(call, step or _step(), path="turn")
 
 
 def test_reconcile_accepts_missing_provider_response_and_returns_normalized_values() -> None:
@@ -237,6 +266,260 @@ def test_reconcile_rejects_openai_total_that_disagrees_with_components() -> None
     response["usage"] = {"input_tokens": 3, "output_tokens": 2, "total_tokens": 6}
 
     _assert_rejected("responses", response, "total_tokens does not match")
+
+
+@pytest.mark.parametrize(
+    ("dialect", "response", "message"),
+    [
+        ("responses", "raw", "provider response is not an object"),
+        ("responses", {"error": {"message": "failed"}}, "contains error evidence"),
+        ("responses", {"status": 200}, "status is not a string"),
+        ("responses", {"status": "failed"}, "not completed"),
+        ("responses", {"status": "completed", "incomplete_details": []}, "is not an object"),
+        (
+            "responses",
+            {"status": "completed", "incomplete_details": {"reason": 7}},
+            "reason is not a string",
+        ),
+        ("responses", {"status": "completed", "incomplete_details": {}}, "contains incomplete_details"),
+        ("chat", {"error": {"message": "failed"}}, "contains error evidence"),
+        ("chat", {"choices": {}}, "choices is not an array"),
+        ("chat", {"choices": [None]}, "first choice is not an object"),
+        ("chat", {"choices": [{"finish_reason": 7}]}, "finish_reason is not a string"),
+        ("messages", {"type": 7}, "type is not a string"),
+        ("messages", {"type": "error"}, "contains error evidence"),
+        ("messages", {"stop_reason": 7}, "stop_reason is not a string"),
+    ],
+)
+def test_reconcile_rejects_failed_or_malformed_provider_termination(
+    dialect: str,
+    response: Any,
+    message: str,
+) -> None:
+    _assert_call_rejected(dialect, response, message)
+
+
+@pytest.mark.parametrize(
+    ("dialect", "response", "finish_reason", "response_status", "message"),
+    [
+        ("responses", {"status": "completed"}, None, "queued", "response_status conflicts"),
+        ("chat", {"choices": [{"finish_reason": "stop"}]}, "vendor", None, "finish_reason conflicts"),
+        ("messages", {"stop_reason": "end_turn"}, "stop_sequence", None, "finish_reason conflicts"),
+    ],
+)
+def test_reconcile_rejects_normalized_termination_conflicts(
+    dialect: str,
+    response: dict[str, Any],
+    finish_reason: str | None,
+    response_status: str | None,
+    message: str,
+) -> None:
+    _assert_call_rejected(
+        dialect,
+        response,
+        message,
+        finish_reason=finish_reason,
+        response_status=response_status,
+    )
+
+
+@pytest.mark.parametrize(
+    ("dialect", "response", "finish_reason", "response_status", "step"),
+    [
+        ("responses", {"status": "completed"}, None, "completed", _step()),
+        ("chat", {"choices": [{"finish_reason": "stop"}]}, "stop", None, _step()),
+        ("messages", {"stop_reason": "end_turn"}, "end_turn", None, _step()),
+        ("chat", {"choices": [{"finish_reason": "tool_calls"}]}, "tool_calls", None, _tool_step()),
+        ("messages", {"stop_reason": "tool_use"}, "tool_use", None, _tool_step()),
+    ],
+)
+def test_reconcile_accepts_matching_terminal_evidence(
+    dialect: str,
+    response: dict[str, Any],
+    finish_reason: str | None,
+    response_status: str | None,
+    step: AtifStep,
+) -> None:
+    result = reconcile_provider_model_call(
+        _call(dialect, response, finish_reason=finish_reason, response_status=response_status),
+        step,
+        path="turn",
+    )
+
+    assert result.finish_reason == finish_reason
+
+
+def test_reconcile_does_not_interpret_unknown_provider_dialect() -> None:
+    response = {"status": "failed", "choices": [{"finish_reason": "length"}]}
+
+    result = reconcile_provider_model_call(_call("custom", response), _step(), path="turn")
+
+    assert result.finish_reason is None
+
+
+@pytest.mark.parametrize("dialect", ("responses", "chat", "messages"))
+def test_reconcile_projects_provider_identity(dialect: str) -> None:
+    response = {"model": "provider-model", "id": "response-1"}
+    if dialect == "responses":
+        response["status"] = "completed"
+
+    result = reconcile_provider_model_call(_call(dialect, response), _step(), path="turn")
+
+    assert result.model_name == "provider-model"
+    assert result.response_id == "response-1"
+
+
+@pytest.mark.parametrize("dialect", ("responses", "chat", "messages"))
+@pytest.mark.parametrize("field_name", ("model", "id"))
+@pytest.mark.parametrize("value", (" ", 7, True))
+def test_reconcile_rejects_invalid_provider_identity(
+    dialect: str,
+    field_name: str,
+    value: Any,
+) -> None:
+    response = {field_name: value}
+    if dialect == "responses":
+        response["status"] = "completed"
+
+    _assert_call_rejected(dialect, response, "expected a non-empty string")
+
+
+@pytest.mark.parametrize(
+    ("dialect", "field_name"),
+    [
+        (dialect, field_name)
+        for dialect in ("responses", "chat", "messages")
+        for field_name in ("model", "id")
+        if (dialect, field_name) != ("chat", "model")
+    ],
+)
+def test_reconcile_rejects_null_provider_identity(dialect: str, field_name: str) -> None:
+    response = {field_name: None}
+    if dialect == "responses":
+        response["status"] = "completed"
+
+    _assert_call_rejected(dialect, response, "expected a non-empty string")
+
+
+@pytest.mark.parametrize("dialect", ("responses", "chat", "messages"))
+@pytest.mark.parametrize("field_name", ("model", "id"))
+def test_reconcile_rejects_provider_identity_conflicts(dialect: str, field_name: str) -> None:
+    response = {field_name: "provider-value"}
+    if dialect == "responses":
+        response["status"] = "completed"
+
+    _assert_call_rejected(
+        dialect,
+        response,
+        f"normalized '{field_name}' conflicts",
+        **({field_name if field_name == "model" else "response_id": "normalized-value"}),
+    )
+
+
+@pytest.mark.parametrize("dialect", ("responses", "chat"))
+def test_reconcile_projects_openai_usage_aliases(dialect: str) -> None:
+    response = {
+        "status": "completed",
+        "usage": {
+            "input_tokens": 11,
+            "prompt_tokens": 11,
+            "output_tokens": 5,
+            "completion_tokens": 5,
+            "total_tokens": 16,
+            "input_tokens_details": {"cached_tokens": 3},
+            "prompt_tokens_details": {"cached_tokens": 3},
+            "cached_input_tokens": 3,
+            "output_tokens_details": {"reasoning_tokens": 2},
+            "completion_tokens_details": {"reasoning_tokens": 2},
+            "reasoning_output_tokens": 2,
+        },
+    }
+
+    result = reconcile_provider_model_call(_call(dialect, response), _step(), path="turn")
+
+    assert result.token_stats == ReconciledTokenStats(
+        prompt_tokens=11,
+        completion_tokens=5,
+        reasoning_tokens=2,
+        total_tokens=16,
+        cached_tokens=3,
+    )
+
+
+@pytest.mark.parametrize(
+    ("usage", "message"),
+    [
+        ({"input_tokens": True}, "expected a non-negative integer"),
+        ({"input_tokens": -1}, "expected a non-negative integer"),
+        ({"input_tokens": 1, "prompt_tokens": 2}, "aliases conflict"),
+        ({"input_tokens_details": []}, "expected an object"),
+        ({"input_tokens_details": {"cached_tokens": 2}, "cached_input_tokens": 3}, "aliases conflict"),
+    ],
+)
+def test_reconcile_rejects_invalid_openai_usage(usage: dict[str, Any], message: str) -> None:
+    _assert_call_rejected("responses", {"status": "completed", "usage": usage}, message)
+
+
+def test_reconcile_projects_anthropic_cache_usage() -> None:
+    response = {
+        "usage": {
+            "input_tokens": 100,
+            "output_tokens": 13,
+            "cache_read_input_tokens": 23,
+            "cache_creation_input_tokens": 8,
+        }
+    }
+
+    result = reconcile_provider_model_call(_call("messages", response), _step(), path="turn")
+
+    assert result.token_stats == ReconciledTokenStats(
+        prompt_tokens=131,
+        completion_tokens=13,
+        total_tokens=144,
+        cached_tokens=23,
+    )
+
+
+@pytest.mark.parametrize(
+    ("dialect", "response"),
+    [
+        ("responses", {"status": "completed", "usage": []}),
+        ("chat", {"usage": "bad"}),
+        ("messages", {"usage": 7}),
+    ],
+)
+def test_reconcile_rejects_non_object_provider_usage(dialect: str, response: dict[str, Any]) -> None:
+    _assert_call_rejected(dialect, response, "usage: expected an object")
+
+
+@pytest.mark.parametrize(
+    ("field_name", "raw_value", "normalized_value"),
+    [
+        ("prompt_tokens", 10, 11),
+        ("completion_tokens", 5, 6),
+        ("reasoning_tokens", 2, 3),
+        ("total_tokens", 15, 16),
+        ("cached_tokens", 1, 2),
+    ],
+)
+def test_reconcile_rejects_normalized_usage_conflicts(
+    field_name: str,
+    raw_value: int,
+    normalized_value: int,
+) -> None:
+    usage_field = {
+        "prompt_tokens": "input_tokens",
+        "completion_tokens": "output_tokens",
+        "reasoning_tokens": "reasoning_output_tokens",
+        "total_tokens": "total_tokens",
+        "cached_tokens": "cached_input_tokens",
+    }[field_name]
+    _assert_call_rejected(
+        "responses",
+        {"status": "completed", "usage": {usage_field: raw_value}},
+        f"normalized {field_name} conflicts",
+        token_stats={field_name: normalized_value},
+    )
 
 
 @pytest.mark.parametrize(
@@ -503,3 +786,163 @@ def test_reconcile_rejects_multiple_anthropic_thinking_blocks() -> None:
     response["content"].insert(1, copy.deepcopy(response["content"][0]))
 
     _assert_rejected("messages", response, "multiple Anthropic thinking blocks")
+
+
+@pytest.mark.parametrize("dialect", ("responses", "chat", "messages"))
+@pytest.mark.parametrize("tool_step", (False, True))
+def test_reconcile_accepts_matching_provider_output(dialect: str, tool_step: bool) -> None:
+    step = _tool_step() if tool_step else _step()
+
+    result = _reconcile(dialect, _response(dialect, tool_step=tool_step), step=step)
+
+    assert (
+        result.finish_reason
+        == {
+            ("responses", False): None,
+            ("responses", True): None,
+            ("chat", False): "stop",
+            ("chat", True): "tool_calls",
+            ("messages", False): "end_turn",
+            ("messages", True): "tool_use",
+        }[(dialect, tool_step)]
+    )
+
+
+@pytest.mark.parametrize("dialect", ("responses", "chat", "messages"))
+@pytest.mark.parametrize("mismatch", ("message", "reasoning", "tool_id", "tool_name", "tool_arguments"))
+def test_reconcile_rejects_provider_output_mismatches(dialect: str, mismatch: str) -> None:
+    tool_step = mismatch.startswith("tool_")
+    response = _response(dialect, tool_step=tool_step)
+    if dialect == "responses":
+        item = response["output"][1]
+        field = {"tool_id": "call_id", "tool_name": "name", "tool_arguments": "arguments"}.get(mismatch)
+        if mismatch == "message":
+            item["content"][0]["text"] = "different"
+        elif mismatch == "reasoning":
+            response["output"][0]["summary"][0]["text"] = "different"
+        else:
+            item[field] = '{"different":true}' if mismatch == "tool_arguments" else "different"
+    elif dialect == "chat":
+        message = response["choices"][0]["message"]
+        if mismatch == "message":
+            message["content"] = "different"
+        elif mismatch == "reasoning":
+            message["reasoning_content"] = "different"
+        else:
+            tool_call = message["tool_calls"][0]
+            field = {"tool_id": "id", "tool_name": "name", "tool_arguments": "arguments"}[mismatch]
+            target = tool_call if mismatch == "tool_id" else tool_call["function"]
+            target[field] = '{"different":true}' if mismatch == "tool_arguments" else "different"
+    else:
+        block = response["content"][1]
+        if mismatch == "message":
+            block["text"] = "different"
+        elif mismatch == "reasoning":
+            response["content"][0]["thinking"] = "different"
+        else:
+            field = {"tool_id": "id", "tool_name": "name", "tool_arguments": "input"}[mismatch]
+            block[field] = {"different": True} if mismatch == "tool_arguments" else "different"
+
+    expected = "message|reasoning" if mismatch in {"message", "reasoning"} else "tool calls"
+    _assert_rejected(dialect, response, expected, step=_tool_step() if tool_step else _step())
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda response: response.__setitem__("output", {}), "expected a Responses output array"),
+        (lambda response: response["output"].append(response["output"][-1]), "multiple Responses messages"),
+        (lambda response: response["output"].append(response["output"].pop(0)), "reasoning cannot follow"),
+        (lambda response: response["output"][0].__setitem__("status", "incomplete"), "not completed"),
+        (lambda response: response["output"][1].__setitem__("phase", "commentary"), "phase is not representable"),
+    ],
+)
+def test_reconcile_rejects_unrepresentable_responses_envelopes(
+    mutate: Callable[[dict[str, Any]], None],
+    message: str,
+) -> None:
+    response = _response("responses")
+    mutate(response)
+
+    _assert_rejected("responses", response, message)
+
+
+def test_reconcile_rejects_namespaced_responses_tool_calls() -> None:
+    response = _response("responses", tool_step=True)
+    response["output"][1]["namespace"] = "mcp__weather"
+
+    _assert_rejected("responses", response, "namespaced Responses", step=_tool_step())
+
+
+@pytest.mark.parametrize(
+    ("choice", "message"),
+    [
+        ({"finish_reason": None, "message": None}, "requires an explicit finish_reason"),
+        ({"finish_reason": "stop", "message": None, "logprobs": {"content": []}}, "cannot carry log probabilities"),
+        ({"finish_reason": "stop", "message": None, "delta": {"content": "hidden"}}, "outside message"),
+        ({"finish_reason": "stop", "message": None, "text": "hidden"}, "unchecked fields"),
+        ({"finish_reason": "stop", "message": []}, "message: expected an object"),
+        (
+            {"finish_reason": "stop", "message": {"role": "assistant", "content": "answer"}, "text": "hidden"},
+            "output outside message",
+        ),
+        (
+            {
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "answer", "refusal": "no"},
+            },
+            "refusal output",
+        ),
+        (
+            {
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "answer", "audio": {"id": "audio"}},
+            },
+            "audio output",
+        ),
+        (
+            {
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "answer"},
+                "logprobs": {"refusal": [{"token": "no"}]},
+            },
+            "refusal log probabilities",
+        ),
+    ],
+)
+def test_reconcile_rejects_unrepresentable_chat_envelopes(choice: dict[str, Any], message: str) -> None:
+    _assert_call_rejected("chat", {"choices": [choice]}, message, finish_reason=choice.get("finish_reason"))
+
+
+@pytest.mark.parametrize(
+    ("choices", "message"),
+    [
+        ([], "empty Chat choices"),
+        ([{"finish_reason": "stop"}, {"finish_reason": "stop"}], "exactly one Chat choice"),
+        ([{"index": 1, "finish_reason": "stop", "message": None}], "expected 0 when present"),
+    ],
+)
+def test_reconcile_rejects_ambiguous_chat_choices(choices: list[dict[str, Any]], message: str) -> None:
+    _assert_call_rejected("chat", {"choices": choices}, message)
+
+
+def test_reconcile_accepts_sparse_chat_choice_without_output() -> None:
+    response = {"choices": [{"index": 0, "finish_reason": "stop", "message": None, "delta": {}, "logprobs": {}}]}
+
+    result = reconcile_provider_model_call(_call("chat", response, finish_reason="stop"), _step(), path="turn")
+
+    assert result.finish_reason == "stop"
+
+
+@pytest.mark.parametrize(
+    ("dialect", "foreign"),
+    [
+        ("responses", {"choices": []}),
+        ("chat", {"content": []}),
+        ("messages", {"output_text": "answer"}),
+    ],
+)
+def test_reconcile_rejects_foreign_provider_semantic_fields(dialect: str, foreign: dict[str, Any]) -> None:
+    response = {**foreign, **({"status": "completed"} if dialect == "responses" else {})}
+
+    _assert_call_rejected(dialect, response, "foreign semantic fields")

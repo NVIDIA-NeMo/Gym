@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from nemo_gym.atif_json import json_values_equal, strict_json_loads
-from nemo_gym.relay_atif import AtifStep
+from nemo_gym.atif_v1_7 import AtifStep
 from nemo_gym.rollout_observability import TrajectoryModelCall
 
 
