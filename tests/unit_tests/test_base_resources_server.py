@@ -102,3 +102,14 @@ class TestVerifyResponseFailureReporting:
         """A policy that scores zero must stay a valid sample."""
         response = BaseVerifyResponse(responses_create_params=self._params(), response=self._response(), reward=0.0)
         assert response.mask_sample is False
+
+    def test_a_degraded_but_legitimately_scored_rollout_is_not_masked(self) -> None:
+        """The diagnosis is independent of the decision to exclude the sample."""
+        response = BaseVerifyResponse(
+            responses_create_params=self._params(),
+            response=self._response(),
+            reward=0.4,
+            failure_reason="one retry was needed to reach the judge",
+        )
+        assert response.mask_sample is False
+        assert response.failure_reason is not None
