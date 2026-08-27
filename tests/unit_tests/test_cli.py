@@ -55,6 +55,7 @@ from nemo_gym.cli.env import (
 )
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config_types import ConfigError, NoServerInstancesError, ResourcesServerInstanceConfig
+from nemo_gym.environment.manifest import dump_manifest
 from nemo_gym.environment.scaffold import ScaffoldError
 from nemo_gym.registry import EnvironmentCatalogEntry
 
@@ -819,6 +820,113 @@ class TestListEnvironments:
                 "modality": "text",
                 "licensing": "Apache-2.0",
                 "lifecycle": "active",
+            }
+        ]
+
+    def test_full_json_output_includes_manifest_and_composition_metadata(
+        self,
+        monkeypatch: MonkeyPatch,
+        capsys,
+        tmp_path: Path,
+    ) -> None:
+        benchmark_dir = tmp_path / "benchmarks" / "alpha"
+        benchmark_dir.mkdir(parents=True)
+        manifest_path = benchmark_dir / "manifest.yaml"
+        config_path = benchmark_dir / "config.yaml"
+        manifest_path.write_text(
+            dump_manifest(
+                {
+                    "name": "alpha",
+                    "version": "1.2.3",
+                    "kind": "benchmark",
+                    "integration_profile": "custom-gym-verifier",
+                    "domain": "math",
+                    "description": "Alpha benchmark",
+                    "modality": "text",
+                    "licensing": "Apache-2.0",
+                    "authors": ["NVIDIA NeMo Gym contributors"],
+                    "reward": {"range": [0, 1], "higher_is_better": True},
+                    "determinism": "seeded",
+                    "resources_server": "alpha_resources",
+                    "agent_server": "simple_agent",
+                    "model_server": "policy_model",
+                    "datasets": [
+                        {
+                            "name": "test",
+                            "type": "benchmark",
+                            "jsonl_fpath": "benchmarks/alpha/data/test.jsonl",
+                            "prepare_script": "benchmarks/alpha/prepare.py",
+                            "prompt_config": "benchmarks/alpha/prompts/default.yaml",
+                        }
+                    ],
+                    "canonical_split": "test",
+                    "standard_prompt_config": "benchmarks/alpha/prompts/default.yaml",
+                }
+            ),
+            encoding="utf-8",
+        )
+        config_path.write_text("{}\n", encoding="utf-8")
+        entry = EnvironmentCatalogEntry(
+            name="alpha",
+            config_path=config_path,
+            path=benchmark_dir,
+            description="Alpha benchmark",
+            domain="math",
+            kind="benchmark",
+            status="experimental",
+            manifest_path=manifest_path,
+            version="1.2.3",
+            integration_profile="custom-gym-verifier",
+            modality="text",
+            licensing="Apache-2.0",
+            lifecycle="active",
+        )
+        self._mock_catalog(
+            monkeypatch,
+            overrides={"json": True, "catalog_full": True},
+            entries=(entry,),
+        )
+        monkeypatch.setattr(
+            nemo_gym.cli.env,
+            "read_environment_details",
+            lambda _path: {
+                "domain": "math",
+                "description": "Alpha benchmark",
+                "value": None,
+                "resources_servers": ["alpha_resources"],
+                "agent": "simple_agent",
+                "datasets": ["test"],
+            },
+        )
+
+        list_environments()
+
+        payload = json.loads(capsys.readouterr().out)[0]
+        assert payload["metadata_complete"] is True
+        assert payload["source"] == {
+            "config": "benchmarks/alpha/config.yaml",
+            "manifest": "benchmarks/alpha/manifest.yaml",
+        }
+        assert payload["composition"] == {
+            "resources_servers": ["alpha_resources"],
+            "agent_server": "simple_agent",
+            "model_server": "policy_model",
+            "rollout_driver": None,
+            "grading_mode": None,
+        }
+        assert payload["authors"] == ["NVIDIA NeMo Gym contributors"]
+        assert payload["reward"] == {"range": [0.0, 1.0], "higher_is_better": True}
+        assert payload["determinism"] == "seeded"
+        assert payload["canonical_split"] == "test"
+        assert payload["standard_prompt_config"] == "benchmarks/alpha/prompts/default.yaml"
+        assert payload["datasets"] == [
+            {
+                "name": "test",
+                "type": "benchmark",
+                "jsonl_fpath": "benchmarks/alpha/data/test.jsonl",
+                "prepare_script": "benchmarks/alpha/prepare.py",
+                "prompt_config": "benchmarks/alpha/prompts/default.yaml",
+                "num_repeats": 1,
             }
         ]
 

@@ -177,6 +177,11 @@ RESOURCES_SERVER = Flag(
 # env status). Each command reads the reserved `json` config key ad hoc via
 # global_config_dict.get(JSON_OUTPUT_KEY_NAME) (see general.py, eval.py, env.py).
 JSON = _bool_flag("json", "json", "Output as machine-readable JSON.")
+CATALOG_FULL = _bool_flag(
+    "full",
+    "catalog_full",
+    "Include source, composition, and full manifest metadata in catalog JSON output.",
+)
 
 # `gym list <type> [<name>]`: an optional component name. When given, the listing command inspects that one
 # component (surfaced as the reserved `component_name` config key) instead of listing all.
@@ -587,6 +592,7 @@ COMMANDS = {
             ),
             _value_flag("lifecycle", "lifecycle", "Filter by lifecycle.", choices=("active", "deprecated")),
             JSON,
+            CATALOG_FULL,
             SEARCH_DIR,
         ),
     ),

@@ -16,9 +16,19 @@ from nemo_gym.environment.manifest import (
     load_manifest,
     manifest_json_schema,
 )
+from nemo_gym.environment.validation import _mirror_differences, _resolve_manifest_composition
 
 
 REPO_ROOT = Path(__file__).parents[2]
+
+SEEDED_CATALOG_BENCHMARKS = (
+    "financebench",
+    "flores200",
+    "gpqa",
+    "gsm8k",
+    "human_eval",
+    "longbench_v2",
+)
 
 
 def _manifest(*, profile: str = "custom-gym-verifier", kind: str = "environment") -> dict:
@@ -67,6 +77,17 @@ def test_environment_manifest_parses_and_uses_declared_defaults() -> None:
     assert manifest.determinism.value == "unknown"
     assert manifest.lifecycle.value == "active"
     assert manifest.session_model is None
+
+
+@pytest.mark.parametrize("name", SEEDED_CATALOG_BENCHMARKS)
+def test_seeded_catalog_benchmark_manifest_matches_authoritative_config(name: str) -> None:
+    benchmark_dir = REPO_ROOT / "benchmarks" / name
+    manifest = load_manifest(benchmark_dir / "manifest.yaml")
+    composition = _resolve_manifest_composition(benchmark_dir / "config.yaml")
+
+    assert manifest.name == name
+    assert manifest.kind.value == "benchmark"
+    assert _mirror_differences(manifest, composition) == {}
 
 
 def test_integration_profiles_are_closed_string_values() -> None:
