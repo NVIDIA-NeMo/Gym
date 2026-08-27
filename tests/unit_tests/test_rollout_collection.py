@@ -94,6 +94,10 @@ class FakeResponse:
         self.status = status
         self.ok = 200 <= status < 300
         self.payload = payload
+        self.released = False
+
+    def release(self) -> None:
+        self.released = True
 
 
 def http_error(status: int, message: str = "boom", body: bytes | None = None) -> ClientResponseError:
@@ -473,7 +477,6 @@ class TestRolloutCollection:
         assert result["_ng_failure_type"] == "ClientResponseError"
         assert result["_ng_failure_http_status"] == 500
         assert result["_ng_failure_response_body"] == '{"detail": "unhandled tool-call json"}'
-        assert result["_ng_failure_delivery"] == "received"
         # No invented verifier output: no reward, no placeholder response, no token payload.
         assert "reward" not in result
         assert "response" not in result
@@ -493,34 +496,43 @@ class TestRolloutCollection:
         assert post.await_count == 1
 
     @pytest.mark.parametrize(
-        ("error", "delivery"),
+        ("error", "status", "expected_class"),
         [
-            (ClientConnectorError(MagicMock(), OSError("connection refused")), "not_delivered"),
-            (ServerDisconnectedError(), "possible"),
-            (orjson.JSONDecodeError("unexpected end of data", "", 0), "received"),
+            (
+                ClientConnectorError(MagicMock(), OSError("connection refused")),
+                None,
+                AGENT_REQUEST_FAILED_FAILURE_CLASS,
+            ),
+            (ServerDisconnectedError(), None, AGENT_REQUEST_FAILED_FAILURE_CLASS),
+            (http_error(503), 503, AGENT_REQUEST_FAILED_FAILURE_CLASS),
+            (http_error(500), 500, AGENT_RUN_ERROR_FAILURE_CLASS),
+            (http_error(400), 400, AGENT_RUN_ERROR_FAILURE_CLASS),
+            (orjson.JSONDecodeError("unexpected end of data", "", 0), 200, AGENT_RUN_ERROR_FAILURE_CLASS),
         ],
-        ids=["connection refused", "dropped mid-flight", "unreadable body"],
+        ids=["connection refused", "dropped mid-flight", "gateway 503", "agent 500", "agent 400", "unreadable body"],
     )
-    async def test_run_examples_records_delivery_state(
-        self, monkeypatch: pytest.MonkeyPatch, error: BaseException, delivery: str
+    async def test_run_examples_classifies_by_who_answered(
+        self, monkeypatch: pytest.MonkeyPatch, error: BaseException, status: int | None, expected_class: str
     ) -> None:
-        """The POST is inside the try, and what the agent may already have run is recorded.
+        """A NeMo Gym agent answers 500 when its handler raises, so its own statuses mean it ran.
 
-        `possible` is the case that forbids resending: the connection was up, so the agent may
-        already have called models, tools or sandboxes.
+        A gateway status or no reply at all does not, and neither is ever resent from here.
         """
-        post = AsyncMock(side_effect=error)
+        post = AsyncMock(side_effect=error) if status is None else AsyncMock(return_value=FakeResponse(status))
         install_fake_server_client(monkeypatch, post)
+        if status == 200:
+
+            async def get_response_json(_response):
+                raise error
+
+            monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", get_response_json)
 
         _, result = await next(RolloutCollectionHelper().run_examples([failing_row()], route_failures_to_sidecar=True))
 
-        expected_class = (
-            AGENT_RUN_ERROR_FAILURE_CLASS if delivery == "received" else AGENT_REQUEST_FAILED_FAILURE_CLASS
-        )
         assert result[NG_FAILURE_CLASS_KEY] == expected_class
         assert result["_ng_failure_type"] == type(error).__name__
-        assert result["_ng_failure_http_status"] is None
-        assert result["_ng_failure_delivery"] == delivery
+        assert result["_ng_failure_http_status"] == status
+        assert "reward" not in result
         assert post.await_count == 1
 
     async def test_run_examples_raises_for_direct_callers(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -660,7 +672,7 @@ class TestRolloutCollection:
         persisted = [orjson.loads(line) for line in output_jsonl_fpath.read_bytes().splitlines()]
         assert [r["reward"] for r in persisted] == [1.0]
 
-    def test_failure_rows_counted_as_zero_skips_scored_rollouts_and_rejects_scoreless_ones(
+    def test_failure_rows_counted_as_zero_skips_scored_rollouts_and_scores_scoreless_ones(
         self, tmp_path: Path
     ) -> None:
         failures_fpath = tmp_path / "output_failures.jsonl"
@@ -710,7 +722,7 @@ class TestRolloutCollection:
 
     @pytest.mark.parametrize(
         ("counted_classes", "expected_scored", "expected_mean"),
-        [([], 1, 1.0), (["verify_failed"], 2, 0.5)],
+        [([], 1, 1.0), ([AGENT_RUN_ERROR_FAILURE_CLASS], 2, 0.5)],
         ids=["off by default", "opted in"],
     )
     async def test_run_from_config_counts_an_opted_in_failure_class_as_zero(
@@ -722,7 +734,11 @@ class TestRolloutCollection:
         expected_scored: int,
         expected_mean: float,
     ) -> None:
-        """Opting in counts the zero the agent already scored; the rollouts jsonl is untouched."""
+        """One 500 and one success, end to end: the failed rollout counts only when asked for.
+
+        `key_metrics` is asserted whole, because the row's diagnostic fields are numbers and the
+        aggregator averages every number it is handed.
+        """
         input_jsonl_fpath = tmp_path / "input.jsonl"
         input_jsonl_fpath.write_text(
             "\n".join(
@@ -735,22 +751,14 @@ class TestRolloutCollection:
         aggregated: dict[str, list[dict]] = {}
 
         async def post(server_name: str, url_path: str, json, **kwargs):
-            assert url_path == "/aggregate_metrics"
+            if url_path == "/run":
+                if json["x"] == 0:
+                    raise http_error(500, "unhandled tool-call json")
+                return FakeResponse(200, {"reward": 1.0})
             aggregated["verify_responses"] = [dict(r) for r in json.verify_responses]
             return FakeResponse(200, compute_aggregate_metrics(aggregated["verify_responses"]).model_dump())
 
         install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
-
-        class Helper(RolloutCollectionHelper):
-            def run_examples(self, examples: list[dict], *args, **kwargs):
-                futures = []
-                for example in examples:
-                    future = Future()
-                    scored = {"reward": 1.0}
-                    failed = {"reward": 0.0, NG_FAILURE_CLASS_KEY: "verify_failed"}
-                    future.set_result((example, scored if example["x"] == 0 else failed))
-                    futures.append(future)
-                return futures
 
         config = RolloutCollectionConfig(
             input_jsonl_fpath=str(input_jsonl_fpath),
@@ -758,16 +766,44 @@ class TestRolloutCollection:
             count_failure_classes_as_zero=counted_classes,
             disable_health_check=True,
         )
-        await Helper().run_from_config(config)
+        await RolloutCollectionHelper().run_from_config(config)
 
         persisted = [orjson.loads(line) for line in output_jsonl_fpath.read_bytes().splitlines()]
         assert [row["reward"] for row in persisted] == [1.0]
-        assert len(aggregated["verify_responses"]) == expected_scored
 
+        failures = [orjson.loads(line) for line in _failures_path_for(output_jsonl_fpath).read_bytes().splitlines()]
+        assert failures[0][NG_FAILURE_CLASS_KEY] == AGENT_RUN_ERROR_FAILURE_CLASS
+        assert "reward" not in failures[0]
+
+        assert len(aggregated["verify_responses"]) == expected_scored
         metrics_fpath = output_jsonl_fpath.with_stem(output_jsonl_fpath.stem + "_aggregate_metrics").with_suffix(
             ".json"
         )
-        assert orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"]["mean/reward"] == expected_mean
+        assert orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"] == {"mean/reward": expected_mean}
+
+    async def test_run_from_config_fails_when_no_rollout_produced_a_result(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """Routing failures out of the score must not turn a dead run into a quiet success."""
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my_agent"}}) + "\n"
+        )
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+        install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(500)))
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            disable_health_check=True,
+        )
+
+        with pytest.raises(RuntimeError, match="produced a result"):
+            await RolloutCollectionHelper().run_from_config(config)
+
+        # The attempt is still on disk, so resume can pick it up.
+        failures = [orjson.loads(line) for line in _failures_path_for(output_jsonl_fpath).read_bytes().splitlines()]
+        assert [row[NG_FAILURE_CLASS_KEY] for row in failures] == [AGENT_RUN_ERROR_FAILURE_CLASS]
 
     async def test_aggregate_counts_an_opted_in_failure_class_from_each_shard_sidecar(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
