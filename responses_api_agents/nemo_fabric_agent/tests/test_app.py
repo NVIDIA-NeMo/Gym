@@ -466,3 +466,28 @@ def test_turns_used_prefers_adapter_reported_count() -> None:
         "messages": [{"role": "ai", "content": "x"}],
     }
     assert _turns_used(output) == 4
+
+
+def test_fabric_output_items_reads_claude_sdk_event_blocks() -> None:
+    """Claude SDK content blocks carry no ``type``; they are identified by their keys."""
+    output = {
+        "response": "done",
+        "events": [
+            {"type": "SystemMessage", "message": {"content": None}},
+            {
+                "type": "AssistantMessage",
+                "message": {"content": [{"id": "tu1", "name": "Bash", "input": {"command": "echo hi"}}]},
+            },
+            {
+                "type": "UserMessage",
+                "message": {"content": [{"tool_use_id": "tu1", "content": "hi", "is_error": False}]},
+            },
+            {"type": "AssistantMessage", "message": {"content": [{"text": "done"}]}},
+        ],
+    }
+    items = [item.model_dump() for item in _fabric_output_items(output, "done")]
+    assert [item["type"] for item in items] == ["function_call", "function_call_output", "message"]
+    assert items[0]["name"] == "Bash"
+    assert items[0]["arguments"] == '{"command": "echo hi"}'
+    assert items[0]["call_id"] == items[1]["call_id"] == "tu1"
+    assert items[1]["output"] == "hi"

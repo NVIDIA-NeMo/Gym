@@ -88,7 +88,6 @@ def _extract_request_input(body_input: Any) -> tuple[Any, Optional[str]]:
     return request_input, "\n\n".join(instruction_parts) or None
 
 
-
 def _fabric_event_items(events: list[Any], response_text: str) -> list[Any]:
     items: list[Any] = []
     for event in events:
@@ -118,6 +117,43 @@ def _fabric_event_items(events: list[Any], response_text: str) -> list[Any]:
                     type="function_call_output",
                 )
             )
+        elif isinstance(event.get("message"), dict) and isinstance(event["message"].get("content"), list):
+            for block in event["message"]["content"]:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("name") and "input" in block:
+                    call_id = str(block.get("id") or f"call_{uuid4().hex}")
+                    items.append(
+                        NeMoGymResponseFunctionToolCall(
+                            id=f"fc_{uuid4().hex}",
+                            call_id=call_id,
+                            name=str(block["name"]),
+                            arguments=json.dumps(block.get("input") or {}, ensure_ascii=False, sort_keys=True),
+                            status="completed",
+                        )
+                    )
+                elif block.get("tool_use_id"):
+                    items.append(
+                        NeMoGymResponseFunctionCallOutput(
+                            id=f"fco_{uuid4().hex}",
+                            call_id=str(block["tool_use_id"]),
+                            output=_content_text(block.get("content")),
+                            status="completed",
+                            type="function_call_output",
+                        )
+                    )
+                else:
+                    text = _content_text(block.get("text"))
+                    if text and text.strip() != response_text.strip():
+                        items.append(
+                            NeMoGymResponseOutputMessage(
+                                id=f"msg_{uuid4().hex}",
+                                content=[NeMoGymResponseOutputText(text=text, annotations=[])],
+                                role="assistant",
+                                status="completed",
+                                type="message",
+                            )
+                        )
         elif etype == "agentMessage":
             text = _content_text(event.get("text"))
             if text and text.strip() != response_text.strip():
@@ -250,7 +286,9 @@ def _turns_used(output: dict[str, Any]) -> int:
             return value
     messages = output.get("messages")
     if isinstance(messages, list):
-        turns = sum(1 for message in messages if isinstance(message, dict) and message.get("role") in {"ai", "assistant"})
+        turns = sum(
+            1 for message in messages if isinstance(message, dict) and message.get("role") in {"ai", "assistant"}
+        )
         if turns:
             return turns
     return 1
