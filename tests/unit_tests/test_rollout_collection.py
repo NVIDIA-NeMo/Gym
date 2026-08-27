@@ -56,6 +56,7 @@ from nemo_gym.rollout_collection import (
     _attach_trajectory_record,
     _build_trajectory_record,
     _expand_input_glob,
+    _failure_rows_counted_as_zero,
     _failures_path_for,
     _get_max_rollout_attempts,
     _rollout_for_export,
@@ -654,6 +655,158 @@ class TestRolloutCollection:
         assert dispatched[0][ATTEMPT_INDEX_KEY_NAME] == 1
         persisted = [orjson.loads(line) for line in output_jsonl_fpath.read_bytes().splitlines()]
         assert [r["reward"] for r in persisted] == [1.0]
+
+    def test_failure_rows_counted_as_zero_skips_scored_rollouts_and_rejects_scoreless_ones(
+        self, tmp_path: Path
+    ) -> None:
+        failures_fpath = tmp_path / "output_failures.jsonl"
+        failures_fpath.write_bytes(
+            b"\n".join(
+                orjson.dumps(row)
+                for row in [
+                    {
+                        TASK_INDEX_KEY_NAME: 0,
+                        ROLLOUT_INDEX_KEY_NAME: 0,
+                        "reward": 0.0,
+                        NG_FAILURE_CLASS_KEY: "verify_failed",
+                    },
+                    {
+                        TASK_INDEX_KEY_NAME: 1,
+                        ROLLOUT_INDEX_KEY_NAME: 0,
+                        "reward": 0.0,
+                        NG_FAILURE_CLASS_KEY: "verify_failed",
+                    },
+                    {
+                        TASK_INDEX_KEY_NAME: 1,
+                        ROLLOUT_INDEX_KEY_NAME: 0,
+                        "reward": 0.0,
+                        NG_FAILURE_CLASS_KEY: "verify_failed",
+                    },
+                    {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "judge_failed"},
+                ]
+            )
+            + b"\n"
+        )
+
+        # Task 0 succeeded on a later attempt, and task 1 failed twice: one row, and only for task 1.
+        rows = _failure_rows_counted_as_zero([failures_fpath], ["verify_failed"], {(0, 0)})
+        assert [row[TASK_INDEX_KEY_NAME] for row in rows] == [1]
+
+        assert _failure_rows_counted_as_zero([failures_fpath], [], set()) == []
+
+        with pytest.raises(ConfigError, match="no rollout happened"):
+            _failure_rows_counted_as_zero([failures_fpath], ["judge_failed"], set())
+
+    @pytest.mark.parametrize(
+        ("counted_classes", "expected_scored", "expected_mean"),
+        [([], 1, 1.0), (["verify_failed"], 2, 0.5)],
+        ids=["off by default", "opted in"],
+    )
+    async def test_run_from_config_counts_an_opted_in_failure_class_as_zero(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        empty_global_config: MagicMock,
+        counted_classes: list[str],
+        expected_scored: int,
+        expected_mean: float,
+    ) -> None:
+        """Opting in counts the zero the agent already scored; the rollouts jsonl is untouched."""
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            "\n".join(
+                json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my_agent"}, "x": i})
+                for i in range(2)
+            )
+            + "\n"
+        )
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+        aggregated: dict[str, list[dict]] = {}
+
+        async def post(server_name: str, url_path: str, json, **kwargs):
+            assert url_path == "/aggregate_metrics"
+            aggregated["verify_responses"] = [dict(r) for r in json.verify_responses]
+            return FakeResponse(200, compute_aggregate_metrics(aggregated["verify_responses"]).model_dump())
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+
+        class Helper(RolloutCollectionHelper):
+            def run_examples(self, examples: list[dict], *args, **kwargs):
+                futures = []
+                for example in examples:
+                    future = Future()
+                    scored = {"reward": 1.0}
+                    failed = {"reward": 0.0, NG_FAILURE_CLASS_KEY: "verify_failed"}
+                    future.set_result((example, scored if example["x"] == 0 else failed))
+                    futures.append(future)
+                return futures
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            count_failure_classes_as_zero=counted_classes,
+            disable_health_check=True,
+        )
+        await Helper().run_from_config(config)
+
+        persisted = [orjson.loads(line) for line in output_jsonl_fpath.read_bytes().splitlines()]
+        assert [row["reward"] for row in persisted] == [1.0]
+        assert len(aggregated["verify_responses"]) == expected_scored
+
+        metrics_fpath = output_jsonl_fpath.with_stem(output_jsonl_fpath.stem + "_aggregate_metrics").with_suffix(
+            ".json"
+        )
+        assert orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"]["mean/reward"] == expected_mean
+
+    async def test_aggregate_counts_an_opted_in_failure_class_from_each_shard_sidecar(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """`gym eval aggregate` applies the same option offline, over the shards' own sidecars."""
+        shard_fpath = tmp_path / "rollouts-chunk0.jsonl"
+        shard_fpath.write_bytes(
+            orjson.dumps(
+                {
+                    TASK_INDEX_KEY_NAME: 0,
+                    ROLLOUT_INDEX_KEY_NAME: 0,
+                    AGENT_REF_KEY_NAME: {"name": "my_agent"},
+                    "reward": 1.0,
+                }
+            )
+            + b"\n"
+        )
+        _failures_path_for(shard_fpath).write_bytes(
+            orjson.dumps(
+                {
+                    TASK_INDEX_KEY_NAME: 1,
+                    ROLLOUT_INDEX_KEY_NAME: 0,
+                    AGENT_REF_KEY_NAME: {"name": "my_agent"},
+                    "reward": 0.0,
+                    NG_FAILURE_CLASS_KEY: "verify_failed",
+                }
+            )
+            + b"\n"
+        )
+        merged_fpath = tmp_path / "rollouts.jsonl"
+        aggregated: dict[str, list[dict]] = {}
+
+        async def post(server_name: str, url_path: str, json, **kwargs):
+            aggregated["verify_responses"] = [dict(r) for r in json.verify_responses]
+            return FakeResponse(200, compute_aggregate_metrics(aggregated["verify_responses"]).model_dump())
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+
+        config = RolloutAggregationConfig(
+            input_glob=str(shard_fpath),
+            output_jsonl_fpath=str(merged_fpath),
+            count_failure_classes_as_zero=["verify_failed"],
+            disable_health_check=True,
+        )
+        await RolloutAggregationHelper().run_from_config(config)
+
+        assert sorted(row["reward"] for row in aggregated["verify_responses"]) == [0.0, 1.0]
+        # The merged rollouts file keeps only the rollouts that produced a result.
+        merged = [orjson.loads(line) for line in merged_fpath.read_bytes().splitlines()]
+        assert [row["reward"] for row in merged] == [1.0]
 
     def test_preprocess_rows_with_prompt_config(self, tmp_path: Path) -> None:
         """prompt_config builds responses_create_params.input from template."""

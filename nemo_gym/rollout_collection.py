@@ -411,6 +411,15 @@ def _normalize_health_check_ignored_checks(value) -> List[str]:
     return list(normalize_ignored_checks(value))
 
 
+_COUNT_FAILURE_CLASSES_AS_ZERO_DESCRIPTION = (
+    "Failure classes from the failures sidecar to include in aggregate metrics as the scored "
+    "rollouts they already are, e.g. ['tau2_malformed_tool_call'], so a model failure counts in "
+    "the denominator instead of dropping out of it. The rollouts jsonl is not touched, so both "
+    "numbers stay computable from one run. Only classes whose rows carry a reward qualify: "
+    "'agent_request_failed' records that no rollout happened and is rejected rather than scored."
+)
+
+
 class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
     num_samples_in_parallel: Optional[int] = Field(
@@ -446,6 +455,10 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
     @classmethod
     def _validate_health_check_ignored_checks(cls, value):
         return _normalize_health_check_ignored_checks(value)
+
+    count_failure_classes_as_zero: List[str] = Field(
+        default_factory=list, description=_COUNT_FAILURE_CLASSES_AS_ZERO_DESCRIPTION
+    )
 
     rollout_collection_driver: Optional[str] = Field(
         default=None,
@@ -661,6 +674,45 @@ def _agent_request_failure_row(exc: BaseException) -> Dict[str, Any]:
         "_ng_failure_response_body": body.decode("utf-8", "replace")[:_MAX_FAILURE_BODY_CHARS] if body else None,
         "_ng_failure_delivery": delivery,
     }
+
+
+def _failure_rows_counted_as_zero(
+    failures_fpaths: List[Path], failure_classes: List[str], scored_keys: set
+) -> List[Dict[str, Any]]:
+    """Sidecar rows the caller opted to count in the metrics denominator.
+
+    Opting in counts a zero the agent itself scored. A row without a ``reward`` is rejected
+    rather than filled in: it records that no rollout happened, and inventing a score for it is
+    what routing failures out of the main jsonl exists to prevent. One row per rollout, and never
+    for a rollout that also succeeded on a later attempt.
+    """
+    if not failure_classes:
+        return []
+
+    wanted = set(failure_classes)
+    rows_by_key: Dict[Tuple[Any, Any], Dict[str, Any]] = {}
+    for fpath in failures_fpaths:
+        if not fpath.exists():
+            continue
+        with fpath.open("rb") as f:
+            for line_no, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                row = loads_jsonl_line(line, fpath, line_no)
+                failure_class = row.get(NG_FAILURE_CLASS_KEY)
+                if failure_class not in wanted:
+                    continue
+                if "reward" not in row:
+                    raise ConfigError(
+                        f"count_failure_classes_as_zero lists {failure_class!r}, but {fpath} line {line_no} "
+                        "carries no reward: this failure means no rollout happened, so there is no score "
+                        "to count. Remove the class, or fix the agent to score the rollout it did produce."
+                    )
+                key = (row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME))
+                if key not in scored_keys:
+                    rows_by_key.setdefault(key, row)
+    return list(rows_by_key.values())
 
 
 class RolloutCollectionHelper(BaseModel):
@@ -1281,8 +1333,17 @@ class RolloutCollectionHelper(BaseModel):
             aggregate_metrics_fpath = None
         else:
             print("Computing aggregate metrics")
+            counted = _failure_rows_counted_as_zero(
+                [failures_fpath],
+                config.count_failure_classes_as_zero,
+                {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in persisted_results},
+            )
+            if counted:
+                print(
+                    f"Counting {len(counted)} failure row(s) as scored zeros: {config.count_failure_classes_as_zero}"
+                )
             aggregate_metrics_fpath = await self._call_aggregate_metrics(
-                persisted_results, persisted_rows, output_fpath
+                persisted_results + counted, persisted_rows + counted, output_fpath
             )
 
         print(f"""Finished rollout collection! View results at:
@@ -1609,6 +1670,9 @@ class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
         default=True,
         description="Concatenate the matched shard JSONLs into output_jsonl_fpath alongside the metrics file.",
     )
+    count_failure_classes_as_zero: List[str] = Field(
+        default_factory=list, description=_COUNT_FAILURE_CLASSES_AS_ZERO_DESCRIPTION
+    )
     disable_health_check: bool = Field(
         default=False,
         description="Skip post-aggregation rollout quality verification and report writing.",
@@ -1683,9 +1747,18 @@ class RolloutAggregationHelper(BaseModel):
                 for r in results:
                     out.write(orjson.dumps(r) + b"\n")
 
+        counted = _failure_rows_counted_as_zero(
+            [failures_path_for(Path(path)) for path in input_paths],
+            config.count_failure_classes_as_zero,
+            {(r.get(TASK_INDEX_KEY_NAME), r.get(ROLLOUT_INDEX_KEY_NAME)) for r in results},
+        )
+        if counted:
+            print(f"Counting {len(counted)} failure row(s) as scored zeros: {config.count_failure_classes_as_zero}")
+
         # `_call_aggregate_metrics` only inspects each row's AGENT_REF_KEY_NAME, which results already carry.
         helper = RolloutCollectionHelper()
-        aggregate_metrics_fpath = await helper._call_aggregate_metrics(results, results, output_fpath)
+        scored = results + counted
+        aggregate_metrics_fpath = await helper._call_aggregate_metrics(scored, scored, output_fpath)
 
         print(f"""Finished rollout aggregation! View results at:
 Merged rollouts: {output_fpath if config.merge_shards else "<not merged>"}
