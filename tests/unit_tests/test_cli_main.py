@@ -63,14 +63,11 @@ def _split_overrides(overrides: list[str]) -> tuple[set[str], set[str]]:
     return paths, others
 
 
-def test_progress_artifact_display_assigns_custom_driver_ownership(tmp_path: Path) -> None:
+def test_progress_artifact_display_omits_custom_drivers(tmp_path: Path) -> None:
     progress_fpath = tmp_path / "rollouts_progress"
 
     assert _progress_artifact_display(progress_fpath, None) == str(progress_fpath)
-    assert (
-        _progress_artifact_display(progress_fpath, "package.driver:run")
-        == "managed by the custom rollout collection driver"
-    )
+    assert _progress_artifact_display(progress_fpath, "package.driver:run") is None
 
 
 # `gym <command>` -> the legacy ng_<command> function it dispatches to, for the config-accepting commands.

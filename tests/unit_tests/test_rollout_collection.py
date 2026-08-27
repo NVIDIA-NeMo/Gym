@@ -2091,6 +2091,61 @@ class TestRolloutCollection:
 
         assert failures_fpath.read_bytes() == b""
 
+    async def test_progress_preserves_existing_count_before_fresh_run_is_seeded(
+        self, tmp_path: Path, empty_global_config: MagicMock
+    ) -> None:
+        output_fpath = tmp_path / "rollouts.jsonl"
+        progress_fpath = progress_path_for(output_fpath)
+        progress_fpath.write_text("5000\n")
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(tmp_path / "does_not_exist.jsonl"),
+            output_jsonl_fpath=str(output_fpath),
+            disable_aggregation=True,
+        )
+
+        with pytest.raises(ConfigPathNotFoundError, match="does_not_exist.jsonl.*--input"):
+            await RolloutCollectionHelper().run_from_config(config)
+
+        assert progress_fpath.read_text() == "5000\n"
+
+    async def test_progress_preserves_banked_count_when_resume_cache_is_corrupt(
+        self, tmp_path: Path, empty_global_config: MagicMock
+    ) -> None:
+        input_rows = [
+            {
+                "responses_create_params": {"input": []},
+                AGENT_REF_KEY_NAME: {"name": "agent"},
+                TASK_INDEX_KEY_NAME: index,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+            }
+            for index in range(3)
+        ]
+        output_fpath = tmp_path / "rollouts.jsonl"
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(tmp_path / "unused.jsonl"),
+            output_jsonl_fpath=str(output_fpath),
+            resume_from_cache=True,
+            disable_aggregation=True,
+        )
+        config.materialized_jsonl_fpath.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in input_rows))
+        cached_results = [
+            {
+                "response": {"usage": {}},
+                AGENT_REF_KEY_NAME: {"name": "agent"},
+                TASK_INDEX_KEY_NAME: index,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+            }
+            for index in range(2)
+        ]
+        output_fpath.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in cached_results) + b"{\n")
+        progress_fpath = progress_path_for(output_fpath)
+        progress_fpath.write_text("2\n")
+
+        with pytest.raises(orjson.JSONDecodeError):
+            await RolloutCollectionHelper().run_from_config(config)
+
+        assert progress_fpath.read_text() == "2\n"
+
     async def test_progress_file_is_resume_aware(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
     ) -> None:

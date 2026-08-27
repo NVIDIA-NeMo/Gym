@@ -165,7 +165,7 @@ class _RolloutProgressWriter:
         self._fpath = fpath
         self._min_interval_seconds = min_interval_seconds
         self._last_write_time: Optional[float] = None
-        self._latest_completed = 0
+        self._latest_completed: Optional[int] = None
         self._disabled = False
         self._closed = False
 
@@ -213,7 +213,8 @@ class _RolloutProgressWriter:
         if self._closed:
             return
         self._closed = True
-        self.update(self._latest_completed, force=True)
+        if self._latest_completed is not None:
+            self.update(self._latest_completed, force=True)
 
 
 def _nonnegative_int(value: Any) -> Optional[int]:
@@ -685,8 +686,8 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
         description=(
             "Optional dotted ``module.path:function`` to run rollout collection instead of the "
             "built-in helper. Lets a benchmark plug in a custom procedure (e.g. an adaptive, "
-            "multi-pass run) while still producing the standard rollout, progress, and "
-            "aggregate-metrics artifacts. The custom driver owns publishing those artifacts. "
+            "multi-pass run) while still producing the standard rollout + aggregate-metrics "
+            "artifacts. "
             "The function is awaited with (rollout_collection_config, global_config_dict). "
             "When unset, the standard single-pass collection runs."
         ),

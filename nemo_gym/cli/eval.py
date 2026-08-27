@@ -63,10 +63,8 @@ logger = logging.getLogger(__name__)
 # commands in this module must not pay for on every invocation.
 
 
-def _progress_artifact_display(progress_fpath: Path, driver_path: str | None) -> str:
-    if driver_path:
-        return "managed by the custom rollout collection driver"
-    return str(progress_fpath)
+def _progress_artifact_display(progress_fpath: Path, driver_path: str | None) -> str | None:
+    return None if driver_path else str(progress_fpath)
 
 
 def _inspect_benchmark(name: str, benchmarks: dict, global_config_dict) -> None:
@@ -413,14 +411,14 @@ def e2e_rollout_collection():  # pragma: no cover
         rollout_collection_config.resolved_progress_file_fpath,
         driver_path,
     )
+    progress_artifact_line = f"4. Rollout progress file: {progress_artifact}\n" if progress_artifact else ""
 
     print(
         f"""Output artifacts:
 1. Preprocessed datasets: {data_processor_config_dict["output_dirpath"]}
 2. Dataset file used for rollout collection: {rollout_collection_config_dict["input_jsonl_fpath"]}
 3. Rollout collection results file: {output_fpath}
-4. Rollout progress file: {progress_artifact}
-{f"Rollout collection driver: {driver_path}" if driver_path else ""}
+{progress_artifact_line}{f"Rollout collection driver: {driver_path}" if driver_path else ""}
 """
     )
     collection_completed = False
