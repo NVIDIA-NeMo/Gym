@@ -598,10 +598,17 @@ Duplicate config paths:
 
     @staticmethod
     def _carry_over_agent_bindings(original: DictConfig, composed: DictConfig) -> None:
-        """Move the environment's bindings onto the composed agent config, in place."""
+        """Move the environment's bindings onto the composed agent config, in place.
+
+        A binding left explicitly unset is carried over still unset, so it is reported rather than
+        silently resolving to whatever the incoming agent happens to declare. It needs its own branch
+        because OmegaConf reports a '???' value as absent.
+        """
         for key in _COMPOSED_AGENT_CARRY_OVER_KEYS:
             if key in original:
                 composed[key] = deepcopy(original[key])
+            elif OmegaConf.is_missing(original, key):
+                composed[key] = MISSING
 
     def raise_on_missing_values(self, global_config_dict: DictConfig) -> None:
         """Fail fast with one actionable error listing every unset '???' value.

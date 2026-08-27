@@ -2075,6 +2075,26 @@ class TestComposeUnboundAgent:
 
         assert "broken.responses_api_agents.simple_agent" in str(exc_info.value)
 
+    def test_carries_over_a_binding_the_environment_leaves_unset(self) -> None:
+        # OmegaConf reports a '???' value as absent, so skipping on `in` alone let the incoming agent's own
+        # model server stand in for one the environment deliberately left for the user to supply.
+        config = self._config(unset_model=self._environment_agent("gpqa_mcqa_resources_server", model_server="???"))
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        block = self._composed_block(config, "unset_model")
+        assert OmegaConf.is_missing(block, "model_server"), "an unset binding must stay unset, not silently resolve"
+
+    def test_carry_over_leaves_an_absent_binding_to_the_incoming_agent(self) -> None:
+        # Absent is not unset: the environment simply has no opinion, so the agent's own value stands.
+        environment = self._environment_agent("gpqa_mcqa_resources_server")
+        del environment["responses_api_agents"]["simple_agent"]["model_server"]
+        config = self._config(no_model=environment)
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert self._composed_block(config, "no_model")["model_server"]["name"] == "policy_model"
+
     def test_raises_when_two_instances_are_unbound(self) -> None:
         config = self._config(second_harness=self._harness())
 
