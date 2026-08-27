@@ -411,15 +411,6 @@ def _normalize_health_check_ignored_checks(value) -> List[str]:
     return list(normalize_ignored_checks(value))
 
 
-_COUNT_FAILURE_CLASSES_AS_ZERO_DESCRIPTION = (
-    "Failure classes from the failures sidecar to include in aggregate metrics as the scored "
-    "rollouts they already are, e.g. ['tau2_malformed_tool_call'], so a model failure counts in "
-    "the denominator instead of dropping out of it. The rollouts jsonl is not touched, so both "
-    "numbers stay computable from one run. Only classes whose rows carry a reward qualify: "
-    "'agent_request_failed' records that no rollout happened and is rejected rather than scored."
-)
-
-
 class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
     num_samples_in_parallel: Optional[int] = Field(
@@ -457,7 +448,12 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
         return _normalize_health_check_ignored_checks(value)
 
     count_failure_classes_as_zero: List[str] = Field(
-        default_factory=list, description=_COUNT_FAILURE_CLASSES_AS_ZERO_DESCRIPTION
+        default_factory=list,
+        description=(
+            "Failure classes from the failures sidecar to count in aggregate metrics as the scored "
+            "rollouts they already are, e.g. ['tau2_malformed_tool_call']. The rollouts jsonl is "
+            "unchanged, and a class whose rows carry no reward is rejected."
+        ),
     )
 
     rollout_collection_driver: Optional[str] = Field(
@@ -1671,7 +1667,12 @@ class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
         description="Concatenate the matched shard JSONLs into output_jsonl_fpath alongside the metrics file.",
     )
     count_failure_classes_as_zero: List[str] = Field(
-        default_factory=list, description=_COUNT_FAILURE_CLASSES_AS_ZERO_DESCRIPTION
+        default_factory=list,
+        description=(
+            "Failure classes from the failures sidecar to count in aggregate metrics as the scored "
+            "rollouts they already are, e.g. ['tau2_malformed_tool_call']. The rollouts jsonl is "
+            "unchanged, and a class whose rows carry no reward is rejected."
+        ),
     )
     disable_health_check: bool = Field(
         default=False,
