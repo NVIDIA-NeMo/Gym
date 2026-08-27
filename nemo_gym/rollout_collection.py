@@ -120,8 +120,9 @@ logger = logging.getLogger(__name__)
 # New contract:
 #   - Successes go to the main jsonl (``output_jsonl_fpath``).
 #   - Failures go to a sidecar (``<output_stem>_failures.jsonl``), one row
-#     per attempt, with ``_ng_failure_class`` set. An ``agent_request_failed``
-#     row holds no reward and no response: there was no rollout.
+#     per attempt, with ``_ng_failure_class`` set. An ``agent_run_error`` or
+#     ``agent_request_failed`` row holds no reward and no response: there was
+#     no rollout. The two differ in whether the agent answered at all.
 #   - ``kill_shaped`` failures (Slurm SIGTERM, Ray actor died, OOM, ...) go
 #     NOWHERE: the absence of a row is the canonical signal. Resume's
 #     set-difference re-dispatches them naturally; per-task timeout bounds
@@ -137,6 +138,8 @@ NG_FAILURE_CLASS_KEY = "_ng_failure_class"
 NG_NO_PERSIST_KEY = "_ng_no_persist"
 NG_TERMINAL_KEY = "_ng_failure_terminal"
 AGENT_REQUEST_FAILED_FAILURE_CLASS = "agent_request_failed"
+AGENT_RUN_ERROR_FAILURE_CLASS = "agent_run_error"
+_NO_RESULT_FAILURE_CLASSES = frozenset({AGENT_REQUEST_FAILED_FAILURE_CLASS, AGENT_RUN_ERROR_FAILURE_CLASS})
 NG_TRAJECTORY_KEY = "ng_trajectory"
 _MODEL_CALL_PAYLOAD_KEYS = ("request", "response", "request_raw", "response_raw")
 
@@ -653,7 +656,11 @@ def _agent_request_failure_row(exc: BaseException) -> Dict[str, Any]:
     No reward and no response: an infrastructure failure is not a verifier score of zero, and a
     placeholder would read as real generation data to token capture, aggregation and trainers.
     ``_ng_failure_delivery`` records whether the agent may already have run, which is the one
-    thing the exception does not say and the only basis for sending the request again.
+    thing the exception does not say and the only basis for sending the request again. It also
+    picks the class: ``agent_run_error`` when the agent answered with an error, so the rollout ran
+    and broke, and ``agent_request_failed`` when the request never got a reply. Neither carries a
+    reward; an evaluation that wants the first counted names it in
+    ``count_failure_classes_as_zero``.
     """
     if isinstance(exc, ClientConnectorError):
         delivery = "not_delivered"
@@ -663,7 +670,9 @@ def _agent_request_failure_row(exc: BaseException) -> Dict[str, Any]:
         delivery = "possible"
     body = getattr(exc, "response_content", None)
     return {
-        NG_FAILURE_CLASS_KEY: AGENT_REQUEST_FAILED_FAILURE_CLASS,
+        NG_FAILURE_CLASS_KEY: (
+            AGENT_RUN_ERROR_FAILURE_CLASS if delivery == "received" else AGENT_REQUEST_FAILED_FAILURE_CLASS
+        ),
         "_ng_failure_type": type(exc).__name__,
         "_ng_failure_message": str(exc) or repr(exc),
         "_ng_failure_http_status": exc.status if isinstance(exc, ClientResponseError) else None,
@@ -677,10 +686,11 @@ def _failure_rows_counted_as_zero(
 ) -> List[Dict[str, Any]]:
     """Sidecar rows the caller opted to count in the metrics denominator.
 
-    Opting in counts a zero the agent itself scored. A row without a ``reward`` is rejected
-    rather than filled in: it records that no rollout happened, and inventing a score for it is
-    what routing failures out of the main jsonl exists to prevent. One row per rollout, and never
-    for a rollout that also succeeded on a later attempt.
+    A row that already carries a ``reward`` is counted as it stands. A row that carries none
+    records that no rollout happened, so it is counted as a zero here and only here: the score
+    enters the metric input, never the sidecar or the rollouts jsonl, which keeps the artifacts
+    free of a verdict no verifier gave. One row per rollout, and never for a rollout that also
+    succeeded on a later attempt.
     """
     if not failure_classes:
         return []
@@ -699,15 +709,9 @@ def _failure_rows_counted_as_zero(
                 failure_class = row.get(NG_FAILURE_CLASS_KEY)
                 if failure_class not in wanted:
                     continue
-                if "reward" not in row:
-                    raise ConfigError(
-                        f"count_failure_classes_as_zero lists {failure_class!r}, but {fpath} line {line_no} "
-                        "carries no reward: this failure means no rollout happened, so there is no score "
-                        "to count. Remove the class, or fix the agent to score the rollout it did produce."
-                    )
                 key = (row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME))
                 if key not in scored_keys:
-                    rows_by_key.setdefault(key, row)
+                    rows_by_key.setdefault(key, row if "reward" in row else {**row, "reward": 0.0})
     return list(rows_by_key.values())
 
 
@@ -1160,7 +1164,7 @@ class RolloutCollectionHelper(BaseModel):
             no_persist = bool(result.get(NG_NO_PERSIST_KEY))
             failure_class = result.get(NG_FAILURE_CLASS_KEY)
             # No rollout happened, so there is nothing to capture, tokenize or average.
-            no_result = failure_class == AGENT_REQUEST_FAILED_FAILURE_CLASS
+            no_result = failure_class in _NO_RESULT_FAILURE_CLASSES
 
             # Fold this rollout's captured model calls into its record (uniform across agents; no-op
             # when capture is off). Never alters the harness output/reward already in `result`.

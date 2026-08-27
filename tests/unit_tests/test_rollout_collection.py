@@ -45,6 +45,7 @@ from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.rollout_collection import (
     _DEFAULT_MAX_ROLLOUT_ATTEMPTS,
     AGENT_REQUEST_FAILED_FAILURE_CLASS,
+    AGENT_RUN_ERROR_FAILURE_CLASS,
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
     NG_TERMINAL_KEY,
@@ -468,7 +469,7 @@ class TestRolloutCollection:
         )
 
         assert returned_row is row
-        assert result[NG_FAILURE_CLASS_KEY] == AGENT_REQUEST_FAILED_FAILURE_CLASS
+        assert result[NG_FAILURE_CLASS_KEY] == AGENT_RUN_ERROR_FAILURE_CLASS
         assert result["_ng_failure_type"] == "ClientResponseError"
         assert result["_ng_failure_http_status"] == 500
         assert result["_ng_failure_response_body"] == '{"detail": "unhandled tool-call json"}'
@@ -513,7 +514,10 @@ class TestRolloutCollection:
 
         _, result = await next(RolloutCollectionHelper().run_examples([failing_row()], route_failures_to_sidecar=True))
 
-        assert result[NG_FAILURE_CLASS_KEY] == AGENT_REQUEST_FAILED_FAILURE_CLASS
+        expected_class = (
+            AGENT_RUN_ERROR_FAILURE_CLASS if delivery == "received" else AGENT_REQUEST_FAILED_FAILURE_CLASS
+        )
+        assert result[NG_FAILURE_CLASS_KEY] == expected_class
         assert result["_ng_failure_type"] == type(error).__name__
         assert result["_ng_failure_http_status"] is None
         assert result["_ng_failure_delivery"] == delivery
@@ -589,7 +593,7 @@ class TestRolloutCollection:
 
         failures = [orjson.loads(line) for line in _failures_path_for(output_jsonl_fpath).read_bytes().splitlines()]
         assert len(failures) == 1
-        assert failures[0][NG_FAILURE_CLASS_KEY] == AGENT_REQUEST_FAILED_FAILURE_CLASS
+        assert failures[0][NG_FAILURE_CLASS_KEY] == AGENT_RUN_ERROR_FAILURE_CLASS
         assert failures[0][TASK_INDEX_KEY_NAME] == 0
         assert failures[0][ROLLOUT_INDEX_KEY_NAME] == 0
         assert failures[0][AGENT_REF_KEY_NAME] == {"name": "my_agent"}
@@ -682,7 +686,11 @@ class TestRolloutCollection:
                         "reward": 0.0,
                         NG_FAILURE_CLASS_KEY: "verify_failed",
                     },
-                    {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "judge_failed"},
+                    {
+                        TASK_INDEX_KEY_NAME: 2,
+                        ROLLOUT_INDEX_KEY_NAME: 0,
+                        NG_FAILURE_CLASS_KEY: AGENT_RUN_ERROR_FAILURE_CLASS,
+                    },
                 ]
             )
             + b"\n"
@@ -694,8 +702,11 @@ class TestRolloutCollection:
 
         assert _failure_rows_counted_as_zero([failures_fpath], [], set()) == []
 
-        with pytest.raises(ConfigError, match="no rollout happened"):
-            _failure_rows_counted_as_zero([failures_fpath], ["judge_failed"], set())
+        # A row with no reward is scored zero here and only here: the sidecar keeps no verdict.
+        scoreless = _failure_rows_counted_as_zero([failures_fpath], [AGENT_RUN_ERROR_FAILURE_CLASS], set())
+        assert [row["reward"] for row in scoreless] == [0.0]
+        sidecar = [orjson.loads(line) for line in failures_fpath.read_bytes().splitlines()]
+        assert "reward" not in sidecar[-1]
 
     @pytest.mark.parametrize(
         ("counted_classes", "expected_scored", "expected_mean"),
