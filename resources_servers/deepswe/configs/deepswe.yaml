@@ -9,7 +9,7 @@ deepswe_resources_server:
       expected_task_count: 113
       is_verifying_golden_patch: false
       task_cpu_multiplier: 2.0
-      task_memory_multiplier: 2.0
+      task_memory_multiplier: 4.0
 
       sandbox_provider: sandbox
       enforce_agent_no_network: true

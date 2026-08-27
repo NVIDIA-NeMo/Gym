@@ -245,12 +245,27 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 "deepswe-task": current_task_id[:63],
                 "deepswe-phase": phase,
                 "nemo_gym_agent": self.config.name or "deepswe",
+                "nemo.nvidia.com/resources": "custom"
             },
             resources=SandboxResources.from_mapping(resources),
             provider_options=self._provider_options(phase=phase),
         )
         sandbox = AsyncSandbox(provider)
         await sandbox.start(spec)
+        if phase == "agent":
+            # The task images carry no git user identity in this sandbox's exec
+            # environment, so every `git commit` fails with "Author identity
+            # unknown". DeepSWE v1.1 grades only committed work, so without
+            # this the strict score collapses for any model that does not
+            # self-recover by running `git config` (measured: Nemotron Super
+            # 0% -> 3.5% resolved from this fix alone; Kimi K3 self-recovered
+            # in 105/105 affected rollouts).
+            await sandbox.exec(
+                'git config --global user.email "agent@nemo-gym.local"'
+                ' && git config --global user.name "NeMo Gym Agent"'
+                " && git config --global --add safe.directory /app || true",
+                timeout_s=120,
+            )
         return sandbox
 
     async def _stop_sandbox(self, sandbox: AsyncSandbox, *, task_id: str, phase: str) -> None:
