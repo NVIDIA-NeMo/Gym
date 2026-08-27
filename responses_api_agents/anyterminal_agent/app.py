@@ -118,8 +118,13 @@ def update_metrics(metrics_fpath: Path, update_dict: Dict[str, Any]) -> None:
     metrics_fpath.write_text(json.dumps(existing | update))
 
 
+# A dead process (killed -9, OOM, node loss) can leave a .lockdir behind forever, wedging every
+# future waiter. 2h comfortably exceeds any real deps-setup run, so a lock that old is presumed dead.
+_AGENT_DEPS_LOCK_STALE_AFTER_SECONDS = 7200  # 2 hours
+
+
 @contextmanager
-def _file_lock(file_path: Path, label: str, max_wait: float = 3600.0, poll_interval: float = 5.0):
+def _file_lock(file_path: Path, label: str, max_wait: float = 7200.0, poll_interval: float = 5.0):
     """Cross-node lock using mkdir, which is atomic on Lustre/NFS."""
     lock_dir = file_path.parent
     lock_dir.mkdir(parents=True, exist_ok=True)
@@ -135,6 +140,14 @@ def _file_lock(file_path: Path, label: str, max_wait: float = 3600.0, poll_inter
             try:
                 lock_age = time.time() - lock_path.stat().st_mtime
             except FileNotFoundError:
+                continue
+            if lock_age >= _AGENT_DEPS_LOCK_STALE_AFTER_SECONDS:
+                try:
+                    if time.time() - lock_path.stat().st_mtime >= _AGENT_DEPS_LOCK_STALE_AFTER_SECONDS:
+                        print(f"  Reclaiming stale {label} lock at {lock_path} (age {lock_age:.0f}s)", flush=True)
+                        shutil.rmtree(lock_path, ignore_errors=True)
+                except FileNotFoundError:
+                    pass
                 continue
             if waited >= max_wait:
                 raise TimeoutError(

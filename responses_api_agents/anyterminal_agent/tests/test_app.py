@@ -22,7 +22,9 @@ constructing the agent.
 
 import hashlib
 import json
+import os
 import shutil
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, PropertyMock, patch
@@ -34,6 +36,7 @@ from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox.providers.apptainer import ApptainerProvider
 from nemo_gym.sandbox.providers.apptainer import provider as apptainer_provider
 from nemo_gym.sandbox.providers.docker import DockerProvider
+from responses_api_agents.anyterminal_agent import app
 from responses_api_agents.anyterminal_agent.app import (
     _RUNNER_TEMPLATE,
     AnyTerminalAgent,
@@ -537,6 +540,29 @@ class TestHarnessProcessorSetup:
         setup_dir = tmp_path / "target"
         lock_path = setup_dir.parent / f".{setup_dir.name}.lockdir"
         lock_path.mkdir()
+
+        with pytest.raises(TimeoutError):
+            with _file_lock(setup_dir, "test", max_wait=0, poll_interval=0):
+                pass
+
+        assert lock_path.exists()
+
+    def test_stale_lock_is_reclaimed(self, tmp_path: Path) -> None:
+        setup_dir = tmp_path / "target"
+        lock_path = setup_dir.parent / f".{setup_dir.name}.lockdir"
+        lock_path.mkdir(parents=True)
+        old = time.time() - app._AGENT_DEPS_LOCK_STALE_AFTER_SECONDS - 1
+        os.utime(lock_path, (old, old))
+
+        with _file_lock(setup_dir, "test", max_wait=1, poll_interval=0):
+            assert lock_path.exists()  # reacquired fresh by us, not the stale one
+
+        assert not lock_path.exists()
+
+    def test_fresh_lock_is_not_reclaimed(self, tmp_path: Path) -> None:
+        setup_dir = tmp_path / "target"
+        lock_path = setup_dir.parent / f".{setup_dir.name}.lockdir"
+        lock_path.mkdir(parents=True)
 
         with pytest.raises(TimeoutError):
             with _file_lock(setup_dir, "test", max_wait=0, poll_interval=0):
