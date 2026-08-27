@@ -265,10 +265,22 @@ class TestEvalRunFlags:
 
 
 class TestEnvTestResourceServerFlag:
-    def test_no_resource_server_runs_all(self, monkeypatch: MonkeyPatch) -> None:
-        target, overrides = _dispatch_for(monkeypatch, ["env", "test"])
+    def test_no_target_refuses_instead_of_testing_every_server(self, monkeypatch: MonkeyPatch) -> None:
+        with pytest.raises(SystemExit) as exc_info:
+            _dispatch_for(monkeypatch, ["env", "test"])
+        assert exc_info.value.code == 2
+
+    def test_all_flag_runs_every_server(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(monkeypatch, ["env", "test", "--all"])
         assert target == "nemo_gym.cli.env:test_all"
         assert overrides == []
+
+    @pytest.mark.parametrize("argv", [["--all", "--resources-server", "gpqa"], ["--all", "gpqa"]])
+    def test_all_flag_conflicts_with_a_named_target(self, monkeypatch: MonkeyPatch, capsys, argv) -> None:
+        with pytest.raises(SystemExit) as exc_info:
+            _dispatch_for(monkeypatch, ["env", "test", *argv])
+        assert exc_info.value.code == 2
+        assert "cannot be combined with a named target" in capsys.readouterr().err
 
     def test_resource_server_name_translates_to_entrypoint(self, monkeypatch: MonkeyPatch) -> None:
         target, overrides = _dispatch_for(monkeypatch, ["env", "test", "--resources-server", "gpqa"])
