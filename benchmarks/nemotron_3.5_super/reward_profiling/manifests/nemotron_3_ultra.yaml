@@ -383,7 +383,7 @@ entries:
       - resources_servers/ns_tools/configs/ns_tools.yaml
       - resources_servers/math_with_judge/configs/math_with_judge.yaml
     data: /lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/data_gym/ultra_v3_sets/260501_ultra_v3_set/math_tir/math_tir_260501.jsonl
-    owner: ???
+    owner: igitman
 
   - label: stem_mcqa_tools_ultra_0
     agent: ns_tools_simple_agent
