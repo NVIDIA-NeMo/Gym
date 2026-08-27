@@ -69,6 +69,15 @@ class CaptureAdapter(Protocol):
         ...
 
 
+@runtime_checkable
+class DeferredCaptureAdapter(CaptureAdapter, Protocol):
+    """Extract capture material whose weight version lives in a deferred ledger."""
+
+    def extract_weight_version(self, response_payload: dict[str, Any]) -> int:
+        """Return the policy version that produced the deferred call."""
+        ...
+
+
 def install_capture(
     serving_layer: Any,
     *,

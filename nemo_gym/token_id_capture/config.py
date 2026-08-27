@@ -83,6 +83,7 @@ from nemo_gym.token_id_capture.protocols import (
 logger = logging.getLogger(__name__)
 
 TOKEN_ID_CAPTURE_BLOCK = "token_id_capture"
+ExternalStagingBackend = Literal["vllm_worker", "megatron_ledger"]
 
 
 class TokenIdCaptureSettings(BaseModel):
@@ -116,10 +117,10 @@ class TokenIdCaptureSettings(BaseModel):
     # per-rollout capture ledger. Serving workers coordinate only through
     # that store — there is no separate gate state.
     external_staging: bool = False
-    # ``worker`` is the existing vLLM path: the serving worker stages before
-    # returning. ``megatron_ledger`` records a request UID now and lets the
-    # framework batch-stage from MInf's in-memory ledger at rollout end.
-    external_staging_backend: Literal["worker", "megatron_ledger"] = "worker"
+    # ``vllm_worker`` stages inside the vLLM serving worker before returning.
+    # ``megatron_ledger`` records a request UID now and lets the framework
+    # batch-stage from MInf's in-memory ledger at rollout end.
+    external_staging_backend: ExternalStagingBackend = "vllm_worker"
     # Store only the environment variable name in config/telemetry. The
     # manifest-route bearer itself is resolved inside the serving process.
     control_auth_token_env: str = Field(
@@ -157,7 +158,7 @@ class TokenIdCaptureConfig(BaseModel):
                 "token_id_capture.external_staging requires rebuild_response=false because the "
                 "framework owns staged-record finalization"
             )
-        if block.external_staging_backend != "worker" and not block.external_staging:
+        if block.external_staging_backend != "vllm_worker" and not block.external_staging:
             raise ValueError("token_id_capture.external_staging_backend requires external_staging=true")
         if not block.enabled:
             # Keep inactive settings for templated configurations.

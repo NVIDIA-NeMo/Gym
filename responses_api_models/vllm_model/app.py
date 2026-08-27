@@ -54,24 +54,13 @@ from nemo_gym.responses_converter import (
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 from nemo_gym.token_id_capture import (
-    NG_CAPTURE_FIELD,
-    NG_COMMIT_COORDS_FIELD,
     current_capture_context,
-    mark_external_ledger_capture_recorded,
-    mark_external_staging_committed,
 )
-from nemo_gym.token_id_capture.adapters.megatron import MegatronCaptureAdapter
 from nemo_gym.token_id_capture.config import token_id_capture_config
-from nemo_gym.token_id_capture.lineage import (
-    LINEAGE_FINGERPRINT_VERSION,
-    assistant_fingerprint,
+from nemo_gym.token_id_capture.external_capture import (
+    ExternalCaptureHandler,
+    make_external_capture_handler,
 )
-from nemo_gym.token_id_capture.records import (
-    TOKEN_FIELDS,
-    response_to_output_items,
-    strip_token_fields,
-)
-from nemo_gym.token_id_capture.staging.records import CommitCoords
 
 
 LOG = logging.getLogger("nemo_gym.vllm_model")
@@ -278,9 +267,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         "mm_processor_kwargs",
         "required_prefix_token_ids",
     )
-    _external_capture_enabled: bool = PrivateAttr(default=False)
-    _external_capture_backend: str = PrivateAttr(default="worker")
-    _megatron_capture_adapter: MegatronCaptureAdapter = PrivateAttr(default_factory=MegatronCaptureAdapter)
+    _external_capture_handler: ExternalCaptureHandler | None = PrivateAttr(default=None)
 
     def get_converter(self) -> "VLLMConverter":
         """Return the converter used for Responses API <-> Chat Completions mapping.
@@ -320,12 +307,8 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         global_config = getattr(self.server_client, "global_config_dict", None)
         capture_config = token_id_capture_config(global_config) if global_config is not None else None
-        self._external_capture_enabled = bool(
-            capture_config is not None and capture_config.token_id_capture.external_staging
-        )
-        if capture_config is not None:
-            self._external_capture_backend = capture_config.token_id_capture.external_staging_backend
-        if self._external_capture_enabled:
+        self._external_capture_handler = None
+        if capture_config is not None and capture_config.token_id_capture.external_staging:
             if self.config.use_completions_api:
                 raise ValueError("token_id_capture.external_staging does not support use_completions_api=true")
             if self.config.is_responses_native:
@@ -335,6 +318,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                     "token_id_capture.external_staging requires return_token_id_information=false; "
                     "worker custody replaces the token echo"
                 )
+            self._external_capture_handler = make_external_capture_handler(
+                capture_config.token_id_capture.external_staging_backend
+            )
 
         self._chat_template_tokenizer = None
         if self.config.use_completions_api and self.config.render_chat_template:
@@ -661,43 +647,11 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         self._apply_sampling_overrides(body_dict)
         self._validate_single_choice_token_request(body_dict)
-        if self._external_capture_enabled:
-            body_dict = self._apply_external_capture(body_dict)
+        if self._external_capture_handler is not None:
+            body_dict = self._external_capture_handler.prepare_request(body_dict)
         else:
             body_dict = self._apply_prefix_supply(body_dict)
 
-        return body_dict
-
-    def _apply_external_capture(self, body_dict: Dict[str, Any]) -> Dict[str, Any]:
-        """Attach the typed admission to this worker-bound chat request.
-
-        An unadmitted call (``UNRESOLVED`` — already poisoned in the ledger)
-        is forwarded as plain traffic: the worker stages nothing and the
-        completion still serves the agent.
-        """
-        context = current_capture_context()
-        if context is None or not context.external_staging:
-            return body_dict
-        admission = context.capture_admission
-        if admission is None:
-            return body_dict
-        if self._external_capture_backend == "megatron_ledger":
-            body_dict.update(
-                logprobs=True,
-                top_logprobs=0,
-                return_tokenized_data=True,
-            )
-            if admission.mode == "token_in":
-                self._megatron_capture_adapter.enter_prefix(body_dict, list(admission.required_prefix_token_ids))
-            return body_dict
-        body_dict[NG_CAPTURE_FIELD] = admission.model_dump(mode="json")
-        body_dict.update(
-            logprobs=True,
-            top_logprobs=0,
-            return_tokens_as_token_ids=True,
-        )
-        if admission.mode == "token_in":
-            body_dict["required_prefix_token_ids"] = list(admission.required_prefix_token_ids)
         return body_dict
 
     # The lock protects the ``[proven, configured]`` diagnostic counts.
@@ -905,8 +859,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                 f"NeMo Gym server `{self.config.name}` config has explicitly been set to not use a reasoning parser i.e. `uses_reasoning_parser: false`. Please do not use a reasoning parser in your vLLM endpoint, or fix the `{self.config.name}` server config!"
             )
 
-        if self._external_capture_enabled:
-            await self._finalize_external_capture(chat_completion_dict)
+        if self._external_capture_handler is not None:
+            await self._external_capture_handler.finalize_response(chat_completion_dict)
 
         if self.config.return_token_id_information:
             message_dict = choice_dict["message"]
@@ -973,198 +927,6 @@ class VLLMModel(SimpleResponsesAPIModel):
             choice_dict["message"] = NeMoGymChatCompletionMessageForTraining.model_validate(message_dict)
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
-
-    async def _finalize_external_capture(self, payload: Dict[str, Any]) -> None:
-        """Publish the worker's coordinates as a ledger row, then strip custody fields.
-
-        The ordering invariant the external sink requires — a call must not
-        become a lineage parent until its staged record is durable — holds
-        structurally: the worker stages before acknowledging, so the ledger
-        row (which is what makes the call resolvable) is written only after
-        the coordinates arrive.
-        """
-        if self._external_capture_backend == "megatron_ledger":
-            await self._finalize_megatron_ledger_capture(payload)
-            return
-        context = current_capture_context()
-        if context is None or not context.external_staging or context.lineage_store is None:
-            return
-        coords_payload = payload.pop(NG_COMMIT_COORDS_FIELD, None)
-        admission = context.capture_admission
-        if admission is None:
-            # UNRESOLVED — the ledger already carries this call's poison row.
-            self._strip_capture_transport_fields(payload)
-            return
-        try:
-            if coords_payload is None:
-                await context.lineage_store.record_failure(
-                    context.rollout_id,
-                    context.model_call_id,
-                    "worker_response_missing_commit_coordinates",
-                )
-                return
-            coords = CommitCoords.model_validate(coords_payload)
-            if coords.rollout_id != context.rollout_id or coords.model_call_id != context.model_call_id:
-                raise ValueError(
-                    f"coordinates for {coords.rollout_id}/{coords.model_call_id} do not match the "
-                    f"active capture context {context.rollout_id}/{context.model_call_id}"
-                )
-            if coords.disposition == "capture_failed":
-                await context.lineage_store.record_failure(
-                    context.rollout_id,
-                    context.model_call_id,
-                    "worker_capture_failed",
-                )
-                return
-            if coords.parent_call_id != admission.parent_call_id or coords.prev_len != admission.prev_len:
-                raise ValueError(f"coordinates for {coords.model_call_id} diverge from admission")
-            # The served envelope id is the terminal-attribution join key: the
-            # agent proves which response it kept by possessing it. Observe the
-            # payload's own id; never mint one. A served completion without an
-            # id is a stamping bug and fails closed (poisons the call below).
-            response_id = str(payload.get("id") or "")
-            if not response_id:
-                raise ValueError(f"served response for {coords.model_call_id} carries no envelope id")
-            child_staging_chain = list(context.parent_staging_chain) + [str(coords.staging_key)]
-            response_items, _ = strip_token_fields(response_to_output_items(payload))
-            # Content-witness keys, hashed while the response is still
-            # server-side: this call's own output, and request + output (the
-            # cumulative reading). Unfingerprintable content abstains (None)
-            # rather than poisoning a valid completion.
-            try:
-                output_fingerprint = assistant_fingerprint(list(response_items)) or None
-                continuation_fingerprint = (
-                    assistant_fingerprint(list(context.request_items or []) + list(response_items)) or None
-                )
-            except (TypeError, ValueError):
-                output_fingerprint = None
-                continuation_fingerprint = None
-            # Custody rows are token-free: the worker's chained ``chain_hash``
-            # replaces the cumulative token array, and its whole-sequence
-            # ``cumulative_hash`` becomes the row digest. Finalization
-            # re-verifies both against the staged deltas in TQ.
-            await context.lineage_store.record(
-                context.rollout_id,
-                context.model_call_id,
-                list(context.request_items or []),
-                response_items,
-                [],
-                coords.cumulative_hash or "",
-                parent_call_id=coords.parent_call_id,
-                staging_key=coords.staging_key,
-                weight_version=coords.weight_version,
-                prev_len=coords.prev_len,
-                delta_len=coords.delta_len,
-                cum_len=coords.cum_len,
-                staging_digest=coords.digest,
-                extras_digest=coords.extras_digest,
-                mode=admission.mode,
-                logical_request_id=context.logical_request_id,
-                admitted_at=context.admitted_at,
-                staging_chain=child_staging_chain,
-                chain_hash=coords.chain_hash,
-                cumulative_hash=coords.cumulative_hash,
-                response_id=response_id,
-                output_fingerprint=output_fingerprint,
-                continuation_fingerprint=continuation_fingerprint,
-                fingerprint_version=LINEAGE_FINGERPRINT_VERSION,
-            )
-            mark_external_staging_committed(
-                rollout_id=coords.rollout_id,
-                model_call_id=coords.model_call_id,
-            )
-        except Exception:
-            # Worker/framework payloads are an external integrity boundary.
-            # Poison capture without turning a valid model completion into a
-            # harness failure.
-            LOG.exception(
-                "Worker capture acknowledgement failed for rollout %s call %s",
-                context.rollout_id,
-                context.model_call_id,
-            )
-            try:
-                await context.lineage_store.record_failure(
-                    context.rollout_id,
-                    context.model_call_id,
-                    "invalid_worker_commit_coordinates",
-                )
-            except Exception:
-                LOG.exception(
-                    "Could not poison rollout %s call %s after a failed acknowledgement",
-                    context.rollout_id,
-                    context.model_call_id,
-                )
-        finally:
-            self._strip_capture_transport_fields(payload)
-
-    async def _finalize_megatron_ledger_capture(self, payload: Dict[str, Any]) -> None:
-        """Record an MInf request UID and exact lineage for rollout-end staging."""
-        context = current_capture_context()
-        if context is None or not context.external_staging or context.lineage_store is None:
-            return
-        admission = context.capture_admission
-        if admission is None:
-            self._strip_capture_transport_fields(payload)
-            return
-        try:
-            pending = self._megatron_capture_adapter.pending_capture(payload, admission)
-            response_items, _ = strip_token_fields(response_to_output_items(payload))
-            cumulative = list(pending.cumulative_token_ids)
-            await context.lineage_store.record(
-                context.rollout_id,
-                context.model_call_id,
-                list(context.request_items or []),
-                response_items,
-                cumulative,
-                compute_digest(cumulative),
-                parent_call_id=admission.parent_call_id,
-                prev_len=admission.prev_len,
-                delta_len=pending.delta_len,
-                cum_len=pending.cum_len,
-                mode=admission.mode,
-                logical_request_id=context.logical_request_id or (str(payload["id"]) if payload.get("id") else None),
-                admitted_at=context.admitted_at,
-                ledger_request_uid=pending.request_uid,
-            )
-            mark_external_ledger_capture_recorded(
-                rollout_id=context.rollout_id,
-                model_call_id=context.model_call_id,
-            )
-        except Exception:
-            LOG.exception(
-                "Megatron ledger capture failed for rollout %s call %s",
-                context.rollout_id,
-                context.model_call_id,
-            )
-            try:
-                await context.lineage_store.record_failure(
-                    context.rollout_id,
-                    context.model_call_id,
-                    "invalid_megatron_ledger_reference",
-                )
-            except Exception:
-                LOG.exception(
-                    "Could not poison rollout %s call %s after a failed MInf reference",
-                    context.rollout_id,
-                    context.model_call_id,
-                )
-        finally:
-            self._strip_capture_transport_fields(payload)
-
-    @staticmethod
-    def _strip_capture_transport_fields(payload: Dict[str, Any]) -> None:
-        """Keep token IDs, logprobs, routes, and coordinates off the agent hop."""
-        payload.pop(NG_COMMIT_COORDS_FIELD, None)
-        payload.pop("prompt_token_ids", None)
-        for choice in payload.get("choices") or []:
-            if not isinstance(choice, dict):
-                continue
-            choice.pop("logprobs", None)
-            choice.pop("token_ids", None)
-            message = choice.get("message")
-            if isinstance(message, dict):
-                for field_name in TOKEN_FIELDS:
-                    message.pop(field_name, None)
 
     @staticmethod
     def _require_token_id_list(value: Any, field_name: str) -> List[Any]:

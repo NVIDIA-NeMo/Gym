@@ -120,6 +120,38 @@ class CaptureLedger(LineageStore, Protocol):
     token-free through ``manifest``.
     """
 
+    async def record(
+        self,
+        rollout_id: str,
+        model_call_id: str,
+        request_items: list[dict],
+        response_items: list[dict],
+        cumulative_token_ids: list[int],
+        digest: str,
+        *,
+        parent_call_id: str | None = None,
+        staging_key: str | None = None,
+        weight_version: int | None = None,
+        prev_len: int | None = None,
+        delta_len: int | None = None,
+        cum_len: int | None = None,
+        staging_digest: str | None = None,
+        extras_digest: str | None = None,
+        mode: str | None = None,
+        logical_request_id: str | None = None,
+        admitted_at: float | None = None,
+        staging_chain: list[str] | None = None,
+        chain_hash: str | None = None,
+        cumulative_hash: str | None = None,
+        response_id: str | None = None,
+        output_fingerprint: str | None = None,
+        continuation_fingerprint: str | None = None,
+        fingerprint_version: int = 0,
+        ledger_request_uid: str | None = None,
+    ) -> None:
+        """Publish lineage with staged-custody or deferred-ledger columns."""
+        ...
+
     async def record_failure(self, rollout_id: str, model_call_id: str, reason: str) -> None:
         """Append a poison row for a call whose capture did not commit.
 
