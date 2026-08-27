@@ -24,6 +24,7 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxPtySession, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import SESSION_ID_KEY
 
 
@@ -115,12 +116,19 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         provider_default_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
         resources = dict(self.config.sandbox_config.get("resources", {}))
 
+        # Derive from the final resources map (after the multilingual bump);
+        # explicit sandbox_config.env keys win over the derived caps.
+        sandbox_resources = SandboxResources.from_mapping(resources)
+        env = dict(self.config.sandbox_config.get("env", {}))
+        if self.config.sandbox_config.get("derive_cpu_env", True):
+            env = cpu_cap_env(sandbox_resources.cpu) | env
+
         eval_sandbox_spec = SandboxSpec(
             image=verify_request.docker_image,
             ttl_s=self.config.sandbox_config.get("ttl_s", None),
             ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s", None),
             workdir=None,  # Default to container's WORKDIR
-            env=self.config.sandbox_config.get("env", {}),
+            env=env,
             files=dict(),
             metadata=provider_default_metadata
             | self.config.sandbox_config.get("metadata", {})
