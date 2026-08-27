@@ -163,12 +163,11 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         for old, new in GOLDEN_PATCH_SOLVE_SH_PATCHES[task_name]:
             content = content.replace(old, new)
 
-        temp_file = NamedTemporaryFile(mode="w+", suffix=".sh", delete_on_close=False)
-        temp_file.write(content)
+        with NamedTemporaryFile(mode="w+", suffix=".sh", delete_on_close=False) as temp_file:
+            temp_file.write(content)
+            temp_file.flush()
 
-        yield temp_file.name
-
-        temp_file.close()
+            yield temp_file.name
 
     async def _upload_folder(
         self, sandbox: AsyncSandbox, local_dirpath: Path, target_dirpath: str, task_name: Optional[str] = None
