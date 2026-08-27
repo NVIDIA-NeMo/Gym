@@ -47,7 +47,6 @@ from nemo_gym.rollout_collection import (
     AGENT_REQUEST_FAILED_FAILURE_CLASS,
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
-    NG_NO_RESULT_KEY,
     NG_TERMINAL_KEY,
     E2ERolloutCollectionConfig,
     RolloutAggregationConfig,
@@ -469,7 +468,6 @@ class TestRolloutCollection:
 
         assert returned_row is row
         assert result[NG_FAILURE_CLASS_KEY] == AGENT_REQUEST_FAILED_FAILURE_CLASS
-        assert result[NG_NO_RESULT_KEY] is True
         assert result["_ng_failure_type"] == "ClientResponseError"
         assert result["_ng_failure_http_status"] == 500
         assert result["_ng_failure_response_body"] == '{"detail": "unhandled tool-call json"}'
@@ -492,45 +490,33 @@ class TestRolloutCollection:
         assert result["_ng_failure_http_status"] == status
         assert post.await_count == 1
 
-    async def test_run_examples_records_connection_failure_as_a_failure_row(
-        self, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(
+        ("error", "delivery"),
+        [
+            (ClientConnectorError(MagicMock(), OSError("connection refused")), "not_delivered"),
+            (ServerDisconnectedError(), "possible"),
+            (orjson.JSONDecodeError("unexpected end of data", "", 0), "received"),
+        ],
+        ids=["connection refused", "dropped mid-flight", "unreadable body"],
+    )
+    async def test_run_examples_records_delivery_state(
+        self, monkeypatch: pytest.MonkeyPatch, error: BaseException, delivery: str
     ) -> None:
-        """The POST itself is inside the try: a dead server yields a row, not a dead run."""
-        post = AsyncMock(side_effect=ClientConnectorError(MagicMock(), OSError("connection refused")))
+        """The POST is inside the try, and what the agent may already have run is recorded.
+
+        `possible` is the case that forbids resending: the connection was up, so the agent may
+        already have called models, tools or sandboxes.
+        """
+        post = AsyncMock(side_effect=error)
         install_fake_server_client(monkeypatch, post)
 
         _, result = await next(RolloutCollectionHelper().run_examples([failing_row()], route_failures_to_sidecar=True))
 
         assert result[NG_FAILURE_CLASS_KEY] == AGENT_REQUEST_FAILED_FAILURE_CLASS
-        assert result["_ng_failure_type"] == "ClientConnectorError"
+        assert result["_ng_failure_type"] == type(error).__name__
         assert result["_ng_failure_http_status"] is None
-        assert result["_ng_failure_delivery"] == "not_delivered"
-
-    async def test_run_examples_never_replays_a_possibly_delivered_post(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A dropped connection may follow model, tool and sandbox side effects: do not resend."""
-        post = AsyncMock(side_effect=ServerDisconnectedError())
-        install_fake_server_client(monkeypatch, post)
-
-        _, result = await next(RolloutCollectionHelper().run_examples([failing_row()], route_failures_to_sidecar=True))
-
-        assert result["_ng_failure_delivery"] == "possible"
+        assert result["_ng_failure_delivery"] == delivery
         assert post.await_count == 1
-
-    async def test_run_examples_records_unreadable_response_as_a_failure_row(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        post = AsyncMock(return_value=FakeResponse(200))
-        install_fake_server_client(monkeypatch, post)
-
-        async def get_response_json(_response):
-            raise orjson.JSONDecodeError("unexpected end of data", "", 0)
-
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", get_response_json)
-
-        _, result = await next(RolloutCollectionHelper().run_examples([failing_row()], route_failures_to_sidecar=True))
-
-        assert result["_ng_failure_type"] == "JSONDecodeError"
-        assert result["_ng_failure_delivery"] == "received"
 
     async def test_run_examples_raises_for_direct_callers(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Library callers (NeMo-RL) keep the exception contract they have today."""
@@ -641,7 +627,6 @@ class TestRolloutCollection:
                     ROLLOUT_INDEX_KEY_NAME: 0,
                     AGENT_REF_KEY_NAME: {"name": "my_agent"},
                     NG_FAILURE_CLASS_KEY: AGENT_REQUEST_FAILED_FAILURE_CLASS,
-                    NG_NO_RESULT_KEY: True,
                 }
             )
             + b"\n"

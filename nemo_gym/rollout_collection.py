@@ -120,9 +120,8 @@ logger = logging.getLogger(__name__)
 # New contract:
 #   - Successes go to the main jsonl (``output_jsonl_fpath``).
 #   - Failures go to a sidecar (``<output_stem>_failures.jsonl``), one row
-#     per attempt, with ``_ng_failure_class`` set. Rows that carry no result
-#     at all (a `/run` call that never returned one) also set
-#     ``_ng_failure_no_result`` and hold no reward or response.
+#     per attempt, with ``_ng_failure_class`` set. An ``agent_request_failed``
+#     row holds no reward and no response: there was no rollout.
 #   - ``kill_shaped`` failures (Slurm SIGTERM, Ray actor died, OOM, ...) go
 #     NOWHERE: the absence of a row is the canonical signal. Resume's
 #     set-difference re-dispatches them naturally; per-task timeout bounds
@@ -137,7 +136,6 @@ logger = logging.getLogger(__name__)
 NG_FAILURE_CLASS_KEY = "_ng_failure_class"
 NG_NO_PERSIST_KEY = "_ng_no_persist"
 NG_TERMINAL_KEY = "_ng_failure_terminal"
-NG_NO_RESULT_KEY = "_ng_failure_no_result"
 AGENT_REQUEST_FAILED_FAILURE_CLASS = "agent_request_failed"
 NG_TRAJECTORY_KEY = "ng_trajectory"
 _MODEL_CALL_PAYLOAD_KEYS = ("request", "response", "request_raw", "response_raw")
@@ -637,14 +635,7 @@ def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
 
 # Request failures that are data, not bugs. Anything else still propagates.
 _RUN_FAILURE_ERRORS = (ClientResponseError, ClientError, orjson.JSONDecodeError, TimeoutError)
-_MAX_FAILURE_DETAIL_CHARS = 2000
-
-
-def _truncated_detail(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value)
-    return text[:_MAX_FAILURE_DETAIL_CHARS]
+_MAX_FAILURE_BODY_CHARS = 2000
 
 
 def _agent_request_failure_row(exc: BaseException) -> Dict[str, Any]:
@@ -652,8 +643,8 @@ def _agent_request_failure_row(exc: BaseException) -> Dict[str, Any]:
 
     No reward and no response: an infrastructure failure is not a verifier score of zero, and a
     placeholder would read as real generation data to token capture, aggregation and trainers.
-    ``_ng_failure_delivery`` records whether the agent may already have run, which is what says
-    if the request is safe to send again.
+    ``_ng_failure_delivery`` records whether the agent may already have run, which is the one
+    thing the exception does not say and the only basis for sending the request again.
     """
     if isinstance(exc, ClientConnectorError):
         delivery = "not_delivered"
@@ -661,13 +652,13 @@ def _agent_request_failure_row(exc: BaseException) -> Dict[str, Any]:
         delivery = "received"
     else:
         delivery = "possible"
+    body = getattr(exc, "response_content", None)
     return {
         NG_FAILURE_CLASS_KEY: AGENT_REQUEST_FAILED_FAILURE_CLASS,
-        NG_NO_RESULT_KEY: True,
         "_ng_failure_type": type(exc).__name__,
-        "_ng_failure_message": _truncated_detail(str(exc) or repr(exc)),
+        "_ng_failure_message": str(exc) or repr(exc),
         "_ng_failure_http_status": exc.status if isinstance(exc, ClientResponseError) else None,
-        "_ng_failure_response_body": _truncated_detail(getattr(exc, "response_content", None)),
+        "_ng_failure_response_body": body.decode("utf-8", "replace")[:_MAX_FAILURE_BODY_CHARS] if body else None,
         "_ng_failure_delivery": delivery,
     }
 
@@ -1120,8 +1111,8 @@ class RolloutCollectionHelper(BaseModel):
 
             no_persist = bool(result.get(NG_NO_PERSIST_KEY))
             failure_class = result.get(NG_FAILURE_CLASS_KEY)
-            # A row with no result has nothing to merge, project or tokenize.
-            no_result = bool(result.get(NG_NO_RESULT_KEY))
+            # No rollout happened, so there is nothing to capture, tokenize or average.
+            no_result = failure_class == AGENT_REQUEST_FAILED_FAILURE_CLASS
 
             # Fold this rollout's captured model calls into its record (uniform across agents; no-op
             # when capture is off). Never alters the harness output/reward already in `result`.
@@ -1132,9 +1123,7 @@ class RolloutCollectionHelper(BaseModel):
                     include_payloads=not _has_observation_gap(result, "multimodal_history_redacted"),
                 )
 
-            if not no_result and (
-                "ng_model_call_capture" in result or "ng_agent_observations" in result or NG_TRAJECTORY_KEY in result
-            ):
+            if "ng_model_call_capture" in result or "ng_agent_observations" in result or NG_TRAJECTORY_KEY in result:
                 _attach_trajectory_record(row, result)
 
             # Freeze and rebuild tokens only for participating agents.
@@ -1263,10 +1252,9 @@ class RolloutCollectionHelper(BaseModel):
         failures_file.close()
 
         if failure_counts:
-            by_class = ", ".join(f"{name}={count}" for name, count in sorted(failure_counts.items()))
             print(
                 f"Coverage: {len(persisted_results)} completed, {sum(failure_counts.values())} failed "
-                f"({by_class}) out of {len(input_rows)} dispatched. Failure rows: {failures_fpath}",
+                f"{dict(failure_counts)} out of {len(input_rows)} dispatched. Failure rows: {failures_fpath}",
                 flush=True,
             )
         if owned_token_source is not None:
@@ -1558,24 +1546,16 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
                     await raise_for_status(res)
                     return row, await get_response_json(res)
                 except Exception as e:
+                    if is_global_aiohttp_client_request_debug_enabled():
+                        print(
+                            "[rollout_collection] /run failed "
+                            f"status={getattr(res, 'status', None)} "
+                            f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
+                            flush=True,
+                        )
                     if not route_failures_to_sidecar or not isinstance(e, _RUN_FAILURE_ERRORS):
-                        if is_global_aiohttp_client_request_debug_enabled():
-                            print(
-                                "[rollout_collection] /run failed "
-                                f"status={getattr(res, 'status', None)} "
-                                f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
-                                flush=True,
-                            )
                         raise
-                    failure = _agent_request_failure_row(e)
-                    print(
-                        "[rollout_collection] /run failed, recording a failure row: "
-                        f"type={failure['_ng_failure_type']} status={failure['_ng_failure_http_status']} "
-                        f"delivery={failure['_ng_failure_delivery']} "
-                        f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
-                        flush=True,
-                    )
-                    return row, failure
+                    return row, _agent_request_failure_row(e)
 
         return tqdm.as_completed(
             map(_post_subroutine, examples),
