@@ -11,6 +11,7 @@ from traceback import format_exc
 from typing import Any, ClassVar, Dict, Optional, Tuple
 
 from fastapi import Request
+from pydantic import BaseModel
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import (
@@ -45,10 +46,14 @@ class TerminalBench21SeedSessionResponse(BaseSeedSessionResponse):
     sandbox_handle: str  # @bxyu-nvidia: Just a plain string URI for now for OpenSandbox backend.
 
 
-class TerminalBench21VerifyRequest(BaseVerifyRequest):
+class TerminalBench21SeedSessionRequest(BaseModel):
     task_name: str
     docker_image: str
     task_folder: str
+
+
+class TerminalBench21VerifyRequest(TerminalBench21SeedSessionRequest, BaseVerifyRequest):
+    pass
 
 
 class TerminalBench21VerifyResponse(BaseVerifyResponse):
@@ -126,7 +131,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             }
 
     async def _create_sandbox(
-        self, verify_request: TerminalBench21VerifyRequest
+        self, verify_request: TerminalBench21SeedSessionRequest
     ) -> Tuple[AsyncSandbox, SandboxPtySession]:
         # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
         global_config_dict = get_global_config_dict()
@@ -170,7 +175,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
 
         return eval_sandbox, pty_session
 
-    async def seed_session(self, request: Request, body: TerminalBench21VerifyRequest) -> BaseSeedSessionResponse:
+    async def seed_session(self, request: Request, body: TerminalBench21SeedSessionRequest) -> BaseSeedSessionResponse:
         eval_sandbox, pty_session = await self._create_sandbox(body)
         self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = eval_sandbox, pty_session
 
