@@ -89,6 +89,36 @@ async def test_default_aggregate_metrics() -> None:
     assert result.key_metrics["mean/reward"] == 1.0
 
 
+@pytest.mark.asyncio
+async def test_aggregate_metrics_reports_each_agent() -> None:
+    result = await _orchestrator().aggregate_metrics(
+        AggregateMetricsRequest(
+            verify_responses=[
+                {
+                    "_ng_task_index": 0,
+                    "_ng_rollout_index": 0,
+                    "reward": -2.0,
+                    "agent_rewards": {"player0": -2.0, "player1": 2.0},
+                    "terminated": True,
+                    "truncated": False,
+                },
+                {
+                    "_ng_task_index": 0,
+                    "_ng_rollout_index": 1,
+                    "reward": -1.0,
+                    "agent_rewards": {"player0": -1.0, "player1": 1.0},
+                    "terminated": True,
+                    "truncated": False,
+                },
+            ]
+        )
+    )
+
+    assert result.key_metrics["mean/reward"] == -1.5
+    assert result.per_agent_metrics["player0"].key_metrics["mean/reward"] == -1.5
+    assert result.per_agent_metrics["player1"].key_metrics["mean/reward"] == 1.5
+
+
 def test_focal_agent_must_have_a_server() -> None:
     with pytest.raises(ValidationError, match="focal_agent"):
         AlternatingTurnOrchestratorConfig(

@@ -21,18 +21,25 @@ from time import time
 from typing import Any, Optional
 from uuid import uuid4
 
-from fastapi import Request
+from fastapi import Body, Request
 from pydantic import ConfigDict, Field, PrivateAttr, model_validator
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_rollout_orchestrator import BaseRolloutOrchestratorConfig, SimpleRolloutOrchestrator
-from nemo_gym.config_types import AgentServerRef, ResourcesServerRef
+from nemo_gym.config_types import (
+    AgentServerRef,
+    AggregateMetrics,
+    AggregateMetricScope,
+    AggregateMetricsRequest,
+    ResourcesServerRef,
+)
 from nemo_gym.multi_agent import AgentActResponse, AgentTurn, MultiAgentResetResponse, MultiAgentStepResponse
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
@@ -96,6 +103,36 @@ class AlternatingTurnOrchestrator(SimpleRolloutOrchestrator):
     async def run(self, request: Request, body: AlternatingTurnRunRequest) -> AlternatingTurnRunResponse:
         async with self._episode_lock:
             return await self._run_episode(request, body)
+
+    async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
+        overall = compute_aggregate_metrics(
+            body.verify_responses,
+            compute_metrics_fn=self.compute_metrics,
+            get_key_metrics_fn=self.get_key_metrics,
+        )
+        per_agent_metrics: dict[str, AggregateMetricScope] = {}
+        for agent_id in self.config.agents:
+            agent_responses = []
+            for response in body.verify_responses:
+                rewards = response.get("agent_rewards")
+                if not isinstance(rewards, dict) or agent_id not in rewards:
+                    continue
+                agent_responses.append(response | {"reward": rewards[agent_id]})
+
+            if not agent_responses:
+                continue
+            metrics = compute_aggregate_metrics(
+                agent_responses,
+                compute_metrics_fn=self.compute_metrics,
+                get_key_metrics_fn=self.get_key_metrics,
+            )
+            per_agent_metrics[agent_id] = AggregateMetricScope(
+                group_level_metrics=metrics.group_level_metrics,
+                metrics=metrics.agent_metrics,
+                key_metrics=metrics.key_metrics,
+            )
+
+        return overall.model_copy(update={"per_agent_metrics": per_agent_metrics})
 
     async def _run_episode(self, request: Request, body: AlternatingTurnRunRequest) -> AlternatingTurnRunResponse:
         trajectories: dict[str, list[AgentTurn]] = {agent_id: [] for agent_id in self.config.agents}
