@@ -194,6 +194,29 @@ else:
 PY_REPEATS
 )}
 
+# env.yaml interpolates ${oc.env:VAR} for judge keys and similar. An unset one is not caught until
+# gym env start parses the config inside the container, which costs a full spin-up and every retry
+# before failing -- jobs 6606132/6606139 burned 4 attempts each on a missing NVI_KEY_EVALUATOR.
+# A bare `VAR=value` in .bashrc is the usual cause: it is a shell variable, not an environment one,
+# so sbatch never sees it.
+if [[ -f "$ENV_YAML" ]]; then
+    _missing=$(python - "$ENV_YAML" <<'PY_ENVVARS'
+import os, re, sys
+from pathlib import Path
+text = Path(sys.argv[1]).read_text()
+names = sorted(set(re.findall(r"\$\{oc\.env:([A-Za-z_][A-Za-z0-9_]*)", text)))
+print(" ".join(n for n in names if not os.environ.get(n)))
+PY_ENVVARS
+)
+    if [[ -n "$_missing" ]]; then
+        echo "ERROR: $ENV_YAML interpolates environment variables that are not exported:" >&2
+        for _v in $_missing; do echo "         $_v" >&2; done
+        echo "       Export them before submitting. A bare assignment in .bashrc is not enough --" >&2
+        echo "       it must be 'export VAR=...' for sbatch to pass it into the container." >&2
+        exit 2
+    fi
+fi
+
 # --resume cannot read unexpanded inputs: _load_from_cache keys on (task, rollout) and an
 # unexpanded row has no rollout index, so collection dies with KeyError '_ng_rollout_index' about
 # 90 seconds in (job 6597590). Fail at submit instead.
