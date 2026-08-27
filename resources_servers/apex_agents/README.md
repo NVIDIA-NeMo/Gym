@@ -66,8 +66,15 @@ Archipelago runner, evaluator registry, metrics layer, LiteLLM dependency, exter
 
 Text is extracted locally from common documents, spreadsheets, presentations, PDFs, text files, and application
 SQLite state. Supported deliverables are also rendered for multimodal judging when LibreOffice is available.
+Presentations, spreadsheets, and PDFs are flattened into changed slides, sheets, and pages; PDF visual evidence is
+restricted to the selected changed pages.
+For spreadsheets with uncached formulas, the verifier re-saves the workbook through LibreOffice before extraction;
+workbooks containing charts are rendered to PDF pages and attached with Archipelago-compatible `[CHART_N]` metadata.
+If LibreOffice or Poppler are absent from the outer Gym container, `document_converter_image` defaults to the configured
+`apex_agents_image` and runs those tools from that Apptainer image.
 `judge_model_server`, `judge_model`, and `judge_create_params_overrides` select the LLM-as-judge and its request
-parameters. `apex_judge_context_window_size`, defaulting to `32768`, bounds the artifact text included in each prompt.
+parameters. `apex_judge_context_window_size` defaults to Gemini's 1,000,000-token model context and is shared by
+artifact selection and final grading; there is no separate 32K grading-prompt cap.
 No judge receives the agent trajectory.
 
 The verify response follows the same three-part contract as the upstream wrapper:

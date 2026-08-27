@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ try:
         MCP_ROOT,
         configure_gateway,
         gateway_config,
+        overlay_task_files,
         populate_world,
         run_stirrup_rollout,
         wait_for_gateway,
@@ -29,6 +31,7 @@ except ImportError:  # Imported as a Gym package during host-side tests.
         MCP_ROOT,
         configure_gateway,
         gateway_config,
+        overlay_task_files,
         populate_world,
         run_stirrup_rollout,
         wait_for_gateway,
@@ -40,6 +43,7 @@ ROOT = Path("/app/apex-gym")
 OUTPUT = ROOT / "output"
 _MCP_RESPOND_ASSERTION = '        assert not self._completed, "Request already responded to"\n'
 _MCP_RESPOND_GUARD = "        if self._completed:\n            return\n"
+_GATEWAY_URL_PATTERN = re.compile(r"Uvicorn running on http://127\.0\.0\.1:(\d+)")
 
 
 def _patch_code_mcp_cancellation_race(mcp_root: Path = MCP_ROOT) -> None:
@@ -70,6 +74,24 @@ async def _stop_process(process: asyncio.subprocess.Process) -> None:
         await process.wait()
 
 
+async def _discover_gateway_url(
+    process: asyncio.subprocess.Process,
+    log_path: Path,
+    timeout_seconds: float = 60.0,
+) -> str:
+    """Read the collision-free port selected by Uvicorn's ``--port 0``."""
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    while True:
+        text = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
+        if match := _GATEWAY_URL_PATTERN.search(text):
+            return f"http://127.0.0.1:{match.group(1)}"
+        if process.returncode is not None:
+            raise RuntimeError(f"Archipelago gateway exited before reporting its port: {text[-4000:]}")
+        if asyncio.get_running_loop().time() >= deadline:
+            raise TimeoutError("Archipelago gateway did not report its dynamically assigned port")
+        await asyncio.sleep(0.1)
+
+
 async def main() -> None:
     config = json.loads((ROOT / "runner_config.json").read_text(encoding="utf-8"))
     OUTPUT.mkdir(parents=True, exist_ok=True)
@@ -80,6 +102,9 @@ async def main() -> None:
         os.environ["EDGAR_USER_AGENT"] = config["edgar_user_agent"]
 
     populate_world(ROOT / "world.zip", scratch)
+    task_files_zip = ROOT / "task_files.zip"
+    if task_files_zip.is_file():
+        overlay_task_files(task_files_zip, scratch)
     gateway_log_path = OUTPUT / "gateway.log"
     gateway_log = gateway_log_path.open("wb")
     gateway = await asyncio.create_subprocess_exec(
@@ -88,16 +113,19 @@ async def main() -> None:
         "--host",
         "127.0.0.1",
         "--port",
-        "8080",
+        "0",
         cwd="/app",
         stdout=gateway_log,
         stderr=asyncio.subprocess.STDOUT,
     )
     try:
-        await wait_for_gateway()
-        await configure_gateway(gateway_config(config.get("foundry_services") or [], config.get("edgar_user_agent")))
+        gateway_url = await _discover_gateway_url(gateway, gateway_log_path)
+        await wait_for_gateway(gateway_url)
+        await configure_gateway(
+            gateway_config(config.get("foundry_services") or [], config.get("edgar_user_agent")), gateway_url
+        )
         initial_manifest = write_snapshot(OUTPUT / "initial.zip")
-        result: dict[str, Any] = await run_stirrup_rollout(config)
+        result: dict[str, Any] = await run_stirrup_rollout(config, gateway_url)
         final_manifest = write_snapshot(OUTPUT / "final.zip")
         result.update(
             {

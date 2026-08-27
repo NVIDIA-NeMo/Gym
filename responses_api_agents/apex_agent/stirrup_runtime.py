@@ -17,8 +17,6 @@ from typing import Any
 FILESYSTEM_ROOT = Path("/filesystem")
 APPS_DATA_ROOT = Path("/.apps_data")
 MCP_ROOT = Path("/app/mcp_servers")
-GATEWAY_URL = "http://127.0.0.1:8080"
-MCP_URL = f"{GATEWAY_URL}/mcp/"
 MCP_TOOL_TIMEOUT_SECONDS = 60
 TOOL_OUTPUT_TOKEN_BUDGET = 24_000
 TOOL_OUTPUT_ESTIMATED_CHARACTERS_PER_TOKEN = 4
@@ -133,6 +131,20 @@ def populate_world(world_zip: Path, scratch_root: Path) -> None:
     (FILESYSTEM_ROOT / "tmp").mkdir(parents=True, exist_ok=True)
 
 
+def overlay_task_files(task_files_zip: Path, scratch_root: Path) -> None:
+    """Overlay task-specific input files without clearing the shared world state."""
+    extracted = scratch_root / "task_files"
+    extracted.mkdir(parents=True, exist_ok=True)
+    _safe_extract_world(task_files_zip, extracted)
+
+    filesystem_source = extracted / "filesystem"
+    apps_source = extracted / ".apps_data"
+    if not filesystem_source.is_dir() and not apps_source.is_dir():
+        filesystem_source = extracted
+    _copy_tree_contents(filesystem_source, FILESYSTEM_ROOT)
+    _copy_tree_contents(apps_source, APPS_DATA_ROOT)
+
+
 def write_snapshot(destination: Path) -> list[str]:
     """Write the local-grader ZIP shape and return its file manifest."""
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -226,14 +238,14 @@ def gateway_config(foundry_services: list[str], edgar_user_agent: str | None) ->
     return {"mcpServers": servers}
 
 
-async def wait_for_gateway(timeout_seconds: float = 60.0) -> None:
+async def wait_for_gateway(gateway_url: str, timeout_seconds: float = 60.0) -> None:
     import httpx
 
     deadline = asyncio.get_running_loop().time() + timeout_seconds
     async with httpx.AsyncClient() as client:
         while True:
             try:
-                response = await client.get(f"{GATEWAY_URL}/health", timeout=2.0)
+                response = await client.get(f"{gateway_url}/health", timeout=2.0)
                 if response.status_code == 200:
                     return
             except httpx.HTTPError:
@@ -243,11 +255,11 @@ async def wait_for_gateway(timeout_seconds: float = 60.0) -> None:
             await asyncio.sleep(0.25)
 
 
-async def configure_gateway(config: dict[str, Any]) -> None:
+async def configure_gateway(config: dict[str, Any], gateway_url: str) -> None:
     import httpx
 
     async with httpx.AsyncClient(timeout=300.0) as client:
-        response = await client.post(f"{GATEWAY_URL}/apps", json=config)
+        response = await client.post(f"{gateway_url}/apps", json=config)
         response.raise_for_status()
 
 
@@ -277,7 +289,7 @@ def _token_usage(history: list[list[Any]]) -> tuple[int, int, int]:
     return input_tokens, output_tokens, reasoning_tokens
 
 
-async def run_stirrup_rollout(config: dict[str, Any]) -> dict[str, Any]:
+async def run_stirrup_rollout(config: dict[str, Any], gateway_url: str) -> dict[str, Any]:
     """Run one 200-turn Stirrup session against the Archipelago MCP gateway."""
     from typing import Annotated, Literal
 
@@ -363,7 +375,7 @@ async def run_stirrup_rollout(config: dict[str, Any]) -> dict[str, Any]:
                 MCPConfig(
                     mcpServers={
                         "archipelago": StreamableHttpServerConfig(
-                            url=MCP_URL,
+                            url=f"{gateway_url}/mcp/",
                             timeout=MCP_TOOL_TIMEOUT_SECONDS,
                             sse_read_timeout=MCP_TOOL_TIMEOUT_SECONDS,
                         )
@@ -499,7 +511,6 @@ async def run_stirrup_rollout(config: dict[str, Any]) -> dict[str, Any]:
         base_url=config["model_base_url"],
         api_key="unused",
         max_tokens=int(config["max_output_tokens"]),
-        timeout=120.0,
         kwargs=model_kwargs,
     )
     managed_tools = ManagedMCPTools()
@@ -510,7 +521,9 @@ async def run_stirrup_rollout(config: dict[str, Any]) -> dict[str, Any]:
         system_prompt=SYSTEM_PROMPT,
         tools=[managed_tools],
         finish_tool=finish_tool,
-        text_only_tool_responses=False,
+        # Chat Completions tool messages accept text only. Stirrup preserves
+        # image results by moving each image into a following user message.
+        text_only_tool_responses=True,
     )
     managed_tools.attach(agent)
 

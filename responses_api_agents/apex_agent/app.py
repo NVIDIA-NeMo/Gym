@@ -50,6 +50,7 @@ _STIRRUP_SETUP_PATH = Path(__file__).with_name("setup_stirrup.sh")
 _STIRRUP_REQUIREMENTS_PATH = Path(__file__).with_name("stirrup-requirements.txt")
 _GUEST_ROOT = "/app/apex-gym"
 _STIRRUP_ROOT = "/app/stirrup-runtime"
+NG_FAILURE_CLASS_KEY = "_ng_failure_class"
 
 
 class ApexAgentConfig(BaseResponsesAPIAgentConfig):
@@ -79,6 +80,7 @@ class ApexAgentRunRequest(BaseRunRequest):
 
     task_id: str
     world_id: str
+    task_input_files: Optional[str] = None
     domain: Optional[str] = None
     foundry_services: List[str] = Field(default_factory=list)
 
@@ -223,7 +225,7 @@ class ApexAgent(SimpleResponsesAPIAgent):
                     parent_dir=PARENT_DIR,
                     image=self.config.image,
                     image_build=self.config.image_build,
-                    sandbox_provider=self.config.sandbox_provider,
+                    sandbox_provider=self._sandbox_provider,
                 )
             if self._stirrup_archive is None:
                 self._stirrup_archive = await self._build_stirrup_archive(self._image)
@@ -238,6 +240,18 @@ class ApexAgent(SimpleResponsesAPIAgent):
         data = await response.read()
         if self.config.max_world_bytes is not None and len(data) > self.config.max_world_bytes:
             raise RuntimeError(f"world archive is {len(data)} bytes; limit is {self.config.max_world_bytes}")
+        target.write_bytes(data)
+
+    async def _download_task_files(self, cookies: Any, target: Path) -> None:
+        response = await self.server_client.get(
+            server_name=self.config.resources_server.name,
+            url_path="/task_files",
+            cookies=cookies,
+        )
+        await raise_for_status(response)
+        data = await response.read()
+        if self.config.max_world_bytes is not None and len(data) > self.config.max_world_bytes:
+            raise RuntimeError(f"task attachment archive is {len(data)} bytes; limit is {self.config.max_world_bytes}")
         target.write_bytes(data)
 
     def _sandbox_spec(self, body: ApexAgentRunRequest, instruction: str) -> SandboxSpec:
@@ -329,7 +343,11 @@ class ApexAgent(SimpleResponsesAPIAgent):
         return response
 
     def _failure(
-        self, body: ApexAgentRunRequest, error: str, return_code: int | None = None
+        self,
+        body: ApexAgentRunRequest,
+        error: str,
+        return_code: int | None = None,
+        failure_class: Optional[str] = None,
     ) -> ApexAgentVerifyResponse:
         LOG.error("Apex rollout failed for task %s: %s", body.task_id, error)
         try:
@@ -337,13 +355,15 @@ class ApexAgent(SimpleResponsesAPIAgent):
         except RuntimeError:
             model = body.responses_create_params.model or "error"
         response = self._response_from_result({"final_answer": ""}, model)
-        return ApexAgentVerifyResponse(
-            **body.model_dump(),
-            response=response,
-            reward=0.0,
-            apex_error=error,
-            container_exit_code=return_code,
-        )
+        payload = body.model_dump() | {
+            "response": response,
+            "reward": 0.0,
+            "apex_error": error,
+            "container_exit_code": return_code,
+        }
+        if failure_class is not None:
+            payload[NG_FAILURE_CLASS_KEY] = failure_class
+        return ApexAgentVerifyResponse.model_validate(payload)
 
     def _persist_ungraded_snapshots(
         self,
@@ -385,6 +405,7 @@ class ApexAgent(SimpleResponsesAPIAgent):
                 with tempfile.TemporaryDirectory(prefix=f"apex-{_safe_id(body.task_id)}-") as scratch:
                     scratch_path = Path(scratch)
                     world_zip = scratch_path / "world.zip"
+                    task_files_zip = scratch_path / "task_files.zip"
                     result_path = scratch_path / "result.json"
                     initial_snapshot_path = scratch_path / "initial.zip"
                     snapshot_path = scratch_path / "final.zip"
@@ -397,10 +418,14 @@ class ApexAgent(SimpleResponsesAPIAgent):
                     await raise_for_status(seed)
                     cookies = seed.cookies
                     await self._download_world(cookies, world_zip)
+                    if body.task_input_files:
+                        await self._download_task_files(cookies, task_files_zip)
                     spec = self._sandbox_spec(body, instruction)
                     async with AsyncSandbox(self._sandbox_provider, spec) as sandbox:
                         await sandbox.start()
                         await sandbox.upload(world_zip, f"{_GUEST_ROOT}/world.zip")
+                        if body.task_input_files:
+                            await sandbox.upload(task_files_zip, f"{_GUEST_ROOT}/task_files.zip")
                         await sandbox.upload(self._stirrup_archive, f"{_GUEST_ROOT}/stirrup-runtime.tar.gz")
                         unpack = await sandbox.exec(
                             f"mkdir -p {shlex.quote(_STIRRUP_ROOT)} && "
@@ -429,7 +454,10 @@ class ApexAgent(SimpleResponsesAPIAgent):
                         if process.return_code != 0:
                             detail = (process.stderr or process.stdout or "")[-4000:]
                             return self._failure(
-                                body, f"sandbox Stirrup rollout exited: {detail}", process.return_code
+                                body,
+                                f"sandbox Stirrup rollout exited: {detail}",
+                                process.return_code,
+                                failure_class="timeout_exceeded" if process.error_type == "timeout" else None,
                             )
                         await sandbox.download(f"{_GUEST_ROOT}/output/result.json", result_path)
                         await sandbox.download(f"{_GUEST_ROOT}/output/initial.zip", initial_snapshot_path)

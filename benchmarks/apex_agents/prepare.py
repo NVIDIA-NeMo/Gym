@@ -15,6 +15,7 @@ from nemo_gym.global_config import get_hf_token
 
 OUTPUT_FPATH = Path("benchmarks/apex_agents/data/apex_agents_benchmark.jsonl")
 WORLD_CACHE_DIR = Path("benchmarks/apex_agents/data/world_cache")
+TASK_FILES_CACHE_DIR = Path("benchmarks/apex_agents/data/task_files_cache")
 DATASET_REPO = "mercor/apex-agents"
 EXCLUDED_WORLD_IDS = frozenset(
     {
@@ -92,6 +93,7 @@ def convert_task(task: dict[str, Any], world: dict[str, Any]) -> dict[str, Any]:
         },
         "task_id": task["task_id"],
         "world_id": task["world_id"],
+        "task_input_files": task.get("task_input_files"),
         "domain": task.get("domain"),
         "foundry_services": foundry_services,
         "verifier_metadata": {
@@ -141,6 +143,40 @@ def prefetch_worlds(worlds_path: Path, *, cache_dir: Path, hf_token: str | None 
     return len(world_ids)
 
 
+def prefetch_task_files(tasks_path: Path, *, cache_dir: Path, hf_token: str | None = None) -> int:
+    """Download all task-specific attachments into the runtime's offline cache."""
+    from huggingface_hub import snapshot_download
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    tasks = json.loads(tasks_path.read_text(encoding="utf-8"))
+    task_ids = sorted(
+        {
+            task["task_id"]
+            for task in tasks
+            if task["world_id"] not in EXCLUDED_WORLD_IDS and task.get("task_input_files")
+        }
+    )
+    if not task_ids:
+        return 0
+
+    kwargs: dict[str, Any] = {
+        "repo_id": DATASET_REPO,
+        "repo_type": "dataset",
+        "cache_dir": str(cache_dir),
+        "allow_patterns": [f"task_files/{task_id}/**" for task_id in task_ids],
+    }
+    if hf_token:
+        kwargs["token"] = hf_token
+    snapshot_root = Path(snapshot_download(**kwargs))
+
+    missing = [task_id for task_id in task_ids if not (snapshot_root / "task_files" / task_id).is_dir()]
+    if missing:
+        preview = ", ".join(missing[:5])
+        suffix = "..." if len(missing) > 5 else ""
+        raise FileNotFoundError(f"Apex task attachments are missing for {preview}{suffix}")
+    return len(task_ids)
+
+
 def prepare(
     tasks_path: Path | None = None,
     worlds_path: Path | None = None,
@@ -148,6 +184,7 @@ def prepare(
     *,
     limit: int | None = None,
     world_cache_dir: Path = WORLD_CACHE_DIR,
+    task_files_cache_dir: Path = TASK_FILES_CACHE_DIR,
     hf_token: str | None = None,
 ) -> Path:
     """Prepare Gym rows and the offline world cache required for rollouts."""
@@ -167,6 +204,8 @@ def prepare(
     print(f"wrote {count} Apex Agents rows to {output}")
     world_count = prefetch_worlds(worlds_path, cache_dir=world_cache_dir, hf_token=hf_token)
     print(f"cached {world_count} Apex Agents world ZIPs")
+    task_file_count = prefetch_task_files(tasks_path, cache_dir=task_files_cache_dir, hf_token=hf_token)
+    print(f"cached attachments for {task_file_count} Apex Agents tasks")
     return output
 
 
@@ -177,6 +216,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=OUTPUT_FPATH)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--world-cache-dir", type=Path, default=WORLD_CACHE_DIR)
+    parser.add_argument("--task-files-cache-dir", type=Path, default=TASK_FILES_CACHE_DIR)
     args = parser.parse_args()
     if (args.tasks is None) != (args.worlds is None):
         parser.error("--tasks and --worlds must be supplied together")
@@ -186,6 +226,7 @@ def main() -> None:
         output=args.output,
         limit=args.limit,
         world_cache_dir=args.world_cache_dir,
+        task_files_cache_dir=args.task_files_cache_dir,
         hf_token=get_hf_token(),
     )
 

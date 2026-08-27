@@ -2,11 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import zipfile
+from inspect import getsource
 from pathlib import Path
 
 from pydantic import BaseModel
 
 from responses_api_agents.apex_agent import stirrup_runtime
+
+
+def test_stirrup_repackages_image_tool_responses_for_chat_completions() -> None:
+    source = getsource(stirrup_runtime.run_stirrup_rollout)
+
+    assert "text_only_tool_responses=True" in source
 
 
 def test_tool_output_uses_head_and_tail_excerpt() -> None:
@@ -54,6 +61,30 @@ def test_world_restore_and_snapshot_preserve_subsystems(monkeypatch, tmp_path: P
     assert (filesystem / "input.txt").read_text() == "input"
     assert (apps / "mail/state.json").read_text() == "{}"
     assert manifest == ["filesystem/input.txt", ".apps_data/mail/state.json"]
+
+
+def test_task_files_overlay_world_before_initial_snapshot(monkeypatch, tmp_path: Path) -> None:
+    filesystem = tmp_path / "filesystem"
+    apps = tmp_path / ".apps_data"
+    monkeypatch.setattr(stirrup_runtime, "FILESYSTEM_ROOT", filesystem)
+    monkeypatch.setattr(stirrup_runtime, "APPS_DATA_ROOT", apps)
+    world = tmp_path / "world.zip"
+    with zipfile.ZipFile(world, "w") as archive:
+        archive.writestr("filesystem/shared.txt", "world")
+        archive.writestr(".apps_data/mail/state.json", "{}")
+    task_files = tmp_path / "task_files.zip"
+    with zipfile.ZipFile(task_files, "w") as archive:
+        archive.writestr("filesystem/source.docx", "task input")
+        archive.writestr("filesystem/shared.txt", "task override")
+
+    stirrup_runtime.populate_world(world, tmp_path / "scratch")
+    stirrup_runtime.overlay_task_files(task_files, tmp_path / "scratch")
+    manifest = stirrup_runtime.write_snapshot(tmp_path / "snapshot.zip")
+
+    assert (filesystem / "source.docx").read_text() == "task input"
+    assert (filesystem / "shared.txt").read_text() == "task override"
+    assert (apps / "mail/state.json").read_text() == "{}"
+    assert "filesystem/source.docx" in manifest
 
 
 def test_gateway_config_runs_packaged_servers_and_offline_edgar(monkeypatch, tmp_path: Path) -> None:

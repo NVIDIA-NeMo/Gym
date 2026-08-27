@@ -1,3 +1,12 @@
+apex_agent_apptainer_sandbox:
+  apptainer:
+    create:
+      start_timeout_s: 1800
+      extra_start_args: ${oc.select:apex_agent_apptainer_extra_start_args,[--containall,--cleanenv,--writable-tmpfs,--fakeroot]}
+      direct_exec: ${oc.select:apex_agent_apptainer_direct_exec,false}
+    exec:
+      fakeroot_for_root: ${oc.select:apex_agent_apptainer_fakeroot_for_root,true}
+
 apex_agent:
   responses_api_agents:
     apex_agent:
@@ -9,7 +18,9 @@ apex_agent:
         type: responses_api_models
         name: policy_model
       concurrency: ${oc.select:apex_agent_concurrency,4}
-      timeout: ${oc.select:apex_agent_timeout,3600}
+      # Match GDPVal's 3h30m per-task budget while leaving 30 minutes of a
+      # four-hour Slurm allocation for startup and teardown.
+      timeout: ${oc.select:apex_agent_timeout,12600}
       # Existing SIF, OCI reference, or the target for a one-time automatic
       # build from Archipelago's pinned upstream Dockerfile.
       image: ${oc.select:apex_agents_image,responses_api_agents/apex_agent/images/archipelago.sif}
@@ -26,11 +37,7 @@ apex_agent:
         dockerfile: ${oc.select:apex_archipelago_dockerfile,environment/Dockerfile}
         docker_tag: ${oc.select:apex_archipelago_docker_tag,nemo-gym-archipelago:0cb5c476c219}
         timeout: ${oc.select:apex_archipelago_build_timeout,7200}
-      sandbox_provider:
-        apptainer:
-          create:
-            start_timeout_s: 1800
-            extra_start_args: ${oc.select:apex_agent_apptainer_extra_start_args,[--containall,--cleanenv,--writable-tmpfs,--fakeroot]}
+      sandbox_provider: ${oc.select:apex_agent_sandbox_provider,apex_agent_apptainer_sandbox}
       sandbox_spec:
         resources: ${oc.select:apex_agent_sandbox_resources,{}}
       # Archipelago's public Apex example uses
@@ -38,10 +45,7 @@ apex_agent:
       # replace it with a Gym/NVIDIA identity.
       edgar_user_agent: ${oc.select:apex_edgar_user_agent,"Mercor APEX-Agents apex@mercor.com"}
       max_turns: ${oc.select:apex_agent_max_turns,200}
-      # Stirrup 0.1 uses this value as its context-window budget and as the
-      # request's completion ceiling. Match GDPval's 262,144-token context
-      # instead of imposing a smaller Gym-side cap.
-      max_output_tokens: ${oc.select:apex_agent_max_output_tokens,262144}
+      max_output_tokens: ${oc.select:apex_agent_max_output_tokens,32768}
       temperature: ${oc.select:apex_agent_temperature,1.0}
       top_p: ${oc.select:apex_agent_top_p,1.0}
       max_snapshot_bytes: ${oc.select:apex_agent_max_snapshot_bytes,null}

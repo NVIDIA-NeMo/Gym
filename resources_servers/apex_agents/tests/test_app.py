@@ -67,6 +67,7 @@ def _body(snapshot: str | None = None) -> ApexVerifyRequest:
 def _server(
     *,
     world_cache_dir: str = "benchmarks/apex_agents/data/world_cache",
+    task_files_cache_dir: str | None = None,
     artifact_output_dir: str | None = None,
 ) -> ApexResourcesServer:
     config = ApexResourcesServerConfig(
@@ -76,6 +77,7 @@ def _server(
         entrypoint="app.py",
         judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
         world_cache_dir=world_cache_dir,
+        task_files_cache_dir=task_files_cache_dir or world_cache_dir,
         artifact_output_dir=artifact_output_dir,
     )
     return ApexResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
@@ -89,7 +91,7 @@ async def test_verify_scores_artifacts_without_returning_snapshot(monkeypatch) -
         assert kwargs["rubric"][0]["criteria"] == "Correct result"
         assert kwargs["server_client"] is not None
         assert kwargs["model_server_name"] == "judge"
-        assert kwargs["judge_context_window_size"] == 32768
+        assert kwargs["judge_context_window_size"] == 1_000_000
         return 1.0, {"v1": {"score": 1.0}}, {"ok": True, "grading_run_id": "run-1"}
 
     monkeypatch.setattr("resources_servers.apex_agents.app.grade_apex_output", fake_judge)
@@ -199,9 +201,63 @@ async def test_seed_session_binds_world_to_session(monkeypatch, tmp_path: Path) 
         await server.world(request)
 
 
+@pytest.mark.asyncio
+async def test_seed_session_serves_prefetched_task_files_overlay(monkeypatch, tmp_path: Path) -> None:
+    world = tmp_path / "world.zip"
+    world.write_bytes(b"world")
+    snapshot_root = tmp_path / "snapshot"
+    task_root = snapshot_root / "task_files" / "task_a"
+    task_root.mkdir(parents=True)
+    (task_root / "source.docx").write_bytes(b"task input")
+
+    async def run_inline(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    snapshot_download = MagicMock(return_value=str(snapshot_root))
+    monkeypatch.setattr("huggingface_hub.hf_hub_download", MagicMock(return_value=str(world)))
+    monkeypatch.setattr("huggingface_hub.snapshot_download", snapshot_download)
+    monkeypatch.setattr("resources_servers.apex_agents.app.asyncio.to_thread", run_inline)
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    server = _server(world_cache_dir=str(cache_dir))
+    request = Request(scope={"type": "http", "session": {SESSION_ID_KEY: "session-1"}})
+    body = ApexSeedSessionRequest(
+        task_id="task_a",
+        world_id="world_9797d81fa71c4dbfb192e89a0f2ac811",
+        task_input_files="snap_0123456789abcdef0123456789abcdef",
+    )
+
+    await server.seed_session(request, body)
+    world_download = await server.world(request)
+    task_download = await server.task_files(request)
+
+    assert Path(world_download.path) == world
+    with zipfile.ZipFile(task_download.path) as archive:
+        assert archive.namelist() == ["filesystem/source.docx"]
+        assert archive.read("filesystem/source.docx") == b"task input"
+    snapshot_download.assert_called_once_with(
+        repo_id="mercor/apex-agents",
+        repo_type="dataset",
+        cache_dir=str(cache_dir),
+        allow_patterns=["task_files/task_a/**"],
+        local_files_only=True,
+    )
+    with pytest.raises(HTTPException, match="seed_session"):
+        await server.task_files(request)
+
+
 def test_seed_session_rejects_invalid_world_id() -> None:
     with pytest.raises(ValueError):
         ApexSeedSessionRequest(task_id="task-1", world_id="../../grader")
+
+
+def test_seed_session_rejects_invalid_task_attachment_id() -> None:
+    with pytest.raises(ValueError):
+        ApexSeedSessionRequest(
+            task_id="task-1",
+            world_id="world_9797d81fa71c4dbfb192e89a0f2ac811",
+            task_input_files="../../attachment.zip",
+        )
 
 
 def test_world_download_is_always_offline(monkeypatch, tmp_path: Path) -> None:

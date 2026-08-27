@@ -13,6 +13,7 @@ import re
 import shutil
 import tempfile
 import uuid
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -39,7 +40,11 @@ from resources_servers.apex_agents.judge import grade_apex_output
 
 
 _WORLD_ID_RE = re.compile(r"^world_[0-9a-f]{32}$")
+_TASK_ID_RE = re.compile(r"^task[-_][A-Za-z0-9_-]+$")
+_TASK_INPUT_FILES_RE = re.compile(r"^snap_[0-9a-f]{32}$")
 _SESSION_WORLD_KEY = "apex_world_id"
+_SESSION_TASK_KEY = "apex_task_id"
+_SESSION_TASK_INPUT_FILES_KEY = "apex_task_input_files"
 
 
 class ApexResourcesServerConfig(BaseResourcesServerConfig):
@@ -50,19 +55,22 @@ class ApexResourcesServerConfig(BaseResourcesServerConfig):
     judge_model_server: ModelServerRef
     judge_model: str = "gemini-3-flash"
     judge_create_params_overrides: Dict[str, Any] = Field(default_factory=lambda: {"reasoning_effort": "low"})
-    judge_context_window_size: int = Field(default=32768, gt=0)
+    judge_context_window_size: int = Field(default=1_000_000, gt=0)
     num_processes: int = 8
     max_snapshot_bytes: Optional[int] = Field(default=None, gt=0)
-    max_uncompressed_bytes: int = 512 * 1024 * 1024
+    max_uncompressed_bytes: int = 4 * 1024 * 1024 * 1024
     max_artifact_files: int = 2000
     dataset_repo: str = "mercor/apex-agents"
     world_cache_dir: str = "benchmarks/apex_agents/data/world_cache"
+    task_files_cache_dir: str = "benchmarks/apex_agents/data/task_files_cache"
     artifact_output_dir: Optional[str] = "results/apex_agents_artifacts"
+    document_converter_image: Optional[str] = None
 
 
 class ApexSeedSessionRequest(BaseSeedSessionRequest):
-    task_id: str
+    task_id: str = Field(pattern=_TASK_ID_RE.pattern)
     world_id: str = Field(pattern=r"^world_[0-9a-f]{32}$")
+    task_input_files: Optional[str] = Field(default=None, pattern=_TASK_INPUT_FILES_RE.pattern)
 
 
 class ApexSeedSessionResponse(BaseSeedSessionResponse):
@@ -116,6 +124,7 @@ class ApexResourcesServer(SimpleResourcesServer):
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
         app.get("/world")(self.world)
+        app.get("/task_files")(self.task_files)
         app.router.on_startup.append(self._preflight_world_cache)
         return app
 
@@ -125,12 +134,32 @@ class ApexResourcesServer(SimpleResourcesServer):
             path = PARENT_DIR / path
         return path.resolve()
 
+    def _task_files_cache_dir(self) -> Path:
+        path = Path(self.config.task_files_cache_dir).expanduser()
+        if not path.is_absolute():
+            path = PARENT_DIR / path
+        return path.resolve()
+
+    def _document_converter_image(self) -> str | None:
+        if not self.config.document_converter_image:
+            return None
+        path = Path(self.config.document_converter_image).expanduser()
+        if not path.is_absolute():
+            path = PARENT_DIR / path
+        return str(path.resolve())
+
     async def _preflight_world_cache(self) -> None:
         """Require preprocessing before this server accepts rollouts."""
         cache_dir = self._world_cache_dir()
         if not cache_dir.is_dir():
             raise RuntimeError(
                 f"Apex world cache does not exist at {cache_dir}; run "
+                "`gym eval prepare --benchmark apex_agents` before starting the environment"
+            )
+        task_files_cache_dir = self._task_files_cache_dir()
+        if not task_files_cache_dir.is_dir():
+            raise RuntimeError(
+                f"Apex task-files cache does not exist at {task_files_cache_dir}; run "
                 "`gym eval prepare --benchmark apex_agents` before starting the environment"
             )
 
@@ -142,19 +171,36 @@ class ApexResourcesServer(SimpleResourcesServer):
         try:
             async with self._semaphore:
                 await asyncio.to_thread(self._download_world, body.world_id)
+                if body.task_input_files:
+                    await asyncio.to_thread(
+                        self._task_files_archive,
+                        body.task_id,
+                        body.task_input_files,
+                    )
         except Exception as exc:
+            input_name = "world and task attachments" if body.task_input_files else "world"
             raise HTTPException(
                 status_code=503,
                 detail=(
-                    f"world {body.world_id} is missing from the preprocessed Apex cache; run "
+                    f"{input_name} for {body.task_id} are missing from the preprocessed Apex cache; run "
                     "`gym eval prepare --benchmark apex_agents`"
                 ),
             ) from exc
         request.session[_SESSION_WORLD_KEY] = body.world_id
+        request.session[_SESSION_TASK_KEY] = body.task_id
+        if body.task_input_files:
+            request.session[_SESSION_TASK_INPUT_FILES_KEY] = body.task_input_files
+        else:
+            request.session.pop(_SESSION_TASK_INPUT_FILES_KEY, None)
         return ApexSeedSessionResponse()
 
     async def world(self, request: Request) -> FileResponse:
-        world_id = str(request.session.pop(_SESSION_WORLD_KEY, ""))
+        has_task_files = bool(request.session.get(_SESSION_TASK_INPUT_FILES_KEY))
+        if has_task_files:
+            world_id = str(request.session.get(_SESSION_WORLD_KEY, ""))
+        else:
+            world_id = str(request.session.pop(_SESSION_WORLD_KEY, ""))
+            request.session.pop(_SESSION_TASK_KEY, None)
         if not _WORLD_ID_RE.fullmatch(world_id):
             raise HTTPException(status_code=404, detail="Call seed_session before requesting the world")
         async with self._semaphore:
@@ -162,6 +208,18 @@ class ApexResourcesServer(SimpleResourcesServer):
         if world_path is None or not world_path.is_file():
             raise HTTPException(status_code=404, detail="Call seed_session before requesting the world")
         return FileResponse(world_path, media_type="application/zip", filename="world.zip")
+
+    async def task_files(self, request: Request) -> FileResponse:
+        task_id = str(request.session.pop(_SESSION_TASK_KEY, ""))
+        task_input_files = str(request.session.pop(_SESSION_TASK_INPUT_FILES_KEY, ""))
+        request.session.pop(_SESSION_WORLD_KEY, None)
+        if not _TASK_ID_RE.fullmatch(task_id) or not _TASK_INPUT_FILES_RE.fullmatch(task_input_files):
+            raise HTTPException(status_code=404, detail="Call seed_session before requesting task files")
+        async with self._semaphore:
+            archive_path = Path(await asyncio.to_thread(self._task_files_archive, task_id, task_input_files))
+        if not archive_path.is_file():
+            raise HTTPException(status_code=404, detail="Call seed_session before requesting task files")
+        return FileResponse(archive_path, media_type="application/zip", filename="task_files.zip")
 
     def _download_world(self, world_id: str) -> str:
         from huggingface_hub import hf_hub_download
@@ -173,6 +231,47 @@ class ApexResourcesServer(SimpleResourcesServer):
             cache_dir=str(self._world_cache_dir()),
             local_files_only=True,
         )
+
+    def _task_files_archive(self, task_id: str, task_input_files: str) -> str:
+        """Build a small filesystem overlay from prefetched task-specific files."""
+        from huggingface_hub import snapshot_download
+
+        if not _TASK_ID_RE.fullmatch(task_id) or not _TASK_INPUT_FILES_RE.fullmatch(task_input_files):
+            raise ValueError("invalid Apex task attachment identity")
+        cache_dir = self._task_files_cache_dir()
+        overlay_dir = cache_dir / "task_overlays"
+        archive_path = overlay_dir / f"{task_id}-{task_input_files}.zip"
+        if archive_path.is_file():
+            return str(archive_path)
+        snapshot_root = Path(
+            snapshot_download(
+                repo_id=self.config.dataset_repo,
+                repo_type="dataset",
+                cache_dir=str(cache_dir),
+                allow_patterns=[f"task_files/{task_id}/**"],
+                local_files_only=True,
+            )
+        )
+        task_root = snapshot_root / "task_files" / task_id
+        files = sorted(path for path in task_root.rglob("*") if path.is_file()) if task_root.is_dir() else []
+        if not files:
+            raise FileNotFoundError(f"no cached Apex task files found for {task_id}")
+
+        overlay_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=overlay_dir, suffix=".zip", delete=False) as temporary:
+            temporary_path = Path(temporary.name)
+        try:
+            with zipfile.ZipFile(temporary_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                for path in files:
+                    relative = path.relative_to(task_root)
+                    archive_name = relative.as_posix()
+                    if relative.parts[0] not in {"filesystem", ".apps_data"}:
+                        archive_name = f"filesystem/{archive_name}"
+                    archive.write(path, archive_name)
+            temporary_path.replace(archive_path)
+        finally:
+            temporary_path.unlink(missing_ok=True)
+        return str(archive_path)
 
     def _failure(
         self,
@@ -323,7 +422,14 @@ class ApexResourcesServer(SimpleResourcesServer):
                         max_files=self.config.max_artifact_files,
                         max_uncompressed_bytes=self.config.max_uncompressed_bytes,
                     )
-                    changes = snapshot_changes(initial_root, initial_files, final_root, final_files)
+                    document_converter_image = self._document_converter_image()
+                    changes = snapshot_changes(
+                        initial_root,
+                        initial_files,
+                        final_root,
+                        final_files,
+                        document_converter_image=document_converter_image,
+                    )
                     artifact_paths = [change.path for change in changes]
                     persisted_output_dir = self._persist_submission(
                         body,
@@ -346,6 +452,7 @@ class ApexResourcesServer(SimpleResourcesServer):
                         judge_model=self.config.judge_model,
                         judge_create_params_overrides=self.config.judge_create_params_overrides,
                         judge_context_window_size=self.config.judge_context_window_size,
+                        document_converter_image=document_converter_image,
                         metadata={
                             "task_id": body.task_id,
                             "execution": {

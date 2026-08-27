@@ -13,18 +13,23 @@ apex_agents:
       judge_model: ${oc.select:judge_model_name,gemini-3-flash}
       judge_create_params_overrides:
         reasoning_effort: low
-      judge_context_window_size: ${oc.select:apex_judge_context_window_size,32768}
+      judge_context_window_size: ${oc.select:apex_judge_context_window_size,1000000}
       num_processes: ${oc.select:apex_verifier_concurrency,8}
       max_snapshot_bytes: ${oc.select:apex_verifier_max_snapshot_bytes,${oc.select:apex_agent_max_snapshot_bytes,null}}
-      max_uncompressed_bytes: ${oc.select:apex_verifier_max_uncompressed_bytes,536870912}
+      max_uncompressed_bytes: ${oc.select:apex_verifier_max_uncompressed_bytes,4294967296}
       max_artifact_files: ${oc.select:apex_verifier_max_artifact_files,2000}
       dataset_repo: ${oc.select:apex_dataset_repo,mercor/apex-agents}
       # Populated by `gym eval prepare --benchmark apex_agents`; rollout
       # execution reads this cache offline and never contacts Hugging Face.
       world_cache_dir: ${oc.select:apex_world_cache_dir,benchmarks/apex_agents/data/world_cache}
+      task_files_cache_dir: ${oc.select:apex_task_files_cache_dir,benchmarks/apex_agents/data/task_files_cache}
       # Trusted-host export of both snapshots, safely extracted changed files,
       # rubric-free submission metadata, and the upstream grading result.
       artifact_output_dir: ${oc.select:apex_artifact_output_dir,results/apex_agents_artifacts}
+      # The Archipelago sandbox image contains LibreOffice and Poppler. The
+      # verifier re-enters it only for formula recalculation and document rendering
+      # when those executables are absent from the outer Gym container.
+      document_converter_image: ${oc.select:apex_agents_image,null}
 
 apex_judge_model:
   responses_api_models:
