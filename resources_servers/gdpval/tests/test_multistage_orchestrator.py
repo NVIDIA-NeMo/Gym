@@ -3124,3 +3124,111 @@ class TestIntegrationWiring:
         assert {row["expected_stage_row_count"] for row in persisted} == {1}
         assert len(set(cache_namespaces)) == 1
         assert len(cache_namespaces[0]) == 64
+
+
+class TestReferenceMissingCoverage:
+    """A terminal ``reference_missing`` row is an omission, not a stage-killer.
+
+    Pins the behaviour the failure-class change relies on: because the row is
+    terminal it is "already resolved", so it never reaches the unresolved-key
+    loop that consults ``waivable_failure_classes``. It is simply an omission
+    governed by the coverage floors -- which is why no leaf policy needs to list
+    ``reference_missing`` as waivable.
+    """
+
+    @staticmethod
+    def _rows(n: int, ref: str):
+        return [{TASK_INDEX_KEY_NAME: i, ROLLOUT_INDEX_KEY_NAME: 0, "reference_ids": [ref]} for i in range(n)]
+
+    def _outcome(self, *, judged: int, planned: int, ref: str = "r1"):
+        from resources_servers.gdpval.multistage_elo import PartialStagePolicy
+        from resources_servers.gdpval.multistage_orchestrator import _partial_stage_outcome
+
+        stage_rows = self._rows(planned, ref)
+        successful = []
+        for i in range(judged):
+            row = dict(stage_rows[i])
+            row["per_reference"] = {ref: {"wins": 4, "losses": 0, "ties": 0}}
+            successful.append(row)
+        policy = PartialStagePolicy(
+            min_success_fraction=0.9,
+            min_per_reference_success_fraction=0.5,
+            min_successful_rows_per_reference=1,
+            waivable_failure_classes=("timeout_exceeded", "transient"),
+        )
+        return _partial_stage_outcome(policy, stage_rows, successful, [], set(), [ref], 1200.0, 1)
+
+    def test_terminal_omission_is_accepted_without_being_waivable(self) -> None:
+        # 19 of 20 judged: the missing one is the reference_missing row. It is
+        # NOT in successful_rows and NOT in unresolved_keys (terminal).
+        outcome = self._outcome(judged=19, planned=20)
+        assert outcome is not None
+        assert outcome["success_fraction"] == pytest.approx(0.95)
+        assert len(outcome["omitted_keys"]) == 1
+
+    def test_still_rejected_when_coverage_floor_is_breached(self) -> None:
+        # Forgiveness is bounded: 17/20 = 0.85 is below min_success_fraction 0.9.
+        assert self._outcome(judged=17, planned=20) is None
+
+    def test_evidence_less_success_row_still_hard_rejects(self) -> None:
+        """The gate this change routes around is intentionally left intact: a
+        row that IS in the success set while carrying no battle stays fatal."""
+        from resources_servers.gdpval.multistage_elo import PartialStagePolicy
+        from resources_servers.gdpval.multistage_orchestrator import _partial_stage_outcome
+
+        ref = "r1"
+        stage_rows = self._rows(20, ref)
+        successful = []
+        for i, row in enumerate(stage_rows):
+            r = dict(row)
+            r["per_reference"] = {} if i == 0 else {ref: {"wins": 4, "losses": 0, "ties": 0}}
+            successful.append(r)
+        policy = PartialStagePolicy(
+            min_success_fraction=0.9,
+            min_per_reference_success_fraction=0.5,
+            min_successful_rows_per_reference=1,
+        )
+        assert _partial_stage_outcome(policy, stage_rows, successful, [], set(), [ref], 1200.0, 1) is None
+
+
+class TestReferenceMissingIsTerminal:
+    """A missing reference deliverable can never be fixed by retrying.
+
+    The verify response stamps the generic ``_ng_failure_terminal`` flag rather
+    than teaching ``_is_terminal_failure`` a GDPVal-specific class name -- the
+    harness already honours that flag, so no change to nemo_gym is needed.
+    """
+
+    def test_generic_terminal_flag_is_honoured(self) -> None:
+        from nemo_gym.rollout_collection import (
+            NG_FAILURE_CLASS_KEY,
+            NG_TERMINAL_KEY,
+            _is_terminal_failure,
+        )
+        from resources_servers.gdpval.app import REFERENCE_MISSING_FAILURE_CLASS
+
+        row = {
+            NG_FAILURE_CLASS_KEY: REFERENCE_MISSING_FAILURE_CLASS,
+            NG_TERMINAL_KEY: True,
+        }
+        assert _is_terminal_failure(row) is True
+
+    def test_timeout_stays_retryable(self) -> None:
+        from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, _is_terminal_failure
+
+        assert _is_terminal_failure({NG_FAILURE_CLASS_KEY: "timeout_exceeded"}) is False
+
+    def test_reference_missing_row_is_not_a_success(self) -> None:
+        """The point of the change: it must not reach the success set, where the
+        non-final-stage coverage gate would reject it before any threshold."""
+        from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY
+        from resources_servers.gdpval.app import REFERENCE_MISSING_FAILURE_CLASS
+        from resources_servers.gdpval.multistage_orchestrator import _is_success_row
+
+        row = {
+            "task_id": "t1",
+            "reward": 0.0,
+            "judge_response": {"error": "reference_missing"},
+            NG_FAILURE_CLASS_KEY: REFERENCE_MISSING_FAILURE_CLASS,
+        }
+        assert _is_success_row(row) is False
