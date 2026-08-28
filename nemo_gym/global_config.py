@@ -626,41 +626,6 @@ Duplicate config paths:
                 agents[source.agent_type] = composed
             global_config_dict.pop(source.name)
 
-    @staticmethod
-    def _pairing_override_enabled(global_config_dict: DictConfig) -> bool:
-        return bool(global_config_dict.get(ALLOW_UNSUPPORTED_PAIRING_KEY_NAME)) or getenv(
-            ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME, ""
-        ).lower() not in ("", "0", "false")
-
-    @staticmethod
-    def _allowed_agents(global_config_dict: DictConfig, target: _AgentInstance) -> Optional[List[str]]:
-        """The agent types the target's resources server declares support for, or None if it declares none.
-
-        Read off the instance: every config that declares a server block states its own fields, so one
-        written from scratch must declare this too.
-        """
-        reference = target.server_config._get_node("resources_server")
-        instance_name = reference.get("name") if isinstance(reference, DictConfig) else None
-        instance = global_config_dict.get(instance_name) if instance_name else None
-        if not isinstance(instance, DictConfig) or RESOURCES_SERVER_TYPE_KEY_NAME not in instance:
-            return None
-        servers = instance[RESOURCES_SERVER_TYPE_KEY_NAME]
-        if not isinstance(servers, DictConfig) or len(servers) != 1:
-            return None
-        implementation = next(iter(servers))
-        declared = servers[implementation].get(ALLOWED_AGENTS_KEY_NAME)
-        if not declared:
-            return None
-        if isinstance(declared, str):
-            return [declared]
-        if not isinstance(declared, ListConfig):
-            raise ConfigError(
-                f"'{instance_name}.{RESOURCES_SERVER_TYPE_KEY_NAME}.{implementation}."
-                f"{ALLOWED_AGENTS_KEY_NAME}' must be a list of agent types, got {type(declared).__name__}. "
-                f"For example: {ALLOWED_AGENTS_KEY_NAME}: [{target.agent_type}]"
-            )
-        return [str(name) for name in declared]
-
     def _raise_on_unsupported_pairing(
         self, global_config_dict: DictConfig, source: _AgentInstance, targets: List[_AgentInstance]
     ) -> None:
@@ -670,13 +635,14 @@ Duplicate config paths:
         knows which harnesses score their task correctly, while a generic harness cannot know that for every
         environment. A server that declares nothing accepts any harness.
         """
-        if self._pairing_override_enabled(global_config_dict):
+        if pairing_override_enabled(global_config_dict):
             return
 
         restrictions: List[Set[str]] = []
         rejected: List[Tuple[_AgentInstance, List[str]]] = []
         for target in targets:
-            allowed = self._allowed_agents(global_config_dict, target)
+            reference = self._resources_server_reference(target.server_config)
+            allowed = allowed_agents_for(global_config_dict, reference.get("name") if reference else None)
             if allowed is None:
                 continue
             restrictions.append(set(allowed))
@@ -1222,6 +1188,39 @@ def get_first_server_config_dict(global_config_dict: DictConfig, top_level_path:
     server_config_dict = list(server_config_dict.values())[0]
 
     return server_config_dict
+
+
+def allowed_agents_for(global_config_dict: DictConfig, resources_server_name: Optional[str]) -> Optional[List[str]]:
+    """The agent types `resources_server_name` declares support for, or None when it declares none.
+
+    A bare string is accepted as a single entry: an `++...allowed_agents=name` override arrives before the
+    server model is validated, and iterating it would read the name as its characters.
+    """
+    instance = global_config_dict.get(resources_server_name) if resources_server_name else None
+    if not isinstance(instance, DictConfig) or RESOURCES_SERVER_TYPE_KEY_NAME not in instance:
+        return None
+    servers = instance[RESOURCES_SERVER_TYPE_KEY_NAME]
+    if not isinstance(servers, DictConfig) or len(servers) != 1:
+        return None
+    implementation = next(iter(servers))
+    declared = servers[implementation].get(ALLOWED_AGENTS_KEY_NAME)
+    if not declared:
+        return None
+    if isinstance(declared, str):
+        return [declared]
+    if not isinstance(declared, ListConfig):
+        raise ConfigError(
+            f"'{resources_server_name}.{RESOURCES_SERVER_TYPE_KEY_NAME}.{implementation}."
+            f"{ALLOWED_AGENTS_KEY_NAME}' must be a list of agent types, got {type(declared).__name__}."
+        )
+    return [str(name) for name in declared]
+
+
+def pairing_override_enabled(global_config_dict: DictConfig) -> bool:
+    """True when the `allowed_agents` guard has been waived by config key or environment variable."""
+    return bool(global_config_dict.get(ALLOW_UNSUPPORTED_PAIRING_KEY_NAME)) or getenv(
+        ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME, ""
+    ).lower() not in ("", "0", "false")
 
 
 def agents_by_resources_server(global_config_dict: DictConfig) -> Dict[str, List[str]]:

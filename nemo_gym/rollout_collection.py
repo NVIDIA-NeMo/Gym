@@ -52,6 +52,8 @@ from nemo_gym.config_types import (
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
+    AGENT_SERVER_TYPE_KEY_NAME,
+    ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
     ATTEMPT_INDEX_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
@@ -60,7 +62,9 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
     agents_by_resources_server,
+    allowed_agents_for,
     get_global_config_dict,
+    pairing_override_enabled,
 )
 from nemo_gym.path_utils import failures_path_for
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
@@ -1740,6 +1744,46 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             "Include the agent's config in the run, or re-route with +agent_map/+agent_name."
         )
 
+    @staticmethod
+    def _validate_agent_pairings(examples: List[Dict], global_config_dict: DictConfig) -> None:
+        """Fail before dispatch when a row points to agent incompatible with the resources server it runs on."""
+        if pairing_override_enabled(global_config_dict):
+            return
+        routes = {
+            (name, row.get(TASK_SOURCE_KEY_NAME))
+            for row in examples
+            if (name := (row.get(AGENT_REF_KEY_NAME) or {}).get("name")) is not None
+        }
+        rejected: Dict[Tuple[str, str], str] = {}
+        for agent, task_source in routes:
+            # indexing by name is safe because we already validated the agent names
+            agents = global_config_dict[agent][AGENT_SERVER_TYPE_KEY_NAME]
+            if not agents:
+                continue
+            # this is only one agent type per agent instance and the check it elsewhere
+            agent_type = str(next(iter(agents)))
+            reference = OmegaConf.select(agents[agent_type], "resources_server")
+            bound = reference.get("name") if isinstance(reference, DictConfig) else None
+            for verifier, relation in (
+                (task_source, "their task_source"),
+                (bound, "the resources server it runs against"),
+            ):
+                allowed = allowed_agents_for(global_config_dict, verifier)
+                if allowed is None or agent_type in allowed:
+                    continue
+                rejected[(agent, str(verifier))] = (
+                    f"  - rows routed to '{agent}' run '{agent_type}', but {relation} "
+                    f"'{verifier}' accepts only: {', '.join(allowed)}"
+                )
+        if not rejected:
+            return
+        raise ValueError(
+            "Rows would be scored by a verifier that does not accept the agent running them:\n"
+            + "\n".join(line for _, line in sorted(rejected.items()))
+            + "\n\nRoute these rows to an agent running one of the accepted types, or pass "
+            f"--allow-unsupported-pairing (or set {ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME}=1) to bypass the check."
+        )
+
     def run_examples(
         self,
         examples: List[Dict],
@@ -1761,6 +1805,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         server_client = self.setup_server_client(head_server_config)
         self.resolve_task_sources(examples, server_client.global_config_dict)
         self._validate_agent_names(examples, server_client.global_config_dict)
+        self._validate_agent_pairings(examples, server_client.global_config_dict)
         semaphore = semaphore or nullcontext()
 
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
