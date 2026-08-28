@@ -621,6 +621,8 @@ def test_slurm_launcher_submits_one_dependent_cpu_cleanup_job(tmp_path: Path) ->
     ]
     main_call, cleanup_call = read_sbatch_calls(calls_path)
     assert "--parsable" in main_call
+    wrap_index = main_call.index("--wrap")
+    assert main_call[wrap_index + 1] == 'exec bash -c "$batch_command"'
 
     submit_dir = str(Path.cwd().resolve())
     repo_root = SBATCH_SCRIPT.resolve().parents[2]
@@ -698,7 +700,7 @@ def test_slurm_launcher_reports_cleanup_submission_failure(tmp_path: Path) -> No
 
 @pytest.mark.parametrize(
     ("first_step", "eval_status", "expected_status"),
-    [("eval", 37, 37), ("eval", 143, 143), ("server", 0, 41)],
+    [("eval", 0, 0), ("eval", 37, 37), ("eval", 143, 143), ("server", 0, 41)],
 )
 def test_slurm_batch_command_preserves_status_and_stops_server(
     tmp_path: Path, first_step: str, eval_status: int, expected_status: int
