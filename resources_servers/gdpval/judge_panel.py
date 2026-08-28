@@ -70,6 +70,16 @@ class ResolvedJudge:
     # server's routing).
     handles_audio: bool = False
     handles_video: bool = False
+    # The transport is selected per provider. Hosted GPT uses rasterized pages,
+    # while Gemini and Claude can consume native PDFs.
+    media_mode: str = "native_pdf"
+    max_native_pdf_pages: Optional[int] = None
+    max_native_pdf_documents: Optional[int] = None
+    max_native_pdf_bytes: Optional[int] = None
+    # Raster tiers are tried in order. The first complete request below the
+    # provider wire cap is used; otherwise that judge is excluded pre-dispatch.
+    raster_dpi_tiers: tuple[int, ...] = ()
+    max_serialized_request_bytes: Optional[int] = None
 
 
 class _HasWeight(Protocol):

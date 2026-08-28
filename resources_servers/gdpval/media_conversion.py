@@ -172,6 +172,22 @@ def pdf_bytes_to_image_blocks(
     return blocks
 
 
+def pdf_page_count(pdf_bytes: bytes) -> int:
+    """Return the exact page count for an in-memory PDF, failing closed."""
+    try:
+        import fitz  # PyMuPDF
+    except ImportError as exc:
+        raise RuntimeError("PyMuPDF is required for native-PDF request gating") from exc
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    except Exception as exc:
+        raise RuntimeError(f"cannot count PDF pages: {exc!r}") from exc
+    try:
+        return int(doc.page_count)
+    finally:
+        doc.close()
+
+
 def pdf_bytes_to_text(pdf_bytes: bytes, *, max_chars: int = DEFAULT_MAX_TEXT_CHARS) -> str:
     """Extract text from a PDF (as bytes), truncated to *max_chars*.
 

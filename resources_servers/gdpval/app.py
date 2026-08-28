@@ -41,7 +41,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Set, Tuple
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -174,6 +174,16 @@ class JudgePanelMember(BaseModel):
     # with a warning (video/images/text are still graded).
     handles_audio: bool = False
     handles_video: bool = False
+    # Representation and request limits are provider-specific. Keeping them on
+    # the panel member prevents one global knob from breaking a different API.
+    media_mode: Optional[Literal["native_pdf", "images_and_text", "native_pdf_overflow_images"]] = None
+    max_native_pdf_pages: Optional[int] = None
+    max_native_pdf_documents: Optional[int] = None
+    max_native_pdf_bytes: Optional[int] = None
+    # Tried in order for images_and_text. The first lossless projection below
+    # max_serialized_request_bytes wins; otherwise this member is excluded.
+    raster_dpi_tiers: Tuple[int, ...] = ()
+    max_serialized_request_bytes: Optional[int] = None
 
 
 def _strict_comparison_trial_failure(
@@ -253,6 +263,8 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     judge_pdf_max_pages: int = 50
     # Attach the extracted text copy alongside the page images. Off → images only.
     judge_pdf_include_text: bool = True
+    # Exact request-wide image cap for raster and PDF-overflow transports.
+    judge_max_images_per_request: int = 450
     # Whether the (single) local judge natively reads audio / video, tracked
     # SEPARATELY because MiniMax-M3 — the reference self-hosted judge — reads video
     # but NOT audio (its config has an image + video tower but no audio config). So
@@ -321,6 +333,8 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
 
 
 class GDPValVerifyRequest(BaseVerifyRequest):
+    model_config = ConfigDict(populate_by_name=True)
+
     task_id: str
     sector: Optional[str] = None
     occupation: Optional[str] = None
@@ -335,6 +349,15 @@ class GDPValVerifyRequest(BaseVerifyRequest):
     # reference. Used by the multi-stage ELO driver to select a different set of
     # reference models per judgementstage without reconfiguring the server.
     reference_ids: Optional[List[str]] = None
+    # Preserve multistage identity through /verify so Stirrup's namespace-keyed
+    # cache and the incrementally tagged output remain auditable.
+    verify_cache_namespace: Optional[str] = None
+    stage_index: Optional[int] = None
+    expected_final_stage_index: Optional[int] = None
+    expected_stage_row_count: Optional[int] = None
+    ng_task_index: Optional[int] = Field(default=None, alias="_ng_task_index")
+    ng_rollout_index: Optional[int] = Field(default=None, alias="_ng_rollout_index")
+    ng_attempt_index: Optional[int] = Field(default=None, alias="_ng_attempt_index")
 
 
 # The reference model has no deliverable for this task, so no battle can be
@@ -463,6 +486,12 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     weight=member.weight,
                     handles_audio=member.handles_audio,
                     handles_video=member.handles_video,
+                    media_mode=member.media_mode or self.config.judge_media_mode,
+                    max_native_pdf_pages=member.max_native_pdf_pages,
+                    max_native_pdf_documents=member.max_native_pdf_documents,
+                    max_native_pdf_bytes=member.max_native_pdf_bytes,
+                    raster_dpi_tiers=tuple(member.raster_dpi_tiers),
+                    max_serialized_request_bytes=member.max_serialized_request_bytes,
                 )
             )
         return judges
@@ -680,8 +709,13 @@ class GDPValResourcesServer(SimpleResourcesServer):
         from resources_servers.gdpval.comparison import (
             JUDGE_REQUEST_TIMEOUT_SECONDS,
             Judge,
+            apply_native_pdf_overflow,
             build_file_section,
             clean_up_paths,
+            filter_media_eligible_judges,
+            plan_native_pdf_overflow,
+            preflight_judge_transport,
+            preview_trial_judges,
             run_trials,
             task_attempted,
         )
@@ -778,6 +812,12 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 weight=rj.weight,
                 handles_audio=rj.handles_audio,
                 handles_video=rj.handles_video,
+                media_mode=rj.media_mode,
+                max_native_pdf_pages=rj.max_native_pdf_pages,
+                max_native_pdf_documents=rj.max_native_pdf_documents,
+                max_native_pdf_bytes=rj.max_native_pdf_bytes,
+                raster_dpi_tiers=rj.raster_dpi_tiers,
+                max_serialized_request_bytes=rj.max_serialized_request_bytes,
             )
             for rj in resolved_judges
         ]
@@ -815,27 +855,56 @@ class GDPValResourcesServer(SimpleResourcesServer):
         ref_errors: Dict[str, List[str]] = {}
         attempted_matchups = 0
         last_error: Optional[Exception] = None
-        # Present PDFs/Office docs either as native PDF data URLs (frontier
-        # judges) or rasterized page images + text (image-only local VLM judges
-        # like a gym-spawned Kimi K2.6) — see ``judge_media_mode``.
-        media_kwargs: Dict[str, Any] = {
-            "media_mode": self.config.judge_media_mode,
-            "render_dpi": self.config.judge_pdf_render_dpi,
-            "max_pages": self.config.judge_pdf_max_pages,
-            "include_text": self.config.judge_pdf_include_text,
-            # Forward each AV modality only when a (routed) judge can read it.
-            "audio_capable": audio_capable,
-            "video_capable": video_capable,
-        }
-        try:
-            # ``build_file_section`` rasterizes pages (PyMuPDF) and extracts text
-            # (pdfminer) in images_and_text mode — CPU-bound work that must not
-            # run on the event loop, same reasoning as the ``run_trials`` dispatch
-            # below.
-            eval_submission = await asyncio.to_thread(
-                build_file_section, str(eval_task_dir), clean_up_list, **media_kwargs
+        # Cache each semantic side independently by representation and DPI.
+        # Native sections are also the exact source for provider-cap preflight.
+        section_cache: Dict[Tuple[str, str, int], List[dict]] = {}
+
+        async def _section(path: Optional[Path], mode: str, render_dpi: int) -> List[dict]:
+            key = (str(path) if path is not None else "<none>", mode, render_dpi)
+            if key not in section_cache:
+                section_cache[key] = await asyncio.to_thread(
+                    build_file_section,
+                    str(path) if path is not None else None,
+                    clean_up_list,
+                    media_mode=mode,
+                    render_dpi=render_dpi,
+                    max_pages=self.config.judge_pdf_max_pages,
+                    include_text=self.config.judge_pdf_include_text,
+                    audio_capable=audio_capable,
+                    video_capable=video_capable,
+                )
+            return section_cache[key]
+
+        def _image_count(*sections: List[dict]) -> int:
+            return sum(
+                1
+                for section in sections
+                for block in section
+                if block.get("type") == "image_url"
+                and str((block.get("image_url") or {}).get("url", "")).startswith("data:image/")
             )
 
+        def _native_pdf_stats(*sections: List[dict]) -> Dict[str, int]:
+            import base64
+
+            from resources_servers.gdpval.media_conversion import pdf_page_count
+
+            pages = documents = byte_count = 0
+            prefix = "data:application/pdf;base64,"
+            for section in sections:
+                for block in section:
+                    if block.get("type") != "image_url":
+                        continue
+                    url = str((block.get("image_url") or {}).get("url", ""))
+                    if not url.startswith(prefix):
+                        continue
+                    payload = base64.b64decode(url[len(prefix) :], validate=True)
+                    documents += 1
+                    byte_count += len(payload)
+                    pages += pdf_page_count(payload)
+            return {"pages": pages, "documents": documents, "bytes": byte_count}
+
+        try:
             # Judge the eval submission against every reference model, and within
             # each model against every available reference repeat. Raw vote
             # counts (not just per-matchup majority) are summed so the win rate
@@ -845,32 +914,182 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 ref_judged_repeats = 0
                 for ref_dir in dirs:
                     refs_subdir = ref_dir / "reference_files"
-                    refs = await asyncio.to_thread(
-                        build_file_section,
-                        str(refs_subdir) if refs_subdir.is_dir() else None,
-                        clean_up_list,
-                        **media_kwargs,
-                    )
-                    ref_submission = await asyncio.to_thread(
-                        build_file_section, str(ref_dir), clean_up_list, **media_kwargs
-                    )
                     attempted_matchups += 1
                     # Seed per (task, ref_id, ref_repeat) so judge sampling is
                     # reproducible and each reference subset draws independently —
                     # this makes multi-stage ELO reruns replayable per stage.
                     rng = make_rng(self.config.judge_sampling_seed, body.task_id, ref_id, ref_dir.name)
                     try:
+                        matchup_judges = list(judges)
+                        media_exclusions: List[Dict[str, Any]] = []
+                        render_dpi = self.config.judge_pdf_render_dpi
+                        native = {
+                            "refs": await _section(
+                                refs_subdir if refs_subdir.is_dir() else None,
+                                "native_pdf",
+                                render_dpi,
+                            ),
+                            "submission_a": await _section(ref_dir, "native_pdf", render_dpi),
+                            "submission_b": await _section(eval_task_dir, "native_pdf", render_dpi),
+                        }
+                        native_stats = _native_pdf_stats(*native.values())
+                        estimated_images = native_stats["pages"] + _image_count(*native.values())
+                        overflow_judges = [
+                            judge for judge in matchup_judges if judge.media_mode == "native_pdf_overflow_images"
+                        ]
+                        overflow_plan: Optional[Dict[str, Any]] = None
+                        if overflow_judges:
+                            caps = {
+                                judge.max_native_pdf_pages
+                                for judge in overflow_judges
+                                if judge.max_native_pdf_pages is not None
+                            }
+                            if len(caps) != 1:
+                                raise ValueError(f"overflow judges require one explicit native page cap, got {caps}")
+                            overflow_plan = plan_native_pdf_overflow(
+                                native,
+                                native_page_cap=caps.pop(),
+                                image_cap=self.config.judge_max_images_per_request,
+                            )
+                        matchup_judges, media_exclusions = filter_media_eligible_judges(
+                            matchup_judges,
+                            native_stats=native_stats,
+                            estimated_images=estimated_images,
+                            image_cap=self.config.judge_max_images_per_request,
+                            overflow_plan=overflow_plan,
+                        )
+                        if not matchup_judges:
+                            raise ValueError("media routing excluded every judge")
+
+                        sections_by_judge: Dict[str, Dict[str, List[dict]]] = {}
+                        transport_receipts: Dict[str, Dict[str, Any]] = {}
+                        failed_names: Set[str] = set()
+                        # Sampling is replayed from the untouched RNG after any
+                        # pre-dispatch exclusion. Only modes that can actually be
+                        # sampled are materialized, avoiding needless raster work.
+                        while True:
+                            active = [judge for judge in matchup_judges if judge.name not in failed_names]
+                            if not active:
+                                raise ValueError("transport preflight excluded every judge")
+                            schedule = preview_trial_judges(active, self.config.num_comparison_trials, rng)
+                            needed = {judge.name: judge for judge in schedule}
+                            new_failure = False
+                            for judge_name, judge in needed.items():
+                                if judge_name in sections_by_judge or judge_name in failed_names:
+                                    continue
+                                candidates: List[Tuple[Optional[int], Dict[str, List[dict]]]] = []
+                                attempted_preflights: List[Dict[str, Any]] = []
+                                if judge.media_mode == "native_pdf":
+                                    candidates.append((None, native))
+                                elif judge.media_mode == "native_pdf_overflow_images":
+                                    if overflow_plan is None:
+                                        raise ValueError("overflow mode selected without a plan")
+                                    transformed = native
+                                    if overflow_plan.get("selected"):
+                                        transformed = await asyncio.to_thread(
+                                            apply_native_pdf_overflow,
+                                            native,
+                                            overflow_plan,
+                                            render_dpi=render_dpi,
+                                            max_pages=self.config.judge_pdf_max_pages,
+                                            include_text=self.config.judge_pdf_include_text,
+                                        )
+                                    candidates.append((render_dpi, transformed))
+                                elif judge.media_mode == "images_and_text":
+                                    tiers = judge.raster_dpi_tiers or (render_dpi,)
+                                    if any(dpi < 36 or dpi > 600 for dpi in tiers):
+                                        raise ValueError(f"invalid raster DPI tiers for {judge.name}: {tiers}")
+                                    # Build and preflight one tier at a time. A
+                                    # 300-page task can allocate tens of MiB per
+                                    # tier, so eagerly materializing every tier
+                                    # defeats the purpose of adaptive routing.
+                                    for dpi in tiers:
+                                        candidate_sections = {
+                                            "refs": await _section(
+                                                refs_subdir if refs_subdir.is_dir() else None,
+                                                "images_and_text",
+                                                dpi,
+                                            ),
+                                            "submission_a": await _section(ref_dir, "images_and_text", dpi),
+                                            "submission_b": await _section(eval_task_dir, "images_and_text", dpi),
+                                        }
+                                        receipt = await asyncio.to_thread(
+                                            preflight_judge_transport,
+                                            judge,
+                                            body.prompt or "",
+                                            candidate_sections,
+                                        )
+                                        receipt["render_dpi"] = dpi
+                                        attempted_preflights.append(receipt)
+                                        if receipt["eligible"]:
+                                            sections_by_judge[judge_name] = candidate_sections
+                                            transport_receipts[judge_name] = receipt
+                                            break
+                                        # Do not retain rejected raster payloads;
+                                        # only the small receipt survives.
+                                        for path in (
+                                            refs_subdir if refs_subdir.is_dir() else None,
+                                            ref_dir,
+                                            eval_task_dir,
+                                        ):
+                                            section_cache.pop(
+                                                (
+                                                    str(path) if path is not None else "<none>",
+                                                    "images_and_text",
+                                                    dpi,
+                                                ),
+                                                None,
+                                            )
+                                else:
+                                    raise ValueError(f"unknown judge media mode: {judge.media_mode}")
+
+                                if judge_name in sections_by_judge:
+                                    continue
+                                for dpi, candidate_sections in candidates:
+                                    receipt = await asyncio.to_thread(
+                                        preflight_judge_transport,
+                                        judge,
+                                        body.prompt or "",
+                                        candidate_sections,
+                                    )
+                                    receipt["render_dpi"] = dpi
+                                    attempted_preflights.append(receipt)
+                                    if receipt["eligible"]:
+                                        sections_by_judge[judge_name] = candidate_sections
+                                        transport_receipts[judge_name] = receipt
+                                        break
+                                if judge_name not in sections_by_judge:
+                                    failed_names.add(judge_name)
+                                    new_failure = True
+                                    media_exclusions.append(
+                                        {
+                                            "mode": judge.media_mode,
+                                            "judges": [judge.name],
+                                            "reason": "transport_preflight",
+                                            "attempts": attempted_preflights,
+                                        }
+                                    )
+                            if not new_failure:
+                                matchup_judges = active
+                                break
+
                         result = await asyncio.to_thread(
                             run_trials,
-                            judges=judges,
+                            judges=matchup_judges,
                             task_prompt=body.prompt or "",
-                            refs=refs,
-                            submission_a=ref_submission,
-                            submission_b=eval_submission,
+                            refs=native["refs"],
+                            submission_a=native["submission_a"],
+                            submission_b=native["submission_b"],
+                            sections_by_judge=sections_by_judge,
                             num_trials=self.config.num_comparison_trials,
                             return_raw_responses=self.config.persist_raw_judge_responses,
                             rng=rng,
                         )
+                        result["transport_by_judge"] = transport_receipts
+                        if media_exclusions:
+                            result["media_routing_exclusions"] = media_exclusions
+                        if overflow_plan and overflow_plan.get("selected"):
+                            result["native_pdf_overflow"] = overflow_plan
                     except Exception as e:  # noqa: BLE001 — isolate per-matchup judge failures
                         last_error = e
                         ref_errors.setdefault(ref_id, []).append(f"{ref_dir.name}: {e!r}")
