@@ -54,7 +54,7 @@ from traceback import format_exc
 from typing import Any, ClassVar, Dict, List, Optional
 
 from fastapi import Request
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.base_resources_server import (
     BaseMultiRewardVerifyResponse,
@@ -84,8 +84,27 @@ _SKIPPABLE_RE = re.compile(r"(<skippable>[^<]*</skippable>)")
 
 
 def add_evaluation_tags(test_plan_text: str) -> str:
-    """Insert the ``<pass>``/``<comment>`` scaffolding the evaluation agent fills in."""
-    return _SKIPPABLE_RE.sub(lambda m: m.group(1) + "\n<pass>Y/N</pass>\n<comment></comment>", test_plan_text)
+    """Insert the ``<pass>``/``<comment>`` scaffolding the evaluation agent fills in.
+
+    Raises when a plan contains ``<skippable>`` blocks but none matched: a silent no-op here
+    produces a plan the evaluation agent cannot score, which surfaces much later as an
+    unexplained zero rather than as a bad test plan.
+    """
+    tagged, count = _SKIPPABLE_RE.subn(
+        lambda m: m.group(1) + "\n<pass>Y/N</pass>\n<comment></comment>", test_plan_text
+    )
+    if count == 0 and "<skippable" in test_plan_text:
+        raise ValueError("test plan has <skippable> blocks but none matched the tagging pattern")
+    return tagged
+
+
+class GraderConfigError(RuntimeError):
+    """The grading environment itself is misconfigured.
+
+    Deliberately distinct: per-plan failures are zeroed and reported, but this one applies to
+    every plan in every rollout, so zeroing it would produce a full dataset of silent zeros
+    that looks like a very bad model.
+    """
 
 
 class VibenchResourcesServerConfig(BaseResourcesServerConfig):
@@ -168,6 +187,11 @@ class PlanResult(BaseModel):
 
 
 class VibenchVerifyResponse(BaseMultiRewardVerifyResponse):
+    # The **body.model_dump() splat carries task fields (prd_files, test_plans,
+    # test_assets_dir, artifact_path) that this response does not redeclare; without this
+    # they are silently dropped and reverify cannot reconstruct the task.
+    model_config = ConfigDict(extra="allow")
+
     app: str
     artifact: str
 
@@ -195,6 +219,16 @@ class VibenchResourcesServer(SimpleResourcesServer):
     @property
     def _repo_root(self) -> Path:
         return Path(self.config.vibench_repo_root).expanduser().resolve()
+
+    @property
+    def _vibench_python(self) -> str:
+        """ViBench's own interpreter when the checkout has one.
+
+        Its scripts import ViBench's dependencies, which are not in the Gym component venv;
+        prepare.py already resolves the same checkout this way.
+        """
+        candidate = self._repo_root / ".venv" / "bin" / "python"
+        return str(candidate) if candidate.exists() else sys.executable
 
     @property
     def _artifact_root(self) -> Path:
@@ -267,7 +301,7 @@ class VibenchResourcesServer(SimpleResourcesServer):
             "print(json.dumps(env_creator.get_env_dict(%r)))" % (str(scripts_dir), self.config.grader_model_name)
         )
         proc = await asyncio.create_subprocess_exec(
-            sys.executable,
+            self._vibench_python,
             "-c",
             probe,
             cwd=str(self._repo_root),
@@ -275,14 +309,23 @@ class VibenchResourcesServer(SimpleResourcesServer):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+        except asyncio.TimeoutError:
+            # Without this the process survives and is re-spawned for every later plan.
+            await self._terminate_group(proc)
+            raise GraderConfigError("env_creator timed out after 120s") from None
         if proc.returncode != 0:
             # Failing loudly matters: degrading to an empty grader env makes every plan die
             # inside the container with "LLM API KEYS is not set", which points debugging at
             # credentials rather than at this call.
-            raise RuntimeError(
+            # Redact before the message is built: this text reaches PlanResult.error and
+            # therefore the committed rollout JSONL, and env_creator's stderr can echo the
+            # very environment it was handed.
+            detail = self._redact(stderr.decode(errors="replace")[-500:], env)
+            raise GraderConfigError(
                 f"env_creator failed (rc={proc.returncode}) for grader_model_name="
-                f"{self.config.grader_model_name!r}: {stderr.decode(errors='replace')[-500:]}"
+                f"{self.config.grader_model_name!r}: {detail}"
             )
         env.update({k: str(v) for k, v in json.loads(stdout).items() if v is not None})
 
@@ -355,11 +398,25 @@ class VibenchResourcesServer(SimpleResourcesServer):
         try:
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
         except asyncio.TimeoutError:
+            # communicate() was cancelled, so nothing is draining stdout. A grading script
+            # that fills the pipe would block on write and never reach its compose cleanup,
+            # which is the whole point of interrupting it rather than killing it.
+            drain = asyncio.create_task(self._drain(proc))
             await self._terminate_group(proc)
+            drain.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await drain
             return 1, f"timed out after {timeout_s:g}s: {' '.join(cmd)}"
 
         code = proc.returncode if proc.returncode is not None else 1
         return code, self._redact((stdout or b"").decode(errors="replace"), env)
+
+    @staticmethod
+    async def _drain(proc: Any) -> None:
+        """Keep reading stdout so an interrupted script never blocks on a full pipe."""
+        with suppress(Exception):
+            while await proc.stdout.read(65536):
+                pass
 
     async def _terminate_group(self, proc: Any) -> None:
         """Escalate SIGINT -> SIGTERM -> SIGKILL across the process group.
@@ -426,7 +483,7 @@ class VibenchResourcesServer(SimpleResourcesServer):
         seed_dir.mkdir(parents=True, exist_ok=True)
         code, log = await self._run_vibench_script(
             [
-                sys.executable,
+                self._vibench_python,
                 str(self._repo_root / SEED_SCRIPT),
                 "--app-dir",
                 str(app_dir),
@@ -443,7 +500,7 @@ class VibenchResourcesServer(SimpleResourcesServer):
             return fail(seeding_failed=True, error=log[-2000:])
 
         evaluate_cmd = [
-            sys.executable,
+            self._vibench_python,
             str(self._repo_root / EVALUATE_SCRIPT),
             "--app-dir",
             str(app_dir),
@@ -511,6 +568,7 @@ class VibenchResourcesServer(SimpleResourcesServer):
 
         started = time.time()
         build_failed = False
+        artifact: Optional[Path] = None
         if not body.artifact_path:
             # The agent could not produce a tarball at all (sandbox died, harness crashed).
             build_failed = True
@@ -518,17 +576,13 @@ class VibenchResourcesServer(SimpleResourcesServer):
             # Resolve first and never touch the raw path: deleting an unvalidated,
             # agent-supplied path would remove arbitrary files even when the path was
             # rejected for reading.
-            artifact: Optional[Path] = None
             try:
                 artifact = self._resolve_artifact(body.artifact_path)
-                self._unpack_artifact(artifact, app_dir)
+                await asyncio.to_thread(self._unpack_artifact, artifact, app_dir)
             except Exception:
                 print(f"Failed to unpack artifact for {body.app}/{body.artifact}", format_exc(), file=sys.stderr)
                 build_failed = True
-            finally:
-                if artifact is not None and self.config.remove_artifact_after_grading:
-                    with suppress(Exception):
-                        artifact.unlink(missing_ok=True)
+            # Deleted after grading, not here -- see the end of this method.
 
         # An agent that produced nothing runnable is a build failure, not a 0-scoring app.
         # The contract is the two scripts ViBench's prompt requires and its grading stack
@@ -547,6 +601,11 @@ class VibenchResourcesServer(SimpleResourcesServer):
                     return await self._grade_one_test_plan(app_dir, plan, work_dir, body.test_assets_dir)
 
             gathered = await asyncio.gather(*(run(p) for p in body.test_plans), return_exceptions=True)
+            # A misconfigured grading environment affects every plan and every rollout;
+            # zeroing it would yield a whole dataset of silent zeros.
+            for outcome in gathered:
+                if isinstance(outcome, GraderConfigError):
+                    raise outcome
             results = [
                 r
                 if isinstance(r, PlanResult)
@@ -565,8 +624,14 @@ class VibenchResourcesServer(SimpleResourcesServer):
             ]
         grading_time_s = time.time() - grading_started
 
+        if artifact is not None and self.config.remove_artifact_after_grading:
+            with suppress(Exception):
+                artifact.unlink(missing_ok=True)
+
         if not self.config.keep_evaluation_artifacts:
-            shutil.rmtree(work_dir, ignore_errors=True)
+            # Blocking filesystem work off the event loop: this server handles concurrent
+            # rollouts and a large app tree takes real time to remove.
+            await asyncio.to_thread(shutil.rmtree, work_dir, ignore_errors=True)
 
         total = len(body.test_plans)
         graded = [r for r in results if not r.seeding_failed and r.error is None]

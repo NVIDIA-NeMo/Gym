@@ -43,15 +43,19 @@ from typing import Dict, List, Optional
 # generated seed.sh, so an app built without it fails evaluation with exit code 127 no matter how
 # good the app is. Writing our own brief would also change what the benchmark measures.
 CODING_PROMPT = "coding_prompt.j2"
+# ViBench's own goal identifiers (_harness/runner/agent/models.py); the template branches on
+# them to say "create from scratch" versus "extend what is here".
+ZERO_TO_ONE = "zero-to-one"
+FEATURE_BUILDING = "feature-building"
 
 RENDER_SNIPPET = """
 import sys, json
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
-prompts_dir, prd_path, max_iterations = sys.argv[1], sys.argv[2], int(sys.argv[3])
+prompts_dir, prd_path, max_iterations, goal = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
 env = Environment(loader=FileSystemLoader(prompts_dir), undefined=StrictUndefined, keep_trailing_newline=True)
 tpl = env.get_template("coding_prompt.j2")
 sys.stdout.write(tpl.render(
-    goal="zero-to-one",
+    goal=goal,
     prd=open(prd_path).read(),
     max_iterations=max_iterations,
     additional_instructions="",
@@ -65,8 +69,14 @@ def vibench_python(root: Path) -> str:
     return str(candidate) if candidate.exists() else sys.executable
 
 
-def render_task_prompt(root: Path, prd_text: str, max_iterations: int) -> Optional[str]:
-    """Render ViBench's coding prompt, or None if the checkout cannot render it."""
+def render_task_prompt(root: Path, prd_text: str, max_iterations: int, artifact: str) -> Optional[str]:
+    """Render ViBench's coding prompt, or None if the checkout cannot render it.
+
+    ``goal`` follows the artifact: ViBench's template branches on it, and rendering
+    ``zero-to-one`` for a feature artifact tells the model to build from scratch a task that
+    is supposed to extend an existing codebase.
+    """
+    goal = ZERO_TO_ONE if artifact.split("-on_")[0] == "mvp" else FEATURE_BUILDING
     prompts_dir = root / "_harness" / "runner" / "agent" / "prompts"
     if not (prompts_dir / CODING_PROMPT).exists():
         return None
@@ -78,7 +88,7 @@ def render_task_prompt(root: Path, prd_text: str, max_iterations: int) -> Option
         tmp = Path(fh.name)
     try:
         result = subprocess.run(
-            [vibench_python(root), "-c", RENDER_SNIPPET, str(prompts_dir), str(tmp), str(max_iterations)],
+            [vibench_python(root), "-c", RENDER_SNIPPET, str(prompts_dir), str(tmp), str(max_iterations), goal],
             capture_output=True,
             text=True,
             timeout=120,
@@ -122,7 +132,6 @@ def build_row(
     root: Path,
     app: str,
     artifact: str,
-    workdir: str,
     system_prompt: Optional[str],
     max_iterations: int,
 ) -> Optional[Dict]:
@@ -147,7 +156,7 @@ def build_row(
     test_assets_dir = str(test_assets.relative_to(root)) if test_assets.is_dir() else None
 
     prd_text = "\n\n".join(pth.read_text() for pth in prds)
-    prompt = render_task_prompt(root, prd_text, max_iterations)
+    prompt = render_task_prompt(root, prd_text, max_iterations, artifact)
     if prompt is None:
         return None
     messages = []
@@ -172,7 +181,6 @@ def main() -> None:
     parser.add_argument("--output", required=True, help="Destination .jsonl")
     parser.add_argument("--apps", nargs="*", default=None, help="App names (default: every app in prds/)")
     parser.add_argument("--artifacts", nargs="*", default=["mvp"], help="Artifacts per app (default: mvp)")
-    parser.add_argument("--workdir", default="/app", help="Build directory inside the sandbox")
     parser.add_argument("--system-prompt", default=None)
     parser.add_argument("--max-iterations", type=int, default=300, help="Value passed to ViBench's prompt")
     parser.add_argument("--limit", type=int, default=None)
@@ -191,7 +199,7 @@ def main() -> None:
         for artifact in args.artifacts:
             if artifact.split("-on_")[0] not in available:
                 continue
-            row = build_row(root, app, artifact, args.workdir, args.system_prompt, args.max_iterations)
+            row = build_row(root, app, artifact, args.system_prompt, args.max_iterations)
             if row is not None:
                 rows.append(row)
 

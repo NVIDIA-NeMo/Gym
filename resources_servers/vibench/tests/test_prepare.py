@@ -74,7 +74,7 @@ class TestRowConstruction:
         root = make_checkout(tmp_path, with_assets=True)
         monkeypatch.setattr(prepare, "render_task_prompt", lambda *a, **k: "RENDERED BRIEF")
 
-        row = prepare.build_row(root, "notes", "mvp", "/app", None, 300)
+        row = prepare.build_row(root, "notes", "mvp", None, 300)
 
         assert row["prd_files"] == ["prds/notes/prd/mvp.txt"]
         assert row["test_plans"] == ["prds/notes/tests/mvp/test1.txt", "prds/notes/tests/mvp/test2.txt"]
@@ -85,7 +85,7 @@ class TestRowConstruction:
         root = make_checkout(tmp_path, with_assets=True)
         monkeypatch.setattr(prepare, "render_task_prompt", lambda *a, **k: "BRIEF")
 
-        row = prepare.build_row(root, "notes", "mvp", "/app", None, 300)
+        row = prepare.build_row(root, "notes", "mvp", None, 300)
 
         assert row["asset_dirs"] == ["prds/notes/assets"]
         assert row["test_assets_dir"] == "prds/notes/test_assets"
@@ -95,7 +95,7 @@ class TestRowConstruction:
         root = make_checkout(tmp_path, with_assets=False)
         monkeypatch.setattr(prepare, "render_task_prompt", lambda *a, **k: "BRIEF")
 
-        row = prepare.build_row(root, "notes", "mvp", "/app", None, 300)
+        row = prepare.build_row(root, "notes", "mvp", None, 300)
 
         assert row["asset_dirs"] == []
         assert row["test_assets_dir"] is None
@@ -104,7 +104,7 @@ class TestRowConstruction:
         root = make_checkout(tmp_path)
         monkeypatch.setattr(prepare, "render_task_prompt", lambda *a, **k: "BRIEF")
 
-        row = prepare.build_row(root, "notes", "mvp", "/app", "SYS", 300)
+        row = prepare.build_row(root, "notes", "mvp", "SYS", 300)
 
         assert [m["role"] for m in row["responses_create_params"]["input"]] == ["system", "user"]
 
@@ -113,25 +113,25 @@ class TestRowConstruction:
         root = make_checkout(tmp_path)
         monkeypatch.setattr(prepare, "render_task_prompt", lambda *a, **k: None)
 
-        assert prepare.build_row(root, "notes", "mvp", "/app", None, 300) is None
+        assert prepare.build_row(root, "notes", "mvp", None, 300) is None
 
     def test_row_is_dropped_when_the_artifact_has_no_test_plans(self, tmp_path, monkeypatch):
         root = make_checkout(tmp_path)
         monkeypatch.setattr(prepare, "render_task_prompt", lambda *a, **k: "BRIEF")
 
-        assert prepare.build_row(root, "notes", "feature2", "/app", None, 300) is None
+        assert prepare.build_row(root, "notes", "feature2", None, 300) is None
 
     def test_row_is_dropped_when_a_prd_is_missing(self, tmp_path, monkeypatch):
         root = make_checkout(tmp_path)
         (root / "prds" / "notes" / "prd" / "mvp.txt").unlink()
         monkeypatch.setattr(prepare, "render_task_prompt", lambda *a, **k: "BRIEF")
 
-        assert prepare.build_row(root, "notes", "mvp", "/app", None, 300) is None
+        assert prepare.build_row(root, "notes", "mvp", None, 300) is None
 
 
 class TestPromptRendering:
     def test_returns_none_when_the_template_is_absent(self, tmp_path):
-        assert prepare.render_task_prompt(tmp_path, "prd text", 300) is None
+        assert prepare.render_task_prompt(tmp_path, "prd text", 300, "mvp") is None
 
     def test_prefers_vibench_own_interpreter(self, tmp_path):
         """ViBench's venv has jinja2; the caller's may not."""
@@ -151,11 +151,22 @@ class TestPromptRendering:
         prompts.mkdir(parents=True)
         (prompts / "coding_prompt.j2").write_text("goal={{ goal }} iters={{ max_iterations }}\n{{ prd }}")
 
-        out = prepare.render_task_prompt(tmp_path, "MY PRD", 42)
+        out = prepare.render_task_prompt(tmp_path, "MY PRD", 42, "mvp")
 
         assert "goal=zero-to-one" in out
         assert "iters=42" in out
         assert "MY PRD" in out
+
+    def test_feature_artifacts_get_the_feature_goal(self, tmp_path):
+        """zero-to-one tells the model to build from scratch; a feature extends a codebase."""
+        pytest.importorskip("jinja2")
+        prompts = tmp_path / "_harness" / "runner" / "agent" / "prompts"
+        prompts.mkdir(parents=True)
+        (prompts / "coding_prompt.j2").write_text("goal={{ goal }}")
+
+        assert "goal=zero-to-one" in prepare.render_task_prompt(tmp_path, "PRD", 1, "mvp")
+        assert "goal=feature-building" in prepare.render_task_prompt(tmp_path, "PRD", 1, "feature1")
+        assert "goal=feature-building" in prepare.render_task_prompt(tmp_path, "PRD", 1, "feature1-on_mvp")
 
     def test_render_failure_is_reported_not_raised(self, tmp_path):
         pytest.importorskip("jinja2")
@@ -163,7 +174,7 @@ class TestPromptRendering:
         prompts.mkdir(parents=True)
         (prompts / "coding_prompt.j2").write_text("{{ undefined_variable }}")
 
-        assert prepare.render_task_prompt(tmp_path, "PRD", 1) is None
+        assert prepare.render_task_prompt(tmp_path, "PRD", 1, "mvp") is None
 
 
 class TestMain:

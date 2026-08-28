@@ -94,7 +94,10 @@ provider config binds, so without it startup fails with *"Sandbox provider refer
 'sandbox' is not defined in the merged config"*. Swap that one path to move to another
 provider (OpenSandbox, Fargate, Enroot) without editing this config.
 
-Use `vibench_agent`'s docker config rather than the stock one. Stock Docker uses a 180s
+Use `vibench_agent`'s docker config rather than the stock one. Note it binds the model
+server to `0.0.0.0` so the bridge can reach it, which publishes that one server — and the
+run's token-capture path — on every host interface. Single-tenant hosts only, or firewall
+the port; see the comment at the top of that file. Stock Docker uses a 180s
 exec timeout, which kills long installs, and OpenCode is told the policy model is at
 `http://127.0.0.1:<port>` (`get_server_url`) — inside a bridged container that is the
 container itself, so the harness makes **zero** LLM calls and exports an empty app. That

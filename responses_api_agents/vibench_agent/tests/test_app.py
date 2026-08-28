@@ -20,6 +20,7 @@ import pytest
 
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.vibench_agent.app import (
+    EXPORT_FILENAME,
     PRD_FILENAME,
     VibenchAgent,
     VibenchAgentConfig,
@@ -111,9 +112,11 @@ class TestHarvest:
         await agent._harvest_app(sandbox, "sess-1")
 
         cmd = sandbox.execs[0]
-        assert "--exclude=./node_modules" in cmd
-        assert "--exclude=./.git" in cmd
-        assert f"--exclude=./{PRD_FILENAME}" in cmd
+        assert "--exclude=node_modules" in cmd
+        assert "--exclude=.git" in cmd
+        assert f"--exclude={PRD_FILENAME}" in cmd
+        # The harness writes its own transcript beside the app; it must not be graded.
+        assert f"--exclude={EXPORT_FILENAME}" in cmd
 
     @pytest.mark.asyncio
     async def test_excludes_virtualenvs(self, tmp_path):
@@ -126,7 +129,11 @@ class TestHarvest:
 
         cmd = sandbox.execs[0]
         for name in (".venv", "venv", "__pycache__"):
-            assert f"--exclude=./{name}" in cmd, f"{name} would be harvested"
+            assert f"--exclude={name}" in cmd, f"{name} would be harvested"
+        # Deliberately unanchored: GNU tar applies a ./-anchored pattern only at the top
+        # level, so nested node_modules/.venv would still be tarred -- and a nested venv
+        # symlink makes the verifier reject the whole artifact.
+        assert "--exclude=./" not in cmd, "anchored patterns miss nested trees"
 
     @pytest.mark.asyncio
     async def test_tar_failure_yields_no_artifact(self, tmp_path):

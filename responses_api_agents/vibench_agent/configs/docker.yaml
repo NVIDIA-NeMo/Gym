@@ -24,6 +24,16 @@
 # model server. It cannot see host loopback, Unix sockets, or other containers'
 # namespaces. OpenSandbox sandboxes have their own address and do not need this
 # file; pass sandbox_model_base_url on the agent instead.
+# EXPOSURE: 0.0.0.0 publishes the model server on *every* host interface, not just the
+# Docker bridge -- including the run's token-capture path (/ng-rollout/<id>). On a host with
+# a public or shared interface that is reachable by anything that can route to it, and the
+# server takes a dummy API key. Only run this on a single-tenant box, or firewall the port.
+#
+# Narrower alternative: bind the bridge gateway address instead of 0.0.0.0. Not the default
+# here because the gateway is not a fixed value -- ViBench's own setup configures custom
+# bridge address pools -- so it has to be resolved per host and verified before use.
+#
+# The other three servers stay on loopback; grader credentials live in those processes.
 policy_model:
   responses_api_models:
     openai_model:

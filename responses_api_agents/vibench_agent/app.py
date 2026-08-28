@@ -45,6 +45,12 @@ from fastapi import Body, Request
 
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.global_config import get_global_config_dict
+from nemo_gym.rollout_observability import (
+    AgentInvocation,
+    AgentObservationBundle,
+    ObservationGap,
+    SandboxObservation,
+)
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import (
@@ -65,14 +71,31 @@ from responses_api_agents.opencode_sandboxed_agent.app import (
 # ViBench's coding agent reads its brief from this path; the seeding and evaluation agents
 # are handed the same PRD text separately at grade time.
 PRD_FILENAME = "prd.txt"
+# The inherited responses() writes OpenCode's session export beside the app.
+EXPORT_FILENAME = "export.json"
 
-# Dependency and VCS trees never travel with the app. .venv/venv matter beyond size: their
-# bin/python symlinks point outside the app dir, which the verifier refuses as an escaping
-# link -- rejecting the entire artifact over a directory the grader would rebuild anyway.
-HARVEST_EXCLUDES = " ".join(
-    f"--exclude=./{name}"
-    for name in ("node_modules", ".git", ".venv", "venv", "env", "__pycache__", ".mypy_cache", ".pytest_cache")
+# Dependency and VCS trees never travel with the app. Patterns are deliberately NOT
+# ``./``-anchored: GNU tar applies an anchored pattern only at the top level, so
+# ``--exclude=./node_modules`` misses ``sub/node_modules`` -- and a nested ``.venv/bin/python``
+# symlinks outside the app dir, which makes the verifier reject the entire artifact.
+#
+# ``export.json`` is the harness's own transcript, written into the same workdir by the
+# inherited ``responses()``; harvesting it would tar the model's full session into the app
+# being graded.
+_EXCLUDED_NAMES = (
+    "node_modules",
+    ".git",
+    ".venv",
+    "venv",
+    "env",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".next",
+    "dist-cache",
 )
+HARVEST_EXCLUDES = " ".join(f"--exclude={name}" for name in _EXCLUDED_NAMES)
+
 
 # Bind addresses that are valid on the Gym host but mean "this container" inside a
 # bridged Docker sandbox. host.docker.internal is added via --add-host=host-gateway.
@@ -230,7 +253,7 @@ class VibenchAgent(OpenCodeSandboxedAgent):
         try:
             result = await sandbox.exec(
                 f"cd {quote(self.config.app_workdir)} && tar "
-                f"{HARVEST_EXCLUDES} --exclude=./{PRD_FILENAME} "
+                f"{HARVEST_EXCLUDES} --exclude={PRD_FILENAME} --exclude={EXPORT_FILENAME} "
                 f"-cf {quote(remote)} .",
                 timeout_s=self.config.harvest_timeout_s,
             )
@@ -263,6 +286,10 @@ class VibenchAgent(OpenCodeSandboxedAgent):
         seed_session_result = await seed_session_response.json()
 
         session_id = request.session[SESSION_ID_KEY]
+        # Same observability contract the parent's run() sets up: responses() only captures
+        # OpenCode observations when this is present, and without it every ViBench rollout
+        # reports no ng_agent_observations at all.
+        rollout_id = self.rollout_id_from_run(body)
         sandbox = await self._create_build_sandbox(
             prd_text=seed_session_result["prd_text"],
             asset_paths=seed_session_result.get("asset_paths", []),
@@ -271,10 +298,15 @@ class VibenchAgent(OpenCodeSandboxedAgent):
         cookies["sandbox_id"] = session_id
         request._cookies = cookies
 
+        request.state._ng_observation_invocation_id = rollout_id
+        observations = None
         try:
             response = await self.responses(request, body.responses_create_params)
             artifact_path = await self._harvest_app(sandbox, session_id)
         finally:
+            with suppress(AttributeError):
+                del request.state._ng_observation_invocation_id
+            observations = self._sandbox_id_to_run_result.get(session_id, {}).pop("_ng_agent_observations", None)
             # Harvest first, then release the box: the tarball is the only thing that
             # survives, and grading happens in a fresh stack.
             try:
@@ -298,6 +330,26 @@ class VibenchAgent(OpenCodeSandboxedAgent):
 
         response_dict: Dict[str, Any] = await get_response_json(verify_response)
         response_dict |= self._sandbox_id_to_run_result.pop(session_id, {})
+        raw_verifier_observation = response_dict.pop("verifier_sandbox_observation", None)
+
+        if rollout_id is not None:
+            if observations is None:
+                observations = AgentObservationBundle(
+                    source="opencode",
+                    records=[AgentInvocation(invocation_id=rollout_id)],
+                    gaps=[ObservationGap(code="observation_capture_failed")],
+                )
+            if raw_verifier_observation is not None:
+                try:
+                    verifier_observation = SandboxObservation.model_validate(raw_verifier_observation)
+                    if verifier_observation.role != "verifier":
+                        raise ValueError("resources server returned a non-verifier sandbox observation")
+                    observations.records.append(verifier_observation)
+                except Exception:
+                    observations.gaps.append(ObservationGap(code="verifier_sandbox_observation_invalid"))
+            else:
+                observations.gaps.append(ObservationGap(code="verifier_sandbox_observation_unavailable"))
+            response_dict["ng_agent_observations"] = observations.model_dump(mode="json")
         return OpenCodeSandboxedAgentVerifyResponse.model_validate(response_dict)
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
