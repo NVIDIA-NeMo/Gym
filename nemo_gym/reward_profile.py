@@ -456,8 +456,8 @@ class RewardProfiler:
             row.pop(ROLLOUT_INDEX_KEY_NAME)
 
             group_metrics["sample"] = row
-            num_rollouts = len(task_idx_to_rollout_infos[task_idx])
-            expected_num_rollouts = expected_rollouts_by_task[task_idx]
+            num_rollouts = len(task_idx_to_rollout_infos[group_key])
+            expected_num_rollouts = expected_rollouts_by_task[group_key]
             group_metrics["num_rollouts"] = num_rollouts
             group_metrics["expected_num_rollouts"] = expected_num_rollouts
             group_metrics["missing_num_rollouts"] = expected_num_rollouts - num_rollouts
@@ -465,7 +465,7 @@ class RewardProfiler:
                 100.0 if expected_num_rollouts == 0 else 100.0 * num_rollouts / expected_num_rollouts
             )
             group_metrics["rollout_infos"] = sorted(
-                task_idx_to_rollout_infos[task_idx],
+                task_idx_to_rollout_infos[group_key],
                 key=lambda r: r[ROLLOUT_INDEX_KEY_NAME],
             )
 
