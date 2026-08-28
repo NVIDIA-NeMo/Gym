@@ -61,6 +61,7 @@ from nemo_gym.rollout_observability import (
 )
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
     get_response_json,
@@ -446,20 +447,23 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         if self.config.debug:
             print("Creating new sandbox since one wasn't provided", file=sys.stderr)
 
+        resources = SandboxResources.from_mapping(self.config.sandbox_config.get("resources", {}))
+        env = cpu_cap_env(resources.cpu) if self.config.sandbox_config.get("derive_cpu_env", True) else {}
+
         # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
         sandbox_spec = SandboxSpec(
             image="swebench/sweb.eval.x86_64.astropy_1776_astropy-12907",  # This is just the first SWE Bench Verified image for now
             ttl_s=self.config.sandbox_config.get("ttl_s", None),
             ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s", None),
             workdir=None,  # Default to container's WORKDIR
-            env=dict(),
+            env=env,
             files=dict(),
             metadata=provider_default_metadata
             | self.config.sandbox_config.get("metadata", {})
             | {
                 "nemo_gym_agent": self.config.name,
             },
-            resources=SandboxResources.from_mapping(self.config.sandbox_config.get("resources", {})),
+            resources=resources,
             entrypoint=None,
             provider_options=self.config.sandbox_config.get("provider_options", {}),
         )

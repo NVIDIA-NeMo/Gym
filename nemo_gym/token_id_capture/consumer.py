@@ -41,6 +41,7 @@ from nemo_gym.token_id_capture.builder import (
 from nemo_gym.token_id_capture.protocols import TokenSource
 from nemo_gym.token_id_capture.records import TokenEntry
 from nemo_gym.token_id_capture.store import TokenCaptureStore
+from nemo_gym.token_id_capture.terminal import TerminalAttribution, resolve_terminal
 
 
 logger = logging.getLogger(__name__)
@@ -96,6 +97,9 @@ def _assemble(
     entries: list[TokenEntry],
     builder: str,
     model: str,
+    *,
+    verified_response: dict | None = None,
+    explicit_terminal_call_id: str | None = None,
 ) -> dict:
     if builder == "per_request":
         # Single-response delivery cannot represent multiple trajectories.
@@ -105,11 +109,40 @@ def _assemble(
             "per_request returns multiple trajectories and is not supported by single-response delivery",
             n_calls=len(entries),
         )
+    # Attribute the verified terminal before building.
+    # ``verified_response`` is the scored response from the /run result.
+    # Attribution anchors chain selection; its absence falls back to the
+    # strict single-chain policy. It must never fail a build.
+    try:
+        attribution = resolve_terminal(entries, verified_response, explicit_terminal_call_id)
+    except Exception:
+        logger.warning("Terminal attribution failed for rollout %s.", rollout_id, exc_info=True)
+        attribution = TerminalAttribution(None, reason="attribution_error")
+
     # Mask a malformed rollout instead of failing the caller.
     # The contiguity check and projection can raise.
     # An uncaught exception could fail a full rollout or training batch.
+    def _attribution_metric(chain_status: str) -> dict:
+        return {
+            "method": attribution.method or "none",
+            "call_id": attribution.model_call_id,
+            "reason": attribution.reason,
+            "chain": chain_status,
+        }
+
     try:
-        out = run_builder(entries, builder)
+        out = run_builder(entries, builder, terminal_call_id=attribution.model_call_id)
+    except (AssertionError, ValueError, KeyError, IndexError, TypeError) as error:
+        logger.warning(
+            "Could not build a trajectory for rollout %s from %d captured call(s): %s",
+            rollout_id,
+            len(entries),
+            error,
+        )
+        failed = _failed_build(rollout_id, builder, f"{type(error).__name__}: {error}", n_calls=len(entries))
+        failed["metrics"]["terminal_attribution"] = _attribution_metric("error")
+        return failed
+    try:
         for chain in out.chains:
             chain.validate()
         response = project_main_chain_response(rollout_id, out, model=model)
@@ -121,18 +154,20 @@ def _assemble(
             len(entries),
             error,
         )
-        return _failed_build(
-            rollout_id,
-            builder,
-            f"{type(error).__name__}: {error}",
-            n_calls=len(entries),
-        )
+        failed = _failed_build(rollout_id, builder, f"{type(error).__name__}: {error}", n_calls=len(entries))
+        # The builder's verdict survives a failed projection.
+        # A broken terminal chain must stay diagnosable in aggregate metrics.
+        failed["metrics"]["terminal_attribution"] = _attribution_metric(out.notes.terminal_chain or "error")
+        return failed
 
     notes = out.notes
     # Report everything dropped by the build.
     # A partial build must not appear complete.
     metrics = {
         "n_calls": len(entries),
+        # Attribution names the call whose response the verifier scored.
+        # ``chain`` reports what the builder did with that name.
+        "terminal_attribution": _attribution_metric(notes.terminal_chain),
         "chains": notes.chains,
         "roots": notes.roots,
         "quarantined_calls": len(out.quarantined),
@@ -145,14 +180,26 @@ def _assemble(
         "empty_generation_calls": len(notes.empty_generation_calls),
     }
     unresolved = notes.unresolved_retries
+    if notes.terminal_chain == "delivered":
+        # The verified chain is attributed and intact.
+        # Off-path calls (auxiliary calls, sub-agent forks, abandoned retries)
+        # are excluded from delivery instead of masking the rollout.
+        mask = False
+    elif attribution.attributed:
+        # Attribution succeeded but its chain is broken or unbuildable.
+        # The rollout's verified trajectory is known and undeliverable.
+        mask = True
+    else:
+        # No attribution: the strict single-chain policy applies.
+        # A retry of the final call can leave two plausible generations.
+        # Mask the rollout when the client-selected generation is unknown.
+        mask = bool(unresolved) or notes.roots != 1 or notes.chains != 1
     return {
         "rollout_id": rollout_id,
         "builder": builder,
         "rebuilt_response": response,
         "metrics": metrics,
-        # A retry of the final call can leave two plausible generations.
-        # Mask the rollout when the client-selected generation is unknown.
-        "mask_sample": bool(unresolved) or notes.roots != 1 or notes.chains != 1,
+        "mask_sample": mask,
         "unresolved_retries": list(unresolved),
     }
 
@@ -163,6 +210,8 @@ def trajectories_for_rollout(
     *,
     builder: str = "prefix_merging",
     model: str = "",
+    verified_response: dict | None = None,
+    explicit_terminal_call_id: str | None = None,
 ) -> dict | None:
     """Build trajectories from a frozen local token-store snapshot.
 
@@ -180,7 +229,14 @@ def trajectories_for_rollout(
         if not snapshot.entries:
             built = _failed_build(rollout_id, builder, "capture contains no token records")
         else:
-            built = _assemble(rollout_id, list(snapshot.entries), builder, model)
+            built = _assemble(
+                rollout_id,
+                list(snapshot.entries),
+                builder,
+                model,
+                verified_response=verified_response,
+                explicit_terminal_call_id=explicit_terminal_call_id,
+            )
         if snapshot.incomplete:
             built["mask_sample"] = True
             built.setdefault("metrics", {})["capture_incomplete"] = True
@@ -198,6 +254,8 @@ async def trajectories_from_source(
     *,
     builder: str = "prefix_merging",
     model: str = "",
+    verified_response: dict | None = None,
+    explicit_terminal_call_id: str | None = None,
 ) -> dict | None:
     """Build trajectories from a frozen ``TokenSource`` snapshot.
 
@@ -212,7 +270,17 @@ async def trajectories_from_source(
     if not snapshot.entries:
         built = _failed_build(rollout_id, builder, "capture contains no token records")
     else:
-        built = await asyncio.to_thread(_assemble, rollout_id, list(snapshot.entries), builder, model)
+        entries = list(snapshot.entries)
+        built = await asyncio.to_thread(
+            lambda: _assemble(
+                rollout_id,
+                entries,
+                builder,
+                model,
+                verified_response=verified_response,
+                explicit_terminal_call_id=explicit_terminal_call_id,
+            )
+        )
     if snapshot.incomplete:
         built["mask_sample"] = True
         built.setdefault("metrics", {})["capture_incomplete"] = True
