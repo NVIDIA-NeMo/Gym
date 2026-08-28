@@ -832,6 +832,46 @@ class AggregateMetricsMixin:
         return {k: v for k, v in agent_metrics.items() if k.startswith(MEAN_PREFIX)}
 
 
+# The field name on `BaseVerifyResponse`. Kept as a literal so this module does not have
+# to import the server module it is imported by.
+MASK_SAMPLE_FIELD = "mask_sample"
+
+
+def _partition_on_mask(
+    verify_responses: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Split into the samples whose reward is a valid measurement, and the rest."""
+    scored, masked = [], []
+    for vr in verify_responses:
+        (masked if vr.get(MASK_SAMPLE_FIELD) else scored).append(vr)
+    return scored, masked
+
+
+def _coverage_metrics(
+    all_responses: List[Dict[str, Any]],
+    scored: List[Dict[str, Any]],
+    masked: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """How much of the run the quality metrics above were actually computed from.
+
+    Empty when nothing was masked, so a run that reports no masking publishes exactly the
+    keys it published before.
+    """
+    if not masked:
+        return {}
+    tasks_total = {vr.get(TASK_INDEX_KEY_NAME, 0) for vr in all_responses}
+    tasks_measured = {vr.get(TASK_INDEX_KEY_NAME, 0) for vr in scored}
+    return {
+        # Deliberately not `coverage/scored`: collection already exports that for how many
+        # rollouts reached the score at all (#2883). These say how many of those the score
+        # was actually computed from, which is smaller as soon as an environment masks.
+        "coverage/measured_rollouts": len(scored),
+        "coverage/masked_rollouts": len(masked),
+        "coverage/measured_tasks": len(tasks_measured),
+        "coverage/fully_masked_tasks": len(tasks_total - tasks_measured),
+    }
+
+
 def _group_by_task(verify_responses: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
     """Group verify responses by task index, returning a list of per-task rollout lists."""
     groups: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
@@ -957,11 +997,30 @@ def compute_aggregate_metrics(
     if not verify_responses:
         return AggregateMetrics()
 
+    # A masked sample is a completed rollout whose reward is not a valid measurement of
+    # the evaluated system. Averaging it in would publish a quality score the run never
+    # measured, so quality metrics are computed from the scored subset only. The masked
+    # rows stay in `verify_responses` and are reported as coverage below.
+    scored, masked = _partition_on_mask(verify_responses)
+    coverage = _coverage_metrics(verify_responses, scored, masked)
+
+    # Observability coverage is measured over every rollout that ran, masked or not: a
+    # masked sample still executed and still reported its own latency.
+    perf_summary = compute_perf_summary(
+        [vr["ng_perf"] for vr in verify_responses if isinstance(vr.get("ng_perf"), dict)],
+        total_rollouts=len(verify_responses),
+    )
+
+    if not scored:
+        # Every rollout was masked. Publishing means over an empty set would invent a
+        # zero; report what happened instead.
+        return AggregateMetrics(agent_metrics=dict(coverage), key_metrics=dict(coverage), perf_summary=perf_summary)
+
     rp = RewardProfiler()
 
     rows = []
     results = []
-    for vr in verify_responses:
+    for vr in scored:
         rows.append(
             {
                 TASK_INDEX_KEY_NAME: vr.get(TASK_INDEX_KEY_NAME, 0),
@@ -969,7 +1028,10 @@ def compute_aggregate_metrics(
                 "agent_ref": {"name": "agent"},
             }
         )
-        results.append(vr if "response" in vr else {**vr, "response": {}})
+        # `mask_sample` is a flag, not a measurement; the profiler would otherwise coerce
+        # it to an int and publish `mean/mask_sample` as though it were a quality metric.
+        result = vr if "response" in vr else {**vr, "response": {}}
+        results.append({k: v for k, v in result.items() if k != MASK_SAMPLE_FIELD})
 
     group_level_metrics, agent_level_metrics, repeat_level_metrics = rp.profile_from_data(rows, results)
 
@@ -988,15 +1050,16 @@ def compute_aggregate_metrics(
     serialized_group = rp.prepare_for_serialization(group_level_metrics)
 
     # Keep task index explicit in aggregate metrics for downstream per-task joins.
-    sorted_task_indices = sorted({vr.get(TASK_INDEX_KEY_NAME, 0) for vr in verify_responses})
+    sorted_task_indices = sorted({vr.get(TASK_INDEX_KEY_NAME, 0) for vr in scored})
     for group, task_idx in zip(serialized_group, sorted_task_indices):
         group[TASK_INDEX_KEY_NAME] = task_idx
 
     serialized_agent = rp.prepare_for_serialization([agent_metrics])[0] if agent_metrics else {}
+    serialized_agent.update(coverage)
 
     # Custom metrics computed from all raw verify responses grouped by task
     if compute_metrics_fn:
-        tasks = _group_by_task(verify_responses)
+        tasks = _group_by_task(scored)
         custom = compute_metrics_fn(tasks)
 
         # Merge per_task_metrics into group_level_metrics (keyed by task_index)
@@ -1017,14 +1080,17 @@ def compute_aggregate_metrics(
         key_metrics = get_key_metrics_fn(serialized_agent)
     else:
         key_metrics = {k: v for k, v in serialized_agent.items() if k.startswith(MEAN_PREFIX)}
-
-    ng_perf_records = [vr["ng_perf"] for vr in verify_responses if isinstance(vr.get("ng_perf"), dict)]
+    # Stays out of the headline set unless something was actually masked, so a run that
+    # masks nothing publishes exactly the keys it published before.
+    key_metrics.update(coverage)
 
     return AggregateMetrics(
         group_level_metrics=serialized_group,
         agent_metrics=serialized_agent,
         key_metrics=key_metrics,
-        perf_summary=compute_perf_summary(ng_perf_records, total_rollouts=len(verify_responses)),
+        perf_summary=perf_summary,
+        # Repeat-level variability is a quality statistic, so it comes from the scored
+        # subset like the rest: `profile_from_data` above is already given only those.
         repeat_level_metrics=serialized_repeat_level_metrics,
     )
 
