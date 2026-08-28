@@ -157,9 +157,11 @@ def test_benchmark_config_is_discoverable_and_isolated() -> None:
     agent = resolved.litmus_bench_benchmark_agent.responses_api_agents.simple_agent
     assert resource.verified is False
     assert agent.resources_server.name == "litmus_bench_benchmark_resources_server"
-    assert len(agent.datasets) == 1
-    assert agent.datasets[0].name == "litmus-bench"
-    assert agent.datasets[0].type == "benchmark"
-    assert agent.datasets[0].prompt_config is None
-    assert agent.datasets[0].num_repeats == 5
-    assert agent.datasets[0].license == "CC-BY-4.0"
+    # Dataset decoupling: the declaration lives on the resources server, not the agent block.
+    assert "datasets" not in agent
+    assert len(resource.datasets) == 1
+    assert resource.datasets[0].name == "litmus-bench"
+    assert resource.datasets[0].type == "benchmark"
+    assert resource.datasets[0].prompt_config is None
+    assert resource.datasets[0].num_repeats == 5
+    assert resource.datasets[0].license == "CC-BY-4.0"
