@@ -403,6 +403,18 @@ def test_notify_failure_uses_shared_ref_check_action() -> None:
         assert any(step.get("name") == "Checkout repository" for step in steps), workflow_file
 
 
+def test_notification_workflows_pin_slack_rejection_handling() -> None:
+    expected_action = (
+        "NVIDIA-NeMo/FW-CI-templates/.github/actions/send-slack-alert@5bc7a0327f326f97eed97b17f1458f2a3376b848"
+    )
+    for workflow_file in (CICD_MAIN_WORKFLOW, FULL_TEST_WORKFLOW):
+        jobs = yaml.safe_load(workflow_file.read_text())["jobs"]
+        steps = jobs["notify-failure"]["steps"]
+        (notify_step,) = (step for step in steps if step.get("name") == "Notify Gym alerts channel")
+
+        assert notify_step["uses"] == expected_action, workflow_file
+
+
 def test_full_test_suite_runs_on_schedule_and_dispatch_not_push() -> None:
     workflow = FULL_TEST_WORKFLOW.read_text()
     on_block = workflow.split("\non:", 1)[1].split("\nconcurrency:", 1)[0]

@@ -297,7 +297,7 @@ jobs:
 
       - name: Notify Gym alerts channel
         if: steps.ref_check.outputs.allowed == 'true'
-        uses: NVIDIA-NeMo/FW-CI-templates/.github/actions/send-slack-alert@cf5acebace78c7c339bc1f804357a991336f1c4d # v1.8.10
+        uses: NVIDIA-NeMo/FW-CI-templates/.github/actions/send-slack-alert@5bc7a0327f326f97eed97b17f1458f2a3376b848 # PR #563
         with:
           webhook: ${{ secrets.SLACK_TEAM_CHANNEL_WEBHOOK }}
           message: |
