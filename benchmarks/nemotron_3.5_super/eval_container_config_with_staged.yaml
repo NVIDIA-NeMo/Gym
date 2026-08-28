@@ -49,6 +49,6 @@ opencode_sandboxed_agent_swebench_pro:
       datasets:
         - name: swebench_pro
           type: benchmark
-          jsonl_fpath: benchmarks/swebench/pro/data/swebench_pro_benchmark.jsonl
+          jsonl_fpath: benchmarks/swebench/data/swebench_pro_benchmark.jsonl
           prepare_script: benchmarks/swebench/pro/prepare.py
           num_repeats: 3
