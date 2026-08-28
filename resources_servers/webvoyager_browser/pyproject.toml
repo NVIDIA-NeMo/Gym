@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nemo-gym-webvoyager-browser"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+  "nemo-gym",
+  "httpx",
+  "pillow",
+  "playwright==1.55.0",
+  "pyautogui",
+]
+
+[tool.setuptools.packages.find]
+where = ["../.."]
+include = [
+  "resources_servers.webvoyager_browser*",
+]
+
+[tool.uv.sources]
+nemo-gym = { path = "../..", editable = true }

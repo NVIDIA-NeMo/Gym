@@ -1,0 +1,13 @@
+# Restrict an end-to-end WebVoyager comparison run to the committed ArXiv--13
+# smoke task while retaining the normal benchmark/agent/server wiring.
+webvoyager_benchmark_agent:
+  responses_api_agents:
+    web_agent:
+      max_steps: 10
+      datasets:
+        - name: webvoyager
+          type: benchmark
+          jsonl_fpath: benchmarks/webvoyager/data/arxiv13-smoke.jsonl
+          prompt_config: null
+          prepare_script: benchmarks/webvoyager/prepare.py
+          num_repeats: 1

@@ -1,0 +1,48 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+web_agent:
+  responses_api_agents:
+    web_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: browsergym_web
+      environment_server: null
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 15
+      max_parse_retries: 2
+      # Shared agent defaults preserve strict parsing and do not alter
+      # trajectories. Individual benchmark profiles opt into recovery.
+      native_action_recovery: strict
+      native_tool_alias_recovery: strict
+      native_max_computer_actions: 20
+      native_parse_retry_feedback: false
+      native_parse_retry_temperature: null
+      native_parse_retry_delay_secs: 0.0
+      repeated_action_warning_threshold: 0
+      repeated_action_window: 5
+      max_consecutive_execution_failures: 3
+      model_turn_max_retries: 0
+      model_retry_delay_secs: 1.0
+      max_image_history: 3
+      judge_max_screenshots: 3
+      visual_observation_text: full_axtree
+      action_prompt_profile: standard
+      redact_old_visual_observations: false
+      # Native VisualWebArena profiles override this with the same read-only
+      # task-image directory mounted into the resource server. Local image
+      # references are confined below this root before being sent to a model.
+      task_image_root: null
+      max_task_image_bytes: 26214400
+      resources_request_timeout_secs: 180.0
+      seed_request_timeout_secs: 1800.0
+      seed_retry_initial_delay_secs: 2.0
+      seed_retry_max_delay_secs: 30.0
+      model_request_timeout_secs: 600.0
+      judge_request_timeout_secs: 300.0
+      close_request_timeout_secs: 30.0
+      run_timeout_secs: 1800.0
+      datasets: []

@@ -1,0 +1,75 @@
+# Nano Omni v3 alignment route. This deliberately does not alter the legacy
+# BrowserGym-compatible WebVoyager benchmark in ../config.yaml.
+config_paths:
+  - resources_servers/webvoyager_browser/configs/webvoyager_browser.yaml
+  - resources_servers/webvoyager_judge/configs/native_v3.yaml
+  - resources_servers/webvoyager_judge/configs/judge_model_gemini_native.yaml
+  - responses_api_agents/web_agent/configs/web_agent.yaml
+
+native_webvoyager_resources:
+  _inherit_from: webvoyager_browser
+  resources_servers:
+    webvoyager_browser:
+      # Robust evaluation keeps a failed UI action visible in the next
+      # observation so the policy can correct it. Alignment mode remains the
+      # default in the reusable native_web component.
+      terminate_on_action_error: false
+      max_computer_actions: 20
+
+native_webvoyager_judge:
+  _inherit_from: webvoyager_native_v3_judge
+
+native_webvoyager_agent:
+  _inherit_from: web_agent
+  responses_api_agents:
+    web_agent:
+      resources_server:
+        type: resources_servers
+        name: native_webvoyager_judge
+      environment_server:
+        type: resources_servers
+        name: native_webvoyager_resources
+      max_steps: 100
+      max_parse_retries: 2
+      native_action_recovery: repair_single_closing_bracket
+      native_tool_alias_recovery: webvoyager_v3
+      native_max_computer_actions: 20
+      # The pinned reference retries the same request after an action-parse
+      # failure: no harness-authored feedback, no sampling override, and a
+      # one-second delay between its three total attempts.
+      native_parse_retry_feedback: false
+      native_parse_retry_temperature: null
+      native_parse_retry_delay_secs: 1.0
+      # Repeat detection stays observation-only. Injecting a recovery hint would
+      # place harness-authored strategy in the policy's context, which the pinned
+      # reference never sends and which a trained policy cannot rely on later.
+      repeated_action_warning_threshold: 0
+      repeated_action_window: 5
+      max_consecutive_execution_failures: 3
+      # 20 policy attempts at 5 s, matching the reference runner, so an unstable
+      # endpoint does not mask samples the reference would have completed.
+      model_turn_max_retries: 19
+      model_retry_delay_secs: 5.0
+      max_image_history: 3
+      judge_max_screenshots: 200
+      visual_observation_text: none
+      redact_old_visual_observations: false
+      # A browser step can legitimately outlive the generic 180 s agent
+      # default while a proxied public site finishes navigation/challenge
+      # handling.  The first 552-task wave observed one valid step completing
+      # in 332.6 s after its caller had already timed out.
+      resources_request_timeout_secs: 420
+      model_request_timeout_secs: 1200
+      # The maintained native judge allows four 120 s provider attempts with
+      # three 5 s delays (495 s total).  This is the outer Gym resource-call
+      # timeout, so it must cover that full envelope rather than cancel and
+      # duplicate an in-flight judge request every 120 s.
+      judge_request_timeout_secs: 540
+      run_timeout_secs: 14400
+      datasets:
+        - name: webvoyager-native-v3
+          type: benchmark
+          jsonl_fpath: benchmarks/webvoyager/data/webvoyager_native_v3.jsonl
+          prompt_config: null
+          prepare_script: benchmarks/webvoyager/prepare_native_v3.py
+          num_repeats: 1

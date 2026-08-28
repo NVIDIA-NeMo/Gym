@@ -1,0 +1,9 @@
+{
+  "name": "example",
+  "type": "example",
+  "jsonl_fpath": "resources_servers/webvoyager_judge/data/example.jsonl",
+  "num_repeats": 1,
+  "license": "Apache 2.0",
+  "Number of examples": 5,
+  "note": "Deterministic empty-answer fixtures only; no benchmark scores are reported."
+}

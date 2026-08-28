@@ -1,0 +1,6 @@
+# Non-secret comparison overlay. Load after a private config that defines the
+# policy_* fields. This intentionally uses the policy model as the judge and is
+# suitable only for an initial smoke comparison, not an independent baseline.
+webvoyager_judge_base_url: ${policy_base_url}
+webvoyager_judge_api_key: ${policy_api_key}
+webvoyager_judge_model_name: ${policy_model_name}
