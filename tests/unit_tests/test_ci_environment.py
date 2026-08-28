@@ -405,7 +405,7 @@ def test_notify_failure_uses_shared_ref_check_action() -> None:
 
 def test_notification_workflows_pin_slack_rejection_handling() -> None:
     expected_action = (
-        "NVIDIA-NeMo/FW-CI-templates/.github/actions/send-slack-alert@5bc7a0327f326f97eed97b17f1458f2a3376b848"
+        "NVIDIA-NeMo/FW-CI-templates/.github/actions/send-slack-alert@f07495d7a01aad5578a407db8e0c4f4e395375f6"
     )
     for workflow_file in (CICD_MAIN_WORKFLOW, FULL_TEST_WORKFLOW):
         jobs = yaml.safe_load(workflow_file.read_text())["jobs"]
