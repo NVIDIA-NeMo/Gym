@@ -107,7 +107,8 @@ the things you tune first, then the deployment config, then the data.
     - `limit_per_entry`: rows to take from every entry. Unset means all
     - `sample`: `head` (default) or `random`. `head` stops reading at the limit, so it is what a
       smoke run wants; `random` must read the whole file, but the first N rows of a sorted dataset
-      are a biased subset, so prefer it when the limit is a deliberate subset
+      are a biased subset, so prefer it when the limit is a deliberate subset. `random` requires a
+      limit somewhere — without one there is nothing to sample down to, and it is rejected
     - `seed`: seeds `random`, mixed with each entry's label so adding an entry does not reshuffle
       its neighbours and invalidate their resume keys
 5. **sbatch** — Slurm settings for the launchers, which shell out to `sbatch`
@@ -142,7 +143,8 @@ the things you tune first, then the deployment config, then the data.
       without editing an upstream config. Do it here rather than in a file: the container is built
       from a Gym ref and has no copy of this repo, so a repo-relative path will not resolve inside it
 10. **entries** — the environments to be profiled
-    - `label` (required): nickname of profiled env
+    - `label` (required): nickname of profiled env. Becomes a filename and a `by_label/`
+      directory, so `[A-Za-z0-9._-]` only; same for `nickname`
     - `agent` (required): `agent_ref` of the data
     - `configs`: gym configs defining the agent and its resources server. The agent must be
       declared by at least one of them
