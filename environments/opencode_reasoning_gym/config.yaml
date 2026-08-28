@@ -1,3 +1,6 @@
+config_paths:
+- nemo_gym/sandbox/providers/local/configs/local.yaml
+
 reasoning_gym:
   resources_servers:
     reasoning_gym:
@@ -9,22 +12,31 @@ reasoning_gym:
 
 opencode_reasoning_gym_agent:
   responses_api_agents:
-    opencode_agent:
+    opencode_sandboxed_agent:
       entrypoint: app.py
       resources_server:
         type: resources_servers
         name: reasoning_gym
-      concurrency: 8
-      command: opencode
-      model: nvinf/nvidia/qwen/qwen3-next-80b-a3b-instruct
+      num_workers: 8
+      # No Gym model server: OpenCode talks to the endpoint in opencode_config directly.
+      model_server: null
+      token_id_capture: false
+      debug: false
       opencode_version: 1.17.11
+      opencode_max_context_window: 262144
+      opencode_max_output_tokens: 131072
       thinking: false
-      setup_timeout: 900
-      timeout: 900
+      sandbox_timeout: 900
+      # Runs on the host. Swap in another provider config to containerize.
+      sandbox_provider: sandbox
+      sandbox_config: {}
+      remote_opencode_install_script_path: null
+      remote_opencode_binary_path: null
       system_prompt: |
         You are a precise reasoning assistant with a bash tool. Use Python to calculate or verify results when helpful.
         Follow the requested final-answer format exactly.
       opencode_config:
+        model: nvinf/nvidia/qwen/qwen3-next-80b-a3b-instruct
         permission:
           bash: allow
           edit: allow

@@ -16,6 +16,8 @@ opencode_sandboxed_agent:
       opencode_version: 1.17.11
       # @bxyu-nvidia: This needs to be set appropriately for every model!
       opencode_max_context_window: 262144
+      # Sent as max_tokens per request, so leave room for the prompt.
+      opencode_max_output_tokens: 131072
 
       remote_opencode_install_script_path: null
       remote_opencode_binary_path: null
@@ -144,6 +146,8 @@ opencode_sandboxed_agent:
 
       sandbox_provider: sandbox
       sandbox_config:
+        # Only used when the resources server hands back no sandbox. Ignored by the local provider.
+        image: swebench/sweb.eval.x86_64.astropy_1776_astropy-12907
         ttl_s: 18000
         ready_timeout_s: 1200
         # cpu also derives parallelism-cap env vars (OMP_NUM_THREADS etc.)
