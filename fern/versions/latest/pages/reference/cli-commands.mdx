@@ -40,7 +40,7 @@ gym env init                  # scaffold a resources server, environment, or ben
 gym env resolve               # resolve and print the final merged config
 gym env validate              # validate a manifest-backed workload or legacy config without services
 gym env packages              # list packages in a server's virtual environment
-gym env test                  # exercise a workload verifier or run resources-server tests
+gym env test                  # run resources-server tests
 gym env publish               # finalize readiness and confirm registry discovery
 gym env start                 # start the servers
 gym env status                # show running servers
@@ -68,7 +68,7 @@ These options are shared across many commands.
 | `--resources-server NAME` | Select a registered resources server by name. |
 | `--model-type NAME` | Select a registered model server type by name (such as `openai_model` or `vllm_model`). |
 | `--search-dir DIR` | Extra root directory to search for components and configs. Repeatable. Applies everywhere Gym resolves paths — discovery, the `--<component>` selectors, `config_paths`, prompt configs, and data files — and is inherited by spawned servers. Equivalent to the `NEMO_GYM_EXTRA_ROOTS` environment variable; see [Configuration](/reference/configuration). |
-| `--json` | Emit machine-readable JSON instead of human-readable output (reporting commands only). |
+| `--json` | Emit machine-readable JSON instead of human-readable output (reporting commands only). Accepted before or after the subcommand; commands that emit no JSON reject it. |
 | `-v`, `--verbose` | Set the logging level to DEBUG. Flows through to spun-up servers. |
 | `-h`, `--help` | Show help for any group or command. |
 
@@ -492,7 +492,8 @@ Exercise a manifest-backed workload's verifier fixture in its resources-server e
 | `--kind environment\|benchmark` | Resolve an ambiguous catalog name. |
 | `--update-expected` | Atomically update fixture rewards after every behavioral check passes. |
 | `--json` | Output the verifier report as JSON. |
-| `--resources-server NAME` | Resources server to test. Omit to test all servers. |
+| `--resources-server NAME` | Resources server to test. |
+| `--all` | Test every resources server. Slow: builds one venv per server, so it must be requested explicitly. |
 | `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 
 ```bash
@@ -502,8 +503,8 @@ gym env test my_eval
 # Test a single server
 gym env test --resources-server example_single_tool_call
 
-# Test all servers
-gym env test
+# Test all servers. Slow: builds one venv per server, so it needs an explicit opt-in.
+gym env test --all
 ```
 
 ### `gym env publish`
@@ -754,6 +755,16 @@ gym eval profile \
     --rollouts rollouts.jsonl
 ```
 
+Writes three files next to the rollouts, named from its stem:
+
+| File | Contents |
+| --- | --- |
+| `<rollouts>_reward_profiling.jsonl` | One row per task. |
+| `<rollouts>_agent_metrics.json` | One entry per agent. |
+| `<rollouts>_repeat_level_metrics.json` | One entry per repeat. |
+
+See [Repeat-Level Metrics](/evaluation/aggregate-metrics#repeat-level-metrics) for the full field list and how to read the variability statistics.
+
 ### `gym eval reverify`
 
 Recompute rewards from existing rollouts by replaying them through a resources server's `/verify` endpoint — without re-running model inference. Starts the resources server automatically from the provided config. Requires the `*_materialized_inputs.jsonl` and `rollouts.jsonl` artifacts produced by `gym eval run`.
@@ -852,7 +863,7 @@ Use the tables below to find their `gym` replacement and update your scripts and
 | `ng_pip_list` | `gym env packages` |
 | `ng_init_resources_server` | `gym env init` |
 | `ng_test` | `gym env test` |
-| `ng_test_all` | `gym env test` (no `--resources-server`) |
+| `ng_test_all` | `gym env test --all` |
 | `ng_prepare_benchmark` | `gym eval prepare` |
 | `ng_e2e_collect_rollouts` | `gym eval run` |
 | `ng_collect_rollouts` | `gym eval run --no-serve` |
