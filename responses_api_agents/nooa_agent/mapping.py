@@ -27,17 +27,7 @@ if TYPE_CHECKING:
 
 Transform = Callable[[Any], Any]
 
-_FORBIDDEN_SOURCE_ROOTS = frozenset(
-    {
-        "agent_ref",
-        "ng_agent_observations",
-        "ng_trajectory",
-        "response",
-        "reward",
-        "verifier_metadata",
-    }
-)
-_FORBIDDEN_SOURCE_PREFIXES = ("_",)
+_ALLOWED_SOURCE_PATHS = ("agent_inputs", "responses_create_params.input")
 
 
 def validate_source_path(source: str) -> None:
@@ -47,13 +37,12 @@ def validate_source_path(source: str) -> None:
     if not source or any(not part or not (part.isidentifier() or part.isdigit()) for part in parts):
         raise ValueError("source must be a non-empty dotted path of identifiers or sequence indexes")
 
-    root = parts[0]
-    if (
-        root in _FORBIDDEN_SOURCE_ROOTS
-        or root.startswith(_FORBIDDEN_SOURCE_PREFIXES)
-        or any(part.startswith("_") for part in parts)
+    if any(part.startswith("_") for part in parts) or not any(
+        source == allowed or source.startswith(f"{allowed}.") for allowed in _ALLOWED_SOURCE_PATHS
     ):
-        raise ValueError(f"mapping from Gym-internal or verifier field {root!r} is not allowed")
+        raise ValueError(
+            f"source {source!r} is not allowed; map only from responses_create_params.input or agent_inputs"
+        )
 
 
 def resolve_source(row: Any, source: str) -> Any:

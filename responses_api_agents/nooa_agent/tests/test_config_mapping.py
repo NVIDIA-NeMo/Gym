@@ -72,7 +72,7 @@ def invocation_config(**overrides: Any) -> NOOAInvocationConfig:
                 "source": "responses_create_params.input",
                 "transform": "latest_user_text",
             },
-            "customer_id": {"source": "customer_id"},
+            "customer_id": {"source": "agent_inputs.customer_id"},
         },
     }
     values.update(overrides)
@@ -88,7 +88,7 @@ def test_materialize_arguments_from_complete_run_row() -> None:
                 {"role": "user", "content": [{"type": "input_text", "text": "Shipping was slow."}]},
             ]
         },
-        "customer_id": "customer-42",
+        "agent_inputs": {"customer_id": "customer-42"},
     }
 
     assert materialize_arguments(row, config.arguments) == {
@@ -100,28 +100,48 @@ def test_materialize_arguments_from_complete_run_row() -> None:
 @pytest.mark.parametrize(
     "source",
     [
+        "answer",
+        "label",
+        "expected_output",
+        "ground_truth",
+        "target",
         "verifier_metadata.answer",
         "agent_ref.name",
         "_ng_rollout_id",
         "response.output",
         "reward",
-        "items.__class__",
+        "responses_create_params.model",
+        "responses_create_params.input_extra",
+        "agent_inputs.items.__class__",
     ],
 )
-def test_forbids_sensitive_and_internal_sources(source: str) -> None:
+def test_rejects_sources_outside_agent_visible_allowlist(source: str) -> None:
     with pytest.raises(ValidationError, match="not allowed"):
         NOOAArgumentBinding(source=source)
 
 
+@pytest.mark.parametrize(
+    "source",
+    [
+        "responses_create_params.input",
+        "responses_create_params.input.0.content",
+        "agent_inputs",
+        "agent_inputs.customer_id",
+    ],
+)
+def test_allows_explicitly_agent_visible_sources(source: str) -> None:
+    assert NOOAArgumentBinding(source=source).source == source
+
+
 def test_rejects_unknown_transform() -> None:
     with pytest.raises(ValidationError, match="unknown transform"):
-        NOOAArgumentBinding(source="customer_id", transform="lambda value: value")
+        NOOAArgumentBinding(source="agent_inputs.customer_id", transform="lambda value: value")
 
 
 def test_resolves_pydantic_models_and_sequence_indexes() -> None:
-    row = {"items": [InputItem(role="user", content="hello")]}
+    row = {"agent_inputs": {"items": [InputItem(role="user", content="hello")]}}
 
-    assert resolve_source(row, "items.0.content") == "hello"
+    assert resolve_source(row, "agent_inputs.items.0.content") == "hello"
 
 
 @pytest.mark.parametrize("source", ["", "items..content", "items.-1", "items.not-valid"])
@@ -131,8 +151,8 @@ def test_rejects_malformed_source_paths(source: str) -> None:
 
 
 def test_missing_source_reports_full_path_and_segment() -> None:
-    with pytest.raises(ValueError, match=r"'customer\.profile\.id'.*'profile'"):
-        resolve_source({"customer": {}}, "customer.profile.id")
+    with pytest.raises(ValueError, match=r"'agent_inputs\.customer\.profile\.id'.*'profile'"):
+        resolve_source({"agent_inputs": {"customer": {}}}, "agent_inputs.customer.profile.id")
 
 
 def test_latest_user_text_uses_last_user_message() -> None:
@@ -179,8 +199,8 @@ def test_validate_invocation_rejects_unknown_argument() -> None:
     config = invocation_config(
         arguments={
             "text": {"source": "responses_create_params.input", "transform": "latest_user_text"},
-            "customer_id": {"source": "customer_id"},
-            "answer": {"source": "answer"},
+            "customer_id": {"source": "agent_inputs.customer_id"},
+            "answer": {"source": "agent_inputs.answer"},
         }
     )
 
@@ -230,8 +250,8 @@ def test_rejects_private_or_invalid_argument_names() -> None:
     with pytest.raises(ValidationError, match="public Python identifiers"):
         invocation_config(
             arguments={
-                "not-valid": {"source": "customer_id"},
-                "_private": {"source": "customer_id"},
+                "not-valid": {"source": "agent_inputs.customer_id"},
+                "_private": {"source": "agent_inputs.customer_id"},
             }
         )
 
