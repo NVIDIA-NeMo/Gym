@@ -338,6 +338,13 @@ def test_megatron_adapter_extracts_ledger_payload_and_epoch() -> None:
     assert adapter.extract_weight_version(payload) == 8
 
 
+@pytest.mark.parametrize("invalid_token_id", [12.7, -0.7, True, "12"])
+def test_megatron_adapter_rejects_non_integer_token_ids(invalid_token_id: Any) -> None:
+    adapter = MegatronCaptureAdapter()
+    with pytest.raises(ValueError, match="must contain only integer token ids"):
+        adapter.extract_prompt_ids({"prompt_token_ids": [invalid_token_id]})
+
+
 def test_megatron_adapter_rejects_calls_spanning_weight_versions() -> None:
     adapter = MegatronCaptureAdapter()
     with pytest.raises(ValueError, match="multiple policy epochs"):

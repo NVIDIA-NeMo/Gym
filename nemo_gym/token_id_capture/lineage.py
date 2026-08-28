@@ -885,7 +885,7 @@ class FileLineageStore:
         response_items: list[dict],
         cumulative_token_ids: list[int],
         digest: str,
-        custody: dict | None = None,
+        capture_columns: dict | None = None,
     ) -> None:
         record = {
             "model_call_id": model_call_id,
@@ -893,12 +893,13 @@ class FileLineageStore:
             "context_len": len(request_items),
             "context_digest": conversation_digest(request_items),
             "digest": digest,
-            **(custody or {}),
+            **(capture_columns or {}),
         }
-        if not custody:
-            # Custody rows are token-free: the chained ``chain_hash`` covers
-            # continuity, so only lineage-only (local capture) rows store the
-            # cumulative sequence for prompt-prefix injection.
+        if not capture_columns or capture_columns.get("ledger_request_uid") is not None:
+            # Worker-custody rows are token-free: their staging chain lets the
+            # worker retrieve the prefix from TQ. Deferred Megatron rows have
+            # no staging chain, so retain their HTTP-echoed cumulative tokens
+            # internally for prompt-prefix injection on the next turn.
             record["cumulative_token_ids"] = list(cumulative_token_ids)
         with self._locked(rollout_id):
             records = self._read(rollout_id)

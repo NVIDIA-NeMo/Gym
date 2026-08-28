@@ -203,6 +203,9 @@ async def resolve_parent(request_messages: list | None) -> None:
     from nemo_gym.token_id_capture.staging.records import CaptureAdmission
 
     if parent is not None:
+        # Staged parents let the worker retrieve the prefix from TQ. Deferred
+        # parents instead carry their exact HTTP-echoed prefix in lineage.
+        required_prefix_token_ids = [] if parent.staging_chain else list(parent.cumulative_token_ids)
         # A legacy external parent row without a chain hash cannot anchor a
         # chained child; the CaptureAdmission validator rejects it and the
         # except path below poisons the call (fail closed).
@@ -213,7 +216,7 @@ async def resolve_parent(request_messages: list | None) -> None:
                 parent_call_id=parent.model_call_id,
                 prev_len=parent.prev_len,
                 mode="token_in",
-                required_prefix_token_ids=[],
+                required_prefix_token_ids=required_prefix_token_ids,
                 staging_chain=list(parent.staging_chain),
                 parent_chain_hash=parent.chain_hash or None,
             )

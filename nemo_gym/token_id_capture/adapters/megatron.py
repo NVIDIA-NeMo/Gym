@@ -31,7 +31,11 @@ def _message(response_payload: dict[str, Any]) -> dict[str, Any]:
 def _token_ids(value: Any, field_name: str) -> list[int]:
     if not isinstance(value, list):
         raise ValueError(f"Megatron capture field {field_name} must be a token-id list")
-    token_ids = [int(token_id) for token_id in value]
+    token_ids: list[int] = []
+    for token_id in value:
+        if isinstance(token_id, bool) or not isinstance(token_id, int):
+            raise ValueError(f"Megatron capture field {field_name} must contain only integer token ids")
+        token_ids.append(token_id)
     if any(token_id < 0 for token_id in token_ids):
         raise ValueError(f"Megatron capture field {field_name} contains a negative token id")
     return token_ids
