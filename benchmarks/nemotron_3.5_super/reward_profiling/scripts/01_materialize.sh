@@ -12,12 +12,11 @@
 #
 # OPTIONAL
 #   OUT_DIR           where <nickname>/ is written        (default: <benchmark>/outputs/sweeps)
-#                     the sweep dir is OUT_DIR/<nickname>; that is what SWEEP_DIR points at later
+#                     OUT_DIR/<nickname> is what SWEEP_DIR points at in every later step
 #   LIMIT_PER_ENTRY   cap every entry at N source rows, for smoke runs. 8 exercises every code
-#                     path in minutes. Lowers a manifest limit, never raises one -- for a
-#                     committed subset set materialize.limit_per_entry or entry.limit in the
-#                     manifest instead. NOT the same as `gym eval run --limit`, which takes the
-#                     first N rows of the whole file and so would cover only the first entry
+#                     path in minutes. Only lowers a manifest limit; for a committed subset use
+#                     materialize.limit_per_entry or entry.limit. NOT `gym eval run --limit`,
+#                     which takes the first N rows of the whole file -- only the first entry
 #   JOBS              worker processes                    (default: one per CPU, capped at entries)
 #   OVERWRITE=1       replace an existing materialized file
 #   GYM_SITE_PACKAGES a venv's site-packages, if nemo_gym is not already importable
@@ -38,20 +37,19 @@ mkdir -p "$OUT_DIR"
 JOBS=${JOBS:-}
 LIMIT_PER_ENTRY=${LIMIT_PER_ENTRY:-}
 
-# Repeats are always written out here rather than left to Gym. --resume keys the materialized
-# inputs on (_ng_task_index, _ng_rollout_index) (rollout_collection.py:740), so a row without a
-# rollout index dies with KeyError '_ng_rollout_index' about 90 seconds in (job 6597590). Every
-# launcher relies on --resume, so there is no unexpanded path.
+# Repeats are written out here rather than left to Gym, because every launcher resumes: --resume
+# keys the materialized inputs on (_ng_task_index, _ng_rollout_index) (rollout_collection.py:740),
+# so a row without a rollout index dies with KeyError '_ng_rollout_index' ~90s in (job 6597590).
 args=(--out-dir "$OUT_DIR")
 [[ -n "$JOBS" ]] && args+=(--jobs "$JOBS")
 [[ -n "$LIMIT_PER_ENTRY" ]] && args+=(--limit-per-entry "$LIMIT_PER_ENTRY")
 [[ "${OVERWRITE:-0}" == "1" ]] && args+=(--overwrite)
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 # nemo_gym needs its dependencies importable. Automatic inside the eval container, not on a login
 # node, where the failure is otherwise a bare ModuleNotFoundError from deep in the CLI.
 if ! python -c "import orjson, nemo_gym" >/dev/null 2>&1; then
     if [[ -n "${GYM_SITE_PACKAGES:-}" ]]; then
+        REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
         export PYTHONPATH="$REPO_ROOT:$GYM_SITE_PACKAGES${PYTHONPATH:+:$PYTHONPATH}"
     fi
     if ! python -c "import orjson, nemo_gym" >/dev/null 2>&1; then

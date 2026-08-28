@@ -18,6 +18,7 @@
 #   VLLM_JOBID    borrow a container from this live job instead of using the local venv
 #   CONTAINER     the sqsh to use with VLLM_JOBID
 #   ENV_YAML      config whose ${oc.env:VAR} keys are checked  (default: <repo>/env.yaml)
+#   GYM_SITE_PACKAGES a venv's site-packages, if nemo_gym is not already importable
 #
 # OUTPUT
 #   SWEEP_DIR/by_label/<label>/profile.txt                per-entry
@@ -49,10 +50,8 @@ if ! python -c "import orjson, nemo_gym" >/dev/null 2>&1; then
     fi
 fi
 
-# The check above covers the split below, which only needs nemo_gym itself. `gym eval profile`
-# reaches much further -- through nemo_gym.cli.eval into openai_utils -- so a venv pinned to an
-# older openai than pyproject.toml imports fine here and then fails once per label, writing the
-# same ImportError into 36 profile.txt files. Fail once, up front, with the real error instead.
+# The check above only proves nemo_gym loads; `gym eval profile` also pulls nemo_gym.cli.eval
+# into openai_utils, so a stale openai pin passes there and then fails once per label. Fail here.
 if [[ -z "${VLLM_JOBID:-}" ]]; then
     if ! profile_import_error=$(python -c "import nemo_gym.cli.eval" 2>&1); then
         echo "ERROR: 'gym eval profile' cannot run here, though nemo_gym itself imports:" >&2
@@ -121,10 +120,8 @@ profile_one() {
 }
 export -f profile_one profile_cmd
 
-# One `gym eval profile` per label, and each pays a full interpreter start. Off Lustre that is
-# ~45s even though the profiling itself is trivial, so 36 labels serially take half an hour while
-# the same work inside the container takes three minutes. Imports are page-cached after the first
-# process, so running them concurrently recovers most of it.
+# Imports are page-cached after the first process, so concurrency recovers most of the
+# per-label interpreter start the header describes.
 PROFILE_JOBS=${PROFILE_JOBS:-8}
 printf '%s\0' "$SWEEP_DIR"/by_label/*/ \
     | xargs -0 -P "$PROFILE_JOBS" -I{} bash -c 'profile_one "$@"' _ {} \

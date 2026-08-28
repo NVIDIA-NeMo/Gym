@@ -15,10 +15,10 @@
 # OPTIONAL
 #   SHARDS_DIR    where shard_NNN/ go                     (default: SWEEP_DIR/shards)
 #
-# Safe to re-run with a different NUM_SHARDS. Rollouts already collected are folded back into the
-# parent and the parent is snapshotted to snapshots/<UTC>/ before any shard directory is touched,
-# then carried into the new layout. Rows are dealt round-robin, so every shard carries every
-# environment and none inherits a whole slow one.
+# Safe to re-run with a different NUM_SHARDS: collected rollouts are folded back into the parent,
+# which is snapshotted to snapshots/<UTC>/ before any shard directory is touched, then carried into
+# the new layout. Rows are dealt round-robin, so every shard carries every environment and none
+# inherits a whole slow one.
 set -euo pipefail
 
 SWEEP_DIR=${SWEEP_DIR:?set SWEEP_DIR to the <out-dir>/<nickname> directory 01_materialize.sh wrote}
@@ -28,9 +28,8 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 
 cd "$REPO_ROOT"
 
-# nemo_gym needs its dependencies importable. Inside the eval container that is automatic; on a
-# login node it is not, and the failure is otherwise a bare ModuleNotFoundError from deep inside
-# the CLI. GYM_SITE_PACKAGES points PYTHONPATH at a venv's site-packages if you are not in one.
+# nemo_gym needs its dependencies importable. Automatic inside the eval container, not on a login
+# node, where the failure is otherwise a bare ModuleNotFoundError from deep in the CLI.
 if ! python -c "import orjson, nemo_gym" >/dev/null 2>&1; then
     if [[ -n "${GYM_SITE_PACKAGES:-}" ]]; then
         export PYTHONPATH="$REPO_ROOT:$GYM_SITE_PACKAGES${PYTHONPATH:+:$PYTHONPATH}"

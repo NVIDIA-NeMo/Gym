@@ -1,8 +1,8 @@
 # Minimal manifest for a judge-scored environment.
 #
-# The difference from example_basic is config_overlay. The shipped config names a judge but never
-# an endpoint -- binding the judge means defining that name here. Without it the composed config
-# fails to resolve and the run dies at parse, before a single rollout.
+# The difference from example_basic is the judge binding under gym_env_start. The shipped config
+# names a judge but never an endpoint, so that name must be defined here. Without it the composed
+# config fails to resolve and the run dies at parse, before a single rollout.
 #
 # ${nv_inference_api_key} comes from env.yaml, which the launchers mount into the container.
 

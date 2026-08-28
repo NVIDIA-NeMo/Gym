@@ -14,6 +14,7 @@
 #   SHAPES        shard counts to cycle through           (default: "4 7 2 9 3 5")
 #   PROFILE_JOBS  passed to 05_profile.sh                 (default: 12)
 #   KEEP=1        leave the scratch copy behind for inspection
+#   TMPDIR        where the scratch copy goes             (default: /tmp)
 #
 # Asserts after every reshape that inputs partition exactly, every rollout sits in the shard
 # owning its input, collected work survives, and merge round-trips; then that the split attributes
@@ -145,12 +146,12 @@ echo
 echo ">>> profiling the resharded copy (final shape check)"
 SWEEP_DIR="$D" PROFILE_JOBS="${PROFILE_JOBS:-12}" bash "$(dirname "${BASH_SOURCE[0]}")/05_profile.sh" >"$SCRATCH/profile.log" 2>&1 || true
 
-python - "$D" "$SWEEP_DIR" <<'PY'
+python - "$D" <<'PY'
 import json, sys
 from pathlib import Path
-d, orig = Path(sys.argv[1]), Path(sys.argv[2])
-src_tasks = len(json.loads((d / "sweep_report.json").read_text())["entries"]) and len(
-    {json.loads(l)["_ng_task_index"] for l in open(d / "rollouts_materialized_inputs.jsonl") if l.strip()})
+d = Path(sys.argv[1])
+src_tasks = len({json.loads(l)["_ng_task_index"]
+                 for l in open(d / "rollouts_materialized_inputs.jsonl") if l.strip()})
 rows = [json.loads(l) for l in open(d / "rollouts_reward_profiling.jsonl") if l.strip()]
 ok = len(rows) == src_tasks
 print(f"  {'PASS' if ok else 'FAIL'}  profiled output is one row per source task ({len(rows)} vs {src_tasks})")

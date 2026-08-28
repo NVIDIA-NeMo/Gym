@@ -471,6 +471,10 @@ rewards before a run finishes.
   independently, so a second one doubles the submissions and they pile up against the account's
   node limit. It now takes a lock on the shards directory and refuses to start twice, but it still
   runs in the foreground — detach it with `setsid nohup ... &`.
+- **Keep `policy_model.num_workers` at 16.** Gym's FastAPI servers default to one worker
+  (`server_utils.py:595`), and every rollout crosses the policy server, so at 512+ concurrency that
+  worker caps throughput regardless of GPU capacity. `server_utils.py:159` divides the aiohttp
+  connector limit by the worker count, so the two are tuned together.
 - `--no-serve` is required for collection. Without it `--input` is silently replaced by the
   collated split.
 - **Do not use `gym eval run --limit` to smoke-test a sweep.** It takes the first N rows of the

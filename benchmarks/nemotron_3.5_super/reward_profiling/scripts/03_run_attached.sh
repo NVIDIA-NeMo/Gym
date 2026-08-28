@@ -20,6 +20,7 @@
 #   ROUTER_PORT   where the vLLM router listens            (default: 8000)
 #   MOUNTS        container mounts                         (default: /lustre:/lustre)
 #   ENV_YAML      mounted so judges resolve their keys     (default: $PWD/env.yaml)
+#   CPUS          --cpus-per-task for the driver           (default: 64)
 #
 # `--resume` is not optional: without it rollout collection clears the output and re-expands from
 # scratch, and a sweep this size will not finish inside one allocation.

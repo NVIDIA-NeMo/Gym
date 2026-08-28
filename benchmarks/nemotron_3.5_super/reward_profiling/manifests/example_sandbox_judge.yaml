@@ -5,7 +5,7 @@
 #
 #   1. A sandbox. ns_tools reads NEMO_SKILLS_SANDBOX_HOST/PORT and otherwise falls back to
 #      127.0.0.1:6000, where nothing listens -- every rollout then fails with a bare 500. Pass
-#      SANDBOX_CONTAINER to 03_run.sh, which starts one and waits for /health before collecting.
+#      SANDBOX_CONTAINER to 03_run_single.sh, which starts one and waits for /health before collecting.
 #   2. A judge. math_with_judge verifies symbolically via math-verify by default and only consults
 #      the judge as a fallback, so should_use_judge has to be turned on explicitly.
 

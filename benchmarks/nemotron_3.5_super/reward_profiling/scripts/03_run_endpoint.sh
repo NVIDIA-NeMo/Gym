@@ -1,9 +1,8 @@
 #!/bin/bash
 # 03 - Run a sweep against any OpenAI-compatible endpoint. No Slurm, no sbatch, no GPUs.
 #
-# The other 03_ scripts allocate and serve the policy themselves. This one takes a URL, so the
-# model is somebody else's problem -- a vLLM already running anywhere reachable, an internal
-# gateway, a hosted API. Only the Gym servers and the collection driver run locally, both CPU-only.
+# Takes a URL instead of allocating the policy: any reachable vLLM, gateway, or hosted API.
+# Only the Gym servers and the collection driver run locally.
 #
 # USAGE
 #   SWEEP_DIR=<out>/<nickname> POLICY_BASE_URL=http://host:8000/v1 \

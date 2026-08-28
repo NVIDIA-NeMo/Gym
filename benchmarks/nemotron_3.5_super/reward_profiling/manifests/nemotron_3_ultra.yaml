@@ -14,20 +14,11 @@ nickname: nemotron_3_ultra
 
 # Becomes sweep_config.yaml, passed to `gym env start --config`.
 gym_env_start:
-  # Gym's FastAPI servers default to a single worker (server_utils.py:595), and every rollout goes
-  # through the policy server on its way to vLLM -- at 512+ concurrency that one worker is the
-  # bottleneck regardless of GPU capacity. The stock eval container sets 16 for the same reason.
-  # Note server_utils.py:159 divides the aiohttp connector limit by the worker count, so the two
-  # are meant to be tuned together.
   policy_model:
     responses_api_models:
       vllm_model:
         num_workers: 16
 
-  # 63 servers probe for a free port and then bind, so they can lose the race in between. Gym's
-  # default range is narrow enough that this recurred -- job 6606945 lost math_judge_model on
-  # :19729 after reporting startup complete. A wide range clear of the ephemeral range
-  # (32768-60999) makes it unlikely; 03_run.sh also retries spin-up.
   port_range_low: 20000
   port_range_high: 30000
 
@@ -141,6 +132,7 @@ gym_env_start:
 #   sample: random           # head (default, stops reading at the limit) | random (reads all)
 #   seed: 0                  # seeds `random`; mixed with each entry's label
 
+
 # Slurm settings, read by the launchers that shell out to `sbatch`. Each key becomes
 # SBATCH_<KEY>, so anything under INPUT ENVIRONMENT VARIABLES in `man sbatch` works. A launcher's
 # own env var wins, so override per run without editing this file.
@@ -148,6 +140,7 @@ sbatch:
   account: nemotron_n3_post
   qos: interactive
   timelimit: "04:00:00"
+
 
 # Containers, for `srun --container-image`.
 srun:
@@ -160,9 +153,11 @@ srun:
   # manifest presents as a hang, not an error. Override with CONTAINER for a one-off.
   container: "/lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/Gym-github_worktrees/reward-profiling/results/vllm/vllm-openai:v0.27.1___tomer_with_gym_all.sqsh"
 
+
 # Runtime settings for `gym eval run --no-serve`.
 gym_eval_run:
   num_repeats: 8
+
 
 entries:
 

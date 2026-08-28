@@ -37,7 +37,7 @@
 #   NUM_SAMPLES_IN_PARALLEL   512 x decode_nodes, or the manifest's value if it sets one
 #   MAX_NUM_SEQS_PER_DECODE_ENGINE         512
 #   ALLOW_PARTIAL_ROLLOUTS                 True
-#   ENV_PORT_RANGE_LOW / _HIGH             20000 / 30000, or the manifest's gym_env_start
+#   ENV_PORT_RANGE_LOW / _HIGH             unset; the manifest's gym_env_start sets the range
 #   SERVERS_READY_TIMEOUT_S / ENV_START_ATTEMPTS   1800 / 4
 #   ENV_YAML / MOUNTS / LOG_DIR            $PWD/env.yaml / /lustre:/lustre / SWEEP_DIR/slurm-logs
 #
@@ -47,13 +47,6 @@
 # measured at 483 rollouts/hr on 32 workers. Scaling past that needs a balancer in front.
 set -euo pipefail
 
-# Sandbox scaling, kept here rather than in the header because it is analysis, not usage:
-# The image runs nginx over N uWSGI workers on ONE node, hashing X-Session-ID so a stateful IPython
-# session stays pinned to one worker. It does not span nodes, and NEMO_SKILLS_SANDBOX_HOST takes a
-# single host, so sandbox capacity is currently one node's worth. Scaling past that needs a
-# balancer in front of several sandbox nodes; measured at 483 rollouts/hr on 32 workers, and the
-# sandbox lane is ~42% of total sweep cost, so this is the first thing to grow.
-
 # SWEEP_DIR first and on its own: it is the path to the manifest's own output, so unlike MODEL and
 # CONTAINER it cannot be supplied by the manifest.
 if [[ -z "${SWEEP_DIR:-}" ]]; then
@@ -61,9 +54,8 @@ if [[ -z "${SWEEP_DIR:-}" ]]; then
     exit 2
 fi
 
-# Slurm and container settings the manifest declared, applied only where this environment does
-# not already set the variable -- so precedence stays manifest -> script env var -> command line. Free-form, so a
-# manifest can set any SBATCH_* sbatch reads without a change here.
+# Apply the manifest's sbatch/srun keys only where this environment leaves them unset, keeping
+# precedence at manifest -> env var -> command line. Free-form, so any SBATCH_* works.
 while IFS='=' read -r _k _v; do
     [[ -n "$_k" ]] || continue
     [[ -n "${!_k:-}" ]] || export "$_k=$_v"
@@ -91,10 +83,6 @@ for _required in MODEL CONTAINER; do
     fi
 done
 
-MODEL=$MODEL
-CONTAINER=$CONTAINER
-SWEEP_DIR=$SWEEP_DIR
-
 # One prefill node feeds several decode nodes; decode is the throughput-limiting side. P4D12 is the
 # largest configuration tested, and 16 nodes still fits inside one 18-node NVL72 rack, which
 # --segment requires.
@@ -104,14 +92,11 @@ NUM_DECODE_NODES=${NUM_DECODE_NODES:-2}
 VLLM_CONFIG=${VLLM_CONFIG:-benchmarks/nemotron_3.5_super/vllm_configs/nemotron_3.5_super.sh}
 MOUNTS=${MOUNTS:-/lustre:/lustre}
 
-# Sandbox sidecar. Empty disables it, which is correct for the no-judge and judge lanes.
-# Logs live with the run they describe, inside SWEEP_DIR. A sharded run submits one job per shard
-# and each shard is its own SWEEP_DIR, so this keeps 16 jobs' logs separated by shard instead of
-# interleaved in one directory. Everything is still under the gitignored outputs/ tree.
-RP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Logs live inside SWEEP_DIR, so a sharded run keeps each shard's job logs separate.
 LOG_DIR=${LOG_DIR:-$SWEEP_DIR/slurm-logs}
 mkdir -p "$LOG_DIR"
 
+# Empty disables the sandbox sidecar, which is correct for the no-judge and judge lanes.
 SANDBOX_CONTAINER=${SANDBOX_CONTAINER:-}
 SANDBOX_PORT=${SANDBOX_PORT:-6000}
 # One worker per core starves the driver, which shares the node. 32 was measured; raise it when the
@@ -147,6 +132,10 @@ MAX_NUM_SEQS_PER_DECODE_ENGINE=${MAX_NUM_SEQS_PER_DECODE_ENGINE:-512}
 GLOBAL_AIOHTTP_CONNECTOR_LIMIT_PER_HOST=${GLOBAL_AIOHTTP_CONNECTOR_LIMIT_PER_HOST:-}
 RUN_PORT_RANGE_LOW=${RUN_PORT_RANGE_LOW:-}
 RUN_PORT_RANGE_HIGH=${RUN_PORT_RANGE_HIGH:-}
+# gym env start probes for a free port then binds, so 63 servers racing each other can lose the
+# port between probe and bind -- job 6563714 died with "lc_judge ... 19730: address already in
+# use" after it had reported startup complete. The manifest sets a wide range clear of the Linux
+# ephemeral range (32768-60999); set these only to override it for one run.
 ENV_PORT_RANGE_LOW=${ENV_PORT_RANGE_LOW:-}
 ENV_PORT_RANGE_HIGH=${ENV_PORT_RANGE_HIGH:-}
 ALLOW_PARTIAL_ROLLOUTS=${ALLOW_PARTIAL_ROLLOUTS:-True}
@@ -228,15 +217,7 @@ SERVERS_READY_TIMEOUT_S=${SERVERS_READY_TIMEOUT_S:-1800}
 # its own servers. Jobs 6563122 and 6563743 both died on "Could not connect to the head server"
 # because of this; bench_e2e.py has never passed it, which is why the same split works there.
 #
-# gym env start probes for a free port then binds, so 63 servers racing each other can lose the
-# port between probe and bind -- job 6563714 died with "lc_judge ... 19730: address already in
-# use" after lc_judge had already reported startup complete. Without these it uses a narrow
-# default (observed 18000-19700). A wide range well clear of the Linux ephemeral range
-# (32768-60999) makes the collision unlikely rather than merely unlucky.
 ENV_START_ATTEMPTS=${ENV_START_ATTEMPTS:-4}
-SERVERS_READY_TIMEOUT_S=${SERVERS_READY_TIMEOUT_S:-1200}
-ENV_PORT_RANGE_LOW=${ENV_PORT_RANGE_LOW:-20000}
-ENV_PORT_RANGE_HIGH=${ENV_PORT_RANGE_HIGH:-30000}
 
 # 1, always: 01_materialize.sh already wrote num_repeats copies of every row, so anything higher
 # would multiply them again.
@@ -268,7 +249,6 @@ fi
 # Same shadowing as WALLTIME: --comment is a flag, so read the manifest's sbatch.comment first.
 SLURM_COMMENT="${SLURM_COMMENT:-${SBATCH_COMMENT:-}}"
 
-# Fixed vLLM Port configurations
 PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT=5600
 DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT=5700
 
@@ -378,7 +358,6 @@ set -euo pipefail
 # Not used when the model has no Mamba layers.
 export VLLM_SSM_CONV_STATE_LAYOUT=DS
 
-# Generic vLLM environment variables.
 export VLLM_USE_FASTOKENS=1
 
 # NIXL uses UCX for cross-node KV transfer. Explicitly enable UCX's CUDA
@@ -392,7 +371,6 @@ export UCX_RNDV_THRESH=0
 
 source "$VLLM_CONFIG"
 
-# Increase the number of file descriptors to 65k
 if [[ \$(ulimit -Hn) == "unlimited" ]] || [[ 65535 -lt \$(ulimit -Hn) ]]; then
   ulimit -Sn 65535
 fi

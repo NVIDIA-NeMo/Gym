@@ -1,5 +1,6 @@
 #!/bin/bash
-# 03 - Run one sweep across N jobs, watch them, resubmit failures, then merge and profile.
+# 03 - Run one sweep across N jobs, watch them, resubmit failures, then merge and split.
+# Each shard's own job profiles itself; run 05_profile.sh afterwards for the whole sweep.
 #
 # One job cannot use 256 nodes: --segment needs a topology-contiguous allocation and an NVL72 rack
 # is 18 nodes, and a single driver at 512 x decode_nodes concurrency would exceed the aiohttp
@@ -16,6 +17,8 @@
 #                 1 is legitimate: it is how a single-job run gets resubmission
 #   SHARDS_DIR    where shard_NNN/ go                      (default: SWEEP_DIR/shards)
 #   POLL_S        seconds between squeue checks            (default: 60)
+#   EXPERIMENT_NAME  job-name prefix                       (default: rp)
+#   GYM_SITE_PACKAGES a venv's site-packages, if nemo_gym is not already importable
 #   MAX_ROUNDS    resubmissions per shard before giving up (default: 4)
 #
 # This runs in the FOREGROUND for hours, so detach it. It locks the shards directory and refuses
