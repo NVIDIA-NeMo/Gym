@@ -1198,13 +1198,14 @@ class RolloutCollectionHelper(BaseModel):
                 tqdm.write(print_str)
 
                 if get_exporters():
-                    step_metrics = {
-                        f"progress/{agent_name}/reward": round(
+                    step_metrics = {"progress/total/rollouts_per_min": rollouts_per_min}
+                    for agent_name, metrics in agent_name_to_metrics.items():
+                        step_metrics[f"progress/{agent_name}/reward"] = round(
                             100 * metrics["reward"] / agent_name_to_counts[agent_name], 2
                         )
-                        for agent_name, metrics in agent_name_to_metrics.items()
-                    }
-                    step_metrics["progress/total/rollouts_per_min"] = rollouts_per_min
+                        step_metrics[f"progress/{agent_name}/reward_lower_bound"] = round(
+                            100 * metrics["reward"] / (counts_left[agent_name] + agent_name_to_counts[agent_name]), 2
+                        )
 
                     export_metrics(step_metrics, step=int(current_pct))
 
