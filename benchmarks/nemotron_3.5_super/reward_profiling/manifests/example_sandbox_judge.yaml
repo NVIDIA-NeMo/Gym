@@ -11,7 +11,7 @@
 
 nickname: example_sandbox_judge
 
-# Becomes sweep_config.yaml, passed to `gym env start --config` (was ng_run).
+# Becomes sweep_config.yaml, passed to `gym env start --config`.
 gym_env_start:
   config_paths:
     - responses_api_models/vllm_model/configs/vllm_model.yaml
@@ -48,7 +48,7 @@ gym_env_start:
         # Replaying a session after a sandbox worker restarts is what tends to wedge the tool call.
         disable_session_restore: true
 
-# Runtime settings for `gym eval run --no-serve` (was ng_collect_rollouts).
+# Runtime settings for `gym eval run --no-serve`.
 gym_eval_run:
   num_repeats: 8
 

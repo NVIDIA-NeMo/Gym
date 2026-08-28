@@ -12,7 +12,7 @@
 
 nickname: nemotron_3_ultra
 
-# Becomes sweep_config.yaml, passed to `gym env start --config` (was ng_run).
+# Becomes sweep_config.yaml, passed to `gym env start --config`.
 gym_env_start:
   # Gym's FastAPI servers default to a single worker (server_utils.py:595), and every rollout goes
   # through the policy server on its way to vLLM -- at 512+ concurrency that one worker is the
@@ -133,7 +133,7 @@ gym_env_start:
         disable_session_restore: true
 
 
-# Runtime settings for `gym eval run --no-serve` (was ng_collect_rollouts).
+# Runtime settings for `gym eval run --no-serve`.
 gym_eval_run:
   num_repeats: 8
 

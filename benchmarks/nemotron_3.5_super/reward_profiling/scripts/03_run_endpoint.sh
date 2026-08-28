@@ -29,23 +29,6 @@ if ! command -v gym >/dev/null 2>&1; then
     exit 2
 fi
 
-# Same incompatibility the Slurm launcher guards: --resume keys the materialized inputs on
-# (task, rollout) and an unexpanded row has no rollout index.
-sweep_expanded=$(python - "$SWEEP_DIR" <<'GUARD'
-import json, sys
-from pathlib import Path
-try:
-    print(json.loads((Path(sys.argv[1]) / "sweep_report.json").read_text()).get("expanded", True))
-except OSError:
-    print(True)
-GUARD
-)
-if [[ "$sweep_expanded" == "False" ]]; then
-    echo "ERROR: $SWEEP_DIR was materialized with --no-expand, which --resume cannot read." >&2
-    echo "       Re-run 01_prepare_sweep.sh without NO_EXPAND=1." >&2
-    exit 2
-fi
-
 NUM_SAMPLES_IN_PARALLEL=${NUM_SAMPLES_IN_PARALLEL:-128}
 SERVERS_READY_TIMEOUT_S=${SERVERS_READY_TIMEOUT_S:-1800}
 ENV_PORT_RANGE_LOW=${ENV_PORT_RANGE_LOW:-20000}
@@ -88,7 +71,7 @@ if ! grep -q "servers ready!" "$env_start_log" 2>/dev/null; then
     exit 1
 fi
 
-# num_repeats=1 because 01_prepare_sweep.sh pre-expanded them; the guard above enforces that.
+# num_repeats=1 because 01_prepare_sweep.sh already wrote num_repeats copies of every row.
 echo ">>> collecting"
 gym eval run --no-serve --resume \
     --input "$SWEEP_DIR/rollouts_materialized_inputs.jsonl" \

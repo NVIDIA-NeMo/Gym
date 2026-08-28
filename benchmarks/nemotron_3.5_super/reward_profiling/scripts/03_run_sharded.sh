@@ -53,33 +53,26 @@ fi
 echo ">>> dealing $SWEEP_DIR into $NUM_SHARDS shards"
 python -m nemo_gym.sweep shard "$SWEEP_DIR" --num-shards "$NUM_SHARDS" --out-dir "$SHARDS_DIR"
 
-# Outstanding rollouts for a shard: inputs whose work is not yet in its rollouts.jsonl. With
-# --no-expand an input row carries no rollout index and stands for num_repeats rollouts, so
-# completeness is judged per task rather than per (task, rollout) pair.
+# Outstanding rollouts for a shard: inputs whose (task, rollout) pair is not yet in its
+# rollouts.jsonl.
 shard_outstanding() {
     python - "$1" <<'INNER'
 import json, sys
 from pathlib import Path
 
 d = Path(sys.argv[1])
-done_pairs, done_tasks = set(), set()
+done_pairs = set()
 for line in open(d / "rollouts.jsonl"):
     if line.strip():
         r = json.loads(line)
         done_pairs.add((r.get("_ng_task_index"), r.get("_ng_rollout_index")))
-        done_tasks.add(r.get("_ng_task_index"))
 
 outstanding = 0
 for line in open(d / "rollouts_materialized_inputs.jsonl"):
     if not line.strip():
         continue
     r = json.loads(line)
-    task, rollout = r.get("_ng_task_index"), r.get("_ng_rollout_index")
-    if rollout is None:
-        # unexpanded: this row stands for every repeat of the task
-        outstanding += task not in done_tasks
-    else:
-        outstanding += (task, rollout) not in done_pairs
+    outstanding += (r.get("_ng_task_index"), r.get("_ng_rollout_index")) not in done_pairs
 print(outstanding)
 INNER
 }

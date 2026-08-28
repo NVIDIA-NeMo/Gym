@@ -70,16 +70,17 @@ The manifest is the highest-level config of what environments are being profiled
 Two blocks, each named for the command it configures:
 
 1. **nickname** — names the run; artifacts land in `<OUT_DIR>/<nickname>/`
-2. **gym_env_start** (was `ng_run`) — becomes `sweep_config.yaml`, passed as `--config`
+2. **gym_env_start** — becomes `sweep_config.yaml`, passed as `--config`
     - `config_paths`: sweep-wide configs merged ahead of every entry's own. Usually just the model
       server, e.g. `responses_api_models/vllm_model/configs/vllm_model.yaml`
     - any other key: ordinary Gym config, spliced in verbatim. A config overrides whatever its own
       `config_paths` pulled in, so these beat every file — which is how a judge gets rebound
       without editing an upstream config. Do it here rather than in a file: the container is built
       from a Gym ref and has no copy of this repo, so a repo-relative path will not resolve inside it
-3. **gym_eval_run** (was `ng_collect_rollouts`) — runtime settings, emitted as `++key=value`
-    - `num_repeats`: rollouts per task; the spread across them is the profile. Also read by
-      `materialize`, which writes this many copies of each row
+3. **gym_eval_run** — runtime settings, emitted as `++key=value`
+    - `num_repeats`: rollouts per task; the spread across them is the profile. Applied by
+      01_prepare_sweep.sh, which writes this many copies of each row into the materialized inputs,
+      so collection itself runs with `++num_repeats=1`
     - anything else Gym takes, e.g. `num_samples_in_parallel`
     - precedence, lowest to highest: **manifest → script env var → command line**. A launcher
       passes `++` only when its env var is set, so these are defaults rather than something
@@ -226,8 +227,7 @@ Unfinished data needs no special handling: partial groups are kept and reported.
 
 ### 04b - Running gym eval profile
 
-`ng_reward_profile` is the legacy alias and still works, but `gym eval profile` is the current
-name and what the scripts call. It runs on a partial file:
+It runs on a partial file:
 
 ```bash
 gym eval profile --inputs <dir>/rollouts_materialized_inputs.jsonl \

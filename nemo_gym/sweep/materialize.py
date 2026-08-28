@@ -82,10 +82,6 @@ class MaterializeReport:
     task_index_ranges: Dict[str, Tuple[int, int]]
     nickname: str = ""
     shuffle_seed: int = 0
-    # Whether repeats were pre-expanded here or left to Gym at collection time. Consumers need it
-    # to choose num_repeats: pre-expanded inputs want 1, one-row-per-task inputs want the
-    # manifest's value, and getting it wrong silently collects one rollout per task instead of all.
-    expanded: bool = True
     # Settings the manifest declared for the collection command, for a launcher to pass as ++
     # overrides. Carried here rather than in sweep_config.yaml because that file configures
     # gym env start, and these belong to gym eval run.
@@ -107,7 +103,6 @@ class MaterializeReport:
             "materialized_bytes": self.materialized_fpath.stat().st_size if self.materialized_fpath.exists() else None,
             "nickname": self.nickname,
             "shuffle_seed": self.shuffle_seed,
-            "expanded": self.expanded,
             "gym_eval_run": self.gym_eval_run,
             "total_source_rows": self.total_source_rows,
             "total_materialized_rows": self.total_materialized_rows,
@@ -139,15 +134,9 @@ def _count_rows(path: str, limit: Optional[int]) -> int:
     return n
 
 
-def _expand_entry(args: Tuple[str, str, str, Optional[str], int, int, Optional[int], bool]) -> Tuple[str, int, int]:
-    """Write one entry's rows into its own part file. Runs in a worker process.
-
-    With ``expand`` false the repeats are left to Gym, which does them itself at collection time
-    (rollout_collection.py:828) while honouring the task index stamped here. That writes one row
-    per task instead of num_repeats rows -- an 8x smaller file for this manifest -- and Gym's
-    preprocessing became cheap enough for that to be the better trade once #2816 landed.
-    """
-    label, data, part_path, override, repeats, task_offset, limit, expand = args
+def _expand_entry(args: Tuple[str, str, str, Optional[str], int, int, Optional[int]]) -> Tuple[str, int, int]:
+    """Write one entry's rows into its own part file. Runs in a worker process."""
+    label, data, part_path, override, repeats, task_offset, limit = args
     src_rows = 0
     written = 0
     with open(data, "rb") as source, open(part_path, "wb") as sink:
@@ -164,14 +153,8 @@ def _expand_entry(args: Tuple[str, str, str, Optional[str], int, int, Optional[i
                 ref["name"] = override
             row[SWEEP_LABEL_KEY] = label
             row[TASK_INDEX_KEY] = task_offset + src_rows
-            if expand:
-                for rollout_index in range(repeats):
-                    row[ROLLOUT_INDEX_KEY] = rollout_index
-                    sink.write(orjson.dumps(row) + b"\n")
-                    written += 1
-            else:
-                # Gym assigns _ng_rollout_index per task when it expands, so leaving it off here
-                # is what lets it number 0..repeats-1 correctly.
+            for rollout_index in range(repeats):
+                row[ROLLOUT_INDEX_KEY] = rollout_index
                 sink.write(orjson.dumps(row) + b"\n")
                 written += 1
             src_rows += 1
@@ -187,7 +170,6 @@ def materialize(
     overwrite: bool = False,
     shuffle_seed: int = 0,
     shuffle_buffer_rows: int = DEFAULT_BUFFER_ROWS,
-    expand: bool = True,
 ) -> MaterializeReport:
     out_dir = Path(out_dir) / manifest.nickname
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -228,7 +210,6 @@ def materialize(
             repeats_by_entry[entry.label],
             offsets[index],
             limit_per_entry,
-            expand,
         )
         for index, entry in enumerate(manifest.entries)
     ]
@@ -285,7 +266,6 @@ def materialize(
         },
         nickname=manifest.nickname,
         shuffle_seed=shuffle_seed,
-        expanded=expand,
         gym_eval_run=manifest.gym_eval_run.overrides(),
         rows_per_entry=rows_per_entry,
         materialized_per_entry=materialized_per_entry,

@@ -175,24 +175,9 @@ SERVERS_READY_TIMEOUT_S=${SERVERS_READY_TIMEOUT_S:-1200}
 ENV_PORT_RANGE_LOW=${ENV_PORT_RANGE_LOW:-20000}
 ENV_PORT_RANGE_HIGH=${ENV_PORT_RANGE_HIGH:-30000}
 
-# 01_prepare_sweep.sh defaults to --no-expand, which writes one row per task and leaves the repeats
-# to Gym. Pre-expanded inputs need ++num_repeats=1 or every rollout would be duplicated; unexpanded
-# inputs need the manifest's value or only one rollout per task is collected. The report records
-# which, so neither is guessed.
-NUM_REPEATS=${NUM_REPEATS:-$(python - "$SWEEP_DIR" <<'PY_REPEATS'
-import json, sys
-from pathlib import Path
-report = Path(sys.argv[1]) / "sweep_report.json"
-doc = json.loads(report.read_text())
-if doc.get("expanded", True):
-    print(1)
-else:
-    repeats = {e.get("num_repeats") for e in doc.get("entries", {}).values() if e.get("num_repeats")}
-    # Per-entry repeats are resolved by agent at collection time; a single shared value is the
-    # only thing expressible as one ++num_repeats override.
-    print(repeats.pop() if len(repeats) == 1 else 1)
-PY_REPEATS
-)}
+# 1, always: 01_prepare_sweep.sh already wrote num_repeats copies of every row, so anything higher
+# would multiply them again.
+NUM_REPEATS=${NUM_REPEATS:-1}
 
 # env.yaml interpolates ${oc.env:VAR} for judge keys and similar. An unset one is not caught until
 # gym env start parses the config inside the container, which costs a full spin-up and every retry
@@ -215,25 +200,6 @@ PY_ENVVARS
         echo "       it must be 'export VAR=...' for sbatch to pass it into the container." >&2
         exit 2
     fi
-fi
-
-# --resume cannot read unexpanded inputs: _load_from_cache keys on (task, rollout) and an
-# unexpanded row has no rollout index, so collection dies with KeyError '_ng_rollout_index' about
-# 90 seconds in (job 6597590). Fail at submit instead.
-sweep_expanded=$(python - "$SWEEP_DIR" <<'GUARD'
-import json, sys
-from pathlib import Path
-report = Path(sys.argv[1]) / "sweep_report.json"
-try:
-    print(json.loads(report.read_text()).get("expanded", True))
-except OSError:
-    print(True)
-GUARD
-)
-if [[ "$sweep_expanded" == "False" ]]; then
-    echo "ERROR: $SWEEP_DIR was materialized with --no-expand, which --resume cannot read." >&2
-    echo "       Re-run 01_prepare_sweep.sh without NO_EXPAND=1." >&2
-    exit 2
 fi
 
 SLURM_COMMENT="${SLURM_COMMENT:-}"
@@ -303,8 +269,6 @@ done
 
 # --resume is load-bearing: Gym reads the pre-expanded inputs instead of re-expanding them
 # (~100 min single-threaded for a full sweep), and a walltime kill continues where it stopped.
-# num_repeats comes from the sweep report: 1 when prepare pre-expanded, the manifest's value when
-# it did not.
 gym eval run --no-serve --resume \\
     --input $SWEEP_DIR/rollouts_materialized_inputs.jsonl \\
     --output $SWEEP_DIR/rollouts.jsonl \\

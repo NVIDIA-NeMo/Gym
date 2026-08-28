@@ -68,12 +68,6 @@ def main(argv: list[str] | None = None) -> int:
         "--jobs", type=int, default=None, help="Worker processes (default: one per CPU, capped at entries)."
     )
     mat.add_argument("--limit-per-entry", type=int, default=None, help="Take at most N source rows per entry.")
-    mat.add_argument(
-        "--no-expand",
-        action="store_true",
-        help="Write one row per task and let Gym expand num_repeats at collection time. "
-        "Much smaller on disk; Gym honours the task index stamped here.",
-    )
     mat.add_argument("--overwrite", action="store_true", help="Replace an existing materialized file.")
     mat.add_argument(
         "--shuffle",
@@ -190,7 +184,6 @@ def main(argv: list[str] | None = None) -> int:
                 limit_per_entry=args.limit_per_entry,
                 overwrite=args.overwrite,
                 shuffle_seed=args.shuffle,
-                expand=not args.no_expand,
             )
             print(f"\nwrote {mreport.materialized_fpath}")
             print(f"  {mreport.total_source_rows:,} source rows -> {mreport.total_materialized_rows:,} materialized")
