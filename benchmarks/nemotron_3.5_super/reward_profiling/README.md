@@ -64,6 +64,17 @@ source .venv/bin/activate
 A venv older than the branch's `openai==2.44.0` pin imports `nemo_gym` fine and then fails inside
 `gym eval profile`, so a stale one is worse than none.
 
+You also need an `env.yaml` in the repo root — it is gitignored, so it does not come with a
+checkout. Judge entries resolve their key through it, and the launchers refuse to submit if any
+variable it names is unexported:
+
+```yaml
+nv_inference_api_key: ${oc.env:NVI_KEY_EVALUATOR}
+```
+
+`export NVI_KEY_EVALUATOR=...` must be a real export — a bare assignment in `.bashrc` is a shell
+variable that sbatch never sees, and `export` there only reaches a login shell.
+
 ## 01 - (Optional) Create a container
 The reward profiling container pre-installs all resources_servers and responses_api_agents needed for reward profiling.
 It follows the same flow from the [Super-v3.5 readme](../README.md), with one change: new container config, created from the manifests: `benchmarks/nemotron_3.5_super/reward_profiling/configs/container_config.yaml`
@@ -268,7 +279,8 @@ reshape, and merge round-trips — then splits and profiles. Read-only with resp
 ### 03b - Starting, resuming and monitoring a profiling job
 
 `03_run_sharded.sh` submits one job per shard and watches them. A shard whose job dies with work
-outstanding is resubmitted, up to `MAX_ROUNDS` (4). It merges and profiles when all are done:
+outstanding is resubmitted, up to `MAX_ROUNDS` (4). It merges and splits when all are done;
+each shard's own job profiles itself, so run `05_profile.sh` after for the whole sweep:
 
 ```bash
 MODEL=<ckpt> CONTAINER=<sqsh> SANDBOX_CONTAINER=<sandbox sqsh> \
@@ -294,9 +306,9 @@ Resumed from cache. Found:
 Monitor with `squeue`, the rollout count, and the per-shard logs:
 
 ```bash
-wc -l <sweep>/shards/shard_*/rollouts.jsonl        # progress
-tail -f <sweep>/slurm-logs/<jobid>-gym-*.log       # job
-less <sweep>/env_start.log                          # the 63 Gym servers
+wc -l <sweep>/shards/shard_*/rollouts.jsonl               # progress
+tail -f <sweep>/shards/shard_000/slurm-logs/*-gym-*.log   # one shard's job
+less <sweep>/shards/shard_000/env_start.log               # its 63 Gym servers
 ```
 
 Expect ~30s to a healthy sandbox, ~4 min to all servers ready, and ~16 min to the first rollout
@@ -416,7 +428,7 @@ scripts/         numbered by run order; see below.
 | `01_materialize.sh` | manifest -> one materialized input | always |
 | `02_shard.sh` | deal into N sweep dirs, one per job | only to exceed one job's node count |
 | `03_run_single.sh` | one job: vLLM + Gym + collect + profile | single-job runs, and what the sharded runner submits |
-| `03_run_sharded.sh` | submit + watch + resubmit N shards, then merge and profile | sharded runs |
+| `03_run_sharded.sh` | submit + watch + resubmit N shards, then merge and split | sharded runs |
 | `03_run_endpoint.sh` | collect against any OpenAI-compatible URL, no Slurm | an endpoint someone else is serving |
 | `03_run_attached.sh` | collect inside an already-running vLLM Slurm job | debugging against a warm allocation |
 | `04_merge_shards.sh` | unshard: merge rollouts back into the parent | after individually-launched shards, or before resharding |
@@ -432,7 +444,8 @@ The `03_` variants differ on two axes, not one:
 | `03_run_endpoint.sh` | no, you give it a URL | 0 -- no Slurm at all |
 | `03_run_attached.sh` | no, uses a running job's | 0 -- srun into yours |
 
-Single job: `01` then `03`. Sharded: `01`, `02`, `03_run_sharded` (which does `04` and `05` itself).
+Single job: `01` then `03_run_single`. Sharded: `01` then `03_run_sharded` (it shards and merges
+itself; run `05` after).
 Against an endpoint you already have: `01` then `03_run_endpoint`. `04` and `05` are separate
 because both are useful mid-run — the profiler handles partial sweeps, so you can see per-entry
 rewards before a run finishes.
@@ -442,6 +455,7 @@ rewards before a run finishes.
 | variable | script | |
 |---|---|---|
 | `MANIFEST`, `OUT_DIR` | 01 | input manifest, where `<nickname>/` lands |
+| `OVERWRITE=1` | 01 | replace an existing materialized file. Refused if rollouts were already collected |
 | `LIMIT_PER_ENTRY` | 01 | take N source rows from *each* entry. Use `8` for a smoke run. Not the same as `gym eval run --limit` |
 | `NUM_SHARDS` | 02, 03_run_sharded | how many jobs to split across |
 | `MODEL`, `CONTAINER` | 03 | checkpoint path, eval sqsh |

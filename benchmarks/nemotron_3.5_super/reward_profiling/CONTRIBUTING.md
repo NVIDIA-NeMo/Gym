@@ -11,7 +11,7 @@
     - a. [Non-judge environments.](#03a---non-judge-environments)
     - b. [Judge environments.](#03b---judge-environments)
     - c. [Sandbox environments.](#03c---sandbox-environments)
-4. [Adding a manifest entry into manifests/nemotron_3_5_super.yaml](#04---adding-a-manifest-entry-into-manifestsnemotron_3_5_superyaml)
+4. [Adding a manifest entry into manifests/nemotron_3_ultra.yaml](#04---adding-a-manifest-entry-into-manifestsnemotron_3_ultrayaml)
 
 Contribute your environment as a one-entry manifest first, prove it runs, then add it to the shared
 manifest. A one-entry manifest fails in seconds; the same mistake in the shared one costs a full
@@ -167,7 +167,7 @@ The sandbox is one node only — sessions pin to a worker by `X-Session-ID` cons
 does not span nodes. Only one arm64 build exists:
 `/lustre/fsw/portfolios/llmservice/users/igitman/images/nemo-skills-sandbox-0.7.1-arm64.sqsh`
 
-## 04 - Adding a manifest entry into manifests/nemotron_3_5_super.yaml
+## 04 - Adding a manifest entry into manifests/nemotron_3_ultra.yaml
 
 Once your entry runs clean alone, move it into
 [`manifests/nemotron_3_ultra.yaml`](./manifests/nemotron_3_ultra.yaml):
