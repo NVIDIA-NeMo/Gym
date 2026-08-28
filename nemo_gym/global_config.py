@@ -643,8 +643,6 @@ Duplicate config paths:
                 agents[source.agent_type] = composed
                 global_config_dict[renames[target.name]] = instance
 
-            self._repin_agents(global_config_dict, renames)
-
         self._raise_on_unapplied_agent_overrides(held_agent_overrides, set(renames.values()))
 
     @staticmethod
@@ -675,19 +673,6 @@ Duplicate config paths:
                 f"Composing would give two instances the same name: {', '.join(clashes)}. "
                 f"Rename the environment's agent instance or compose the config manually."
             )
-
-    @staticmethod
-    def _repin_agents(global_config_dict: DictConfig, renames: dict) -> None:
-        """Follow the rename through `agent:` pins on datasets, which name an instance."""
-        for instance in global_config_dict.values():
-            if not isinstance(instance, DictConfig):
-                continue
-            for server_type in (RESOURCES_SERVER_TYPE_KEY_NAME, AGENT_SERVER_TYPE_KEY_NAME):
-                for block in (instance.get(server_type) or {}).values():
-                    for dataset in block.get("datasets") or []:
-                        pinned = dataset.get("agent") if isinstance(dataset, DictConfig) else None
-                        if pinned in renames:
-                            dataset["agent"] = renames[pinned]
 
     def _raise_on_unsupported_pairing(
         self, global_config_dict: DictConfig, source: _AgentInstance, targets: List[_AgentInstance]
