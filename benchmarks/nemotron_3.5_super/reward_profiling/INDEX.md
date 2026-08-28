@@ -1,6 +1,7 @@
 # Reward Profiling How-To
 
 ## Index
+0. [Setup](#00---setup)
 1. [(Optional) Create a container](#01---optional-create-a-container)
 2. [Create a manifest](#02---create-a-manifest)
 3. [Run the reward profiling job](#03---run-the-reward-profiling-job)
@@ -11,6 +12,19 @@
    - b. [Running gym eval profile](#04b---running-gym-eval-profile)
    - c. [Re-creating profiled data to input shapes with reward profiled information](#04c---re-creating-profiled-data-to-input-shapes-with-reward-profiled-information)
 
+
+## 00 - Setup
+
+Everything outside the profiling job — validate, prepare, shard, merge, split, profile — is
+CPU-only and runs from a venv. Once, in the repo root:
+
+```bash
+uv venv && uv sync --extra dev
+source .venv/bin/activate
+```
+
+A venv older than the branch's `openai==2.44.0` pin imports `nemo_gym` fine and then fails inside
+`gym eval profile`, so a stale one is worse than none.
 
 ## 01 - (Optional) Create a container
 The reward profiling container pre-installs all resources_servers and responses_api_agents needed for reward profiling.
@@ -235,17 +249,29 @@ gym eval profile --inputs <dir>/rollouts_materialized_inputs.jsonl \
 ```
 
 ```
-Reward profile completion: 2151/2304 rollout rows (93.36%)
-Input rows: 288 total; 232 complete; 56 partial; 0 without rollouts dropped from output.
+Reward profile completion: 2243/2304 rollout rows (97.35%)
+Input rows: 288 total; 263 complete; 25 partial; 0 without rollouts dropped from output.
 ```
 
-`05_profile.sh` does the split and then profiles every entry plus the whole sweep:
+`05_profile.sh` splits, then profiles every entry plus the whole sweep. No GPU, no Slurm:
+
+```bash
+source .venv/bin/activate
+SWEEP_DIR=<sweep> bash $R/scripts/05_profile.sh
+```
+
+`VLLM_JOBID`/`CONTAINER` are an alternative, not a requirement — they borrow a container from any
+live allocation to get `gym` on PATH, which is how `03_run.sh` calls this at the end of its job:
 
 ```bash
 SWEEP_DIR=<sweep> CONTAINER=<sqsh> VLLM_JOBID=<any live job> bash $R/scripts/05_profile.sh
 ```
 
-The profiler needs no GPU; `VLLM_JOBID`/`CONTAINER` only get it a container with `gym` on PATH.
+Labels run concurrently — each is a separate `gym` process and on Lustre interpreter start
+dominates (~45s vs ~5s in the container). 36 labels take ~4m45s at `PROFILE_JOBS=12` (default 8).
+
+It fails fast on the two things that otherwise error identically in all 36 `profile.txt` files: a
+venv older than the `openai==2.44.0` pin, and an unexported `${oc.env:VAR}` from `env.yaml`.
 
 ### 04c - Re-creating profiled data to input shapes with reward profiled information
 
@@ -255,7 +281,7 @@ not the expanded input:
 ```
 source tasks          288      <- what you started with
 materialized inputs 2,304      tasks x num_repeats
-rollouts            2,151      collected
+rollouts            2,243      collected
 profiling rows        288      <- one per task
 ```
 
