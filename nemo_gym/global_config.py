@@ -139,6 +139,8 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
 # Data keys
 TASK_INDEX_KEY_NAME = "_ng_task_index"
 ROLLOUT_INDEX_KEY_NAME = "_ng_rollout_index"
+# Opaque async-RL target version forwarded with policy model requests when present.
+TARGET_WEIGHT_VERSION_KEY_NAME = "_ng_target_weight_version"
 # Resume re-dispatch attempt counter (0 on the first attempt); distinguishes retries of the same
 # (task, rollout) so their captured model calls stay separable.
 ATTEMPT_INDEX_KEY_NAME = "_ng_attempt_index"
