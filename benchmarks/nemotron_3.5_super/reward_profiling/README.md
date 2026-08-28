@@ -16,13 +16,13 @@ To contribute an environment, see [CONTRIBUTING.md](./CONTRIBUTING.md).
 1. [(Optional) Create a container](#01---optional-create-a-container)
 2. [Create a manifest](#02---create-a-manifest)
 3. [Run the reward profiling job](#03---run-the-reward-profiling-job)
-   - a. [Sharding / Unsharding data](#03a---sharding--unsharding-data)
-   - b. [Starting, resuming and monitoring a profiling job](#03b---starting-resuming-and-monitoring-a-profiling-job)
+   - a. [Starting, resuming and monitoring a profiling job](#03a---starting-resuming-and-monitoring-a-profiling-job)
 4. [Postprocess reward profiling outputs](#04---postprocess-reward-profiling-outputs)
    - a. [Collating finished / unfinished data](#04a---collating-finished--unfinished-data)
    - b. [Running gym eval profile](#04b---running-gym-eval-profile)
    - c. [Re-creating profiled data to input shapes with reward profiled information](#04c---re-creating-profiled-data-to-input-shapes-with-reward-profiled-information)
 5. [Reference](#05---reference)
+6. Appendix — [sharding by hand](#a1---sharding-and-unsharding-by-hand), [building the container](#a2---building-the-reward-profiling-container)
 
 ## Quick start
 
@@ -35,21 +35,25 @@ uv venv && uv sync --extra dev && source .venv/bin/activate
 # 1. manifest -> one materialized input file
 MANIFEST=$R/manifests/nemotron_3_ultra.yaml bash $R/scripts/01_materialize.sh
 
-# 2. one Slurm job: serves vLLM, starts Gym, collects, profiles
-#    the containers, account, qos and timelimit come from the manifest's srun/sbatch blocks,
-#    so the checkpoint is the only thing that varies per run
-MODEL=<checkpoint> \
-  SWEEP_DIR=$R/outputs/sweeps/nemotron_3_ultra bash $R/scripts/03_run_single.sh
+# 2. shard across N jobs, submit them, resubmit any that die, merge and split when done.
+#    Model, containers, account, qos and timelimit all come from the manifest, so there is
+#    nothing else to pass. Runs for hours in the foreground -- detach it, and start only one.
+setsid nohup bash -lc "SWEEP_DIR=$R/outputs/sweeps/nemotron_3_ultra NUM_SHARDS=16 \
+  bash $R/scripts/03_run_sharded.sh" > watcher.log 2>&1 &
 
-# 3. profile (also run automatically at the end of step 2; safe on a partial run)
+# 3. profile the whole sweep (safe on a partial run)
 SWEEP_DIR=$R/outputs/sweeps/nemotron_3_ultra bash $R/scripts/05_profile.sh
 ```
 
-Set `CONTAINER`, `SANDBOX_CONTAINER` or any `SBATCH_*` to override the manifest for one run.
+`NUM_SHARDS` is jobs, not nodes: each is `NUM_PREFILL_NODES + NUM_DECODE_NODES` (1 + 2 by
+default), so 16 shards is 48 nodes. Size it from [RATES.md](RATES.md).
+
+For a single job instead of N, swap step 2 for `03_run_single.sh` — same arguments, no sharding.
+`MODEL=<ckpt>` overrides the manifest's checkpoint; so does `CONTAINER`, `SANDBOX_CONTAINER`, or
+any `SBATCH_*`.
 
 Add `LIMIT_PER_ENTRY=8` to step 1 for a smoke run that exercises every code path in minutes —
 N rows from *each* entry, which is not what `gym eval run --limit` does ([why](#gotchas)).
-To go past ~16 nodes, insert `02_shard.sh` and use `03_run_sharded.sh` — see [03a](#03a---sharding--unsharding-data).
 
 ## 00 - Setup
 
@@ -76,57 +80,11 @@ nv_inference_api_key: ${oc.env:NVI_KEY_EVALUATOR}
 variable that sbatch never sees, and `export` there only reaches a login shell.
 
 ## 01 - (Optional) Create a container
-The reward profiling container pre-installs all resources_servers and responses_api_agents needed for reward profiling.
-It follows the same flow from the [Super-v3.5 readme](../README.md), with one change: new container config, created from the manifests: `benchmarks/nemotron_3.5_super/reward_profiling/configs/container_config.yaml`
 
-```bash
-# 0. make container config
-python -m nemo_gym.sweep container-config manifests/*.yaml --out configs/container_config.yaml
-
-# 1. make vllm container
-mkdir results/vllm
-CONTAINER_IMAGE_PATH=vllm/vllm-openai:v0.27.1
-mkdir -p "$(dirname "$CONTAINER_IMAGE_PATH")"
-enroot import -o "results/$CONTAINER_IMAGE_PATH" "docker://${CONTAINER_IMAGE_PATH}"
-
-SLURM_ACCOUNT=nemotron_n3_post \
-SBATCH_PARTITION=batch \
-SBATCH_QOS=interactive \
-BASE_IMAGE=$(pwd)/results/vllm/vllm-openai:v0.27.1 \
-bash benchmarks/nemotron_3.5_super/build-super-vl-evals-v0271-thin.sh \
-    $(pwd)/results/vllm/vllm-openai:v0.27.1___tomer.sqsh
-
-# 2. make reward profiling container from vllm container
-SBATCH_ACCOUNT=nemotron_n3_post \
-SBATCH_PARTITION=batch \
-SBATCH_QOS=interactive \
-SBATCH_GRES=gpu:4 \
-INPUT_CONTAINER=$(pwd)/results/vllm/vllm-openai:v0.27.1___tomer.sqsh \
-OUTPUT_CONTAINER=$(pwd)/results/vllm/vllm-openai:v0.27.1___tomer_with_gym_all.sqsh \
-MOUNTS=$(pwd)/env.yaml:/opt/Gym/env.yaml:x-create=file \
-GYM_CONFIG=benchmarks/nemotron_3.5_super/reward_profiling/configs/container_config.yaml \
-SKIP_PREPARE=1 \
-NEMO_GYM_GIT_REF=main \
-sbatch benchmarks/nemotron_3.5_super/build_eval_container.sh
-```
-
-Two things differ from the stock eval container build:
-
-- **`GYM_CONFIG`** points at the generated `container_config.yaml`, not `eval_container_config.yaml`.
-  Step 0 unions every `config_paths` across the manifests *and* their `gym_env_start` overlays, then
-  adds dummy `policy_*` / `nv_inference_api_key` values so the config resolves at build time without
-  secrets. The overlay part matters: the judge model servers exist only there, and a server with no
-  baked venv installs at runtime and hangs the run behind connection retries rather than failing.
-  Regenerate whenever an entry pulls in a new server; the file is reproducible from the manifest.
-- **`SKIP_PREPARE=1`** skips `gym eval prepare`, which downloads benchmark datasets. Reward
-  profiling supplies its own data via the manifest, so preparation would fail on environments that
-  have no registered benchmark split.
-
-Building all three lanes' servers gives 63 baked venvs. Building only a subset and then running a
-manifest that needs more is the failure above -- it presents as a hang, not an error.
-
-You also need a **sandbox container** if any entry uses `ns_tools` or `math_formal_lean`. Only one
-arm64 build exists: `/lustre/fsw/portfolios/llmservice/users/igitman/images/nemo-skills-sandbox-0.7.1-arm64.sqsh`
+The manifest already names a container that exists, so a normal run needs nothing here. Build a new
+one only when an entry pulls in a server the image does not have — see
+[A2](#a2---building-the-reward-profiling-container), and
+[CONTRIBUTING](CONTRIBUTING.md#01---creating-a-container) for how to tell.
 
 ## 02 - Create a Manifest
 The manifest is the highest-level config of what environments are being profiled, and parameterizes any judge, sandbox, or config overrides needed.
@@ -233,43 +191,26 @@ MANIFEST=$R/manifests/<name>.yaml bash $R/scripts/01_materialize.sh
 # -> $R/outputs/sweeps/<nickname>/
 ```
 
-Then run it. One job serves the policy itself:
+Then run it. `03_run_sharded.sh` is the normal path: it shards, submits one job per shard,
+resubmits any that die, and merges when they finish. `NUM_SHARDS=1` is legitimate — it is how a
+single-job run gets resubmission.
 
 ```bash
-MODEL=<ckpt> SWEEP_DIR=$R/outputs/sweeps/<nickname> bash $R/scripts/03_run_single.sh
+SWEEP_DIR=$R/outputs/sweeps/<nickname> NUM_SHARDS=16 bash $R/scripts/03_run_sharded.sh
 ```
 
-Or against a policy already served somewhere — no Slurm, no GPUs:
+Two variants, both taking the same manifest-supplied settings:
 
 ```bash
+# one job, no watcher, no resubmission
+SWEEP_DIR=$R/outputs/sweeps/<nickname> bash $R/scripts/03_run_single.sh
+
+# against a policy already served somewhere -- no Slurm, no GPUs
 SWEEP_DIR=<sweep> POLICY_BASE_URL=http://host:8000/v1 POLICY_MODEL_NAME=<model> \
   POLICY_API_KEY=<key> bash $R/scripts/03_run_endpoint.sh
 ```
 
-### 03a - Sharding / Unsharding data
-
-One job cannot go past ~16 nodes: `--segment` needs a topology-contiguous allocation and an NVL72
-rack is 18 nodes. To go wider, split the input across N jobs — which `03_run_sharded.sh` does for
-you, so you rarely run these two directly:
-
-```bash
-SWEEP_DIR=<sweep> NUM_SHARDS=16 bash $R/scripts/02_shard.sh   # deal
-SWEEP_DIR=<sweep> bash $R/scripts/04_merge_shards.sh          # unshard
-```
-
-Reach for them only to launch shards by hand, or to reshard between runs. Each shard directory is a
-complete SWEEP_DIR, so `03_run_single.sh` runs against one unmodified. Rows are dealt round-robin,
-so every shard carries every environment and none inherits a whole slow one.
-
-This works because `_ng_task_index` is stamped before sharding and Gym never rewrites it, so shard
-rollouts concatenate without renumbering. Merge deduplicates on `(_ng_task_index,
-_ng_rollout_index)` — the same key Gym resumes on — so a rerun shard cannot double-count.
-
-Resharding to a different N is safe and lossless: collected rollouts are folded back into the
-parent and snapshotted to `snapshots/<UTC>/` before any shard directory is touched, then carried
-into the new layout.
-
-### 03b - Starting, resuming and monitoring a profiling job
+### 03a - Starting, resuming and monitoring a profiling job
 
 `03_run_sharded.sh` submits one job per shard and watches them. A shard whose job dies with work
 outstanding is resubmitted, up to `MAX_ROUNDS` (4). It merges and splits when all are done;
@@ -497,3 +438,81 @@ rewards before a run finishes.
   keys read via `${oc.env:VAR}` need a real export; `03_run_single.sh` and `05_profile.sh` both check.
 - `agent_ref_override` rewrites `agent_ref` while concatenating. Use it only to deliberately run a
   dataset through a different agent; the override is recorded in the build report.
+
+## Appendix
+
+### A1 - Sharding and unsharding by hand
+
+One job cannot go past ~16 nodes: `--segment` needs a topology-contiguous allocation and an NVL72
+rack is 18 nodes. To go wider, split the input across N jobs — which `03_run_sharded.sh` does for
+you, so you rarely run these two directly:
+
+```bash
+SWEEP_DIR=<sweep> NUM_SHARDS=16 bash $R/scripts/02_shard.sh   # deal
+SWEEP_DIR=<sweep> bash $R/scripts/04_merge_shards.sh          # unshard
+```
+
+Reach for them only to launch shards by hand, or to reshard between runs. Each shard directory is a
+complete SWEEP_DIR, so `03_run_single.sh` runs against one unmodified. Rows are dealt round-robin,
+so every shard carries every environment and none inherits a whole slow one.
+
+This works because `_ng_task_index` is stamped before sharding and Gym never rewrites it, so shard
+rollouts concatenate without renumbering. Merge deduplicates on `(_ng_task_index,
+_ng_rollout_index)` — the same key Gym resumes on — so a rerun shard cannot double-count.
+
+Resharding to a different N is safe and lossless: collected rollouts are folded back into the
+parent and snapshotted to `snapshots/<UTC>/` before any shard directory is touched, then carried
+into the new layout.
+
+### A2 - Building the reward profiling container
+The reward profiling container pre-installs all resources_servers and responses_api_agents needed for reward profiling.
+It follows the same flow from the [Super-v3.5 readme](../README.md), with one change: new container config, created from the manifests: `benchmarks/nemotron_3.5_super/reward_profiling/configs/container_config.yaml`
+
+```bash
+# 0. make container config
+python -m nemo_gym.sweep container-config manifests/*.yaml --out configs/container_config.yaml
+
+# 1. make vllm container
+mkdir results/vllm
+CONTAINER_IMAGE_PATH=vllm/vllm-openai:v0.27.1
+mkdir -p "$(dirname "$CONTAINER_IMAGE_PATH")"
+enroot import -o "results/$CONTAINER_IMAGE_PATH" "docker://${CONTAINER_IMAGE_PATH}"
+
+SLURM_ACCOUNT=nemotron_n3_post \
+SBATCH_PARTITION=batch \
+SBATCH_QOS=interactive \
+BASE_IMAGE=$(pwd)/results/vllm/vllm-openai:v0.27.1 \
+bash benchmarks/nemotron_3.5_super/build-super-vl-evals-v0271-thin.sh \
+    $(pwd)/results/vllm/vllm-openai:v0.27.1___tomer.sqsh
+
+# 2. make reward profiling container from vllm container
+SBATCH_ACCOUNT=nemotron_n3_post \
+SBATCH_PARTITION=batch \
+SBATCH_QOS=interactive \
+SBATCH_GRES=gpu:4 \
+INPUT_CONTAINER=$(pwd)/results/vllm/vllm-openai:v0.27.1___tomer.sqsh \
+OUTPUT_CONTAINER=$(pwd)/results/vllm/vllm-openai:v0.27.1___tomer_with_gym_all.sqsh \
+MOUNTS=$(pwd)/env.yaml:/opt/Gym/env.yaml:x-create=file \
+GYM_CONFIG=benchmarks/nemotron_3.5_super/reward_profiling/configs/container_config.yaml \
+SKIP_PREPARE=1 \
+NEMO_GYM_GIT_REF=main \
+sbatch benchmarks/nemotron_3.5_super/build_eval_container.sh
+```
+
+Two things differ from the stock eval container build:
+
+- **`GYM_CONFIG`** points at the generated `container_config.yaml`, not `eval_container_config.yaml`.
+  Step 0 unions every `config_paths` across the manifests *and* their `gym_env_start` overlays, then
+  adds dummy `policy_*` / `nv_inference_api_key` values so the config resolves at build time without
+  secrets. The overlay part matters: the judge model servers exist only there, and a server with no
+  baked venv installs at runtime and hangs the run behind connection retries rather than failing.
+  Regenerate whenever an entry pulls in a new server; the file is reproducible from the manifest.
+- **`SKIP_PREPARE=1`** skips `gym eval prepare`, which downloads benchmark datasets. Reward
+  profiling supplies its own data via the manifest, so preparation would fail on environments that
+  have no registered benchmark split.
+
+Building all three lanes' servers gives 63 baked venvs. Building only a subset and then running a
+manifest that needs more is the failure above -- it presents as a hang, not an error.
+
+You also need a **sandbox container** if any entry uses `ns_tools` or `math_formal_lean`. Only one
+arm64 build exists: `/lustre/fsw/portfolios/llmservice/users/igitman/images/nemo-skills-sandbox-0.7.1-arm64.sqsh`
