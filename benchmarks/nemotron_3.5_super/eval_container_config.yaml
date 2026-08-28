@@ -109,9 +109,9 @@ opencode_deepswe_resources_server:
   resources_servers:
     deepswe:
       datasets: []
-opencode_sandboxed_agent_terminal_bench_2_1:
-  responses_api_agents:
-    opencode_sandboxed_agent:
+opencode_terminal_bench_2_1_resources_server:
+  resources_servers:
+    terminal_bench_2_1:
       datasets: []
 
 ########################################
