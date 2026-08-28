@@ -164,6 +164,27 @@ still short of `max_num_seqs`. It includes the tail, so it understates steady-st
 what you get if you stop at 95%. The sandbox ran one node per shard with 32 uWSGI workers; sandbox
 capacity scales independently of GPUs and was not varied here.
 
+## Sharded through the launcher (jobs 6608099/6608100, 2026-08-28)
+
+The only measurement taken through `03_run_sharded.sh` end to end rather than a bench harness.
+36 environments, 288 tasks x 8 repeats, 2 shards x (1 prefill + 1 decode) = **16 GPUs**,
+`policy_model.num_workers: 16`.
+
+| | |
+|---|---|
+| collected | 1,831 new rollouts (411 more carried in by resume) |
+| window | ~31 min of collection, ~6 min of spin-up before it |
+| average | ~3,540 rollouts/hr, **~220 rollouts/hr/GPU** |
+| observed peak | ~8,800 rollouts/hr, **~550 rollouts/hr/GPU** |
+
+**Do not size from the average.** The run was killed at 97.35% while in the tail, and a 288-task
+subset makes the tail disproportionate -- peak-to-tail here is ~150x (146/min falling to 1-4/min).
+The peak is the number that reflects the steady state; the average reflects this run's shape.
+
+This is also not a clean A/B for `num_workers: 16` against the earlier lane measurements: different
+shard count, different topology, and a resumed rather than cold start. It is evidence the launcher
+sustains a realistic rate at a realistic shape, not evidence that 16 workers caused it.
+
 ## Tail behaviour (job 6563900, all 36 environments in one job)
 
 Rollouts per 30s window, from a standing start:

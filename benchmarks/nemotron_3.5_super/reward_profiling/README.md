@@ -114,7 +114,7 @@ arm64 build exists: `/lustre/fsw/portfolios/llmservice/users/igitman/images/nemo
 
 ## 02 - Create a Manifest
 The manifest is the highest-level config of what environments are being profiled, and parameterizes any judge, sandbox, or config overrides needed.
-Three blocks, each named for the command it configures:
+Four top-level keys. The middle two are named for the command they configure:
 
 1. **nickname** — names the run; artifacts land in `<OUT_DIR>/<nickname>/`
 2. **gym_env_start** — becomes `sweep_config.yaml`, passed as `--config`
