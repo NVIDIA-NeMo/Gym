@@ -1081,3 +1081,23 @@ def test_validate_checks_the_agent_that_actually_dispatches(tmp_path):
     )
     with pytest.raises(SweepValidationError, match="agent_ref_override 'typo_agent'"):
         validate_manifest(manifest, repo_root=str(tmp_path), check_data=False)
+
+
+def test_label_and_nickname_must_be_path_safe():
+    """Both become filesystem paths: label a _parts/ file and a by_label/ dir, nickname the sweep
+    dir. A slash surfaces as FileNotFoundError inside a worker; an empty nickname drops the sweep's
+    artifacts into the sweeps root beside every other run's."""
+    entry = {"label": "a", "agent": "a", "configs": ["c.yaml"], "data": "d.jsonl"}
+    with pytest.raises(PydanticValidationError, match="should match pattern"):
+        SweepManifest.model_validate({"nickname": "t", "entries": [{**entry, "label": "math/cot"}]})
+    with pytest.raises(PydanticValidationError, match="at least 1 character"):
+        SweepManifest.model_validate({"nickname": "", "entries": [entry]})
+
+
+def test_split_raises_rather_than_succeeding_with_zero_labels(tmp_path):
+    """Pointing at <out-dir> instead of <out-dir>/<nickname> used to write an empty report, print
+    'wrote 0 label directories' and exit 0."""
+    (tmp_path / "sweep_report.json").write_text(json.dumps({"entries": {}}))
+    (tmp_path / "rollouts_materialized_inputs.jsonl").write_text("")
+    with pytest.raises(SweepSplitError, match="wrong directory"):
+        split_sweep(tmp_path)

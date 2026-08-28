@@ -86,6 +86,13 @@ def _load_ranges(report_fpath: Path) -> List[Tuple[int, int, str]]:
             raise SweepSplitError(f"Entry '{label}' in {report_fpath} has no task_index_range.")
         ranges.append((int(span[0]), int(span[1]), label))
 
+    if not ranges:
+        raise SweepSplitError(
+            f"{report_fpath} lists no entries, so there is nothing to split. This is usually the "
+            f"wrong directory: split takes the <out-dir>/<nickname> directory materialize wrote, "
+            f"or a single shards/shard_NNN, not <out-dir> or shards/ itself."
+        )
+
     ranges.sort()
     for (lo, hi, label), (next_lo, _, next_label) in zip(ranges, ranges[1:]):
         if hi >= next_lo:

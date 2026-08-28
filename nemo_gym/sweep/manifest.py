@@ -60,7 +60,10 @@ class SweepEntry(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    label: str
+    # Becomes a _parts/ filename and a by_label/ directory, so it has to be path-safe. A slash
+    # would otherwise surface as a FileNotFoundError from inside a worker, naming the path rather
+    # than the label that produced it.
+    label: str = Field(min_length=1, pattern=r"^[A-Za-z0-9._-]+$")
     data: str
     configs: List[str] = Field(min_length=1)
     agent: str
@@ -300,7 +303,9 @@ class SweepManifest(BaseModel):
 
     # Identifies this run and scopes every artifact it writes, so profiling the same blend
     # against a different checkpoint never collides.
-    nickname: str
+    # Scopes every artifact. Empty would make out_dir/<nickname> just out_dir, dropping this
+    # sweep's files into the sweeps root alongside every other run's.
+    nickname: str = Field(min_length=1, pattern=r"^[A-Za-z0-9._-]+$")
     # How many jobs the sweep is split across, i.e. NUM_SHARDS. Nodes = num_shards x
     # (vllm.prefill_nodes + vllm.decode_nodes). Leave unset for the launcher's default.
     num_shards: Optional[int] = Field(default=None, ge=1)
