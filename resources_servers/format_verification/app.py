@@ -32,11 +32,7 @@ class FormatVerificationResourcesServerConfig(BaseResourcesServerConfig):
 
 
 class FormatVerificationVerifyRequest(TaskData, BaseVerifyRequest):
-    # Redeclared: verify() dispatches on verifier.get("type") and reads it as a plain dict,
-    # so the task_data union types must not replace it on the wire.
-    # Explicit ignore preserves the wire's pre-existing handling of UNDECLARED fields
-    # (they are dropped, as before this refactor). Fields TaskData declares are typed and
-    # kept. Flipping undeclared-field handling to allow is a separate, per-server decision.
+    # Redeclared: verify() reads this as a plain dict.
     model_config = ConfigDict(extra="ignore")
     verifier: Dict[str, Any]
 

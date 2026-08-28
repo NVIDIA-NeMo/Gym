@@ -810,8 +810,7 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
             await self._cleanup_session(request.session.get(SESSION_ID_KEY))
 
     async def verify(self, body: LitmusAgentVerifyRequest) -> LitmusAgentVerifyResponse:
-        # property_type is a typed field now (task_data.py), so it no longer lands in
-        # model_extra; the legacy resolution path below still expects it in this dict.
+        # property_type is typed now, so it no longer lands in model_extra.
         extra = dict(body.model_extra or {})
         if body.property_type is not None:
             extra.setdefault("property_type", body.property_type)

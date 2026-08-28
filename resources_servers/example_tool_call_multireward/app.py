@@ -64,9 +64,6 @@ class GetWeatherResponse(BaseModel):
 
 
 class ToolCallMultiRewardVerifyRequest(TaskData, BaseVerifyRequest):
-    # Explicit ignore preserves the wire's pre-existing handling of UNDECLARED fields
-    # (they are dropped, as before this refactor). Fields TaskData declares are typed and
-    # kept. Flipping undeclared-field handling to allow is a separate, per-server decision.
     model_config = ConfigDict(extra="ignore")
     # The single tool call the model is expected to make, e.g.
     # {"name": "get_weather", "arguments": {"city": "San Francisco"}}.

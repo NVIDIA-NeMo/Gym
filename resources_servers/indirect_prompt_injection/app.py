@@ -42,8 +42,7 @@ from resources_servers.indirect_prompt_injection.task_data import InjectionSpecD
 from resources_servers.indirect_prompt_injection.verifier import check_injection_followed, extract_function_calls
 
 
-# The wire model for the row's injection spec now lives in task_data.py; tests and downstream
-# code keep importing it from here under its historical name.
+# Historical import name for the spec model, now defined in task_data.py.
 InjectionSpec = InjectionSpecData
 
 
