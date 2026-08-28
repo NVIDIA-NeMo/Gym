@@ -1,7 +1,7 @@
 gymnasium:
   resources_servers:
     gymnasium:
-      requires_agent: [gymnasium_agent]
+      allowed_agents: [gymnasium_agent]
       entrypoint: base.py
       domain: other
       verified: false

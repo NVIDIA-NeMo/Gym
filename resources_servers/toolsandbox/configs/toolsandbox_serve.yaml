@@ -18,7 +18,7 @@
 toolsandbox:
   resources_servers:
     toolsandbox:
-      requires_agent: [toolsandbox_agent]
+      allowed_agents: [toolsandbox_agent]
       entrypoint: app.py
       host: 0.0.0.0
       domain: agent

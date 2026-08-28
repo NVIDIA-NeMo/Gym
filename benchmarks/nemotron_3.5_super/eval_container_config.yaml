@@ -33,7 +33,7 @@ sandbox:
 critpt_benchmark_resources_server:
   resources_servers:
     critpt:
-      requires_agent: [critpt_agent]
+      allowed_agents: [critpt_agent]
       api_key: dummy  # pragma: allowlist secret
 
 ########################################

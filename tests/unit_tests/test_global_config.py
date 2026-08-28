@@ -1955,9 +1955,9 @@ class TestComposeUnboundAgent:
         return agents["hermes_agent"]
 
     def _guarded_config(self, *required_agents: str) -> DictConfig:
-        """The standard config with the environment's resources server declaring `requires_agent`."""
+        """The standard config with the environment's resources server declaring `allowed_agents`."""
         config = self._config()
-        config["gpqa_mcqa_resources_server"]["resources_servers"]["mcqa"]["requires_agent"] = list(required_agents)
+        config["gpqa_mcqa_resources_server"]["resources_servers"]["mcqa"]["allowed_agents"] = list(required_agents)
         return config
 
     def _parse(self, config: DictConfig) -> DictConfig:
@@ -2054,7 +2054,7 @@ class TestComposeUnboundAgent:
         """
         config = self._config()
         config["gpqa_mcqa_resources_server"]["resources_servers"]["extra"] = DictConfig(
-            {"entrypoint": "app.py", "domain": "knowledge", "requires_agent": ["scicode_agent"]}
+            {"entrypoint": "app.py", "domain": "knowledge", "allowed_agents": ["scicode_agent"]}
         )
 
         GlobalConfigDictParser().compose_unbound_agent(config)
@@ -2065,7 +2065,7 @@ class TestComposeUnboundAgent:
         """A permissive verifier must not vouch for a restrictive one in the same config."""
         config = self._guarded_config("hermes_agent")
         config["strict_resources_server"] = DictConfig(
-            {"resources_servers": {"scicode": {"entrypoint": "app.py", "requires_agent": ["scicode_agent"]}}}
+            {"resources_servers": {"scicode": {"entrypoint": "app.py", "allowed_agents": ["scicode_agent"]}}}
         )
         config["strict_agent"] = DictConfig(self._environment_agent("strict_resources_server"))
 
@@ -2079,7 +2079,7 @@ class TestComposeUnboundAgent:
         config = self._guarded_config("simple_agent")
         for name, required in (("scicode", ["scicode_agent", "simple_agent"]), ("critpt", ["critpt_agent"])):
             config[f"{name}_resources_server"] = DictConfig(
-                {"resources_servers": {name: {"entrypoint": "app.py", "requires_agent": required}}}
+                {"resources_servers": {name: {"entrypoint": "app.py", "allowed_agents": required}}}
             )
             config[f"{name}_agent"] = DictConfig(self._environment_agent(f"{name}_resources_server"))
 
@@ -2099,7 +2099,7 @@ class TestComposeUnboundAgent:
         config["critpt_resources_server"] = DictConfig(
             {
                 "resources_servers": {
-                    "critpt": {"entrypoint": "app.py", "requires_agent": ["critpt_agent", "simple_agent"]}
+                    "critpt": {"entrypoint": "app.py", "allowed_agents": ["critpt_agent", "simple_agent"]}
                 }
             }
         )

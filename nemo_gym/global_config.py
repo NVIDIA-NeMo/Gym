@@ -150,7 +150,7 @@ AGENT_SERVER_TYPE_KEY_NAME = "responses_api_agents"
 # Carried over from the environment's agent instance onto the composed agent; every other key is dropped.
 _COMPOSED_AGENT_CARRY_OVER_KEYS = ("resources_server", "model_server", "datasets")
 # Declared on a resources server: the agent types it is known to score correctly. Absent means any harness.
-REQUIRES_AGENT_KEY_NAME = "requires_agent"
+ALLOWED_AGENTS_KEY_NAME = "allowed_agents"
 RESOURCES_SERVER_TYPE_KEY_NAME = "resources_servers"
 
 
@@ -633,11 +633,11 @@ Duplicate config paths:
         ).lower() not in ("", "0", "false")
 
     @staticmethod
-    def _required_agents(global_config_dict: DictConfig, target: _AgentInstance) -> Optional[List[str]]:
+    def _allowed_agents(global_config_dict: DictConfig, target: _AgentInstance) -> Optional[List[str]]:
         """The agent types the target's resources server declares support for, or None if it declares none.
 
         Read off the instance: every config that declares a server block states its own fields, so one
-        written from scratch must declare this too (enforced by test_agent_pairing.py).
+        written from scratch must declare this too.
         """
         reference = target.server_config._get_node("resources_server")
         instance_name = reference.get("name") if isinstance(reference, DictConfig) else None
@@ -648,7 +648,7 @@ Duplicate config paths:
         if not isinstance(servers, DictConfig) or len(servers) != 1:
             return None
         implementation = next(iter(servers))
-        declared = servers[implementation].get(REQUIRES_AGENT_KEY_NAME)
+        declared = servers[implementation].get(ALLOWED_AGENTS_KEY_NAME)
         return [str(name) for name in declared] if declared else None
 
     def _raise_on_unsupported_pairing(
@@ -665,9 +665,9 @@ Duplicate config paths:
 
         rejected: List[Tuple[_AgentInstance, List[str]]] = []
         for target in targets:
-            required = self._required_agents(global_config_dict, target)
-            if required is not None and source.agent_type not in required:
-                rejected.append((target, required))
+            allowed = self._allowed_agents(global_config_dict, target)
+            if allowed is not None and source.agent_type not in allowed:
+                rejected.append((target, allowed))
         if not rejected:
             return
 
@@ -675,10 +675,10 @@ Duplicate config paths:
         # error at a time means one full re-resolve per instance.
         rejected_list = "\n".join(
             f"  - {target.name} uses {target.server_config['resources_server']['name']} "
-            f"and accepts {', '.join(required)}"
-            for target, required in rejected
+            f"and accepts {', '.join(allowed)}"
+            for target, allowed in rejected
         )
-        supported = sorted(set.intersection(*(set(required) for _, required in rejected)))
+        supported = sorted(set.intersection(*(set(allowed) for _, allowed in rejected)))
         remedy = f"Select one of: {', '.join(supported)}." if supported else "No single agent satisfies all of them."
         raise UnsupportedAgentPairingError(
             f"""'{source.agent_type}' is not declared compatible with {len(rejected)} of the agent instance(s) """
