@@ -18,7 +18,6 @@ import base64
 import glob
 import hashlib
 import importlib.util
-import json
 import os
 import random
 import re
@@ -39,6 +38,7 @@ from subprocess import run as subprocess_run
 from traceback import format_exc
 from typing import Any, Dict, List, Literal, NamedTuple, Optional, Tuple, Union
 
+import orjson
 import ray
 import tomlkit
 from gprof2dot import main as gprof2dot_main
@@ -70,6 +70,12 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.profiling import Profiler
 from nemo_gym.server_utils import get_first_server_config_dict
+from responses_api_agents.swe_agents.opencode_replay import (
+    build_replay_subagent_manifest,
+    merge_replay_subagent_trajectories,
+    parse_replay_subagent_manifest,
+    parse_replay_subagent_payload,
+)
 from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
 
 
@@ -194,6 +200,25 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
             "the main agent can spawn subagent sessions. Each session's "
             "trajectory is captured to its own `llm_completions/<id>/*.json` "
             "files keyed by sessionID."
+        ),
+    )
+
+    opencode_patch_mode: Literal["worktree", "committed"] = Field(
+        default="worktree",
+        description=(
+            "How the opencode harness extracts the model patch at the end of a "
+            "rollout.\n"
+            "  'worktree' (default): `git diff` of the working tree (untracked "
+            "files intent-to-added first). Correct for the SWE-bench-style "
+            "prompts that tell the agent NOT to commit.\n"
+            "  'committed': diff the pre-run HEAD against the most-advanced "
+            "commit the agent left behind (searched across HEAD and every local "
+            "branch), ignoring the working tree. Required by task families whose "
+            "problem statement asks the agent to commit its solution — e.g. the "
+            "DeepSWE set, whose statements end with 'work on this in a new "
+            "branch from main and commit everything when you are done'. Under "
+            "'worktree' those rollouts leave a clean tree and every patch is "
+            "recorded as 0 bytes."
         ),
     )
 
@@ -675,7 +700,7 @@ EVAL_HARNESS_COMMIT={eval_harness_commit} \\
 
 class NVInternalDatasetProcessor(BaseDatasetHarnessProcessor):
     def get_run_command(self) -> ExecuteContainerCommandArgs:
-        instance_dict = json.loads(self.config.problem_info["instance_dict"])
+        instance_dict = orjson.loads(self.config.problem_info["instance_dict"])
         base_dockerfile = instance_dict.get("base_dockerfile", "")
         instance_dockerfile = instance_dict.get("instance_dockerfile", "")
 
@@ -769,23 +794,23 @@ cp /root/output.json /trajectories_mount/eval_results/output.json
         )
 
     def postprocess_after_run(self, report_file: Path) -> None:
-        instance_dict = json.loads(self.config.problem_info["instance_dict"])
+        instance_dict = orjson.loads(self.config.problem_info["instance_dict"])
 
         fail_to_pass_str = instance_dict.get("fail_to_pass_select", instance_dict.get("fail_to_pass", "[]"))
         pass_to_pass_str = instance_dict.get("pass_to_pass_select", instance_dict.get("pass_to_pass", "[]"))
 
         if isinstance(fail_to_pass_str, str):
-            f2p = set(json.loads(fail_to_pass_str))
+            f2p = set(orjson.loads(fail_to_pass_str))
         else:
             f2p = set(fail_to_pass_str)
 
         if isinstance(pass_to_pass_str, str):
-            p2p = set(json.loads(pass_to_pass_str))
+            p2p = set(orjson.loads(pass_to_pass_str))
         else:
             p2p = set(pass_to_pass_str)
 
         with open(report_file, "r+") as f:
-            test_results = json.loads(f.read())
+            test_results = orjson.loads(f.read())
             is_resolved = self.check_tests_passed(
                 test_results,
                 f2p,
@@ -802,7 +827,7 @@ cp /root/output.json /trajectories_mount/eval_results/output.json
                 },
             )
             f.seek(0)
-            f.write(json.dumps({self.config.instance_id: report_dict}, indent=4))
+            f.write(orjson.dumps({self.config.instance_id: report_dict}, option=orjson.OPT_INDENT_2).decode())
 
     def check_tests_passed(
         self,
@@ -881,7 +906,7 @@ REBENCH_DIR={rebench_dir} \
         return name.strip()
 
     def get_run_command(self) -> ExecuteContainerCommandArgs:
-        instance_dict = json.loads(self.config.problem_info["instance_dict"])
+        instance_dict = orjson.loads(self.config.problem_info["instance_dict"])
         install_config = instance_dict.get("install_config", {})
         test_cmds = install_config.get("test_cmd", [])
         if isinstance(test_cmds, str):
@@ -901,9 +926,9 @@ REBENCH_DIR={rebench_dir} \
         fail_to_pass = instance_dict.get("FAIL_TO_PASS", [])
         pass_to_pass = instance_dict.get("PASS_TO_PASS", [])
         if isinstance(fail_to_pass, str):
-            fail_to_pass = json.loads(fail_to_pass)
+            fail_to_pass = orjson.loads(fail_to_pass)
         if isinstance(pass_to_pass, str):
-            pass_to_pass = json.loads(pass_to_pass)
+            pass_to_pass = orjson.loads(pass_to_pass)
 
         # Write test metadata to files to avoid exceeding OS argument length limits
         eval_meta_dir = self.config.eval_private_dir / "eval_meta"
@@ -913,10 +938,10 @@ REBENCH_DIR={rebench_dir} \
         norm_fail_to_pass = sorted(self._normalize_test_name(n) for n in fail_to_pass)
         norm_pass_to_pass = sorted(self._normalize_test_name(n) for n in pass_to_pass)
         (eval_meta_dir / "expected_passed.json").write_text(
-            json.dumps(sorted(set(norm_fail_to_pass + norm_pass_to_pass)))
+            orjson.dumps(sorted(set(norm_fail_to_pass + norm_pass_to_pass))).decode()
         )
-        (eval_meta_dir / "fail_to_pass.json").write_text(json.dumps(norm_fail_to_pass))
-        (eval_meta_dir / "pass_to_pass.json").write_text(json.dumps(norm_pass_to_pass))
+        (eval_meta_dir / "fail_to_pass.json").write_text(orjson.dumps(norm_fail_to_pass).decode())
+        (eval_meta_dir / "pass_to_pass.json").write_text(orjson.dumps(norm_pass_to_pass).decode())
 
         install_block = "\n".join(install_cmds) if install_cmds else ""
         test_block = "\n".join(test_cmds)
@@ -974,7 +999,7 @@ printf '{{"_test_completed": true, "exit_code": %d}}\\n' $TEST_EXIT \
         test_output_path = report_path.parent / "test_output.log"
 
         instance_id = self.config.instance_id
-        instance_dict = json.loads(self.config.problem_info["instance_dict"])
+        instance_dict = orjson.loads(self.config.problem_info["instance_dict"])
         install_config = instance_dict.get("install_config", {})
         log_parser_name = install_config.get("log_parser", "")
 
@@ -987,7 +1012,7 @@ printf '{{"_test_completed": true, "exit_code": %d}}\\n' $TEST_EXIT \
                     "error": "No test output produced inside container",
                 }
             }
-            report_path.write_text(json.dumps(report, indent=2))
+            report_path.write_text(orjson.dumps(report, option=orjson.OPT_INDENT_2).decode())
             return
 
         # Use the tree resolved at server startup (carried in the instance
@@ -1005,7 +1030,7 @@ printf '{{"_test_completed": true, "exit_code": %d}}\\n' $TEST_EXIT \
                     "error": f"Unknown log parser: {log_parser_name}",
                 }
             }
-            report_path.write_text(json.dumps(report, indent=2))
+            report_path.write_text(orjson.dumps(report, option=orjson.OPT_INDENT_2).decode())
             return
 
         test_output = test_output_path.read_text(errors="replace")
@@ -1014,9 +1039,9 @@ printf '{{"_test_completed": true, "exit_code": %d}}\\n' $TEST_EXIT \
         passed = sorted(k for k, v in results.items() if v == "PASSED")
 
         eval_meta_dir = self.config.eval_private_dir / "eval_meta"
-        expected_passed = json.loads((eval_meta_dir / "expected_passed.json").read_text())
-        norm_f2p = json.loads((eval_meta_dir / "fail_to_pass.json").read_text())
-        norm_p2p = json.loads((eval_meta_dir / "pass_to_pass.json").read_text())
+        expected_passed = orjson.loads((eval_meta_dir / "expected_passed.json").read_text())
+        norm_f2p = orjson.loads((eval_meta_dir / "fail_to_pass.json").read_text())
+        norm_p2p = orjson.loads((eval_meta_dir / "pass_to_pass.json").read_text())
 
         passed_set = set(passed)
         fail_to_pass_set = set(norm_f2p)
@@ -1036,7 +1061,7 @@ printf '{{"_test_completed": true, "exit_code": %d}}\\n' $TEST_EXIT \
                 "passed_match": passed == expected_passed,
             }
         }
-        report_path.write_text(json.dumps(report, indent=2))
+        report_path.write_text(orjson.dumps(report, option=orjson.OPT_INDENT_2).decode())
 
 
 class SweBenchExtDatasetProcessor(BaseDatasetHarnessProcessor):
@@ -1045,7 +1070,7 @@ class SweBenchExtDatasetProcessor(BaseDatasetHarnessProcessor):
     def _get_instance_dict(self) -> dict:
         raw = self.config.problem_info.get("instance_dict", "{}")
         if isinstance(raw, str):
-            return json.loads(raw)
+            return orjson.loads(raw)
         return raw
 
     def get_run_command(self) -> ExecuteContainerCommandArgs:
@@ -1069,14 +1094,14 @@ class SweBenchExtDatasetProcessor(BaseDatasetHarnessProcessor):
         fail_to_pass = inst.get("FAIL_TO_PASS", inst.get("fail_to_pass", []))
         pass_to_pass = inst.get("PASS_TO_PASS", inst.get("pass_to_pass", []))
         if isinstance(fail_to_pass, str):
-            fail_to_pass = json.loads(fail_to_pass)
+            fail_to_pass = orjson.loads(fail_to_pass)
         if isinstance(pass_to_pass, str):
-            pass_to_pass = json.loads(pass_to_pass)
+            pass_to_pass = orjson.loads(pass_to_pass)
 
         eval_meta_dir = self.config.eval_private_dir / "eval_meta"
         eval_meta_dir.mkdir(parents=True, exist_ok=True)
-        (eval_meta_dir / "fail_to_pass.json").write_text(json.dumps(fail_to_pass))
-        (eval_meta_dir / "pass_to_pass.json").write_text(json.dumps(pass_to_pass))
+        (eval_meta_dir / "fail_to_pass.json").write_text(orjson.dumps(fail_to_pass).decode())
+        (eval_meta_dir / "pass_to_pass.json").write_text(orjson.dumps(pass_to_pass).decode())
         (eval_meta_dir / "test_framework.txt").write_text(test_framework)
 
         reset_cmd = f"git reset --hard {base_commit}" if base_commit else ""
@@ -1178,12 +1203,12 @@ printf '{{"_test_completed": true, "exit_code": %d}}\\n' $TEST_EXIT \
                     "error": "No test output produced inside container",
                 }
             }
-            report_path.write_text(json.dumps(report, indent=2))
+            report_path.write_text(orjson.dumps(report, option=orjson.OPT_INDENT_2).decode())
             return
 
         eval_meta_dir = self.config.eval_private_dir / "eval_meta"
-        fail_to_pass = json.loads((eval_meta_dir / "fail_to_pass.json").read_text())
-        pass_to_pass = json.loads((eval_meta_dir / "pass_to_pass.json").read_text())
+        fail_to_pass = orjson.loads((eval_meta_dir / "fail_to_pass.json").read_text())
+        pass_to_pass = orjson.loads((eval_meta_dir / "pass_to_pass.json").read_text())
         test_framework = (eval_meta_dir / "test_framework.txt").read_text().strip()
 
         test_output = test_output_path.read_text(errors="replace")
@@ -1197,7 +1222,7 @@ printf '{{"_test_completed": true, "exit_code": %d}}\\n' $TEST_EXIT \
         )
 
         report = {instance_id: result}
-        report_path.write_text(json.dumps(report, indent=2))
+        report_path.write_text(orjson.dumps(report, option=orjson.OPT_INDENT_2).decode())
 
 
 class DeepSWEDatasetProcessor(BaseDatasetHarnessProcessor):
@@ -1219,7 +1244,7 @@ class DeepSWEDatasetProcessor(BaseDatasetHarnessProcessor):
     def _get_instance_dict(self) -> dict:
         raw = self.config.problem_info.get("instance_dict", "{}")
         if isinstance(raw, str):
-            return json.loads(raw)
+            return orjson.loads(raw)
         return raw
 
     def get_run_command(self) -> ExecuteContainerCommandArgs:
@@ -1227,6 +1252,8 @@ class DeepSWEDatasetProcessor(BaseDatasetHarnessProcessor):
         base_commit = inst.get("base_commit", "")
         test_patch = inst.get("test_patch", "")
         test_sh = inst.get("test_sh", "")
+        grader_py = inst.get("grader_py", "")
+        test_config_json = inst.get("test_config_json", "")
         # Optional environment-repair command run before the verifier. Some mirror
         # images were built with newer deps than the repo pins, breaking the
         # pre-existing (base) suite regardless of the patch ("broken baseline").
@@ -1235,11 +1262,16 @@ class DeepSWEDatasetProcessor(BaseDatasetHarnessProcessor):
 
         # Materialize the verifier artifacts on the host; _build_apptainer_command
         # binds them into the eval container at the absolute paths test.sh expects
-        # (/tests/test.sh, /tests/test.patch).
+        # (/tests/test.sh, /tests/test.patch, /tests/grader.py, and
+        # /tests/config.json).
         test_patch_path = self.config.eval_private_dir / "test.patch"
         test_patch_path.write_text(test_patch)
         test_sh_path = self.config.eval_private_dir / "test.sh"
         test_sh_path.write_text(test_sh)
+        grader_py_path = self.config.eval_private_dir / "grader.py"
+        grader_py_path.write_text(grader_py)
+        test_config_path = self.config.eval_private_dir / "config.json"
+        test_config_path.write_text(test_config_json)
 
         reset_cmd = f"git reset --hard {base_commit}" if base_commit else "git reset --hard HEAD"
         # Brace group (not a subshell) so env changes — e.g. `unset LD_LIBRARY_PATH`
@@ -1273,7 +1305,7 @@ git apply --whitespace=nowarn /root/patch.diff \
   || git apply --reject --recount --ignore-space-change --whitespace=nowarn /root/patch.diff \
   || true
 
-# The Harbor verifier writes 1/0 to /logs/verifier/reward.txt and the captured
+# The Harbor verifier writes its score under /logs/verifier and the captured
 # model diff to /logs/artifacts/model.patch; create both dirs first.
 mkdir -p /logs/verifier /logs/artifacts /trajectories_mount/eval_results
 chmod +x /tests/test.sh 2>/dev/null || true
@@ -1284,8 +1316,11 @@ chmod +x /tests/test.sh 2>/dev/null || true
 bash /tests/test.sh > /trajectories_mount/eval_results/verifier_output.log 2>&1
 VERIFIER_EXIT=$?
 
-REWARD=$(cat /logs/verifier/reward.txt 2>/dev/null | tr -dc '0-9')
-cp /logs/verifier/reward.txt /trajectories_mount/eval_results/reward.txt 2>/dev/null || true
+REWARD=$(cat /logs/verifier/reward.txt 2>/dev/null | tr -dc '0-9-')
+if [ -z "$REWARD" ] && [ -f /logs/verifier/reward.json ]; then
+  REWARD=$(python3 -c 'import json; print(json.load(open("/logs/verifier/reward.json")).get("reward", ""))' 2>/dev/null)
+fi
+printf '%s\\n' "${{REWARD:-}}" > /trajectories_mount/eval_results/reward.txt
 printf '{{"_test_completed": true, "verifier_exit": %d, "reward": "%s"}}\\n' "$VERIFIER_EXIT" "${{REWARD:-}}" \
   > /trajectories_mount/eval_results/report.json
 """
@@ -1310,8 +1345,8 @@ printf '{{"_test_completed": true, "verifier_exit": %d, "reward": "%s"}}\\n' "$V
 
         raw: dict[str, Any] = {}
         try:
-            raw = json.loads(report_path.read_text())
-        except (OSError, json.JSONDecodeError):
+            raw = orjson.loads(report_path.read_text())
+        except (OSError, orjson.JSONDecodeError):
             pass
 
         reward_path = report_path.parent / "reward.txt"
@@ -1329,7 +1364,7 @@ printf '{{"_test_completed": true, "verifier_exit": %d, "reward": "%s"}}\\n' "$V
                 "verifier_exit": raw.get("verifier_exit"),
             }
         }
-        report_path.write_text(json.dumps(report, indent=2))
+        report_path.write_text(orjson.dumps(report, option=orjson.OPT_INDENT_2).decode())
 
 
 class DeNovoSWEDatasetProcessor(BaseDatasetHarnessProcessor):
@@ -1364,7 +1399,7 @@ class DeNovoSWEDatasetProcessor(BaseDatasetHarnessProcessor):
     def _get_instance_dict(self) -> dict:
         raw = self.config.problem_info.get("instance_dict", "{}")
         if isinstance(raw, str):
-            return json.loads(raw)
+            return orjson.loads(raw)
         return raw
 
     def get_run_command(self) -> ExecuteContainerCommandArgs:
@@ -1391,7 +1426,7 @@ class DeNovoSWEDatasetProcessor(BaseDatasetHarnessProcessor):
         test_patch_path.write_text(test_patch)
         meta_path = self.config.eval_private_dir / "denovoswe_meta.json"
         meta_path.write_text(
-            json.dumps(
+            orjson.dumps(
                 {
                     "instance_id": inst.get("instance_id", ""),
                     "workdir": workdir,
@@ -1400,7 +1435,7 @@ class DeNovoSWEDatasetProcessor(BaseDatasetHarnessProcessor):
                     "pypi_name": pypi_name,
                     "expected_coverage_percent": expected_coverage,
                 }
-            )
+            ).decode()
         )
         binary_path = self.config.eval_private_dir / "denovoswe_test_binary.b64"
         binary_path.write_text(test_binary_b64)
@@ -1561,8 +1596,8 @@ fi
 
         raw: dict[str, Any] = {}
         try:
-            raw = json.loads(report_path.read_text())
-        except (OSError, json.JSONDecodeError):
+            raw = orjson.loads(report_path.read_text())
+        except (OSError, orjson.JSONDecodeError):
             pass
 
         reward_path = report_path.parent / "reward.txt"
@@ -1585,7 +1620,33 @@ fi
                 "expected_coverage_percent": raw.get("expected_coverage_percent"),
             }
         }
-        report_path.write_text(json.dumps(report, indent=2))
+        report_path.write_text(orjson.dumps(report, option=orjson.OPT_INDENT_2).decode())
+
+
+def _parse_replay_messages(problem_info: Dict[str, Any]) -> Optional[list]:
+    """Parse `problem_info["replay_messages"]` (JSON-encoded chat-completion
+    message list, or already-decoded list; metadata is typed Dict[str, str] so
+    the wire form is always a JSON string, but tests may pass a list directly).
+    """
+    raw = problem_info.get("replay_messages")
+    if isinstance(raw, str):
+        try:
+            return orjson.loads(raw)
+        except orjson.JSONDecodeError:
+            return None
+    if isinstance(raw, list):
+        return raw
+    return None
+
+
+def _extract_replay_system_content(replay_messages_list: list) -> Optional[str]:
+    """First non-empty system-role message content in a chat-completion message list."""
+    for m in replay_messages_list:
+        if isinstance(m, dict) and m.get("role") == "system":
+            content = m.get("content")
+            if isinstance(content, str) and content.strip():
+                return content
+    return None
 
 
 class OpenHandsHarnessProcessor(BaseDatasetHarnessProcessor):
@@ -1739,17 +1800,10 @@ AGENT_FRAMEWORK_COMMIT={commit} \\
         # persistent_dir (mounted as /trajectories_mount inside the apptainer) and
         # forward the path as positional arg #18 to run_infer.sh.
         replay_messages_mounted_path = ""
-        replay_messages_raw = self.config.problem_info.get("replay_messages")
-        if isinstance(replay_messages_raw, str):
-            try:
-                replay_messages_list = json.loads(replay_messages_raw)
-            except json.JSONDecodeError:
-                replay_messages_list = None
-        else:
-            replay_messages_list = replay_messages_raw
+        replay_messages_list = _parse_replay_messages(self.config.problem_info)
         if replay_messages_list:
             replay_messages_host_path = self.config.persistent_dir / "replay_messages.json"
-            replay_messages_host_path.write_text(json.dumps(replay_messages_list))
+            replay_messages_host_path.write_text(orjson.dumps(replay_messages_list).decode())
             replay_messages_mounted_path = f"{self.config.base_mounted_dir}/replay_messages.json"
 
             # The replay file already encodes the original system prompt, but
@@ -1762,13 +1816,7 @@ AGENT_FRAMEWORK_COMMIT={commit} \\
             # YAML-level agent_prompt_overrides). The standard mount logic in
             # _build_apptainer_command bind-mounts this file at the container's
             # system_prompt.j2 path.
-            replay_system_content = None
-            for m in replay_messages_list:
-                if isinstance(m, dict) and m.get("role") == "system":
-                    c = m.get("content")
-                    if isinstance(c, str) and c.strip():
-                        replay_system_content = c
-                        break
+            replay_system_content = _extract_replay_system_content(replay_messages_list)
             if replay_system_content:
                 sp_host_path = self.config.persistent_dir / "replay_system_prompt.j2"
                 sp_host_path.write_text(replay_system_content)
@@ -1961,16 +2009,40 @@ def _resolve_opencode_workspace_path(problem_info: Dict[str, Any]) -> str:
     return "/testbed"
 
 
+def _tool_param_dict(tool: Any) -> Dict[str, Any]:
+    dumped = tool.model_dump()
+    if dumped.get("defer_loading") is None:
+        dumped["defer_loading"] = False
+    return dumped
+
+
 def _extract_instance_dict(problem_info: Dict[str, Any]) -> Dict[str, Any]:
     raw = problem_info.get("instance_dict")
     if isinstance(raw, str):
         try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
+            return orjson.loads(raw)
+        except orjson.JSONDecodeError:
             return {}
     if isinstance(raw, dict):
         return raw
     return {}
+
+
+def _deepswe_uses_offline_jvm_cache(problem_info: Dict[str, Any]) -> bool:
+    """Return whether a DeepSWE verifier deliberately uses its image's JVM cache.
+
+    Maven records the repository ID that supplied each cached artifact, while
+    Gradle also retains repository-specific resolution metadata. Replacing
+    Maven Central with a differently named/located mirror immediately before
+    an offline verifier run can therefore make already-cached plugins appear
+    unavailable. Preserve the image's build-time repository configuration for
+    these tasks instead of injecting the online-evaluation mirror.
+    """
+    if problem_info.get("dataset_name") != "deepswe":
+        return False
+
+    test_sh = str(_extract_instance_dict(problem_info).get("test_sh", ""))
+    return "--offline" in test_sh or re.search(r"\bmvn[^\n]*\s-o(?:\s|$)", test_sh) is not None
 
 
 # The ONLY instance fields exposed to the AGENT container; ground truth (gold/test
@@ -2102,7 +2174,44 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
         for key in ("temperature", "top_p"):
             if self.config.inference_params.get(key) is not None:
                 llm_model_cfg[key] = self.config.inference_params[key]
-        config_str = json.dumps({"llm": {"model": llm_model_cfg}})
+        config_str = orjson.dumps({"llm": {"model": llm_model_cfg}}).decode()
+
+        # REPLAY_MESSAGES_PATH support: mirrors OpenHandsHarnessProcessor. When
+        # problem_info carries `replay_messages`, dump it to a file under
+        # persistent_dir (mounted as /trajectories_mount inside the apptainer)
+        # and forward the mounted path to run_infer.sh / bench/cli.ts as
+        # positional arg #13. The bench harness replays each recorded tool call
+        # for real against the fresh sandbox (via a scripted turn in the
+        # nemo-gym provider that feeds opencode's normal tool-execution path —
+        # same "swap the transport, keep the loop" design as live turns) before
+        # falling through to live model calls, so the container's filesystem
+        # state stays consistent with the replayed conversation.
+        #
+        # The replay's own system message is pinned as resolved_system_prompt_template
+        # UNCONDITIONALLY (overriding any agent_prompt_overrides selection), same
+        # rationale as OpenHands: it's the canonical source of truth for the
+        # recorded conversation, and the standard mount logic in
+        # _build_apptainer_command already bind-mounts resolved_system_prompt_template
+        # to /opencode_setup/opencode/system_prompt.txt for the opencode path.
+        replay_messages_mounted_path = ""
+        replay_subagents_mounted_path = ""
+        replay_messages_list = _parse_replay_messages(data_point)
+        if replay_messages_list:
+            replay_messages_host_path = self.config.persistent_dir / "replay_messages.json"
+            replay_messages_host_path.write_text(orjson.dumps(replay_messages_list).decode())
+            replay_messages_mounted_path = f"{self.config.base_mounted_dir}/replay_messages.json"
+
+            replay_system_content = _extract_replay_system_content(replay_messages_list)
+            if replay_system_content:
+                sp_host_path = self.config.persistent_dir / "replay_system_prompt.txt"
+                sp_host_path.write_text(replay_system_content)
+                self.config.resolved_system_prompt_template = str(sp_host_path)
+
+            replay_subagent_manifest = parse_replay_subagent_manifest(data_point)
+            if replay_subagent_manifest:
+                replay_subagents_host_path = self.config.persistent_dir / "replay_subagents.json"
+                replay_subagents_host_path.write_text(orjson.dumps(replay_subagent_manifest).decode())
+                replay_subagents_mounted_path = f"{self.config.base_mounted_dir}/replay_subagents.json"
 
         workspace_path = _resolve_opencode_workspace_path(data_point)
         user_message = _render_opencode_user_message(
@@ -2186,7 +2295,10 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             f"export NEMO_GYM_MODEL_SERVER_NAME={self.config.model_server_name} && "
             f"export NEMO_GYM_MODEL_SERVER_BASE_URL={shlex.quote(model_server_base_url)} && "
             f"export COMMAND_EXEC_TIMEOUT={self.config.command_exec_timeout} && "
-            f"export ENABLE_SUBAGENTS={'1' if self.config.opencode_subagents_enabled else '0'} && "
+            f"export ENABLE_SUBAGENTS={'1' if self.config.opencode_subagents_enabled or replay_subagents_mounted_path else '0'} && "
+            # bench/cli.ts decides how to extract the model patch; 'worktree'
+            # (its own default) reproduces the historical `git diff` capture.
+            f"export PATCH_MODE={shlex.quote(self.config.opencode_patch_mode)} && "
             "export OPENCODE_DISABLE_MODELS_FETCH=1 && "
             "mkdir -p /root/.cache/opencode && "
             "echo '{}' >/root/.cache/opencode/models.json && "
@@ -2208,8 +2320,19 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             f"    {user_message_in_sif} "  # $11: pre-rendered user message file
         )
 
-        if self.config.resolved_system_prompt_template is not None:
-            agent_main_cmd += "    /opencode_setup/opencode/system_prompt.txt "  # $12: system override
+        # Positional args 12..14 of run_infer.sh. Empty = shell-side default.
+        # Emit up to the LAST non-empty slot so a trailing placeholder is only
+        # inserted when a later arg (REPLAY_MESSAGES_PATH at #13) needs it at
+        # the right shift index.
+        sp_set = self.config.resolved_system_prompt_template is not None
+        positional_args = [
+            "/opencode_setup/opencode/system_prompt.txt" if sp_set else "",  # 12 SYSTEM_PROMPT_PATH
+            replay_messages_mounted_path or "",  # 13 REPLAY_MESSAGES_PATH
+            replay_subagents_mounted_path or "",  # 14 REPLAY_SUBAGENTS_PATH
+        ]
+        last_set = max((i for i, a in enumerate(positional_args) if a), default=-1)
+        for a in positional_args[: last_set + 1]:
+            agent_main_cmd += f"    {a} " if a else "    '' "
 
         agent_script_name = f"agent_script_{agent_run_id}.sh"
         agent_script_path = self.config.persistent_dir / agent_script_name
@@ -2299,8 +2422,8 @@ def update_and_read_metrics(metrics_fpath: Path, update_dict: Dict[str, Any] | N
 
     with file_lock(metrics_fpath, "persistent metrics", max_wait=300, poll_interval=1):
         try:
-            existing_dict = json.loads(metrics_fpath.read_text() or "{}")
-        except (json.JSONDecodeError, FileNotFoundError):
+            existing_dict = orjson.loads(metrics_fpath.read_text() or "{}")
+        except (orjson.JSONDecodeError, FileNotFoundError):
             print(f"Error reading {metrics_fpath}: {format_exc()}\n\nDefaulting to empty metrics", flush=True)
             existing_dict = {}
 
@@ -2312,24 +2435,12 @@ def update_and_read_metrics(metrics_fpath: Path, update_dict: Dict[str, Any] | N
 
             # Write to a temp file and swap it to reduce chance of reading a partially written file.
             tmp_file = metrics_fpath.with_suffix(f".tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}")
-            tmp_file.write_text(json.dumps(metrics))
+            tmp_file.write_text(orjson.dumps(metrics).decode())
             os.replace(tmp_file, metrics_fpath)
         else:
             metrics = existing_dict
 
         return metrics
-
-
-# _TOOL_PARAM_BOOL_FIELDS_DEFAULT_FALSE = ("defer_loading",)
-
-
-# def _dump_tool_as_tool_param(tool: BaseModel) -> Dict[str, Any]:
-#     """Dump a response Tool pydantic model to a ToolParam-compatible dict."""
-#     data = tool.model_dump()
-#     for key in _TOOL_PARAM_BOOL_FIELDS_DEFAULT_FALSE:
-#         if data.get(key) is None:
-#             data[key] = False
-#     return data
 
 
 _PAGE_SIZE = os.sysconf("SC_PAGE_SIZE")
@@ -2504,10 +2615,10 @@ class RunOpenHandsAgent(BaseModel):
                 sess_id = "main"
                 try:
                     with open(path_str, "r") as f:
-                        payload = json.load(f)
+                        payload = orjson.loads(f.read())
                     if isinstance(payload, dict) and payload.get("session_id"):
                         sess_id = str(payload["session_id"])
-                except (OSError, json.JSONDecodeError):
+                except (OSError, orjson.JSONDecodeError):
                     pass
                 mtime = os.path.getmtime(path_str)
                 if mtime > session_mtime.get(sess_id, -1):
@@ -2717,7 +2828,7 @@ class RunOpenHandsAgent(BaseModel):
         metrics.openhands_run_time += time.time()
 
         with open(out_file, "r") as f:
-            out_dict = json.loads(f.read().strip())
+            out_dict = orjson.loads(f.read().strip())
 
         metrics.per_turn_metrics = out_dict.get("metrics")
         metrics.agent_error_kind = _classify_agent_error(out_dict.get("error"))
@@ -2730,14 +2841,14 @@ class RunOpenHandsAgent(BaseModel):
         self.config.output_for_eval_path.parent.mkdir(parents=True, exist_ok=True)
         with self.config.output_for_eval_path.open("w") as f:
             f.write(
-                json.dumps(
+                orjson.dumps(
                     {
                         "model_name_or_path": out_dict["metadata"]["llm_config"]["model"],
                         "instance_id": out_dict["instance_id"],
                         "model_patch": patch,
                         "oh_time_metrics": out_dict["metrics"],
                     }
-                )
+                ).decode()
             )
 
         # Dump out dot and png files from profiling on OpenHands level
@@ -2820,7 +2931,7 @@ class RunOpenHandsAgent(BaseModel):
                 f"SWE-bench_Multilingual / SWE-rebench families (got {dataset_name!r})."
             )
 
-        instance_dict = json.loads(self.config.problem_info["instance_dict"])
+        instance_dict = orjson.loads(self.config.problem_info["instance_dict"])
         golden_patch = instance_dict.get("patch") or ""
         # DeNovoSWE has no model-style patch — the original source code already
         # lives in the image at ``parent_commit``. An empty patch is the
@@ -2838,13 +2949,13 @@ class RunOpenHandsAgent(BaseModel):
         self.config.output_for_eval_path.parent.mkdir(parents=True, exist_ok=True)
         with self.config.output_for_eval_path.open("w") as f:
             f.write(
-                json.dumps(
+                orjson.dumps(
                     {
                         "model_name_or_path": "golden_patch_verification",
                         "instance_id": instance_id,
                         "model_patch": golden_patch,
                     }
-                )
+                ).decode()
             )
         with open(self.config.model_patch_path, "w") as f:
             f.write(golden_patch)
@@ -2991,9 +3102,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         first_prefix_count = 0
         try:
             with open(completion_files[0], "r") as f:
-                first_data = json.load(f)
+                first_data = orjson.loads(f.read())
             first_prefix_count = len(first_data.get("messages") or [])
-        except (OSError, json.JSONDecodeError):
+        except (OSError, orjson.JSONDecodeError):
             pass
 
         # Prefer the main session (no parent_session_id). Fall back to the
@@ -3002,14 +3113,14 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         for fpath in completion_files:
             try:
                 with open(fpath, "r") as f:
-                    data = json.load(f)
-            except (OSError, json.JSONDecodeError):
+                    data = orjson.loads(f.read())
+            except (OSError, orjson.JSONDecodeError):
                 continue
             if "session_id" in data and data.get("parent_session_id") in (None, ""):
                 main_data = data
         if main_data is None:
             with open(completion_files[-1], "r") as f:
-                main_data = json.load(f)
+                main_data = orjson.loads(f.read())
 
         messages, tools = self._materialize_trajectory(main_data)
         return messages, tools, first_prefix_count
@@ -3029,8 +3140,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         for fpath in sorted(completions_dir.glob("*.json")):
             try:
                 with open(fpath, "r") as f:
-                    data = json.load(f)
-            except (OSError, json.JSONDecodeError):
+                    data = orjson.loads(f.read())
+            except (OSError, orjson.JSONDecodeError):
                 continue
             sess_id = data.get("session_id")
             if not sess_id:
@@ -3038,14 +3149,25 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             by_session[sess_id] = data
         for sess_id, data in by_session.items():
             messages, tools = self._materialize_trajectory(data)
-            out.append(
-                {
-                    "session_id": sess_id,
-                    "parent_session_id": data.get("parent_session_id"),
-                    "messages": messages,
-                    "tools": tools,
-                }
-            )
+            entry = {
+                "session_id": sess_id,
+                "parent_session_id": data.get("parent_session_id"),
+                "messages": messages,
+                "tools": tools,
+            }
+            for key in [
+                "recorded_session_id",
+                "recorded_parent_session_id",
+                "spawn_call_id",
+                "spawn_index",
+                "subagent_type",
+                "replay_prefix_message_count",
+                "global_turn",
+                "session_start_global_turn",
+            ]:
+                if data.get(key) is not None:
+                    entry[key] = data[key]
+            out.append(entry)
         return out
 
     ########################################
@@ -3192,7 +3314,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         maven_mirror_dir = Path(__file__).parent / "maven_mirror"
         mvn_settings_path = maven_mirror_dir / "settings.xml"
         gradle_init_path = maven_mirror_dir / "init.gradle"
-        if mvn_settings_path.exists() and gradle_init_path.exists():
+        preserve_offline_jvm_cache = command.mode == "eval" and _deepswe_uses_offline_jvm_cache(data_point)
+        if mvn_settings_path.exists() and gradle_init_path.exists() and not preserve_offline_jvm_cache:
             mvn_b64 = base64.b64encode(mvn_settings_path.read_bytes()).decode()
             grad_b64 = base64.b64encode(gradle_init_path.read_bytes()).decode()
             # Belt-and-suspenders: write init.gradle to every common
@@ -3379,12 +3502,16 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             # DeepSWEDatasetProcessor.get_run_command() wrote these to persistent_dir.
             test_sh_path = params.eval_private_dir / "test.sh"
             test_patch_path = params.eval_private_dir / "test.patch"
+            grader_py_path = params.eval_private_dir / "grader.py"
+            test_config_path = params.eval_private_dir / "config.json"
             # Placeholder needed: eval container starts before the agent writes the
             # patch (golden-patch path writes it before launch).
             if not params.model_patch_path.exists():
                 params.model_patch_path.write_text("")
             mount_args.append(f"--mount type=bind,src={test_sh_path},dst=/tests/test.sh,ro")
             mount_args.append(f"--mount type=bind,src={test_patch_path},dst=/tests/test.patch,ro")
+            mount_args.append(f"--mount type=bind,src={grader_py_path},dst=/tests/grader.py,ro")
+            mount_args.append(f"--mount type=bind,src={test_config_path},dst=/tests/config.json,ro")
             mount_args.append(f"--mount type=bind,src={params.model_patch_path},dst=/root/patch.diff")
 
         if data_point.get("dataset_name") == "denovoswe":
@@ -3494,8 +3621,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         Returns None for plain seed inputs (system + user only) — there is nothing
         to replay in that case. Returns a JSON-encoded `list[dict]` (chat-completion
         message format) when function_call / function_call_output items are present.
+
+        Supported for both `openhands` and `opencode` harnesses.
         """
-        if self.config.agent_framework != "openhands":
+        if self.config.agent_framework not in ("openhands", "opencode"):
             return None
         input_items = body.input if isinstance(body.input, list) else []
 
@@ -3514,7 +3643,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 chat_messages.append(m.model_dump(exclude_none=True))
             elif isinstance(m, dict):
                 chat_messages.append(m)
-        return json.dumps(chat_messages)
+        return orjson.dumps(chat_messages).decode()
 
     def _setup_params(
         self, body: NeMoGymResponseCreateParamsNonStreaming
@@ -3522,17 +3651,29 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         problem_info = body.metadata | {"container_formatter": self.config.container_formatter}
         instance_id = problem_info.get("instance_id", "unknown")
 
-        # REPLAY_MESSAGES_PATH support (OpenHands harness only): when the request's
-        # input carries a prior agent trajectory (function_call / function_call_output
-        # items beyond the initial system+user messages), convert the partial
-        # Responses-format input to OpenAI chat-completion format here in the gym
-        # layer and surface it via problem_info["replay_messages"] (JSON-encoded
-        # because metadata is typed as Dict[str, str]). OpenHandsHarnessProcessor
-        # then writes it to a file and forwards the path to run_infer.sh as
-        # positional arg #18.
+        # REPLAY_MESSAGES_PATH support (openhands + opencode harnesses): when the
+        # request's input carries a prior agent trajectory (function_call /
+        # function_call_output items beyond the initial system+user messages),
+        # convert the partial Responses-format input to OpenAI chat-completion
+        # format here in the gym layer and surface it via
+        # problem_info["replay_messages"] (JSON-encoded because metadata is typed
+        # as Dict[str, str]). OpenHandsHarnessProcessor / OpenCodeHarnessProcessor
+        # then write it to a file and forward the path to run_infer.sh as a
+        # positional arg (openhands: #18; opencode: #13).
         replay_messages_json = self._maybe_build_replay_messages(body)
         if replay_messages_json is not None:
             problem_info = {**problem_info, "replay_messages": replay_messages_json}
+            subagent_payload = parse_replay_subagent_payload(problem_info)
+            if subagent_payload:
+                replay_subagent_manifest = build_replay_subagent_manifest(
+                    orjson.loads(replay_messages_json),
+                    subagent_payload,
+                )
+                if replay_subagent_manifest:
+                    problem_info = {
+                        **problem_info,
+                        "replay_subagent_manifest": orjson.dumps(replay_subagent_manifest).decode(),
+                    }
 
         # Create persistent directory for I/O and logs in local workspace
         instance_dir = f"{instance_id}_{int(time.time() * 1000)}_{str(uuid.uuid4())[:8]}"
@@ -3551,13 +3692,13 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         instance_dataset_dir.mkdir(parents=True, exist_ok=True)
         instance_dataset_path = eval_private_dir / f"{agent_run_id}.jsonl"
         agent_instance_dataset_path = instance_dataset_dir / f"{agent_run_id}.jsonl"
-        instance_dict = json.loads(problem_info["instance_dict"])
+        instance_dict = orjson.loads(problem_info["instance_dict"])
         if "repo" in instance_dict and "repo_name" not in instance_dict:
             instance_dict["repo_name"] = instance_dict["repo"]
         with open(instance_dataset_path, "w") as f:
-            f.write(json.dumps(instance_dict) + "\n")
+            f.write(orjson.dumps(instance_dict).decode() + "\n")
         with open(agent_instance_dataset_path, "w") as f:
-            f.write(json.dumps(_redact_instance_dict_for_agent(instance_dict)) + "\n")
+            f.write(orjson.dumps(_redact_instance_dict_for_agent(instance_dict)).decode() + "\n")
 
         trajectories_root = persistent_dir / "trajectories" / instance_id
         output_for_eval_mounted_path = (
@@ -3619,6 +3760,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             generation_apptainer_spinup_timestamp_mounted_fpath=base_mounted_dir
             / "generation_apptainer_spinup_timestamp",
         )
+
+        if parse_replay_subagent_manifest(problem_info):
+            params.opencode_subagents_enabled = True
 
         params.metrics_fpath.write_text("{}")
 
@@ -3690,7 +3834,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         if maybe_report_file:
             dataset_processor.postprocess_after_run(maybe_report_file)
 
-            report = json.loads(Path(maybe_report_file).read_text())
+            report = orjson.loads(Path(maybe_report_file).read_text())
             assert params.instance_id in report, (
                 f"Report is malformatted. Expected instance ID key: {params.instance_id}. Report: {report}"
             )
@@ -3707,14 +3851,13 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         # 4) Memory watchdog killed the agent container (OOM).
         # 5) Memory watchdog killed the eval container.
         persisted_metrics = SWEBenchMetrics.model_validate(update_and_read_metrics(params.metrics_fpath))
-        resolved_now = metrics_to_update.get("resolved", False)
         agent_error_kind = persisted_metrics.agent_error_kind
         eval_timed_out = bool(persisted_metrics.eval_timed_out)
         agent_timed_out = bool(persisted_metrics.agent_timed_out)
         oom_killed = bool(persisted_metrics.oom_killed)
         eval_oom_killed = bool(persisted_metrics.eval_oom_killed)
         if (
-            (resolved_now and agent_error_kind in ("max_iteration", "context_window"))
+            agent_error_kind in ("max_iteration", "context_window")
             or eval_timed_out
             or agent_timed_out
             or oom_killed
@@ -3787,17 +3930,30 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         # picks the backend). NeMoGymResponse.model is a required non-None string,
         # so fall back to the agent's configured model server name.
         metadata: dict[str, str] = {
-            "input": json.dumps([i.model_dump() for i in input_items]),
-            "metrics": json.dumps(updated_metrics),
+            "input": orjson.dumps([i.model_dump() for i in input_items]).decode(),
+            "metrics": orjson.dumps(updated_metrics).decode(),
             "instance_config": params.model_dump_json(),
         }
-        if params.opencode_subagents_enabled:
-            subagent_trajectories = [
+        replay_subagent_manifest = parse_replay_subagent_manifest(params.problem_info)
+        if params.opencode_subagents_enabled or replay_subagent_manifest:
+            captured_subagents = [
                 entry
                 for entry in self.get_all_session_trajectories_from_completions(trajectories_dir, params.instance_id)
                 if entry.get("parent_session_id")
             ]
-            metadata["subagent_trajectories"] = json.dumps(subagent_trajectories)
+            if captured_subagents:
+                captured_manifest = build_replay_subagent_manifest(
+                    chat_completions_trajectory,
+                    {"sessions": captured_subagents},
+                    strict=False,
+                )
+                if captured_manifest:
+                    captured_subagents = captured_manifest["sessions"]
+            subagent_trajectories = merge_replay_subagent_trajectories(
+                replay_subagent_manifest,
+                captured_subagents,
+            )
+            metadata["subagent_trajectories"] = orjson.dumps(subagent_trajectories).decode()
 
         return NeMoGymResponse(
             id=f"swebench-{params.instance_id}",
@@ -3820,13 +3976,21 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
             metadata, response.metadata = response.metadata, None
             responses_create_params = body.responses_create_params.model_dump() | {
-                "input": json.loads(metadata["input"]),
-                "tools": [t.model_dump() for t in response.tools] if response.tools else [],
+                "input": orjson.loads(metadata["input"]),
+                "tools": [_tool_param_dict(t) for t in response.tools] if response.tools else [],
             }
             metrics = SWEBenchMetrics.model_validate_json(metadata["metrics"])
             subagent_trajectories = None
             if "subagent_trajectories" in metadata:
-                subagent_trajectories = json.loads(metadata["subagent_trajectories"])
+                subagent_trajectories = orjson.loads(metadata["subagent_trajectories"])
+                # Make the returned create params replay-ready. Historical
+                # rollout rows exposed this only as a sibling result field,
+                # which meant callers had to copy it into request metadata
+                # manually before branching the trajectory.
+                responses_create_params["metadata"] = {
+                    **(responses_create_params.get("metadata") or {}),
+                    "subagent_trajectories": metadata["subagent_trajectories"],
+                }
 
             return SWEBenchVerifyResponse(
                 responses_create_params=responses_create_params,

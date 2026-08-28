@@ -15,6 +15,9 @@
 # limitations under the License.
 """Validate Nemo Gym pivot-format JSONL rows.
 
+Three `expected_action` types are accepted, one per model call: `function_call` for a single tool
+call, `function_call_batch` for a parallel set emitted in one response, and `message` for text.
+
 The structural checks are dependency-free. If --gym-repo is provided, the script also validates
 responses_create_params and expected_action against the local Gym Pydantic models for
 single_step_tool_use_with_argument_comparison.
@@ -66,9 +69,13 @@ def extract_tool_name(tool: Any) -> str | None:
 
 
 def expected_calls(expected_action: dict[str, Any]) -> list[dict[str, Any]]:
+    """Flatten an action into the calls it expects, so single and parallel labels share one path."""
     action_type = expected_action.get("type")
     if action_type == "function_call":
         return [expected_action]
+    if action_type == "function_call_batch":
+        calls = expected_action.get("calls")
+        return calls if isinstance(calls, list) else []
     return []
 
 
@@ -100,8 +107,20 @@ def validate_expected_action(expected_action: Any, line_number: int) -> tuple[st
             raise ValidationError(f"line {line_number}: message expected_action.content must be a string")
         return action_type, []
 
-    if action_type != "function_call":
+    if action_type not in ("function_call", "function_call_batch"):
         raise ValidationError(f"line {line_number}: unsupported expected_action type {action_type!r}")
+
+    if action_type == "function_call_batch":
+        calls = expected_action.get("calls")
+        if not isinstance(calls, list) or not calls:
+            raise ValidationError(f"line {line_number}: function_call_batch.calls must be a non-empty list")
+        if len(calls) == 1:
+            # `extract_action` returns the lone call itself rather than wrapping it, so it never
+            # produces a one-element batch. A label of that shape describes a response the model
+            # cannot emit, which means the converter took the batch path for a single call.
+            raise ValidationError(
+                f"line {line_number}: function_call_batch with a single call should be a plain function_call"
+            )
 
     tool_names = [validate_function_call(call, line_number) for call in expected_calls(expected_action)]
     return action_type, tool_names
@@ -195,7 +214,10 @@ def validate_file(args: argparse.Namespace) -> Counter:
         if not isinstance(row, dict):
             raise ValidationError(f"line {line_number}: row must be an object")
 
-        for required_key in ("responses_create_params", "expected_action", "agent_ref"):
+        required_keys = ["responses_create_params", "expected_action"]
+        if args.require_agent_ref:
+            required_keys.append("agent_ref")
+        for required_key in required_keys:
             if required_key not in row:
                 raise ValidationError(f"line {line_number}: missing required key {required_key!r}")
 
@@ -211,7 +233,7 @@ def validate_file(args: argparse.Namespace) -> Counter:
 
         params = row["responses_create_params"]
         expected_action = row["expected_action"]
-        agent_name = validate_agent_ref(row["agent_ref"], line_number, args.agent_ref)
+        agent_name = validate_agent_ref(row["agent_ref"], line_number, args.agent_ref) if "agent_ref" in row else None
         tool_names = validate_responses_create_params(params, line_number)
         action_type, expected_tool_names = validate_expected_action(expected_action, line_number)
         validate_with_gym_models(response_model, expected_action_adapter, params, expected_action, line_number)
@@ -225,7 +247,10 @@ def validate_file(args: argparse.Namespace) -> Counter:
                 )
 
         metrics["action_type", action_type] += 1
-        metrics["agent_ref", agent_name] += 1
+        if action_type == "function_call_batch":
+            metrics["batch_size", len(expected_action["calls"])] += 1
+        if agent_name is not None:
+            metrics["agent_ref", agent_name] += 1
         metrics["input_items_total"] += len(params["input"])
         metrics["tools_total"] += len(params.get("tools") or [])
         for tool_name in expected_tool_names:
@@ -244,11 +269,23 @@ def pct(count: int, total: int) -> str:
 
 def print_expected_action_split(metrics: Counter) -> None:
     total = metrics["rows"]
+    batch_count = metrics["action_type", "function_call_batch"]
     function_call_count = metrics["action_type", "function_call"]
     message_count = metrics["action_type", "message"]
     print("expected_action_split:")
-    print(f"  function_call: {function_call_count} ({pct(function_call_count, total)})")
-    print(f"  message: {message_count} ({pct(message_count, total)})")
+    print(f"  function_call_batch (parallel): {batch_count} ({pct(batch_count, total)})")
+    print(f"  function_call (single):         {function_call_count} ({pct(function_call_count, total)})")
+    print(f"  message (chat):                 {message_count} ({pct(message_count, total)})")
+
+    batch_sizes = sorted(
+        (key[1], count)
+        for key, count in metrics.items()
+        if isinstance(key, tuple) and len(key) == 2 and key[0] == "batch_size"
+    )
+    if batch_sizes:
+        print("batch_sizes:")
+        for size, count in batch_sizes:
+            print(f"  {size} calls: {count} ({pct(count, total)})")
 
 
 def print_metrics(metrics: Counter) -> None:
@@ -292,7 +329,14 @@ def parse_args() -> argparse.Namespace:
         default=[],
         help="Require at least one comma-separated dotted metadata field path.",
     )
-    parser.set_defaults(check_tool_names=True)
+    parser.add_argument(
+        "--no-require-agent-ref",
+        dest="require_agent_ref",
+        action="store_false",
+        help="Allow rows without agent_ref. Row-level routing is optional: a dataset routed by its "
+        "config omits the key, and Gym fills it in at rollout time.",
+    )
+    parser.set_defaults(check_tool_names=True, require_agent_ref=True)
     return parser.parse_args()
 
 
