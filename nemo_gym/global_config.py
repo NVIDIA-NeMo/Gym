@@ -643,6 +643,9 @@ Duplicate config paths:
                 agents[source.agent_type] = composed
                 global_config_dict[renames[target.name]] = instance
 
+            self._raise_on_outdated_routing(global_config_dict, renames)
+            self._route_rows_stamped_before_the_swap(global_config_dict, renames)
+
         self._raise_on_unapplied_agent_overrides(held_agent_overrides, set(renames.values()))
 
     @staticmethod
@@ -673,6 +676,49 @@ Duplicate config paths:
                 f"Composing would give two instances the same name: {', '.join(clashes)}. "
                 f"Rename the environment's agent instance or compose the config manually."
             )
+
+    @staticmethod
+    def _raise_on_outdated_routing(global_config_dict: DictConfig, renames: Dict[str, str]) -> None:
+        """Reject routing that sends rows to an instance the swap renamed away.
+
+        Destinations name a server that has to exist: `agent_name`, `agent_map` values and `fan_out`
+        entries. Their keys are matching bases read off the data, so those may name the old instance.
+        """
+        outdated = []
+        selected = global_config_dict.get("agent_name")
+        if selected in renames:
+            outdated.append(("agent_name", selected))
+
+        declared = global_config_dict.get("agent_map")
+        if isinstance(declared, DictConfig):
+            outdated += [(f"agent_map[{key}]", value) for key, value in declared.items() if value in renames]
+
+        listed = global_config_dict.get("fan_out")
+        if isinstance(listed, DictConfig):
+            outdated += [
+                (f"fan_out[{key}]", agent) for key, agents in listed.items() for agent in agents if agent in renames
+            ]
+        if not outdated:
+            return
+        listing = "\n".join(f"  - {where}: '{name}' is now '{renames[name]}'" for where, name in outdated)
+        raise AgentCompositionError(
+            f"""Routing names agent instances that no longer exist once the agent is swapped:
+{listing}
+
+Use the name the composed config reports."""
+        )
+
+    @staticmethod
+    def _route_rows_stamped_before_the_swap(global_config_dict: DictConfig, renames: Dict[str, str]) -> None:
+        """Map the pre-swap instance name onto the composed one, for rows stamped before it happened.
+
+        Only a matching base is added, so a route the user declared still wins.
+        """
+        declared = global_config_dict.get("agent_map")
+        routes = dict(renames)
+        if isinstance(declared, DictConfig):
+            routes.update({str(key): value for key, value in declared.items()})
+        global_config_dict["agent_map"] = routes
 
     def _raise_on_unsupported_pairing(
         self, global_config_dict: DictConfig, source: _AgentInstance, targets: List[_AgentInstance]
