@@ -184,11 +184,11 @@ srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 \
     --container-mounts=$MOUNTS \
     --container-workdir=\$SLURM_SUBMIT_DIR \
     --no-container-mount-home \
-    bash -lc '
+    bash -c '
         set -euo pipefail
         cd "\$SLURM_SUBMIT_DIR"
         exec "\$@"
-    ' bash bash -lc "\$vllm_command" &
+    ' bash bash -c "\$vllm_command" &
 server_step=\$!
 
 cleanup_server() {
@@ -222,10 +222,10 @@ if (( $should_run_eval )); then
         --container-mounts=$MOUNTS \
         --container-workdir="\$SLURM_SUBMIT_DIR" \
         --no-container-mount-home \
-        bash -lc '
+        bash -c '
             set -euo pipefail
             cd "\$SLURM_SUBMIT_DIR"
-            exec bash -lc "\$eval_command"
+            exec bash -c "\$eval_command"
         ' &
     eval_step=\$!
 
