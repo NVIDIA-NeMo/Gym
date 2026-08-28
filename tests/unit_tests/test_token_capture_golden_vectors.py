@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Golden vectors are the cross-repo wire contract for the lineage hashes.
+"""Verify the hash values shared by Gym and external lineage resolvers.
 
-An external resolver must reproduce these byte-for-byte or every continuation
-silently resolves unresolved. If this test fails, either bump the fingerprint or
-digest version machinery deliberately, or fix the regression — never regenerate
-the vectors silently.
+An external resolver must reproduce these values byte-for-byte.
+Otherwise, unchanged continuations resolve as ``UNRESOLVED``.
+When an intentional encoding change alters a value, update the corresponding fingerprint or digest version.
+Do not regenerate the vectors to hide an unintended change.
 """
 
 from nemo_gym.token_id_capture.lineage import assistant_fingerprint, canonicalize_tool_arguments, conversation_digest

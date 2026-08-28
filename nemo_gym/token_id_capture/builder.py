@@ -15,24 +15,20 @@
 
 """Build trainable trajectories from a frozen token capture.
 
-The builder consumes ``TokenEntry`` records from a ``TokenCaptureSnapshot``.
-The snapshot is frozen before the consumer passes its entries to the builder.
+The consumer freezes a ``TokenCaptureSnapshot`` before passing its ``TokenEntry`` records here.
+The builder can return multiple trajectories when a rollout contains independent call chains.
 
-It does not infer relationships between calls.
-It can return multiple trajectories.
+Each current record states whether the call starts a root, continues a verified parent, or has unresolved ancestry.
+The builder verifies every resolved parent against the child's prompt tokens before joining the calls.
+An unresolved call begins a separate fragment.
+The builder never infers a parent across that boundary.
 
-``prefix_merging`` chains calls by token-prefix relationships.
-Each call uses the earlier call with the longest matching cumulative sequence as its parent.
-The cumulative sequence contains the prompt and generation.
-This strategy rebuilds an append-only rollout as one chain.
-A rewritten or compacted prompt starts a new root.
-Identical candidate parents are ambiguous.
-The builder quarantines the ambiguous subtree.
+``prefix_merging`` uses token-prefix matching only when a verified parent is absent from the frozen snapshot.
+For example, capture can filter a parent that generated no tokens.
+In that case, prefix matching may reconnect the child to a verified surviving ancestor.
 
-Both strategies are independent of capture order.
-``prefix_merging`` processes entries by increasing prompt length.
-This order comes from the tokens.
-A parent's prompt is shorter than its child's prompt.
+The build does not depend on capture order.
+``prefix_merging`` processes entries by increasing prompt length because a parent's prompt is shorter than its child's.
 
 Loss masks follow token provenance.
 Policy-generated tokens have a mask value of 1 and retain their captured log probabilities.
@@ -203,11 +199,10 @@ def _resolve_parent(
 
 
 class _NullPrefixIndex:
-    """Stands in when no entry can need prefix inference.
+    """Avoid building a token-prefix index when every parent is present.
 
     Every supported entry carries a request-time parent decision.
     Only missing-parent recovery needs the trie.
-    Avoiding the trie is significant for long multi-call rollouts.
     """
 
     def add(self, candidate: "_Node") -> None:

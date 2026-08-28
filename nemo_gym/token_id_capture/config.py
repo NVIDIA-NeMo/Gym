@@ -20,7 +20,7 @@ env:
   nemo_gym:
     token_id_capture:
       enabled: true
-      dir: /tmp/ng_tokcap                  # The writer and consumer share this node-local directory.
+      dir: /tmp/nemo_gym_token_id_captures  # The writer and consumer share this node-local directory.
       sink: my_pkg.sinks:MyDataPlaneSink   # This optional sink replaces the file store.
 ```
 

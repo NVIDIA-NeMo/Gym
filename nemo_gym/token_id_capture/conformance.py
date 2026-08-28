@@ -13,15 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Verify an external token-capture transport against the ``protocols`` contracts.
+"""Verify that an external token-capture transport follows Gym's protocols.
 
-A framework transport (e.g. NeMo-RL over TransferQueue) replaces Gym's file store.
-The contract points it must satisfy fail silently in production.
-``run_conformance`` exercises each one directly.
+A framework transport can replace Gym's file store.
+For example, NeMo-RL can carry records through a transfer queue.
+An incorrect implementation can lose records or make a committed parent invisible to another client.
+``run_conformance`` checks these behaviors directly.
 Factories must return fresh client instances over the same shared backend.
-Fresh instances are how cross-client visibility gets tested.
+The checks use fresh instances to verify cross-client visibility.
 Each check uses its own rollout id, so failed checks cannot poison later ones.
-Like ``protocols``, this module avoids FastAPI, Ray, Torch, and aiohttp imports.
+This module avoids FastAPI, Ray, Torch, and aiohttp imports.
 """
 
 from __future__ import annotations
@@ -61,7 +62,7 @@ def _make_entry(
     request_items: list[dict],
     text: str,
 ) -> TokenEntry:
-    """Build a realistic committed entry, stamped exactly as ``capture_tokens`` would stamp it."""
+    """Build a committed entry with the metadata that ``capture_tokens`` records."""
     entry = TokenEntry(
         rollout_id=rollout_id,
         model_call_id=model_call_id,
@@ -80,7 +81,7 @@ def _make_entry(
 
 
 def _identical_retry(entry: TokenEntry) -> TokenEntry:
-    """A retry resends the same serialized bytes; simulate one via a lossless round trip."""
+    """Simulate a retry that resends the same serialized entry."""
     return TokenEntry.model_validate(entry.model_dump(mode="json"))
 
 

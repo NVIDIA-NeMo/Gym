@@ -24,12 +24,10 @@ Consumers read through ``TokenSource.freeze``.
 They identify the frozen state with ``snapshot_id``.
 This module avoids FastAPI, Ray, Torch, and aiohttp imports.
 
-The load-bearing guarantee is the happens-before edge through ``TokenSink.put``.
-``put`` is awaited on the serving path.
-The harness therefore cannot send a continuation before the previous call's record is durable.
-The record must also be visible to any worker's lineage resolver when ``put`` returns.
-A transport that acknowledges ``put`` before cross-client visibility breaks this silently.
-The break appears only as a load-dependent trickle of unresolved, masked samples.
+The serving path awaits ``TokenSink.put`` before returning the model response.
+When ``put`` returns, the record must be durable and visible to every worker's lineage resolver.
+The harness can then send a continuation to any worker without racing publication of the previous call.
+A transport that returns before cross-client visibility can produce intermittent unresolved samples under load.
 
 A sink may additionally implement ``begin_call(rollout_id, model_call_id)``.
 It is an optional extension and deliberately not part of the ``TokenSink`` protocol.
@@ -92,9 +90,8 @@ class LineageStore(Protocol):
     After ``TokenSink.put`` returns, a later ``resolve`` on any worker must see the entry.
     Visibility is required per rollout key only, so the store may shard by rollout.
     Implementations must never guess among candidates.
-    ``resolve`` may fail toward UNRESOLVED on any doubt.
+    ``resolve`` must return ``UNRESOLVED`` when it cannot prove one parent.
     The offline builder independently re-verifies every claimed link by digest.
-    That backstop is what makes the relaxations in this module safe.
     External implementations should embed Gym's ``RolloutLineage`` matcher rather than reimplement the hashing.
     ``nemo_gym.token_id_capture.lineage`` is importable without the server stack.
     Callers of ``commit_entry`` outside ``capture_tokens`` must run ``stamp_continuation`` themselves.

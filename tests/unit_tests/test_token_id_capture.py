@@ -1029,8 +1029,11 @@ def test_installed_sink_is_marked_incomplete_through_the_protocol(installed_sink
 
 
 def test_a_sink_without_mark_incomplete_is_refused_at_install():
-    """The signal cannot be lost quietly: a sink that cannot report a lost call is
-    refused when installed, matching the startup validation of configured sinks."""
+    """Reject a sink that cannot report a lost call.
+
+    Without ``mark_incomplete``, a failed write could leave no durable evidence.
+    Installation rejects that sink before it can silently lose capture records.
+    """
 
     class _PutOnlySink:
         async def put(self, entry):

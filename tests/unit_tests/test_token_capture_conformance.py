@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Run the conformance kit against Gym's own backends.
+"""Run the token-capture conformance checks against Gym's backends.
 
-The kit is what an external framework (e.g. NeMo-RL over TransferQueue) runs
-against its sink/source/lineage adapters; Gym's file store and an in-memory
-backend must both pass every applicable check.
+External frameworks run the same checks against their sink, source, and lineage adapters.
+For example, NeMo-RL can use them to verify adapters backed by a transfer queue.
+These tests verify Gym's file store and an in-memory backend.
 """
 
 import asyncio
@@ -36,7 +36,7 @@ def test_file_store_passes_all_checks(tmp_path):
 
 
 class _MemoryBackend:
-    """The minimal external-transport shape from the integration tests."""
+    """Store records in memory for protocol conformance tests."""
 
     def __init__(self):
         self.entries: dict[str, dict[str, TokenEntry]] = {}
@@ -135,7 +135,7 @@ def test_memory_backend_passes_applicable_checks():
 
 
 class _FeedLineage:
-    """The intended external-adapter shape: subclass the base, implement two hooks."""
+    """Implement backend hooks while reusing Gym's lineage matching."""
 
     def __new__(cls, backend):
         from nemo_gym.token_id_capture import IncrementalLineageStore
@@ -158,8 +158,7 @@ class _FeedLineage:
 
 
 def test_memory_backend_passes_via_the_incremental_base():
-    """An adapter built on IncrementalLineageStore passes the kit with ~15 lines of
-    backend-specific code — the pattern a TransferQueue adapter follows."""
+    """Verify that an incremental adapter can reuse Gym's protocol implementation."""
     backend = _MemoryBackend()
     passed = asyncio.run(
         run_conformance(

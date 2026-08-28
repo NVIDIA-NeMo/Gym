@@ -29,13 +29,13 @@ The shared ``LineageStore`` resolves entries already committed by ``TokenSink``.
 Each child receives its parent's cumulative tokens.
 Downstream inference consumes those tokens to supply the exact prompt prefix.
 
-Every new record distinguishes a root, a resolved parent, and an unresolved boundary.
-Only records that predate this metadata use token-prefix fallback.
+Every supported record distinguishes a root, a resolved parent, and an unresolved boundary.
+The builder uses token-prefix matching only when a verified parent is absent from the frozen snapshot.
+It never uses prefix matching to cross an unresolved boundary.
 
-The guaranteed invariant is token-chain exactness, not conversation fidelity.
 A delivered chain contains exactly the tokens the policy emitted over the recorded context.
-The hashes deliberately ignore reasoning and some inserted items.
-Those fields may differ from the harness rendering without breaking token-chain exactness.
+The hashes ignore reasoning and selected items that a harness may omit when it echoes model output.
+These differences do not change the captured token sequence.
 Ambiguous matches remain unresolved rather than risking tokens from the wrong call.
 """
 
