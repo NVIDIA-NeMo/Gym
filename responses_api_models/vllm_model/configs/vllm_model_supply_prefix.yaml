@@ -1,0 +1,15 @@
+# Opt in to prefix supply on the Gym model server.
+#
+# The server requests the exact tokens from a verified parent through required_prefix_token_ids.
+# The backend must return generation-time prompt_token_ids that prove the prefix was applied.
+# prefix_requested records intent only.
+# prefix_supplied records proven application.
+#
+# Supply requires exactly one recorded parent that matches the incoming conversation.
+# A missing or ambiguous parent leaves the request unchanged.
+# Stock vLLM does not support the required_prefix_token_ids extension.
+# Prefix supply is incompatible with use_completions_api=true.
+policy_model:
+  responses_api_models:
+    vllm_model:
+      supply_prefix_token_ids: true

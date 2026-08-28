@@ -55,8 +55,8 @@ class CaptureContext:
     The context identifies the rollout and model call.
     ``token_sink`` receives the resulting record.
     A framework may provide any ``TokenSink`` implementation.
-    Every consumer shares the same per-call parent decision.
-    This keeps request-time resolution and capture metadata consistent.
+    Parent resolution runs once for each call.
+    Prefix supply and token capture read the same immutable decision.
     """
 
     rollout_id: str
@@ -68,6 +68,12 @@ class CaptureContext:
     model: str = ""
     # ``commit_entry`` sets this after another capture path records the call.
     committed: bool = False
+    # Store resolved continuations as parent-relative suffixes.
+    delta_records: bool = False
+    # This records the model server's intent to request prefix supply.
+    prefix_requested: bool = False
+    # This records proven application based on generation-time prompt_token_ids.
+    prefix_supplied: bool = False
     # Resolve the parent once before dispatch.
     # Downstream inference and capture share this immutable decision.
     parent_resolution: LineageResolution | None = None
@@ -84,10 +90,12 @@ class CaptureContext:
 
 
 _CAPTURE_CONTEXT: ContextVar[CaptureContext | None] = ContextVar("nemo_gym_capture_context", default=None)
+
+# Worker-level health counters are logged periodically.
 _STATS_LOCK = threading.Lock()
 _RESOLUTION_COUNTS = {"root": 0, "resolved": 0, "unresolved": 0}
-_CAPTURE_FAILURES = 0
-_RESOLVER_UNAVAILABLE_NOTED = False
+_CAPTURE_FAILURES = [0]
+_RESOLVER_UNAVAILABLE_NOTED = [False]
 
 
 def _count_resolution(status_value: str) -> None:
@@ -99,9 +107,9 @@ def _count_resolution(status_value: str) -> None:
 
 
 def capture_health_snapshot() -> dict:
-    """Return worker-level capture health counters."""
+    """Return worker-level capture health for metrics endpoints."""
     with _STATS_LOCK:
-        return {"resolutions": dict(_RESOLUTION_COUNTS), "capture_failures": _CAPTURE_FAILURES}
+        return {"resolutions": dict(_RESOLUTION_COUNTS), "capture_failures": _CAPTURE_FAILURES[0]}
 
 
 def set_token_sink(context: CaptureContext) -> Token:
@@ -121,22 +129,6 @@ def reset_token_sink(token: Token) -> None:
     _CAPTURE_CONTEXT.reset(token)
 
 
-async def register_call_intent() -> None:
-    """Record that the captured call is about to be dispatched.
-
-    ``begin_call`` is an optional sink extension.
-    It lets a source detect a call whose entry was lost.
-    A failure happens before generation and must fail the model call.
-    The harness can retry without spending inference compute.
-    """
-    context = _CAPTURE_CONTEXT.get()
-    if context is None or context.token_sink is None:
-        return
-    begin_call = getattr(context.token_sink, "begin_call", None)
-    if begin_call is not None:
-        await begin_call(context.rollout_id, context.model_call_id)
-
-
 async def resolve_parent(request_messages: list | None) -> None:
     """Resolve which recorded call this request continues.
 
@@ -144,7 +136,8 @@ async def resolve_parent(request_messages: list | None) -> None:
     Resolve once before dialect conversion or dispatch.
     Prefix supply and capture then share one parent decision.
     Return without work for untagged traffic.
-    Every attempt records a root, resolved, or unresolved decision.
+    Every attempted resolution records a root, resolved, or unresolved decision.
+    An unresolved decision includes its reason.
     """
     context = _CAPTURE_CONTEXT.get()
     if context is None or request_messages is None:
@@ -157,12 +150,16 @@ async def resolve_parent(request_messages: list | None) -> None:
                 ParentResolutionStatus.UNRESOLVED,
                 reason="resolver_unavailable",
             )
-            global _RESOLVER_UNAVAILABLE_NOTED
+            # Startup requires an explicit unresolved-continuation opt-in.
+            # Emit one warning and track later calls in the counters.
             with _STATS_LOCK:
-                first = not _RESOLVER_UNAVAILABLE_NOTED
-                _RESOLVER_UNAVAILABLE_NOTED = True
+                first = not _RESOLVER_UNAVAILABLE_NOTED[0]
+                _RESOLVER_UNAVAILABLE_NOTED[0] = True
             if first:
-                logger.warning("No lineage resolver is available. Every continuation will be unresolved and masked.")
+                logger.warning(
+                    "No lineage resolver is available: every continuation resolves UNRESOLVED "
+                    "and multi-call rollouts will be masked (allow_unresolved_continuations is set)."
+                )
         else:
             context.parent_resolution = await context.lineage_store.resolve(context.rollout_id, request_messages)
         _count_resolution(context.parent_resolution.status.value)
@@ -172,6 +169,24 @@ async def resolve_parent(request_messages: list | None) -> None:
             ParentResolutionStatus.UNRESOLVED,
             reason="lookup_error",
         )
+
+
+async def register_call_intent() -> None:
+    """Record durable call intent before dispatch starts generation.
+
+    ``begin_call`` is an optional sink extension.
+    A dangling intent identifies a lost entry.
+    Failure happens before generation and propagates to the caller.
+    The harness can retry without spending inference compute.
+    Sinks without ``begin_call`` cannot report a missing final entry this way.
+    """
+    context = _CAPTURE_CONTEXT.get()
+    if context is None or context.token_sink is None:
+        return
+    begin = getattr(context.token_sink, "begin_call", None)
+    if begin is None:
+        return
+    await begin(context.rollout_id, context.model_call_id)
 
 
 async def capture_tokens(
@@ -232,6 +247,8 @@ async def capture_tokens(
             # so the recorded id matches what the client received in every dialect.
             response_id=str(payload.get("id") or "") or None,
             created_at=time.time(),
+            prefix_requested=context.prefix_requested,
+            prefix_supplied=context.prefix_supplied,
         )
         if request_messages is not None:
             stamp_continuation(entry, list(request_messages))
@@ -270,18 +287,38 @@ async def commit_entry(
         context.committed = True
         return
     try:
+        # Use the resolution decided before dispatch.
+        # Engine-side callers may pass their own resolution.
         resolution = parent_resolution or context.parent_resolution
         if resolution is None:
             resolution = LineageResolution(
                 ParentResolutionStatus.UNRESOLVED,
                 reason="not_attempted",
             )
-        # The cumulative length and digest always describe this call.
+        # The digest always describes the full sequence.
+        # Delta storage changes representation, not lineage identity.
         # The parent decision is persisted with the same sink write.
+        cumulative = None
+        if (
+            context.delta_records
+            and not entry.prompt_is_delta
+            and resolution.status == ParentResolutionStatus.RESOLVED
+            and resolution.match is not None
+            and resolution.match.cumulative_token_ids
+        ):
+            parent_cum = list(resolution.match.cumulative_token_ids)
+            prompt = list(entry.prompt_token_ids)
+            # Store a suffix only when the prompt extends the exact parent tokens.
+            # Otherwise retain the full prompt and preserve a safe reconstruction anchor.
+            if len(prompt) >= len(parent_cum) and prompt[: len(parent_cum)] == parent_cum:
+                cumulative = prompt + list(entry.generation_token_ids)
+                entry.prompt_token_ids = prompt[len(parent_cum) :]
+                entry.prompt_is_delta = True
         stamp_lineage(
             entry,
             resolution.match.model_call_id if resolution.match is not None else None,
             parent_resolution=resolution.status,
+            cumulative=cumulative,
         )
         entry.parent_resolution_reason = resolution.reason or ""
         await context.token_sink.put(entry)
@@ -297,10 +334,9 @@ async def _capture_failed(context: CaptureContext, stage: str) -> None:
     Mark the rollout so consumers can mask the sample.
     Call this only from an ``except`` block.
     """
-    global _CAPTURE_FAILURES
     with _STATS_LOCK:
-        _CAPTURE_FAILURES += 1
-        failures = _CAPTURE_FAILURES
+        _CAPTURE_FAILURES[0] += 1
+        failures = _CAPTURE_FAILURES[0]
     if failures % 10 == 0:
         logger.error("Training-token capture has failed %d times in this worker.", failures)
     logger.warning(

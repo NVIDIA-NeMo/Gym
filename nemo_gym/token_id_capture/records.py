@@ -145,10 +145,25 @@ class TokenEntry(BaseModel):
     # The context fields verify the request that produced this call.
     continuation_context_len: int = 0
     continuation_context_digest: str = ""
-    # Persist the resolver's diagnostic reason.
+
+    # The resolver's diagnostic reason for the parent decision above.
+    # Persisted so a resolution-rate regression is debuggable from records alone.
     parent_resolution_reason: str = ""
-    # Identify the continuation fingerprint algorithm.
+    # The fingerprint algorithm version that produced continuation_fingerprint.
+    # A resolver must not match records stamped by a different algorithm.
     fingerprint_version: int | None = None
+
+    # Delta storage is part of the initial record schema.
+    # A delta prompt stores only the suffix after the resolved parent.
+    # Root and unresolved records always store full prompts.
+    # This guarantees that every reconstructable chain has a full-prompt anchor.
+    prompt_is_delta: bool = False
+
+    # Prefix supply fields are part of the initial record schema.
+    # Request intent is distinct from generation-time proof.
+    prefix_requested: bool = False
+    # This is true only when generation-time prompt_token_ids prove prefix application.
+    prefix_supplied: bool = False
 
     @model_validator(mode="after")
     def _refuse_a_newer_record(self) -> "TokenEntry":
@@ -167,7 +182,8 @@ class TokenEntry(BaseModel):
         if self.schema_version < TOKEN_ENTRY_MIN_SCHEMA_VERSION:
             raise ValueError(
                 f"token record is schema_version {self.schema_version}, below the supported minimum "
-                f"{TOKEN_ENTRY_MIN_SCHEMA_VERSION}. Regenerate the rollout with a current writer."
+                f"{TOKEN_ENTRY_MIN_SCHEMA_VERSION}. Pre-lineage records were never written in "
+                "production; regenerate the rollout with a current writer."
             )
         if len(self.generation_token_ids) != len(self.generation_log_probs):
             raise ValueError(
@@ -183,11 +199,22 @@ class TokenEntry(BaseModel):
         if self.parent_resolution in {ParentResolutionStatus.ROOT, ParentResolutionStatus.UNRESOLVED}:
             if self.parent_call_id is not None:
                 raise ValueError(f"{self.parent_resolution.value} parent metadata cannot carry parent_call_id")
+        if self.prompt_is_delta and (
+            self.parent_call_id is None or self.parent_resolution != ParentResolutionStatus.RESOLVED
+        ):
+            raise ValueError("a delta prompt requires a RESOLVED parent_call_id to reconstruct from")
         return self
 
 
 def cumulative_tokens(entry: TokenEntry) -> list[int]:
-    """The full sequence a child of this call must start with."""
+    """The full sequence a child of this call must start with.
+
+    Delta records require parent-chain reconstruction.
+    """
+    if entry.prompt_is_delta:
+        raise ValueError(
+            f"model call {entry.model_call_id} stores a delta prompt; reconstruct through its parent chain"
+        )
     return list(entry.prompt_token_ids) + list(entry.generation_token_ids)
 
 
@@ -196,13 +223,18 @@ def stamp_lineage(
     parent_call_id: str | None,
     *,
     parent_resolution: ParentResolutionStatus | None = None,
+    cumulative: list[int] | None = None,
 ) -> TokenEntry:
     """Fill token lineage and the request-time parent decision.
 
-    ``cum_len`` and ``digest`` always describe this call.
+    ``cum_len`` and ``digest`` describe the full sequence.
+    A delta entry must pass ``cumulative`` explicitly.
     ``parent_resolution=None`` preserves records built by compatibility callers.
     """
-    cumulative = cumulative_tokens(entry)
+    if cumulative is None:
+        cumulative = cumulative_tokens(entry)
+    elif entry.prompt_is_delta is False and cumulative != cumulative_tokens(entry):
+        raise ValueError("provided cumulative tokens disagree with the entry's own arrays")
     entry.cum_len = len(cumulative)
     entry.digest = compute_digest(cumulative)
     entry.parent_call_id = parent_call_id

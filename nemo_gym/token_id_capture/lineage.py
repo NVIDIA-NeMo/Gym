@@ -293,6 +293,8 @@ class LineageNode:
     # A mid-rollout dialect switch can misalign it; verification then fails closed.
     context_len: int = 0
     context_digest: str = ""
+    parent_call_id: str | None = None
+    prompt_is_delta: bool = False
 
 
 def stamp_continuation(entry: TokenEntry, request_items: list[dict]) -> TokenEntry:
@@ -396,6 +398,8 @@ class RolloutLineage:
             entry_offset=entry_offset,
             context_len=entry.continuation_context_len,
             context_digest=entry.continuation_context_digest,
+            parent_call_id=entry.parent_call_id,
+            prompt_is_delta=entry.prompt_is_delta,
         )
         previous = self.by_call_id.get(entry.model_call_id)
         if previous is not None:
@@ -530,6 +534,8 @@ class IncrementalLineageStore:
       ``_load_entry(rollout_id, ref)`` -> ``TokenEntry`` for one committed record.
 
     Optional hooks:
+      ``_load_entries(rollout_id, refs)`` — batch-load one parent chain
+        (default: call ``_load_entry`` for each reference).
       ``_read_locked(rollout_id)`` — context manager held around fetch+resolve
         for backends with a read-lock discipline (default: no lock).
       ``is_process_shared()`` — default ``True``; an external backend exists to
@@ -539,14 +545,21 @@ class IncrementalLineageStore:
     class CursorReset(Exception):
         """The stored cursor no longer describes the backend; refetch from scratch."""
 
-    def __init__(self, *, max_cached_rollouts: int = 65536) -> None:
+    def __init__(self, *, max_cached_rollouts: int = 65536, max_cached_tokens: int = 8_000_000) -> None:
         import threading
 
         if max_cached_rollouts < 1:
             raise ValueError("max_cached_rollouts must be positive")
+        if max_cached_tokens < 1:
+            raise ValueError("max_cached_tokens must be positive")
         # (cursor, refs, lineage): lineage stays at index 2 for diagnostics/tooling.
         self._cache: dict[str, tuple[Any, dict[str, Any], RolloutLineage]] = {}
         self._max_cached_rollouts = max_cached_rollouts
+        # Keep only the latest materialized parent for each rollout.
+        # The global token bound avoids recreating full-record memory growth.
+        self._materialized: dict[str, tuple[str, tuple[int, ...]]] = {}
+        self._materialized_tokens = 0
+        self._max_cached_tokens = max_cached_tokens
         self._cache_guard = threading.Lock()
         # Fixed lock striping bounds synchronization metadata.
         # Hash collisions only serialize unrelated rollouts.
@@ -558,6 +571,13 @@ class IncrementalLineageStore:
 
     def _load_entry(self, rollout_id: str, ref: Any) -> TokenEntry:
         raise NotImplementedError
+
+    def _load_entries(self, rollout_id: str, refs: list[Any]) -> list[TokenEntry]:
+        """Load several committed entries.
+
+        Backends can override this hook to fetch a parent chain in one operation.
+        """
+        return [self._load_entry(rollout_id, ref) for ref in refs]
 
     def _read_locked(self, rollout_id: str):
         from contextlib import nullcontext
@@ -582,6 +602,27 @@ class IncrementalLineageStore:
                 if oldest == rollout_id:
                     break
                 self._cache.pop(oldest)
+                materialized = self._materialized.pop(oldest, None)
+                if materialized is not None:
+                    self._materialized_tokens -= len(materialized[1])
+
+    def _cached_materialized(self, rollout_id: str) -> tuple[str, tuple[int, ...]] | None:
+        with self._cache_guard:
+            return self._materialized.get(rollout_id)
+
+    def _remember_materialized(self, rollout_id: str, call_id: str, tokens: tuple[int, ...]) -> None:
+        with self._cache_guard:
+            previous = self._materialized.pop(rollout_id, None)
+            if previous is not None:
+                self._materialized_tokens -= len(previous[1])
+            if len(tokens) > self._max_cached_tokens:
+                return
+            self._materialized[rollout_id] = (call_id, tokens)
+            self._materialized_tokens += len(tokens)
+            while self._materialized_tokens > self._max_cached_tokens:
+                oldest = next(iter(self._materialized))
+                evicted = self._materialized.pop(oldest)
+                self._materialized_tokens -= len(evicted[1])
 
     def _refresh(self, rollout_id: str) -> tuple[dict[str, Any], RolloutLineage]:
         with self._cache_guard:
@@ -601,39 +642,60 @@ class IncrementalLineageStore:
 
     def _materialize(
         self, rollout_id: str, node: LineageNode, refs: dict[str, Any], lineage: RolloutLineage
-    ) -> list[int]:
+    ) -> tuple[int, ...]:
         """Load one RESOLVED parent's cumulative tokens from the backend.
 
+        Read the chain in one batch and append each token segment once.
         Digest verification makes stale references fail closed.
         """
         from nemo_gym.token_id_capture.records import compute_digest
 
-        def load(call_id: str) -> TokenEntry:
-            if call_id not in refs:
-                raise ValueError(f"lineage node for {call_id} has no backend ref")
-            entry = self._load_entry(rollout_id, refs[call_id])
-            if entry.model_call_id != call_id:
-                raise ValueError(f"ref for {call_id} points at {entry.model_call_id}")
-            return entry
-
-        # Walk delta suffixes back to a full-prompt anchor.
-        suffixes: list[tuple[list[int], list[int]]] = []
-        current = load(node.call_id)
-        depth = 0
-        while getattr(current, "prompt_is_delta", False):
-            depth += 1
-            if depth > 10_000:
+        # Metadata carries enough lineage to collect every backend reference before loading tokens.
+        cached = self._cached_materialized(rollout_id)
+        chain: list[LineageNode] = []
+        seen: set[str] = set()
+        current = node
+        cached_tokens: tuple[int, ...] | None = None
+        while True:
+            if cached is not None and current.call_id == cached[0]:
+                cached_tokens = cached[1]
+                break
+            if current.call_id in seen:
+                raise ValueError(f"delta chain for {node.call_id} contains a cycle")
+            if len(chain) >= 10_000:
                 raise ValueError(f"delta chain for {node.call_id} exceeds sane depth")
-            suffixes.append((list(current.prompt_token_ids), list(current.generation_token_ids)))
-            if not current.parent_call_id or lineage.by_call_id.get(current.parent_call_id) is None:
-                raise ValueError(f"delta record {current.model_call_id} has no indexed parent")
-            current = load(current.parent_call_id)
-        tokens = cumulative_tokens(current)
-        for suffix, generation in reversed(suffixes):
-            tokens = tokens + suffix + generation
+            seen.add(current.call_id)
+            chain.append(current)
+            if not current.prompt_is_delta:
+                break
+            if not current.parent_call_id:
+                raise ValueError(f"delta record {current.call_id} has no parent call id")
+            parent = lineage.by_call_id.get(current.parent_call_id)
+            if parent is None:
+                raise ValueError(f"delta record {current.call_id} has no indexed parent")
+            current = parent
+
+        ordered_nodes = list(reversed(chain))
+        missing_ref = next((item.call_id for item in ordered_nodes if item.call_id not in refs), None)
+        if missing_ref is not None:
+            raise ValueError(f"lineage node for {missing_ref} has no backend ref")
+        entries = (
+            self._load_entries(rollout_id, [refs[item.call_id] for item in ordered_nodes]) if ordered_nodes else []
+        )
+
+        tokens = list(cached_tokens or ())
+        for expected, entry in zip(ordered_nodes, entries, strict=True):
+            if entry.model_call_id != expected.call_id:
+                raise ValueError(f"ref for {expected.call_id} points at {entry.model_call_id}")
+            if entry.prompt_is_delta != expected.prompt_is_delta:
+                raise ValueError(f"metadata for {expected.call_id} disagrees with its stored entry")
+            tokens.extend(entry.prompt_token_ids)
+            tokens.extend(entry.generation_token_ids)
         if node.digest and compute_digest(tokens) != node.digest:
             raise ValueError(f"materialized tokens for {node.call_id} fail their digest")
-        return tokens
+        materialized = tuple(tokens)
+        self._remember_materialized(rollout_id, node.call_id, materialized)
+        return materialized
 
     async def resolve(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
         return await asyncio.to_thread(self._resolve, rollout_id, request_items)
@@ -662,6 +724,8 @@ class IncrementalLineageStore:
     async def close(self) -> None:
         with self._cache_guard:
             self._cache.clear()
+            self._materialized.clear()
+            self._materialized_tokens = 0
 
 
 class FileLineageStore(IncrementalLineageStore):
@@ -672,10 +736,16 @@ class FileLineageStore(IncrementalLineageStore):
     ``put`` is immediately visible.
     """
 
-    def __init__(self, root: str | Path, *, max_cached_rollouts: int = 65536) -> None:
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        max_cached_rollouts: int = 65536,
+        max_cached_tokens: int = 8_000_000,
+    ) -> None:
         from nemo_gym.token_id_capture.store import TokenCaptureStore
 
-        super().__init__(max_cached_rollouts=max_cached_rollouts)
+        super().__init__(max_cached_rollouts=max_cached_rollouts, max_cached_tokens=max_cached_tokens)
         self._store = TokenCaptureStore(root)
 
     def _read_locked(self, rollout_id: str):
@@ -711,3 +781,11 @@ class FileLineageStore(IncrementalLineageStore):
         with self._store.path_for(rollout_id).open("rb") as handle:
             handle.seek(ref)
             return TokenEntry.model_validate(orjson.loads(handle.readline()))
+
+    def _load_entries(self, rollout_id: str, refs: list[Any]) -> list[TokenEntry]:
+        entries = []
+        with self._store.path_for(rollout_id).open("rb") as handle:
+            for ref in refs:
+                handle.seek(ref)
+                entries.append(TokenEntry.model_validate(orjson.loads(handle.readline())))
+        return entries

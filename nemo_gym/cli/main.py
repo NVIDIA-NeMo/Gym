@@ -761,6 +761,11 @@ COMMANDS = {
         summary="Resolve the final config from configs, flags, and overrides.",
         flags=(CONFIG, SEARCH_DIR),
     ),
+    "env schema": Command(
+        target="nemo_gym.cli.env:show_schema",
+        summary="Print a resources server's task-data schema as JSON Schema.",
+        flags=(RESOURCES_SERVER, SEARCH_DIR),
+    ),
     "env validate": Command(
         target="nemo_gym.cli.env:validate",
         summary="Validate a manifest-backed workload or config without starting services.",

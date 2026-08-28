@@ -81,6 +81,8 @@ from nemo_gym.rollout_observability import (
     TrajectoryToolCall,
     TrajectoryTurn,
 )
+from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
+from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
 _failures_path_for = failures_path_for  # Backwards-compatible alias
@@ -1176,6 +1178,19 @@ class RolloutCollectionHelper(BaseModel):
         return input_rows, rows, results, result_strs
 
     async def run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
+        """Collect rollouts for a whole config. Wrapped in the run-scoped `job` span.
+
+        This is the driver side of an evaluation run and the outermost span Gym produces,
+        so every rollout it dispatches is a descendant of it. `job` is in the `default`
+        preset but deliberately not in `per_rollout`, where each rollout is meant to be
+        its own bounded root trace.
+        """
+        if not is_span_group_enabled(GymSpanGroup.JOB):
+            return await self._run_from_config(config)
+        with managed_span(GymSpanGroup.JOB, "gym.job"):
+            return await self._run_from_config(config)
+
+    async def _run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
         failures_fpath = failures_path_for(output_fpath)
 

@@ -22,6 +22,9 @@ env:
       enabled: true
       dir: /tmp/nemo_gym_token_id_captures  # The writer and consumer share this node-local directory.
       sink: my_pkg.sinks:MyDataPlaneSink   # This optional sink replaces the file store.
+      lineage_store: my_pkg.sinks:MyResolver  # Required with a custom sink (same backend namespace).
+      delta_records: true                  # Store RESOLVED continuations as parent-relative suffixes.
+      max_mask_fraction: 0.5               # Abort a run that is mostly producing masked rollouts.
 ```
 
 Evaluation capture uses ``/ng-rollout/<id>/...``.
@@ -114,8 +117,13 @@ class TokenIdCaptureSettings(BaseModel):
     # Without one, every multi-call continuation is unresolved and masked.
     # This flag permits that degraded behavior explicitly.
     allow_unresolved_continuations: bool = False
-    # Abort once enough finalized rollouts exceed this masked fraction.
-    # ``None`` disables the limit.
+    # Store resolved prompts as suffixes of their verified parent tokens.
+    # This avoids repeatedly storing the growing full prompt.
+    # Root and unresolved records remain full-prompt reconstruction anchors.
+    delta_records: bool = False
+    # Abort when the finalized-rollout masked fraction exceeds this limit.
+    # Enforcement begins after ``mask_fraction_min_samples`` observations.
+    # ``None`` disables the kill switch.
     max_mask_fraction: float | None = None
     mask_fraction_min_samples: int = 50
 
@@ -172,14 +180,15 @@ class TokenIdCaptureConfig(BaseModel):
             return
         if block.allow_unresolved_continuations:
             logger.warning(
-                "token_id_capture has a custom sink and no lineage_store. "
-                "Every continuation will be unresolved and masked."
+                "token_id_capture has a custom sink and no lineage_store: every continuation "
+                "will resolve UNRESOLVED and multi-call rollouts will be masked."
             )
             return
         raise ValueError(
-            "token_id_capture has a custom sink but no lineage_store. Configure "
+            "token_id_capture has a custom sink but no lineage_store, so no continuation can "
+            "resolve its parent and every multi-call rollout will be masked. Configure "
             "token_id_capture.lineage_store on the same backend as the sink, or set "
-            "token_id_capture.allow_unresolved_continuations: true to accept unresolved continuations."
+            "token_id_capture.allow_unresolved_continuations: true to accept the loss."
         )
 
     @property
