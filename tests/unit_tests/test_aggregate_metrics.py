@@ -889,3 +889,74 @@ class TestPerfSummaryInAggregateMetrics:
         # token_observability_coverage (hand-built dict), so it doesn't count as token-covered.
         assert result.perf_summary["overall_observability_coverage"] == 0.5
         assert result.perf_summary["token_observability_coverage"] == 0.0
+
+
+class TestMaskedSamplesAreNotScored:
+    """A masked sample is a completed rollout whose reward is not a valid measurement."""
+
+    def _vr(self, task, rollout, reward, mask=False):
+        return {
+            TASK_INDEX_KEY_NAME: task,
+            ROLLOUT_INDEX_KEY_NAME: rollout,
+            "reward": reward,
+            "mask_sample": mask,
+        }
+
+    def test_a_masked_zero_does_not_halve_the_score(self) -> None:
+        result = compute_aggregate_metrics([self._vr(0, 0, 1.0), self._vr(0, 1, 0.0, mask=True)])
+
+        assert result.key_metrics["mean/reward"] == 1.0
+        assert result.key_metrics["coverage/measured_rollouts"] == 1
+        assert result.key_metrics["coverage/masked_rollouts"] == 1
+
+    def test_the_flag_is_not_published_as_a_quality_metric(self) -> None:
+        result = compute_aggregate_metrics([self._vr(0, 0, 1.0), self._vr(0, 1, 0.0, mask=True)])
+
+        assert not [key for key in result.agent_metrics if key.endswith("/mask_sample")]
+
+    def test_a_run_that_masks_nothing_is_unchanged(self) -> None:
+        """No masking means no new keys, so an existing dashboard reads what it read before."""
+        plain = compute_aggregate_metrics(_make_verify_responses(2, 2))
+        flagged = compute_aggregate_metrics([{**vr, "mask_sample": False} for vr in _make_verify_responses(2, 2)])
+
+        assert flagged.key_metrics == plain.key_metrics
+        assert not [key for key in flagged.key_metrics if key.startswith("coverage/")]
+
+    def test_a_fully_masked_run_reports_coverage_instead_of_a_zero(self) -> None:
+        result = compute_aggregate_metrics([self._vr(0, 0, 0.0, mask=True), self._vr(1, 0, 0.0, mask=True)])
+
+        assert "mean/reward" not in result.key_metrics
+        assert result.key_metrics["coverage/measured_rollouts"] == 0
+        assert result.key_metrics["coverage/fully_masked_tasks"] == 2
+
+    def test_a_fully_masked_task_is_counted_but_not_scored(self) -> None:
+        result = compute_aggregate_metrics(
+            [self._vr(0, 0, 1.0), self._vr(1, 0, 0.0, mask=True), self._vr(1, 1, 0.0, mask=True)]
+        )
+
+        assert result.key_metrics["mean/reward"] == 1.0
+        assert result.key_metrics["coverage/measured_tasks"] == 1
+        assert result.key_metrics["coverage/fully_masked_tasks"] == 1
+        # The scored task keeps its own index rather than inheriting the masked one's.
+        assert [group[TASK_INDEX_KEY_NAME] for group in result.group_level_metrics] == [0]
+
+    def test_custom_metrics_see_only_the_scored_samples(self) -> None:
+        seen = {}
+
+        def _compute_metrics(tasks):
+            seen["rollouts"] = sum(len(task) for task in tasks)
+            return {}
+
+        compute_aggregate_metrics(
+            [self._vr(0, 0, 1.0), self._vr(0, 1, 0.0, mask=True)],
+            compute_metrics_fn=_compute_metrics,
+        )
+
+        assert seen["rollouts"] == 1
+
+    def test_a_fully_masked_run_still_reports_observability_coverage(self) -> None:
+        """A masked sample still executed, so it still counts for perf coverage."""
+        result = compute_aggregate_metrics([{**self._vr(0, 0, 0.0, mask=True), "ng_perf": {"num_turns": 3}}])
+
+        assert result.perf_summary is not None
+        assert result.perf_summary["overall_observability_coverage"] == 1.0

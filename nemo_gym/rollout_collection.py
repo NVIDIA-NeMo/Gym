@@ -116,21 +116,34 @@ from nemo_gym.token_id_capture.delivery import (
 logger = logging.getLogger(__name__)
 
 
-def _masking_step_metrics(agent_name: str, total: int, unmasked: Counter) -> Dict[str, float]:
-    """Progress metrics for the rollouts an environment reported as masked.
+def _masking_step_metrics(agent_name: str, scored: Counter, dropped: Counter) -> Dict[str, float]:
+    """In-progress view of what a run is losing to its environment rather than its policy.
 
-    ``reward`` keeps averaging over every rollout so an existing dashboard reads the
-    same number it read before. ``reward_unmasked`` is the same average with the masked
-    rollouts removed, and the gap between the two is the score a run lost to its own
-    infrastructure. Both keys appear only once something is actually masked, so a run
-    that reports no masking exports exactly what it exported before.
+    ``scored`` covers persisted rollouts only, split into the unmasked ones (``count``,
+    ``reward``) and the masked ones; ``dropped`` counts what never reached the main output
+    at all. ``reward_unmasked`` averages over the unmasked rollouts alone, so the gap
+    against the existing ``reward`` series is the score lost to infrastructure. Failed and
+    omitted attempts are reported as counts, never folded into a quality average.
+
+    Empty until something is actually masked or dropped, so a healthy run exports exactly
+    what it exported before. The final numbers come from ``/aggregate_metrics``; this is
+    the progress view while the run is still going.
     """
-    masked = total - int(unmasked["count"])
-    if not masked or not total:
+    masked, unmasked = int(scored["masked"]), int(scored["count"])
+    failed, omitted = int(dropped["failed"]), int(dropped["omitted"])
+    if not (masked or failed or omitted):
         return {}
-    metrics = {f"progress/{agent_name}/masked_pct": round(100 * masked / total, 2)}
-    if unmasked["count"]:
-        metrics[f"progress/{agent_name}/reward_unmasked"] = round(100 * unmasked["reward"] / unmasked["count"], 2)
+
+    metrics: Dict[str, float] = {}
+    persisted = masked + unmasked
+    if masked and persisted:
+        metrics[f"progress/{agent_name}/masked_pct"] = round(100 * masked / persisted, 2)
+    if unmasked:
+        metrics[f"progress/{agent_name}/reward_unmasked"] = round(100 * scored["reward"] / unmasked, 2)
+    if failed:
+        metrics[f"progress/{agent_name}/failed"] = failed
+    if omitted:
+        metrics[f"progress/{agent_name}/omitted"] = omitted
     return metrics
 
 
@@ -1356,10 +1369,13 @@ class RolloutCollectionHelper(BaseModel):
         pcts_to_print = list(range(1, 100)) + [99.5, 100]
         agent_name_to_metrics = defaultdict(Counter)
         agent_name_to_counts = defaultdict(int)
-        # Reward totals over the rollouts an environment did not mask. Token capture
-        # already reports its own masking; this is the same accounting for the masking
-        # an environment declares on its verify response.
-        agent_name_to_unmasked = defaultdict(Counter)
+        # Quality accounting restricted to persisted rollouts: `count`/`reward` over the
+        # unmasked ones, `masked` over the rest. Token capture already reports its own
+        # masking; this is the same accounting for what an environment declares on its
+        # verify response.
+        agent_name_to_scored = defaultdict(Counter)
+        # Rollouts that never reach the main output at all, kept apart from quality.
+        agent_name_to_dropped = defaultdict(Counter)
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
         dispatched_per_agent = Counter(counts_left)
         start_time = time()
@@ -1508,10 +1524,17 @@ class RolloutCollectionHelper(BaseModel):
                     {k: v for k, v in result.items() if isinstance(v, (int, float)) and not k.startswith("_")}
                 )
                 agent_name_to_counts[agent_name] += 1
-                if not result.get(MASK_SAMPLE_KEY):
-                    agent_name_to_unmasked[agent_name].update(
-                        {"reward": float(result.get("reward") or 0.0), "count": 1}
-                    )
+
+            # Quality accounting covers only what reaches the main rollout output, which is
+            # what /aggregate_metrics later scores. Broader than `no_result`: any failure
+            # class goes to the sidecar and a kill-shaped rollout is not stored at all, so
+            # both are counted as such rather than as a reward that happened to be zero.
+            if no_persist or failure_class is not None:
+                agent_name_to_dropped[agent_name].update({"omitted" if no_persist else "failed": 1})
+            elif result.get(MASK_SAMPLE_KEY):
+                agent_name_to_scored[agent_name].update({"masked": 1})
+            else:
+                agent_name_to_scored[agent_name].update({"reward": float(result.get("reward") or 0.0), "count": 1})
 
             current_pct = 100 * len(results) / len(input_rows)
             if pcts_to_print and current_pct >= pcts_to_print[0]:
@@ -1548,9 +1571,13 @@ class RolloutCollectionHelper(BaseModel):
                         step_metrics[f"progress/{agent_name}/reward_lower_bound"] = round(
                             100 * metrics["reward"] / (counts_left[agent_name] + agent_name_to_counts[agent_name]), 2
                         )
-                    for agent_name, total in agent_name_to_counts.items():
+                    for agent_name in agent_name_to_counts:
                         step_metrics.update(
-                            _masking_step_metrics(agent_name, total, agent_name_to_unmasked[agent_name])
+                            _masking_step_metrics(
+                                agent_name,
+                                agent_name_to_scored[agent_name],
+                                agent_name_to_dropped[agent_name],
+                            )
                         )
 
                     export_metrics(step_metrics, step=int(current_pct))

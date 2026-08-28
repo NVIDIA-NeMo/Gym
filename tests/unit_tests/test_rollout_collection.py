@@ -3968,20 +3968,36 @@ class TestPreprocessExamples:
 
 
 class TestMaskingStepMetrics:
-    """`mask_sample` reported by an environment shows up in the progress metrics."""
+    """Progress accounting covers persisted rollouts; dropped attempts are counted apart."""
 
-    def test_nothing_masked_adds_no_keys(self) -> None:
-        assert _masking_step_metrics("my_agent", 4, Counter({"reward": 2.0, "count": 4})) == {}
+    def test_a_healthy_run_adds_no_keys(self) -> None:
+        assert _masking_step_metrics("my_agent", Counter({"reward": 2.0, "count": 4}), Counter()) == {}
 
     def test_masked_rollouts_report_their_share_and_the_score_without_them(self) -> None:
-        # 10 rollouts, 2 masked; the 8 unmasked ones scored 4.0 in total.
-        metrics = _masking_step_metrics("my_agent", 10, Counter({"reward": 4.0, "count": 8}))
+        # 10 persisted, 2 masked; the 8 unmasked ones scored 4.0 in total.
+        metrics = _masking_step_metrics("my_agent", Counter({"reward": 4.0, "count": 8, "masked": 2}), Counter())
 
         assert metrics == {
             "progress/my_agent/masked_pct": 20.0,
             "progress/my_agent/reward_unmasked": 50.0,
         }
 
-    def test_every_rollout_masked_reports_the_share_without_a_score(self) -> None:
+    def test_every_persisted_rollout_masked_publishes_no_score(self) -> None:
         """No unmasked rollout means no honest average to publish."""
-        assert _masking_step_metrics("my_agent", 6, Counter()) == {"progress/my_agent/masked_pct": 100.0}
+        assert _masking_step_metrics("my_agent", Counter({"masked": 6}), Counter()) == {
+            "progress/my_agent/masked_pct": 100.0
+        }
+
+    def test_failed_and_omitted_attempts_do_not_enter_the_quality_average(self) -> None:
+        """A sidecar row and a kill-shaped one are counted, never averaged as a zero."""
+        metrics = _masking_step_metrics(
+            "my_agent",
+            Counter({"reward": 4.0, "count": 4}),
+            Counter({"failed": 3, "omitted": 2}),
+        )
+
+        assert metrics == {
+            "progress/my_agent/reward_unmasked": 100.0,
+            "progress/my_agent/failed": 3,
+            "progress/my_agent/omitted": 2,
+        }
