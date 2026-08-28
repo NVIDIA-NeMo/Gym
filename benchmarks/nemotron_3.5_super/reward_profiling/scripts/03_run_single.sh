@@ -66,7 +66,7 @@ try:
     doc = json.loads((Path(sys.argv[1]) / "sweep_report.json").read_text())
 except OSError:
     doc = {}
-for block in ("sbatch", "srun"):
+for block in ("sbatch", "srun", "vllm"):
     for key, value in (doc.get(block) or {}).items():
         print(f"{key}={value}")
 PY_SBATCH

@@ -85,7 +85,8 @@ fi
 
 
 echo ">>> dealing $SWEEP_DIR into $NUM_SHARDS shards"
-python -m nemo_gym.sweep shard "$SWEEP_DIR" --num-shards "$NUM_SHARDS" --out-dir "$SHARDS_DIR"
+SWEEP_DIR="$SWEEP_DIR" NUM_SHARDS="$NUM_SHARDS" SHARDS_DIR="$SHARDS_DIR" \
+    bash "$RP_DIR/scripts/02_shard.sh"
 
 # Outstanding rollouts for a shard: inputs whose (task, rollout) pair is not yet in its
 # rollouts.jsonl.
@@ -160,7 +161,8 @@ while :; do
 done
 
 echo ">>> merging shard rollouts back into $SWEEP_DIR"
-python -m nemo_gym.sweep merge "$SHARDS_DIR" --output "$SWEEP_DIR/rollouts.jsonl"
+SWEEP_DIR="$SWEEP_DIR" SHARDS_DIR="$SHARDS_DIR" OUTPUT="$SWEEP_DIR/rollouts.jsonl" \
+    bash "$RP_DIR/scripts/04_merge_shards.sh"
 
 echo ">>> splitting by manifest entry"
 python -m nemo_gym.sweep split "$SWEEP_DIR"

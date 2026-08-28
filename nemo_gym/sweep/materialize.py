@@ -92,6 +92,8 @@ class MaterializeReport:
     sbatch: Dict[str, str] = field(default_factory=dict)
     # CONTAINER / SANDBOX_CONTAINER / MOUNTS, applied the same way.
     srun: Dict[str, str] = field(default_factory=dict)
+    # MODEL / VLLM_CONFIG, applied the same way.
+    vllm: Dict[str, str] = field(default_factory=dict)
 
     @property
     def total_source_rows(self) -> int:
@@ -112,6 +114,7 @@ class MaterializeReport:
             "gym_eval_run": self.gym_eval_run,
             "sbatch": self.sbatch,
             "srun": self.srun,
+            "vllm": self.vllm,
             "total_source_rows": self.total_source_rows,
             "total_materialized_rows": self.total_materialized_rows,
             "entries": {
@@ -345,6 +348,7 @@ def materialize(
         gym_eval_run=manifest.gym_eval_run.overrides(),
         sbatch=manifest.sbatch.env(),
         srun=manifest.srun.env(),
+        vllm=manifest.vllm.env(),
         rows_per_entry=rows_per_entry,
         materialized_per_entry=materialized_per_entry,
         num_repeats_per_entry=repeats_by_entry,

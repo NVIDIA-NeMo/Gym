@@ -228,6 +228,27 @@ class Srun(BaseModel):
         return {key: value for key, value in pairs.items() if value}
 
 
+class Vllm(BaseModel):
+    """What the launcher serves, i.e. ``vllm serve <model>``.
+
+    ``model`` is also passed as ``++policy_model_name``, since the served name and the name Gym
+    routes to have to agree. Optional: a manifest that pins a checkpoint is reproducible on its
+    own, and leaving it out means the launcher requires MODEL, which is right when the same blend
+    is profiled against many checkpoints.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Served checkpoint path, i.e. MODEL.
+    model: Optional[str] = None
+    # The vLLM arg script the launcher sources, i.e. VLLM_CONFIG.
+    config: Optional[str] = None
+
+    def env(self) -> Dict[str, str]:
+        pairs = {"MODEL": self.model, "VLLM_CONFIG": self.config}
+        return {key: value for key, value in pairs.items() if value}
+
+
 class SweepManifest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -241,6 +262,7 @@ class SweepManifest(BaseModel):
     materialize: Materialize = Field(default_factory=Materialize)
     sbatch: Sbatch = Field(default_factory=Sbatch)
     srun: Srun = Field(default_factory=Srun)
+    vllm: Vllm = Field(default_factory=Vllm)
     gym_env_start: GymEnvStart = Field(default_factory=GymEnvStart)
     gym_eval_run: GymEvalRun = Field(default_factory=GymEvalRun)
 

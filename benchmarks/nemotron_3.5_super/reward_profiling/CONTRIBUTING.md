@@ -113,8 +113,7 @@ Two extra things, in [`manifests/example_sandbox_judge.yaml`](./manifests/exampl
 MANIFEST=$R/manifests/<yours>.yaml OUT_DIR=$R/outputs/sweeps/<name> LIMIT_PER_ENTRY=8 \
   bash $R/scripts/01_materialize.sh
 
-MODEL=<ckpt> CONTAINER=<eval sqsh> \
-  SWEEP_DIR=$R/outputs/sweeps/<name>/<nickname> bash $R/scripts/03_run_single.sh
+MODEL=<ckpt> SWEEP_DIR=$R/outputs/sweeps/<name>/<nickname> bash $R/scripts/03_run_single.sh
 ```
 
 `LIMIT_PER_ENTRY=8` takes only the first 8 rows of your dataset instead of all of them, so at
@@ -159,7 +158,8 @@ is missing.
 
 ### 03c - Sandbox environments.
 
-Pass `SANDBOX_CONTAINER=<nemo-skills sqsh>`. Without it `ns_tools` falls back to `127.0.0.1:6000`,
+The shared manifest's `srun.sandbox_container` already names one; a standalone manifest needs its
+own, or `SANDBOX_CONTAINER=<nemo-skills sqsh>`. Without it `ns_tools` falls back to `127.0.0.1:6000`,
 where nothing listens, and every rollout fails with a bare 500. `03_run_single.sh` starts one and waits
 for `/health` before collecting, so watch that gate rather than the rollout count.
 

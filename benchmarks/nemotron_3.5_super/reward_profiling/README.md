@@ -236,8 +236,7 @@ MANIFEST=$R/manifests/<name>.yaml bash $R/scripts/01_materialize.sh
 Then run it. One job serves the policy itself:
 
 ```bash
-MODEL=<ckpt> CONTAINER=<eval sqsh> SANDBOX_CONTAINER=<sandbox sqsh> \
-  SWEEP_DIR=$R/outputs/sweeps/<nickname> bash $R/scripts/03_run_single.sh
+MODEL=<ckpt> SWEEP_DIR=$R/outputs/sweeps/<nickname> bash $R/scripts/03_run_single.sh
 ```
 
 Or against a policy already served somewhere — no Slurm, no GPUs:
@@ -250,31 +249,25 @@ SWEEP_DIR=<sweep> POLICY_BASE_URL=http://host:8000/v1 POLICY_MODEL_NAME=<model> 
 ### 03a - Sharding / Unsharding data
 
 One job cannot go past ~16 nodes: `--segment` needs a topology-contiguous allocation and an NVL72
-rack is 18 nodes. To go wider, split the input across N jobs.
+rack is 18 nodes. To go wider, split the input across N jobs — which `03_run_sharded.sh` does for
+you, so you rarely run these two directly:
 
 ```bash
 SWEEP_DIR=<sweep> NUM_SHARDS=16 bash $R/scripts/02_shard.sh   # deal
 SWEEP_DIR=<sweep> bash $R/scripts/04_merge_shards.sh          # unshard
 ```
 
-Each shard directory is a complete SWEEP_DIR, so `03_run_single.sh` runs against one unmodified. Rows are
-dealt round-robin, so every shard carries every environment and none inherits a whole slow one.
+Reach for them only to launch shards by hand, or to reshard between runs. Each shard directory is a
+complete SWEEP_DIR, so `03_run_single.sh` runs against one unmodified. Rows are dealt round-robin,
+so every shard carries every environment and none inherits a whole slow one.
 
 This works because `_ng_task_index` is stamped before sharding and Gym never rewrites it, so shard
 rollouts concatenate without renumbering. Merge deduplicates on `(_ng_task_index,
 _ng_rollout_index)` — the same key Gym resumes on — so a rerun shard cannot double-count.
 
-Resharding to a different N is safe and lossless. `02_shard.sh` folds any collected rollouts back
-into the parent and snapshots it to `snapshots/<UTC>/` before touching a shard directory, then
-carries that work into the new layout. To check that on your own data:
-
-```bash
-SWEEP_DIR=<sweep> bash $R/scripts/debug_selftest.sh
-```
-
-It drives a scratch copy through six shard counts (4→7→2→9→3→5), asserting after each that inputs
-partition exactly, every rollout sits in the shard owning its input, collected work survives the
-reshape, and merge round-trips — then splits and profiles. Read-only with respect to `SWEEP_DIR`.
+Resharding to a different N is safe and lossless: collected rollouts are folded back into the
+parent and snapshotted to `snapshots/<UTC>/` before any shard directory is touched, then carried
+into the new layout.
 
 ### 03b - Starting, resuming and monitoring a profiling job
 
@@ -283,8 +276,7 @@ outstanding is resubmitted, up to `MAX_ROUNDS` (4). It merges and splits when al
 each shard's own job profiles itself, so run `05_profile.sh` after for the whole sweep:
 
 ```bash
-MODEL=<ckpt> CONTAINER=<sqsh> SANDBOX_CONTAINER=<sandbox sqsh> \
-  SWEEP_DIR=<sweep> NUM_SHARDS=16 bash $R/scripts/03_run_sharded.sh
+MODEL=<ckpt> SWEEP_DIR=<sweep> NUM_SHARDS=16 bash $R/scripts/03_run_sharded.sh
 ```
 
 It runs in the foreground for hours, so detach it — and start exactly one, since each watcher

@@ -154,6 +154,13 @@ srun:
   container: "/lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/Gym-github_worktrees/reward-profiling/results/vllm/vllm-openai:v0.27.1___tomer_with_gym_all.sqsh"
 
 
+# What gets served, i.e. `vllm serve <model>`; also passed as ++policy_model_name.
+# Pinned so the manifest is reproducible on its own and a run needs no arguments at all. Profiling
+# a different checkpoint means MODEL=<ckpt> on the command line, which overrides this -- change
+# `nickname` too, or the new run's artifacts land in the same directory as the old one's.
+vllm:
+  model: /lustre/fsw/portfolios/llmservice/users/abukharin/super35_dualds0821_pure_lm_ab/hf_text/full_generalist_prod/iter_6500
+
 # Runtime settings for `gym eval run --no-serve`.
 gym_eval_run:
   num_repeats: 8
