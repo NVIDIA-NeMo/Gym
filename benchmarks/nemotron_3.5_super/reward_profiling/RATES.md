@@ -1,148 +1,60 @@
-# Measured throughput, for compute planning
+# Measured rates, for compute planning
 
-Rates for sizing a run of `manifests/nemotron_3_ultra.yaml`. Measured on the P/D stack described
-under Conditions.
+Per-environment throughput for `manifests/nemotron_3_ultra.yaml`, measured lane by lane on
+1 prefill + 2 decode = **12 GPUs**, `num_repeats: 8`.
 
-**Every number below was measured lane-by-lane through a bench harness, not through
-`scripts/03_run.sh`.** The launcher's first successful end-to-end run (job
-6563900, 2026-08-27) collected 259/288 rollouts across all 36 environments with zero failures, but
-at `num_samples_in_parallel=1024` against a 288-row input -- every row in flight at once, so it
-produced a burst rather than a rate and is not comparable. Its shape is still informative and is
-recorded under Tail behaviour.
+**These are shares of one fleet, not independent capacities.** Every environment in a lane shared
+one endpoint, so a fast environment's rate reflects queueing behind slow ones. Use them to rank
+which environments dominate; do not sum them for GPU-hours — that overcounts by roughly the number
+of environments. Size from the aggregate at the bottom.
 
-## Conditions
-
-| | no-judge lane | judge lane | sandbox lane |
+| environment | lane | rollouts/hr | notes |
 |---|---|---|---|
-| job | 6553550 | 6559594 | 6559594 |
-| topology | 1 prefill + 2 decode = **12 GPUs** | same | same |
-| `num_samples_in_parallel` | 128 | 48 | 32 |
-| result | 2,245 rollouts / 1,438 s | 244 rollouts / 411 s | 55 rollouts / 410 s |
-| aggregate | **5,621 rollouts/hr** | **2,139 rollouts/hr** | **483 rollouts/hr** |
-| sandbox tier | n/a | n/a | 1 node, 32 uWSGI workers |
+| tau_pivot | plain | 755 | shares an agent with `tau_pivot_aq_mms` |
+| tau_pivot_aq_mms | plain | 755 | shared rate |
+| comp_coding | plain | 494 | shares an agent with `comp_coding_nemotronx` |
+| comp_coding_nemotronx | plain | 494 | shared rate, but 688 KB/row vs 306 — true rate likely lower |
+| ds1_augmented | plain | 387 | shares an agent with `ds1_basic` |
+| ds1_basic | plain | 387 | shared rate |
+| structured_outputs | plain | 385 | shares an agent with `structured_outputs_v2` |
+| structured_outputs_v2 | plain | 385 | shared rate |
+| equivalence_rule | plain | 288 | |
+| structured_outputs_v4 | plain | 281 | |
+| gdpval_pivot_v1 | plain | 278 | |
+| toolcall_schema | plain | 269 | |
+| workbench | plain | 264 | |
+| ds2_freeform | plain | 261 | |
+| droid_pivot_v1 | plain | 261 | |
+| search_pivot | plain | 235 | |
+| stem_mcqa_ultra_0 | plain | 232 | |
+| ds3_citation | plain | 206 | |
+| calendar_v2 | plain | 172 | |
+| nvarc_transductive | plain | 167 | |
+| instruction_following | plain | 152 | |
+| swe_pivot | plain | 126 | |
+| nvarc_inductive | plain | 85 | |
+| ether0 | plain | 80 | |
+| reasoning_gym | plain | 56 | slowest plain env; a tail driver |
+| terminal_pivot | plain | — | zero rollouts in the measured run; unsized |
+| multichallenge | judge | 285 | |
+| long_context | judge | 278 | |
+| abstention | judge | 271 | post-fix. The pre-fix 544/hr is void — truncated judge returning early |
+| inverse_if | judge | 258 | |
+| stem_openqa_ultra_0 | judge | 231 | |
+| math_cot | judge | 75 | slowest judge env by 4x; n=9-11, rate and reward both unresolved |
+| math_tir | sandbox | 421 | all three `ns_tools` entries share one agent and one rate |
+| stem_mcqa_tools_ultra_0 | sandbox | 421 | shared rate |
+| stem_openqa_tools_ultra_0 | sandbox | 421 | shared rate |
+| lean | sandbox | 61 | n=7, all reward 0.000. Too few to read; worst env in the pre-sweep too |
 
-## Sizing (use these)
+Lane aggregates: **plain 5,621/hr** (concurrency 128), **judge 1,398-2,139/hr** (48),
+**sandbox 483/hr** (32, one sandbox node with 32 uWSGI workers).
 
-Aggregate rate is the number to plan with. Per-environment rates below are *shares of one fleet*,
-not independent capacities -- summing per-environment GPU-hours overcounts by roughly the number
-of environments.
+## Sizing
 
-```
-GPU-hours = total_rollouts / (aggregate_rate / GPUs_measured)
-```
-
-| lane | rows | rollouts (x8) | aggregate | GPU-hours |
-|---|---|---|---|---|
-| no-judge (26 envs) | 623,006 | 4,984,048 | 5,621/hr | **10,640** |
-| judge (6 envs) | 51,707 | 413,656 | 1,398-2,139/hr | **2,320-3,551** |
-| sandbox (4 envs) | 51,408 | 411,264 | 483/hr | **10,218** |
-| **total (all 3 lanes)** | | | | **23,178-24,409** |
-
-Superseded by the mixed-workload measurement below: **16,540 GPU-hours**. Summing lanes
-measured separately double-counts, because judge and sandbox rollouts hold no GPU while blocked.
-
-| nodes | GPUs | wall (all 3 lanes) |
-|---|---|---|
-| 12 | 48 | 20.1-21.2 days |
-| 24 | 96 | **10.1-10.6 days** |
-| 48 | 192 | 5.0-5.3 days |
-| 96 | 384 | 2.5-2.6 days |
-
-**Sandbox is 42% of the total from 4 of 36 environments.** It measured 483/hr against a single
-sandbox node running 32 uWSGI workers, at driver concurrency 32 -- the lowest of any lane. This is
-the softest number here and the most improvable: sandbox capacity is a separate axis from GPU
-count, so adding sandbox nodes should move it without touching the fleet. Size the sandbox tier
-before committing to these figures.
-
-**Every figure is a floor.** Each decode engine schedules up to `max_num_seqs=512`, so 128
-concurrency against 2 decode nodes ran at ~12.5% of capacity -- the client semaphore, not the GPUs,
-was the limit. Raising concurrency should improve all of it.
-
-## Per-environment rates (relative ranking only)
-
-Contended: every environment in a lane shared one endpoint, so a fast environment's rate reflects
-queueing behind slow ones. Useful for spotting which environments dominate, not for per-environment
-GPU-hours.
-
-| no-judge | /hr | | judge | /hr |
-|---|---|---|---|---|
-| tau_pivot | 755 | | multichallenge | 285 |
-| code_gen | 494 | | lc_judge | 278 |
-| structured_outputs_v3 | 387 | | abstention | 271 |
-| structured_outputs | 385 | | inverse_if | 258 |
-| lc_equivalence_rule | 288 | | equivalence_llm_judge | 231 |
-| structured_outputs_v4 | 281 | | math_with_judge | 75 |
-| gdpval_pivot | 278 | | | |
-| toolcall_schema | 269 | | | |
-| workplace_assistant | 264 | | | |
-| freeform_formatting | 261 | | | |
-| droid_pivot | 261 | | | |
-| search_pivot | 235 | | | |
-| mcqa | 232 | | | |
-| citation_format | 206 | | | |
-| calendar | 172 | | | |
-| nvarc_transductive | 167 | | | |
-| instruction_following | 152 | | | |
-| swe_pivot | 126 | | | |
-| nvarc_inductive | 85 | | | |
-| ether0 | 80 | | | |
-| reasoning_gym | 56 | | | |
-
-Sandbox lane, same caveat:
-
-| sandbox | /hr | mean reward | note |
-|---|---|---|---|
-| ns_tools (3 entries, 1 agent) | 421 | 0.792 | math_tir + stem_mcqa + stem_openqa share `ns_tools_simple_agent`, so one rate covers all three |
-| math_formal_lean | 61 | 0.000 | 7 rollouts, all zero -- too few to read, see caveats |
-
-## Caveats
-
-- **The judge lane ran at concurrency 48 vs the no-judge lane's 128**, so the 4x aggregate gap
-  overstates the true judge penalty. Re-measure at matched concurrency before trusting the ratio.
-- **The judge lane measured 1,398/hr and 2,139/hr on two runs at identical concurrency (48)** --
-  a 53% spread with no deliberate change between them, most likely prefix-cache warmth from the
-  earlier run against the same endpoint. Neither number is solid; the range above reflects that.
-  Anything that depends on the judge figure needs a repeat measurement on a cold endpoint.
-- **`math_with_judge` is the slowest environment in the lane by 4x** (79/hr, vs 333-544/hr for its
-  peers) and returned mean reward 0.000 on one run and 0.222 on the next, on 11 and 9 rollouts.
-  Both samples are too small to read. Its rate and its reward are both unresolved.
-- **The sandbox lane produced 0 rollouts and 0 failures.** No sidecar exists, so `ns_tools` finds
-  nothing at `127.0.0.1:6000` and connection errors retry forever without being recorded. Its four
-  environments (~411k rollouts) are entirely unsized, and in the pre-sweep runs they were the most
-  expensive of the whole set.
-- **`terminus_judge_string_only`** produced zero rollouts in the no-judge run; no rate.
-- **`math_formal_lean` returned 0.000 on all 7 rollouts.** Not read as a finding: n=7, and lean was
-  the worst env in the pre-sweep too (25.8% completion). It needs a longer run before its reward or
-  its 61/hr means anything.
-- **Two config fixes are carried in the manifests, not upstream.** `ns_tools` registers only
-  `math_with_judge` on main and nv-internal-main, so rows carrying `verifier_type: mcqa` fail with
-  a bare 500; and `abstention` caps its judge at `max_output_tokens: 64`, which truncates a
-  reasoning judge mid-thought. Both are fixed on `Gym-ultra-3-rebased` and in the 260603 bundle,
-  neither is on main. The sandbox and judge rates here depend on the manifest overlays supplying
-  them. **The pre-fix abstention numbers (544/hr, reward 0.685) are void** -- that rate was a
-  truncated judge returning early.
-- Environments sharing an agent share a rate: `comp_coding`/`comp_coding_nemotronx`,
-  `ds1_augmented`/`ds1_basic`, `tau_pivot`/`tau_pivot_aq_mms`. `comp_coding_nemotronx` averages
-  688 KB/row against `comp_coding`'s 306, so its true rate is likely lower.
-
-
-## All 36 environments together, sharded (job 6602112/6602113, 2026-08-27)
-
-The first measurement of the whole manifest running as one mixed workload rather than lane by lane.
-
-| | |
-|---|---|
-| topology | 2 shards x (1 prefill + 1 decode) = **16 GPUs** |
-| `num_samples_in_parallel` | 512 per shard |
-| collected | 2,249 of 2,304 (97.6%), 0 failures |
-| collection window | ~24 min per shard, after ~16 min of vLLM load and server startup |
-| **aggregate** | **~5,620 rollouts/hr** (2,800 + 2,822) |
-
-Per GPU that is 351/hr, against 468/hr for the no-judge lane alone. The mixed run is slower per GPU
-because it includes the sandbox and judge environments, and the figure spans the tail -- the early
-rate was far higher and decayed as the slow environments came to dominate.
-
-**Sizing the full sweep from this**, which is the number to prefer over summing the lanes:
+Size from the mixed-workload run, not from the lanes. Running all 36 together on
+2 shards x (1 prefill + 1 decode) = 16 GPUs gave **~5,620 rollouts/hr** (job 6602112/6602113),
+and a launcher run at the same shape sustained a **~550 rollouts/hr/GPU peak** (job 6608099/6608100).
 
 ```
 5,808,968 rollouts / 5,620 per hr = 1,034 h on 16 GPUs = 16,540 GPU-hours
@@ -154,53 +66,26 @@ rate was far higher and decayed as the slow environments came to dominate.
 | 48 | 192 | 3.6 days |
 | 96 | 384 | 1.8 days |
 
-That is well under the 23,178-24,409 GPU-hours the per-lane numbers implied, and the gap is the
-point of running them together: a judge rollout blocked on the gateway and a sandbox rollout
-blocked on uWSGI occupy no GPU while they wait, so they fill time the GPU-bound environments would
-have left idle. Summing lanes measured separately double-counts that.
+Summing the lanes instead gives 23,178-24,409 GPU-hours, and the gap is the point of running them
+together: a judge rollout blocked on the gateway and a sandbox rollout blocked on uWSGI hold no GPU
+while they wait, so they fill time the GPU-bound environments would leave idle.
 
-Caveats. One measurement, at one topology, and 512 concurrency against a single decode engine is
-still short of `max_num_seqs`. It includes the tail, so it understates steady-state and overstates
-what you get if you stop at 95%. The sandbox ran one node per shard with 32 uWSGI workers; sandbox
-capacity scales independently of GPUs and was not varied here.
+Disk, one-time per (manifest, checkpoint): `01_prepare_sweep.sh` writes **291.5 GB** in ~2,087 s
+(5,808,968 rows from 726,121 source rows, 36 workers). Sharding copies it, so peak is **~583 GB**.
 
-## Sharded through the launcher (jobs 6608099/6608100, 2026-08-28)
+## Caveats
 
-The only measurement taken through `03_run_sharded.sh` end to end rather than a bench harness.
-36 environments, 288 tasks x 8 repeats, 2 shards x (1 prefill + 1 decode) = **16 GPUs**,
-`policy_model.num_workers: 16`.
-
-| | |
-|---|---|
-| collected | 1,831 new rollouts (411 more carried in by resume) |
-| window | ~31 min of collection, ~6 min of spin-up before it |
-| average | ~3,540 rollouts/hr, **~220 rollouts/hr/GPU** |
-| observed peak | ~8,800 rollouts/hr, **~550 rollouts/hr/GPU** |
-
-**Do not size from the average.** The run was killed at 97.35% while in the tail, and a 288-task
-subset makes the tail disproportionate -- peak-to-tail here is ~150x (146/min falling to 1-4/min).
-The peak is the number that reflects the steady state; the average reflects this run's shape.
-
-This is also not a clean A/B for `num_workers: 16` against the earlier lane measurements: different
-shard count, different topology, and a resumed rather than cold start. It is evidence the launcher
-sustains a realistic rate at a realistic shape, not evidence that 16 workers caused it.
-
-## Tail behaviour (job 6563900, all 36 environments in one job)
-
-Rollouts per 30s window, from a standing start:
-
-```
-   0  ->  151  ->  206  ->  224  ->  238  ->  250  ->  256  ->  259
-      +151     + 55     + 18     + 14     + 12     +  6     +  3
-```
-
-The first window ran at roughly 18,000 rollouts/hr instantaneous, the last at ~360 -- a 50x
-collapse. Fast environments (`code_gen`, `calendar`, `mcqa`, `structured_outputs_v4`, all 8/8)
-drain immediately; the tail is `reasoning_gym` 7/8, `ether0` 4/8, `ns_tools` 14/24,
-`math_formal_lean` 2/8.
-
-This is the straggler problem the pre-sweep runs hit: first pass 74.4% completion, rising to 89.8%
-only after hand-splitting into `final_fast` / `final_slow`. Plan the sweep around the tail, not the
-aggregate. Mixing lanes is still correct -- judge rollouts block on the gateway and sandbox
-rollouts on uWSGI, so they occupy no GPU while waiting -- but a residue job for the slow entries is
-worth expecting.
+- **Every rate is a floor.** Each decode engine schedules up to `max_num_seqs=512`; 128 concurrency
+  against 2 decode nodes ran at ~12.5% of capacity. The client semaphore was the limit, not the GPUs.
+- **Plan around the tail, not the aggregate.** A whole-manifest run went 151 -> 55 -> 18 -> 14 -> 12
+  -> 6 -> 3 rollouts per 30 s window — ~18,000/hr instantaneous down to ~360, a 50x collapse. Fast
+  environments drain immediately and the slow ones dominate the end. Expect a residue job.
+- **Sandbox capacity is a separate axis from GPU count.** It measured lowest of any lane at the
+  lowest concurrency, on a single node. Size the sandbox tier before trusting the sandbox figures.
+- **The judge lane ran at concurrency 48 against the plain lane's 128**, so the 4x aggregate gap
+  overstates the judge penalty. It also measured 1,398 and 2,139/hr on two runs at identical
+  concurrency — a 53% spread, probably prefix-cache warmth. Re-measure on a cold endpoint.
+- **Two config fixes live in the manifest overlays, not upstream.** `ns_tools` registers only
+  `math_with_judge` on main, so rows carrying `verifier_type: mcqa` fail with a bare 500; and
+  `abstention` caps its judge at `max_output_tokens: 64`, truncating a reasoning judge mid-thought.
+  The sandbox and judge rates here depend on those overlays being present.

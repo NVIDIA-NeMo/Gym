@@ -360,8 +360,7 @@ There is no script for this rewrite yet; it is per-dataset, since not every data
 ### Layout
 
 ```
-RATES.md         measured throughput and GPU-hour sizing. Read before allocating.
-SCALE-NOTES.md   full-scale prepare timings and disk sizing.
+RATES.md         per-environment rates, GPU-hour and disk sizing. Read before allocating.
 CONTRIBUTING.md  how to add an environment.
 manifests/       input: what to profile. Hand-edited.
                  nemotron_3_ultra.yaml is the real sweep; example_*.yaml are minimal
