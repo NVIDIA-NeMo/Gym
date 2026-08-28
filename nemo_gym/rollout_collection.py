@@ -1304,7 +1304,7 @@ class RolloutCollectionHelper(BaseModel):
         warned_malformed_rollout_id = False
 
         # Intermediate status printing
-        pcts_to_print = list(range(1, 100)) + [99.5]
+        pcts_to_print = list(range(1, 100)) + [99.5, 100]
         agent_name_to_metrics = defaultdict(Counter)
         agent_name_to_counts = defaultdict(int)
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
@@ -1466,12 +1466,14 @@ class RolloutCollectionHelper(BaseModel):
                 tqdm.write(print_str)
 
                 if get_exporters():
-                    step_metrics = {
-                        f"progress/{agent_name}/reward": round(
+                    step_metrics = {"progress/total/rollouts_per_min": rollouts_per_min}
+                    for agent_name, metrics in agent_name_to_metrics.items():
+                        step_metrics[f"progress/{agent_name}/reward"] = round(
                             100 * metrics["reward"] / agent_name_to_counts[agent_name], 2
                         )
-                        for agent_name, metrics in agent_name_to_metrics.items()
-                    }
+                        step_metrics[f"progress/{agent_name}/reward_lower_bound"] = round(
+                            100 * metrics["reward"] / (counts_left[agent_name] + agent_name_to_counts[agent_name]), 2
+                        )
 
                     export_metrics(step_metrics, step=int(current_pct))
 

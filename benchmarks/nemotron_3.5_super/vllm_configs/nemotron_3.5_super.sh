@@ -15,7 +15,6 @@ VLLM_COMMON_ARGS=(
     --max-model-len 262144
     --kv-cache-dtype fp8
     --no-disable-hybrid-kv-cache-manager
-    --no-async-scheduling
     --block-size 128
     --mamba-cache-mode align
     --mamba-ssm-cache-dtype float32
