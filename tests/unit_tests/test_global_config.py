@@ -2396,7 +2396,10 @@ class TestComposeUnboundAgent:
         assert block["resources_server"]["name"] == "gpqa_mcqa_resources_server"
         assert block["max_turns"] == 30
         assert "max_steps" not in block
-        assert OmegaConf.to_container(block["datasets"])[0]["num_repeats"] == 8
+        # Dataset decoupling: the declaration lives on the resources server, not the agent block.
+        assert "datasets" not in block
+        rs_block = resolved["gpqa_mcqa_resources_server"]["resources_servers"]["mcqa"]
+        assert OmegaConf.to_container(rs_block["datasets"])[0]["num_repeats"] == 8
         assert "hermes_agent" not in resolved
 
     def _cli_dict(self, config: dict) -> DictConfig:
