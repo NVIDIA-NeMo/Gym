@@ -8,7 +8,7 @@
 # the shape that scales. At the 16-node default, NUM_SHARDS=16 is a 256-node run.
 #
 # USAGE
-#   MODEL=<ckpt> CONTAINER=<sqsh> SANDBOX_CONTAINER=<sandbox sqsh> \
+#   MODEL=<ckpt> \
 #     SWEEP_DIR=<out>/<nickname> NUM_SHARDS=16 bash $R/scripts/03_run_sharded.sh
 #
 # REQUIRED + OPTIONAL
@@ -47,7 +47,10 @@ if ! flock -n "$_lock_fd"; then
     exit 2
 fi
 
-for _required in MODEL CONTAINER SWEEP_DIR; do
+# Not CONTAINER: this script never uses it, it just passes the environment through to
+# 03_run_single.sh, which resolves it from the shard's sweep_report.json if the manifest names one.
+# Requiring it here would reject a manifest that supplies its own container.
+for _required in MODEL SWEEP_DIR; do
     if [[ -z "${!_required:-}" ]]; then
         echo "ERROR: $_required is required. See the header of $0." >&2
         exit 2
