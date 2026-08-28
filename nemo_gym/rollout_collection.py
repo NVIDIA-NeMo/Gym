@@ -687,17 +687,19 @@ def _failure_rows_counted_as_zero(
 ) -> List[Dict[str, Any]]:
     """Sidecar rows the caller opted to count in the metrics denominator.
 
+    The last attempt of a rollout is the one that stands, so it is selected across every failure
+    class before the wanted classes are picked out. Selecting the other way round would let a
+    stale attempt be counted after a later one landed in a class the caller did not ask for.
+
     A row that already carries a ``reward`` is counted as it stands. A row that carries none
     records that no rollout happened, so it is counted as a zero here and only here: the score
     enters the metric input, never the sidecar or the rollouts jsonl, which keeps the artifacts
-    free of a verdict no verifier gave. One row per rollout, the last attempt of it, and never
-    for a rollout that also succeeded on a later attempt.
+    free of a verdict no verifier gave. A rollout that also succeeded is never counted.
     """
     if not failure_classes:
         return []
 
-    wanted = set(failure_classes)
-    rows_by_key: Dict[Tuple[Any, Any], Dict[str, Any]] = {}
+    latest_by_key: Dict[Tuple[Any, Any], Dict[str, Any]] = {}
     for fpath in failures_fpaths:
         if not fpath.exists():
             continue
@@ -707,17 +709,19 @@ def _failure_rows_counted_as_zero(
                 if not line:
                     continue
                 row = loads_jsonl_line(line, fpath, line_no)
-                failure_class = row.get(NG_FAILURE_CLASS_KEY)
-                if failure_class not in wanted:
-                    continue
-                key = (row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME))
-                if key not in scored_keys:
-                    # Diagnostics stay in the sidecar: an HTTP status is a number, and the
-                    # aggregator averages every number it is handed. The last attempt wins.
-                    scored = {k: v for k, v in row.items() if not k.startswith("_ng_failure_")}
-                    scored.setdefault("reward", 0.0)
-                    rows_by_key[key] = scored
-    return list(rows_by_key.values())
+                latest_by_key[(row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME))] = row
+
+    wanted = set(failure_classes)
+    counted = []
+    for key, row in latest_by_key.items():
+        if key in scored_keys or row.get(NG_FAILURE_CLASS_KEY) not in wanted:
+            continue
+        # Diagnostics stay in the sidecar: an HTTP status is a number, and the aggregator
+        # averages every number it is handed.
+        scored = {k: v for k, v in row.items() if not k.startswith("_ng_failure_")}
+        scored.setdefault("reward", 0.0)
+        counted.append(scored)
+    return counted
 
 
 class RolloutCollectionHelper(BaseModel):

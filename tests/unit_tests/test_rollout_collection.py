@@ -672,53 +672,51 @@ class TestRolloutCollection:
         persisted = [orjson.loads(line) for line in output_jsonl_fpath.read_bytes().splitlines()]
         assert [r["reward"] for r in persisted] == [1.0]
 
-    def test_failure_rows_counted_as_zero_skips_scored_rollouts_and_scores_scoreless_ones(
-        self, tmp_path: Path
-    ) -> None:
+    def test_failure_rows_counted_as_zero_selects_the_last_attempt_of_each_rollout(self, tmp_path: Path) -> None:
+        """The last attempt stands, so it is chosen before the wanted classes are picked out."""
         failures_fpath = tmp_path / "output_failures.jsonl"
+
+        def attempt(task_index: int, failure_class: str, reward: float | None = 0.0) -> dict:
+            row = {
+                TASK_INDEX_KEY_NAME: task_index,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                NG_FAILURE_CLASS_KEY: failure_class,
+                "_ng_failure_http_status": 500,
+            }
+            return row if reward is None else {**row, "reward": reward}
+
         failures_fpath.write_bytes(
             b"\n".join(
                 orjson.dumps(row)
                 for row in [
-                    {
-                        TASK_INDEX_KEY_NAME: 0,
-                        ROLLOUT_INDEX_KEY_NAME: 0,
-                        "reward": 0.0,
-                        NG_FAILURE_CLASS_KEY: "verify_failed",
-                    },
-                    {
-                        TASK_INDEX_KEY_NAME: 1,
-                        ROLLOUT_INDEX_KEY_NAME: 0,
-                        "reward": 0.0,
-                        NG_FAILURE_CLASS_KEY: "verify_failed",
-                    },
-                    {
-                        TASK_INDEX_KEY_NAME: 1,
-                        ROLLOUT_INDEX_KEY_NAME: 0,
-                        "reward": 0.0,
-                        NG_FAILURE_CLASS_KEY: "verify_failed",
-                    },
-                    {
-                        TASK_INDEX_KEY_NAME: 2,
-                        ROLLOUT_INDEX_KEY_NAME: 0,
-                        NG_FAILURE_CLASS_KEY: AGENT_RUN_ERROR_FAILURE_CLASS,
-                    },
+                    attempt(0, AGENT_RUN_ERROR_FAILURE_CLASS),
+                    attempt(1, AGENT_RUN_ERROR_FAILURE_CLASS),
+                    attempt(1, AGENT_RUN_ERROR_FAILURE_CLASS),
+                    attempt(2, AGENT_RUN_ERROR_FAILURE_CLASS, reward=None),
+                    attempt(3, AGENT_RUN_ERROR_FAILURE_CLASS),
+                    attempt(3, AGENT_REQUEST_FAILED_FAILURE_CLASS),
+                    attempt(4, AGENT_REQUEST_FAILED_FAILURE_CLASS),
+                    attempt(4, AGENT_RUN_ERROR_FAILURE_CLASS),
                 ]
             )
             + b"\n"
         )
 
-        # Task 0 succeeded on a later attempt, and task 1 failed twice: one row, and only for task 1.
-        rows = _failure_rows_counted_as_zero([failures_fpath], ["verify_failed"], {(0, 0)})
-        assert [row[TASK_INDEX_KEY_NAME] for row in rows] == [1]
+        # Task 0 succeeded on a later attempt. Task 1 failed twice and counts once. Task 3 ended in
+        # a class the caller did not ask for, so its earlier attempt must not stand in for it.
+        rows = _failure_rows_counted_as_zero([failures_fpath], [AGENT_RUN_ERROR_FAILURE_CLASS], {(0, 0)})
+        assert sorted(row[TASK_INDEX_KEY_NAME] for row in rows) == [1, 2, 4]
 
         assert _failure_rows_counted_as_zero([failures_fpath], [], set()) == []
 
-        # A row with no reward is scored zero here and only here: the sidecar keeps no verdict.
-        scoreless = _failure_rows_counted_as_zero([failures_fpath], [AGENT_RUN_ERROR_FAILURE_CLASS], set())
-        assert [row["reward"] for row in scoreless] == [0.0]
+        # A row with no reward is scored zero here and only here, and diagnostics never reach the
+        # aggregator, which averages every number it is handed.
+        scoreless = next(row for row in rows if row[TASK_INDEX_KEY_NAME] == 2)
+        assert scoreless["reward"] == 0.0
+        assert not any(key.startswith("_ng_failure_") for key in scoreless)
         sidecar = [orjson.loads(line) for line in failures_fpath.read_bytes().splitlines()]
-        assert "reward" not in sidecar[-1]
+        assert "reward" not in sidecar[3]
+        assert sidecar[3]["_ng_failure_http_status"] == 500
 
     @pytest.mark.parametrize(
         ("counted_classes", "expected_scored", "expected_mean"),
