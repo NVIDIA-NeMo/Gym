@@ -1088,10 +1088,9 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                     max_num_tries += 1
 
                 response_content = await response.content.read()
-                content = response_content.decode(errors="replace")
                 kind = "rate_limit" if response.status in RATE_LIMIT_ERROR_CODES else "server_error"
                 print(
-                    f"[model_retry url={request_kwargs.get('url')} status={response.status} kind={kind} try={tries} max_tries={max_num_tries} error_msg={content[:200]}]",
+                    f"[model_retry status={response.status} kind={kind} try={tries} max_tries={max_num_tries}]",
                     flush=True,
                 )
                 await sleep(0.5)

@@ -129,7 +129,7 @@ class TestOpenAIUtils:
         NeMoGymAsyncOpenAI(api_key="abc", base_url="https://api.openai.com/v1")
 
     async def test_request_with_retry_preserves_final_body_and_retry_count(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         request_info = RequestInfo(
             url=URL("https://api.fireworks.ai/inference/v1/chat/completions"),
@@ -154,7 +154,11 @@ class TestOpenAIUtils:
             )
             return value
 
-        responses = [response(b"first"), response(b"second"), response(b"final body")]
+        responses = [
+            response(b"credential=first-secret"),
+            response(b"token=second-secret"),
+            response(b"final body"),
+        ]
         request_mock = AsyncMock(side_effect=responses)
         monkeypatch.setattr("nemo_gym.openai_utils.request", request_mock)
         monkeypatch.setattr("nemo_gym.openai_utils.sleep", AsyncMock())
@@ -169,6 +173,11 @@ class TestOpenAIUtils:
         assert request_mock.await_count == 3
         assert exc_info.value.response_content == b"final body"
         assert exc_info.value.retry_count == 2
+        log = capsys.readouterr().out
+        assert "model_retry" in log
+        assert "first-secret" not in log
+        assert "second-secret" not in log
+        assert "error_msg=" not in log
 
 
 class TestNeMoGymResponseCreateParamsNonStreaming:

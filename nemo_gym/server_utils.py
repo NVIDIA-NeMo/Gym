@@ -502,6 +502,7 @@ _SENSITIVE_UPSTREAM_FIELD_PARTS = (
     "token",
 )
 _MAX_UPSTREAM_ERROR_TEXT_LENGTH = 4096
+_REDACTED_NON_JSON_UPSTREAM_RESPONSE = "[REDACTED NON-JSON UPSTREAM RESPONSE]"
 
 
 def _sanitize_upstream_url(url: object) -> str:
@@ -542,9 +543,15 @@ def _decode_upstream_response_content(content: object) -> object:
         return repr(content)
 
     try:
-        return _sanitize_upstream_response(json.loads(text))
+        parsed = json.loads(text)
     except json.JSONDecodeError:
-        return text[:_MAX_UPSTREAM_ERROR_TEXT_LENGTH]
+        parsed = None
+
+    if isinstance(parsed, (dict, list)):
+        return _sanitize_upstream_response(parsed)
+    # Plain text and JSON scalars have no field boundaries on which to apply
+    # targeted secret redaction, so exposing them could leak credentials.
+    return _REDACTED_NON_JSON_UPSTREAM_RESPONSE
 
 
 def format_client_response_error(error: ClientResponseError, server: Optional[str] = None) -> dict[str, Any]:

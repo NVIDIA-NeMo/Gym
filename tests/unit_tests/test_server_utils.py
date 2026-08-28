@@ -187,6 +187,80 @@ class TestServerUtils:
         assert "provider-secret" not in log
         assert "user:pass" not in log
 
+    def test_exception_middleware_redacts_non_json_upstream_error(self, capsys) -> None:
+        class TestSimpleServer(SimpleServer):
+            def setup_webserver(self):
+                raise AssertionError
+
+        server = TestSimpleServer(
+            config=BaseRunServerInstanceConfig(name="policy_model", host="", port=0, entrypoint=""),
+            server_client=ServerClient(
+                head_server_config=BaseServerConfig(host="", port=0),
+                global_config_dict=DictConfig({}),
+            ),
+        )
+        app = FastAPI()
+        server.setup_exception_middleware(app)
+
+        @app.get("/fail")
+        async def fail():
+            request_info = RequestInfo(
+                url=URL("https://api.fireworks.ai/inference/v1/chat/completions"),
+                method="POST",
+                headers=CIMultiDict(),
+                real_url=URL("https://api.fireworks.ai/inference/v1/chat/completions"),
+            )
+            error = ClientResponseError(
+                request_info=request_info,
+                history=(),
+                status=502,
+                message="provider failed",
+            )
+            error.response_content = b"provider failed: credential=plain-text-secret"
+            raise error
+
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.get("/fail")
+
+        assert response.status_code == 502
+        assert response.json()["detail"]["response_body"] == "[REDACTED NON-JSON UPSTREAM RESPONSE]"
+        log = capsys.readouterr().out
+        assert "Upstream request failed" in log
+        assert "plain-text-secret" not in log
+
+    def test_exception_middleware_redacts_json_scalar_upstream_error(self) -> None:
+        class TestSimpleServer(SimpleServer):
+            def setup_webserver(self):
+                raise AssertionError
+
+        server = TestSimpleServer(
+            config=BaseRunServerInstanceConfig(name="policy_model", host="", port=0, entrypoint=""),
+            server_client=ServerClient(
+                head_server_config=BaseServerConfig(host="", port=0),
+                global_config_dict=DictConfig({}),
+            ),
+        )
+        app = FastAPI()
+        server.setup_exception_middleware(app)
+
+        @app.get("/fail")
+        async def fail():
+            request_info = RequestInfo(
+                url=URL("https://api.fireworks.ai/inference/v1/chat/completions"),
+                method="POST",
+                headers=CIMultiDict(),
+                real_url=URL("https://api.fireworks.ai/inference/v1/chat/completions"),
+            )
+            error = ClientResponseError(request_info=request_info, history=(), status=502)
+            error.response_content = b'"credential=plain-text-secret"'
+            raise error
+
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.get("/fail")
+
+        assert response.status_code == 502
+        assert response.json()["detail"]["response_body"] == "[REDACTED NON-JSON UPSTREAM RESPONSE]"
+
     def test_exception_middleware_preserves_nested_upstream_error(self) -> None:
         class TestSimpleServer(SimpleServer):
             def setup_webserver(self):
