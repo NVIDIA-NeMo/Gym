@@ -68,14 +68,14 @@ These options are shared across many commands.
 | `--benchmark NAME` | Select a registered benchmark by name instead of a config path. |
 | `--resources-server NAME` | Select a registered resources server by name. |
 | `--model-type NAME` | Select a registered model server type by name (such as `openai_model` or `vllm_model`). |
-| `--agent NAME[/FLAVOR]` | Run the environment with a different agent harness. Refer to [Swapping the agent](#swapping-the-agent). |
+| `--agent-type NAME[/FLAVOR]` | Run the environment with a different agent harness. Refer to [Swapping the agent](#swapping-the-agent). |
 | `--search-dir DIR` | Extra root directory to search for components and configs. Repeatable. Applies everywhere Gym resolves paths — discovery, the `--<component>` selectors, `config_paths`, prompt configs, and data files — and is inherited by spawned servers. Equivalent to the `NEMO_GYM_EXTRA_ROOTS` environment variable; see [Configuration](/reference/configuration). |
 | `--json` | Emit machine-readable JSON instead of human-readable output (reporting commands only). Accepted before or after the subcommand; commands that emit no JSON reject it. |
 | `-v`, `--verbose` | Set the logging level to DEBUG. Flows through to spun-up servers. |
 | `-h`, `--help` | Show help for any group or command. |
 
 <Tip>
-The `--benchmark`, `--resources-server`, `--model-type`, and `--agent` selectors resolve a component name to its config file for you, so you do not need to know the project's directory layout. If you mistype a name, the CLI suggests the closest match. To point at a config file directly, use `--config <path>` instead.
+The `--benchmark`, `--resources-server`, `--model-type`, and `--agent-type` selectors resolve a component name to its config file for you, so you do not need to know the project's directory layout. If you mistype a name, the CLI suggests the closest match. To point at a config file directly, use `--config <path>` instead.
 </Tip>
 
 
@@ -93,17 +93,18 @@ Commands that need a model (`gym env start`, `gym eval run`) configure it throug
 
 ### Swapping the agent
 
-`--agent NAME` runs an environment or benchmark with a different agent harness, without editing any
+`--agent-type NAME` runs an environment or benchmark with a different agent harness, without editing any
 config. It resolves to `responses_api_agents/NAME/configs/NAME.yaml`; use `NAME/FLAVOR` to pick a
 non-default config in that directory.
 
 ```bash
 # Run GPQA with the Hermes harness instead of the one its config names
-gym eval run --agent hermes_agent --benchmark gpqa --model-type vllm_model
+gym eval run --agent-type hermes_agent --benchmark gpqa --model-type vllm_model
 ```
 
 Available on `gym env start`, `gym env validate`, `gym env prefetch`, and `gym eval run`. Like the other
-selectors it is pure shorthand, so `--agent hermes_agent` and `--config <that file>` behave identically.
+selectors it is pure shorthand, so `--agent-type hermes_agent` and `--config <that file>` behave
+identically.
 
 Run `gym list agents` to see the harnesses you can pass.
 
@@ -112,26 +113,39 @@ report the harness actually used: composing `hermes_agent` onto `gpqa_mcqa_simpl
 `gpqa_mcqa_hermes_agent`. `gym env start` prints the instance list, which matters for the two-step flow:
 
 ```bash
-gym env start --agent hermes_agent --benchmark gpqa --model-type vllm_model
+gym env start --agent-type hermes_agent --benchmark gpqa --model-type vllm_model
 gym eval run --no-serve --agent gpqa_mcqa_hermes_agent --input rows.jsonl
 ```
 
 <Note>
-With `--no-serve`, `--agent` names an already-running server instance to collect rollouts from, because
-the servers were composed when they were started. Without it, `--agent` selects the harness to compose.
+`--agent-type` chooses the harness to compose; `--agent` names the running instance to collect rollouts
+from. Because the harness is settled once the servers are up, `--agent-type` is rejected with
+`--no-serve`.
 </Note>
+
+Anything that routes rows — `--agent`, `+agent_map` values, `+fan_out` entries — must name the composed
+instance, and Gym says so rather than failing later:
+
+```text
+Routing names agent instances that no longer exist once the agent is swapped:
+  - agent_name: 'gpqa_mcqa_simple_agent' is now 'gpqa_mcqa_hermes_agent'
+
+Use the name the composed config reports.
+```
+
+Rows collected before the swap are re-routed for you, so existing rollout files stay usable.
 
 <Warning>
 Some tasks only work with the harness they were built for. A resources server may pin the harnesses
-required for the task with [`requires_agent`](/reference/configuration#resources-server-fields), and
+required for the task with [`allowed_agents`](/reference/configuration#resources-server-fields), and
 Gym refuses a pairing it does not list, before any server starts:
 
 ```text
 'hermes_agent' is not declared compatible with 1 of the agent instance(s) it would replace,
 so it cannot be scored correctly:
-  - scicode_benchmark_agent uses scicode_benchmark_resources_server and accepts scicode_agent
+  - gsm8k_aviary_agent uses gsm8k_aviary_resources_server and accepts aviary_agent
 
-Select one of: scicode_agent. Or pass --allow-unsupported-pairing (or set
+Select one of: aviary_agent. Or pass --allow-unsupported-pairing (or set
 NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING=1) to bypass the check.
 ```
 
@@ -503,7 +517,7 @@ By default, values a run needs but the config leaves undefined (such as `policy_
 | `--resources-server NAME` | Validate a named resources server config. |
 | `--model-type NAME` | Also load a named model config (otherwise a dummy `policy_model` is used). |
 | `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
-| `--agent NAME[/FLAVOR]` | Compose the environment with the named agent harness. Refer to [Swapping the agent](#swapping-the-agent). |
+| `--agent-type NAME[/FLAVOR]` | Compose the environment with the named agent harness. Refer to [Swapping the agent](#swapping-the-agent). |
 | `--allow-unsupported-pairing` | Run even if the resources server does not declare support for the selected agent. |
 | `--model` / `--model-url` / `--model-api-key` | Override model name, base URL, and API key. |
 
@@ -591,7 +605,7 @@ Start the NeMo Gym servers (agents, models, resources) defined by the provided c
 | `--resources-server NAME` | Load the named resources server config. |
 | `--model-type NAME` | Load the named model server type config. |
 | `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
-| `--agent NAME[/FLAVOR]` | Compose the environment with the named agent harness. Refer to [Swapping the agent](#swapping-the-agent). |
+| `--agent-type NAME[/FLAVOR]` | Compose the environment with the named agent harness. Refer to [Swapping the agent](#swapping-the-agent). |
 | `--allow-unsupported-pairing` | Run even if the resources server does not declare support for the selected agent. |
 | `--model`, `-m` | Served model identifier. See [Selecting the model server](#selecting-the-model-server). |
 | `--model-url` | Model server base URL. |
@@ -670,7 +684,8 @@ Collate data, start the servers, and collect rollouts. This is the main evaluati
 | `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 | `--no-serve` | Collect against already-running servers instead of starting them. |
 | `--resume` | Resume from cached rollouts instead of recollecting. Maps to legacy `+resume_from_cache=true`. Refer to [Resume interrupted runs](#resume-interrupted-runs). |
-| `--agent`, `-a` | With `--no-serve`: the running server instance to collect rollouts from. Otherwise: the agent harness to compose. Refer to [Swapping the agent](#swapping-the-agent). |
+| `--agent-type NAME[/FLAVOR]` | Compose the environment with the named agent harness. Rejected with `--no-serve`. Refer to [Swapping the agent](#swapping-the-agent). |
+| `--agent`, `-a` | Agent instance to collect rollouts with. |
 | `--allow-unsupported-pairing` | Run even if the resources server does not declare support for the selected agent. |
 | `--input`, `-i` | Input tasks JSONL file. |
 | `--output`, `-o` | Output rollouts JSONL file. |
@@ -981,7 +996,7 @@ The most common Hydra overrides now have dedicated flags:
 | Legacy Hydra override | New flag |
 | --- | --- |
 | `"+config_paths=[a.yaml,b.yaml]"` | `--config a.yaml --config b.yaml` |
-| `+agent_name=...` | `--agent` (with `--no-serve`) |
+| `+agent_name=...` | `--agent` |
 | `+input_jsonl_fpath=...` | `--input` |
 | `+input_glob=...` | `--input-glob` |
 | `+output_jsonl_fpath=...` | `--output` |
