@@ -533,6 +533,16 @@ class BenchmarkDatasetConfig(BaseModel):
     prepare_script: Path
     prompt_config: Optional[Path] = None
     num_repeats: int = Field(default=1, ge=1)
+    agent: Optional[str] = Field(
+        default=None,
+        description=(
+            "Agent instance that runs this benchmark (a top-level key of the merged config). "
+            "Only needed when the config is ambiguous: the dataset is declared on a resources "
+            "server that several agents reference. The pin must name one of those agents — rows "
+            "are dispatched along the agent -> resources server edge, so any other value is a "
+            "config error. Unambiguous configs resolve without it."
+        ),
+    )
 
 
 ########################################
