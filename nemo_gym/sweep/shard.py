@@ -32,10 +32,11 @@ shards finish early and idle.
 
 import json
 import shutil
-from datetime import datetime, timezone
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
+
 
 INPUTS_NAME = "rollouts_materialized_inputs.jsonl"
 ROLLOUTS_NAME = "rollouts.jsonl"
@@ -108,7 +109,7 @@ def shard_sweep(sweep_dir: str | Path, num_shards: int, out_dir: Optional[str | 
     absorbed = 0
     snapshot_dir: Optional[Path] = None
     if any(out_dir.glob("shard_*/" + ROLLOUTS_NAME)):
-        merged_here = merge_shards(out_dir, output_fpath=out_dir / "_premerge.jsonl")
+        merge_shards(out_dir, output_fpath=out_dir / "_premerge.jsonl")
         parent_rollouts = sweep_dir / ROLLOUTS_NAME
         seen_parent: Set[Tuple[object, object]] = set()
         if parent_rollouts.is_file():
@@ -184,7 +185,9 @@ def shard_sweep(sweep_dir: str | Path, num_shards: int, out_dir: Optional[str | 
     carried = _carry_existing_rollouts(sweep_dir, shard_dirs, owner_of_key)
 
     result = ShardResult(
-        shard_dirs=shard_dirs, rows_per_shard=counts, carried_rollouts=carried,
+        shard_dirs=shard_dirs,
+        rows_per_shard=counts,
+        carried_rollouts=carried,
         removed_stale=[d.name for d in stale],
         absorbed_rollouts=absorbed,
         snapshot_dir=snapshot_dir,

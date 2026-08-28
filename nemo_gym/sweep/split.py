@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+
 INPUTS_NAME = "rollouts_materialized_inputs.jsonl"
 ROLLOUTS_NAME = "rollouts.jsonl"
 REPORT_NAME = "sweep_report.json"
@@ -169,9 +170,7 @@ def split_sweep(sweep_dir: str | Path, out_dir: Optional[str | Path] = None) -> 
     counts = {label: SplitCounts() for _, _, label in ranges}
 
     result = SplitResult(out_dir=out_dir, counts=counts)
-    result.unmapped_inputs = _split_file(
-        sweep_dir / INPUTS_NAME, ranges, lows, out_dir, INPUTS_NAME, counts, "inputs"
-    )
+    result.unmapped_inputs = _split_file(sweep_dir / INPUTS_NAME, ranges, lows, out_dir, INPUTS_NAME, counts, "inputs")
     result.unmapped_rollouts = _split_file(
         sweep_dir / ROLLOUTS_NAME, ranges, lows, out_dir, ROLLOUTS_NAME, counts, "rollouts"
     )

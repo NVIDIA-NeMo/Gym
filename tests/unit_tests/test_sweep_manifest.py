@@ -24,9 +24,9 @@ import pytest
 import yaml
 
 from nemo_gym.sweep.build import build_sweep, container_config
+from nemo_gym.sweep.manifest import SweepValidationError, load_manifest, validate_manifest
 from nemo_gym.sweep.shard import SweepShardError, merge_shards, reshard, shard_sweep
 from nemo_gym.sweep.split import SweepSplitError, split_sweep
-from nemo_gym.sweep.manifest import SweepValidationError, load_manifest, validate_manifest
 
 
 def _write_config(tmp_path, name, agent):
@@ -577,13 +577,15 @@ def test_container_config_includes_overlay_declared_servers(tmp_path):
 def _sweep_dir_with_ranges(tmp_path, ranges, inputs, rollouts):
     d = tmp_path / "sweep"
     d.mkdir()
-    (d / "sweep_report.json").write_text(json.dumps({
-        "entries": {label: {"task_index_range": [lo, hi]} for label, lo, hi in ranges}
-    }))
+    (d / "sweep_report.json").write_text(
+        json.dumps({"entries": {label: {"task_index_range": [lo, hi]} for label, lo, hi in ranges}})
+    )
     (d / "rollouts_materialized_inputs.jsonl").write_text(
-        "".join(json.dumps({"_ng_task_index": i, "x": 1}) + "\n" for i in inputs))
+        "".join(json.dumps({"_ng_task_index": i, "x": 1}) + "\n" for i in inputs)
+    )
     (d / "rollouts.jsonl").write_text(
-        "".join(json.dumps({"_ng_task_index": i, "reward": 1.0}) + "\n" for i in rollouts))
+        "".join(json.dumps({"_ng_task_index": i, "reward": 1.0}) + "\n" for i in rollouts)
+    )
     return d
 
 
@@ -597,7 +599,9 @@ def test_split_separates_entries_that_share_an_agent(tmp_path):
     )
     result = split_sweep(d)
     assert {k: (v.inputs, v.rollouts) for k, v in result.counts.items()} == {
-        "math_tir": (2, 2), "stem_mcqa": (2, 1), "stem_openqa": (1, 1),
+        "math_tir": (2, 2),
+        "stem_mcqa": (2, 1),
+        "stem_openqa": (1, 1),
     }
     written = json.loads((result.out_dir / "math_tir" / "rollouts.jsonl").read_text().splitlines()[0])
     assert written["_ng_task_index"] == 0
@@ -605,8 +609,7 @@ def test_split_separates_entries_that_share_an_agent(tmp_path):
 
 def test_split_reports_labels_that_collected_nothing(tmp_path):
     """A label with no rollouts must show as zero, not vanish -- that silence is the finding."""
-    d = _sweep_dir_with_ranges(
-        tmp_path, [("ran", 0, 0), ("silent", 1, 1)], inputs=[0, 1], rollouts=[0])
+    d = _sweep_dir_with_ranges(tmp_path, [("ran", 0, 0), ("silent", 1, 1)], inputs=[0, 1], rollouts=[0])
     result = split_sweep(d)
     assert result.labels_without_rollouts == ["silent"]
     assert result.counts["silent"].inputs == 1
@@ -631,12 +634,14 @@ def test_split_prefers_the_stamped_label_over_ranges(tmp_path):
     """The stamped label wins, so a rollouts file is self-describing without its report."""
     d = tmp_path / "sweep"
     d.mkdir()
-    (d / "sweep_report.json").write_text(json.dumps(
-        {"entries": {"alpha": {"task_index_range": [0, 0]}, "beta": {"task_index_range": [1, 1]}}}))
+    (d / "sweep_report.json").write_text(
+        json.dumps({"entries": {"alpha": {"task_index_range": [0, 0]}, "beta": {"task_index_range": [1, 1]}}})
+    )
     (d / "rollouts_materialized_inputs.jsonl").write_text("")
     # index says alpha, stamped label says beta -- the label must win
     (d / "rollouts.jsonl").write_text(
-        json.dumps({"_ng_task_index": 0, "_ng_sweep_label": "beta", "reward": 1.0}) + "\n")
+        json.dumps({"_ng_task_index": 0, "_ng_sweep_label": "beta", "reward": 1.0}) + "\n"
+    )
     result = split_sweep(d)
     assert result.counts["beta"].rollouts == 1
     assert result.counts["alpha"].rollouts == 0
@@ -649,7 +654,8 @@ def test_split_ignores_an_unknown_stamped_label(tmp_path):
     (d / "sweep_report.json").write_text(json.dumps({"entries": {"alpha": {"task_index_range": [0, 0]}}}))
     (d / "rollouts_materialized_inputs.jsonl").write_text("")
     (d / "rollouts.jsonl").write_text(
-        json.dumps({"_ng_task_index": 0, "_ng_sweep_label": "renamed_since", "reward": 1.0}) + "\n")
+        json.dumps({"_ng_task_index": 0, "_ng_sweep_label": "renamed_since", "reward": 1.0}) + "\n"
+    )
     result = split_sweep(d)
     assert result.counts["alpha"].rollouts == 1
     assert not (result.out_dir / "renamed_since").exists()
@@ -662,17 +668,19 @@ def _materialized(tmp_path, n_tasks, repeats=2, labels=("alpha", "beta")):
     rows = []
     for task in range(n_tasks):
         for rollout in range(repeats):
-            rows.append({
-                "_ng_task_index": task,
-                "_ng_rollout_index": rollout,
-                "_ng_sweep_label": labels[task % len(labels)],
-                "agent_ref": {"name": "shared_agent"},
-            })
-    (d / "rollouts_materialized_inputs.jsonl").write_text(
-        "".join(json.dumps(r) + "\n" for r in rows))
+            rows.append(
+                {
+                    "_ng_task_index": task,
+                    "_ng_rollout_index": rollout,
+                    "_ng_sweep_label": labels[task % len(labels)],
+                    "agent_ref": {"name": "shared_agent"},
+                }
+            )
+    (d / "rollouts_materialized_inputs.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
     (d / "sweep_config.yaml").write_text("config_paths: []\n")
-    (d / "sweep_report.json").write_text(json.dumps({
-        "entries": {lab: {"task_index_range": [i, n_tasks - 1]} for i, lab in enumerate(labels[:1])}}))
+    (d / "sweep_report.json").write_text(
+        json.dumps({"entries": {lab: {"task_index_range": [i, n_tasks - 1]} for i, lab in enumerate(labels[:1])}})
+    )
     # materialize touches this to complete the --resume gate
     (d / "rollouts.jsonl").touch()
     return d, rows
@@ -691,8 +699,9 @@ def test_shard_is_lossless_and_round_robin(tmp_path):
         for line in open(shard / "rollouts_materialized_inputs.jsonl"):
             seen.append(json.loads(line))
     assert len(seen) == len(rows)
-    assert {(r["_ng_task_index"], r["_ng_rollout_index"]) for r in seen} == \
-           {(r["_ng_task_index"], r["_ng_rollout_index"]) for r in rows}
+    assert {(r["_ng_task_index"], r["_ng_rollout_index"]) for r in seen} == {
+        (r["_ng_task_index"], r["_ng_rollout_index"]) for r in rows
+    }
 
 
 def test_each_shard_is_a_usable_sweep_dir(tmp_path):
@@ -710,14 +719,14 @@ def test_merge_recovers_every_rollout_exactly_once(tmp_path):
     result = shard_sweep(d, num_shards=3)
     # simulate each shard collecting its own inputs
     for shard in result.shard_dirs:
-        (shard / "rollouts.jsonl").write_text(
-            (shard / "rollouts_materialized_inputs.jsonl").read_text())
+        (shard / "rollouts.jsonl").write_text((shard / "rollouts_materialized_inputs.jsonl").read_text())
 
     merged = merge_shards(d / "shards")
     assert merged.merged == len(rows)
     assert merged.duplicates == 0
-    keys = [(json.loads(l)["_ng_task_index"], json.loads(l)["_ng_rollout_index"])
-            for l in open(merged.output_fpath)]
+    keys = [
+        (json.loads(ln)["_ng_task_index"], json.loads(ln)["_ng_rollout_index"]) for ln in open(merged.output_fpath)
+    ]
     assert len(keys) == len(set(keys)) == len(rows)
 
 
@@ -738,7 +747,8 @@ def test_merge_reports_a_shard_that_collected_nothing(tmp_path):
     d, _ = _materialized(tmp_path, n_tasks=4, repeats=1)
     result = shard_sweep(d, num_shards=2)
     (result.shard_dirs[0] / "rollouts.jsonl").write_text(
-        (result.shard_dirs[0] / "rollouts_materialized_inputs.jsonl").read_text())
+        (result.shard_dirs[0] / "rollouts_materialized_inputs.jsonl").read_text()
+    )
     merged = merge_shards(d / "shards")
     assert result.shard_dirs[1].name in merged.shards_empty
 
@@ -754,19 +764,16 @@ def test_reshard_to_a_different_count_is_lossless(tmp_path):
 def test_split_gives_the_same_answer_on_merged_as_unsharded(tmp_path):
     """The property that makes sharding safe: global indices survive the round trip."""
     d, rows = _materialized(tmp_path, n_tasks=6, repeats=2, labels=("alpha", "beta"))
-    (d / "rollouts.jsonl").write_text(
-        (d / "rollouts_materialized_inputs.jsonl").read_text())
+    (d / "rollouts.jsonl").write_text((d / "rollouts_materialized_inputs.jsonl").read_text())
     direct = split_sweep(d, out_dir=tmp_path / "direct")
 
     result = shard_sweep(d, num_shards=4)
     for shard in result.shard_dirs:
-        (shard / "rollouts.jsonl").write_text(
-            (shard / "rollouts_materialized_inputs.jsonl").read_text())
+        (shard / "rollouts.jsonl").write_text((shard / "rollouts_materialized_inputs.jsonl").read_text())
     merge_shards(d / "shards", output_fpath=d / "rollouts.jsonl")
     via_shards = split_sweep(d, out_dir=tmp_path / "via_shards")
 
-    assert {k: v.rollouts for k, v in direct.counts.items()} == \
-           {k: v.rollouts for k, v in via_shards.counts.items()}
+    assert {k: v.rollouts for k, v in direct.counts.items()} == {k: v.rollouts for k, v in via_shards.counts.items()}
 
 
 def test_shard_rejects_a_bad_count(tmp_path):
@@ -786,7 +793,7 @@ def test_reshard_carries_collected_work_into_the_new_layout(tmp_path):
     """Resharding a half-finished run must resume, not recollect from scratch."""
     d, rows = _materialized(tmp_path, n_tasks=12, repeats=2)
     # half the work already done
-    done = [json.loads(l) for l in open(d / "rollouts_materialized_inputs.jsonl")][: len(rows) // 2]
+    done = [json.loads(ln) for ln in open(d / "rollouts_materialized_inputs.jsonl")][: len(rows) // 2]
     (d / "rollouts.jsonl").write_text("".join(json.dumps(r) + "\n" for r in done))
 
     result = shard_sweep(d, num_shards=5)
@@ -794,8 +801,10 @@ def test_reshard_carries_collected_work_into_the_new_layout(tmp_path):
 
     # every carried rollout must land in the shard that owns its input row
     for shard in result.shard_dirs:
-        owned = {(json.loads(l)["_ng_task_index"], json.loads(l)["_ng_rollout_index"])
-                 for l in open(shard / "rollouts_materialized_inputs.jsonl")}
+        owned = {
+            (json.loads(ln)["_ng_task_index"], json.loads(ln)["_ng_rollout_index"])
+            for ln in open(shard / "rollouts_materialized_inputs.jsonl")
+        }
         for line in open(shard / "rollouts.jsonl"):
             r = json.loads(line)
             assert (r["_ng_task_index"], r["_ng_rollout_index"]) in owned
@@ -804,7 +813,7 @@ def test_reshard_carries_collected_work_into_the_new_layout(tmp_path):
 def test_shard_unshard_reshard_loses_nothing(tmp_path):
     """shard -> merge -> reshard -> merge is the round trip for changing job count mid-run."""
     d, rows = _materialized(tmp_path, n_tasks=20, repeats=2)
-    done = [json.loads(l) for l in open(d / "rollouts_materialized_inputs.jsonl")][:17]
+    done = [json.loads(ln) for ln in open(d / "rollouts_materialized_inputs.jsonl")][:17]
     (d / "rollouts.jsonl").write_text("".join(json.dumps(r) + "\n" for r in done))
     before = {(r["_ng_task_index"], r["_ng_rollout_index"]) for r in done}
 
@@ -813,8 +822,9 @@ def test_shard_unshard_reshard_loses_nothing(tmp_path):
     shard_sweep(d, num_shards=7, out_dir=tmp_path / "b")
     merged = merge_shards(tmp_path / "b", output_fpath=tmp_path / "final.jsonl")
 
-    after = {(json.loads(l)["_ng_task_index"], json.loads(l)["_ng_rollout_index"])
-             for l in open(merged.output_fpath)}
+    after = {
+        (json.loads(ln)["_ng_task_index"], json.loads(ln)["_ng_rollout_index"]) for ln in open(merged.output_fpath)
+    }
     assert after == before
     assert merged.duplicates == 0
 
@@ -830,8 +840,7 @@ def test_reshard_to_fewer_removes_stale_shard_dirs(tmp_path):
     wide = shard_sweep(d, num_shards=6)
     assert len(wide.shard_dirs) == 6
     for shard in wide.shard_dirs:
-        (shard / "rollouts.jsonl").write_text(
-            (shard / "rollouts_materialized_inputs.jsonl").read_text())
+        (shard / "rollouts.jsonl").write_text((shard / "rollouts_materialized_inputs.jsonl").read_text())
 
     narrow = shard_sweep(d, num_shards=3)
     assert len(narrow.shard_dirs) == 3
@@ -845,8 +854,7 @@ def test_merge_does_not_call_a_fully_duplicate_shard_empty(tmp_path):
     """A shard whose rows were all seen already is not the same as one that collected nothing."""
     d, _ = _materialized(tmp_path, n_tasks=4, repeats=1)
     result = shard_sweep(d, num_shards=2)
-    body = "".join(
-        (s / "rollouts_materialized_inputs.jsonl").read_text() for s in result.shard_dirs)
+    body = "".join((s / "rollouts_materialized_inputs.jsonl").read_text() for s in result.shard_dirs)
     # both shards claim every rollout, so the second contributes nothing new
     for shard in result.shard_dirs:
         (shard / "rollouts.jsonl").write_text(body)
@@ -862,16 +870,16 @@ def test_reshard_absorbs_unmerged_shard_work_before_destroying_it(tmp_path):
     wide = shard_sweep(d, num_shards=6)
     # every shard collected, and nobody ran merge
     for shard in wide.shard_dirs:
-        (shard / "rollouts.jsonl").write_text(
-            (shard / "rollouts_materialized_inputs.jsonl").read_text())
+        (shard / "rollouts.jsonl").write_text((shard / "rollouts_materialized_inputs.jsonl").read_text())
     assert (d / "rollouts.jsonl").read_text() == "", "parent still empty, as after a raw shard run"
 
     narrow = shard_sweep(d, num_shards=3)
 
     # the work was folded into the parent before shard_003..005 were deleted
     assert narrow.absorbed_rollouts == 12
-    parent_keys = {(json.loads(l)["_ng_task_index"], json.loads(l)["_ng_rollout_index"])
-                   for l in open(d / "rollouts.jsonl")}
+    parent_keys = {
+        (json.loads(ln)["_ng_task_index"], json.loads(ln)["_ng_rollout_index"]) for ln in open(d / "rollouts.jsonl")
+    }
     assert len(parent_keys) == 12
     # and carried forward into the narrower layout
     carried = sum(sum(1 for _ in open(s / "rollouts.jsonl")) for s in narrow.shard_dirs)
@@ -882,8 +890,7 @@ def test_reshard_snapshots_the_parent_before_touching_shards(tmp_path):
     d, _ = _materialized(tmp_path, n_tasks=6, repeats=1)
     first = shard_sweep(d, num_shards=3)
     for shard in first.shard_dirs:
-        (shard / "rollouts.jsonl").write_text(
-            (shard / "rollouts_materialized_inputs.jsonl").read_text())
+        (shard / "rollouts.jsonl").write_text((shard / "rollouts_materialized_inputs.jsonl").read_text())
 
     second = shard_sweep(d, num_shards=2)
     assert second.snapshot_dir is not None and second.snapshot_dir.is_dir()

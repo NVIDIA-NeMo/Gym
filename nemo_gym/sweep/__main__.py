@@ -119,8 +119,10 @@ def main(argv: list[str] | None = None) -> int:
             if result.snapshot_dir:
                 print(f"snapshot before resharding: {result.snapshot_dir}")
             if result.removed_stale:
-                print(f"removed {len(result.removed_stale)} stale shard dir(s) from a wider layout: "
-                      f"{', '.join(result.removed_stale)}")
+                print(
+                    f"removed {len(result.removed_stale)} stale shard dir(s) from a wider layout: "
+                    f"{', '.join(result.removed_stale)}"
+                )
             if result.carried_rollouts:
                 print(f"carried {result.carried_rollouts:,} already-collected rollouts into the new layout")
             print("each shard directory is a valid SWEEP_DIR; run the launcher against each")
@@ -155,8 +157,7 @@ def main(argv: list[str] | None = None) -> int:
             doc = container_config(manifests)
             with open(args.output, "w") as handle:
                 yaml.safe_dump(doc, handle, default_flow_style=False, sort_keys=False)
-            print(f"wrote {args.output}: {len(doc['config_paths'])} config paths "
-                  f"from {len(manifests)} manifest(s)")
+            print(f"wrote {args.output}: {len(doc['config_paths'])} config paths from {len(manifests)} manifest(s)")
             return 0
 
         manifest = load_manifest(args.manifest)
