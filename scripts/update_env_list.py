@@ -148,13 +148,13 @@ class ServerInfo:
         return f"<a href='{self.readme_path}'>README</a>"
 
 
-def visit_agent_datasets(data: dict) -> AgentDatasetsMetadata:  # pragma: no cover
+def visit_agent_datasets(data: dict) -> AgentDatasetsMetadata:
     agent = AgentDatasetsMetadata()
     if not isinstance(data, dict):
         return agent
-    found_datasets_list = False
-    has_implicit_train_source = False
-    for v1 in data.values():
+    instances_with_datasets: set = set()
+    implicit_source_agents: list = []
+    for instance_name, v1 in data.items():
         if not isinstance(v1, dict):
             continue
         # Datasets are declared on the resources server; agent blocks are still
@@ -168,7 +168,7 @@ def visit_agent_datasets(data: dict) -> AgentDatasetsMetadata:  # pragma: no cov
                     continue
                 datasets = v3.get("datasets")
                 if isinstance(datasets, list):
-                    found_datasets_list = True
+                    instances_with_datasets.add(instance_name)
                     for entry in datasets:
                         if isinstance(entry, dict):
                             agent.types.append(entry.get("type"))
@@ -185,11 +185,16 @@ def visit_agent_datasets(data: dict) -> AgentDatasetsMetadata:  # pragma: no cov
                                     if isinstance(hf_id, dict):
                                         agent.huggingface_repo_id = hf_id.get("repo_id")
                 elif v3.get("harbor_datasets") or v3.get("vf_env_id"):
-                    has_implicit_train_source = True
-    # Harbor/verifiers agents provide their own task source; only count that as
-    # trainable data when the config declares no datasets list at all.
-    if has_implicit_train_source and not found_datasets_list:
-        agent.types.append("train")
+                    implicit_source_agents.append(v3)
+    # Harbor/verifiers agents provide their own task source; count that as trainable data
+    # (appended once) unless the agent's own environment already declares datasets — on the
+    # agent block itself or on the resources server its `resources_server.name` edge points at.
+    for v3 in implicit_source_agents:
+        rs_ref = v3.get("resources_server")
+        rs_name = rs_ref.get("name") if isinstance(rs_ref, dict) else None
+        if rs_name not in instances_with_datasets:
+            agent.types.append("train")
+            break
     return agent
 
 

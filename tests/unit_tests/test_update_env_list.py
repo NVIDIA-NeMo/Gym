@@ -73,7 +73,7 @@ def test_visit_agent_datasets_reads_resources_server_datasets() -> None:
     assert metadata.license == "Apache 2.0"
 
 
-def test_visit_agent_datasets_ignores_harbor_fallback_when_datasets_declared() -> None:
+def test_visit_agent_datasets_ignores_harbor_fallback_when_its_rs_declares_datasets() -> None:
     metadata = visit_agent_datasets(
         {
             "test_rs": {
@@ -87,6 +87,7 @@ def test_visit_agent_datasets_ignores_harbor_fallback_when_datasets_declared() -
                 "responses_api_agents": {
                     "harbor_agent": {
                         "harbor_datasets": {"my_bench": {}},
+                        "resources_server": {"type": "resources_servers", "name": "test_rs"},
                     }
                 }
             },
@@ -94,6 +95,31 @@ def test_visit_agent_datasets_ignores_harbor_fallback_when_datasets_declared() -
     )
 
     assert metadata.types == ["validation"]
+
+
+def test_visit_agent_datasets_unrelated_rs_does_not_suppress_harbor_fallback() -> None:
+    """Suppression follows the agent's resources_server edge, not any datasets list in the file."""
+    metadata = visit_agent_datasets(
+        {
+            "unrelated_rs": {
+                "resources_servers": {
+                    "my_server": {
+                        "datasets": [{"name": "validation", "type": "validation"}],
+                    }
+                }
+            },
+            "test_agent": {
+                "responses_api_agents": {
+                    "harbor_agent": {
+                        "harbor_datasets": {"my_bench": {}},
+                        "resources_server": {"type": "resources_servers", "name": "other_rs"},
+                    }
+                }
+            },
+        }
+    )
+
+    assert metadata.types == ["validation", "train"]
 
 
 def test_visit_agent_datasets_harbor_fallback_without_datasets() -> None:
@@ -106,6 +132,25 @@ def test_visit_agent_datasets_harbor_fallback_without_datasets() -> None:
                     }
                 }
             }
+        }
+    )
+
+    assert metadata.types == ["train"]
+
+
+def test_visit_agent_datasets_vf_env_fallback_without_datasets() -> None:
+    metadata = visit_agent_datasets(
+        {"test_agent": {"responses_api_agents": {"vf_agent": {"vf_env_id": "my-verifiers-env"}}}}
+    )
+
+    assert metadata.types == ["train"]
+
+
+def test_visit_agent_datasets_implicit_train_is_added_once_for_many_agents() -> None:
+    metadata = visit_agent_datasets(
+        {
+            "a": {"responses_api_agents": {"harbor_agent": {"harbor_datasets": {"b1": {}}}}},
+            "b": {"responses_api_agents": {"vf_agent": {"vf_env_id": "e"}}},
         }
     )
 

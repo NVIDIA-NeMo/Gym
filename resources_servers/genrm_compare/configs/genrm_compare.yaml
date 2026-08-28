@@ -80,13 +80,13 @@ genrm_compare_resources_server:
       description: GenRM pairwise comparison for RLHF training
       value: Compare multiple candidate responses using GenRM model
 
-# GenRM model server (local vLLM). Same structure as responses_api_models/genrm_model/configs/genrm_model.yaml.
-# Uses ${genrm_model_name} from env. Load this block when running genrm_compare, or load that file instead.
       datasets:
       - name: example
         type: example
         jsonl_fpath: resources_servers/genrm_compare/data/example.jsonl
 
+# GenRM model server (local vLLM). Same structure as responses_api_models/genrm_model/configs/genrm_model.yaml.
+# Uses ${genrm_model_name} from env. Load this block when running genrm_compare, or load that file instead.
 genrm_model:
   responses_api_models:
     genrm_model:

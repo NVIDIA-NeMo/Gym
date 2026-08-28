@@ -15,11 +15,6 @@ bigcodebench:
       min_time_limit: 1.0
       gt_time_limit: 20.0
       subprocess_timeout: 240.0
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/bigcodebench/data/example.jsonl
-        license: Apache 2.0
 bigcodebench_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -30,3 +25,11 @@ bigcodebench_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
+      # Stays on the agent: benchmarks/bigcodebench/config.yaml adds a second agent on this
+      # resources server, and non-benchmark datasets have no `agent:` pin to disambiguate an
+      # RS-declared task_source in that closure.
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/bigcodebench/data/example.jsonl
+        license: Apache 2.0
