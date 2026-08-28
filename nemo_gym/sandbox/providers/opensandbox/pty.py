@@ -386,10 +386,6 @@ class OpenSandboxPtySession:
                     "run bulk-output commands attached or through the exec API instead",
                     file=stderr,
                 )
-                # raise SandboxPtyError(
-                #     "PTY output exceeded the server's retained window while detached; "
-                #     "run bulk-output commands attached or through the exec API instead"
-                # )
             if needle in buffer:
                 break
             await self.detach()
