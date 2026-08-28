@@ -241,6 +241,7 @@ async def test_health_on_and_off_leave_collection_and_metrics_byte_identical(
     source = {
         "responses_create_params": {"input": []},
         "agent_ref": {"name": "synthetic-agent"},
+        "_ng_rollout_id": "123e4567-e89b-42d3-a456-426614174000",
     }
 
     class GoldenHelper(RolloutCollectionHelper):
@@ -629,8 +630,9 @@ def test_bound_call_without_token_counts_is_a_model_call_finding(tmp_path: Path)
 
 
 def test_current_producer_response_reference_binds_to_captured_call_id(tmp_path: Path) -> None:
+    rollout_id = "123e4567-e89b-42d3-a456-426614174000"
     model_ref = {"type": "responses_api_models", "name": "openai_model"}
-    row = {"_ng_task_index": 0, "_ng_rollout_index": 0}
+    row = {"_ng_task_index": 0, "_ng_rollout_index": 0, "_ng_rollout_id": rollout_id}
     response = {
         "output": [{"type": "message", "role": "assistant", "content": "ok"}],
         "usage": {"input_tokens": 3, "output_tokens": 2},
@@ -639,12 +641,12 @@ def test_current_producer_response_reference_binds_to_captured_call_id(tmp_path:
         "response": response,
         "ng_trajectory": {
             "task_id": "0",
-            "rollout_id": "0-0",
+            "rollout_id": rollout_id,
             "turns": [
                 {
                     "invocation_id": "root",
                     "task_id": "0",
-                    "rollout_id": "0-0",
+                    "rollout_id": rollout_id,
                     "turn_no": 1,
                     "timestamp": 1.0,
                     "answer": "ok",

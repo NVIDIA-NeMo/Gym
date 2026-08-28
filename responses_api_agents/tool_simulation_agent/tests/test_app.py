@@ -238,15 +238,16 @@ class TestApp:
             test_client.post(
                 "/run",
                 json={
+                    "_ng_rollout_id": "123e4567-e89b-42d3-a456-426614174000",
                     "responses_create_params": {
                         "input": [],
-                    }
+                    },
                 },
             )
 
         server_client_post_mock.assert_called_once_with(
             server_name="tool_agent",
-            url_path="/v1/responses",
+            url_path="/ng-rollout/123e4567-e89b-42d3-a456-426614174000/v1/responses",
             json=NeMoGymResponseCreateParamsNonStreaming(
                 input=[],
             ),
@@ -288,6 +289,7 @@ class TestApp:
             test_client.post(
                 "/run",
                 json={
+                    "_ng_rollout_id": "123e4567-e89b-42d3-a456-426614174000",
                     "responses_create_params": {
                         "input": [
                             {
@@ -296,7 +298,7 @@ class TestApp:
                             }
                         ],
                         "tools": tools,
-                    }
+                    },
                 },
             )
 
@@ -344,7 +346,7 @@ class TestApp:
         expected_invalid_verify_response_calls = [
             call(
                 server_name="tool_agent",
-                url_path="/v1/responses",
+                url_path="/ng-rollout/123e4567-e89b-42d3-a456-426614174000/v1/responses",
                 json=NeMoGymResponseCreateParamsNonStreaming(
                     input=[
                         NeMoGymEasyInputMessage(
@@ -359,6 +361,7 @@ class TestApp:
                 server_name="tool_resources_server",
                 url_path="/verify",
                 json={
+                    "_ng_rollout_id": "123e4567-e89b-42d3-a456-426614174000",
                     "responses_create_params": {
                         "background": None,
                         "include": None,
@@ -418,6 +421,7 @@ class TestApp:
         valid_verify_response = test_client.post(
             "/run",
             json={
+                "_ng_rollout_id": "123e4567-e89b-42d3-a456-426614174000",
                 "responses_create_params": {
                     "input": [
                         {
@@ -426,7 +430,7 @@ class TestApp:
                         }
                     ],
                     "tools": tools,
-                }
+                },
             },
         )
         assert valid_verify_response.status_code == 200
@@ -502,6 +506,7 @@ class TestApp:
         response = test_client.post(
             "/run",
             json={
+                "_ng_rollout_id": "123e4567-e89b-42d3-a456-426614174000",
                 "responses_create_params": {
                     "input": [
                         {
@@ -509,7 +514,7 @@ class TestApp:
                             "content": "Please answer directly.",
                         }
                     ]
-                }
+                },
             },
         )
 
@@ -520,7 +525,7 @@ class TestApp:
         assert response_json["response"]["id"] == "chat_response_id"
         server_client_post_mock.assert_called_once_with(
             server_name="tool_agent",
-            url_path="/v1/responses",
+            url_path="/ng-rollout/123e4567-e89b-42d3-a456-426614174000/v1/responses",
             json=NeMoGymResponseCreateParamsNonStreaming(
                 input=[
                     NeMoGymEasyInputMessage(

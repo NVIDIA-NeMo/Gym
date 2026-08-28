@@ -23,6 +23,7 @@ from pathlib import Path
 from threading import get_ident
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
+from uuid import UUID
 
 import orjson
 import pytest
@@ -37,6 +38,7 @@ from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
+    ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
@@ -105,6 +107,13 @@ def empty_global_config(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     get_global_config_dict = MagicMock(return_value={})
     monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", get_global_config_dict)
     return get_global_config_dict
+
+
+def _pop_valid_rollout_ids(rows: list[dict]) -> list[str]:
+    rollout_ids = [row.pop(ROLLOUT_ID_KEY_NAME) for row in rows]
+    assert len(set(rollout_ids)) == len(rollout_ids)
+    assert all(UUID(rollout_id).version == 4 and str(UUID(rollout_id)) == rollout_id for rollout_id in rollout_ids)
+    return rollout_ids
 
 
 class FakeResponse:
@@ -233,7 +242,11 @@ class TestRolloutCollection:
         }
 
     def test_build_trajectory_record_merges_all_evidence_sources(self) -> None:
-        row = {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3}
+        row = {
+            TASK_INDEX_KEY_NAME: 2,
+            ROLLOUT_INDEX_KEY_NAME: 3,
+            ROLLOUT_ID_KEY_NAME: "123e4567-e89b-42d3-a456-426614174000",
+        }
         result = {
             "ng_trajectory": {
                 "task_id": "2",
@@ -309,7 +322,13 @@ class TestRolloutCollection:
         assert observed_only.tool_call_id == "observed-only" and observed_only.output == "new"
 
     def test_build_trajectory_record_normalizes_identity_and_merges_model_calls(self) -> None:
-        row = {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3, "task_id": "collector-task"}
+        rollout_id = "123e4567-e89b-42d3-a456-426614174000"
+        row = {
+            TASK_INDEX_KEY_NAME: 2,
+            ROLLOUT_INDEX_KEY_NAME: 3,
+            ROLLOUT_ID_KEY_NAME: rollout_id,
+            "task_id": "collector-task",
+        }
         result = {
             "ng_trajectory": {
                 "task_id": "producer-task",
@@ -348,8 +367,8 @@ class TestRolloutCollection:
 
         trajectory = _build_trajectory_record(row, result)
 
-        assert (trajectory.task_id, trajectory.rollout_id) == ("collector-task", "2-3")
-        assert (trajectory.turns[0].task_id, trajectory.turns[0].rollout_id) == ("collector-task", "2-3")
+        assert (trajectory.task_id, trajectory.rollout_id) == ("collector-task", rollout_id)
+        assert (trajectory.turns[0].task_id, trajectory.turns[0].rollout_id) == ("collector-task", rollout_id)
         assert {gap.code for gap in trajectory.gaps} >= {"producer_trajectory_identity_mismatch"}
         assert [call.model_call_id for call in trajectory.model_calls] == ["producer-only", "shared", "capture-only"]
         assert [call.request for call in trajectory.model_calls] == ["kept", "captured", "new"]
@@ -359,7 +378,11 @@ class TestRolloutCollection:
         }
 
     def test_trajectory_projection_failure_preserves_rollout(self) -> None:
-        row = {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3}
+        row = {
+            TASK_INDEX_KEY_NAME: 2,
+            ROLLOUT_INDEX_KEY_NAME: 3,
+            ROLLOUT_ID_KEY_NAME: "123e4567-e89b-42d3-a456-426614174000",
+        }
         result = {
             "ng_model_call_capture": {
                 "calls": [
@@ -381,7 +404,11 @@ class TestRolloutCollection:
         assert result["ng_model_call_capture"]["calls"][0]["response"] == {"output": "answer"}
 
     def test_trajectory_projection_failure_without_attachment_keeps_gap(self, monkeypatch) -> None:
-        row = {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3}
+        row = {
+            TASK_INDEX_KEY_NAME: 2,
+            ROLLOUT_INDEX_KEY_NAME: 3,
+            ROLLOUT_ID_KEY_NAME: "123e4567-e89b-42d3-a456-426614174000",
+        }
         result = {"ng_trajectory": {}}
         monkeypatch.setattr(nemo_gym.rollout_collection, "_build_trajectory_record", MagicMock(side_effect=ValueError))
 
@@ -554,11 +581,12 @@ class TestRolloutCollection:
         # responses_api_agents/simple_agent/app.py), bypassing join_model_call_observations
         # entirely -- so its ModelCallRef is never canonicalized with a model_call_id and only
         # ever carries (model_ref, response_id). Token fields must still populate.
-        row = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+        rollout_id = "123e4567-e89b-42d3-a456-426614174000"
+        row = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, ROLLOUT_ID_KEY_NAME: rollout_id}
         result = {
             NG_TRAJECTORY_KEY: {
                 "task_id": "0",
-                "rollout_id": "0-0",
+                "rollout_id": rollout_id,
                 "invocations": [
                     {
                         "invocation_id": "root",
@@ -593,11 +621,12 @@ class TestRolloutCollection:
     def test_ng_perf_does_not_guess_an_ambiguous_response_id_match(self) -> None:
         # Two captured calls share the same (model_ref, response_id) pair -- the ref must
         # resolve to no match rather than guessing either one, so its tokens stay uncounted.
-        row = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+        rollout_id = "123e4567-e89b-42d3-a456-426614174000"
+        row = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, ROLLOUT_ID_KEY_NAME: rollout_id}
         result = {
             NG_TRAJECTORY_KEY: {
                 "task_id": "0",
-                "rollout_id": "0-0",
+                "rollout_id": rollout_id,
                 "invocations": [
                     {
                         "invocation_id": "root",
@@ -1315,6 +1344,7 @@ class TestRolloutCollection:
         )
 
         rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        _pop_valid_rollout_ids(rows)
         assert rows == [
             {
                 "_ng_task_index": 0,
@@ -1383,6 +1413,41 @@ class TestRolloutCollection:
                 "agent_ref": {"name": "my_agent"},
             },
         ]
+
+    def test_preprocess_rows_rejects_duplicate_explicit_rollout_ids(self, tmp_path: Path) -> None:
+        fpath = tmp_path / "input.jsonl"
+        fpath.write_text(
+            json.dumps(
+                {
+                    "responses_create_params": {"input": []},
+                    "_ng_rollout_id": "123e4567-e89b-42d3-a456-426614174000",
+                }
+            )
+            + "\n"
+        )
+        config = RolloutCollectionConfig(
+            agent_name="my_agent",
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath="abcd",
+            num_repeats=2,
+        )
+
+        with pytest.raises(ValueError, match="must be unique"):
+            RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+    def test_preprocess_rows_rejects_a_non_uuid_rollout_id(self, tmp_path: Path) -> None:
+        fpath = tmp_path / "input.jsonl"
+        fpath.write_text(
+            json.dumps({"responses_create_params": {"input": []}, "_ng_rollout_id": "task-0-rollout-0"}) + "\n"
+        )
+        config = RolloutCollectionConfig(
+            agent_name="my_agent",
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath="abcd",
+        )
+
+        with pytest.raises(ValueError, match="canonical UUIDv4"):
+            RolloutCollectionHelper._preprocess_rows_from_config(None, config)
 
     def test_preprocess_rows_stamps_skills_ref(self, tmp_path: Path) -> None:
         """skills.path is a run-level knob: each row is stamped with skills_ref (path + hash +
@@ -1660,6 +1725,7 @@ class TestRolloutCollection:
                 return metrics_fpath
 
         actual_returned_results = await TestRolloutCollectionHelper().run_from_config(config)
+        _pop_valid_rollout_ids(actual_returned_results)
         empty_global_config.assert_called_once_with()
         clear_captures.assert_not_called()
         merge_capture.assert_not_called()
@@ -1712,6 +1778,7 @@ class TestRolloutCollection:
 
         with output_jsonl_fpath.open() as f:
             actual_written_results = [json.loads(line) for line in f]
+        _pop_valid_rollout_ids(actual_written_results)
         assert expected_results == actual_written_results
 
         aggregate_metrics_fpath = tmp_path / "output_aggregate_metrics.json"
@@ -1982,6 +2049,8 @@ class TestRolloutCollection:
     ) -> None:
         from nemo_gym.base_responses_api_model import CaptureStore
 
+        rollout_id = "123e4567-e89b-42d3-a456-426614174000"
+        monkeypatch.setattr(nemo_gym.rollout_collection, "uuid4", lambda: rollout_id)
         capture_dir = tmp_path / "captures"
         monkeypatch.setattr(
             nemo_gym.rollout_collection,
@@ -2006,16 +2075,17 @@ class TestRolloutCollection:
             input_fpath.write_bytes(orjson.dumps(source_row) + b"\n")
 
         store = CaptureStore(capture_dir)
-        store.record("0-0", {"model_call_id": "stale", "dialect": "responses", "request": {}, "response": {}})
+        store.record(rollout_id, {"model_call_id": "stale", "dialect": "responses", "request": {}, "response": {}})
 
         class Helper(RolloutCollectionHelper):
             def run_examples(self, examples, *args, **kwargs):
                 [example] = examples
                 assert example[TASK_INDEX_KEY_NAME] == 0 and example[ROLLOUT_INDEX_KEY_NAME] == 0
-                assert store.read("0-0") == []
+                assert example[ROLLOUT_ID_KEY_NAME] == rollout_id
+                assert store.read(rollout_id) == []
                 request = {"input": [{"type": "input_image", "image_url": "data:image/png;base64,secret"}]}
                 store.record(
-                    "0-0",
+                    rollout_id,
                     {"model_call_id": "fresh", "dialect": "responses", "request": request, "response": {}},
                 )
                 future = Future()
@@ -2024,7 +2094,7 @@ class TestRolloutCollection:
                     result["ng_trajectory"] = {
                         "schema_version": "1.0",
                         "task_id": "0",
-                        "rollout_id": "0-0",
+                        "rollout_id": rollout_id,
                         "gaps": [{"code": "multimodal_history_redacted"}],
                     }
                 future.set_result((example, result))
@@ -2032,7 +2102,7 @@ class TestRolloutCollection:
 
         results = await Helper().run_from_config(config)
 
-        assert [exchange["model_call_id"] for exchange in store.read("0-0")] == ["fresh"]
+        assert [exchange["model_call_id"] for exchange in store.read(rollout_id)] == ["fresh"]
         assert [call["model_call_id"] for call in results[0]["ng_model_call_capture"]["calls"]] == ["fresh"]
         trajectory_request = results[0]["ng_trajectory"]["model_calls"][0]["request"]
         trajectory_response = results[0]["ng_trajectory"]["model_calls"][0]["response"]
@@ -2041,7 +2111,7 @@ class TestRolloutCollection:
         else:
             assert trajectory_request["input"][0]["type"] == "input_image" and trajectory_response == {}
         assert "request" not in results[0]["ng_model_call_capture"]["calls"][0]
-        assert store.read("0-0")[0]["request"]["input"][0]["type"] == "input_image"
+        assert store.read(rollout_id)[0]["request"]["input"][0]["type"] == "input_image"
         if redact_payloads:
             assert "data:image/png;base64,secret" not in orjson.dumps(results[0]).decode()
 
@@ -2058,13 +2128,11 @@ class TestRolloutCollection:
             lambda: {"observability_enabled": True, "model_call_capture_dir": str(capture_dir)},
         )
 
-        # These indices would derive ``0-0``.
-        # The explicit id must win for both writer and consumer.
-        # Otherwise readback finds no matching capture.
+        rollout_id = "123e4567-e89b-42d3-a456-426614174000"
         source_row = {
             "responses_create_params": {"input": []},
             AGENT_REF_KEY_NAME: {"name": "agent"},
-            ROLLOUT_ID_KEY_NAME: "step7.0-0",
+            ROLLOUT_ID_KEY_NAME: rollout_id,
         }
         input_fpath = tmp_path / "input.jsonl"
         input_fpath.write_bytes(orjson.dumps(source_row) + b"\n")
@@ -2081,7 +2149,7 @@ class TestRolloutCollection:
             def run_examples(self, examples, *args, **kwargs):
                 [example] = examples
                 store.record(
-                    "step7.0-0",
+                    rollout_id,
                     {"model_call_id": "call", "dialect": "responses", "request": {}, "response": {}},
                 )
                 future = Future()
@@ -2090,10 +2158,8 @@ class TestRolloutCollection:
 
         results = await Helper().run_from_config(config)
 
-        assert results[0][ROLLOUT_ID_KEY_NAME] == "step7.0-0"
+        assert results[0][ROLLOUT_ID_KEY_NAME] == rollout_id
         assert [call["model_call_id"] for call in results[0]["ng_model_call_capture"]["calls"]] == ["call"]
-        # No capture uses the derived id.
-        # The explicit id replaces it.
         assert store.read("0-0") == []
 
     async def test_run_from_config_does_not_finalize_a_nonparticipating_agent(
@@ -2281,6 +2347,7 @@ class TestRolloutCollection:
                 return None
 
         actual_returned_results = await TestRolloutCollectionHelper().run_from_config(config)
+        _pop_valid_rollout_ids(actual_returned_results)
 
         expected_results = [
             {
@@ -2467,6 +2534,9 @@ class TestRolloutCollection:
         )
 
         actual_returned_results = RolloutCollectionHelper()._load_from_cache(config)
+        input_rows, completed_rows, results, result_strs = actual_returned_results
+        _pop_valid_rollout_ids([*input_rows, *completed_rows])
+        actual_returned_results = (input_rows, completed_rows, results, result_strs)
 
         expected_results = (
             [
@@ -3001,7 +3071,7 @@ class TestTokenCaptureRetention:
     """Test retirement after handoff and stale-record clearing.
 
     ``TokenCaptureStore.append`` uses append mode.
-    Rollout ids are deterministic.
+    Rollout ids are stable across infrastructure retries.
     Clearing prevents a rerun from merging different attempts.
     Retirement prevents unbounded growth after durable handoff.
     """
@@ -3017,26 +3087,29 @@ class TestTokenCaptureRetention:
         )
 
     async def test_clear_removes_stale_records_before_dispatch(self, tmp_path: Path) -> None:
+        rollout_id = "123e4567-e89b-42d3-a456-426614174000"
         store = TokenCaptureStore(tmp_path)
-        store.append(self._entry("0-0", "old"))
-        await store.mark_incomplete("0-0", "old")
-        rows = [{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}]
+        store.append(self._entry(rollout_id, "old"))
+        await store.mark_incomplete(rollout_id, "old")
+        rows = [{ROLLOUT_ID_KEY_NAME: rollout_id}]
 
         clear_token_captures_for_rollouts(rows, [tmp_path])
 
-        assert store.read_entries("0-0") == []
-        assert not store.is_incomplete("0-0")
+        assert store.read_entries(rollout_id) == []
+        assert not store.is_incomplete(rollout_id)
 
     def test_clear_is_a_noop_without_capture_dirs(self, tmp_path: Path) -> None:
+        rollout_id = "123e4567-e89b-42d3-a456-426614174000"
         store = TokenCaptureStore(tmp_path)
-        store.append(self._entry("0-0", "keep"))
-        clear_token_captures_for_rollouts([{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}], [])
-        assert len(store.read_entries("0-0")) == 1
+        store.append(self._entry(rollout_id, "keep"))
+        clear_token_captures_for_rollouts([{ROLLOUT_ID_KEY_NAME: rollout_id}], [])
+        assert len(store.read_entries(rollout_id)) == 1
 
-    def test_clear_skips_rows_without_a_derivable_rollout_id(self, tmp_path: Path) -> None:
+    def test_clear_requires_a_rollout_id(self, tmp_path: Path) -> None:
         store = TokenCaptureStore(tmp_path)
         store.append(self._entry("0-0", "keep"))
-        clear_token_captures_for_rollouts([{"unrelated": True}], [tmp_path])
+        with pytest.raises(ValueError, match="_ng_rollout_id is required"):
+            clear_token_captures_for_rollouts([{"unrelated": True}], [tmp_path])
         assert len(store.read_entries("0-0")) == 1
 
 
@@ -3047,11 +3120,14 @@ class TestFinalizeRolloutTokenCapture:
     A framework can provide a source without using Gym configuration.
     """
 
+    ROLLOUT_ID = "123e4567-e89b-42d3-a456-426614174000"
+
     @staticmethod
     def _record(output: list | None = None) -> dict:
         return {
             TASK_INDEX_KEY_NAME: 0,
             ROLLOUT_INDEX_KEY_NAME: 0,
+            ROLLOUT_ID_KEY_NAME: TestFinalizeRolloutTokenCapture.ROLLOUT_ID,
             "reward": 1.0,
             "response": {"model": "m", "output": output if output is not None else []},
         }
@@ -3059,7 +3135,7 @@ class TestFinalizeRolloutTokenCapture:
     @staticmethod
     def _capture(store: TokenCaptureStore) -> None:
         entry = TokenEntry(
-            rollout_id="0-0",
+            rollout_id=TestFinalizeRolloutTokenCapture.ROLLOUT_ID,
             model_call_id="c1",
             prompt_token_ids=[1, 2, 3],
             generation_token_ids=[4, 5],
@@ -3082,18 +3158,18 @@ class TestFinalizeRolloutTokenCapture:
         assert result["reward"] == 1.0  # Preserve harness and verifier output.
         assert result[TOKEN_CAPTURE_KEY]["delivered_fraction"] == 1.0
         assert built is not None and built["rebuilt_response"] is not None
-        assert len(store.read_entries("0-0")) == 1  # Retain evidence until durable handoff.
-        assert await retire_rollout_token_capture("0-0", store, built) is True
-        assert store.read_entries("0-0") == []
+        assert len(store.read_entries(self.ROLLOUT_ID)) == 1  # Retain evidence until durable handoff.
+        assert await retire_rollout_token_capture(self.ROLLOUT_ID, store, built) is True
+        assert store.read_entries(self.ROLLOUT_ID) == []
 
     async def test_retirement_cannot_delete_a_newer_rollout_attempt(self, tmp_path: Path) -> None:
         store = TokenCaptureStore(tmp_path)
         self._capture(store)
         built = await finalize_rollout_token_capture(self._record(), store)
 
-        store.delete("0-0")
+        store.delete(self.ROLLOUT_ID)
         replacement = TokenEntry(
-            rollout_id="0-0",
+            rollout_id=self.ROLLOUT_ID,
             model_call_id="new",
             prompt_token_ids=[1],
             generation_token_ids=[2],
@@ -3101,8 +3177,8 @@ class TestFinalizeRolloutTokenCapture:
         )
         store.append(replacement)
 
-        assert await retire_rollout_token_capture("0-0", store, built) is False
-        assert [entry.model_call_id for entry in store.read_entries("0-0")] == ["new"]
+        assert await retire_rollout_token_capture(self.ROLLOUT_ID, store, built) is False
+        assert [entry.model_call_id for entry in store.read_entries(self.ROLLOUT_ID)] == ["new"]
 
     async def test_a_rollout_that_already_has_token_ids_is_left_alone(self, tmp_path: Path) -> None:
         """Keep the token ids sampled by a native agent.
@@ -3122,9 +3198,9 @@ class TestFinalizeRolloutTokenCapture:
         assert result["response"]["output"] == native
         assert TOKEN_CAPTURE_KEY not in result
         assert capture_build_can_retire(built)
-        assert len(store.read_entries("0-0")) == 1
-        assert await retire_rollout_token_capture("0-0", store, built) is True
-        assert store.read_entries("0-0") == []
+        assert len(store.read_entries(self.ROLLOUT_ID)) == 1
+        assert await retire_rollout_token_capture(self.ROLLOUT_ID, store, built) is True
+        assert store.read_entries(self.ROLLOUT_ID) == []
 
     async def test_native_and_external_rollouts_are_handled_in_one_batch(self, tmp_path: Path) -> None:
         """Finalize native and external rollouts through the same call."""
@@ -3170,7 +3246,7 @@ class TestFinalizeRolloutTokenCapture:
         store = TokenCaptureStore(tmp_path)
         self._capture(store)
         # A call that failed to capture leaves a chain that looks contiguous but is missing a turn.
-        await store.mark_incomplete("0-0", "c2")
+        await store.mark_incomplete(self.ROLLOUT_ID, "c2")
         result = self._record()
 
         with pytest.warns(UserWarning, match="marked for masking"):
@@ -3194,7 +3270,7 @@ class TestFinalizeRolloutTokenCapture:
     async def test_a_failed_build_keeps_its_records_and_reports_why(self, tmp_path: Path) -> None:
         store = TokenCaptureStore(tmp_path)
         malformed = TokenEntry(
-            rollout_id="0-0",
+            rollout_id=self.ROLLOUT_ID,
             model_call_id="c1",
             prompt_token_ids=[1, 2],
             generation_token_ids=[4, 5],
@@ -3212,14 +3288,13 @@ class TestFinalizeRolloutTokenCapture:
         assert result[MASK_SAMPLE_KEY] is True
         assert "ValidationError" in result[TOKEN_CAPTURE_KEY]["error"]
         # Retain failed-build records as diagnostic evidence.
-        assert store.path_for("0-0").stat().st_size > 0
+        assert store.path_for(self.ROLLOUT_ID).stat().st_size > 0
 
     async def test_a_rollout_with_no_capture_key_is_masked(self, tmp_path: Path) -> None:
         result = self._record()
-        del result[TASK_INDEX_KEY_NAME]
-        del result[ROLLOUT_INDEX_KEY_NAME]
+        del result[ROLLOUT_ID_KEY_NAME]
 
-        with pytest.warns(UserWarning, match="carries no id"):
+        with pytest.warns(UserWarning, match="carries no _ng_rollout_id"):
             built = await finalize_rollout_token_capture(result, TokenCaptureStore(tmp_path))
 
         # Mask the rollout before it reaches the trainer without ids.

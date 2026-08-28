@@ -44,6 +44,7 @@ from responses_api_agents.stirrup_agent.task_strategy import TaskStrategy
 
 
 STIRRUP_AGENT_DIR = Path(__file__).resolve().parent.parent
+ROLLOUT_ID = "123e4567-e89b-42d3-a456-426614174000"
 
 
 def _make_config(
@@ -192,7 +193,12 @@ class TestExecuteOnlyMode:
             input="ignored",
             metadata={"task_id": "task-1", "prompt": "do the thing", "_ng_rollout_index": "0"},
         )
-        body = StirrupRunRequest(responses_create_params=params, task_id="task-1", prompt="do the thing")
+        body = StirrupRunRequest(
+            responses_create_params=params,
+            task_id="task-1",
+            prompt="do the thing",
+            **{"_ng_rollout_id": ROLLOUT_ID},
+        )
         request = MagicMock()
         request.cookies = {}
 
@@ -236,7 +242,12 @@ class TestJudgeOnlyMode:
             input="ignored",
             metadata={"task_id": "task-1", "prompt": "do the thing", "_ng_rollout_index": "0"},
         )
-        body = StirrupRunRequest(responses_create_params=params, task_id="task-1", prompt="do the thing")
+        body = StirrupRunRequest(
+            responses_create_params=params,
+            task_id="task-1",
+            prompt="do the thing",
+            **{"_ng_rollout_id": ROLLOUT_ID},
+        )
         request = MagicMock()
         request.cookies = {}
 
@@ -273,7 +284,12 @@ class TestJudgeOnlyMode:
             input="ignored",
             metadata={"task_id": "missing-task", "prompt": "do the thing", "_ng_rollout_index": "0"},
         )
-        body = StirrupRunRequest(responses_create_params=params, task_id="missing-task", prompt="do the thing")
+        body = StirrupRunRequest(
+            responses_create_params=params,
+            task_id="missing-task",
+            prompt="do the thing",
+            **{"_ng_rollout_id": ROLLOUT_ID},
+        )
         request = MagicMock()
         request.cookies = {}
 
@@ -346,7 +362,12 @@ class TestRerunIncompleteMode:
             input="ignored",
             metadata={"task_id": task_id, "prompt": "do the thing", "_ng_rollout_index": "0"},
         )
-        return StirrupRunRequest(responses_create_params=params, task_id=task_id, prompt="do the thing")
+        return StirrupRunRequest(
+            responses_create_params=params,
+            task_id=task_id,
+            prompt="do the thing",
+            **{"_ng_rollout_id": ROLLOUT_ID},
+        )
 
     @pytest.mark.asyncio
     async def test_full_mode_finished_task_skips_rollout_and_verifies(self, tmp_path) -> None:
@@ -676,6 +697,7 @@ class TestReuseCachedDeliverable:
             task_id="task-1",
             prompt="do the thing",
             reuse_cached_deliverable=True,
+            **{"_ng_rollout_id": ROLLOUT_ID},
         )
         request = MagicMock()
         request.cookies = {}
@@ -735,6 +757,7 @@ class TestReuseCachedDeliverable:
             task_id="task-1",
             prompt="do the thing",
             reuse_cached_deliverable=True,
+            **{"_ng_rollout_id": ROLLOUT_ID},
         )
         request = MagicMock()
         request.cookies = {}
@@ -771,6 +794,7 @@ class TestReferenceKeyedVerifyCache:
             prompt="do the thing",
             reuse_cached_deliverable=True,
             reference_ids=list(reference_ids),
+            **{"_ng_rollout_id": ROLLOUT_ID},
         )
 
     def test_cache_path_is_reference_set_keyed_and_order_independent(self, tmp_path) -> None:

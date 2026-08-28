@@ -217,6 +217,7 @@ class TestApp:
 
     @pytest.mark.parametrize("resolved", [False, None])
     async def test_run_emits_standard_turns_and_tool_observation(self, resolved: bool | None) -> None:
+        rollout_id = "123e4567-e89b-42d3-a456-426614174000"
         server, server_client = _make_agent(True)
         response_base = {
             "created_at": 1.0,
@@ -269,7 +270,7 @@ class TestApp:
             if url_path == "/seed_session":
                 return _mock_response()
             if server_name == "simple":
-                nested_request = MagicMock(cookies=kwargs["cookies"], path_params={"rollout_id": "4-1"})
+                nested_request = MagicMock(cookies=kwargs["cookies"], path_params={"rollout_id": rollout_id})
                 model_response = await server.responses(nested_request, Response(), kwargs["json"])
                 return _mock_response(model_response.model_dump(mode="json"))
             if server_name == "model":
@@ -289,6 +290,7 @@ class TestApp:
                 "instance_id": 0,
                 "_ng_task_index": 4,
                 "_ng_rollout_index": 1,
+                "_ng_rollout_id": rollout_id,
             }
         )
         request = MagicMock()
@@ -299,10 +301,10 @@ class TestApp:
             (item.kwargs["server_name"], item.kwargs["url_path"]) for item in server_client.post.await_args_list
         ] == [
             ("resources", "/seed_session"),
-            ("simple", "/ng-rollout/4-1/v1/responses"),
-            ("model", "/ng-rollout/4-1/v1/responses"),
+            ("simple", f"/ng-rollout/{rollout_id}/v1/responses"),
+            ("model", f"/ng-rollout/{rollout_id}/v1/responses"),
             ("resources", "/lookup"),
-            ("model", "/ng-rollout/4-1/v1/responses"),
+            ("model", f"/ng-rollout/{rollout_id}/v1/responses"),
             ("resources", "/verify"),
         ]
 
@@ -318,7 +320,12 @@ class TestApp:
                 for index, response_id in enumerate(("resp-tool", "resp-final"), start=1)
             ]
         }
-        row = {TASK_INDEX_KEY_NAME: 4, ROLLOUT_INDEX_KEY_NAME: 1, "instance_id": 0}
+        row = {
+            TASK_INDEX_KEY_NAME: 4,
+            ROLLOUT_INDEX_KEY_NAME: 1,
+            "_ng_rollout_id": rollout_id,
+            "instance_id": 0,
+        }
         _attach_trajectory_record(row, result_data)
         serialized = orjson.loads(orjson.dumps(result_data))
         trajectory = TrajectoryRecord.model_validate(serialized["ng_trajectory"])
@@ -331,8 +338,8 @@ class TestApp:
         assert trajectory.invocations[0].conversation[-1].type == "message"
         turns = trajectory.turns
         assert [(turn.task_id, turn.rollout_id, turn.turn_no, turn.step_count) for turn in turns] == [
-            ("0", "4-1", 1, 1),
-            ("0", "4-1", 2, 1),
+            ("0", rollout_id, 1, 1),
+            ("0", rollout_id, 2, 1),
         ]
         assert all(turn.timestamp > 0 for turn in turns)
         assert [turn.model_calls[0].response_id for turn in turns] == ["resp-tool", "resp-final"]
@@ -355,6 +362,7 @@ class TestApp:
 
     @pytest.mark.parametrize(("capture_enabled", "override_responses"), ((False, False), (True, False), (True, True)))
     async def test_run_preserves_self_dispatch(self, capture_enabled: bool, override_responses: bool) -> None:
+        rollout_id = "123e4567-e89b-42d3-a456-426614174000"
         agent_type = SimpleAgent
         if override_responses:
 
@@ -389,6 +397,7 @@ class TestApp:
                 "responses_create_params": {"input": "question"},
                 TASK_INDEX_KEY_NAME: 0,
                 ROLLOUT_INDEX_KEY_NAME: 0,
+                "_ng_rollout_id": rollout_id,
             }
         )
         request = MagicMock(cookies={})
@@ -397,7 +406,7 @@ class TestApp:
 
         assert [call.kwargs["url_path"] for call in server_client.post.await_args_list] == [
             "/seed_session",
-            "/ng-rollout/0-0/v1/responses" if capture_enabled else "/v1/responses",
+            f"/ng-rollout/{rollout_id}/v1/responses",
             "/verify",
         ]
         assert "ng_trajectory" not in result.model_dump(mode="json")
@@ -914,6 +923,7 @@ class TestApp:
         assert _drop_nulls(expected_responses_dict) == _drop_nulls(actual_responses_dict)
 
     async def test_run_skip_verification_uses_configured_reward(self) -> None:
+        rollout_id = "123e4567-e89b-42d3-a456-426614174000"
         config = SimpleAgentConfig(
             host="0.0.0.0",
             port=8080,
@@ -957,7 +967,10 @@ class TestApp:
 
         response = client.post(
             "/run",
-            json={"responses_create_params": {"input": [{"role": "user", "content": "hello"}]}},
+            json={
+                "responses_create_params": {"input": [{"role": "user", "content": "hello"}]},
+                "_ng_rollout_id": rollout_id,
+            },
         )
 
         assert response.status_code == 200
@@ -969,7 +982,7 @@ class TestApp:
         post_call_kwargs = [post_call.kwargs for post_call in server.server_client.post.call_args_list]
         assert [kwargs["url_path"] for kwargs in post_call_kwargs] == [
             "/seed_session",
-            "/v1/responses",
+            f"/ng-rollout/{rollout_id}/v1/responses",
         ]
         assert post_call_kwargs[0]["server_name"] == "my resources server"
         assert post_call_kwargs[1]["server_name"] == "simple_agent"

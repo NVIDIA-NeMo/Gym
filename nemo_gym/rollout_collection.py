@@ -27,6 +27,7 @@ from itertools import repeat
 from pathlib import Path
 from time import time
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
+from uuid import uuid4
 
 import orjson
 from aiohttp import ClientError
@@ -69,7 +70,7 @@ from nemo_gym.global_config import (
 )
 from nemo_gym.path_utils import failures_path_for
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+from nemo_gym.rollout_correlation import get_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
     AgentInvocation,
     AgentObservationBundle,
@@ -161,6 +162,29 @@ def _nonnegative_int(value: Any) -> Optional[int]:
     return value if type(value) is int and value >= 0 else None
 
 
+def _assign_and_validate_rollout_ids(rows: list[dict[str, Any]]) -> bool:
+    """Assign missing rollout ids and reject invalid or duplicate ids.
+
+    Return whether any ids were assigned.
+    """
+    assigned = False
+    rollout_ids: list[str] = []
+    for row in rows:
+        rollout_id = row.get(ROLLOUT_ID_KEY_NAME)
+        if rollout_id is None:
+            rollout_id = str(uuid4())
+            row[ROLLOUT_ID_KEY_NAME] = rollout_id
+            assigned = True
+        rollout_ids.append(get_rollout_id_from_run_body(row))
+
+    duplicates = sorted(rollout_id for rollout_id, count in Counter(rollout_ids).items() if count > 1)
+    if duplicates:
+        raise ValueError(
+            f"{ROLLOUT_ID_KEY_NAME} values must be unique across the dispatch set; duplicates: {duplicates}"
+        )
+    return assigned
+
+
 def _has_observation_gap(result: dict[str, Any], code: str) -> bool:
     for key in (NG_TRAJECTORY_KEY, "ng_agent_observations"):
         observations = result.get(key)
@@ -175,7 +199,7 @@ def _trajectory_identity(row: dict[str, Any]) -> tuple[str, str]:
         (str(row[key]) for key in ("task_id", "problem_id", "instance_id") if row.get(key) is not None),
         str(row[TASK_INDEX_KEY_NAME]),
     )
-    rollout_id = maybe_rollout_id_from_run_body(row) or f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
+    rollout_id = get_rollout_id_from_run_body(row)
     return task_id, rollout_id
 
 
@@ -1113,6 +1137,7 @@ class RolloutCollectionHelper(BaseModel):
                 stacklevel=2,
             )
 
+        _assign_and_validate_rollout_ids(rows)
         return rows
 
     def _load_from_cache(
@@ -1120,6 +1145,10 @@ class RolloutCollectionHelper(BaseModel):
     ) -> Tuple[List[Dict], List[Dict], List[Dict], List[List[str]]]:
         with config.materialized_jsonl_fpath.open() as f:
             original_input_rows = list(map(orjson.loads, tqdm(f, desc="Reading materialized input rows")))
+        if _assign_and_validate_rollout_ids(original_input_rows):
+            with config.materialized_jsonl_fpath.open("wb") as f:
+                for row in original_input_rows:
+                    f.write(orjson.dumps(row) + b"\n")
         with Path(config.output_jsonl_fpath).open("rb") as f:
             result_strs = [[line.strip()] for line in tqdm(f, desc="Reading existing output rows")]
         results = [orjson.loads(p[0]) for p in result_strs]
@@ -1155,9 +1184,8 @@ class RolloutCollectionHelper(BaseModel):
 
         input_rows = [row for row in original_input_rows if get_key(row) not in gated]
 
-        # Stamp the resume attempt (count of prior failures for this key) on actual retries so their
-        # captured model calls are keyed separately from the prior attempt's (see
-        # maybe_rollout_id_from_run_body). The first attempt (0) is left unstamped -> bare rollout id.
+        # Preserve the count of prior failures as retry metadata.
+        # Infrastructure retries retain the same rollout UUID.
         for row in input_rows:
             attempt = attempts_by_key.get(get_key(row), 0)
             if attempt > 0:
@@ -1265,7 +1293,7 @@ class RolloutCollectionHelper(BaseModel):
         # The source is absent when capture or response rebuilding is disabled.
         # A framework-owned transport may rebuild through its own source.
         # The sink still records captures when Gym does not rebuild.
-        # Reruns still clear deterministic rollout ids before dispatch.
+        # Reruns still clear stale captures for their stable rollout UUIDs.
         token_source = None
         owned_token_source = None
         token_capture_config = TokenIdCaptureConfig.model_validate(global_config)
@@ -1276,8 +1304,8 @@ class RolloutCollectionHelper(BaseModel):
             if isinstance(token_source, TokenCaptureStore):
                 owned_token_source = token_source
 
-        # Clear only rows about to be dispatched, after resume has assigned retry suffixes. This also
-        # removes a kill-shaped attempt's partial capture when its rollout-attempt id is reused.
+        # Clear only rows about to be dispatched.
+        # This removes a failed execution's partial capture when its rollout UUID is reused.
         if capture_dirs:
             print("Clearing existing model-call captures for rollouts being dispatched")
             clear_model_call_captures_for_rollouts(input_rows, capture_dirs)
@@ -1411,7 +1439,7 @@ class RolloutCollectionHelper(BaseModel):
                 persisted_rows.append(row)
                 persisted_results.append(result)
                 try:
-                    rollout_id = maybe_rollout_id_from_run_body(result)
+                    rollout_id = get_rollout_id_from_run_body(result)
                 except (TypeError, ValueError) as error:
                     # Preserve capture evidence when the rollout id is invalid.
                     rollout_id = None

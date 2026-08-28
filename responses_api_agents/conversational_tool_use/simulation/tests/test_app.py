@@ -42,6 +42,7 @@ from responses_api_agents.conversational_tool_use.simulation.prompt import agent
 
 
 POLICY = "Follow policy."
+ROLLOUT_ID = "123e4567-e89b-42d3-a456-426614174000"
 TOP_LEVEL_TOOLS = [
     {
         "name": "lookup",
@@ -241,6 +242,7 @@ def materialized_run_request(**kwargs) -> ConversationalToolUseAgentRunRequest:
         profile="general",
         policy=POLICY,
         tools=TOP_LEVEL_TOOLS,
+        **{"_ng_rollout_id": ROLLOUT_ID},
         **kwargs,
     )
 
@@ -994,7 +996,7 @@ async def test_run_routes_rollout_5xx_to_transient_failure_sidecar_contract() ->
     async def route_post(**kwargs):
         if kwargs["url_path"] == "/seed_session":
             return JsonResponseStub({}, cookies={"session_id": "session-1"})
-        if kwargs["url_path"] == "/v1/responses":
+        if kwargs["url_path"].endswith("/v1/responses"):
             raise http_error(503)
         if kwargs["url_path"] == "/discard_session":
             assert kwargs["cookies"] == {"session_id": "session-1"}
@@ -1026,9 +1028,9 @@ async def test_run_correlates_self_and_resource_model_calls_with_rollout_identit
     async def route_post(**kwargs):
         requests.append(kwargs)
         if kwargs["url_path"] == "/seed_session":
-            assert kwargs["json"]["rollout_id"] == "7-2"
+            assert kwargs["json"]["rollout_id"] == ROLLOUT_ID
             return JsonResponseStub({}, cookies={"session_id": "session-1"})
-        if kwargs["url_path"] == "/ng-rollout/7-2/v1/responses":
+        if kwargs["url_path"] == f"/ng-rollout/{ROLLOUT_ID}/v1/responses":
             return JsonResponseStub(response_payload([assistant_message("msg_1", "Done.")]))
         if kwargs["url_path"] == "/verify":
             return JsonResponseStub(
@@ -1053,7 +1055,7 @@ async def test_run_correlates_self_and_resource_model_calls_with_rollout_identit
     assert result.reward == 1.0
     assert [request["url_path"] for request in requests] == [
         "/seed_session",
-        "/ng-rollout/7-2/v1/responses",
+        f"/ng-rollout/{ROLLOUT_ID}/v1/responses",
         "/verify",
     ]
 
@@ -1081,7 +1083,7 @@ async def test_run_routes_verify_5xx_to_transient_failure_sidecar_contract() -> 
     async def route_post(**kwargs):
         if kwargs["url_path"] == "/seed_session":
             return JsonResponseStub({}, cookies={"session_id": "session-1"})
-        if kwargs["url_path"] == "/v1/responses":
+        if kwargs["url_path"].endswith("/v1/responses"):
             return JsonResponseStub(response_payload([assistant_message("msg_1", "Done.")]))
         if kwargs["url_path"] == "/verify":
             raise http_error(502)
@@ -1111,7 +1113,7 @@ async def test_run_preserves_verified_semantic_zero_as_scored_result() -> None:
     async def route_post(**kwargs):
         if kwargs["url_path"] == "/seed_session":
             return JsonResponseStub({}, cookies={"session_id": "session-1"})
-        if kwargs["url_path"] == "/v1/responses":
+        if kwargs["url_path"].endswith("/v1/responses"):
             return JsonResponseStub(response_payload([assistant_message("msg_1", "Incorrect answer.")]))
         if kwargs["url_path"] == "/verify":
             return JsonResponseStub(
@@ -1144,7 +1146,7 @@ async def test_run_does_not_convert_non_retryable_4xx_to_transient_failure() -> 
     async def route_post(**kwargs):
         if kwargs["url_path"] == "/seed_session":
             return JsonResponseStub({}, cookies={"session_id": "session-1"})
-        if kwargs["url_path"] == "/v1/responses":
+        if kwargs["url_path"].endswith("/v1/responses"):
             raise http_error(400)
         if kwargs["url_path"] == "/discard_session":
             return JsonResponseStub({"discarded": True})

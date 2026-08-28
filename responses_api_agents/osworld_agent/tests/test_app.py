@@ -449,6 +449,7 @@ def make_run_request(
             input=[], temperature=temperature, top_p=top_p
         ),
         verifier_metadata=metadata,
+        **{"_ng_rollout_id": "123e4567-e89b-42d3-a456-426614174000"},
     )
 
 
@@ -631,7 +632,10 @@ class TestApp:
         mock_remote.options.return_value.remote.assert_called_once()
         positional_args, _ = mock_remote.options.return_value.remote.call_args
         assert positional_args[0] == DEFAULT_OSWORLD_TASK
-        assert positional_args[1]["base_url"] == "http://127.0.0.1:8000/ng-rollout/4-0/v1"
+        assert (
+            positional_args[1]["base_url"]
+            == "http://127.0.0.1:8000/ng-rollout/123e4567-e89b-42d3-a456-426614174000/v1"
+        )
         assert positional_args[1]["evaluator_disable_gpu"] is True
         assert positional_args[1]["docker_port_lock_timeout"] == 300.0
         assert positional_args[1]["enable_proxy"] is False
@@ -683,7 +687,7 @@ class TestApp:
         assert response.reward == 1.0
         positional_args, _ = mock_remote.options.return_value.remote.call_args
         runner_kwargs = positional_args[1]
-        assert runner_kwargs["base_url"] == "http://127.0.0.1:8000/v1"
+        assert runner_kwargs["base_url"] == "http://127.0.0.1:8000/ng-rollout/123e4567-e89b-42d3-a456-426614174000/v1"
         assert runner_kwargs["sandbox_provider_config"] == {"docker": {"create": {"use_init": False}}}
         assert runner_kwargs["sandbox_spec"] == {
             "image": "docker://osworld@sha256:fixed",

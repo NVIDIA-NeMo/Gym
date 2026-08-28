@@ -39,6 +39,9 @@ from responses_api_agents.pinchbench.app import (
 )
 
 
+ROLLOUT_ID = "123e4567-e89b-42d3-a456-426614174000"
+
+
 def make_config(**over) -> PinchBenchAgentConfig:
     base = dict(
         name="pinchbench",
@@ -78,14 +81,16 @@ async def test_responses_not_implemented():
 
 
 def test_task_env_gateway_mode():
-    env = make_agent()._task_env("task_x")
+    agent = make_agent()
+    env = agent._task_env("task_x")
     assert env["TASK_ID"] == "task_x"
     assert env["OPENCLAW_GATEWAY_TOKEN"] == "pinchbench-local"
     assert env["MODEL_NAME"] == "vendor/model"
     assert env["JUDGE_BASE_URL"] == "http://endpoint/v1"
     assert env["BRAVE_API_KEY"] == "brave-key"
     assert "NEMO_GYM_OBSERVABILITY_ENABLED" not in env
-    assert make_agent()._task_env("task_x", "1-2")["NEMO_GYM_OBSERVABILITY_ENABLED"] == "1"
+    agent.server_client.global_config_dict = {"observability_enabled": True}
+    assert agent._task_env("task_x", ROLLOUT_ID)["NEMO_GYM_OBSERVABILITY_ENABLED"] == "1"
 
 
 def test_task_env_prefixes_configured_gym_model_servers():
@@ -266,13 +271,7 @@ async def test_run_returns_zero_on_failure_never_raises(tmp_path, monkeypatch):
         raise RuntimeError("sandbox exploded")
 
     monkeypatch.setattr(agent, "_run_in_sandbox", boom)
-    body = MagicMock()
-    body.model_dump.return_value = {
-        "responses_create_params": {"input": [{"role": "user", "content": "hi"}]},
-        "verifier_metadata": {"task_id": "task_x"},
-    }
-
-    resp = await agent.run(body=body)  # must not raise
+    resp = await agent.run(body=_run_body())  # must not raise
     assert resp.reward == 0.0
     assert resp.status == "error"
     assert resp.task_id == "task_x"
@@ -280,12 +279,13 @@ async def test_run_returns_zero_on_failure_never_raises(tmp_path, monkeypatch):
 
 
 def _run_body(task_id="task_x"):
-    body = MagicMock()
-    body.model_dump.return_value = {
-        "responses_create_params": {"input": [{"role": "user", "content": "hi"}]},
-        "verifier_metadata": {"task_id": task_id},
-    }
-    return body
+    return PinchBenchRunRequest.model_validate(
+        {
+            "responses_create_params": {"input": [{"role": "user", "content": "hi"}]},
+            "verifier_metadata": {"task_id": task_id},
+            "_ng_rollout_id": ROLLOUT_ID,
+        }
+    )
 
 
 def _observed_run_body(task_id="task_x"):
@@ -295,6 +295,7 @@ def _observed_run_body(task_id="task_x"):
             "verifier_metadata": {"task_id": task_id},
             "_ng_task_index": 1,
             "_ng_rollout_index": 2,
+            "_ng_rollout_id": ROLLOUT_ID,
         }
     )
 
@@ -417,7 +418,7 @@ async def test_run_returns_correlated_openclaw_observations(tmp_path, monkeypatc
 
     result = await agent.run(body=_observed_run_body())
 
-    assert rollout_ids == ["1-2"]
+    assert rollout_ids == [ROLLOUT_ID]
     assert result.ng_agent_observations.source == "openclaw"
     assert _records(result.ng_agent_observations, AgentInvocation)[0].invocation_id == "session-1"
     assert _records(result.ng_agent_observations, ToolCallObservation)[0].duration_ms == 500

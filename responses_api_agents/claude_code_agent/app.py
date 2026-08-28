@@ -726,7 +726,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
 
             with tempfile.TemporaryDirectory(prefix="nemo_gym_claude_mcp_") as mcp_config_dir:
                 mcp_config = self._write_rollout_mcp_config(seed_resp_json, Path(mcp_config_dir))
-                if rollout_id is not None:
+                if self._model_call_capture_enabled():
                     episode = await self._create_episode(
                         body.responses_create_params,
                         mcp_config=mcp_config,
@@ -739,6 +739,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                         body.responses_create_params,
                         mcp_config=mcp_config,
                         skills_path=skills_path,
+                        rollout_id=rollout_id,
                     )
                     observations = None
                 agent_resp_json = agent_resp.model_dump(mode="json")

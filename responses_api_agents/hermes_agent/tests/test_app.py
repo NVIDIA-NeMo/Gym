@@ -406,6 +406,7 @@ class TestObservability:
         ]
 
     def test_run_returns_observations_without_leaking_internal_attachment(self) -> None:
+        rollout_id = "123e4567-e89b-42d3-a456-426614174000"
         server_client = MagicMock(spec=ServerClient)
         server_client.global_config_dict = {"observability_enabled": True}
         agent = HermesAgent(config=_config(), server_client=server_client)
@@ -432,7 +433,7 @@ class TestObservability:
             if url_path == "/seed_session":
                 return _FakeResponse({}, {"session": "1"})
             if url_path.endswith("/v1/responses"):
-                response = await agent.responses(MagicMock(path_params={"rollout_id": "1-2"}), json)
+                response = await agent.responses(MagicMock(path_params={"rollout_id": rollout_id}), json)
                 return _FakeResponse(response.model_dump(mode="json"), cookies)
             return _FakeResponse(json | {"reward": 1.0})
 
@@ -444,6 +445,7 @@ class TestObservability:
                 "responses_create_params": {"input": "solve"},
                 "_ng_task_index": 1,
                 "_ng_rollout_index": 2,
+                "_ng_rollout_id": rollout_id,
             }
         )
 

@@ -90,15 +90,16 @@ class TestGymnasiumServer:
         assert {"/reset", "/step", "/aggregate_metrics"}.issubset(routes)
 
     def test_rollout_prefixed_reset_and_step(self):
+        rollout_id = "123e4567-e89b-42d3-a456-426614174000"
         client = TestClient(_make_env(_TerminatingEnv).setup_webserver())
         reset = client.post(
-            "/ng-rollout/4-2/reset",
+            f"/ng-rollout/{rollout_id}/reset",
             json={"responses_create_params": {"input": []}},
         )
         assert reset.status_code == 200
 
         step = client.post(
-            "/ng-rollout/4-2/step",
+            f"/ng-rollout/{rollout_id}/step",
             json={
                 "responses_create_params": {"input": []},
                 "response": _make_response("x").model_dump(mode="json"),

@@ -108,6 +108,7 @@ class TestApp:
         )
 
     async def test_run_seeds_and_verifies_model_response_without_tool_execution(self) -> None:
+        rollout_id = "123e4567-e89b-42d3-a456-426614174000"
         server = NonExecutingSimpleAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
         responses_create_params = NeMoGymResponseCreateParamsNonStreaming(input="hello")
         model_response = _tool_call_response(arguments='{"summary":"ok"}')
@@ -126,19 +127,25 @@ class TestApp:
         request.cookies = {}
         result = await server.run(
             request=request,
-            body=NonExecutingSimpleAgentRunRequest(responses_create_params=responses_create_params),
+            body=NonExecutingSimpleAgentRunRequest(
+                responses_create_params=responses_create_params,
+                **{"_ng_rollout_id": rollout_id},
+            ),
         )
 
         assert result.reward == 1.0
         assert server.server_client.post.call_args_list[0] == call(
             server_name="resource",
             url_path="/seed_session",
-            json={"responses_create_params": responses_create_params.model_dump()},
+            json={
+                "responses_create_params": responses_create_params.model_dump(),
+                "_ng_rollout_id": rollout_id,
+            },
             cookies={},
         )
         assert server.server_client.post.call_args_list[1] == call(
             server_name="non_executing_agent",
-            url_path="/v1/responses",
+            url_path=f"/ng-rollout/{rollout_id}/v1/responses",
             json=responses_create_params,
             cookies={"session": "seeded"},
         )

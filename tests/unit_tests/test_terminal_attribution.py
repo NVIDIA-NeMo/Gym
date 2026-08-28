@@ -399,13 +399,15 @@ def test_assemble_broken_terminal_chain_masks():
 
 # --- delivery end to end -------------------------------------------------------
 
+ROLLOUT_ID = "123e4567-e89b-42d3-a456-426614174000"
+
 
 def _delivery_case(tmp_path, result: dict) -> dict:
     store = TokenCaptureStore(tmp_path)
 
     async def go() -> dict:
         for entry in _aux_entries():
-            await store.put(entry.model_copy(update={"rollout_id": "t0-r0"}))
+            await store.put(entry.model_copy(update={"rollout_id": ROLLOUT_ID}))
         return await finalize_rollout_token_capture(result, store)
 
     return asyncio.run(go())
@@ -413,7 +415,7 @@ def _delivery_case(tmp_path, result: dict) -> dict:
 
 def test_finalize_attributes_from_the_result_response(tmp_path):
     result = {
-        "_ng_rollout_id": "t0-r0",
+        "_ng_rollout_id": ROLLOUT_ID,
         "response": _response(
             [_assistant_item("step one"), _assistant_item("final answer")],
             response_id="resp_2",
@@ -431,7 +433,7 @@ def test_finalize_attributes_from_the_result_response(tmp_path):
 
 def test_finalize_honors_an_explicit_terminal_key(tmp_path):
     result = {
-        "_ng_rollout_id": "t0-r0",
+        "_ng_rollout_id": ROLLOUT_ID,
         "response": {"id": "", "model": "m", "object": "response", "output": []},
         TERMINAL_CALL_KEY: "call2",
         "reward": 1.0,
@@ -444,7 +446,7 @@ def test_finalize_honors_an_explicit_terminal_key(tmp_path):
 
 def test_finalize_without_witnesses_keeps_the_strict_policy(tmp_path):
     result = {
-        "_ng_rollout_id": "t0-r0",
+        "_ng_rollout_id": ROLLOUT_ID,
         "response": {"id": "", "model": "m", "object": "response", "output": []},
         "reward": 1.0,
     }

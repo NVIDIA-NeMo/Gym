@@ -61,7 +61,7 @@ from nemo_gym.responses_streaming import (
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+from nemo_gym.rollout_correlation import get_rollout_id_from_run_body
 from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap, join_model_call_observations
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
@@ -1507,19 +1507,18 @@ def _store_for_rollout(rollout_id: str, capture_dirs: list[Path]) -> Optional[Ca
 def clear_model_call_captures_for_rollouts(records: list[Any], capture_dirs: list[Path]) -> None:
     """Remove stale per-rollout capture files for these records before dispatch.
 
-    Capture files are keyed by a deterministic rollout id (task-rollout-attempt), so without this a
-    fresh run or a kill-shaped retry would append onto the previous attempt's capture for the same
-    id. The caller passes only rows about to be dispatched, after assigning any retry suffix.
+    Capture files are keyed by the stable rollout UUID.
+    Without cleanup, a fresh execution of that UUID would append to stale capture data.
+    Every dispatched record must carry its validated rollout id.
     """
     if not capture_dirs:
         return
     for directory in capture_dirs:
         store = CaptureStore(directory)
         for record in records:
-            rollout_id = maybe_rollout_id_from_run_body(record)
-            if rollout_id:
-                store.path_for(rollout_id).unlink(missing_ok=True)
-                store.incomplete_path_for(rollout_id).unlink(missing_ok=True)
+            rollout_id = get_rollout_id_from_run_body(record)
+            store.path_for(rollout_id).unlink(missing_ok=True)
+            store.incomplete_path_for(rollout_id).unlink(missing_ok=True)
 
 
 def merge_model_call_capture_into_record(
@@ -1527,18 +1526,17 @@ def merge_model_call_capture_into_record(
 ) -> dict[str, Any]:
     """Attach captured model-call observability data to a rollout record in place.
 
-    Keyed by the rollout id derived from the record's task/rollout/attempt indices, so the attached
-    shape is identical for every agent harness. Adds
-    ``ng_model_call_capture = {rollout_id, metrics, calls}`` where ``calls`` are derived observability
-    records. Raw request and response payloads remain in the capture store and are omitted from the
-    attachment unless ``include_payloads`` is true. Capture/read/join failures are attached as
-    ``gaps``. The harness output and reward are not modified.
+    The record's required rollout UUID selects the capture.
+    The attached shape is identical for every agent harness.
+    ``ng_model_call_capture`` contains the rollout id, metrics, and derived observability calls.
+    Raw request and response payloads remain in the capture store by default.
+    Set ``include_payloads`` to include them.
+    Capture, read, and join failures are attached as ``gaps``.
+    The harness output and reward are not modified.
     """
     if not capture_dirs:
         return record
-    rollout_id = maybe_rollout_id_from_run_body(record)
-    if rollout_id is None:
-        return record
+    rollout_id = get_rollout_id_from_run_body(record)
     gaps: list[ObservationGap] = []
     store = _store_for_rollout(rollout_id, capture_dirs)
     if store is None:

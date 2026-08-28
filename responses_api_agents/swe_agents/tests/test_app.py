@@ -32,6 +32,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.swe_agents.app import (
     ActiveContainerCommand,
@@ -2820,9 +2821,36 @@ class TestSWEBenchWrapperResponses:
 
 
 class TestSWEBenchWrapperRun:
+    @pytest.mark.parametrize(
+        ("model_call_capture_enabled", "token_id_capture_enabled", "expected_rollout_id"),
+        [
+            (False, False, "123e4567-e89b-42d3-a456-426614174000"),
+            (True, False, "123e4567-e89b-42d3-a456-426614174000"),
+            (False, True, "123e4567-e89b-42d3-a456-426614174000"),
+            (True, True, "123e4567-e89b-42d3-a456-426614174000"),
+        ],
+        ids=("disabled", "observability-only", "token-capture-only", "both"),
+    )
     @pytest.mark.asyncio
-    async def test_run_resolved(self, monkeypatch) -> None:
+    async def test_run_resolved(
+        self,
+        monkeypatch,
+        model_call_capture_enabled: bool,
+        token_id_capture_enabled: bool,
+        expected_rollout_id: str,
+    ) -> None:
         wrapper = _create_wrapper(monkeypatch)
+        wrapper.server_client.global_config_dict = {
+            "observability_enabled": model_call_capture_enabled,
+            "token_id_capture": {
+                "enabled": token_id_capture_enabled,
+                "all_agents": token_id_capture_enabled,
+            },
+        }
+        observations = AgentObservationBundle(
+            source="swe_opencode",
+            records=[AgentInvocation(invocation_id="main")],
+        )
         subagents = [
             {
                 "session_id": "child",
@@ -2846,10 +2874,13 @@ class TestSWEBenchWrapperRun:
                 "metrics": json.dumps({"resolved": True, "patch_exists": True}),
                 "instance_config": _make_instance_config(tempfile.mkdtemp()).model_dump_json(),
                 "subagent_trajectories": json.dumps(subagents),
+                "agent_observations": observations.model_dump_json(),
             },
         )
 
-        with patch.object(SWEBenchWrapper, "responses", new_callable=AsyncMock, return_value=mock_response):
+        with patch.object(
+            SWEBenchWrapper, "_responses", new_callable=AsyncMock, return_value=mock_response
+        ) as responses_mock:
             from nemo_gym.base_resources_server import BaseRunRequest
 
             body = BaseRunRequest(
@@ -2864,12 +2895,21 @@ class TestSWEBenchWrapperRun:
                         "split": "test",
                         "instance_dict": "{}",
                     },
-                )
+                ),
+                _ng_task_index=7,
+                _ng_rollout_index=2,
+                _ng_attempt_index=1,
+                _ng_rollout_id=expected_rollout_id,
             )
 
             result = await wrapper.run(body)
             assert isinstance(result, SWEBenchVerifyResponse)
             assert result.reward == 1.0
+            assert result.ng_agent_observations == (observations if model_call_capture_enabled else None)
+            assert responses_mock.await_args.args[1] == expected_rollout_id
+            assert responses_mock.await_args.kwargs == {
+                "token_id_capture_enabled": token_id_capture_enabled,
+            }
             assert result.subagent_trajectories == subagents
             assert json.loads(result.responses_create_params.metadata["subagent_trajectories"]) == subagents
 
@@ -2893,7 +2933,7 @@ class TestSWEBenchWrapperRun:
             },
         )
 
-        with patch.object(SWEBenchWrapper, "responses", new_callable=AsyncMock, return_value=mock_response):
+        with patch.object(SWEBenchWrapper, "_responses", new_callable=AsyncMock, return_value=mock_response):
             from nemo_gym.base_resources_server import BaseRunRequest
 
             body = BaseRunRequest(
@@ -2908,7 +2948,8 @@ class TestSWEBenchWrapperRun:
                         "split": "test",
                         "instance_dict": "{}",
                     },
-                )
+                ),
+                _ng_rollout_id="123e4567-e89b-42d3-a456-426614174000",
             )
 
             result = await wrapper.run(body)

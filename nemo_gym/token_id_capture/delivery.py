@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import warnings
 
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+from nemo_gym.rollout_correlation import get_rollout_id_from_run_body
 from nemo_gym.token_id_capture.consumer import trajectories_from_source
 from nemo_gym.token_id_capture.protocols import TokenSource
 
@@ -109,9 +109,16 @@ async def finalize_rollout_token_capture(result: dict, source: TokenSource | Non
         return None
 
     try:
-        rollout_id = maybe_rollout_id_from_run_body(result)
+        rollout_id = get_rollout_id_from_run_body(result)
     except (TypeError, ValueError) as error:
-        # A malformed explicit id cannot be looked up.
+        if result.get("_ng_rollout_id") is None:
+            return _unusable(
+                result,
+                "no capture key",
+                "a rollout result carries no _ng_rollout_id, so its recorded token ids could not "
+                "be looked up and it will be token-less.",
+            )
+        # A malformed id cannot be looked up.
         # Mask the rollout instead of raising.
         return _unusable(
             result,
@@ -122,8 +129,6 @@ async def finalize_rollout_token_capture(result: dict, source: TokenSource | Non
     if rollout_carries_token_ids(result):
         # Re-finalization must return the frozen snapshot.
         # The caller must be able to retire on every path.
-        if rollout_id is None:
-            return None
         try:
             snapshot = await source.freeze(rollout_id)
         except Exception:
@@ -138,15 +143,6 @@ async def finalize_rollout_token_capture(result: dict, source: TokenSource | Non
                 "version": snapshot.version,
             },
         }
-
-    if rollout_id is None:
-        # No correlation key was preserved on the finished record.
-        return _unusable(
-            result,
-            "no capture key",
-            "a rollout result carries no id and no task/rollout indices, so its recorded token ids "
-            "could not be looked up and it will be token-less.",
-        )
 
     response = result.get("response") if isinstance(result.get("response"), dict) else {}
     explicit_terminal = result.get(TERMINAL_CALL_KEY)

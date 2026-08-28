@@ -16,65 +16,68 @@ import re
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
+from functools import lru_cache
 from typing import Any, Optional
+from uuid import UUID
 
 from pydantic import BaseModel
 
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX
-from nemo_gym.global_config import (
-    ATTEMPT_INDEX_KEY_NAME,
-    ROLLOUT_ID_KEY_NAME,
-    ROLLOUT_INDEX_KEY_NAME,
-    TASK_INDEX_KEY_NAME,
-)
+from nemo_gym.global_config import ROLLOUT_ID_KEY_NAME
 
 
 _ROLLOUT_ID: ContextVar[Optional[str]] = ContextVar("nemo_gym_rollout_id", default=None)
 
-# A capture id is a path segment in ``/ng-rollout/<id>/...``.
-# Restrict it to characters that survive a path round trip.
-# Exclude leading dots because stores also use the id as a filename component.
+# A rollout id is a path segment in ``/ng-rollout/<id>/...``.
+# Canonical UUIDv4 strings are safe as path and filename components.
 # Middleware uses the same pattern.
-ROLLOUT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+ROLLOUT_ID_PATTERN = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 
 
-def maybe_rollout_id_from_run_body(body: BaseModel | Mapping[str, Any] | None) -> Optional[str]:
-    """Build the capture key for a run request.
+@lru_cache(maxsize=4096)
+def _validate_rollout_id(value: str) -> str:
+    """Validate one canonical UUIDv4 string and cache the result."""
+    if ROLLOUT_ID_PATTERN.fullmatch(value) is None:
+        raise ValueError(f"{ROLLOUT_ID_KEY_NAME} must be a canonical UUIDv4 string; got {value!r}")
+    try:
+        parsed = UUID(value)
+    except ValueError as error:
+        raise ValueError(f"{ROLLOUT_ID_KEY_NAME} must be a canonical UUIDv4 string; got {value!r}") from error
 
-    An explicit ``_ng_rollout_id`` takes precedence.
-    Otherwise derive ``"{task}-{rollout}"`` from the task and rollout indices.
-    Re-dispatch attempts append ``-a{n}``.
-    Writers and consumers must use this same identity.
-    Reused task and rollout indices produce a repeated capture key.
-    Use an explicit id when numbering restarts across dispatches.
+    if parsed.version != 4 or str(parsed) != value:
+        raise ValueError(f"{ROLLOUT_ID_KEY_NAME} must be a canonical UUIDv4 string; got {value!r}")
+    return value
+
+
+def validate_rollout_id(value: Any) -> str:
+    """Validate and return a canonical UUIDv4 rollout id.
+
+    Validation is cached for repeated use throughout one rollout request.
+    Non-string values are rejected before consulting the cache.
+    """
+    if not isinstance(value, str):
+        raise ValueError(f"{ROLLOUT_ID_KEY_NAME} must be a canonical UUIDv4 string; got {value!r}")
+    return _validate_rollout_id(value)
+
+
+def get_rollout_id_from_run_body(body: BaseModel | Mapping[str, Any] | None) -> str:
+    """Retrieve and validate the required rollout id from a run request.
+
+    The request must carry ``_ng_rollout_id`` as a canonical UUIDv4 string.
+    Task, rollout, and attempt indices are metadata and never form this identity.
+
+    Raises:
+        ValueError: If the body is unsupported, the field is missing, or the value is invalid.
     """
     if not isinstance(body, (BaseModel, Mapping)):
-        return None
+        raise ValueError(f"a run request body with {ROLLOUT_ID_KEY_NAME} is required; got {body!r}")
 
-    def field(key: str) -> Any:
-        return body.get(key) if isinstance(body, Mapping) else getattr(body, key, None)
-
-    explicit = field(ROLLOUT_ID_KEY_NAME)
-    if explicit is not None:
-        # Reject malformed explicit ids instead of sanitizing them.
-        # Rewriting would create a key the caller cannot look up.
-        if not (isinstance(explicit, str) and ROLLOUT_ID_PATTERN.match(explicit)):
-            raise ValueError(
-                f"{ROLLOUT_ID_KEY_NAME} must be a string of letters, digits, dots, dashes or "
-                f"underscores starting with a letter or digit; got {explicit!r}"
-            )
-        rollout_id = explicit
-    else:
-        task = field(TASK_INDEX_KEY_NAME)
-        rollout = field(ROLLOUT_INDEX_KEY_NAME)
-        if task is None or rollout is None:
-            return None
-        rollout_id = f"{task}-{rollout}"
-
-    attempt = field(ATTEMPT_INDEX_KEY_NAME)
-    if attempt is not None and int(attempt) > 0:
-        rollout_id = f"{rollout_id}-a{int(attempt)}"
-    return rollout_id
+    rollout_id = (
+        body.get(ROLLOUT_ID_KEY_NAME) if isinstance(body, Mapping) else getattr(body, ROLLOUT_ID_KEY_NAME, None)
+    )
+    if rollout_id is None:
+        raise ValueError(f"{ROLLOUT_ID_KEY_NAME} is required in every run request")
+    return validate_rollout_id(rollout_id)
 
 
 def current_rollout_id() -> Optional[str]:

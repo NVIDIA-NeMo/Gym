@@ -109,7 +109,7 @@ class _RunServerClient:
         if url_path == "/seed_session":
             http.read = AsyncMock(return_value=b"{}")
             http.content.read = AsyncMock(return_value=b"{}")
-        elif url_path == "/v1/responses":
+        elif url_path.endswith("/v1/responses"):
             http.status = self.responses_status
             http.ok = self.responses_status < 400
             payload = _model_response([_answer_msg()])
@@ -153,6 +153,7 @@ def _run_body() -> BrowsecompAgentRunRequest:
         {
             "responses_create_params": {"input": [{"role": "user", "content": "Q?"}]},
             "question": "Q?",
+            "_ng_rollout_id": "123e4567-e89b-42d3-a456-426614174000",
         }
     )
 

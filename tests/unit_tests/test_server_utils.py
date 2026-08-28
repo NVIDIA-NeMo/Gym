@@ -29,6 +29,7 @@ from nemo_gym.global_config import (
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
 )
+from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import (
     BaseServer,
     BaseServerConfig,
@@ -265,6 +266,72 @@ class TestServerUtils:
             url_path="blah blah",
         )
         assert "my mock response" == actual_response
+
+    async def test_ServerClient_propagates_rollout_identity_without_observability(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        server_client = ServerClient(
+            head_server_config=BaseServerConfig(host="head", port=1),
+            global_config_dict=DictConfig(
+                {
+                    "resource": {
+                        "resources_servers": {
+                            "implementation": {
+                                "host": "resource",
+                                "port": 2,
+                            }
+                        }
+                    },
+                    "model": {
+                        "responses_api_models": {
+                            "implementation": {
+                                "host": "model",
+                                "port": 3,
+                            }
+                        }
+                    },
+                }
+            ),
+        )
+        request_mock = AsyncMock(return_value="response")
+        monkeypatch.setattr(nemo_gym.server_utils, "request", request_mock)
+
+        with rollout_context("rollout-7"):
+            await server_client.post(server_name="resource", url_path="/tool")
+            await server_client.post(server_name="model", url_path="/v1/responses")
+
+        assert request_mock.await_args_list[0].kwargs["url"] == "http://resource:2/ng-rollout/rollout-7/tool"
+        assert request_mock.await_args_list[1].kwargs["url"] == "http://model:3/ng-rollout/rollout-7/v1/responses"
+
+    async def test_ServerClient_recovers_rollout_identity_from_verify_body_without_observability(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        server_client = ServerClient(
+            head_server_config=BaseServerConfig(host="head", port=1),
+            global_config_dict=DictConfig(
+                {
+                    "resource": {
+                        "resources_servers": {
+                            "implementation": {
+                                "host": "resource",
+                                "port": 2,
+                            }
+                        }
+                    }
+                }
+            ),
+        )
+        request_mock = AsyncMock(return_value="response")
+        monkeypatch.setattr(nemo_gym.server_utils, "request", request_mock)
+
+        rollout_id = "123e4567-e89b-42d3-a456-426614174000"
+        await server_client.post(
+            server_name="resource",
+            url_path="/verify",
+            json={"_ng_rollout_id": rollout_id},
+        )
+
+        assert request_mock.await_args.kwargs["url"] == f"http://resource:2/ng-rollout/{rollout_id}/verify"
 
     def test_BaseServer_load_config_from_global_config(self, monkeypatch: MonkeyPatch) -> None:
         # Clear any lingering env vars.

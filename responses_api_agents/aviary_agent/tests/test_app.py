@@ -32,6 +32,9 @@ from responses_api_agents.aviary_agent.app import (
 )
 
 
+ROLLOUT_ID = "123e4567-e89b-42d3-a456-426614174000"
+
+
 class TestApp:
     def test_lifecycle(self) -> None:
         config = AviaryAgentConfig(
@@ -91,6 +94,7 @@ class TestApp:
             json={
                 "task_idx": 0,
                 "responses_create_params": {"input": [{"role": "user", "content": "hello"}]},
+                "_ng_rollout_id": ROLLOUT_ID,
             },
         )
         assert res_no_model.status_code == 200
@@ -101,7 +105,7 @@ class TestApp:
         assert calls[0] == call(server_name="my resources name", url_path="/seed_session", json={"task_idx": 0})
 
         assert calls[1][1]["server_name"] == "my model name"
-        assert calls[1][1]["url_path"] == "/v1/responses"
+        assert calls[1][1]["url_path"] == f"/ng-rollout/{ROLLOUT_ID}/v1/responses"
         model_input = calls[1][1]["json"].input
         assert len(model_input) == 2
         assert model_input[0].content == "hello"
@@ -183,7 +187,9 @@ class TestApp:
         agent.server_client.post = AsyncMock(return_value=dotjson_mock)
 
         request = AviaryAgentRunRequest(
-            task_idx=0, responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[])
+            task_idx=0,
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            **{"_ng_rollout_id": ROLLOUT_ID},
         )
         response = await agent.responses(request)
 
@@ -195,7 +201,7 @@ class TestApp:
                 call(server_name="my resources name", url_path="/seed_session", json={"task_idx": 0}),
                 call(
                     server_name="my model name",
-                    url_path="/v1/responses",
+                    url_path=f"/ng-rollout/{ROLLOUT_ID}/v1/responses",
                     json=NeMoGymResponseCreateParamsNonStreaming.model_validate(
                         {"input": [{"role": "user", "content": "Initial observation"}], "tools": []}
                     ),
@@ -285,7 +291,9 @@ class TestApp:
         agent.server_client.post = AsyncMock(return_value=dotjson_mock)
 
         request = AviaryAgentRunRequest(
-            task_idx=42, responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[])
+            task_idx=42,
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            **{"_ng_rollout_id": ROLLOUT_ID},
         )
         response = await agent.responses(request)
 
@@ -297,12 +305,12 @@ class TestApp:
         assert len(calls) == 6
         assert calls[0] == call(server_name="my resources name", url_path="/seed_session", json={"task_idx": 42})
         assert calls[1][1]["server_name"] == "my model name"
-        assert calls[1][1]["url_path"] == "/v1/responses"
+        assert calls[1][1]["url_path"] == f"/ng-rollout/{ROLLOUT_ID}/v1/responses"
         assert calls[2][1]["server_name"] == "my resources name"
         assert calls[2][1]["url_path"] == "/step"
         assert calls[2][1]["json"]["action"][0]["call_id"] == "call_1"
         assert calls[3][1]["server_name"] == "my model name"
-        assert calls[3][1]["url_path"] == "/v1/responses"
+        assert calls[3][1]["url_path"] == f"/ng-rollout/{ROLLOUT_ID}/v1/responses"
         assert calls[4][1]["server_name"] == "my resources name"
         assert calls[4][1]["url_path"] == "/step"
         assert calls[4][1]["json"]["action"][0]["call_id"] == "call_2"
@@ -385,7 +393,9 @@ class TestApp:
         agent.server_client.post = AsyncMock(return_value=dotjson_mock)
 
         request = AviaryAgentRunRequest(
-            task_idx=42, responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[])
+            task_idx=42,
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            **{"_ng_rollout_id": ROLLOUT_ID},
         )
         response = await agent.responses(request)
 
@@ -480,7 +490,9 @@ class TestApp:
         agent.server_client.post = AsyncMock(return_value=dotjson_mock)
 
         request = AviaryAgentRunRequest(
-            task_idx=0, responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[])
+            task_idx=0,
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            **{"_ng_rollout_id": ROLLOUT_ID},
         )
         await agent.responses(request)
 
@@ -583,7 +595,9 @@ class TestApp:
         agent.server_client.post = AsyncMock(return_value=dotjson_mock)
 
         request = AviaryAgentRunRequest(
-            task_idx=0, responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[])
+            task_idx=0,
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            **{"_ng_rollout_id": ROLLOUT_ID},
         )
         verify_response = await agent.run(request)
 
@@ -601,7 +615,7 @@ class TestApp:
                 call(server_name="my resources name", url_path="/seed_session", json={"task_idx": 0}),
                 call(
                     server_name="my model name",
-                    url_path="/v1/responses",
+                    url_path=f"/ng-rollout/{ROLLOUT_ID}/v1/responses",
                     json=NeMoGymResponseCreateParamsNonStreaming.model_validate(
                         {"input": [{"role": "user", "content": "obs"}], "tools": []}
                     ),

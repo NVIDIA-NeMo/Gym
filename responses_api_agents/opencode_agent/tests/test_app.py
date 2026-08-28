@@ -434,9 +434,10 @@ class TestRolloutObservability:
         assert "agent_transcript_unavailable" in {gap.code for gap in episode.observations.gaps}
 
     def test_run_attaches_artifact_observations_when_enabled(self, tmp_path: Path) -> None:
+        rollout_id = "123e4567-e89b-42d3-a456-426614174000"
         db = _session_db(tmp_path, [("assistant", [{"type": "text", "text": "done"}])])
         items, usage = parse_opencode_session(db)
-        observations = _parse_opencode_session(db, "1-2")
+        observations = _parse_opencode_session(db, rollout_id)
         agent = _make_agent()
         agent.server_client.global_config_dict = {"observability_enabled": True}
         agent._run_opencode = AsyncMock(return_value=(items, usage, "model", observations))
@@ -453,7 +454,7 @@ class TestRolloutObservability:
 
         async def post(server_name, url_path, json=None, cookies=None, **kwargs):
             if url_path.endswith("/v1/responses"):
-                response = await agent.responses(MagicMock(path_params={"rollout_id": "1-2"}), json)
+                response = await agent.responses(MagicMock(path_params={"rollout_id": rollout_id}), json)
                 return Response(response.model_dump(mode="json"))
             return Response(json | {"reward": 1.0}) if url_path == "/verify" else Response({})
 
@@ -464,6 +465,7 @@ class TestRolloutObservability:
                 "responses_create_params": {"input": "solve"},
                 "_ng_task_index": 1,
                 "_ng_rollout_index": 2,
+                "_ng_rollout_id": rollout_id,
             }
         )
 
@@ -471,8 +473,10 @@ class TestRolloutObservability:
 
         assert result.ng_agent_observations is not None
         assert _invocations(result.ng_agent_observations)[0].conversation
-        assert agent._run_opencode.await_args.kwargs["rollout_id"] == "1-2"
-        assert agent.server_client.post.await_args_list[1].kwargs["url_path"] == "/ng-rollout/1-2/v1/responses"
+        assert agent._run_opencode.await_args.kwargs["rollout_id"] == rollout_id
+        assert agent.server_client.post.await_args_list[1].kwargs["url_path"] == (
+            f"/ng-rollout/{rollout_id}/v1/responses"
+        )
         verify_json = agent.server_client.post.await_args_list[2].kwargs["json"]
         assert "_ng_agent_observations" not in verify_json["response"]
 

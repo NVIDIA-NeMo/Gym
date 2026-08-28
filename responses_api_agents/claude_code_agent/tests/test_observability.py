@@ -30,6 +30,7 @@ from responses_api_agents.claude_code_agent.observability import (
 
 
 MODEL_REF = ModelServerRef(type="responses_api_models", name="policy")
+ROLLOUT_ID = "123e4567-e89b-42d3-a456-426614174000"
 T = TypeVar("T")
 
 
@@ -435,10 +436,11 @@ def _captured_call(call_id: str, response_id: str, *, compact: bool = False) -> 
 def _rollout_record(tmp_path: Path, *calls: dict) -> dict:
     store = CaptureStore(tmp_path)
     for call in calls:
-        store.record("0-0", call)
+        store.record(ROLLOUT_ID, call)
     return {
         "_ng_task_index": 0,
         "_ng_rollout_index": 0,
+        "_ng_rollout_id": ROLLOUT_ID,
         "ng_agent_observations": _compaction_bundle().model_dump(mode="json"),
     }
 
