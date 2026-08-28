@@ -1,0 +1,79 @@
+---
+title: "Compare Harnesses"
+description: "Run the same environment with a different agent harness to measure how much of a score comes from the harness rather than the model."
+position: 3
+---
+
+An agent harness turns a model into an agent: it manages conversation state, routes tool calls, and
+decides when a task is complete. Two harnesses running the same model on the same tasks can score very
+differently, so a harness is a variable worth isolating rather than a fixed part of the environment.
+
+`--agent-type` runs an environment or benchmark with a harness other than the one its config names,
+without editing any config:
+
+```bash
+gym list agents
+gym eval run --agent-type hermes_agent --benchmark gpqa --model-type vllm_model
+```
+
+Holding the model, dataset, and repeat count fixed while changing only `--agent-type` gives you the
+harness contribution to the score. Refer to
+[Swapping the agent](/reference/cli-commands#swapping-the-agent) for the flag reference.
+
+## The composed instance is renamed
+
+Composition replaces the environment's agent and renames the server instance after the harness that
+runs it, so metrics and `gym env status` report what actually ran. Composing `hermes_agent` onto
+`gpqa_mcqa_simple_agent` produces `gpqa_mcqa_hermes_agent`.
+
+That name is what you use to route rollouts when the servers are already up:
+
+```bash
+gym env start --agent-type hermes_agent --benchmark gpqa --model-type vllm_model
+gym eval run --no-serve --agent gpqa_mcqa_hermes_agent --input rows.jsonl
+```
+
+End-to-end rollouts collection (without the `--no-serve` flag) keeps working — rows stamped with the
+pre-swap instance are re-routed for you under the hood.
+
+## Not every pairing is valid
+
+A verifier is written against the behavior of a particular harness. A resources server can declare
+which harnesses are compatible with it in
+[`allowed_agents`](/reference/configuration#resources-server-fields), and Gym refuses an undeclared
+pairing before any server starts:
+
+```text
+'hermes_agent' is not declared compatible with 1 of the agent instance(s) it would replace,
+so it cannot be scored correctly:
+  - gsm8k_aviary_agent uses gsm8k_aviary_resources_server and accepts aviary_agent
+
+Select one of: aviary_agent. Or pass --allow-unsupported-pairing (or set
+NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING=1) to bypass the check.
+```
+
+<Warning>
+`--allow-unsupported-pairing` runs the pairing anyway. Scores from an undeclared pairing may not mean
+what they appear to mean — the harness might not be compatible with the resources server.
+</Warning>
+
+A server that declares nothing accepts any harness — such environments are swappable without further
+setup.
+
+## Self-contained environments
+
+Some agent servers own their environment and declare no resources server. Those are left alone by a swap,
+because there would be nothing for the incoming harness to bind to. If every agent in a config
+is self-contained, selecting a harness fails with `no other agent instance to rehost it on`.
+
+<Cards>
+
+<Card title="Configure Agents" href="/agent-server">
+Set up a built-in or custom agent harness.
+</Card>
+
+<Card title="CLI Reference" href="/reference/cli-commands#swapping-the-agent">
+Flags, modes, and error messages for agent selection.
+</Card>
+
+</Cards>
