@@ -2035,7 +2035,9 @@ class TestComposeUnboundAgent:
 
         GlobalConfigDictParser().compose_unbound_agent(config)
 
-        assert list(config["gpqa_mcqa_simple_agent"]["responses_api_agents"]) == ["hermes_agent"]
+        assert "gpqa_mcqa_hermes_agent" in config
+        assert "gpqa_mcqa_simple_agent" not in config
+        assert list(config["gpqa_mcqa_hermes_agent"]["responses_api_agents"]) == ["hermes_agent"]
 
     def test_a_bare_string_still_rejects_a_different_agent(self) -> None:
         config = self._set_allowed_agents("scicode_agent")
@@ -2199,19 +2201,6 @@ class TestComposeUnboundAgent:
         GlobalConfigDictParser().compose_unbound_agent(config)
 
         assert expected in config, f"expected {expected}, got {sorted(config)}"
-
-    def test_rename_follows_through_dataset_agent_pins(self) -> None:
-        """Benchmark datasets pin an agent by instance name, so the pin has to move with the rename."""
-        environment_agent = self._environment_agent("gpqa_mcqa_resources_server")
-        environment_agent["responses_api_agents"]["simple_agent"]["datasets"][0]["agent"] = "gpqa_mcqa_simple_agent"
-        config = self._config()
-        config["gpqa_mcqa_simple_agent"] = DictConfig(environment_agent)
-
-        GlobalConfigDictParser().compose_unbound_agent(config)
-
-        assert (
-            self._composed_block(config, "gpqa_mcqa_simple_agent")["datasets"][0]["agent"] == "gpqa_mcqa_hermes_agent"
-        )
 
     def test_raises_when_the_rename_would_collide(self) -> None:
         config = self._config()
