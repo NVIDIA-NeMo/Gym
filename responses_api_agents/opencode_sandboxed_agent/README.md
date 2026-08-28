@@ -14,6 +14,24 @@ python responses_api_agents/opencode_sandboxed_agent/client.py \
 
 For E2E functional testing, run as above and remove the actual opencode run command from the exec.
 
+## Running locally (no container)
+
+Swap in the `local` sandbox provider to run OpenCode as a host subprocess:
+
+```bash
+gym env start --config environments/opencode_math/config.yaml
+```
+
+This suits resources servers that do not provision their own sandbox. A server that returns a
+sandbox id from `/seed_session`, such as swebench, needs a provider that supports `connect`,
+so pair those with a container provider instead.
+
+Install is skipped when `opencode` is on PATH. For an external OpenAI-compatible endpoint, leave
+`model_server` unset, put `model`/`provider` in `opencode_config`, and turn `token_id_capture` off.
+
+No isolation here: OpenCode's bash tool has your full user access and picks up your personal
+OpenCode config and skills. Use a container provider for untrusted tasks.
+
 ## Prefetch OpenCode binary and upload to S3
 ```bash
 curl -L https://opencode.ai/install -o opencode_install.sh

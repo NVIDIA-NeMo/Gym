@@ -18,9 +18,11 @@ import sqlite3
 import subprocess
 import sys
 from pathlib import Path
+from shutil import rmtree
 from types import SimpleNamespace
 from typing import Any, Dict
 from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
 
 from pytest import MonkeyPatch, fixture, mark
 
@@ -64,6 +66,48 @@ class TestOpenCodeSandboxedAgent:
         )
         subprocess.run([sys.executable, "-c", code], check=True, timeout=30)
 
+    @fixture
+    def results_session(self) -> Any:
+        # responses() creates results/<session id> next to app.py, so isolate and remove it.
+        session_id = f"test-{uuid4().hex}"
+        yield session_id
+        rmtree(Path(app_module.__file__).parent / "results" / session_id, ignore_errors=True)
+
+    async def test_multi_turn_input_does_not_break_prompt_extraction(
+        self, monkeypatch: MonkeyPatch, results_session: str
+    ) -> None:
+        # Assistant items carry pydantic content parts, not dicts, so they must be skipped.
+        server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=MagicMock(spec=ServerClient))
+        sandbox_mock = MagicMock()
+        sandbox_mock.exec = AsyncMock(
+            return_value=SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None)
+        )
+        sandbox_mock.download = AsyncMock()
+        monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox_mock})
+        monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value=dict()))
+
+        await server.responses(
+            request=MagicMock(
+                session={SESSION_ID_KEY: results_session},
+                cookies={"sandbox_id": ""},
+                path_params={"rollout_id": "direct-call"},
+            ),
+            body=NeMoGymResponseCreateParamsNonStreaming(
+                input=[
+                    {"role": "user", "content": "hi"},
+                    {
+                        "id": "m1",
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": "prev", "annotations": []}],
+                    },
+                ]
+            ),
+        )
+
+        assert "-- hi " in sandbox_mock.exec.await_args_list[0].kwargs["command"]
+
     def _create_config(self) -> OpenCodeSandboxedAgentConfig:
         return OpenCodeSandboxedAgentConfig(
             host="0.0.0.0",
@@ -77,6 +121,7 @@ class TestOpenCodeSandboxedAgent:
             sandbox_config=dict(),
             sandbox_timeout=0,
             opencode_max_context_window=0,
+            opencode_max_output_tokens=0,
             token_id_capture=True,
         )
 
@@ -105,6 +150,108 @@ class TestOpenCodeSandboxedAgent:
         # Opt-out and no-cpu-limit paths inject nothing.
         assert (await created_spec({"resources": {"cpu": 2}, "derive_cpu_env": False})).env == {}
         assert (await created_spec({"resources": {"memory_mib": 8192}})).env == {}
+
+    async def test_create_opencode_config_without_a_model_server_defers_to_opencode_config(self) -> None:
+        config = self._create_config()
+        config.model_server = None
+        config.opencode_config = {"model": "nvinf/some-model", "provider": {"nvinf": {"npm": "@ai-sdk/x"}}}
+        agent = OpenCodeSandboxedAgent.model_construct(config=config)
+
+        opencode_config = await agent._create_opencode_config(MagicMock())
+
+        assert opencode_config["model"] == "nvinf/some-model"
+        assert set(opencode_config["provider"]) == {"nvinf"}
+
+    async def test_run_knobs_shape_the_opencode_command(self, monkeypatch: MonkeyPatch, results_session: str) -> None:
+        config = self._create_config()
+        config.opencode_command = "npx opencode"
+        config.thinking = False
+        config.extra_args = ["--share"]
+        config.repo_dir = "/testbed"
+        config.env = {"MY_VAR": "my_value"}
+        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+
+        sandbox_mock = MagicMock()
+        sandbox_mock.exec = AsyncMock(
+            return_value=SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None)
+        )
+        sandbox_mock.download = AsyncMock()
+        monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox_mock})
+        monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value=dict()))
+
+        await server.responses(
+            request=MagicMock(
+                session={SESSION_ID_KEY: results_session},
+                cookies={"sandbox_id": ""},
+                path_params={"rollout_id": "direct-call"},
+            ),
+            body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "hi"}]),
+        )
+
+        call = sandbox_mock.exec.await_args_list[0]
+        command = call.kwargs["command"]
+        assert "npx opencode run" in command
+        assert "command -v npx " in command
+        assert "--thinking" not in command
+        assert "--share" in command
+        assert "mkdir -p /testbed && cd /testbed" in command
+        assert call.kwargs["env"]["MY_VAR"] == "my_value"
+
+    async def test_input_system_message_is_folded_into_the_prompt(
+        self, monkeypatch: MonkeyPatch, results_session: str
+    ) -> None:
+        config = self._create_config()
+        config.system_prompt = "Config prompt."
+        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+
+        sandbox_mock = MagicMock()
+        sandbox_mock.exec = AsyncMock(
+            return_value=SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None)
+        )
+        sandbox_mock.download = AsyncMock()
+        monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox_mock})
+        monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value=dict()))
+
+        await server.responses(
+            request=MagicMock(
+                session={SESSION_ID_KEY: results_session},
+                cookies={"sandbox_id": ""},
+                path_params={"rollout_id": "direct-call"},
+            ),
+            body=NeMoGymResponseCreateParamsNonStreaming(
+                input=[{"role": "system", "content": "Dataset prompt."}, {"role": "user", "content": "hi"}],
+            ),
+        )
+
+        command = sandbox_mock.exec.await_args_list[0].kwargs["command"]
+        assert "'Config prompt.\n\nDataset prompt.\n\nhi'" in command
+
+    async def test_system_prompt_is_prepended_to_the_opencode_prompt(
+        self, monkeypatch: MonkeyPatch, results_session: str
+    ) -> None:
+        config = self._create_config()
+        config.system_prompt = "Answer in one word."
+        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+
+        sandbox_mock = MagicMock()
+        sandbox_mock.exec = AsyncMock(
+            return_value=SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None)
+        )
+        sandbox_mock.download = AsyncMock()
+        monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox_mock})
+        monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value=dict()))
+
+        await server.responses(
+            request=MagicMock(
+                session={SESSION_ID_KEY: results_session},
+                cookies={"sandbox_id": ""},
+                path_params={"rollout_id": "direct-call"},
+            ),
+            body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "what is 2+2"}]),
+        )
+
+        run_command = sandbox_mock.exec.await_args_list[0].kwargs["command"]
+        assert "'Answer in one word.\n\nwhat is 2+2'" in run_command
 
     @fixture
     def opencode_export_test_data(self) -> Dict[str, Any]:
@@ -181,7 +328,9 @@ class TestOpenCodeSandboxedAgent:
 
         assert expected_usages == actual_usages
 
-    async def test_responses_sanity(self, opencode_export_test_data: Dict[str, Any], monkeypatch: MonkeyPatch) -> None:
+    async def test_responses_sanity(
+        self, opencode_export_test_data: Dict[str, Any], monkeypatch: MonkeyPatch, results_session: str
+    ) -> None:
         config = self._create_config()
         server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
@@ -213,7 +362,7 @@ class TestOpenCodeSandboxedAgent:
 
         actual_response = await server.responses(
             request=MagicMock(
-                session={SESSION_ID_KEY: "my session"},
+                session={SESSION_ID_KEY: results_session},
                 cookies={"sandbox_id": ""},
                 path_params={"rollout_id": "direct-call"},
             ),
@@ -301,7 +450,11 @@ class TestOpenCodeSandboxedAgent:
         assert expected_response == actual_response
         assert not any(key.startswith("_ng_") for key in server._sandbox_id_to_run_result[""])
         assert "XDG_DATA_HOME" not in sandbox_mock.exec.await_args_list[0].kwargs["env"]
-        assert sandbox_mock.exec.await_args_list[1].kwargs["env"] is None
+        # The export exec carries the run's OpenCode config so session lookup matches,
+        # but no XDG_DATA_HOME when observations are not being collected.
+        export_env = sandbox_mock.exec.await_args_list[1].kwargs["env"]
+        assert "XDG_DATA_HOME" not in export_env
+        assert export_env["OPENCODE_CONFIG_CONTENT"] == "{}"
 
     def test_agent_sandbox_observation_classifies_timeout_errors(self) -> None:
         server = OpenCodeSandboxedAgent(

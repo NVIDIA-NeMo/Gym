@@ -383,13 +383,23 @@ def parse_opencode_observations(db_path: Path, fallback_invocation_id: str) -> A
 
 class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
-    model_server: ModelServerRef
+    model_server: Optional[ModelServerRef] = None
 
     opencode_version: str
     remote_opencode_install_script_path: Optional[str] = None
     remote_opencode_binary_path: Optional[str] = None
     opencode_config: Dict[str, Any] = Field(default_factory=dict)
     opencode_max_context_window: int
+    opencode_max_output_tokens: int
+    # OpenCode takes one prompt, so this is prepended to the user message.
+    system_prompt: Optional[str] = None
+    # Split on spaces, so a multi-word launcher works (e.g. "npx opencode").
+    opencode_command: str = "opencode"
+    thinking: bool = True
+    extra_args: List[str] = Field(default_factory=list)
+    # Where OpenCode runs, created if missing. Defaults to the sandbox working directory.
+    repo_dir: Optional[str] = None
+    env: Dict[str, str] = Field(default_factory=dict)
 
     # Sandbox config
     sandbox_provider: str
@@ -418,6 +428,8 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
     opencode_run_stderr: str
     opencode_finished: bool
     opencode_export_found: bool
+    turns_used: int = 0
+    finished_naturally: bool = False
     ng_agent_observations: Optional[AgentObservationBundle] = Field(
         default=None,
         exclude_if=lambda value: value is None,
@@ -452,7 +464,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
         sandbox_spec = SandboxSpec(
-            image="swebench/sweb.eval.x86_64.astropy_1776_astropy-12907",  # This is just the first SWE Bench Verified image for now
+            image=self.config.sandbox_config.get("image"),
             ttl_s=self.config.sandbox_config.get("ttl_s", None),
             ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s", None),
             workdir=None,  # Default to container's WORKDIR
@@ -505,6 +517,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         )
 
     async def _create_opencode_config(self, request: Request) -> Dict[str, Any]:
+        # No model server: opencode_config supplies the provider, pointing at any OpenAI-compatible endpoint.
+        if self.config.model_server is None:
+            return {"$schema": "https://opencode.ai/config.json", **self.config.opencode_config}
         base_url = (
             self.base_url_for_run(
                 base_url=get_server_url(self.config.model_server.name),
@@ -531,7 +546,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                                 "context": self.config.opencode_max_context_window,
                                 "input": self.config.opencode_max_context_window,
                                 # See the OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX flag below for more information.
-                                "output": self.config.opencode_max_context_window,
+                                "output": self.config.opencode_max_output_tokens,
                             },
                         },
                     },
@@ -626,17 +641,25 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         sandbox = self._sandbox_id_to_sandbox[request.cookies["sandbox_id"]]
 
         query = None
-        # This can be modified to handle system/developer prompts too.
+        input_system = None
         for input_item in body.input:
-            if input_item.role == "user":
+            role = getattr(input_item, "role", None)
+            if role not in ("user", "system", "developer"):
+                continue
+            content = input_item.content
+            if isinstance(content, list):
+                assert len(content) == 1, body.input
+                content = content[0]["text"]
+            if role == "user":
                 assert not query, body.input
-                if isinstance(input_item.content, str):
-                    query = input_item.content
-                elif isinstance(input_item.content, list):
-                    assert len(input_item.content) == 1, body.input
-                    query = input_item.content[0]["text"]
+                query = content
+            else:
+                input_system = content
 
         assert query, body.input
+
+        # OpenCode takes a single prompt argument, so system text has to lead the query.
+        query = "\n\n".join([p for p in (self.config.system_prompt, input_system, query) if p])
 
         opencode_debug_str = ""
         if self.config.debug:
@@ -647,7 +670,13 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # For now, the activation is put on the harness side.
         conda_activate_command_str = "{ source /opt/miniconda3/bin/activate && conda activate testbed || true; }"
 
-        opencode_thinking_str = "--thinking"
+        opencode_thinking_str = "--thinking" if self.config.thinking else ""
+        opencode_extra_args_str = " ".join(self.config.extra_args)
+        cd_command_str = (
+            f"mkdir -p {quote(self.config.repo_dir)} && cd {quote(self.config.repo_dir)}"
+            if self.config.repo_dir
+            else "true"
+        )
 
         if self.config.remote_opencode_binary_path and self.config.remote_opencode_install_script_path:
             install_str = f"""bash {self.config.remote_opencode_install_script_path} --binary {self.config.remote_opencode_binary_path}"""
@@ -660,15 +689,18 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && echo "Downloaded OpenCode installer to $installer" \
         && VERSION={self.config.opencode_version} bash "$installer\""""
 
+        opencode_binary = self.config.opencode_command.split()[0]
+
         # --auto is to approve not explicitly denied requests.
         command = f"""
         echo "Shell: $SHELL" \
         && {conda_activate_command_str} \
         && echo "Optionally activated Conda env" \
-        && {install_str} \
+        && {cd_command_str} \
         && export PATH=$HOME/.opencode/bin:$PATH \
-        && echo "Installed OpenCode" \
-        && opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} -- {quote(query)} \
+        && {{ command -v {opencode_binary} >/dev/null 2>&1 || {{ {install_str}; }} }} \
+        && echo "OpenCode available" \
+        && {self.config.opencode_command} run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} {opencode_extra_args_str} -- {quote(query)} \
         && echo "OpenCode run finished"
         """
 
@@ -680,9 +712,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             "OPENCODE_CONFIG_CONTENT": opencode_config_content,
             # @bxyu-nvidia: OpenCode defaults to 32k here https://github.com/anomalyco/opencode/blob/58a99916bb96edf5cf605dc03e1be1e4bacf9ff7/packages/opencode/src/provider/transform.ts#L21
             # and there is no way to set it to null.
-            # Here, we set an exorbitantly high number that cannot ever be reached.
+            # Sent as max_tokens on every request, so it must stay clear of max_model_len.
             # In future versions of OpenCode, this can be directly passed via maxOutputTokens in the limit config above https://github.com/anomalyco/opencode/blob/1b18a50418f730aca32630ccfcde850f2b5fc360/packages/opencode/src/provider/transform.ts#L1418
-            "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": str(1_000_000_000),
+            "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": str(self.config.opencode_max_output_tokens),
+            **self.config.env,
         }
         remote_data_home = None
         if collect_observations:
@@ -713,10 +746,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         try:
             export_result = await sandbox.exec(
                 command=f"""export PATH=$HOME/.opencode/bin:$PATH \
+            && {cd_command_str} \
             && (command -v jq >/dev/null 2>&1 || (apt-get update && apt-get install -y --no-install-recommends jq)) \
-            && session_id=$(opencode session list --format json | jq -r '.[0].id') \
-            && opencode export $session_id > {export_fname}""",
-                env={"XDG_DATA_HOME": remote_data_home} if remote_data_home is not None else None,
+            && session_id=$({self.config.opencode_command} session list --format json | jq -r '.[0].id') \
+            && {self.config.opencode_command} export $session_id > {export_fname}""",
+                env=opencode_env | ({"XDG_DATA_HOME": remote_data_home} if remote_data_home is not None else {}),
             )
         except:
             export_result = None
@@ -726,7 +760,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             print("Export stderr:\n", export_result.stderr, file=sys.stderr)
 
         try:
-            pwd_result = await sandbox.exec(command="pwd")
+            pwd_result = await sandbox.exec(command=f"{cd_command_str} && pwd")
             results_remote_fpath = Path(pwd_result.stdout.strip()) / export_fname
         except:
             print("Failed to get current working directory", format_exc(), file=sys.stderr)
@@ -825,7 +859,15 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             observations.records.append(agent_sandbox_observation)
             observations.gaps.append(ObservationGap(code="sandbox_lifecycle_timing_unavailable"))
 
+        assistant_messages = [
+            item
+            for item in output
+            if getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
+        ]
         run_result = {
+            "turns_used": len(assistant_messages),
+            "finished_naturally": bool(output)
+            and output[-1] is (assistant_messages[-1] if assistant_messages else None),
             "opencode_results_fpath": str(results_local_fpath) if opencode_export_found else "",
             "opencode_run_stdout": result_stdout,
             "opencode_run_stderr": result_stderr,
@@ -839,7 +881,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
-            model=body.model or self.config.model_server.name,
+            model=body.model or (self.config.model_server.name if self.config.model_server else self.config.name),
             object="response",
             output=output,
             tool_choice=body.tool_choice,
