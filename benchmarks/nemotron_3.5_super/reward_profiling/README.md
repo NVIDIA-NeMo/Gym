@@ -43,7 +43,8 @@ MODEL=<checkpoint> CONTAINER=<eval sqsh> SANDBOX_CONTAINER=<sandbox sqsh> \
 SWEEP_DIR=$R/outputs/sweeps/nemotron_3_ultra bash $R/scripts/05_profile.sh
 ```
 
-Add `LIMIT_PER_ENTRY=8` to step 1 for a smoke run that exercises every code path in minutes.
+Add `LIMIT_PER_ENTRY=8` to step 1 for a smoke run that exercises every code path in minutes —
+N rows from *each* entry, which is not what `gym eval run --limit` does ([why](#gotchas)).
 To go past ~16 nodes, insert `02_shard.sh` and use `03_run_sharded.sh` — see [03a](#03a---sharding--unsharding-data).
 
 ## 00 - Setup

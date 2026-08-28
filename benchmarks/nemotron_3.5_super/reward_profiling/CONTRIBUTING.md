@@ -120,6 +120,14 @@ MODEL=<ckpt> CONTAINER=<eval sqsh> \
 `num_repeats: 8` that is 64 rollouts — enough to exercise every code path in minutes. Drop it for
 a real run. Every other variable is in [README § Common knobs](./README.md#05---reference).
 
+**Do not smoke-test with `gym eval run --limit` instead.** It looks equivalent and is not.
+`--limit` takes the first N rows of the whole input at collection time; `LIMIT_PER_ENTRY` takes N
+rows from *each* entry at prepare time. Identical for your one-entry manifest, wrong the moment you
+test against the full sweep in step 04 — entries are laid out as contiguous blocks in manifest
+order, so `--limit 72` there covers 2 of 36 environments instead of all 36. It fails silently: you
+get rollouts, rewards and a clean profile for `tau_pivot`, and conclude your entry passed when it
+never ran.
+
 Then profile and read the result:
 
 ```bash
