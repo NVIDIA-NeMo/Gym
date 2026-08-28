@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import pytest
 
+from nemo_gym.token_id_capture.external_capture import MegatronLedgerCaptureHandler
 from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore
 from nemo_gym.token_id_capture.records import compute_digest
 from nemo_gym.token_id_capture.sink import (
@@ -102,6 +103,38 @@ async def test_ledger_row_round_trips_token_free_manifest(store):
 
 
 @pytest.mark.asyncio
+async def test_megatron_pending_row_round_trips_token_free_manifest(store):
+    await store.record(
+        "r1",
+        "c1",
+        [USER_1],
+        [ASSISTANT_1],
+        TOKENS_1,
+        compute_digest(TOKENS_1),
+        parent_call_id=None,
+        prev_len=0,
+        delta_len=len(TOKENS_1),
+        cum_len=len(TOKENS_1),
+        mode="text",
+        logical_request_id="lr-c1",
+        admitted_at=1_755_600_000.25,
+        ledger_request_uid="minf-uid-1",
+        chain_hash=CHAIN_HASH_1,
+        cumulative_hash=CUMULATIVE_HASH_1,
+        response_id="minf-uid-1",
+    )
+    manifest = RolloutManifest.model_validate(await store.manifest("r1"))
+    assert manifest.records == []
+    (pending,) = manifest.pending_records
+    assert pending.model_call_id == "c1"
+    assert pending.ledger_request_uid == "minf-uid-1"
+    assert pending.chain_hash == CHAIN_HASH_1
+    assert pending.cumulative_hash == CUMULATIVE_HASH_1
+    assert pending.response_id == "minf-uid-1"
+    assert "cumulative_token_ids" not in manifest.model_dump()["pending_records"][0]
+
+
+@pytest.mark.asyncio
 async def test_legacy_row_without_admitted_at_still_validates(store):
     custody = _custody("c1")
     custody.pop("admitted_at")
@@ -161,6 +194,48 @@ async def _admit(store, request_items, rollout_id="r1", model_call_id="c2"):
     finally:
         reset_token_sink(token)
     return context
+
+
+@pytest.mark.asyncio
+async def test_megatron_pending_parent_admits_child_with_http_prefix(store):
+    handler = MegatronLedgerCaptureHandler()
+    root = await _admit(store, [USER_1], model_call_id="c1")
+    assert root.capture_admission is not None and root.capture_admission.mode == "text"
+
+    response = {
+        "id": "minf-uid-1",
+        "choices": [
+            {
+                "message": {
+                    **ASSISTANT_1,
+                    "prompt_token_ids": TOKENS_1[:-1],
+                    "generation_token_ids": TOKENS_1[-1:],
+                }
+            }
+        ],
+    }
+    token = set_token_sink(root)
+    try:
+        await handler.finalize_response(response)
+    finally:
+        reset_token_sink(token)
+
+    child = await _admit(store, [USER_1, ASSISTANT_1, USER_2], model_call_id="c2")
+    admission = child.capture_admission
+    assert admission is not None and admission.mode == "token_in"
+    assert admission.parent_call_id == "c1"
+    assert admission.prev_len == len(TOKENS_1)
+    assert admission.required_prefix_token_ids == TOKENS_1
+    assert admission.staging_chain == []
+    assert child.parent_tokens == TOKENS_1
+
+    token = set_token_sink(child)
+    try:
+        prepared = handler.prepare_request({})
+    finally:
+        reset_token_sink(token)
+    assert prepared["required_prefix_token_ids"] == TOKENS_1
+    assert RolloutManifest.model_validate(await store.manifest("r1")).failures == []
 
 
 @pytest.mark.asyncio

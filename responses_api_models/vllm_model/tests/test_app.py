@@ -63,6 +63,8 @@ from nemo_gym.token_id_capture import (
     resolve_parent,
     set_token_sink,
 )
+from nemo_gym.token_id_capture.staging.digest import compute_chain_hash, hash_token_ids
+from nemo_gym.token_id_capture.staging.records import CaptureAdmission
 from responses_api_models.vllm_model.app import (
     VLLMConverter,
     VLLMModel,
@@ -728,7 +730,7 @@ PARAMETERIZE_DATA = [
 
 
 class TestApp:
-    def _setup_server(self, monkeypatch: MonkeyPatch):
+    def _setup_server(self, monkeypatch: MonkeyPatch, *, external_staging_backend: str | None = None):
         config = VLLMModelConfig(
             host="0.0.0.0",
             port=8081,
@@ -745,10 +747,136 @@ class TestApp:
         get_global_config_dict_mock.return_value = dict()
         monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
 
-        return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+        global_config = {}
+        if external_staging_backend is not None:
+            global_config = {
+                "token_id_capture": {
+                    "enabled": True,
+                    "external_staging": True,
+                    "external_staging_backend": external_staging_backend,
+                    "rebuild_response": False,
+                }
+            }
+        return VLLMModel(
+            config=config,
+            server_client=MagicMock(spec=ServerClient, global_config_dict=global_config),
+        )
 
     async def test_sanity(self, monkeypatch: MonkeyPatch) -> None:
         self._setup_server(monkeypatch)
+
+    def test_megatron_capture_handler_prepares_an_admitted_child_request(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch, external_staging_backend="megatron_ledger")
+        context = CaptureContext(
+            rollout_id="rollout-1",
+            model_call_id="c2",
+            token_sink=None,
+            external_staging=True,
+            capture_admission=CaptureAdmission(
+                rollout_id="rollout-1",
+                model_call_id="c2",
+                parent_call_id="c1",
+                prev_len=3,
+                mode="token_in",
+                required_prefix_token_ids=[10, 11, 12],
+                parent_chain_hash="0" * 64,
+            ),
+        )
+        token = set_token_sink(context)
+        try:
+            outbound = server._preprocess_chat_completion_create_params(
+                MagicMock(),
+                {"messages": [{"role": "user", "content": "continue"}]},
+            )
+        finally:
+            reset_token_sink(token)
+
+        assert outbound["return_tokenized_data"] is True
+        assert outbound["required_prefix_token_ids"] == [10, 11, 12]
+        assert outbound["logprobs"] is True
+        assert outbound["top_logprobs"] == 0
+        assert "ng_capture" not in outbound
+        assert "return_tokens_as_token_ids" not in outbound
+
+    async def test_megatron_capture_handler_finalizes_through_chat_completions(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch, external_staging_backend="megatron_ledger")
+        client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        client.create_chat_completion = AsyncMock(
+            return_value={
+                "id": "minf-17",
+                "object": "chat.completion",
+                "created": FIXED_TIME,
+                "model": "dummy_model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": "done",
+                            "prompt_token_ids": [10, 11],
+                            "generation_token_ids": [12],
+                        },
+                    }
+                ],
+            }
+        )
+        server._clients = [client]
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "session-1"}
+        request.headers = {}
+        lineage_store = InMemoryLineageStore()
+        context = CaptureContext(
+            rollout_id="rollout-1",
+            model_call_id="c1",
+            token_sink=None,
+            lineage_store=lineage_store,
+            external_staging=True,
+            logical_request_id="logical-1",
+            admitted_at=1.5,
+            request_items=[{"role": "user", "content": "go"}],
+            capture_admission=CaptureAdmission(
+                rollout_id="rollout-1",
+                model_call_id="c1",
+                mode="text",
+            ),
+        )
+        token = set_token_sink(context)
+        try:
+            response = await server.chat_completions(
+                request,
+                NeMoGymChatCompletionCreateParamsNonStreaming(
+                    messages=[{"role": "user", "content": "go"}],
+                ),
+            )
+        finally:
+            reset_token_sink(token)
+
+        outbound = client.create_chat_completion.await_args.kwargs
+        assert outbound["return_tokenized_data"] is True
+        assert context.committed is True
+        manifest = await lineage_store.manifest("rollout-1")
+        assert manifest["pending_records"] == [
+            {
+                "schema_version": 2,
+                "model_call_id": "c1",
+                "parent_call_id": None,
+                "mode": "text",
+                "prev_len": 0,
+                "delta_len": 3,
+                "cum_len": 3,
+                "ledger_request_uid": "minf-17",
+                "chain_hash": compute_chain_hash(None, [10, 11, 12]),
+                "cumulative_hash": hash_token_ids([10, 11, 12]),
+                "response_id": "minf-17",
+                "logical_request_id": "logical-1",
+                "admitted_at": 1.5,
+            }
+        ]
+        response_payload = response.model_dump()
+        assert "prompt_token_ids" not in response_payload
+        assert "prompt_token_ids" not in response_payload["choices"][0]["message"]
+        assert "generation_token_ids" not in response_payload["choices"][0]["message"]
 
     def test_session_client_routing_is_stable_across_workers(self, monkeypatch: MonkeyPatch) -> None:
         workers = [self._setup_server(monkeypatch) for _ in range(2)]

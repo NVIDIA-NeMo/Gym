@@ -105,18 +105,52 @@ class LineageStore(Protocol):
 class CaptureLedger(LineageStore, Protocol):
     """A lineage store that doubles as the per-rollout capture ledger.
 
-    External staging requires this surface: committed rows additionally carry
+    External staging requires this surface: rows additionally carry either
     the token-free ``CallRecord`` custody columns (passed to ``record`` as
     keyword arguments: ``parent_call_id``, ``staging_key``, ``weight_version``,
     ``prev_len``/``delta_len``/``cum_len``, ``staging_digest``,
     ``extras_digest``, ``mode``, ``logical_request_id``, ``admitted_at``,
     ``staging_chain``, ``chain_hash``, ``cumulative_hash``, ``response_id``,
     ``output_fingerprint``, ``continuation_fingerprint``,
-    ``fingerprint_version``),
+    ``fingerprint_version``), or
+    a deferred MInf reference (``ledger_request_uid`` plus its lineage,
+    content hashes, served ``response_id``, and length columns),
     poison rows are
     appended with ``record_failure``, and the framework reads the rollout back
     token-free through ``manifest``.
     """
+
+    async def record(
+        self,
+        rollout_id: str,
+        model_call_id: str,
+        request_items: list[dict],
+        response_items: list[dict],
+        cumulative_token_ids: list[int],
+        digest: str,
+        *,
+        parent_call_id: str | None = None,
+        staging_key: str | None = None,
+        weight_version: int | None = None,
+        prev_len: int | None = None,
+        delta_len: int | None = None,
+        cum_len: int | None = None,
+        staging_digest: str | None = None,
+        extras_digest: str | None = None,
+        mode: str | None = None,
+        logical_request_id: str | None = None,
+        admitted_at: float | None = None,
+        staging_chain: list[str] | None = None,
+        chain_hash: str | None = None,
+        cumulative_hash: str | None = None,
+        response_id: str | None = None,
+        output_fingerprint: str | None = None,
+        continuation_fingerprint: str | None = None,
+        fingerprint_version: int = 0,
+        ledger_request_uid: str | None = None,
+    ) -> None:
+        """Publish lineage with staged-custody or deferred-ledger columns."""
+        ...
 
     async def record_failure(self, rollout_id: str, model_call_id: str, reason: str) -> None:
         """Append a poison row for a call whose capture did not commit.
@@ -130,8 +164,8 @@ class CaptureLedger(LineageStore, Protocol):
         """Return the rollout's token-free ledger as plain wire data.
 
         The shape validates as ``staging.records.RolloutManifest``:
-        committed rows under ``records`` (each a ``CallRecord`` payload plus
-        ``logical_request_id``) and poison rows under ``failures``.
+        committed rows under ``records``, deferred MInf rows under
+        ``pending_records``, and poison rows under ``failures``.
         Cumulative token IDs never appear in the manifest.
         """
         ...

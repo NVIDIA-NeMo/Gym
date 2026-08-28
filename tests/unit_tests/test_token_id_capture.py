@@ -346,6 +346,17 @@ def test_external_staging_requires_framework_owned_rebuild_and_active_capture():
     assert config.token_id_capture.external_staging is True
 
 
+def test_megatron_ledger_backend_requires_external_staging():
+    with pytest.raises(ValueError, match="requires external_staging=true"):
+        TokenIdCaptureConfig.model_validate(
+            {
+                "token_id_capture": {
+                    "external_staging_backend": "megatron_ledger",
+                }
+            }
+        )
+
+
 def test_agent_capture_selection_uses_static_agent_config_or_all_agents():
     config = {
         "token_id_capture": {"enabled": True, "rebuild_response": False},
