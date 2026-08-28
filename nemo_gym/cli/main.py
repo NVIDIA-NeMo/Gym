@@ -176,7 +176,13 @@ RESOURCES_SERVER = Flag(
 # Shared flag: emit machine-readable JSON instead of human output. Reused by reporting commands (version, list,
 # env status). Each command reads the reserved `json` config key ad hoc via
 # global_config_dict.get(JSON_OUTPUT_KEY_NAME) (see general.py, eval.py, env.py).
-JSON = _bool_flag("json", "json", "Output as machine-readable JSON.")
+# SUPPRESS so an absent trailing `--json` can't overwrite one given before the subcommand (see build_parser).
+JSON = Flag(
+    register=lambda p: p.add_argument(
+        "--json", action="store_true", default=argparse.SUPPRESS, help="Output as machine-readable JSON."
+    ),
+    translate_to_hydra=lambda args: ["+json=true"] if getattr(args, "json", False) else [],
+)
 
 # `gym list <type> [<name>]`: an optional component name. When given, the listing command inspects that one
 # component (surfaced as the reserved `component_name` config key) instead of listing all.
@@ -318,6 +324,7 @@ _ASSETS = {
     "environment": ("environments", "", "config"),
     "resources-server": ("resources_servers", "configs", None),
     "model-type": ("responses_api_models", "configs", None),
+    "agent-type": ("responses_api_agents", "configs", None),
 }
 
 
@@ -433,6 +440,36 @@ ENVIRONMENT = _asset_selector("environment")
 RESOURCES_SERVER_CONFIG = _asset_selector("resources-server")
 MODEL_TYPE = _asset_selector("model-type")
 
+# Override for the verifier-side `allowed_agents` guard. Offered wherever --agent-type composes.
+ALLOW_UNSUPPORTED_PAIRING = _bool_flag(
+    "allow-unsupported-pairing",
+    "allow_unsupported_pairing",
+    "Run even if the environment's resources server does not declare support for the selected agent.",
+)
+
+AGENT_TYPE = Flag(
+    register=lambda p: p.add_argument(
+        "--agent-type",
+        metavar="NAME",
+        help="Agent (NAME or NAME/FLAVOR) to run the selected environment or benchmark.",
+    ),
+    translate_to_hydra=lambda args: _translate_agent_type(args),
+)
+
+
+def _translate_agent_type(args: argparse.Namespace) -> list[str]:
+    """`--agent-type` picks the harness to compose, which is already fixed once the servers are up."""
+    name = getattr(args, "agent_type", None)
+    if not name:
+        return []
+    if getattr(args, "no_serve", False):
+        raise ValueError(
+            "`--agent-type` chooses which agent runs the task, which is settled once the servers are "
+            "running, so it cannot be combined with `--no-serve`. Use `--agent` to name one of them."
+        )
+    return [f"+config_paths=[{_asset_config_path('agent-type', name)}]"]
+
+
 # `--search-dir`: extra component-search roots. `main()` folds these into the `NEMO_GYM_EXTRA_ROOTS` env
 # var before dispatch (see there), so a single register-only flag suffices for every command — the roots
 # reach discovery, the `--<component> NAME` selectors, deep path resolution, and spawned servers alike.
@@ -524,6 +561,8 @@ def _env_test(args: argparse.Namespace, overrides: list[str]) -> None:
     manifest_options = any(_has_override(overrides, key) for key in ("catalog_kind", "update_expected", "json"))
     if manifest_selected and legacy_selected:
         args._parser.error("select a workload name or --resources-server, not both")
+    if args.all and (manifest_selected or legacy_selected):
+        args._parser.error("--all tests every resources server, so it cannot be combined with a named target")
     if manifest_options and not manifest_selected:
         args._parser.error("--kind, --update-expected, and --json require a workload name")
     if manifest_selected:
@@ -532,9 +571,15 @@ def _env_test(args: argparse.Namespace, overrides: list[str]) -> None:
 
     # Run a single server's tests if +entrypoint was passed. No need to check for
     # --resources-server because it is translated to +entrypoint in the flag definition.
-    dispatch(
-        "nemo_gym.cli.env:test" if _has_override(overrides, "entrypoint") else "nemo_gym.cli.env:test_all", overrides
-    )
+    if _has_override(overrides, "entrypoint"):
+        dispatch("nemo_gym.cli.env:test", overrides)
+        return
+
+    if not args.all:
+        args._parser.error(
+            "requires a target: a workload name, --resources-server NAME, or --all to test every resources server."
+        )
+    dispatch("nemo_gym.cli.env:test_all", overrides)
 
 
 def _dataset_upload(args: argparse.Namespace, overrides: list[str]) -> None:
@@ -730,6 +775,8 @@ COMMANDS = {
             ENVIRONMENT,
             RESOURCES_SERVER_CONFIG,
             MODEL_TYPE,
+            AGENT_TYPE,
+            ALLOW_UNSUPPORTED_PAIRING,
             SEARCH_DIR,
             MODEL,
             MODEL_URL,
@@ -745,9 +792,9 @@ COMMANDS = {
             _bool_flag("outdated", "outdated", "List only outdated packages."),
             Flag(
                 register=lambda p: p.add_argument(
-                    "--json", action="store_true", help="Output the package list as JSON."
+                    "--json", action="store_true", default=argparse.SUPPRESS, help="Output the package list as JSON."
                 ),
-                translate_to_hydra=lambda args: ["+format=json"] if args.json else [],
+                translate_to_hydra=lambda args: ["+format=json"] if getattr(args, "json", False) else [],
             ),
         ),
     ),
@@ -761,6 +808,13 @@ COMMANDS = {
             JSON,
             RESOURCES_SERVER,
             SEARCH_DIR,
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--all",
+                    action="store_true",
+                    help="Test every resources server. Slow: builds one venv per server.",
+                )
+            ),
         ),
     ),
     "env publish": Command(
@@ -777,6 +831,8 @@ COMMANDS = {
             ENVIRONMENT,
             RESOURCES_SERVER_CONFIG,
             MODEL_TYPE,
+            AGENT_TYPE,
+            ALLOW_UNSUPPORTED_PAIRING,
             SEARCH_DIR,
             MODEL,
             MODEL_URL,
@@ -792,6 +848,8 @@ COMMANDS = {
             ENVIRONMENT,
             RESOURCES_SERVER_CONFIG,
             MODEL_TYPE,
+            AGENT_TYPE,
+            ALLOW_UNSUPPORTED_PAIRING,
             SEARCH_DIR,
         ),
     ),
@@ -819,6 +877,8 @@ COMMANDS = {
                 )
             ),
             _bool_flag("resume", "resume_from_cache", "Resume from cached rollouts instead of recollecting."),
+            AGENT_TYPE,
+            ALLOW_UNSUPPORTED_PAIRING,
             _value_flag("agent", "agent_name", "Agent to collect rollouts with.", aliases=("-a",)),
             _value_flag("input", "input_jsonl_fpath", "Input tasks JSONL file.", aliases=("-i",)),
             _value_flag("output", "output_jsonl_fpath", "Output rollouts JSONL file.", aliases=("-o",)),
@@ -975,6 +1035,10 @@ COMMANDS = {
 }
 
 
+def _accepts_json(parser: argparse.ArgumentParser) -> bool:
+    return any("--json" in action.option_strings for action in parser._actions)
+
+
 def _add_leaf(subparsers: argparse._SubParsersAction, name: str, command: Command) -> None:
     leaf = subparsers.add_parser(name, help=command.summary, description=command.summary)
     # `_parser=leaf` so error reporting (and flag "did you mean?" hints) uses this command's own options/prog.
@@ -991,7 +1055,10 @@ def build_parser() -> argparse.ArgumentParser:
     # _GymArgumentParser propagates to every subparser (argparse defaults parser_class to type(self)).
     parser = _GymArgumentParser(prog="gym", add_help=True)
     parser.add_argument("--version", action="store_true", help="Show the NeMo Gym version and exit.")
-    parser.add_argument("--json", action="store_true", help="With --version, output as JSON.")
+    # Also registered on every command that emits JSON, so `--json` is accepted before or after the subcommand.
+    parser.add_argument(
+        "--json", action="store_true", help="Output as machine-readable JSON (--version and reporting commands)."
+    )
     # Also registered on every leaf, so `-v` is accepted before or after the subcommand.
     parser.add_argument("-v", "--verbose", action="store_true", help="Set logging level to DEBUG.")
     parser.set_defaults(_parser=parser)
@@ -1115,6 +1182,14 @@ def main() -> None:
         if command is None:
             args._parser.print_help()
             sys.exit(1)
+
+        # A pre-subcommand `--json` reaches commands that emit no JSON, where it would otherwise be dropped
+        # without a word. Reject it instead of pretending it applied.
+        if getattr(args, "json", False) and not _accepts_json(args._parser):
+            args._parser.error(
+                "--json is not supported by this command; it applies to --version and to reporting commands "
+                "such as `gym list benchmarks`, `gym search`, and `gym env status`"
+            )
 
         try:
             translated = [token for flag in command.flags for token in flag.translate_to_hydra(args)]
