@@ -16,6 +16,7 @@ import re
 from typing import Any, Optional
 
 from fastapi import FastAPI
+from pydantic import ConfigDict
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -32,7 +33,10 @@ class SWEJudgeResourcesServerConfig(BaseResourcesServerConfig):
 
 
 class SWEJudgeRunRequest(TaskData, BaseRunRequest):
-    pass
+    # Explicit ignore preserves the wire's pre-existing handling of UNDECLARED fields
+    # (they are dropped, as before this refactor). Fields TaskData declares are typed and
+    # kept. Flipping undeclared-field handling to allow is a separate, per-server decision.
+    model_config = ConfigDict(extra="ignore")
 
 
 class SWEJudgeVerifyRequest(SWEJudgeRunRequest, BaseVerifyRequest):

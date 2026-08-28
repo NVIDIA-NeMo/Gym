@@ -15,6 +15,8 @@
 
 from typing import Any, Dict, Optional
 
+from pydantic import ConfigDict
+
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
@@ -33,7 +35,10 @@ class AalcrResourcesServerConfig(BaseResourcesServerConfig):
 
 
 class AALCRVerifyRequest(TaskData, BaseVerifyRequest):
-    pass
+    # Explicit ignore preserves the wire's pre-existing handling of UNDECLARED fields
+    # (they are dropped, as before this refactor). Fields TaskData declares are typed and
+    # kept. Flipping undeclared-field handling to allow is a separate, per-server decision.
+    model_config = ConfigDict(extra="ignore")
 
 
 class AALCRVerifyResponse(AALCRVerifyRequest, BaseVerifyResponse):

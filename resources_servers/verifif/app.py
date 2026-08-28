@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple
 
 from fastapi import FastAPI
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -154,6 +154,11 @@ class TuringVIFResourcesServerConfig(BaseResourcesServerConfig):
 
 class TuringVIFRunRequest(TaskData, BaseRunRequest):
     """Request model for the VerifIF resource server."""
+
+    # Explicit ignore preserves the wire's pre-existing handling of UNDECLARED fields
+    # (they are dropped, as before this refactor). Fields TaskData declares are typed and
+    # kept. Flipping undeclared-field handling to allow is a separate, per-server decision.
+    model_config = ConfigDict(extra="ignore")
 
 
 class TuringVIFVerifyRequest(TuringVIFRunRequest, BaseVerifyRequest):
