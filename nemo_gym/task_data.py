@@ -2,9 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Per-server task-data schemas.
 
-A resources server may ship a ``task_data.py`` module next to its ``app.py`` exporting a single
+A resources server ships a ``task_data.py`` module next to its ``app.py`` exporting a single
 symbol ``TaskData``: either a Pydantic ``BaseModel`` subclass or a type (e.g. an
 ``Annotated[Union[...], Field(discriminator=...)]`` alias) accepted by ``pydantic.TypeAdapter``.
+A self-contained agent (one that declares datasets but no ``resources_server`` reference) ships
+the same module under ``responses_api_agents/<implementation>/`` and owns its rows' schema; an
+agent WITH a reference uses that resources server's schema instead.
 It describes the task-owned fields of that server's dataset rows, written FLAT in the planned
 end-state shape: the fields as they will appear inside the unified ``task_data`` row key after
 the row-format migration. Framework-owned keys (see ``RESERVED_ROW_KEYS``) are never part of
@@ -67,18 +70,17 @@ class TaskDataSchemaError(Exception):
 
 
 def find_server_dir(server_name: str, base_folder: str = "resources_servers") -> Optional[Path]:
-    """Locate ``<base_folder>/<server_name>`` relative to the cwd or the Gym install root.
+    """Locate ``<base_folder>/<server_name>`` via the shared component search roots.
 
-    Mirrors the search order used by the CLI's server-dir resolution, minus the venv-marker
-    requirement (a schema can exist for a server whose venv was never set up). Self-contained
-    agents (which verify in-process) keep their schemas under ``responses_api_agents/<name>/``.
+    Resolves against ``_resolve_under_cwd_or_install`` (extra plugin roots first, then cwd, then
+    the Gym install root), without the CLI's venv-marker requirement (a schema can exist for a
+    server whose venv was never set up). Self-contained agents (which verify in-process) keep
+    their schemas under ``responses_api_agents/<name>/``.
     """
-    rel = Path(base_folder) / server_name
-    for root in (Path.cwd(), Path(__file__).resolve().parent.parent):
-        candidate = root / rel
-        if candidate.is_dir():
-            return candidate
-    return None
+    from nemo_gym import _resolve_under_cwd_or_install
+
+    candidate = _resolve_under_cwd_or_install(Path(base_folder) / server_name, validator=Path.is_dir)
+    return candidate if candidate.is_dir() else None
 
 
 def load_task_data_schema(server_dir: Path) -> Optional[TypeAdapter]:
@@ -212,7 +214,7 @@ class TaskDataValidator:
 def validate_jsonl_rows(
     server_name: str, adapter: TypeAdapter, dataset_fpath: str, lines: Iterable[str]
 ) -> TaskDataValidationReport:
-    """Validate an iterable of JSONL lines; convenience wrapper used by CLI tooling."""
+    """Validate an iterable of JSONL lines against one schema; entry point for whole-file validation."""
     validator = TaskDataValidator(server_name=server_name, adapter=adapter, dataset_fpath=dataset_fpath)
     for i, line in enumerate(lines):
         line = line.strip()

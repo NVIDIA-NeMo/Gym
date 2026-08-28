@@ -856,8 +856,10 @@ This could be due to a change in how metrics are calculated, leading to outdated
                         if row.pop(AGENT_REF_KEY, None) is not None:
                             legacy_agent_ref_rows += 1
                         row[TASK_SOURCE_KEY_NAME] = c.name
-                        if validator is not None:
-                            validator.validate_row(row_index, row)
+                        # num_repeats duplicates each line consecutively; validate only the first
+                        # copy so reports count each source row once, with its jsonl line index.
+                        if validator is not None and row_index % d.num_repeats == 0:
+                            validator.validate_row(row_index // d.num_repeats, row)
                         target.write(f"{json.dumps(row)}\n")
 
                 if validator is not None and (not validator.report.clean or validator.report.unknown_keys):

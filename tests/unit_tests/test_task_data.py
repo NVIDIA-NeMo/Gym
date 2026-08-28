@@ -334,3 +334,25 @@ class TestSelfContainedAgentSchemaFallback:
         monkeypatch.chdir(tmp_path)
         agent = self._agent("tau2", {"type": "resources_servers", "name": "missing_rs"})
         assert TrainDataProcessor._task_data_validator_for(agent, self._dataset(), [agent]) is None
+
+    def test_agent_with_valid_rs_reference_uses_that_servers_schema(self, tmp_path, monkeypatch):
+        # The benchmark shape: the dataset is declared on the agent, the agent references a
+        # resources-server instance by name, and validation must use that server's schema.
+        rs_dir = tmp_path / "resources_servers" / "math_with_judge"
+        rs_dir.mkdir(parents=True)
+        (rs_dir / "task_data.py").write_text(
+            "from pydantic import BaseModel, ConfigDict\n"
+            "class TaskData(BaseModel):\n"
+            "    model_config = ConfigDict(extra='allow')\n"
+            "    expected_answer: str\n"
+        )
+        monkeypatch.chdir(tmp_path)
+        rs = ResourcesServerInstanceConfig(
+            name="bench_rs",
+            server_type_config_dict=OmegaConf.create({}),
+            resources_servers={"math_with_judge": {"entrypoint": "app.py", "domain": "math"}},
+        )
+        agent = self._agent("simple_agent", {"type": "resources_servers", "name": "bench_rs"})
+        validator = TrainDataProcessor._task_data_validator_for(agent, self._dataset(), [agent, rs])
+        assert validator is not None
+        assert validator.report.server_name == "math_with_judge"
