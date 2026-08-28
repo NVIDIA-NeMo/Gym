@@ -537,9 +537,10 @@ class BenchmarkDatasetConfig(BaseModel):
         default=None,
         description=(
             "Agent instance that runs this benchmark (a top-level key of the merged config). "
-            "Only needed when the config is ambiguous: when the dataset is not declared inside "
-            "an agent block and more (or fewer) than one agent references the declaring "
-            "resources server. Unambiguous configs resolve without it."
+            "Only needed when the config is ambiguous: the dataset is declared on a resources "
+            "server that several agents reference. The pin must name one of those agents — rows "
+            "are dispatched along the agent -> resources server edge, so any other value is a "
+            "config error. Unambiguous configs resolve without it."
         ),
     )
 

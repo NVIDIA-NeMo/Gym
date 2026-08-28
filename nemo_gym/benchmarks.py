@@ -30,8 +30,8 @@ from nemo_gym.global_config import (
     POLICY_MODEL_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
-    agents_by_resources_server,
     get_first_server_config_dict,
+    resolve_dataset_agent,
 )
 
 
@@ -71,13 +71,9 @@ class BenchmarkConfig(BaseModel):
             global_config_dict = _parse_no_environment_tolerating_unset_values(initial_config_dict)
 
         # A benchmark dataset may be declared by an agent block (legacy) or a resources server
-        # block (decoupled layout). The agent that runs the benchmark resolves, first hit wins:
-        # 1. the dataset's explicit `agent:` key (the escape hatch for ambiguous configs;
-        #    unambiguous configs don't need it);
-        # 2. the declaring agent block itself (legacy inference);
-        # 3. the unique agent referencing the declaring resources server.
+        # block (decoupled layout). `resolve_dataset_agent` is the same resolver rollout
+        # dispatch uses, so the listed agent is always the agent that runs.
         datasets: List[BenchmarkDatasetConfig] = []
-        candidate_agent_server_instance_names: List[Optional[str]] = []
         declaring_instance_names: List[str] = []
         for server_instance_name in global_config_dict:
             server_config = global_config_dict[server_instance_name]
@@ -94,7 +90,6 @@ class BenchmarkConfig(BaseModel):
                     continue
 
                 datasets.append(BenchmarkDatasetConfig.model_validate(dataset))
-                candidate_agent_server_instance_names.append(str(server_instance_name) if is_agent else None)
                 declaring_instance_names.append(str(server_instance_name))
 
         if len(datasets) < 1:
@@ -105,17 +100,10 @@ class BenchmarkConfig(BaseModel):
 
         dataset = datasets[0]
 
-        agent_name = dataset.agent or candidate_agent_server_instance_names[0]
-        if agent_name is None:
-            declaring_rs = declaring_instance_names[0]
-            candidates = agents_by_resources_server(global_config_dict).get(declaring_rs, [])
-            if len(candidates) != 1:
-                raise ConfigError(
-                    f"Benchmark config {path}: dataset {dataset.name!r} is declared by resources server "
-                    f"{declaring_rs!r}, which {len(candidates)} agents reference. Pin the harness with an "
-                    "`agent:` key on the dataset declaration."
-                )
-            agent_name = candidates[0]
+        try:
+            agent_name = resolve_dataset_agent(global_config_dict, declaring_instance_names[0], pin=dataset.agent)
+        except ConfigError as e:
+            raise ConfigError(f"Benchmark config {path}: dataset {dataset.name!r}: {e}") from e
 
         return cls(
             name=dataset.name,
