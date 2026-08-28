@@ -176,7 +176,9 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
 
         return eval_sandbox, pty_session
 
-    async def seed_session(self, request: Request, body: TerminalBench21SeedSessionRequest) -> BaseSeedSessionResponse:
+    async def seed_session(
+        self, request: Request, body: TerminalBench21SeedSessionRequest
+    ) -> TerminalBench21SeedSessionResponse:
         eval_sandbox, pty_session = await self._create_sandbox(body)
         self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = eval_sandbox, pty_session
 
