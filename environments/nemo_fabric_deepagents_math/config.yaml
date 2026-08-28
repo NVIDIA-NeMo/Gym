@@ -11,6 +11,10 @@ math_with_judge:
       verified: false
       description: OpenMathReasoning evaluated with math-verify through NeMo Fabric and DeepAgents.
       value: Evaluate mathematical reasoning with DeepAgents.
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: environments/nemo_fabric_deepagents_math/data/example.jsonl
 
 nemo_fabric_deepagents_math_agent:
   responses_api_agents:
@@ -34,7 +38,3 @@ nemo_fabric_deepagents_math_agent:
       fabric_config: {}
       system_prompt: |
         You are a precise math assistant. Use Python when it helps and put only the final answer in \boxed{}.
-      datasets:
-        - name: example
-          type: example
-          jsonl_fpath: environments/nemo_fabric_deepagents_math/data/example.jsonl

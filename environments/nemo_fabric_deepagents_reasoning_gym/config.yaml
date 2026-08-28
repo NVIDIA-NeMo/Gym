@@ -6,6 +6,10 @@ reasoning_gym:
       verified: true
       description: Reasoning Gym evaluated through NeMo Fabric and DeepAgents.
       value: Evaluate reasoning tasks with DeepAgents.
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: environments/nemo_fabric_deepagents_reasoning_gym/data/example.jsonl
 
 nemo_fabric_deepagents_reasoning_gym_agent:
   responses_api_agents:
@@ -29,7 +33,3 @@ nemo_fabric_deepagents_reasoning_gym_agent:
       fabric_config: {}
       system_prompt: |
         Solve the problem carefully and return only the answer in the exact format requested.
-      datasets:
-        - name: example
-          type: example
-          jsonl_fpath: environments/nemo_fabric_deepagents_reasoning_gym/data/example.jsonl
