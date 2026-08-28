@@ -290,6 +290,8 @@ main_job_id=$(
 main_job_id=${main_job_id%%;*}
 
 if (( should_run_eval )); then
+    # @bxyu-nvidia: Don't run cleanup job in reservation
+    unset SBATCH_RESERVATION
     if ! cleanup_job_id=$(
         sbatch \
             --parsable \
