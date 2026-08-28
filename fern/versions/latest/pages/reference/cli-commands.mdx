@@ -754,6 +754,16 @@ gym eval profile \
     --rollouts rollouts.jsonl
 ```
 
+Writes three files next to the rollouts, named from its stem:
+
+| File | Contents |
+| --- | --- |
+| `<rollouts>_reward_profiling.jsonl` | One row per task. |
+| `<rollouts>_agent_metrics.json` | One entry per agent. |
+| `<rollouts>_repeat_level_metrics.json` | One entry per repeat. |
+
+See [Repeat-Level Metrics](/evaluation/aggregate-metrics#repeat-level-metrics) for the full field list and how to read the variability statistics.
+
 ### `gym eval reverify`
 
 Recompute rewards from existing rollouts by replaying them through a resources server's `/verify` endpoint — without re-running model inference. Starts the resources server automatically from the provided config. Requires the `*_materialized_inputs.jsonl` and `rollouts.jsonl` artifacts produced by `gym eval run`.

@@ -866,6 +866,10 @@ class AggregateMetrics(BaseModel):
             "i.e. observability was disabled for the whole run."
         ),
     )
+    repeat_level_metrics: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Per-repeat summary stats (one dict per rollout_index).",
+    )
 
 
 ########################################

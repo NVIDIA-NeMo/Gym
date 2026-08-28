@@ -1590,6 +1590,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 "agent_metrics": agg_result.agent_metrics,
                 "key_metrics": agg_result.key_metrics,
                 "group_level_metrics": agg_result.group_level_metrics,
+                "repeat_level_metrics": agg_result.repeat_level_metrics,
             }
             if agg_result.perf_summary is not None:
                 agent_entry["perf_summary"] = agg_result.perf_summary
