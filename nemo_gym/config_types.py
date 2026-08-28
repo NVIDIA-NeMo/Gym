@@ -858,6 +858,14 @@ class AggregateMetrics(BaseModel):
         default_factory=dict,
         description="Headline metrics for this benchmark. Subset of agent_metrics.",
     )
+    perf_summary: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Cross-rollout efficiency stats aggregated from each rollout's ng_perf field. "
+            "Absent (not null-valued keys) when no rollout in this batch carried ng_perf, "
+            "i.e. observability was disabled for the whole run."
+        ),
+    )
 
 
 ########################################
