@@ -954,7 +954,7 @@ class TestAllConfig(BaseNeMoGymCLIConfig):
     Examples:
 
     ```bash
-    gym env test
+    gym env test --all
     ```
     """
 

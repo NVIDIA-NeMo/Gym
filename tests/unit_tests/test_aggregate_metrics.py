@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import warnings
 from unittest.mock import MagicMock
 
 import pytest
@@ -23,8 +24,9 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.reward_profile import (
+    RewardProfiler,
     add_avg_sample_std_dev,
     compute_aggregate_metrics,
     compute_pass_majority_metrics,
@@ -454,6 +456,267 @@ class TestComputeSubsetMetrics:
         tasks = [[{"reward": 1.0}, {"reward": 0.0}]]
         m = compute_subset_metrics(tasks, "nonexistent")
         assert m == {}
+
+
+class TestRepeatLevelMetrics:
+    def test_absent_for_single_repeat(self) -> None:
+        responses = _make_verify_responses(tasks=4, rollouts_per_task=1)
+        result = compute_aggregate_metrics(responses)
+        assert result.repeat_level_metrics == []
+
+    def test_present_for_multi_repeat(self) -> None:
+        responses = _make_verify_responses(tasks=4, rollouts_per_task=3)
+        result = compute_aggregate_metrics(responses)
+        assert len(result.repeat_level_metrics) == 3
+
+    def test_repeat_entry_structure(self) -> None:
+        responses = _make_verify_responses(tasks=4, rollouts_per_task=2)
+        result = compute_aggregate_metrics(responses)
+        for i, entry in enumerate(result.repeat_level_metrics):
+            assert entry[ROLLOUT_INDEX_KEY_NAME] == i
+            assert entry["sample_count"] == 4
+            assert entry["missing_count"] == 0
+            for stat in ("mean", "median", "std", "sem", "ci_low_95", "ci_high_95", "min", "max", "p25", "p75"):
+                assert f"{stat}/reward" in entry, f"{stat}/reward missing from repeat entry"
+
+    def test_known_values(self) -> None:
+        """Spot-check mean and std for a controlled 2-repeat case."""
+        # repeat 0 rewards: task 0→0, 1→1, 2→0, 3→1  ⟹ mean=0.5, std≈0.577
+        responses = [
+            {TASK_INDEX_KEY_NAME: t, ROLLOUT_INDEX_KEY_NAME: r, "reward": float((t + r) % 2)}
+            for t in range(4)
+            for r in range(2)
+        ]
+        result = compute_aggregate_metrics(responses)
+        assert len(result.repeat_level_metrics) == 2
+        r0 = next(e for e in result.repeat_level_metrics if e[ROLLOUT_INDEX_KEY_NAME] == 0)
+        assert r0["mean/reward"] == pytest.approx(0.5)
+        assert r0["std/reward"] == pytest.approx((1 / 3) ** 0.5, rel=1e-3)
+        assert r0["sample_count"] == 4
+
+    def test_ci_narrower_with_more_samples(self) -> None:
+        """Wider sample set → narrower CI (same reward variance)."""
+        small = _make_verify_responses(tasks=3, rollouts_per_task=2)
+        large = _make_verify_responses(tasks=20, rollouts_per_task=2)
+
+        def ci_width(metrics):
+            return metrics[0]["ci_high_95/reward"] - metrics[0]["ci_low_95/reward"]
+
+        assert ci_width(compute_aggregate_metrics(small).repeat_level_metrics) > ci_width(
+            compute_aggregate_metrics(large).repeat_level_metrics
+        )
+
+    def test_missing_count(self) -> None:
+        """Tasks absent for a rollout_index are reflected in missing_count."""
+        responses = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0},
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 0.0},
+            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.5},
+        ]
+        result = compute_aggregate_metrics(responses)
+        assert len(result.repeat_level_metrics) == 2
+        by_idx = {e[ROLLOUT_INDEX_KEY_NAME]: e for e in result.repeat_level_metrics}
+        assert by_idx[0]["sample_count"] == 2
+        assert by_idx[0]["missing_count"] == 0
+        assert by_idx[1]["sample_count"] == 1
+        assert by_idx[1]["missing_count"] == 1
+
+    def test_no_ci_with_one_sample(self) -> None:
+        """With only 1 task per repeat, sem is 0.0 (degenerate) and CI is not emitted."""
+        responses = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0},
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 0.5},
+        ]
+        result = compute_aggregate_metrics(responses)
+        for entry in result.repeat_level_metrics:
+            assert entry["sem/reward"] == pytest.approx(0.0)
+            assert "ci_low_95/reward" not in entry
+            assert "ci_high_95/reward" not in entry
+
+
+class TestMissingRolloutWarning:
+    """When some repeats are missing tasks, repeat_level_metrics stats are computed from
+    unequal sample sizes -- RewardProfiler should warn rather than silently produce
+    metrics that look comparable but aren't.
+    """
+
+    def test_warns_when_a_repeat_is_missing_tasks(self) -> None:
+        responses = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0},
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 0.0},
+            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.5},
+            # task 1, rollout 1 is missing.
+        ]
+        with pytest.warns(UserWarning, match="missing_count"):
+            result = compute_aggregate_metrics(responses)
+
+        by_idx = {e[ROLLOUT_INDEX_KEY_NAME]: e for e in result.repeat_level_metrics}
+        assert by_idx[1]["missing_count"] == 1
+
+    def test_no_warning_when_all_repeats_complete(self) -> None:
+        responses = [
+            {TASK_INDEX_KEY_NAME: t, ROLLOUT_INDEX_KEY_NAME: r, "reward": float(t + r)}
+            for t in range(3)
+            for r in range(2)
+        ]
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = compute_aggregate_metrics(responses)
+
+        assert not any("missing_count" in str(w.message) for w in caught)
+        assert all(entry["missing_count"] == 0 for entry in result.repeat_level_metrics)
+
+    def test_no_warning_for_single_repeat(self) -> None:
+        """A single rollout_index never produces repeat_level_metrics at all, so there's
+        nothing to warn about even though every task is trivially "complete" for it.
+        """
+        responses = _make_verify_responses(tasks=4, rollouts_per_task=1)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = compute_aggregate_metrics(responses)
+
+        assert not any("missing_count" in str(w.message) for w in caught)
+        assert result.repeat_level_metrics == []
+
+
+class TestConfidenceIntervalZeroSem:
+    """When sem is exactly 0 (every value in the sample is identical), scipy's t.interval
+    returns NaN due to an internal ±inf * 0, rather than the mathematically-correct degenerate
+    interval. RewardProfiler._confidence_interval should special-case this to (mean, mean)
+    and warn, rather than silently serializing the CI as null.
+    """
+
+    def test_collapses_to_mean_and_warns(self) -> None:
+        with pytest.warns(UserWarning, match="Standard error is 0"):
+            ci = RewardProfiler()._confidence_interval(mean=0.5, sem=0.0, n=4)
+
+        assert ci == (0.5, 0.5)
+
+    def test_no_warning_for_nonzero_sem(self) -> None:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            ci = RewardProfiler()._confidence_interval(mean=0.5, sem=0.1, n=4)
+
+        assert ci is not None
+        assert not any("Standard error is 0" in str(w.message) for w in caught)
+
+    def test_n_le_1_returns_none_without_warning(self) -> None:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            ci = RewardProfiler()._confidence_interval(mean=0.5, sem=0.0, n=1)
+
+        assert ci is None
+        assert not any("Standard error is 0" in str(w.message) for w in caught)
+
+    def test_end_to_end_identical_per_repeat_means_yield_point_ci(self) -> None:
+        """Reproduces the exact case from production: 2 repeats whose per-task rewards differ
+        but whose per-repeat means happen to be identical (both 0.5) -> se_across_repeats/mean/reward == 0.0,
+        so the cross-repeat CI should collapse to a point instead of being null.
+        """
+        responses = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0},
+            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0},
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 1.0},
+            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 0.0},
+        ]
+        with pytest.warns(UserWarning, match="Standard error is 0"):
+            result = compute_aggregate_metrics(responses)
+
+        assert result.agent_metrics["se_across_repeats/mean/reward"] == pytest.approx(0.0)
+        assert result.agent_metrics["ci_low_95_across_repeats/mean/reward"] == pytest.approx(0.5)
+        assert result.agent_metrics["ci_high_95_across_repeats/mean/reward"] == pytest.approx(0.5)
+
+
+class TestAggregateRepeatLevelMetrics:
+    """Unit tests for RewardProfiler._aggregate_repeat_level_metrics, which collapses the
+    per-repeat estimates in repeat_level_metrics (one row per rollout_index) down to a single
+    mean/median/se per agent -- how consistent the repeat-level estimates are with each other.
+    """
+
+    def test_empty_input(self) -> None:
+        assert RewardProfiler()._aggregate_repeat_level_metrics([]) == []
+
+    def test_single_repeat_metric_is_degenerate(self) -> None:
+        """A single repeat has nothing to vary across, so se is 0 and mean == median == the value."""
+        repeat_level_metrics = [
+            {AGENT_REF_KEY_NAME: {"name": "agent"}, ROLLOUT_INDEX_KEY_NAME: 0, "mean/reward": 0.75},
+        ]
+        result = RewardProfiler()._aggregate_repeat_level_metrics(repeat_level_metrics)
+
+        assert len(result) == 1
+        assert result[0][AGENT_REF_KEY_NAME] == {"name": "agent"}
+        assert result[0]["mean_across_repeats/mean/reward"] == pytest.approx(0.75)
+        assert result[0]["median_across_repeats/mean/reward"] == pytest.approx(0.75)
+        assert result[0]["se_across_repeats/mean/reward"] == pytest.approx(0.0)
+        assert result[0]["std_across_repeats/mean/reward"] == pytest.approx(0.0)
+        assert result[0]["min_across_repeats/mean/reward"] == pytest.approx(0.75)
+        assert result[0]["max_across_repeats/mean/reward"] == pytest.approx(0.75)
+
+    def test_known_values_across_repeats(self) -> None:
+        """3 repeats with per-repeat means 1, 2, 3 -> mean=2, median=2, se=std([1,2,3])/sqrt(3)."""
+        repeat_level_metrics = [
+            {AGENT_REF_KEY_NAME: {"name": "agent"}, ROLLOUT_INDEX_KEY_NAME: i, "mean/reward": float(i + 1)}
+            for i in range(3)
+        ]
+        result = RewardProfiler()._aggregate_repeat_level_metrics(repeat_level_metrics)
+
+        assert len(result) == 1
+        entry = result[0]
+        assert entry["mean_across_repeats/mean/reward"] == pytest.approx(2.0)
+        assert entry["median_across_repeats/mean/reward"] == pytest.approx(2.0)
+        assert entry["se_across_repeats/mean/reward"] == pytest.approx(1.0 / (3**0.5))
+        assert entry["std_across_repeats/mean/reward"] == pytest.approx(1.0)
+        assert entry["min_across_repeats/mean/reward"] == pytest.approx(1.0)
+        assert entry["max_across_repeats/mean/reward"] == pytest.approx(3.0)
+
+    def test_skewed_repeats_median_differs_from_mean(self) -> None:
+        """An outlier repeat pulls the mean away from the median, demonstrating both are useful."""
+        repeat_level_metrics = [
+            {AGENT_REF_KEY_NAME: {"name": "agent"}, ROLLOUT_INDEX_KEY_NAME: 0, "mean/reward": 0.0},
+            {AGENT_REF_KEY_NAME: {"name": "agent"}, ROLLOUT_INDEX_KEY_NAME: 1, "mean/reward": 0.0},
+            {AGENT_REF_KEY_NAME: {"name": "agent"}, ROLLOUT_INDEX_KEY_NAME: 2, "mean/reward": 9.0},
+        ]
+        result = RewardProfiler()._aggregate_repeat_level_metrics(repeat_level_metrics)
+
+        entry = result[0]
+        assert entry["median_across_repeats/mean/reward"] == pytest.approx(0.0)
+        assert entry["mean_across_repeats/mean/reward"] == pytest.approx(3.0)
+        assert entry["mean_across_repeats/mean/reward"] != entry["median_across_repeats/mean/reward"]
+
+    def test_per_agent_grouping(self) -> None:
+        """Repeats from different agents are aggregated independently, not pooled together."""
+        repeat_level_metrics = [
+            {AGENT_REF_KEY_NAME: {"name": "agent_a"}, ROLLOUT_INDEX_KEY_NAME: 0, "mean/reward": 0.0},
+            {AGENT_REF_KEY_NAME: {"name": "agent_a"}, ROLLOUT_INDEX_KEY_NAME: 1, "mean/reward": 2.0},
+            {AGENT_REF_KEY_NAME: {"name": "agent_b"}, ROLLOUT_INDEX_KEY_NAME: 0, "mean/reward": 10.0},
+            {AGENT_REF_KEY_NAME: {"name": "agent_b"}, ROLLOUT_INDEX_KEY_NAME: 1, "mean/reward": 10.0},
+        ]
+        result = RewardProfiler()._aggregate_repeat_level_metrics(repeat_level_metrics)
+
+        by_agent = {entry[AGENT_REF_KEY_NAME]["name"]: entry for entry in result}
+        assert set(by_agent) == {"agent_a", "agent_b"}
+        assert by_agent["agent_a"]["mean_across_repeats/mean/reward"] == pytest.approx(1.0)
+        assert by_agent["agent_a"]["se_across_repeats/mean/reward"] > 0
+        assert by_agent["agent_b"]["mean_across_repeats/mean/reward"] == pytest.approx(10.0)
+        assert by_agent["agent_b"]["se_across_repeats/mean/reward"] == pytest.approx(0.0)
+
+    def test_merged_into_agent_level_metrics_via_compute_aggregate_metrics(self) -> None:
+        """End-to-end: the aggregated repeat-level stats land in the public agent_metrics dict,
+        without disturbing the original (non-repeat-aggregated) agent_metrics keys.
+        """
+        # 4 tasks x 3 repeats; each repeat has a different, internally-constant reward so the
+        # per-repeat "mean/reward" values are exactly 0.0, 1.0, 2.0.
+        responses = [
+            {TASK_INDEX_KEY_NAME: t, ROLLOUT_INDEX_KEY_NAME: r, "reward": float(r)} for t in range(4) for r in range(3)
+        ]
+        result = compute_aggregate_metrics(responses)
+
+        # Original per-rollout agent-level stat is untouched.
+        assert result.agent_metrics["mean/reward"] == pytest.approx(1.0)
+        # Cross-repeat aggregate of the per-repeat means [0, 1, 2].
+        assert result.agent_metrics["mean_across_repeats/mean/reward"] == pytest.approx(1.0)
+        assert result.agent_metrics["median_across_repeats/mean/reward"] == pytest.approx(1.0)
+        assert result.agent_metrics["se_across_repeats/mean/reward"] == pytest.approx(1.0 / (3**0.5))
 
 
 class TestAddAvgSampleStdDev:
