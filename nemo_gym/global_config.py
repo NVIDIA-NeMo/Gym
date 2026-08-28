@@ -642,9 +642,9 @@ Duplicate config paths:
         reference = target.server_config._get_node("resources_server")
         instance_name = reference.get("name") if isinstance(reference, DictConfig) else None
         instance = global_config_dict.get(instance_name) if instance_name else None
-        if not isinstance(instance, DictConfig) or "resources_servers" not in instance:
+        if not isinstance(instance, DictConfig) or RESOURCES_SERVER_TYPE_KEY_NAME not in instance:
             return None
-        servers = instance["resources_servers"]
+        servers = instance[RESOURCES_SERVER_TYPE_KEY_NAME]
         if not isinstance(servers, DictConfig) or len(servers) != 1:
             return None
         implementation = next(iter(servers))
