@@ -1,4 +1,5 @@
 # LMArena proxy v3 benchmark.
+judge_api_key: dummy  # pragma: allowlist secret
 
 config_paths:
   - resources_servers/arena/configs/lmarena_v3.yaml
@@ -31,11 +32,6 @@ lmarena_v3_benchmark_agent:
         prompt_config: null
         prepare_script: benchmarks/lmarena_v3/prepare.py
         num_repeats: 1
-        gitlab_identifier:
-          dataset_name: lmarena_v3
-          version: 0.0.1
-          artifact_fpath: lmarena_v3_validation.jsonl
-        license: TBD
 
 policy_model:
   responses_api_models:

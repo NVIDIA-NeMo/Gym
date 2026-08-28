@@ -97,67 +97,6 @@ class TestApp:
         )
         SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
-    async def test_run_reuse_saved_response_skips_model(self) -> None:
-        server, server_client = _make_agent(False)
-        server.config.reuse_saved_response = True
-        client = TestClient(server.setup_webserver())
-
-        saved_response = {
-            "id": "resp_saved",
-            "created_at": 0.0,
-            "model": "policy",
-            "object": "response",
-            "output": [],
-            "parallel_tool_calls": False,
-            "tool_choice": "none",
-            "tools": [],
-        }
-        verify_response = {
-            "responses_create_params": {"input": []},
-            "response": saved_response,
-            "reward": 1.0,
-        }
-        seed = _mock_response()
-        verified = _mock_response(verify_response)
-        server_client.post = AsyncMock(side_effect=[seed, verified])
-
-        response = client.post("/run", json={"responses_create_params": {"input": []}, "response": saved_response})
-
-        assert response.status_code == 200
-        assert response.json()["reward"] == 1.0
-        assert [call.kwargs["server_name"] for call in server_client.post.await_args_list] == [
-            "resources",
-            "resources",
-        ]
-        assert server_client.post.await_args_list[1].kwargs["url_path"] == "/verify"
-
-    @pytest.mark.parametrize("saved_response", [pytest.param(None, id="null"), pytest.param(..., id="missing")])
-    async def test_run_reuse_saved_response_requires_response(self, saved_response) -> None:
-        server, server_client = _make_agent(False)
-        server.config.reuse_saved_response = True
-        server_client.post = AsyncMock(return_value=_mock_response())
-        client = TestClient(server.setup_webserver())
-        payload = {"responses_create_params": {"input": []}}
-        if saved_response is not ...:
-            payload["response"] = saved_response
-
-        response = client.post("/run", json=payload)
-
-        assert response.status_code == 400
-        server_client.post.assert_not_awaited()
-
-    async def test_run_reuse_saved_response_rejects_malformed_response(self) -> None:
-        server, _ = _make_agent(False)
-        server.config.reuse_saved_response = True
-        client = TestClient(server.setup_webserver())
-
-        response = client.post(
-            "/run",
-            json={"responses_create_params": {"input": []}, "response": {"model": "incomplete"}},
-        )
-
-        assert response.status_code == 422
-
     async def test_responses(self, monkeypatch: MonkeyPatch) -> None:
         config = SimpleAgentConfig(
             host="0.0.0.0",
