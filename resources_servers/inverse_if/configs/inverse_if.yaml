@@ -99,9 +99,6 @@ inverse_if:
       description: "Inverse IF instruction-following benchmark with per-task LLM judge"
       verified: false
 
-# ============================================================================
-# Inverse IF Agent Configuration
-# ============================================================================
       datasets:
       - name: inverse_if_example
         type: example
@@ -124,6 +121,10 @@ inverse_if:
 #       model: ${judge_model_name}
 #       return_token_id_information: false
 #       uses_reasoning_parser: true
+
+# ============================================================================
+# Inverse IF Agent Configuration
+# ============================================================================
 inverse_if_simple_agent:
   responses_api_agents:
     simple_agent:
