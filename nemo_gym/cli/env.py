@@ -86,6 +86,13 @@ from nemo_gym.server_utils import (
     ServerStatus,
     initialize_ray,
 )
+from nemo_gym.telemetry.metrics import record_active_servers
+from nemo_gym.telemetry.setup import (
+    configure_telemetry_env,
+    init_telemetry,
+    shutdown_telemetry,
+    telemetry_config_from_global_config,
+)
 
 
 # Grace period after SIGINT before escalating to SIGKILL. Kept short so Ctrl-C is responsive.
@@ -373,6 +380,13 @@ class RunHelper:  # pragma: no cover
         # e2e rollout-collection path, which both start servers via this method).
         GlobalConfigDictParser().raise_on_no_server_instances(global_config_dict)
 
+        # Translate the `telemetry:` block into NEMO_GYM_OTEL_* env vars *before* anything is
+        # spawned. run_command copies os.environ into every server process, and that copy is
+        # the only channel these settings have — the servers share no memory with this one.
+        # Also mints the run id they all report, so a backend can group one run's processes.
+        configure_telemetry_env(telemetry_config_from_global_config(global_config_dict))
+        init_telemetry(server_name="orchestrator", server_type="orchestrator")
+
         # Initialize Ray cluster in the main process
         # Note: This function will modify the global config dict - update `ray_head_node_address`
         initialize_ray()
@@ -452,6 +466,11 @@ class RunHelper:  # pragma: no cover
         self._head_server_instance.set_server_instances(
             [inst.model_dump(mode="json") for inst in self._server_instance_display_configs]
         )
+
+        # `gym.servers.active` is a gauge, so exactly one process may write it or the
+        # exported value is just whoever wrote last. The orchestrator is the only process
+        # that knows the fleet size, so it is the only writer (see telemetry/metrics.py).
+        record_active_servers(len(self._server_instance_display_configs))
 
         self._server_client = ServerClient(
             head_server_config=ServerClient.load_head_server_config(),
@@ -585,6 +604,11 @@ Process `{process_name}` stderr:
             sleep(sleep_interval)
 
     def shutdown(self) -> None:
+        # Before the servers go: the gauge should read zero once the fleet is torn down,
+        # and a BatchSpanProcessor needs an explicit flush or the last interval is lost.
+        record_active_servers(0)
+        shutdown_telemetry()
+
         print("Sending interrupt signals to servers...")
         for process in self._processes.values():
             process.send_signal(SIGINT)
