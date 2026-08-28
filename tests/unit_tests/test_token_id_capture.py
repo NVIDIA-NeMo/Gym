@@ -1277,6 +1277,43 @@ def _put_shared_file_entry(
     TokenCaptureStore(root).append(entry)
 
 
+def _put_shared_file_delta_chain(root: str, depth: int) -> tuple[list[dict], list[int]]:
+    """Write a resolved delta chain and return its next request and cumulative tokens."""
+    rollout_id = "delta-chain"
+    request = [{"role": "user", "content": "start"}]
+    cumulative: list[int] = []
+    store = TokenCaptureStore(root)
+    for index in range(depth):
+        output = [{"role": "assistant", "content": f"answer-{index}"}]
+        parent_call_id = f"call-{index - 1}" if index else None
+        parent_resolution = ParentResolutionStatus.RESOLVED if index else ParentResolutionStatus.ROOT
+        prompt_tokens = [10 + index]
+        generation_tokens = [100 + index]
+        cumulative = cumulative + prompt_tokens + generation_tokens
+        entry = TokenEntry(
+            rollout_id=rollout_id,
+            model_call_id=f"call-{index}",
+            prompt_token_ids=prompt_tokens,
+            generation_token_ids=generation_tokens,
+            generation_log_probs=[-0.1],
+            output_items=output,
+            parent_call_id=parent_call_id,
+            parent_resolution=parent_resolution,
+            prompt_is_delta=index > 0,
+        )
+        stamp_continuation(entry, request)
+        stamp_lineage(
+            entry,
+            parent_call_id,
+            parent_resolution=parent_resolution,
+            cumulative=cumulative,
+        )
+        store.append(entry)
+        request.extend(output)
+        request.append({"role": "user", "content": f"continue-{index}"})
+    return request, cumulative
+
+
 async def test_file_lineage_resolves_across_independent_worker_instances(tmp_path):
     reader = FileLineageStore(tmp_path)
     request = [{"role": "user", "content": "hello"}]
@@ -1291,7 +1328,59 @@ async def test_file_lineage_resolves_across_independent_worker_instances(tmp_pat
     assert parent.match.cumulative_token_ids == (1, 2, 3)
 
 
-async def test_file_lineage_cache_is_lru_and_metadata_only(tmp_path):
+async def test_file_lineage_batch_loads_and_flattens_a_delta_chain(tmp_path):
+    request, expected_tokens = _put_shared_file_delta_chain(str(tmp_path), depth=100)
+    resolver = FileLineageStore(tmp_path)
+
+    with patch.object(resolver, "_load_entries", wraps=resolver._load_entries) as load_entries:
+        resolution = await resolver.resolve("delta-chain", request)
+
+    assert resolution.status == ParentResolutionStatus.RESOLVED
+    assert resolution.match is not None
+    assert resolution.match.model_call_id == "call-99"
+    assert resolution.match.cumulative_token_ids == tuple(expected_tokens)
+    load_entries.assert_called_once()
+    assert len(load_entries.call_args.args[1]) == 100
+
+
+async def test_file_lineage_reuses_the_latest_materialized_parent(tmp_path):
+    request, expected_tokens = _put_shared_file_delta_chain(str(tmp_path), depth=100)
+    resolver = FileLineageStore(tmp_path)
+    assert (await resolver.resolve("delta-chain", request)).status == ParentResolutionStatus.RESOLVED
+
+    output = [{"role": "assistant", "content": "answer-100"}]
+    expected_tokens.extend([110, 200])
+    entry = TokenEntry(
+        rollout_id="delta-chain",
+        model_call_id="call-100",
+        prompt_token_ids=[110],
+        generation_token_ids=[200],
+        generation_log_probs=[-0.1],
+        output_items=output,
+        parent_call_id="call-99",
+        parent_resolution=ParentResolutionStatus.RESOLVED,
+        prompt_is_delta=True,
+    )
+    stamp_continuation(entry, request)
+    stamp_lineage(
+        entry,
+        "call-99",
+        parent_resolution=ParentResolutionStatus.RESOLVED,
+        cumulative=expected_tokens,
+    )
+    TokenCaptureStore(tmp_path).append(entry)
+    request.extend(output)
+    request.append({"role": "user", "content": "continue-100"})
+
+    with patch.object(resolver, "_load_entries", wraps=resolver._load_entries) as load_entries:
+        resolution = await resolver.resolve("delta-chain", request)
+
+    assert resolution.match is not None
+    assert resolution.match.cumulative_token_ids == tuple(expected_tokens)
+    assert len(load_entries.call_args.args[1]) == 1
+
+
+async def test_file_lineage_cache_is_lru_and_keeps_nodes_metadata_only(tmp_path):
     resolver = FileLineageStore(tmp_path, max_cached_rollouts=2)
     continuation = [
         {"role": "user", "content": "hello"},
@@ -1316,6 +1405,22 @@ async def test_file_lineage_cache_is_lru_and_metadata_only(tmp_path):
     assert cold.status == ParentResolutionStatus.RESOLVED
     assert cold.match is not None
     assert cold.match.cumulative_token_ids == (1, 2, 3)
+
+
+async def test_file_lineage_materialized_cache_has_a_global_token_bound(tmp_path):
+    resolver = FileLineageStore(tmp_path, max_cached_tokens=4)
+    continuation = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+        {"role": "user", "content": "next"},
+    ]
+    for rollout_id in ("r-a", "r-b"):
+        _put_shared_file_entry(str(tmp_path), rollout_id, f"{rollout_id}-c1")
+        assert (await resolver.resolve(rollout_id, continuation)).status == ParentResolutionStatus.RESOLVED
+
+    assert "r-a" not in resolver._materialized
+    assert resolver._materialized["r-b"][1] == (1, 2, 3)
+    assert resolver._materialized_tokens == 3
 
 
 def test_file_lineage_uses_bounded_striped_locks(tmp_path):
@@ -2020,6 +2125,14 @@ def _entry_fields(**overrides):
 def test_a_record_below_the_schema_floor_is_refused():
     with pytest.raises(ValidationError, match="below the supported minimum"):
         TokenEntry(**_entry_fields(schema_version=TOKEN_ENTRY_MIN_SCHEMA_VERSION - 1))
+
+
+def test_omitted_optional_schema_fields_use_safe_defaults():
+    entry = TokenEntry(**_entry_fields())
+
+    assert entry.prompt_is_delta is False
+    assert entry.prefix_requested is False
+    assert entry.prefix_supplied is False
 
 
 def test_a_record_newer_than_this_reader_is_refused():

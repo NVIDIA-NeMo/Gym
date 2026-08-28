@@ -1153,6 +1153,7 @@ class _CaptureMiddleware:
         token_store: Any = None,
         configured_sink: Any = None,
         lineage_store: Any = None,
+        delta_records: bool = False,
         token_capture_enabled: bool = False,
     ) -> None:
         self._app = app
@@ -1163,6 +1164,7 @@ class _CaptureMiddleware:
         # Built from token_id_capture.sink, once, in this process.
         self._configured_sink = configured_sink
         self._lineage_store = lineage_store
+        self._delta_records = delta_records
         # Capture may have no destination in this process.
         # A framework may stage records from its inference worker.
         # This process still resolves the capture identity.
@@ -1196,19 +1198,20 @@ class _CaptureMiddleware:
         # Installed sinks are resolved for each request.
         token_sink = self._configured_sink or installed_token_sink() or self._token_store
         capture_wanted = token_capture_requested and (token_sink is not None or self._token_capture_enabled)
-        if token_capture_requested and dialect is None and token_sink is not None:
-            # This call cannot produce a capture record.
-            # Its output may still feed a later prompt.
-            # Mark the rollout incomplete before forwarding the request.
-            try:
-                await token_sink.mark_incomplete(rollout_from_path, "")
-            except Exception:
-                logger.warning(
-                    "Could not mark rollout %s incomplete for unobserved path %s.",
-                    rollout_from_path,
-                    path,
-                    exc_info=True,
-                )
+        if token_capture_requested and dialect is None:
+            # An uncapturable call must not look complete.
+            # Its output can still feed later prompts.
+            # Mark the rollout before forwarding so consumers retain that evidence.
+            if token_sink is not None:
+                try:
+                    await token_sink.mark_incomplete(rollout_from_path, "")
+                except Exception:
+                    logger.warning(
+                        "Could not mark rollout %s incomplete for unobserved path %s.",
+                        rollout_from_path,
+                        path,
+                        exc_info=True,
+                    )
         if (self._store is None and not capture_wanted) or rollout_from_path is None or dialect is None:
             await self._app(scope, receive, send)
             return
@@ -1229,6 +1232,7 @@ class _CaptureMiddleware:
                     model_call_id=model_call_id,
                     token_sink=token_sink,
                     lineage_store=self._lineage_store,
+                    delta_records=self._delta_records,
                 )
             )
 
@@ -1459,6 +1463,7 @@ def install_model_call_capture(
         token_store=token_store,
         configured_sink=configured_sink,
         lineage_store=lineage_store,
+        delta_records=(capture_settings.token_id_capture.delta_records if capture_settings is not None else False),
         token_capture_enabled=capture_settings.enabled if capture_settings is not None else False,
     )
 

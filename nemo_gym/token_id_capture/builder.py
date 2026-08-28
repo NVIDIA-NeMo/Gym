@@ -198,6 +198,69 @@ def _resolve_parent(
     return None, False, "missing_resolution"
 
 
+def _materialize_delta_prompts(entries: list[TokenEntry]) -> tuple[list[TokenEntry], list[str]]:
+    """Rebuild full prompts for delta records by walking their parent chains.
+
+    Return full-prompt entries and call ids with broken chains.
+    """
+    by_id = {entry.model_call_id: entry for entry in entries}
+    cumulative: dict[str, list[int] | None] = {}
+
+    def cum_of(call_id: str) -> list[int] | None:
+        if call_id in cumulative:
+            return cumulative[call_id]
+
+        path: list[TokenEntry] = []
+        seen: set[str] = set()
+        current_id = call_id
+        while current_id not in cumulative:
+            if current_id in seen or len(path) > 10_000:
+                cumulative[current_id] = None
+                break
+            seen.add(current_id)
+            entry = by_id.get(current_id)
+            if entry is None:
+                cumulative[current_id] = None
+                break
+            if not entry.prompt_is_delta:
+                cumulative[current_id] = list(entry.prompt_token_ids) + list(entry.generation_token_ids)
+                break
+            path.append(entry)
+            if entry.parent_call_id is None:
+                cumulative[current_id] = None
+                break
+            current_id = entry.parent_call_id
+
+        value = cumulative[current_id]
+        if value is None:
+            for entry in path:
+                cumulative[entry.model_call_id] = None
+            return None
+        for entry in reversed(path):
+            value = value + list(entry.prompt_token_ids) + list(entry.generation_token_ids)
+            cumulative[entry.model_call_id] = value
+        return cumulative[call_id]
+
+    materialized: list[TokenEntry] = []
+    broken: list[str] = []
+    for entry in entries:
+        if not entry.prompt_is_delta:
+            materialized.append(entry)
+            continue
+        cum = cum_of(entry.model_call_id)
+        if cum is None:
+            broken.append(entry.model_call_id)
+            continue
+        full_prompt = cum[: len(cum) - len(entry.generation_token_ids)]
+        rebuilt = entry.model_copy(update={"prompt_token_ids": full_prompt, "prompt_is_delta": False})
+        # Verify the reconstructed full sequence.
+        if rebuilt.digest and compute_digest(cum) != rebuilt.digest:
+            broken.append(entry.model_call_id)
+            continue
+        materialized.append(rebuilt)
+    return materialized, broken
+
+
 class _NullPrefixIndex:
     """Avoid building a token-prefix index when every parent is present.
 
@@ -228,6 +291,11 @@ def prefix_merging(entries: list[TokenEntry], terminal_call_id: str | None = Non
             duplicate_conflicts.append(candidate.model_call_id)
     entries = list(deduped.values())
 
+    # Chain construction assumes full prompts.
+    # Materialize delta records before sorting or checking parent digests.
+    # Exclude a record when its parent chain cannot be reconstructed exactly.
+    entries, unreconstructable = _materialize_delta_prompts(entries)
+
     # A call without generated tokens has no training signal.
     # Its cumulative sequence equals its prompt.
     # Keeping it would make it the parent of another call with the same prompt.
@@ -236,6 +304,7 @@ def prefix_merging(entries: list[TokenEntry], terminal_call_id: str | None = Non
     empty_generation = [e.model_call_id for e in entries if not e.generation_token_ids]
     entries = [e for e in entries if e.generation_token_ids]
     if not entries:
+        # Report delta reconstruction failures even when no entries remain.
         return BuildOutput(
             chains=[],
             notes=BuildNotes(
@@ -243,6 +312,10 @@ def prefix_merging(entries: list[TokenEntry], terminal_call_id: str | None = Non
                 empty_generation_calls=empty_generation,
                 terminal_call_id=terminal_call_id,
                 terminal_chain="not_captured" if terminal_call_id else "",
+                parent_link_failures=(
+                    {"delta_chain_unreconstructable": len(unreconstructable)} if unreconstructable else {}
+                ),
+                unresolved_parent_calls=list(unreconstructable),
             ),
         )
 
@@ -267,6 +340,12 @@ def prefix_merging(entries: list[TokenEntry], terminal_call_id: str | None = Non
             parent_link_failures.get("duplicate_call_id_conflict", 0) + 1
         )
         unresolved_parent_calls.append(call_id)
+    for call_id in unreconstructable:
+        parent_link_failures["delta_chain_unreconstructable"] = (
+            parent_link_failures.get("delta_chain_unreconstructable", 0) + 1
+        )
+        unresolved_parent_calls.append(call_id)
+
     for entry in ordered:
         prompt = list(entry.prompt_token_ids)
         node = _Node(entry=entry, cumulative=prompt + list(entry.generation_token_ids))

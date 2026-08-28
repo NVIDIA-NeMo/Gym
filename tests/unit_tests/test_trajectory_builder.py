@@ -20,6 +20,9 @@ import threading
 import pytest
 
 from nemo_gym.token_id_capture import (
+    CaptureContext,
+    FileLineageStore,
+    InMemoryLineageStore,
     ParentResolutionStatus,
     TokenCaptureSnapshot,
     assert_prefix_contiguity,
@@ -27,12 +30,16 @@ from nemo_gym.token_id_capture import (
     prefix_merging,
     project_chain_to_output_items,
     project_main_chain_response,
+    reset_token_sink,
+    set_token_sink,
+    stamp_continuation,
     stamp_lineage,
     token_id_capture_dirs_from_config,
     trajectories_for_rollout,
     trajectories_from_source,
 )
 from nemo_gym.token_id_capture.records import TokenEntry
+from nemo_gym.token_id_capture.sink import commit_entry, resolve_parent
 from nemo_gym.token_id_capture.store import TokenCaptureStore
 
 
@@ -48,8 +55,8 @@ def _entry(mcid, prompt, gen, parent=None, lp=None, created_at=0.0):
         # Chain selection uses this value.
         created_at=created_at,
     )
-    # Stamp the way a current writer does: every record carries a decision.
-    # (Pre-v3 unstamped records no longer exist and are refused by readers.)
+    # Stamp the way a current writer does.
+    # Every supported record carries a parent decision.
     status = ParentResolutionStatus.RESOLVED if parent is not None else ParentResolutionStatus.ROOT
     stamp_lineage(e, parent, parent_resolution=status)
     return e
@@ -773,3 +780,163 @@ def test_a_chain_that_breaks_is_split_and_reported():
     assert len(out.chains) > 1
     assert out.notes.delivered_fraction < 1.0
     assert_prefix_contiguity(project_main_chain_response("r0", out, model="m"))
+
+
+def _commit_delta_entry(
+    store: TokenCaptureStore,
+    lineage: FileLineageStore,
+    rollout_id: str,
+    call_id: str,
+    prompt: list[int],
+    generation: list[int],
+    request: list[dict],
+) -> CaptureContext:
+    entry = TokenEntry(
+        rollout_id=rollout_id,
+        model_call_id=call_id,
+        prompt_token_ids=prompt,
+        generation_token_ids=generation,
+        generation_log_probs=[-0.1] * len(generation),
+        output_items=[{"type": "message", "role": "assistant", "content": f"answer {call_id}"}],
+    )
+    stamp_continuation(entry, request)
+    context = CaptureContext(
+        rollout_id=rollout_id,
+        model_call_id=call_id,
+        token_sink=store,
+        lineage_store=lineage,
+        delta_records=True,
+    )
+    token = set_token_sink(context)
+    try:
+        asyncio.run(resolve_parent(request))
+        asyncio.run(commit_entry(entry))
+    finally:
+        reset_token_sink(token)
+    return context
+
+
+def test_delta_records_store_suffixes_and_reconstruct_exact_prompts(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    lineage = FileLineageStore(tmp_path)
+    rollout_id = "delta"
+    request1 = [{"role": "user", "content": "q1"}]
+    _commit_delta_entry(store, lineage, rollout_id, "c1", [1, 2, 3], [4, 5], request1)
+    request2 = request1 + [
+        {"role": "assistant", "content": "answer c1"},
+        {"role": "user", "content": "q2"},
+    ]
+    second = _commit_delta_entry(
+        store,
+        lineage,
+        rollout_id,
+        "c2",
+        [1, 2, 3, 4, 5, 6, 7],
+        [8],
+        request2,
+    )
+    request3 = request2 + [
+        {"role": "assistant", "content": "answer c2"},
+        {"role": "user", "content": "q3"},
+    ]
+    third = _commit_delta_entry(
+        store,
+        lineage,
+        rollout_id,
+        "c3",
+        [1, 2, 3, 4, 5, 6, 7, 8, 9],
+        [10, 11],
+        request3,
+    )
+
+    assert second.parent_resolution is not None
+    assert second.parent_resolution.status == ParentResolutionStatus.RESOLVED
+    assert third.parent_resolution is not None
+    assert third.parent_resolution.status == ParentResolutionStatus.RESOLVED
+    entries = {entry.model_call_id: entry for entry in store.read_entries(rollout_id)}
+    assert entries["c1"].prompt_is_delta is False
+    assert entries["c2"].prompt_is_delta is True
+    assert entries["c2"].prompt_token_ids == [6, 7]
+    assert entries["c3"].prompt_is_delta is True
+    assert entries["c3"].prompt_token_ids == [9]
+
+    built = asyncio.run(trajectories_from_source(rollout_id, store))
+    assert built["mask_sample"] is False
+    output = built["rebuilt_response"]["output"]
+    assert [item["generation_token_ids"] for item in output] == [[4, 5], [8], [10, 11]]
+    assert output[2]["prompt_token_ids"] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+
+def test_delta_materialization_handles_a_thousand_turns_without_recursion():
+    root = _entry("c0", [1], [2])
+    entries = [root]
+    cumulative = [1, 2]
+    for turn in range(1, 1_101):
+        suffix = [10_000 + turn]
+        generation = [20_000 + turn]
+        full_prompt = cumulative + suffix
+        entry = _entry(f"c{turn}", full_prompt, generation, parent=f"c{turn - 1}")
+        entry.prompt_token_ids = suffix
+        entry.prompt_is_delta = True
+        entries.append(entry)
+        cumulative = full_prompt + generation
+
+    out = prefix_merging(entries)
+
+    assert len(out.chains) == 1
+    assert len(out.chains[0].links) == len(entries)
+    assert out.chains[0].links[-1].entry.prompt_token_ids == cumulative[:-1]
+
+
+def test_broken_delta_chain_masks_instead_of_guessing(tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    orphan = TokenEntry(
+        rollout_id="orphan",
+        model_call_id="child",
+        prompt_token_ids=[9],
+        generation_token_ids=[10],
+        generation_log_probs=[-0.1],
+        output_items=[{"type": "message", "role": "assistant", "content": "a"}],
+        prompt_is_delta=True,
+        parent_call_id="missing-parent",
+        parent_resolution=ParentResolutionStatus.RESOLVED,
+    )
+    stamp_continuation(orphan, [{"role": "user", "content": "q"}])
+    stamp_lineage(
+        orphan,
+        "missing-parent",
+        parent_resolution=ParentResolutionStatus.RESOLVED,
+        cumulative=[1, 2, 9, 10],
+    )
+    store.append(orphan)
+
+    built = asyncio.run(trajectories_from_source("orphan", store))
+    out = prefix_merging(store.read_entries("orphan"))
+
+    assert built["mask_sample"] is True
+    assert out.notes.parent_link_failures["delta_chain_unreconstructable"] == 1
+    assert out.notes.unresolved_parent_calls == ["child"]
+
+
+def test_in_memory_lineage_refuses_delta_records():
+    entry = TokenEntry(
+        rollout_id="r",
+        model_call_id="child",
+        prompt_token_ids=[9],
+        generation_token_ids=[10],
+        generation_log_probs=[-0.1],
+        output_items=[{"type": "message", "role": "assistant", "content": "answer"}],
+        prompt_is_delta=True,
+        parent_call_id="parent",
+        parent_resolution=ParentResolutionStatus.RESOLVED,
+    )
+    stamp_continuation(entry, [{"role": "user", "content": "q"}])
+    stamp_lineage(
+        entry,
+        "parent",
+        parent_resolution=ParentResolutionStatus.RESOLVED,
+        cumulative=[1, 9, 10],
+    )
+
+    with pytest.raises(ValueError, match="durable-log-backed"):
+        asyncio.run(InMemoryLineageStore().put(entry))
