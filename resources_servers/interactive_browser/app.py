@@ -27,6 +27,7 @@ a rollout abandoned without either leaves its browser open until the process
 exits (local) or the provider reclaims it (remote).
 """
 
+import logging
 import re
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -43,6 +44,9 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY
+
+
+logger = logging.getLogger(__name__)
 
 
 try:  # package import (gym loads the resources server as a module)
@@ -95,6 +99,15 @@ class ToolResponse(BaseModel):
     error: Optional[str] = None
 
 
+# Fields ``BaseVerifyResponse`` owns. A verify request may carry them as extras, so they
+# are dropped from the spread rather than passed twice.
+_RESPONSE_OWNED_FIELDS = frozenset({"reward", "failure_reason", "mask_sample"})
+
+
+class _ScoringUnavailable(RuntimeError):
+    """The browser could not be read, so no measurement of the policy exists."""
+
+
 class BrowserVerifyRequest(BaseVerifyRequest):
     model_config = ConfigDict(extra="allow")
     verifier_metadata: Optional[Dict[str, Any]] = None
@@ -145,7 +158,9 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
             try:
                 await old.backend.close()
             except Exception:
-                pass
+                # Reporting beats hiding: a browser we could not close is a resource this
+                # run is still holding, and the next seed proceeds either way.
+                logger.warning("could not close the previous browser for session %s", session_id, exc_info=True)
 
         # The rollout id travels with the session so a remote provider can tag
         # (and later account for) the browser it hands out.
@@ -215,36 +230,66 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
         return ToolResponse(observation="", done=True)
 
     # ----- reward -------------------------------------------------------- #
+    def _verify_response(
+        self, body: BrowserVerifyRequest, reward: float, failure_reason: Optional[str] = None
+    ) -> BaseVerifyResponse:
+        """Build the response without letting a request field collide with a response one.
+
+        ``BrowserVerifyRequest`` allows extra fields, so a caller can put ``reward`` or
+        ``failure_reason`` in the body; spreading the dump and also passing them as
+        keywords would raise ``TypeError: got multiple values``.
+        """
+        return BaseVerifyResponse(
+            **{k: v for k, v in body.model_dump().items() if k not in _RESPONSE_OWNED_FIELDS},
+            reward=reward,
+            failure_reason=failure_reason,
+        )
+
     async def verify(self, request: Request, body: BrowserVerifyRequest) -> BaseVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
         st = self._session_id_to_state.get(session_id)
-        reward = 0.0
+        if st is None:
+            # The session this rollout ran in is gone: it was never seeded, it was already
+            # verified, or the server lost it. There is nothing to measure, so say so
+            # instead of reporting a zero that reads as a policy that solved nothing.
+            return self._verify_response(body, reward=0.0, failure_reason="browser session not found at verify")
+
+        reward, failure_reason = 0.0, None
         try:
-            if st is not None:
-                reward = await self._score(st)
+            reward = await self._score(st)
+        except _ScoringUnavailable as exc:
+            # The browser died before it could be read. The rollout itself may have been
+            # fine; what failed is the measurement. Raising here would abort the whole
+            # collection run, because only JudgeError is converted to a routed row.
+            failure_reason = str(exc)
         finally:
-            if st is not None:
-                try:
-                    await st.backend.close()
-                finally:
-                    self._session_id_to_state.pop(session_id, None)
-        return BaseVerifyResponse(**body.model_dump(), reward=reward)
+            try:
+                await st.backend.close()
+            except Exception:
+                logger.warning("could not close the browser for session %s", session_id, exc_info=True)
+            finally:
+                self._session_id_to_state.pop(session_id, None)
+        return self._verify_response(body, reward=reward, failure_reason=failure_reason)
 
     async def _score(self, st: _SessionState) -> float:
         gt = st.gt or {}
-        if "final_url" in gt:
-            return float(await st.backend.current_url() == gt["final_url"])
-        if "url_contains" in gt:
-            return float(gt["url_contains"] in await st.backend.current_url())
-        if "dom_contains" in gt:
-            # Check title + full visible page text (not just interactive elements),
-            # so non-interactive DOM text (e.g. a <p>) is matched too.  Only the
-            # title is used from the observation, so skip the element scan.
-            obs = await st.backend.observe(max_elements=0)
-            haystack = (obs.title + " " + await st.backend.text()).lower()
-            return float(str(gt["dom_contains"]).lower() in haystack)
         if "answer_equals" in gt:
+            # Answered from state the episode already produced; no browser call needed.
             return float((st.answer or "").strip() == str(gt["answer_equals"]).strip())
+        try:
+            if "final_url" in gt:
+                return float(await st.backend.current_url() == gt["final_url"])
+            if "url_contains" in gt:
+                return float(gt["url_contains"] in await st.backend.current_url())
+            if "dom_contains" in gt:
+                # Check title + full visible page text (not just interactive elements),
+                # so non-interactive DOM text (e.g. a <p>) is matched too.  Only the
+                # title is used from the observation, so skip the element scan.
+                obs = await st.backend.observe(max_elements=0)
+                haystack = (obs.title + " " + await st.backend.text()).lower()
+                return float(str(gt["dom_contains"]).lower() in haystack)
+        except Exception as exc:
+            raise _ScoringUnavailable(f"browser unreachable while scoring: {type(exc).__name__}: {exc}") from exc
         # Fail loudly rather than scoring 0: a dataset whose verifier_metadata
         # carries an unsupported (or misspelled) key would otherwise give every
         # rollout reward 0, which is indistinguishable from a policy that never
