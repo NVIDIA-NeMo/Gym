@@ -18,7 +18,7 @@ import shlex
 from os import environ
 from pathlib import Path
 from subprocess import Popen
-from sys import stderr, stdout
+from sys import executable, stderr, stdout
 from typing import IO, Any
 
 from omegaconf import DictConfig
@@ -132,7 +132,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
 
     is_editable_install = (dir_path.resolve() / "../../pyproject.toml").exists()
     lock_path = venv_path.with_name(f"{venv_path.name}.lock")
-    lock_command = f"python -m nemo_gym.cli.venv_lock {shlex.quote(str(lock_path))}"
+    lock_command = f"{shlex.quote(executable)} -m nemo_gym.cli.venv_lock {shlex.quote(str(lock_path))}"
 
     if should_skip_venv_setup:
         # Even a no-op setup must take the lock: another process may have created
