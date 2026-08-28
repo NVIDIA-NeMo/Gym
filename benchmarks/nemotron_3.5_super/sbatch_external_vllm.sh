@@ -15,17 +15,6 @@ OPENSANDBOX_DOMAIN="${OPENSANDBOX_DOMAIN:-}"
 OPENSANDBOX_API_KEY="${OPENSANDBOX_API_KEY:-}"
 OPENSANDBOX_PROTOCOL="${OPENSANDBOX_PROTOCOL:-http}"
 
-# The checkout this script ships in; a caller running a copy of it names its own.
-gym_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
-if [[ "${1:-}" == "--gym-root" ]]; then
-    if [[ -z "${2:-}" ]]; then
-        echo "--gym-root needs a path" >&2
-        exit 2
-    fi
-    gym_root=$2
-    shift 2
-fi
-
 should_run_eval=$(( $# > 0 ))
 if (( should_run_eval )); then
     EXPERIMENT_NAME=$EXPERIMENT_NAME
@@ -267,7 +256,7 @@ submit_dir=$(pwd -P)
 if [[ -n "$OPENSANDBOX_DOMAIN" ]]; then
     cleanup_connection=(--domain "$OPENSANDBOX_DOMAIN" --api-key "$OPENSANDBOX_API_KEY" --protocol "$OPENSANDBOX_PROTOCOL")
 else
-    cleanup_connection=(--connection-config "$gym_root/env.yaml")
+    cleanup_connection=(--connection-config "$submit_dir/env.yaml")
 fi
 cleanup_user=${NEMO_GYM_USER:-$USER}
 main_job_id=$(
@@ -307,7 +296,7 @@ if (( should_run_eval )); then
             --time=00:30:00 \
             --job-name="gym-cleanup-$main_job_id" \
             --output="$submit_dir/slurm-logs/%j-gym-cleanup-$main_job_id.log" \
-            "$gym_root/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py" \
+            "$submit_dir/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py" \
             "${cleanup_connection[@]}" \
             --run-id "$main_job_id" \
             --user "$cleanup_user" \
