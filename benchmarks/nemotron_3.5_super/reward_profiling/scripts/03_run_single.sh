@@ -21,9 +21,11 @@
 #
 # OPTIONAL - shape
 #   NUM_PREFILL_NODES / NUM_DECODE_NODES   1 / 2. Nodes = P + D, capped ~16 by --segment
-#   WALLTIME                               04:00:00
-#   SBATCH_ACCOUNT / _GRES / _QOS          nemotron_n4_post / gpu:4 / interactive
-#                                          read by sbatch from the environment, so exported here
+#   WALLTIME                               manifest sbatch.timelimit, else 04:00:00
+#   SBATCH_*                               anything sbatch reads from the environment. The
+#                                          manifest's sbatch block sets these; setting one here
+#                                          overrides it. Falls back to nemotron_n4_post / gpu:4 /
+#                                          interactive when neither names them
 #
 # OPTIONAL - sandbox lane (ns_tools, math_formal_lean)
 #   SANDBOX_CONTAINER  a nemo-skills sandbox sqsh. Without one those entries read
@@ -45,24 +47,13 @@
 # measured at 483 rollouts/hr on 32 workers. Scaling past that needs a balancer in front.
 set -euo pipefail
 
-# Input arguments and validation
-# Required:
-#   MODEL        served checkpoint path (also used as policy_model_name)
-#   CONTAINER    reward-profiling sqsh (built by ../../build_eval_container.sh with SKIP_PREPARE=1)
-#   SWEEP_DIR    <out-dir>/<nickname> written by 01_materialize.sh
-#
-# Optional, with defaults below. SBATCH_ACCOUNT / SBATCH_PARTITION / SBATCH_QOS / SBATCH_GRES are
-# read by sbatch itself from the environment, so they are exported rather than passed as flags.
-#
-# Sandbox lane: set SANDBOX_CONTAINER to a nemo-skills sandbox sqsh to run one alongside. Required
-# by ns_tools and math_formal_lean, which read NEMO_SKILLS_SANDBOX_HOST/PORT and otherwise fall
-# back to 127.0.0.1:6000, where nothing listens -- the lane then fails with a bare 500 per rollout.
-#
+# Sandbox scaling, kept here rather than in the header because it is analysis, not usage:
 # The image runs nginx over N uWSGI workers on ONE node, hashing X-Session-ID so a stateful IPython
 # session stays pinned to one worker. It does not span nodes, and NEMO_SKILLS_SANDBOX_HOST takes a
 # single host, so sandbox capacity is currently one node's worth. Scaling past that needs a
 # balancer in front of several sandbox nodes; measured at 483 rollouts/hr on 32 workers, and the
 # sandbox lane is ~42% of total sweep cost, so this is the first thing to grow.
+
 # SWEEP_DIR first and on its own: it is the path to the manifest's own output, so unlike MODEL and
 # CONTAINER it cannot be supplied by the manifest.
 if [[ -z "${SWEEP_DIR:-}" ]]; then
@@ -213,7 +204,10 @@ NUM_SAMPLES_IN_PARALLEL=${NUM_SAMPLES_IN_PARALLEL:-${_manifest_concurrency:-$((M
 
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-reward-profiling}"
 
-WALLTIME=${WALLTIME:-04:00:00}
+# Falls back to the manifest's sbatch.timelimit before the hardcoded default. sbatch reads
+# SBATCH_TIMELIMIT from the environment, but --time is passed on the command line below and a
+# flag beats an env var -- so without this the manifest's timelimit is silently ignored.
+WALLTIME=${WALLTIME:-${SBATCH_TIMELIMIT:-04:00:00}}
 
 # sbatch picks these up from the environment. Without an account it refuses the job outright, and
 # without a GRES request a non-CPU partition rejects it -- both are hard errors at submit, so they
@@ -271,7 +265,8 @@ PY_ENVVARS
     fi
 fi
 
-SLURM_COMMENT="${SLURM_COMMENT:-}"
+# Same shadowing as WALLTIME: --comment is a flag, so read the manifest's sbatch.comment first.
+SLURM_COMMENT="${SLURM_COMMENT:-${SBATCH_COMMENT:-}}"
 
 # Fixed vLLM Port configurations
 PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT=5600
