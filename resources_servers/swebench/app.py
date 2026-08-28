@@ -39,6 +39,7 @@ from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.rollout_observability import SandboxObservation
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import SESSION_ID_KEY
 from resources_servers.swebench.swebench_patches import (
     patch_swebench_multilingual_golden_patch_pass,
@@ -245,12 +246,19 @@ class SwebenchResourcesServer(SimpleResourcesServer):
 
         patch_swebench_multilingual_resources_request(resources, test_spec.instance_id)
 
+        # Derive from the final resources map (after the multilingual bump);
+        # explicit sandbox_config.env keys win over the derived caps.
+        sandbox_resources = SandboxResources.from_mapping(resources)
+        env = dict(self.config.sandbox_config.get("env", {}))
+        if self.config.sandbox_config.get("derive_cpu_env", True):
+            env = cpu_cap_env(sandbox_resources.cpu) | env
+
         eval_sandbox_spec = SandboxSpec(
             image=test_spec.instance_image_key,
             ttl_s=self.config.sandbox_config.get("ttl_s", None),
             ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s", None),
             workdir=None,  # Default to container's WORKDIR
-            env=self.config.sandbox_config.get("env", {}),
+            env=env,
             files=dict(),
             metadata=provider_default_metadata
             | self.config.sandbox_config.get("metadata", {})
@@ -258,7 +266,7 @@ class SwebenchResourcesServer(SimpleResourcesServer):
                 "nemo_gym_agent": self.config.name,
                 "instance_id": test_spec.instance_id[:63],
             },
-            resources=SandboxResources.from_mapping(resources),
+            resources=sandbox_resources,
             entrypoint=None,
             provider_options=self.config.sandbox_config.get("provider_options", {}),
         )
