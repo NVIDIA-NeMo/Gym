@@ -1,0 +1,84 @@
+indian_banking:
+  resources_servers:
+    indian_banking:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: >-
+        Indian retail-banking customer-support environment: a multi-turn dialog with an
+        LLM-simulated customer over 33 deterministic banking tools (accounts, deposits,
+        loans, cards, mandates, service requests), scored with partial credit against
+        gold tool calls, final DB state, required disclosures and an NL-assertion judge.
+      value: >-
+        Improve stateful multi-turn tool use, policy compliance and customer
+        communication in a regulated domain.
+      # User simulator and judge. Point both at a model server that is NOT the
+      # policy (e.g. the vllm_model / openai_model instance below) so the policy
+      # never judges itself.
+      user_sim_model_server:
+        type: responses_api_models
+        name: user_simulator_model
+      user_sim_responses_create_params:
+        input: []
+        temperature: 0.0
+        max_output_tokens: 512
+      judge_model_server:
+        type: responses_api_models
+        name: user_simulator_model
+      judge_responses_create_params:
+        input: []
+        temperature: 0.0
+        max_output_tokens: 1024
+      should_use_judge: true
+      max_user_turns: 8
+      max_tool_rounds: 12
+indian_banking_agent:
+  responses_api_agents:
+    gymnasium_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: indian_banking
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      # Keep >= ~25: dialogs run 22-25 steps (tool rounds + user turns combined).
+      max_steps: 25
+      # The dataset repository (placeholder below until the upload lands) also carries
+      # db.json and kb.json — the synthetic customer DB and knowledge base the server
+      # loads at startup. Download them next to the splits and place them in
+      # resources_servers/indian_banking/data/ before serving.
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/indian_banking/data/train.jsonl
+        source:
+          type: huggingface
+          repo_id: NPCI/nemo-gym-indian-banking
+          artifact_fpath: train.jsonl
+        license: Apache 2.0
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/indian_banking/data/validation.jsonl
+        source:
+          type: huggingface
+          repo_id: NPCI/nemo-gym-indian-banking
+          artifact_fpath: validation.jsonl
+        license: Apache 2.0
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/indian_banking/data/example.jsonl
+# OpenAI-compatible endpoint used for both the user simulator and the judge
+# (one server so the policy never judges itself; split into two blocks and
+# repoint judge_model_server if you want separate models).
+# Supplied from env.yaml (repo root, gitignored) like the policy_* keys:
+#   user_sim_base_url / user_sim_api_key / user_sim_model_name
+# The user simulator (and judge) must be a different model from the policy.
+user_simulator_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${user_sim_base_url}
+      openai_api_key: ${user_sim_api_key}
+      openai_model: ${user_sim_model_name}
+      openai_default_headers: {}
