@@ -187,6 +187,57 @@ AGENT_REF_KEY_NAME = "agent_ref"
 # resolved to an agent at dispatch time. See the dataset-decoupling RFC.
 TASK_SOURCE_KEY_NAME = "task_source"
 SKILLS_REF_KEY_NAME = "skills_ref"
+REWARD_KEY_NAME = "reward"
+
+# Metric key names. `RewardProfiler` builds its metric names from these prefixes and suffixes, and
+# consumers of `*_aggregate_metrics.json` (e.g. `gym eval compare`) parse them back out -- so they
+# live here, where both sides can import them without pulling in pandas/scipy/wandb.
+MEAN_STAT_NAME = "mean"
+MAX_STAT_NAME = "max"
+MIN_STAT_NAME = "min"
+MEDIAN_STAT_NAME = "median"
+STD_STAT_NAME = "std"
+SEM_STAT_NAME = "sem"
+P25_STAT_NAME = "p25"
+P75_STAT_NAME = "p75"
+CI_LOW_95_STAT_NAME = "ci_low_95"
+CI_HIGH_95_STAT_NAME = "ci_high_95"
+HISTOGRAM_STAT_NAME = "histogram"
+
+# `<stat>/<field>`, e.g. `mean/reward`.
+STAT_SEPARATOR = "/"
+MEAN_PREFIX = f"{MEAN_STAT_NAME}{STAT_SEPARATOR}"
+MAX_PREFIX = f"{MAX_STAT_NAME}{STAT_SEPARATOR}"
+MIN_PREFIX = f"{MIN_STAT_NAME}{STAT_SEPARATOR}"
+MEDIAN_PREFIX = f"{MEDIAN_STAT_NAME}{STAT_SEPARATOR}"
+STD_PREFIX = f"{STD_STAT_NAME}{STAT_SEPARATOR}"
+SEM_PREFIX = f"{SEM_STAT_NAME}{STAT_SEPARATOR}"
+P25_PREFIX = f"{P25_STAT_NAME}{STAT_SEPARATOR}"
+P75_PREFIX = f"{P75_STAT_NAME}{STAT_SEPARATOR}"
+CI_LOW_95_PREFIX = f"{CI_LOW_95_STAT_NAME}{STAT_SEPARATOR}"
+CI_HIGH_95_PREFIX = f"{CI_HIGH_95_STAT_NAME}{STAT_SEPARATOR}"
+
+# `<stat>_across_repeats/mean/<field>`: one repeat's estimate aggregated over the run's repeats.
+ACROSS_REPEATS_MARKER = f"_across_repeats{STAT_SEPARATOR}"
+MEAN_ACROSS_REPEATS_PREFIX = f"{MEAN_STAT_NAME}{ACROSS_REPEATS_MARKER}"
+MEDIAN_ACROSS_REPEATS_PREFIX = f"{MEDIAN_STAT_NAME}{ACROSS_REPEATS_MARKER}"
+STD_ACROSS_REPEATS_PREFIX = f"{STD_STAT_NAME}{ACROSS_REPEATS_MARKER}"
+MIN_ACROSS_REPEATS_PREFIX = f"{MIN_STAT_NAME}{ACROSS_REPEATS_MARKER}"
+MAX_ACROSS_REPEATS_PREFIX = f"{MAX_STAT_NAME}{ACROSS_REPEATS_MARKER}"
+SE_ACROSS_REPEATS_PREFIX = f"se{ACROSS_REPEATS_MARKER}"
+CI_LOW_95_ACROSS_REPEATS_PREFIX = f"{CI_LOW_95_STAT_NAME}{ACROSS_REPEATS_MARKER}"
+CI_HIGH_95_ACROSS_REPEATS_PREFIX = f"{CI_HIGH_95_STAT_NAME}{ACROSS_REPEATS_MARKER}"
+
+# Suffixes `compute_pass_majority_metrics` appends to a pass@k metric name.
+STD_DEV_ACROSS_RUNS_SUFFIX = f"{STAT_SEPARATOR}std_dev_across_runs"
+STD_ERR_ACROSS_RUNS_SUFFIX = f"{STAT_SEPARATOR}std_err_across_runs"
+AVG_SAMPLE_STD_DEV_SUFFIX = f"{STAT_SEPARATOR}avg_sample_std_dev"
+
+# Per-task keys in `group_level_metrics`.
+ROLLOUT_INFOS_KEY_NAME = "rollout_infos"
+NUM_ROLLOUTS_KEY_NAME = "num_rollouts"
+EXPECTED_NUM_ROLLOUTS_KEY_NAME = "expected_num_rollouts"
+MISSING_NUM_ROLLOUTS_KEY_NAME = "missing_num_rollouts"
 
 POLICY_BASE_URL_KEY_NAME = "policy_base_url"
 POLICY_API_KEY_KEY_NAME = "policy_api_key"  # pragma: allowlist secret
