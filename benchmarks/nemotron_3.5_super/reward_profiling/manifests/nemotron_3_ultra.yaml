@@ -141,6 +141,23 @@ gym_env_start:
 #   sample: random           # head (default, stops reading at the limit) | random (reads all)
 #   seed: 0                  # seeds `random`; mixed with each entry's label
 
+# Slurm settings, read by the launchers that shell out to `sbatch`. Each key becomes
+# SBATCH_<KEY>, so anything under INPUT ENVIRONMENT VARIABLES in `man sbatch` works. A launcher's
+# own env var wins, so override per run without editing this file.
+sbatch:
+  account: nemotron_n3_post
+  qos: interactive
+  timelimit: "04:00:00"
+
+# Containers, for `srun --container-image`.
+srun:
+  # Only one arm64 build of the sandbox exists; ns_tools and math_formal_lean need it, and without
+  # it they fall back to 127.0.0.1:6000 and fail with a bare 500 per rollout.
+  sandbox_container: /lustre/fsw/portfolios/llmservice/users/igitman/images/nemo-skills-sandbox-0.7.1-arm64.sqsh
+  # Built per checkout by ../../build_eval_container.sh, so it is a local path rather than a shared
+  # one -- set CONTAINER, or uncomment and point this at yours.
+  # container: results/vllm/vllm-openai:v0.27.1___tomer_with_gym_all.sqsh
+
 # Runtime settings for `gym eval run --no-serve`.
 gym_eval_run:
   num_repeats: 8
