@@ -11,7 +11,7 @@
     - a. [Non-judge environments.](#03a---non-judge-environments)
     - b. [Judge environments.](#03b---judge-environments)
     - c. [Sandbox environments.](#03c---sandbox-environments)
-4. [Adding a manifest entry into manifests/nemotron_3_ultra.yaml](#04---adding-a-manifest-entry-into-manifestsnemotron_3_ultrayaml)
+4. [Adding a manifest entry into manifests/nemotron_3_5_super.yaml](#04---adding-a-manifest-entry-into-manifestsnemotron_3_5_superyaml)
 
 Contribute your environment as a one-entry manifest first, prove it runs, then add it to the shared
 manifest. A one-entry manifest fails in seconds; the same mistake in the shared one costs a full
@@ -27,7 +27,7 @@ throughout, and all paths below are relative to the repo root.
 | your data `.jsonl` | always | one row per task, on `/lustre`. Not committed |
 | `resources_servers/<env>/` | only if your env is not already in Gym | verifier + config. See the [environment guide](https://docs.nvidia.com/nemo/gym/latest/contribute/environments) |
 | `$R/manifests/<yours>.yaml` | always | your one-entry manifest. Committed |
-| `$R/manifests/nemotron_3_ultra.yaml` | step 04 | add your entry to the shared sweep |
+| `$R/manifests/nemotron_3_5_super.yaml` | step 04 | add your entry to the shared sweep |
 | `$R/configs/container_config.yaml` | only if you pulled in a new server | regenerate, do not hand-edit |
 
 Nothing else. In particular you do not edit anything under `nemo_gym/`, and you do not edit
@@ -38,13 +38,16 @@ upstream configs under `resources_servers/*/configs/` to bind a judge — that g
 
 ```json
 { "agent_ref": { "name": "my_simple_agent" },
-  "responses_create_params": { "input": [ ... ] },
-  "verifier_metadata": { ... } }
+  "responses_create_params": { "input": [ ... ] } }
 ```
 
 `agent_ref.name` is what rollout collection dispatches on — it is why 36 environments can share one
 deployment. It must match the `agent` your manifest entry declares, and that agent must be declared
 by one of the entry's `configs`. `validate` checks all three agree.
+
+Add `verifier_metadata` only if your verifier reads it — the reference answer, expected tool call,
+or test cases it scores against. Most entries in the shared manifest do not carry one, because
+their verifiers score the response intrinsically. Nothing in the sweep looks at it.
 
 ## 01 - Creating a container.
 
@@ -94,8 +97,10 @@ single rollout.
 Two keys, both in [`manifests/example_judge.yaml`](./manifests/example_judge.yaml): the model server
 itself, and the binding that tells your resources server to use it.
 
-Set `max_concurrent_requests`. The transport retries 429s with a flat sleep and extends its retry
-budget on rate limits, so a saturated judge degrades into a retry storm rather than backpressure.
+Set `max_concurrent_requests` if the judge is an external endpoint, as the ones in the shared
+manifest are. The transport retries 429s with a flat sleep and extends its retry budget on rate
+limits, so a saturated gateway degrades into a retry storm rather than backpressure. A judge served
+locally has no such limit and does not need it.
 
 ### 02c - Sandbox environments.
 
@@ -118,7 +123,19 @@ MODEL=<ckpt> SWEEP_DIR=$R/outputs/sweeps/<name>/<nickname> bash $R/scripts/03_ru
 
 `LIMIT_PER_ENTRY=8` takes only the first 8 rows of your dataset instead of all of them, so at
 `num_repeats: 8` that is 64 rollouts — enough to exercise every code path in minutes. Drop it for
-a real run. Every other variable is in [README § Common knobs](./README.md#05---reference).
+a real run.
+
+If a policy endpoint already exists, skip the GPUs entirely — this is the fastest loop for checking
+a new entry, since there is no allocation to wait for:
+
+```bash
+SWEEP_DIR=<sweep> POLICY_BASE_URL=http://host:8000/v1 POLICY_MODEL_NAME=<model> \
+  POLICY_API_KEY=<key> bash $R/scripts/03_run_endpoint.sh
+```
+
+The judges are already a hosted endpoint either way, so only the policy costs GPUs. A sandbox entry
+still needs `NEMO_SKILLS_SANDBOX_HOST/PORT` pointed somewhere reachable, since this path starts no
+sandbox of its own. Every other variable is in [README § Common knobs](./README.md#common-knobs).
 
 If you want a *committed* subset — your dataset has 200k rows and only 10k belong in the sweep —
 that is `limit` on your entry, or `materialize.limit_per_entry` for a manifest-wide default. Set
@@ -167,10 +184,10 @@ The sandbox is one node only — sessions pin to a worker by `X-Session-ID` cons
 does not span nodes. Only one arm64 build exists:
 `/lustre/fsw/portfolios/llmservice/users/igitman/images/nemo-skills-sandbox-0.7.1-arm64.sqsh`
 
-## 04 - Adding a manifest entry into manifests/nemotron_3_ultra.yaml
+## 04 - Adding a manifest entry into manifests/nemotron_3_5_super.yaml
 
 Once your entry runs clean alone, move it into
-[`manifests/nemotron_3_ultra.yaml`](./manifests/nemotron_3_ultra.yaml):
+[`manifests/nemotron_3_5_super.yaml`](./manifests/nemotron_3_5_super.yaml):
 
 - **Append to `entries`, never insert.** Order assigns task indices, so appending keeps every
   existing `--resume` key valid; inserting in the middle renumbers every entry after yours and

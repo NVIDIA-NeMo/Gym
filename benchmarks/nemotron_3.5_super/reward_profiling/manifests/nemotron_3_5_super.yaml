@@ -1,6 +1,3 @@
-# ARCHIVED. nemotron_3_5_super.yaml is the manifest in use; this is kept as the state the
-# ultra-3 measurements in RATES.md were taken against. Edit that one, not this.
-#
 # The reward-profiling sweep: every environment, one Gym deployment, one input file.
 #
 # Rows carry their own agent_ref and rollout collection dispatches per row, so 36 environments
@@ -13,7 +10,7 @@
 #
 # Provenance: data_gym/ultra_v3_sets/260603_ultra_v3_set_final.
 
-nickname: nemotron_3_ultra
+nickname: nemotron_3_5_super
 
 # Becomes sweep_config.yaml, passed to `gym env start --config`.
 gym_env_start:

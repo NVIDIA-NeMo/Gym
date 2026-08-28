@@ -3,7 +3,7 @@
 Runs the policy over every dataset in the RL training blend and summarizes per-task reward, so you
 can see which environments the checkpoint has saturated and which still carry signal.
 
-`manifests/nemotron_3_ultra.yaml` is the full sweep: **36 environments, 726,121 source rows**, run
+`manifests/nemotron_3_5_super.yaml` is the full sweep: **36 environments, 726,121 source rows**, run
 as **one** Gym deployment over one concatenated input. Each row carries its own `agent_ref` and
 rollout collection dispatches per row, so judge-scored, sandbox-backed and plain environments all
 coexist in a single job. The machinery is generic and lives in `nemo_gym/sweep/`; only the
@@ -33,16 +33,16 @@ R=benchmarks/nemotron_3.5_super/reward_profiling
 uv venv && uv sync --extra dev && source .venv/bin/activate
 
 # 1. manifest -> one materialized input file
-MANIFEST=$R/manifests/nemotron_3_ultra.yaml bash $R/scripts/01_materialize.sh
+MANIFEST=$R/manifests/nemotron_3_5_super.yaml bash $R/scripts/01_materialize.sh
 
 # 2. shard across N jobs, submit them, resubmit any that die, merge and split when done.
 #    Model, containers, account, qos and timelimit all come from the manifest, so there is
 #    nothing else to pass. Runs for hours in the foreground -- detach it, and start only one.
-setsid nohup bash -lc "SWEEP_DIR=$R/outputs/sweeps/nemotron_3_ultra NUM_SHARDS=16 \
+setsid nohup bash -lc "SWEEP_DIR=$R/outputs/sweeps/nemotron_3_5_super NUM_SHARDS=16 \
   bash $R/scripts/03_run_sharded.sh" > watcher.log 2>&1 &
 
 # 3. profile the whole sweep (safe on a partial run)
-SWEEP_DIR=$R/outputs/sweeps/nemotron_3_ultra bash $R/scripts/05_profile.sh
+SWEEP_DIR=$R/outputs/sweeps/nemotron_3_5_super bash $R/scripts/05_profile.sh
 ```
 
 `NUM_SHARDS` is jobs, not nodes: each is `NUM_PREFILL_NODES + NUM_DECODE_NODES` (1 + 2 by
@@ -350,7 +350,7 @@ There is no script for this rewrite yet; it is per-dataset, since not every data
 RATES.md         per-environment rates, GPU-hour and disk sizing. Read before allocating.
 CONTRIBUTING.md  how to add an environment.
 manifests/       input: what to profile. Hand-edited.
-                 nemotron_3_ultra.yaml is the real sweep; example_*.yaml are minimal
+                 nemotron_3_5_super.yaml is the real sweep; example_*.yaml are minimal
                  one-entry manifests for basic / judge / sandbox+judge.
 configs/         generated container config. Reproducible from the manifests.
 outputs/         everything a run produces: sweeps/<nickname>/. Gitignored.

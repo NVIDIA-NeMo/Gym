@@ -1,6 +1,6 @@
 # Measured rates, for compute planning
 
-Per-environment throughput for `manifests/nemotron_3_ultra.yaml`, measured lane by lane on
+Per-environment throughput for `manifests/nemotron_3_5_super.yaml`, measured lane by lane on
 1 prefill + 2 decode = **12 GPUs**, `num_repeats: 8`.
 
 **These are shares of one fleet, not independent capacities.** Every environment in a lane shared
