@@ -17,6 +17,7 @@ import importlib.metadata
 import shlex
 import threading
 from pathlib import Path
+from sys import executable
 from time import sleep
 from unittest.mock import MagicMock, call, patch
 
@@ -40,7 +41,7 @@ def _with_venv_lock(unlocked_command: str, venv_path: Path) -> str:
     cd_command, setup_command = unlocked_command.split(" && ", 1)
     lock_path = venv_path.with_name(f"{venv_path.name}.lock")
     return (
-        f"{cd_command} && python -m nemo_gym.cli.venv_lock {lock_path} {shlex.quote(setup_command)} "
+        f"{cd_command} && {executable} -m nemo_gym.cli.venv_lock {lock_path} {shlex.quote(setup_command)} "
         f"&& source {venv_path}/bin/activate"
     )
 
@@ -48,7 +49,7 @@ def _with_venv_lock(unlocked_command: str, venv_path: Path) -> str:
 def _with_venv_wait(unlocked_command: str, venv_path: Path) -> str:
     cd_command, activate_command = unlocked_command.split(" && ", 1)
     lock_path = venv_path.with_name(f"{venv_path.name}.lock")
-    return f"{cd_command} && python -m nemo_gym.cli.venv_lock {lock_path} true && {activate_command}"
+    return f"{cd_command} && {executable} -m nemo_gym.cli.venv_lock {lock_path} true && {activate_command}"
 
 
 def test_run_locked_waits_for_existing_venv_setup(tmp_path: Path) -> None:
