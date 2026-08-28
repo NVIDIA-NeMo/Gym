@@ -621,7 +621,9 @@ async def test_provider_attach_pty_retries_timed_out_takeover(monkeypatch: pytes
     rejected.closed = True
     clients = [FakeHttpClient(ws=rejected), FakeHttpClient(ws=FakeWs([CONNECTED]))]
     handed_out: list[FakeHttpClient] = []
-    monkeypatch.setattr(provider, "_pty_http_client", lambda: handed_out.append(clients[len(handed_out)]) or handed_out[-1])
+    monkeypatch.setattr(
+        provider, "_pty_http_client", lambda: handed_out.append(clients[len(handed_out)]) or handed_out[-1]
+    )
     monkeypatch.setattr(pty_module, "_PTY_TAKEOVER_RETRY_DELAYS", (0.0,))
     handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=FakeRaw())
     session = await provider.attach_pty(handle, "s-7", takeover=True)
