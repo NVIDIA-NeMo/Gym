@@ -438,12 +438,15 @@ gym env resolve \
 
 Validate a manifest-backed workload or legacy config without starting Ray or server subprocesses. Manifest validation resolves the Gym config offline, checks composition mirrors and datasets, and reports the resolved components. Legacy validation retains the existing config pre-flight behavior. Exits `0` when valid, or `1` with a clean message when not.
 
+By default, values a run needs but the config leaves undefined (such as `policy_base_url` from `env.yaml`) are filled with placeholders so the rest can still be checked, and reported as a warning. Pass `--strict` to fail on them instead.
+
 | Option | Description |
 | --- | --- |
 | `NAME` | Manifest-backed catalog entry to validate. |
 | `--kind environment\|benchmark` | Resolve an ambiguous catalog name. |
 | `--manifest PATH` | Validate a manifest directly instead of selecting by name. |
 | `--sync` | Atomically synchronize config-owned composition mirrors after all checks pass. |
+| `--strict` | Resolve the config exactly as a run would, with no placeholder model values. An undefined value fails instead of warning. |
 | `--json` | Output the manifest validation report as JSON. |
 | `--config PATH` | Config file to load. Repeatable. |
 | `--environment NAME` / `--benchmark NAME` | Validate a named environment / benchmark config. |
@@ -460,6 +463,9 @@ gym env validate --benchmark gsm8k
 
 # or explicit config path(s)
 gym env validate --config resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml
+
+# fail unless everything a run needs is defined, credentials included
+gym env validate --resources-server example_single_tool_call --model-type openai_model --strict
 ```
 
 ### `gym env packages`
