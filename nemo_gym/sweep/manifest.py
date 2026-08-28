@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 
 AGENT_REF_KEY = "agent_ref"
@@ -320,6 +320,23 @@ class SweepManifest(BaseModel):
         return self.gym_eval_run.num_repeats
 
     @model_validator(mode="after")
+    def _random_sampling_needs_a_limit(self) -> "SweepManifest":
+        """``random`` only selects when there is a limit to select down to.
+
+        Without one it silently returns manifest order, and the counting pass still reads every
+        file end to end to satisfy the exact count random would have needed -- 36.9 GB here, for a
+        sample that never happens.
+        """
+        if self.materialize.sample == "random":
+            if self.materialize.limit_per_entry is None and not any(e.limit for e in self.entries):
+                raise ValueError(
+                    "materialize.sample is 'random' but nothing sets a limit, so there is nothing "
+                    "to sample down to. Set materialize.limit_per_entry or an entry's limit, or "
+                    "drop sample."
+                )
+        return self
+
+    @model_validator(mode="after")
     def _unique_labels(self) -> "SweepManifest":
         dupes = [label for label, count in Counter(e.label for e in self.entries).items() if count > 1]
         if dupes:
@@ -364,11 +381,22 @@ def load_manifest(path: str | Path) -> SweepManifest:
     path = Path(path)
     if not path.is_file():
         raise SweepValidationError(f"Manifest not found: {path}")
-    with open(path) as handle:
-        raw = yaml.safe_load(handle)
+    try:
+        with open(path) as handle:
+            raw = yaml.safe_load(handle)
+    except yaml.YAMLError as exc:
+        raise SweepValidationError(f"{path} is not valid YAML: {exc}") from exc
     if not isinstance(raw, dict):
         raise SweepValidationError(f"Manifest must be a mapping, got {type(raw).__name__}: {path}")
-    return SweepManifest.model_validate(raw)
+    try:
+        return SweepManifest.model_validate(raw)
+    except ValidationError as exc:
+        # Otherwise a one-key typo surfaces as a pydantic traceback from a CLI whose other errors
+        # are one-liners, and the useful part is buried under a stack.
+        problems = "\n".join(
+            f"  {'.'.join(str(x) for x in err['loc']) or '<root>'}: {err['msg']}" for err in exc.errors()
+        )
+        raise SweepValidationError(f"{path} is not a valid manifest:\n{problems}") from exc
 
 
 def observed_agents(data_path: Path, sample_rows: int = DEFAULT_SAMPLE_ROWS) -> Counter:

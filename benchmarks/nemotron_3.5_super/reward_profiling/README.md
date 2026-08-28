@@ -402,7 +402,7 @@ rewards before a run finishes.
 | `MODEL`, `CONTAINER` | 03 | checkpoint path, eval sqsh |
 | `SANDBOX_CONTAINER` | 03 | required by `ns_tools` and `math_formal_lean` |
 | `NUM_PREFILL_NODES`, `NUM_DECODE_NODES` | 03 | P/D split; nodes = P + D |
-| `SBATCH_ACCOUNT`, `SBATCH_GRES` | 03 | default `nemotron_n4_post`, `gpu:4` |
+| `SBATCH_ACCOUNT`, `SBATCH_GRES` | 03 | `nemotron_n4_post`, `gpu:4` — only when the manifest's `sbatch` block is silent |
 | `WALLTIME`, `MAX_ROUNDS` | 03 | per-job limit; resubmissions per shard (4) |
 | `PROFILE_JOBS` | 05 | concurrent label profiles (8) |
 
@@ -478,7 +478,7 @@ It follows the same flow from the [Super-v3.5 readme](../README.md), with one ch
 
 ```bash
 # 0. make container config
-python -m nemo_gym.sweep container-config manifests/*.yaml --out configs/container_config.yaml
+python -m nemo_gym.sweep container-config $R/manifests/*.yaml --out $R/configs/container_config.yaml
 
 # 1. make vllm container
 mkdir results/vllm
