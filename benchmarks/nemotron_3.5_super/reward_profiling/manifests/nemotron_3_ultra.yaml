@@ -154,9 +154,11 @@ srun:
   # Only one arm64 build of the sandbox exists; ns_tools and math_formal_lean need it, and without
   # it they fall back to 127.0.0.1:6000 and fail with a bare 500 per rollout.
   sandbox_container: /lustre/fsw/portfolios/llmservice/users/igitman/images/nemo-skills-sandbox-0.7.1-arm64.sqsh
-  # Built per checkout by ../../build_eval_container.sh, so it is a local path rather than a shared
-  # one -- set CONTAINER, or uncomment and point this at yours.
-  # container: results/vllm/vllm-openai:v0.27.1___tomer_with_gym_all.sqsh
+  # Built by ../../build_eval_container.sh from configs/container_config.yaml, which is generated
+  # from this manifest -- so the image has exactly these entries' servers baked in. Rebuild and
+  # update this when an entry pulls in a new server; running against an image built for a different
+  # manifest presents as a hang, not an error. Override with CONTAINER for a one-off.
+  container: "/lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/Gym-github_worktrees/reward-profiling/results/vllm/vllm-openai:v0.27.1___tomer_with_gym_all.sqsh"
 
 # Runtime settings for `gym eval run --no-serve`.
 gym_eval_run:

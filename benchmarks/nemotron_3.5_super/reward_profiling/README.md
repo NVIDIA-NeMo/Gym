@@ -36,12 +36,16 @@ uv venv && uv sync --extra dev && source .venv/bin/activate
 MANIFEST=$R/manifests/nemotron_3_ultra.yaml bash $R/scripts/01_materialize.sh
 
 # 2. one Slurm job: serves vLLM, starts Gym, collects, profiles
-MODEL=<checkpoint> CONTAINER=<eval sqsh> SANDBOX_CONTAINER=<sandbox sqsh> \
+#    the containers, account, qos and timelimit come from the manifest's srun/sbatch blocks,
+#    so the checkpoint is the only thing that varies per run
+MODEL=<checkpoint> \
   SWEEP_DIR=$R/outputs/sweeps/nemotron_3_ultra bash $R/scripts/03_run_single.sh
 
 # 3. profile (also run automatically at the end of step 2; safe on a partial run)
 SWEEP_DIR=$R/outputs/sweeps/nemotron_3_ultra bash $R/scripts/05_profile.sh
 ```
+
+Set `CONTAINER`, `SANDBOX_CONTAINER` or any `SBATCH_*` to override the manifest for one run.
 
 Add `LIMIT_PER_ENTRY=8` to step 1 for a smoke run that exercises every code path in minutes —
 N rows from *each* entry, which is not what `gym eval run --limit` does ([why](#gotchas)).
