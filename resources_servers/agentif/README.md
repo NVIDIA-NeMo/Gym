@@ -34,7 +34,8 @@ raised). A preceding failed/`None` code check short-circuits any later `llm` /
 Two headline metrics follow upstream `1.evaluation_api.py`:
 
 - **ISR** (Instruction Success Rate) — `1.0` when every scored constraint in a
-  row passed, else `0.0`; this is the per-row reward returned by `verify()`.
+  row passed and none errored, else `0.0`; this is the per-row reward returned
+  by `verify()`.
 - **CSR** (Constraint Success Rate) — fraction of scored constraints
   (`n_true / (n_true + n_false)`) that passed, corpus-wide.
 
@@ -45,7 +46,17 @@ Two headline metrics follow upstream `1.evaluation_api.py`:
   breakdown (`unconditional` / `conditional` / `example_driven` in the data).
 - `by_type/{formatting,semantic,tool}/accuracy` — per-type breakdown
   (`formatting` / `semantic` / `resource` in the data).
-- `n_null_total` — total unscored constraints across the corpus (diagnostics).
+- `n_null_total` — total unscored constraints across the corpus (diagnostics),
+  split into `n_skipped_total` and `n_error_total`.
+
+Unscored constraints come in two flavours, and they are treated differently:
+
+- **skipped** — an `llm_conditional_check` gate answered `NO`, so the constraint
+  does not apply to this response. Excluded from ISR and CSR (upstream parity).
+- **error** — a judge call failed, a `code` checker raised, or the judge returned
+  no usable `YES` / `NO` verdict (including ambiguous output mentioning both).
+  Errors count as evaluation failures: the row scores ISR `0.0` rather than
+  silently dropping the constraint.
 
 `get_key_metrics` surfaces `isr`, `csr`, and `mean_reward` as the report
 headline.

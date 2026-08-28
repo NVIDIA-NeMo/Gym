@@ -16,6 +16,7 @@ import asyncio
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from pytest import approx
 
 from nemo_gym.config_types import ModelServerRef
@@ -34,6 +35,7 @@ from resources_servers.agentif.app import (
     _coerce_text,
     _format_judge_prompt,
     _normalize_checker_source,
+    _parse_yes_no,
     _response_text,
     _run_code_check,
     _strip_think,
@@ -182,12 +184,14 @@ def test_verify_llm_no_reward_0() -> None:
     assert resp.n_false == 1 and resp.isr_pass == 0 and resp.isr_counted == 1
 
 
-def test_verify_llm_judge_failure_null() -> None:
+def test_verify_llm_judge_failure_is_evaluation_error() -> None:
     server = _server()
     server._call_judge = AsyncMock(return_value=None)
     body = _request([_constraint([{"type": "llm", "exec": "Judge {response}"}])], text="hi")
     resp = _verify(server, body)
-    assert resp.n_null == 1 and resp.isr_counted == 0 and resp.reward == approx(0.0)
+    assert resp.n_error == 1 and resp.n_skipped == 0 and resp.n_null == 1
+    # A judge failure is an evaluation failure for the row, not a silent drop.
+    assert resp.isr_counted == 1 and resp.isr_pass == 0 and resp.reward == approx(0.0)
 
 
 # ── verify: code constraints ──────────────────────────────────────────────
@@ -201,12 +205,12 @@ def test_verify_code_pass() -> None:
     assert resp.n_true == 1 and resp.reward == approx(1.0)
 
 
-def test_verify_code_error_null() -> None:
+def test_verify_code_error_is_evaluation_error() -> None:
     server = _server()
     src = "def check_following(response):\n    raise RuntimeError('x')"
     body = _request([_constraint([{"type": "code", "exec": src}])], text="hello")
     resp = _verify(server, body)
-    assert resp.n_null == 1 and resp.isr_counted == 0
+    assert resp.n_error == 1 and resp.isr_counted == 1 and resp.isr_pass == 0
 
 
 # ── verify: conditional check ─────────────────────────────────────────────
@@ -224,7 +228,7 @@ def test_verify_conditional_check_yes_continues() -> None:
     assert resp.n_true == 1 and resp.reward == approx(1.0)
 
 
-def test_verify_conditional_check_not_yes_null() -> None:
+def test_verify_conditional_check_no_is_skipped() -> None:
     server = _server()
     server._call_judge = AsyncMock(return_value="NO does not apply")
     body = _request(
@@ -232,7 +236,49 @@ def test_verify_conditional_check_not_yes_null() -> None:
         text="hello",
     )
     resp = _verify(server, body)
-    assert resp.n_null == 1 and resp.isr_counted == 0
+    # Precondition did not fire: the constraint is skipped, not an evaluation failure.
+    assert resp.n_skipped == 1 and resp.n_error == 0 and resp.isr_counted == 0
+
+
+def test_verify_conditional_check_judge_failure_is_error() -> None:
+    server = _server()
+    server._call_judge = AsyncMock(return_value=None)
+    body = _request(
+        [_constraint([{"type": "llm_conditional_check", "exec": "cond"}, {"type": "code", "exec": "x"}])],
+        text="hello",
+    )
+    resp = _verify(server, body)
+    assert resp.n_error == 1 and resp.n_skipped == 0 and resp.isr_counted == 1 and resp.isr_pass == 0
+
+
+def test_verify_pass_plus_error_does_not_score_isr_1() -> None:
+    server = _server()
+    server._call_judge = AsyncMock(side_effect=["YES", None])
+    body = _request(
+        [
+            _constraint([{"type": "llm", "exec": "a {response}"}]),
+            _constraint([{"type": "llm", "exec": "b {response}"}]),
+        ],
+        text="x",
+    )
+    resp = _verify(server, body)
+    assert resp.n_true == 1 and resp.n_error == 1
+    assert resp.isr_pass == 0 and resp.isr_counted == 1 and resp.reward == approx(0.0)
+
+
+def test_verify_pass_plus_skipped_still_scores_isr_1() -> None:
+    server = _server()
+    server._call_judge = AsyncMock(side_effect=["YES", "NO"])
+    body = _request(
+        [
+            _constraint([{"type": "llm", "exec": "a {response}"}]),
+            _constraint([{"type": "llm_conditional_check", "exec": "cond"}, {"type": "code", "exec": "x"}]),
+        ],
+        text="x",
+    )
+    resp = _verify(server, body)
+    assert resp.n_true == 1 and resp.n_skipped == 1 and resp.n_error == 0
+    assert resp.isr_pass == 1 and resp.reward == approx(1.0)
 
 
 # ── verify: misc ──────────────────────────────────────────────────────────
@@ -274,7 +320,7 @@ def test_verify_multi_constraint_partial() -> None:
     assert resp.isr_pass == 0 and resp.isr_counted == 1
 
 
-def test_verify_all_null_isr_not_counted() -> None:
+def test_verify_all_errors_count_as_row_failure() -> None:
     server = _server()
     server._call_judge = AsyncMock(return_value=None)
     body = _request(
@@ -285,7 +331,7 @@ def test_verify_all_null_isr_not_counted() -> None:
         text="x",
     )
     resp = _verify(server, body)
-    assert resp.n_null == 2 and resp.isr_counted == 0 and resp.reward == approx(0.0)
+    assert resp.n_error == 2 and resp.isr_counted == 1 and resp.reward == approx(0.0)
 
 
 def test_verify_llm_then_code_pipeline() -> None:
@@ -310,6 +356,8 @@ def _row(**kw: Any) -> Dict[str, Any]:
         "n_true": 0,
         "n_false": 0,
         "n_null": 0,
+        "n_skipped": 0,
+        "n_error": 0,
         "isr_pass": 0,
         "isr_counted": 0,
         "by_dimension": {},
@@ -410,12 +458,12 @@ def test_run_code_check_with_import() -> None:
 # ── verify: non yes/no string → null ──────────────────────────────────────
 
 
-def test_verify_string_not_yes_no_scores_null() -> None:
+def test_verify_string_not_yes_no_scores_error() -> None:
     server = _server()
     server._call_judge = AsyncMock(return_value="maybe")
     body = _request([_constraint([{"type": "llm", "exec": "Judge {response}"}])], text="hi")
     resp = _verify(server, body)
-    assert resp.n_null == 1 and resp.isr_counted == 0
+    assert resp.n_error == 1 and resp.isr_counted == 1 and resp.isr_pass == 0
 
 
 # ── config: nullcontext when concurrency disabled ─────────────────────────
@@ -507,10 +555,10 @@ def test_verify_empty_response_reward_zero() -> None:
 # ── verify: code failure then llm → terminal None (upstream parity) ───────
 
 
-def test_verify_code_fail_then_llm_scores_null() -> None:
+def test_verify_code_fail_then_llm_scores_error() -> None:
     server = _server()
     # If the judge were (wrongly) called on the failed step, it would return YES
-    # and the constraint would score True. Parity requires None instead.
+    # and the constraint would score True. Parity requires an evaluation error instead.
     judge = AsyncMock(return_value="YES")
     server._call_judge = judge
     bad_code = "def check_following(response):\n    raise ValueError('x')"
@@ -519,5 +567,52 @@ def test_verify_code_fail_then_llm_scores_null() -> None:
         text="hello",
     )
     resp = _verify(server, body)
-    assert resp.n_null == 1 and resp.isr_counted == 0
+    assert resp.n_error == 1 and resp.isr_counted == 1 and resp.isr_pass == 0
     judge.assert_not_called()
+
+
+# ── judge verdict parsing ─────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("YES", True),
+        ("NO", False),
+        ("  yes  ", None),
+        ("The answer is YES.", True),
+        ("Explanation: it fails.\nNO", False),
+        # Both verdicts in scope: ambiguous, never a silent pass.
+        ("NO, the response is not YES-formatted", None),
+        ("YES or NO?", None),
+        # The final verdict line wins over reasoning that mentions the other label.
+        ("It could be NO if the list were empty.\nYES", True),
+        ("Maybe YES at first glance.\nNO", False),
+        # Substrings must not match.
+        ("NOTHING matches", None),
+        ("YESTERDAY the model replied", None),
+        ("", None),
+        (None, None),
+        (True, None),
+    ],
+)
+def test_parse_yes_no(text, expected) -> None:
+    assert _parse_yes_no(text) is expected
+
+
+def test_verify_ambiguous_judge_verdict_is_error() -> None:
+    server = _server()
+    server._call_judge = AsyncMock(return_value="NO, the response does not end with YES")
+    body = _request([_constraint([{"type": "llm", "exec": "Judge {response}"}])], text="hello")
+    resp = _verify(server, body)
+    assert resp.n_true == 0 and resp.n_error == 1
+    assert resp.reward == approx(0.0)
+
+
+def test_compute_metrics_reports_skipped_and_error_totals() -> None:
+    server = _server()
+    rows = [_row(n_skipped=2, n_error=1, n_null=3, isr_counted=1)]
+    metrics = server.compute_metrics([rows])
+    assert metrics["n_skipped_total"] == 2
+    assert metrics["n_error_total"] == 1
+    assert metrics["n_null_total"] == 3

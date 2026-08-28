@@ -22,7 +22,9 @@ exec a dataset-provided ``check_following(response)`` in a fresh globals dict.
 Two headline metrics follow upstream ``1.evaluation_api.py``:
 
 * **ISR** (Instruction Success Rate) — 1.0 when every scored constraint in the
-  row passed, else 0.0; returned by ``verify()`` as the per-row reward.
+  row passed and none errored, else 0.0; returned by ``verify()`` as the per-row
+  reward. Judge / checker failures count as evaluation failures for the row;
+  constraints whose conditional precondition did not fire are skipped instead.
 * **CSR** (Constraint Success Rate) — fraction of scored constraints that
   passed; reported corpus-wide by ``compute_metrics``.
 
@@ -67,6 +69,13 @@ _DIM_MAP = {"unconditional": "vanilla", "conditional": "condition", "example_dri
 _TYPE_MAP = {"formatting": "formatting", "semantic": "semantic", "resource": "tool"}
 
 _UNSET = object()
+# Constraint outcomes that are not True / False: a conditional constraint whose
+# precondition did not fire (skipped, upstream parity) versus a judge / checker
+# that failed to produce a usable verdict (evaluation error, counted against the row).
+_SKIPPED = object()
+_ERROR = object()
+
+_VERDICT_RE = re.compile(r"\b(YES|NO)\b")
 
 
 def _strip_think(text: str) -> str:
@@ -123,6 +132,28 @@ def _normalize_checker_source(function: str) -> str:
         count=1,
         flags=re.MULTILINE,
     )
+
+
+def _parse_yes_no(text: Any) -> Optional[bool]:
+    """Parse a judge verdict.
+
+    Returns ``True`` / ``False`` for a decisive YES / NO, and ``None`` when the
+    verdict is missing or ambiguous. The final non-empty line is inspected first
+    (judges are prompted to end with the verdict) before falling back to the whole
+    text, so trailing restatements win over reasoning above them. A scope that
+    mentions both YES and NO (e.g. ``"NO, the response is not YES-formatted"``) is
+    ambiguous rather than a pass.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return None
+    lines = [ln for ln in text.strip().splitlines() if ln.strip()]
+    for scope in ([lines[-1]] if lines else []) + [text]:
+        verdicts = {m.group(1) for m in _VERDICT_RE.finditer(scope)}
+        if verdicts == {"YES"}:
+            return True
+        if verdicts == {"NO"}:
+            return False
+    return None
 
 
 def _format_judge_prompt(prompt_template: str, student_text: str) -> str:
@@ -193,6 +224,8 @@ class AgentIFVerifyResponse(BaseVerifyResponse):
     n_true: int = 0
     n_false: int = 0
     n_null: int = 0
+    n_skipped: int = 0
+    n_error: int = 0
     isr_pass: int = 0
     isr_counted: int = 0
     by_dimension: Dict[str, Dict[str, int]] = {}
@@ -233,20 +266,28 @@ class AgentIFResourcesServer(SimpleResourcesServer):
             return None
 
     async def _score_constraint(self, constraint: Dict[str, Any], response: str) -> Any:
-        """Run one constraint's checker pipeline to a True / False / None verdict."""
+        """Run one constraint's checker pipeline.
+
+        Returns ``True`` / ``False`` for a scored constraint, ``_SKIPPED`` when a
+        conditional precondition did not fire (upstream parity: the constraint does
+        not apply), or ``_ERROR`` when a judge call or code checker failed or the
+        judge verdict was unusable.
+        """
         working: Any = response
         score: Any = _UNSET
         for ev in constraint.get("evaluation", []):
             etype = ev.get("type")
             if working is None and etype in ("llm", "llm_conditional_check"):
-                # Preceding code check failed; propagate None without calling the judge (upstream parity).
-                score = None
+                # Preceding code check failed; propagate the error without calling the judge.
+                score = _ERROR
                 break
             if etype == "llm_conditional_check":
-                cond = await self._call_judge(_format_judge_prompt(ev.get("exec", ""), working or ""))
-                if cond and "YES" in cond:
+                cond_text = await self._call_judge(_format_judge_prompt(ev.get("exec", ""), working or ""))
+                cond = _parse_yes_no(cond_text)
+                if cond is True:
                     continue
-                score = None
+                # NO → the constraint does not apply; no verdict → the gate itself failed.
+                score = _SKIPPED if cond is False else _ERROR
                 break
             elif etype == "llm":
                 judge_text = await self._call_judge(_format_judge_prompt(ev.get("exec", ""), working or ""))
@@ -263,14 +304,12 @@ class AgentIFResourcesServer(SimpleResourcesServer):
 
         if score is _UNSET:
             if isinstance(working, str):
-                if "YES" in working:
-                    score = True
-                elif "NO" in working:
-                    score = False
-                else:
-                    score = None
+                verdict = _parse_yes_no(working)
+                score = _ERROR if verdict is None else verdict
+            elif working is None:
+                score = _ERROR
             else:
-                score = working
+                score = bool(working)
         return score
 
     async def verify(self, body: AgentIFVerifyRequest) -> AgentIFVerifyResponse:
@@ -278,14 +317,16 @@ class AgentIFResourcesServer(SimpleResourcesServer):
         constraints = meta.get("constraints") or []
         response = _strip_think(_response_text(body.response))
 
-        n_true = n_false = n_null = 0
+        n_true = n_false = n_skipped = n_error = 0
         by_dimension: Dict[str, Dict[str, int]] = {}
         by_type: Dict[str, Dict[str, int]] = {}
 
         for constraint in constraints:
             score = await self._score_constraint(constraint, response)
-            if score is None:
-                n_null += 1
+            if score is _SKIPPED:
+                n_skipped += 1
+            elif score is _ERROR:
+                n_error += 1
             elif score is True:
                 n_true += 1
                 _bump_breakdowns(constraint, True, by_dimension, by_type)
@@ -295,15 +336,20 @@ class AgentIFResourcesServer(SimpleResourcesServer):
 
         n_scored = n_true + n_false
         csr = n_true / n_scored if n_scored else 0.0
-        isr_counted = 1 if n_scored else 0
-        isr_pass = 1 if (n_scored and n_false == 0) else 0
+        # A judge / checker failure is an evaluation failure for the row, not a silent
+        # drop: a row with one passing constraint and one erroring constraint must not
+        # score ISR 1.0. Constraints skipped by an unmet precondition stay excluded.
+        isr_counted = 1 if (n_scored or n_error) else 0
+        isr_pass = 1 if (n_scored and n_false == 0 and n_error == 0) else 0
 
         LOG.info(
-            "agentif verify query_id=%s isr=%d csr=%.3f n_scored=%d",
+            "agentif verify query_id=%s isr=%d csr=%.3f n_scored=%d n_error=%d n_skipped=%d",
             meta.get("query_id"),
             isr_pass,
             csr,
             n_scored,
+            n_error,
+            n_skipped,
         )
         return AgentIFVerifyResponse(
             **body.model_dump(),
@@ -311,7 +357,9 @@ class AgentIFResourcesServer(SimpleResourcesServer):
             reward=float(isr_pass),
             n_true=n_true,
             n_false=n_false,
-            n_null=n_null,
+            n_null=n_skipped + n_error,
+            n_skipped=n_skipped,
+            n_error=n_error,
             isr_pass=isr_pass,
             isr_counted=isr_counted,
             by_dimension=by_dimension,
@@ -354,6 +402,8 @@ class AgentIFResourcesServer(SimpleResourcesServer):
             metrics["mean_reward"] = sum(rewards) / len(rewards)
         metrics["count"] = len(rows)
         metrics["n_null_total"] = sum(int(r.get("n_null", 0)) for r in rows)
+        metrics["n_skipped_total"] = sum(int(r.get("n_skipped", 0)) for r in rows)
+        metrics["n_error_total"] = sum(int(r.get("n_error", 0)) for r in rows)
         return metrics
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
