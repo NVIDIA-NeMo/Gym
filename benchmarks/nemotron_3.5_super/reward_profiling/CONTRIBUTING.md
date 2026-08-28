@@ -1,16 +1,17 @@
 # How to Contribute an environment / dataset.
 
 ## Index
-1. Creating a container.
-2. Creating a single manifest file.
-    a. Non-judge environments.
-    b. Judge environments.
-    c. Sandbox environments.
-3. Running a single manifest job.
-    a. Non-judge environments.
-    b. Judge environments.
-    c. Sandbox environments.
-4. Adding a manifest entry into manifests/nemotron_3_5_super.yaml
+0. [Files you touch](#files-you-touch) / [What your data rows need](#what-your-data-rows-need)
+1. [Creating a container.](#01---creating-a-container)
+2. [Creating a single manifest file.](#02---creating-a-single-manifest-file)
+    - a. [Non-judge environments.](#02a---non-judge-environments)
+    - b. [Judge environments.](#02b---judge-environments)
+    - c. [Sandbox environments.](#02c---sandbox-environments)
+3. [Running a single manifest job.](#03---running-a-single-manifest-job)
+    - a. [Non-judge environments.](#03a---non-judge-environments)
+    - b. [Judge environments.](#03b---judge-environments)
+    - c. [Sandbox environments.](#03c---sandbox-environments)
+4. [Adding a manifest entry into manifests/nemotron_3_5_super.yaml](#04---adding-a-manifest-entry-into-manifestsnemotron35superyaml)
 
 Contribute your environment as a one-entry manifest first, prove it runs, then add it to the shared
 manifest. A one-entry manifest fails in seconds; the same mistake in the shared one costs a full
