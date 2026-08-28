@@ -33,7 +33,7 @@ AGENT_REF_KEY = "agent_ref"
 DEFAULT_SAMPLE_ROWS = 1000
 
 
-class SweepValidationError(Exception):
+class SweepValidationError(ValueError):
     """Raised when a manifest is internally inconsistent or disagrees with its data."""
 
 
