@@ -872,8 +872,6 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # @bxyu-nvidia: "sandbox_handle" comes from resources_servers/swebench/app.py
         # Once we graduate to use the sandbox server, this will be in a generic seed_session type that can be model validated.
         seed_session_result = await seed_session_response.json()
-        provider_sandbox_id = seed_session_result.get("sandbox_handle")
-        provider_sandbox_id = provider_sandbox_id if isinstance(provider_sandbox_id, str) else None
         sandbox, pty_session = await self._start_sandbox(
             sandbox_id=seed_session_result.get("sandbox_handle"),
             pty_session_id=seed_session_result.get("pty_session_id"),

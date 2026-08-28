@@ -44,6 +44,7 @@ class TerminalBench21ResourcesServerConfig(BaseResourcesServerConfig):
 
 class TerminalBench21SeedSessionResponse(BaseSeedSessionResponse):
     sandbox_handle: str  # @bxyu-nvidia: Just a plain string URI for now for OpenSandbox backend.
+    pty_session_id: str
 
 
 class TerminalBench21SeedSessionRequest(BaseModel):
@@ -179,7 +180,9 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         eval_sandbox, pty_session = await self._create_sandbox(body)
         self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = eval_sandbox, pty_session
 
-        return TerminalBench21SeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)
+        return TerminalBench21SeedSessionResponse(
+            sandbox_handle=eval_sandbox._handle.sandbox_id, pty_session_id=pty_session.session_id
+        )
 
     @contextmanager
     def _patch_golden_patch_solve_sh(self, task_name: str, local_fpath: Path):
