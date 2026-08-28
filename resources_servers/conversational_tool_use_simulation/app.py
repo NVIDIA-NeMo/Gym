@@ -42,7 +42,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, raise_for_status, rollout_path_prefix
-from resources_servers.conversational_tool_use_simulation.task_data import TaskData
 
 
 TRAJECTORY_COMPLETE_INDICATOR = "###STOP###"
@@ -426,7 +425,9 @@ class DiscardSessionResponse(BaseModel):
     discarded: bool
 
 
-class ConversationalToolUseVerifyRequest(TaskData, BaseVerifyRequest):
+class ConversationalToolUseVerifyRequest(BaseVerifyRequest):
+    # Not inheriting TaskData: this stateful server consumes task fields at seed_session, and
+    # verify() reads none of them, so the verify wire must not require row fields.
     model_config = ConfigDict(extra="allow")
 
 
