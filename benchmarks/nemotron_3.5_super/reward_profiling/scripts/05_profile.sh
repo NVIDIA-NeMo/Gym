@@ -81,8 +81,9 @@ PY_ENVVARS
     if [[ -n "$_missing" ]]; then
         echo "ERROR: $ENV_YAML interpolates environment variables that are not exported:" >&2
         for _v in $_missing; do echo "         $_v" >&2; done
-        echo "       Export them first. 'export VAR=...' in .bashrc only reaches a login shell," >&2
-        echo "       so run this under 'bash -lc' or export them in the current one." >&2
+        echo "       'export VAR=...' in .bashrc only reaches a login shell, so either export" >&2
+        echo "       them here, or re-run this under one:" >&2
+        echo "         bash -lc \"SWEEP_DIR=$SWEEP_DIR bash $0\"" >&2
         exit 2
     fi
 fi

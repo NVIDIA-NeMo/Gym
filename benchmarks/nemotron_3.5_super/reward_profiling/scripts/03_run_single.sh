@@ -83,6 +83,7 @@ for _required in MODEL CONTAINER; do
     fi
 done
 
+# ---- job shape -------------------------------------------------------------------
 # One prefill node feeds several decode nodes; decode is the throughput-limiting side. P4D12 is the
 # largest configuration tested, and 16 nodes still fits inside one 18-node NVL72 rack, which
 # --segment requires.
@@ -127,6 +128,7 @@ MAX_NUM_SEQS_PER_DECODE_ENGINE=${MAX_NUM_SEQS_PER_DECODE_ENGINE:-512}
 # the gym command line. Each is unset by default, so nothing here overrides what the manifest
 # declared unless you ask for it; if the manifest is silent too, Gym's own default applies.
 #
+# ---- Gym overrides: unset means the manifest wins ---------------------------------
 # A ++ override beats a config file, so passing one unconditionally -- which this used to do --
 # silently ignores the manifest. Set a variable and it wins; leave it and the manifest wins.
 GLOBAL_AIOHTTP_CONNECTOR_LIMIT_PER_HOST=${GLOBAL_AIOHTTP_CONNECTOR_LIMIT_PER_HOST:-}
@@ -155,6 +157,7 @@ ENV_OVERRIDES=""
 ENV_OVERRIDES+=$(_override port_range_low "$ENV_PORT_RANGE_LOW")
 ENV_OVERRIDES+=$(_override port_range_high "$ENV_PORT_RANGE_HIGH")
 
+# ---- manifest-declared ++ overrides -----------------------------------------------
 # Settings the manifest declared for this command, rendered as ++ overrides. An env var of the same
 # name in upper case wins, so precedence is manifest -> env var -> anything you add on the command
 # line. num_samples_in_parallel is excluded: the launcher computes it from the job's shape below.
@@ -223,6 +226,7 @@ ENV_START_ATTEMPTS=${ENV_START_ATTEMPTS:-4}
 # would multiply them again.
 NUM_REPEATS=${NUM_REPEATS:-1}
 
+# ---- submit-time guards -----------------------------------------------------------
 # env.yaml interpolates ${oc.env:VAR} for judge keys and similar. An unset one is not caught until
 # gym env start parses the config inside the container, which costs a full spin-up and every retry
 # before failing -- jobs 6606132/6606139 burned 4 attempts each on a missing NVI_KEY_EVALUATOR.
