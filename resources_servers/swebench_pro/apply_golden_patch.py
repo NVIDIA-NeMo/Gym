@@ -54,6 +54,10 @@ if __name__ == "__main__":
     config = get_global_config_dict()
     with open(config["benchmark_jsonl"], encoding="utf-8") as benchmark:
         rows = [json.loads(line) for line in benchmark]
+    if instance_id_prefixes := config.get("instance_id_prefixes"):
+        rows = [row for row in rows if any(row["instance_id"].startswith(prefix) for prefix in instance_id_prefixes)]
+        if not rows:
+            raise ValueError(f"No rows matched instance_id_prefixes={instance_id_prefixes}")
     if limit := config.get("limit"):
         rows = rows[: int(limit)]
     for row in rows:

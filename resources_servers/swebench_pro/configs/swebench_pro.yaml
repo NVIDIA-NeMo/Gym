@@ -11,6 +11,7 @@ swebench_pro_resources_server:
       apply_anti_cheating: true
       is_verifying_golden_patch: false
       prefetch_go_modules: true
+      enable_opensandbox_runtime_parity: true
 
       sandbox_provider: sandbox
       sandbox_config:
@@ -21,6 +22,9 @@ swebench_pro_resources_server:
           memory_mib: 30720
           disk_gib: 30
         provider_options:
+          platform:
+            os: linux
+            arch: amd64
           resource_requests:
             cpu: 4
             memory_mib: 30720
@@ -39,6 +43,7 @@ swebench_pro_example_resources_server:
       image_repository: docker.io/jefzda/sweap-images
       is_verifying_golden_patch: true
       prefetch_go_modules: true
+      enable_opensandbox_runtime_parity: true
 
       sandbox_provider: sandbox
       sandbox_config:
@@ -49,6 +54,9 @@ swebench_pro_example_resources_server:
           memory_mib: 30720
           disk_gib: 30
         provider_options:
+          platform:
+            os: linux
+            arch: amd64
           resource_requests:
             cpu: 4
             memory_mib: 30720
