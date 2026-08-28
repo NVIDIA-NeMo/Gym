@@ -16,7 +16,7 @@ import asyncio
 import glob as glob_module
 import json
 import os
-import time
+import time as time_module
 import warnings
 from asyncio import Future, Semaphore
 from collections import Counter
@@ -927,7 +927,7 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         tracker = latency_tracker if latency_tracker is not None else DispatchLatencyTracker()
         # `is not None`, not truthiness: 0.0 is a real budget that is already
         # spent, and must drain rather than disable the check.
-        deadline = (time.monotonic() + dispatch_budget_s) if dispatch_budget_s is not None else None
+        deadline = (time_module.monotonic() + dispatch_budget_s) if dispatch_budget_s is not None else None
 
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:
@@ -935,7 +935,7 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
                 # real remaining time at the moment this task would start rather
                 # than at queueing time.
                 if deadline is not None:
-                    remaining = deadline - time.monotonic()
+                    remaining = deadline - time_module.monotonic()
                     margin = tracker.drain_margin(drain_margin_s)
                     if remaining <= 0 or (margin is not None and remaining < margin):
                         tracker.record_drained()
@@ -953,7 +953,7 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
                             ),
                         }
 
-                started = time.monotonic()
+                started = time_module.monotonic()
                 res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
                 try:
                     await raise_for_status(res)
@@ -967,7 +967,7 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
                         )
                     raise
                 result = await get_response_json(res)
-                tracker.record(time.monotonic() - started)
+                tracker.record(time_module.monotonic() - started)
                 return row, result
 
         # Materialise the tasks in input order. `asyncio.as_completed` builds its
