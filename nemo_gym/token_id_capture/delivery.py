@@ -49,6 +49,11 @@ TOKEN_CAPTURE_KEY = "_ng_token_capture"
 MASK_SAMPLE_KEY = "mask_sample"
 _REDUNDANT_CAPTURE_KEY = "_redundant_capture"
 
+# A caller that knows the kept model call names it here on the result.
+# A gate seal or an agent-declared terminal id uses this key.
+# It joins with the response-id and content witnesses for terminal attribution.
+TERMINAL_CALL_KEY = "_ng_terminal_model_call_id"
+
 
 def rollout_carries_token_ids(result: dict) -> bool:
     """Whether this rollout already holds what training needs.
@@ -144,8 +149,17 @@ async def finalize_rollout_token_capture(result: dict, source: TokenSource | Non
         )
 
     response = result.get("response") if isinstance(result.get("response"), dict) else {}
+    explicit_terminal = result.get(TERMINAL_CALL_KEY)
     try:
-        built = await trajectories_from_source(rollout_id, source, model=str(response.get("model") or ""))
+        # The result's response is what the verifier scored.
+        # Terminal attribution joins it to one captured call.
+        built = await trajectories_from_source(
+            rollout_id,
+            source,
+            model=str(response.get("model") or ""),
+            verified_response=response or None,
+            explicit_terminal_call_id=str(explicit_terminal) if explicit_terminal else None,
+        )
     except Exception as error:
         # A transport failure may be unrelated to this rollout.
         # Mask this rollout instead of failing the entire batch.
