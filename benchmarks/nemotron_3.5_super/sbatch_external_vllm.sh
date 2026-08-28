@@ -274,7 +274,7 @@ main_job_id=$(
         --comment="$SLURM_COMMENT" \
         --exclusive \
         --segment=$NUM_NODES \
-        --wrap 'exec bash -lc "$batch_command"'
+        --wrap 'exec bash -c "$batch_command"'
 )
 main_job_id=${main_job_id%%;*}
 
