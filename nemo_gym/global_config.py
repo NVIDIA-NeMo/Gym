@@ -649,7 +649,17 @@ Duplicate config paths:
             return None
         implementation = next(iter(servers))
         declared = servers[implementation].get(ALLOWED_AGENTS_KEY_NAME)
-        return [str(name) for name in declared] if declared else None
+        if not declared:
+            return None
+        if isinstance(declared, str):
+            return [declared]
+        if not isinstance(declared, ListConfig):
+            raise ConfigError(
+                f"'{instance_name}.{RESOURCES_SERVER_TYPE_KEY_NAME}.{implementation}."
+                f"{ALLOWED_AGENTS_KEY_NAME}' must be a list of agent types, got {type(declared).__name__}. "
+                f"For example: {ALLOWED_AGENTS_KEY_NAME}: [{target.agent_type}]"
+            )
+        return [str(name) for name in declared]
 
     def _raise_on_unsupported_pairing(
         self, global_config_dict: DictConfig, source: _AgentInstance, targets: List[_AgentInstance]

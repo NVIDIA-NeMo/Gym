@@ -2013,6 +2013,38 @@ class TestComposeUnboundAgent:
 
         assert list(config["gpqa_mcqa_simple_agent"]["responses_api_agents"]) == ["hermes_agent"]
 
+    def _set_allowed_agents(self, declared) -> DictConfig:
+        """The standard config with `allowed_agents` set to an arbitrary value, not just a list."""
+        config = self._config()
+        config["gpqa_mcqa_resources_server"]["resources_servers"]["mcqa"]["allowed_agents"] = declared
+        return config
+
+    def test_a_single_agent_may_be_declared_as_a_bare_string(self) -> None:
+        config = self._set_allowed_agents("hermes_agent")
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert list(config["gpqa_mcqa_simple_agent"]["responses_api_agents"]) == ["hermes_agent"]
+
+    def test_a_bare_string_still_rejects_a_different_agent(self) -> None:
+        config = self._set_allowed_agents("scicode_agent")
+
+        with raises(UnsupportedAgentPairingError) as error:
+            GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert "accepts scicode_agent" in str(error.value)
+
+    @mark.parametrize("declared", [5, {"a": 1}], ids=["scalar", "mapping"])
+    def test_a_value_that_is_neither_string_nor_list_is_reported(self, declared) -> None:
+        config = self._set_allowed_agents(declared)
+
+        with raises(ConfigError) as error:
+            GlobalConfigDictParser().compose_unbound_agent(config)
+
+        message = str(error.value)
+        assert "gpqa_mcqa_resources_server.resources_servers.mcqa.allowed_agents" in message
+        assert "must be a list of agent types" in message
+
     def test_swap_rejected_when_the_selected_agent_is_not_declared(self) -> None:
         config = self._guarded_config("scicode_agent")
 
