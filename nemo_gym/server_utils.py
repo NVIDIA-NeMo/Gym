@@ -75,6 +75,8 @@ from nemo_gym.global_config import (
 )
 from nemo_gym.profiling import Profiler
 from nemo_gym.rollout_correlation import current_rollout_id, maybe_rollout_id_from_run_body
+from nemo_gym.telemetry._fallbacks import is_span_group_enabled, safe_set_span_attributes
+from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
 _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
@@ -221,12 +223,93 @@ async def request(
     _max_connection_retries: Optional[int] = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
+    """Make an outbound HTTP call through Gym's shared aiohttp client.
+
+    This is the only place Gym talks to another server, so it is also the only place
+    trace context has to be injected: every agent -> model and agent -> resources hop goes
+    through here. `CLAUDE.md` bans httpx precisely to keep it that way.
+    """
     # Faster JSON dumps than the default aiohttp json
     if kwargs.get("json"):
         kwargs["data"] = orjson.dumps(kwargs.pop("json"))
         kwargs.setdefault("headers", dict())
         kwargs["headers"]["Content-Type"] = "application/json"
 
+    # Gate first: a disabled site costs one frozenset lookup and nothing else. Gym runs at
+    # 16k+ concurrency, so this is a hot path (kb/knowledge/conventions/hot-path-overhead.md).
+    if is_span_group_enabled(GymSpanGroup.HTTP_CLIENT):
+        return await _traced_request(
+            method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+        )
+    return await _request_with_retries(
+        method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+    )
+
+
+async def _traced_request(
+    method: str,
+    url: str,
+    _internal: bool = False,
+    _max_connection_retries: Optional[int] = None,
+    **kwargs: Unpack[_RequestOptions],
+) -> ClientResponse:  # pragma: no cover
+    """`_request_with_retries` wrapped in a CLIENT span, with `traceparent` injected.
+
+    Uses `nemo_gym.telemetry.spans.client_span` rather than nemo-lens's `managed_span`
+    because the latter cannot set `SpanKind` — see that module for why an INTERNAL span
+    is wrong on a cross-service hop.
+
+    Injection happens inside the span so the header carries *this* span as the parent —
+    the receiving server's FastAPI instrumentation extracts it and its SERVER span becomes
+    our child. That edge is what makes one rollout a single trace across three processes.
+
+    Retries reuse the same span rather than starting one per attempt: the caller asked for
+    one logical request, and the retry count is recorded as an attribute instead.
+    """
+    from nemo_gym.telemetry.contrib import inject_trace_context
+    from nemo_gym.telemetry.spans import client_span
+
+    with client_span(f"HTTP {method.upper()}") as span:
+        headers = kwargs.get("headers")
+        # aiohttp accepts several mapping types here; normalise to a dict we can inject into
+        # without mutating a caller's object.
+        headers = dict(headers) if headers else {}
+        inject_trace_context(headers)
+        kwargs["headers"] = headers
+
+        if span is not None:
+            attributes = {
+                "http.request.method": method.upper(),
+                "url.full": _redacted_url(url),
+                "nemo.gym.rollout.id": current_rollout_id(),
+            }
+            safe_set_span_attributes(span, attributes)
+
+        response = await _request_with_retries(
+            method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+        )
+
+        if span is not None:
+            safe_set_span_attributes(span, {"http.response.status_code": response.status})
+        return response
+
+
+def _redacted_url(url: str) -> str:
+    """Strip the query string from a URL before it becomes a span attribute.
+
+    Query strings in Gym carry API keys and, on rollout-prefixed routes, task content.
+    The path is the useful part for a trace; the query is a leak waiting to happen.
+    """
+    return url.split("?", 1)[0]
+
+
+async def _request_with_retries(
+    method: str,
+    url: str,
+    _internal: bool = False,
+    _max_connection_retries: Optional[int] = None,
+    **kwargs: Unpack[_RequestOptions],
+) -> ClientResponse:  # pragma: no cover
     client = get_global_aiohttp_client()
     num_tries = 1
     retries = 0
@@ -600,12 +683,68 @@ def set_nemo_gym_fastapi_num_workers(num_workers: int) -> None:  # pragma: no co
     environ[NEMO_GYM_FASTAPI_NUM_WORKERS] = str(num_workers)
 
 
+#: Base class name -> the Gym server-type directory it lives in. Matched against the MRO
+#: rather than imported, because base_resources_server and friends import *this* module.
+_TELEMETRY_SERVER_TYPE_BY_BASE = {
+    "SimpleResourcesServer": "resources_servers",
+    "SimpleResponsesAPIAgent": "responses_api_agents",
+    "SimpleResponsesAPIModel": "responses_api_models",
+}
+
+
+def _telemetry_server_type(server_cls: Type) -> Optional[str]:
+    """Return the Gym server-type name for *server_cls*, or None if it is not one."""
+    for base in server_cls.__mro__:
+        server_type = _TELEMETRY_SERVER_TYPE_BY_BASE.get(base.__name__)
+        if server_type is not None:
+            return server_type
+    return None
+
+
 class SimpleServer(BaseServer):
     server_client: ServerClient
 
     @abstractmethod
     def setup_webserver(self) -> FastAPI:
         pass
+
+    def setup_telemetry(self) -> None:
+        """Initialise this process's nemo-lens telemetry. Idempotent, once per process.
+
+        Every Gym server is its own process with its own providers — there is no parent
+        handle to inherit, only the `NEMO_GYM_OTEL_*` environment the orchestrator
+        exported before spawning it. A failure here is logged and swallowed: telemetry
+        must never stop a server from serving.
+        """
+        from nemo_gym.telemetry.setup import init_telemetry
+
+        init_telemetry(
+            server_name=self.config.name,
+            server_type=_telemetry_server_type(type(self)),
+        )
+
+    def instrument_app_for_telemetry(self, app: FastAPI) -> None:
+        """Apply OTel FastAPI auto-instrumentation to *app*, if telemetry is exporting.
+
+        Gives every server the inbound half of context propagation plus dimensioned
+        `http.server.*` metrics, which is why Gym does not use nemo-lens's undimensioned
+        `gym.server.request_duration_ms` (see `nemo_gym/telemetry/metrics.py`).
+
+        A server whose instrumentation could not be applied keeps serving; it just does not
+        extract inbound trace context.
+        """
+        from nemo_gym.telemetry.contrib import instrument_fastapi_app
+        from nemo_gym.telemetry.setup import get_telemetry
+
+        telemetry = get_telemetry()
+        if telemetry is None or not telemetry.is_exporting:
+            return
+        # Gated on the span group like every other site, so `server` actually controls
+        # something. Checked here rather than per request because the instrumentor is
+        # installed once at startup, by which point init_telemetry has resolved the groups.
+        if not is_span_group_enabled(GymSpanGroup.SERVER):
+            return
+        instrument_fastapi_app(app)
 
     def get_session_middleware_key(self) -> str:
         # This method is here to override in case we want to ever use an actual session middleware secret key.
@@ -757,6 +896,13 @@ repr(e): {repr(e)}"""
         if global_config_dict[DRY_RUN_KEY_NAME]:
             return
 
+        # Before setup_webserver so the OTel providers exist by the time the app is
+        # instrumented below: FastAPIInstrumentor captures the tracer provider at
+        # instrument time, and a no-op provider captured here would stay no-op forever.
+        # Once per process — uvicorn's multi-worker path re-enters run_webserver in each
+        # worker via the module import, and init_telemetry is idempotent.
+        server.setup_telemetry()
+
         app = server.setup_webserver()
         # After the app is fully built so subclass routes are present. Only resources servers expose tools over MCP,
         # so gating the lazy import on their config keeps the MCP SDK out of agent/model processes that never need it.
@@ -768,6 +914,11 @@ repr(e): {repr(e)}"""
         server.set_ulimit()
         server.prefix_server_logs()
         server.setup_exception_middleware(app)
+        # Must precede uvicorn.run: Starlette refuses add_middleware once the app has
+        # started. This is the ingress half of cross-process propagation — the instrumentor
+        # extracts an inbound `traceparent` and parents this server's SERVER span to the
+        # caller's CLIENT span.
+        server.instrument_app_for_telemetry(app)
 
         @app.exception_handler(RequestValidationError)
         async def validation_exception_handler(request: Request, exc):
@@ -818,7 +969,15 @@ Full body: {json.dumps(exc.body, indent=4)}
             uvicorn_kwargs["app"] = app
 
         if is_main_fastapi_proc:
-            uvicorn.run(**uvicorn_kwargs)
+            try:
+                uvicorn.run(**uvicorn_kwargs)
+            finally:
+                # BatchSpanProcessor only exports on a timer, so without an explicit flush
+                # the last seconds of a run — including the spans of whatever was in
+                # flight at shutdown — are silently dropped.
+                from nemo_gym.telemetry.setup import shutdown_telemetry
+
+                shutdown_telemetry()
 
         return app
 

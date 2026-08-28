@@ -2009,13 +2009,6 @@ def _resolve_opencode_workspace_path(problem_info: Dict[str, Any]) -> str:
     return "/testbed"
 
 
-def _tool_param_dict(tool: Any) -> Dict[str, Any]:
-    dumped = tool.model_dump()
-    if dumped.get("defer_loading") is None:
-        dumped["defer_loading"] = False
-    return dumped
-
-
 def _extract_instance_dict(problem_info: Dict[str, Any]) -> Dict[str, Any]:
     raw = problem_info.get("instance_dict")
     if isinstance(raw, str):
@@ -3977,7 +3970,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             metadata, response.metadata = response.metadata, None
             responses_create_params = body.responses_create_params.model_dump() | {
                 "input": orjson.loads(metadata["input"]),
-                "tools": [_tool_param_dict(t) for t in response.tools] if response.tools else [],
+                "tools": [t.model_dump() for t in response.tools] if response.tools else [],
             }
             metrics = SWEBenchMetrics.model_validate_json(metadata["metrics"])
             subagent_trajectories = None
