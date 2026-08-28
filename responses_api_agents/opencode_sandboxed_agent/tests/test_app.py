@@ -486,7 +486,7 @@ class TestOpenCodeSandboxedAgent:
         sandbox.stop = AsyncMock(side_effect=RuntimeError("resource server already stopped the sandbox"))
         sandbox.pty = AsyncMock()
         sandbox.pty.exec.return_value = SimpleNamespace(
-            stdout="OpenCode run finished", stderr="", return_code=0, error_type=None
+            stdout="Shell: /bin/bash\nOpenCode run finished", stderr="", return_code=0, error_type=None
         )
         server._start_sandbox = AsyncMock(return_value=(sandbox, AsyncMock()))
         monkeypatch.setattr(
