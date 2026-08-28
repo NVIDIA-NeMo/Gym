@@ -19,6 +19,15 @@ on:
     branches:
       - main
       - "pull-request/[0-9]+"
+  schedule:
+    - cron: "0 */4 * * *"
+  workflow_dispatch:
+    inputs:
+      send_notification:
+        description: Send a Slack notification to the Gym alerts channel on failure
+        required: false
+        default: true
+        type: boolean
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
@@ -48,6 +57,13 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       docs_only: ${{ steps.changes.outputs.docs_only }}
+      # Single source of truth for "is this a periodic/on-demand run" -
+      # referenced by container_build/gpu_e2e_tests/provider_e2e_tests and
+      # Nemo_CICD_Test instead of each re-deriving it. NOT used by
+      # notify-failure, which checks github.event_name directly since it
+      # must still fire even if this job was skipped (e.g. pre-flight
+      # failed) - a skipped job's outputs, including literal ones, are empty.
+      is_nightly: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -71,10 +87,22 @@ jobs:
   container_build:
     name: Build Gym container
     needs: [pre-flight, classify_changes, unit_tests]
-    # Temporarily disabled: the nemo-ci-aws-gpu-x2 self-hosted runner pool is
-    # queuing indefinitely and blocking PRs. Re-enable once the pool backlog
-    # is resolved.
-    if: false
+    # Nightly only: this job runs on the internal nemo-ci-aws-gpu-x2 runner
+    # pool, which is shared with NeMo-RL's H100 CI traffic and was queuing
+    # indefinitely on every PR push. Run it on the nightly schedule, or
+    # on-demand via workflow_dispatch, instead.
+    #
+    # A job's own `if:` replaces (not ANDs with) the implicit success()-of-
+    # needs check, so pre-flight/classify_changes/unit_tests success must be
+    # checked explicitly here - unit_tests may legitimately be "skipped" on a
+    # docs-only latest commit, so that's tolerated too.
+    if: >-
+      ${{
+        needs.classify_changes.outputs.is_nightly == 'true' &&
+        needs.pre-flight.result == 'success' &&
+        needs.classify_changes.result == 'success' &&
+        (needs.unit_tests.result == 'success' || needs.unit_tests.result == 'skipped')
+      }}
     runs-on: ${{ needs.pre-flight.outputs.runner_prefix }}
     environment: ${{ contains(needs.pre-flight.outputs.registry, 'azure') && 'nemo-ci' || '' }}
     outputs:
@@ -133,9 +161,18 @@ jobs:
   gpu_e2e_tests:
     name: ${{ matrix.name }}
     needs: [pre-flight, classify_changes, unit_tests, container_build]
-    # Temporarily disabled: depends on container_build, which is disabled
-    # while the nemo-ci-aws-gpu-x2 runner pool backlog is resolved.
-    if: false
+    # Nightly only, same reasoning as container_build above. Also requires
+    # container_build to have actually succeeded - its `image` output is set
+    # before the "Build and push" step runs, so it can be non-empty even if
+    # the push itself failed.
+    if: >-
+      ${{
+        needs.classify_changes.outputs.is_nightly == 'true' &&
+        needs.pre-flight.result == 'success' &&
+        needs.classify_changes.result == 'success' &&
+        (needs.unit_tests.result == 'success' || needs.unit_tests.result == 'skipped') &&
+        needs.container_build.result == 'success'
+      }}
     strategy:
       fail-fast: false
       matrix:
@@ -175,7 +212,16 @@ jobs:
   provider_e2e_tests:
     name: ${{ matrix.provider }}-e2e
     needs: [classify_changes, unit_tests]
-    if: needs.classify_changes.outputs.docs_only != 'true'
+    # Nightly only: exercises a live external inference provider (Fireworks).
+    # Run nightly, or on-demand via workflow_dispatch, instead of on every PR
+    # push. Only needs [classify_changes, unit_tests] (no pre-flight/
+    # container_build dependency), so only those two are checked here.
+    if: >-
+      ${{
+        needs.classify_changes.outputs.is_nightly == 'true' &&
+        needs.classify_changes.result == 'success' &&
+        (needs.unit_tests.result == 'success' || needs.unit_tests.result == 'skipped')
+      }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -225,6 +271,8 @@ jobs:
       - name: Check test results
         shell: bash -e -u -o pipefail {0}
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          IS_NIGHTLY: ${{ needs.classify_changes.outputs.is_nightly }}
           CLASSIFY_RESULT: ${{ needs.classify_changes.result }}
           DOCS_ONLY: ${{ needs.classify_changes.outputs.docs_only }}
           PREFLIGHT_RESULT: ${{ needs.pre-flight.result }}
@@ -233,13 +281,14 @@ jobs:
           GPU_E2E_TEST_RESULT: ${{ needs.gpu_e2e_tests.result }}
           PROVIDER_E2E_TEST_RESULT: ${{ needs.provider_e2e_tests.result }}
         run: |
+          echo "Event: $EVENT_NAME"
           echo "Pre-flight: $PREFLIGHT_RESULT"
           echo "Classify changes: $CLASSIFY_RESULT"
           echo "Docs only: $DOCS_ONLY"
           echo "Unit tests: $UNIT_TEST_RESULT"
-          echo "Container build: $CONTAINER_BUILD_RESULT (not gating - temporarily disabled)"
-          echo "GPU E2E tests: $GPU_E2E_TEST_RESULT (not gating - temporarily disabled)"
-          echo "Provider E2E tests: $PROVIDER_E2E_TEST_RESULT (not gating)"
+          echo "Container build: $CONTAINER_BUILD_RESULT"
+          echo "GPU E2E tests: $GPU_E2E_TEST_RESULT"
+          echo "Provider E2E tests: $PROVIDER_E2E_TEST_RESULT"
 
           if [[ "$PREFLIGHT_RESULT" != "success" ]]; then
             echo "Pre-flight did not succeed."
@@ -249,6 +298,28 @@ jobs:
           if [[ "$CLASSIFY_RESULT" != "success" ]]; then
             echo "Change classification did not succeed."
             exit 1
+          fi
+
+          if [[ "$IS_NIGHTLY" == "true" ]]; then
+            # Nightly/manual runs always fall through to the nightly-job gate
+            # below, regardless of docs_only classification - unit_tests may
+            # legitimately be skipped if the latest commit happens to be
+            # docs-only, but container_build/gpu_e2e_tests/provider_e2e_tests
+            # still ran and must be checked either way.
+            if [[ "$UNIT_TEST_RESULT" != "success" && "$UNIT_TEST_RESULT" != "skipped" ]]; then
+              echo "Unit tests did not succeed."
+              exit 1
+            fi
+
+            if [[ "$CONTAINER_BUILD_RESULT" != "success" || \
+                  "$GPU_E2E_TEST_RESULT" != "success" || \
+                  "$PROVIDER_E2E_TEST_RESULT" != "success" ]]; then
+              echo "One or more nightly jobs did not succeed."
+              exit 1
+            fi
+
+            echo "All required test jobs completed successfully."
+            exit 0
           fi
 
           if [[ "$DOCS_ONLY" == "true" ]]; then
@@ -261,10 +332,56 @@ jobs:
             exit 1
           fi
 
-          if [[ "$UNIT_TEST_RESULT" == "success" ]]; then
-            echo "All required test jobs completed successfully."
-            exit 0
+          if [[ "$UNIT_TEST_RESULT" != "success" ]]; then
+            echo "One or more required test jobs did not succeed."
+            exit 1
           fi
 
-          echo "One or more required test jobs did not succeed."
-          exit 1
+          echo "All required test jobs completed successfully."
+          exit 0
+
+  notify-failure:
+    name: Notify test failure
+    runs-on: ubuntu-latest
+    needs: [pre-flight, classify_changes, unit_tests, container_build, gpu_e2e_tests, provider_e2e_tests, Nemo_CICD_Test]
+    environment: main
+    # Deliberately checks github.event_name directly rather than
+    # needs.classify_changes.outputs.is_nightly: classify_changes is skipped
+    # (and all its outputs, including literal ones, become empty) if
+    # pre-flight fails, which would otherwise silently suppress the alert
+    # for exactly the failure class this notifier exists to catch.
+    if: >-
+      ${{
+        always() && !cancelled() &&
+        (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+        needs.Nemo_CICD_Test.result == 'failure' &&
+        (github.event_name != 'workflow_dispatch' || inputs.send_notification)
+      }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      # workflow_dispatch can be run against any ref via the Actions UI, so
+      # only alert the shared Gym channel for runs against main or a release
+      # branch (rMAJOR.MINOR.PATCH) - not ad-hoc feature-branch dispatches.
+      - name: Check ref is main or a release branch
+        id: ref_check
+        uses: ./.github/actions/is-main-or-release-ref
+
+      - name: Notify Gym alerts channel
+        if: steps.ref_check.outputs.allowed == 'true'
+        uses: NVIDIA-NeMo/FW-CI-templates/.github/actions/send-slack-alert@cf5acebace78c7c339bc1f804357a991336f1c4d # v1.8.10
+        with:
+          webhook: ${{ secrets.SLACK_TEAM_CHANNEL_WEBHOOK }}
+          message: |
+            :rotating_light: Nightly Gym CI failed on ${{ github.ref_name }}
+
+            • Repository: ${{ github.repository }}
+            • Commit: `${{ github.sha }}`
+            • Pre-flight: ${{ needs.pre-flight.result }}
+            • Classify changes: ${{ needs.classify_changes.result }}
+            • Unit tests: ${{ needs.unit_tests.result }}
+            • Container build: ${{ needs.container_build.result }}
+            • GPU E2E tests: ${{ needs.gpu_e2e_tests.result }}
+            • Provider E2E tests: ${{ needs.provider_e2e_tests.result }}
+            • Workflow: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>
