@@ -146,11 +146,7 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
 
 
 class GenRMCompareVerifyRequest(TaskData, BaseVerifyRequest):
-    """Verify request with optional principle for cohort-based GenRM comparison.
-
-    The fields below are injected by the agent at verify time, not carried by dataset rows,
-    so they stay declared here rather than on TaskData.
-    """
+    """Verify request; the fields below are agent-injected at verify time, not dataset rows."""
 
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
