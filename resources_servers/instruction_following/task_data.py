@@ -6,8 +6,9 @@ Two dataset shapes coexist by design: older blends (including the committed exam
 ``instruction_id_list``/``prompt``/``kwargs``/``grading_mode`` at the row top level, while the
 current format nests them under ``verifier_metadata`` (the server's ``_migrate_legacy_metadata``
 before-validator accepts both). This flat schema validates both generations unchanged, because
-core validation splices ``verifier_metadata`` contents up before checking; ``legacy_location``
-records the server's canonical nested wire placement. Required-ness mirrors
+core validation splices ``verifier_metadata`` contents up before checking. No field carries a
+``legacy_location`` marker: that marker means "the wire reads this field ONLY from inside
+verifier_metadata", and here the wire accepts both placements. Required-ness mirrors
 ``InstructionFollowingRunRequest``'s after-validator, which rejects rows missing
 ``instruction_id_list``/``prompt``/``kwargs`` from the merged metadata.
 """
@@ -29,14 +30,14 @@ class TaskData(BaseModel):
             "Registry keys of the verifiable instructions to check "
             "(e.g. 'length_constraints:nth_paragraph_first_word')."
         ),
-        json_schema_extra={"consumed_by": ["verify"], "legacy_location": "verifier_metadata"},
+        json_schema_extra={"consumed_by": ["verify"]},
     )
     prompt: str = Field(
         description=(
             "Original instruction prompt (duplicates the user turn in responses_create_params.input). "
             "Required by the wire after-validator but never read by verify()."
         ),
-        json_schema_extra={"consumed_by": ["provenance"], "legacy_location": "verifier_metadata"},
+        json_schema_extra={"consumed_by": ["provenance"]},
     )
     kwargs: List[Optional[Dict[str, Any]]] = Field(
         description=(
@@ -45,10 +46,10 @@ class TaskData(BaseModel):
             "first_word}, {N, relation}); entries may be null or {}, and None values inside a dict "
             "are filtered out by verify()."
         ),
-        json_schema_extra={"consumed_by": ["verify"], "legacy_location": "verifier_metadata"},
+        json_schema_extra={"consumed_by": ["verify"]},
     )
     grading_mode: Optional[str] = Field(
         default=None,
         description="'binary' (all instructions must pass) or 'fraction'; verify() defaults to 'binary'.",
-        json_schema_extra={"consumed_by": ["verify"], "legacy_location": "verifier_metadata"},
+        json_schema_extra={"consumed_by": ["verify"]},
     )
