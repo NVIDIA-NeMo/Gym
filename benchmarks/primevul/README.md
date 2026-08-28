@@ -29,6 +29,12 @@ gym eval run --no-serve \
     --num-repeats 1
 ```
 
-The committed benchmark JSONL contains five synthetic rows for offline validation. `gym eval
-prepare` replaces it with the pinned canonical split. Do not use `--limit`, because it may cut a pair
-in half; pass `+prepare_script_args.max_pairs=N` to preparation when a whole-pair subset is needed.
+`data/primevul_example.jsonl` is five synthetic rows for offline smoke runs, committed because
+none of it is third-party code. `gym eval prepare` writes the pinned canonical split to
+`data/primevul_benchmark.jsonl`, which is gitignored — the real functions are third-party C/C++
+under their upstream projects' own licenses and must never be committed. Preparation is therefore a
+prerequisite for `gym env validate` and `gym env publish`, which stream the declared dataset.
+
+Do not use `--limit`: it may cut a pair in half, and the paired metric only scores pairs whose two
+members are both present. Pass `+prepare_script_args.max_pairs=N` to preparation when a whole-pair
+subset is needed.

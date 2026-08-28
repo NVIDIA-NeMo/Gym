@@ -9,18 +9,25 @@ from typing import Any, Optional
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME
 
 
-# PrimeVul's four pair-wise outcomes (paper §IV-B2), mapped to the metric keys we report. They
-# partition every complete pair, so the four rates sum to 1:
+# PrimeVul's four pair-wise outcomes (paper §IV-B2), mapped to the metric keys we report:
 #
 #   P-C  correct     both members classified correctly — the reported benchmark number
 #   P-V  vulnerable  both members called vulnerable — the degenerate "always say vulnerable" policy
 #   P-B  benign      both members called benign — the mirror-image degenerate policy
 #   P-R  reversed    the labels are inverted: the fix is flagged and the vulnerability is missed
+#
+# `unanswered` is a fifth bucket with no counterpart in the paper, whose setting had no unparseable
+# replies. It exists because P-V, P-B and P-R are claims about what a model *did*, and a pair with
+# a missing verdict supports no such claim: folding a truncated rollout into "reversed" would
+# report reasoning the model never performed. Unanswered pairs stay in the denominator, so
+# `paired_accuracy` is unaffected — a pair nobody answered is correctly not correct — and only the
+# behavioural buckets are kept clean. All five partition every complete pair and sum to 1.
 PAIRWISE_OUTCOME_KEYS = {
     "correct": "mean/paired_accuracy",
     "vulnerable": "mean/pairwise_vulnerable_rate",
     "benign": "mean/pairwise_benign_rate",
     "reversed": "mean/pairwise_reversed_rate",
+    "unanswered": "mean/pairwise_unanswered_rate",
 }
 
 
@@ -136,10 +143,10 @@ def _complete_pair_count(rows: list[dict]) -> int:
 
 
 def _pairwise_outcomes(rows: list[dict]) -> Optional[dict[str, float]]:
-    """The rates of PrimeVul's four pair-wise outcomes, or None without a complete pair.
+    """The rates of the pair-wise outcomes, or None without a complete pair.
 
-    The four outcomes partition every complete pair, so the rates sum to 1. `correct` is the
-    reported metric; the other three are what distinguish a model that understands the code from
+    The outcomes partition every complete pair, so the rates sum to 1. `correct` is the reported
+    metric; `vulnerable` and `benign` are what distinguish a model that understands the code from
     one that has collapsed onto a constant answer, which a single accuracy number cannot show.
 
     Incomplete pairs are skipped rather than counted as failures: a pair split across an eval
@@ -156,7 +163,11 @@ def _pairwise_outcomes(rows: list[dict]) -> Optional[dict[str, float]]:
 
 
 def _pair_outcome(members: list[dict]) -> str:
-    """Classify one complete pair into exactly one of PrimeVul's four pair-wise outcomes."""
+    """Classify one complete pair into exactly one pair-wise outcome."""
+    # Checked before the behavioural buckets: a pair missing either verdict cannot be described as
+    # constant or reversed, whichever label the reward coerced the unparseable member to.
+    if any(member.get("parse_error") for member in members):
+        return "unanswered"
     if all(member.get("correct") for member in members):
         return "correct"
     predictions = [_predicted_label(member) for member in members]

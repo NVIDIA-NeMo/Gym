@@ -19,6 +19,7 @@ All third-party software is used as obtained, without modification, unless other
 | **OmegaConf** | Config library | BSD-3-Clause | Omry Yadan | https://github.com/omry/omegaconf |
 | **OpenAI Python** | API client | Apache-2.0 | OpenAI | https://github.com/openai/openai-python |
 | **PinchBench** | Agentic benchmark (cloned & patched at image build) | MIT | PinchBench | https://github.com/pinchbench/skill |
+| **PrimeVul** | Vulnerability-detection benchmark: classification prompt adapted in `benchmarks/primevul/prompt.yaml`, dataset downloaded at preparation time | MIT | DLVulDet | https://github.com/DLVulDet/PrimeVul |
 | **spaCy Model (en_core_web_sm)** | NLP embedding model | MIT | Explosion AI | https://github.com/explosion/spacy-models/releases/tag/en_core_web_sm-3.8.0 |
 | **IFEval (vendored)** | Instruction-following rule checkers (`resources_servers/iheval/ifeval/`) — verbatim from IHEval (`src/rule_following/evaluate/`), which adapts Google Research's IFEval; kept unmodified aside from an added license header. See `resources_servers/iheval/ifeval/PROVENANCE.md`. | Apache-2.0 | Google Research / ytyz1307zzh | https://github.com/ytyz1307zzh/IHEval |
 | **Uvicorn** | ASGI server | BSD-3-Clause | Encode OSS Ltd. | https://github.com/encode/uvicorn |

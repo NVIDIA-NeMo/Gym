@@ -35,12 +35,24 @@ Each row must provide:
 ## Metrics
 
 Per-row reward is binary classification accuracy. `/aggregate_metrics` additionally reports the
-paper's four mutually exclusive pair outcomes:
+paper's four mutually exclusive pair outcomes, plus one of our own:
 
 - `mean/paired_accuracy` (P-C): both members are correct; this is the headline metric.
 - `mean/pairwise_vulnerable_rate` (P-V): both members are predicted vulnerable.
 - `mean/pairwise_benign_rate` (P-B): both members are predicted benign.
 - `mean/pairwise_reversed_rate` (P-R): both labels are reversed.
+- `mean/pairwise_unanswered_rate`: at least one member produced no parsable verdict.
+
+The last has no counterpart in the paper, whose setting had no unparseable replies. It exists
+because P-V, P-B and P-R are claims about what a model *did*, and a pair with a missing verdict
+supports no such claim — folding a truncated rollout into "reversed" would report reasoning the
+model never performed. Unanswered pairs stay in the denominator, so `paired_accuracy` is unaffected
+and a model cannot raise its score by declining to answer.
+
+A rollout that was cut off before answering also sets `failure_reason` on its verify response
+(`model response incomplete: max_output_tokens`). The reward is still 0, but the field marks it as
+an infrastructure limit rather than a capability result. Reasoning models hit this readily: give
+them a generous `--max-output-tokens`, since a small budget is spent entirely on chain of thought.
 
 It also reports parse-error rate, binary accuracy, precision, recall, F1, confusion counts, pair
 count, and rollout count. With repeated rollouts, pair metrics are computed at each explicit rollout
@@ -52,8 +64,10 @@ Preparation downloads the `paired` configuration of the `colin/PrimeVul` Hugging
 immutable revision `4fd7158322872d711e90f091dbd8673ef32cb1be`. The canonical split is the upstream
 `test` split: 435 vulnerable/fixed pairs, or 870 rows.
 
-The committed five-row file is synthetic smoke data authored for NeMo Gym; it contains no
-third-party project source. Running preparation replaces it with the canonical test split:
+`benchmarks/primevul/data/primevul_example.jsonl` is synthetic smoke data authored for NeMo Gym;
+it contains no third-party project source, which is why it is the only data file committed.
+Preparation writes the canonical test split to the gitignored
+`benchmarks/primevul/data/primevul_benchmark.jsonl`:
 
 ```bash
 gym eval prepare --benchmark primevul

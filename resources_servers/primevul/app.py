@@ -3,7 +3,7 @@
 """PrimeVul paired vulnerability classification as a NeMo Gym resources server."""
 
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Optional
 
 from pydantic import BaseModel
 
@@ -68,12 +68,28 @@ class PrimeVulVerifyResponse(BaseVerifyResponse):
     gold_is_vulnerable: bool
 
 
+def truncation_failure_reason(response: NeMoGymResponse) -> Optional[str]:
+    """Why this rollout's reward may not reflect policy quality, or None if it does.
+
+    A reasoning model can spend its whole output budget on chain of thought and never emit a final
+    message. That scores 0 like any other wrong answer, but it is an infrastructure limit rather
+    than a capability result, so it is reported through ``failure_reason`` — the field Gym provides
+    for exactly this distinction — instead of being silently folded into the reward.
+    """
+    if getattr(response, "status", None) != "incomplete":
+        return None
+    details = getattr(response, "incomplete_details", None)
+    reason = getattr(details, "reason", None) if details is not None else None
+    return f"model response incomplete: {reason or 'unknown'}"
+
+
 class PrimeVulVerifier:
     async def verify(self, body: PrimeVulVerifyRequest) -> PrimeVulVerifyResponse:
         verdict = parse_verdict(final_assistant_text(body.response))
         return PrimeVulVerifyResponse(
             **body.model_dump(),
             **score_verdict(verdict, body.verifier_metadata.model_dump()),
+            failure_reason=truncation_failure_reason(body.response),
         )
 
 
@@ -90,6 +106,7 @@ class PrimeVulResourcesServer(PrimeVulVerifier, SimpleResourcesServer):
             "mean/pairwise_vulnerable_rate",
             "mean/pairwise_benign_rate",
             "mean/pairwise_reversed_rate",
+            "mean/pairwise_unanswered_rate",
             "mean/parse_error_rate",
             "mean/binary_accuracy",
             "mean/binary_f1",

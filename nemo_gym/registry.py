@@ -22,7 +22,7 @@ import yaml
 from omegaconf import DictConfig, OmegaConf
 
 from nemo_gym import PARENT_DIR, component_search_roots
-from nemo_gym.benchmarks import _benchmark_config_name, _benchmark_config_paths
+from nemo_gym.benchmarks import MANIFEST_FILENAME, _benchmark_config_name, _benchmark_config_paths
 from nemo_gym.config_types import ConfigError
 from nemo_gym.discovery import iter_server_configs, read_config_metadata
 from nemo_gym.environment.manifest import EnvironmentManifest, ManifestError, load_manifest
@@ -33,7 +33,6 @@ ENVIRONMENTS_DIR = PARENT_DIR / ENVIRONMENTS_SUBDIR
 BENCHMARKS_SUBDIR = "benchmarks"
 RESOURCES_SERVERS_SUBDIR = "resources_servers"
 ENVIRONMENT_CONFIG_FILENAME = "config.yaml"
-MANIFEST_FILENAME = "manifest.yaml"
 
 CatalogKind = Literal["environment", "benchmark"]
 CatalogStatus = Literal["experimental", "no-manifest"]

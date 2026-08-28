@@ -37,6 +37,8 @@ from nemo_gym.global_config import (
 BENCHMARKS_SUBDIR = "benchmarks"
 BENCHMARKS_DIR = PARENT_DIR / BENCHMARKS_SUBDIR
 
+MANIFEST_FILENAME = "manifest.yaml"
+
 
 class BenchmarkConfig(BaseModel):
     name: str  # this is a dataset name, not the config name (they are usually the same)
@@ -119,7 +121,14 @@ def _is_benchmark_config(config_path: Path) -> bool:
 
     A raw single-file parse (no `config_paths`/interpolation resolution), so it's format-agnostic and can't
     fail on includes. An unparseable file is kept (returns True) so the resolve step surfaces a diagnostic.
+
+    An environment `manifest.yaml` is excluded by name. Discovery is otherwise filename-agnostic on
+    purpose, but a manifest mirrors its workload's composition — including the `type: benchmark`
+    dataset — so it matches by content while not being a runnable Gym config. Counting it would list
+    every manifest-backed benchmark twice under one name, silently dropping one entry.
     """
+    if config_path.name == MANIFEST_FILENAME:
+        return False
 
     def declares(node: object) -> bool:
         if isinstance(node, dict):

@@ -18,6 +18,5 @@ primevul_benchmark_simple_agent:
         jsonl_fpath: benchmarks/primevul/data/primevul_benchmark.jsonl
         prompt_config: benchmarks/primevul/prompt.yaml
         prepare_script: benchmarks/primevul/prepare.py
-        license: MIT
         # Benchmark repetition is a run-level option. Pass `--num-repeats N` to `gym eval run`.
         num_repeats: 1

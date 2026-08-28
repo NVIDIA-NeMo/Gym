@@ -52,7 +52,13 @@ def tool_call_item(index: int = 0) -> dict:
     }
 
 
-def make_response(*messages: str, trailing_tool_call: bool = False) -> NeMoGymResponse:
+def make_response(
+    *messages: str,
+    trailing_tool_call: bool = False,
+    status: str = "completed",
+    incomplete_reason: str | None = None,
+) -> NeMoGymResponse:
+    """A response. `incomplete_reason` reproduces a rollout truncated before it answered."""
     output: list[dict] = []
     for index, text in enumerate(messages):
         output.append(
@@ -66,6 +72,10 @@ def make_response(*messages: str, trailing_tool_call: bool = False) -> NeMoGymRe
         )
     if trailing_tool_call:
         output.append(tool_call_item(len(messages)))
+    if incomplete_reason is not None:
+        # What the live run produced: a reasoning item, no message, and the budget exhausted.
+        output.append({"id": "rs_0", "type": "reasoning", "summary": []})
+        status = "incomplete"
     return NeMoGymResponse(
         id="resp",
         created_at=0.0,
@@ -75,6 +85,8 @@ def make_response(*messages: str, trailing_tool_call: bool = False) -> NeMoGymRe
         parallel_tool_calls=True,
         tool_choice="auto",
         tools=[],
+        status=status,
+        incomplete_details={"reason": incomplete_reason} if incomplete_reason else None,
     )
 
 
@@ -114,6 +126,10 @@ class TestVerdictParsing:
             ("NO", False),
             ("(2) NO: No security vulnerability.", False),
             ("2", False),
+            # Reply forms actually observed from Nemotron 3.5 Lightning on this prompt.
+            ("(1) YES", True),
+            ("1", True),
+            ("YES: A security vulnerability detected.", True),
         ],
     )
     def test_parses_published_options(self, text: str, expected: bool) -> None:
@@ -121,6 +137,35 @@ class TestVerdictParsing:
 
     def test_last_explicit_option_wins(self) -> None:
         assert parse_verdict("I considered NO, but the final answer is YES.")["is_vulnerable"] is True
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # Every one of these is a YES whose justification contains the English word "no".
+            # Scanning for the last YES|NO token reads them all as benign, silently and
+            # asymmetrically: it corrupts positive detections only.
+            "YES. The function copies unbounded input with strcpy and there is no bounds check.",
+            "YES: A security vulnerability detected. There is no length validation.",
+            "YES. No bounds check is performed.",
+            "Yes, this is vulnerable.",
+            "The code has an out-of-bounds write, so YES.",
+            # A reply that quotes both options before committing to one.
+            "(1) YES: A security vulnerability detected.\n(2) NO: No security vulnerability.\nMy answer: (1)",
+        ],
+    )
+    def test_prose_containing_no_does_not_invert_a_yes(self, text: str) -> None:
+        assert parse_verdict(text)["is_vulnerable"] is True
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "NO. There is no vulnerability here.",
+            "No security vulnerability.",
+            "(2) NO: No security vulnerability. The length is checked.",
+        ],
+    )
+    def test_prose_around_a_no_still_reads_as_benign(self, text: str) -> None:
+        assert parse_verdict(text)["is_vulnerable"] is False
 
     def test_reasoning_draft_is_ignored(self) -> None:
         assert parse_verdict("<think>Maybe YES</think>NO")["is_vulnerable"] is False
@@ -187,12 +232,54 @@ class TestPairedMetrics:
                 verify_row(correct=False, gold_is_vulnerable=False, pred_is_vulnerable=True),
                 "reversed",
             ),
+            # Both members unparseable (e.g. both rollouts truncated).
+            (
+                verify_row(correct=False, parse_error=True, pred_is_vulnerable=None),
+                verify_row(correct=False, parse_error=True, gold_is_vulnerable=False, pred_is_vulnerable=None),
+                "unanswered",
+            ),
+            # One member unparseable: the pair still supports no behavioural claim.
+            (
+                verify_row(),
+                verify_row(correct=False, parse_error=True, gold_is_vulnerable=False, pred_is_vulnerable=None),
+                "unanswered",
+            ),
         ],
     )
     def test_pairwise_outcomes(self, vulnerable: dict, benign: dict, outcome: str) -> None:
         metrics = aggregate_paired([[vulnerable], [benign]])
         assert metrics[PAIRWISE_OUTCOME_KEYS[outcome]] == 1.0
         assert sum(metrics[key] for key in PAIRWISE_OUTCOME_KEYS.values()) == 1.0
+
+    def test_unanswered_pairs_do_not_inflate_paired_accuracy(self) -> None:
+        """An unanswered pair stays in the denominator: it is not correct, and not excluded.
+
+        Dropping it would let a model raise its reported score by failing to answer.
+        """
+        answered = [
+            [verify_row(pair_id="answered")],
+            [verify_row(pair_id="answered", gold_is_vulnerable=False, pred_is_vulnerable=False)],
+        ]
+        truncated = [
+            [verify_row(pair_id="truncated", correct=False, parse_error=True, pred_is_vulnerable=None)],
+            [
+                verify_row(
+                    pair_id="truncated",
+                    correct=False,
+                    parse_error=True,
+                    gold_is_vulnerable=False,
+                    pred_is_vulnerable=None,
+                )
+            ],
+        ]
+        metrics = aggregate_paired(answered + truncated)
+        assert metrics["n_pairs"] == 2
+        assert metrics["mean/paired_accuracy"] == 0.5
+        assert metrics["mean/pairwise_unanswered_rate"] == 0.5
+        # The behavioural buckets stay empty rather than claiming the model reversed the labels.
+        assert metrics["mean/pairwise_reversed_rate"] == 0.0
+        assert metrics["mean/pairwise_vulnerable_rate"] == 0.0
+        assert metrics["mean/pairwise_benign_rate"] == 0.0
 
     def test_incomplete_pair_has_no_pair_metric(self) -> None:
         assert "mean/paired_accuracy" not in aggregate_paired([[verify_row()]])
@@ -283,6 +370,37 @@ class TestResourcesServer:
         )
         assert result.reward == 0.0
         assert result.parse_error is True
+        # A model that answered, badly, is a capability result — nothing to disclaim.
+        assert result.failure_reason is None
+
+    async def test_truncated_response_is_flagged_as_an_infrastructure_failure(self) -> None:
+        """A reasoning model can spend its whole budget thinking and never emit a verdict.
+
+        Observed live: 4 of 20 rollouts came back `incomplete` with only a reasoning item and no
+        message. The reward is still 0, but `failure_reason` marks it as not a capability result.
+        """
+        result = await make_server().verify(
+            PrimeVulVerifyRequest(
+                responses_create_params={"input": [{"role": "user", "content": "code"}]},
+                response=make_response(incomplete_reason="max_output_tokens"),
+                verifier_metadata=GOLD_VULNERABLE,
+            )
+        )
+        assert result.reward == 0.0
+        assert result.parse_error is True
+        assert result.failure_reason == "model response incomplete: max_output_tokens"
+
+    async def test_incomplete_without_details_still_reports_a_reason(self) -> None:
+        result = await make_server().verify(
+            PrimeVulVerifyRequest(
+                responses_create_params={"input": [{"role": "user", "content": "code"}]},
+                response=make_response("YES", status="incomplete"),
+                verifier_metadata=GOLD_VULNERABLE,
+            )
+        )
+        # It answered, so the reward stands; the truncation is still disclosed.
+        assert result.reward == 1.0
+        assert result.failure_reason == "model response incomplete: unknown"
 
     def test_metadata_is_required(self) -> None:
         with pytest.raises(ValidationError, match="verifier_metadata"):
@@ -380,7 +498,10 @@ class TestData:
         assert self.RECORD["code"] in messages[1]["content"]
 
     def test_committed_sample_has_exactly_five_synthetic_rows(self) -> None:
-        path = BENCHMARK_DIR / "data" / "primevul_benchmark.jsonl"
+        # Its own filename, not the benchmark dataset's: `gym eval prepare` writes the real 870-row
+        # split to `primevul_benchmark.jsonl`, which would otherwise overwrite this tracked file
+        # with third-party C/C++ and leave it staged for an unwary `git add -A`.
+        path = BENCHMARK_DIR / "data" / "primevul_example.jsonl"
         rows = [json.loads(line) for line in path.read_text().splitlines() if line]
         assert len(rows) == 5
         assert all(row["verifier_metadata"]["id"].startswith("synthetic-") for row in rows)
