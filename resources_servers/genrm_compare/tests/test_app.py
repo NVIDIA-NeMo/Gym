@@ -15,6 +15,7 @@
 """Tests for GenRM Compare Resources Server."""
 
 import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -63,10 +64,12 @@ class TestGenRMCompareConfig:
         )
 
         # Check defaults
+        assert config.comparison_mode == "rollout_cohort"
         assert config.comparison_strategy == "circular"
         assert config.num_judges_per_comparison == 1
         assert config.use_principle is False
         assert config.aggregator_method == "simple_tiebreaker"
+        assert config.score_source == "overall"
         assert config.default_score == 3.0
         assert config.default_ranking == 3.5
 
@@ -260,7 +263,8 @@ class TestGenRMCompareResourcesServer:
         async def run_single_comparison_mock(*args, **kwargs):
             i, j = kwargs["pair_idx"]
             # Random deterministic return
-            return (5 * (i + 1 / 16), 5 * (j + 1 / 16), 2 if i % 2 else 5)
+            scores = (5 * (i + 1 / 16), 5 * (j + 1 / 16), 2 if i % 2 else 5)
+            return (*scores, *scores, 0.0, 0.0, 0.0)
 
         monkeypatch.setattr(server, "_run_single_comparison", run_single_comparison_mock)
 
@@ -360,11 +364,86 @@ class TestGenRMCompareResourcesServer:
         )
         # Call 1 since the second call is our tested call
         actual_metadata = aggregate_scores_mock.call_args_list[1].kwargs["comparison_metadata"]
-        assert expected_metadata == actual_metadata
+        assert expected_metadata == tuple(actual_metadata)
 
         expected_rewards = golden_rewards
         actual_rewards = [r.reward for r in results]
         assert expected_rewards == actual_rewards
+
+    async def test_fixed_baseline_counterbalances_and_keeps_clean_scores(self, monkeypatch: MonkeyPatch) -> None:
+        config = GenRMCompareConfig(
+            host="localhost",
+            port=8000,
+            entrypoint="app.py",
+            domain="rlhf",
+            name="genrm_compare",
+            genrm_model_server=ModelServerRef(type="responses_api_models", name="genrm_model"),
+            genrm_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[], max_output_tokens=1024),
+            comparison_mode="fixed_baseline",
+            score_source="rubric_mean",
+            num_judges_per_comparison=2,
+        )
+        server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
+        response_objs = [{"output": [{"type": "message", "content": [{"type": "output_text", "text": "rollout"}]}]}]
+        seen_pairs = []
+
+        async def compare(_conversation, response_1, response_2, **_kwargs):
+            first = response_1["output"][0]["content"][0]["text"]
+            second = response_2["output"][0]["content"][0]["text"]
+            seen_pairs.append((first, second))
+            if first == "rollout":
+                return 5.0, 1.0, 1.0, 4.0, 2.0, 2.0, 0.0, 0.0, 0.0
+            return 1.0, 4.0, 6.0, 2.0, 3.0, 5.0, 0.0, 0.0, 0.0
+
+        monkeypatch.setattr(server, "_run_single_comparison", compare)
+        (
+            rewards,
+            raw_scores,
+            clean_scores,
+            metrics,
+            _,
+            overall_raw,
+            overall_adjusted,
+            adjustments,
+        ) = await server._run_fixed_baseline_compare([], response_objs, "baseline", None, "prompt")
+
+        assert set(seen_pairs) == {("rollout", "baseline"), ("baseline", "rollout")}
+        assert rewards == approx([4.5])
+        assert raw_scores == approx([4.5])
+        assert clean_scores == approx([4.5])
+        assert overall_raw == approx([3.5])
+        assert overall_adjusted == approx([3.5])
+        assert adjustments == approx([0.0])
+        assert metrics["genrm_parse_failure_rate_per_group"] == 0.0
+        assert metrics["genrm_rubric_parse_failure_rate_per_group"] == 0.0
+
+    async def test_failed_rubric_parse_is_neutral_but_not_clean(self, monkeypatch: MonkeyPatch) -> None:
+        config = GenRMCompareConfig(
+            host="localhost",
+            port=8000,
+            entrypoint="app.py",
+            domain="rlhf",
+            name="genrm_compare",
+            genrm_model_server=ModelServerRef(type="responses_api_models", name="genrm_model"),
+            genrm_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[], max_output_tokens=1024),
+            comparison_mode="fixed_baseline",
+            score_source="rubric_mean",
+        )
+        server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
+
+        async def failed(*_args, **_kwargs):
+            return 3.0, 3.0, 3.5, 4.0, 2.0, 2.0, 0.0, 1.0, 0.0
+
+        monkeypatch.setattr(server, "_run_single_comparison", failed)
+        response_objs = [{"output": [{"type": "message", "content": [{"type": "output_text", "text": "rollout"}]}]}]
+        rewards, _, clean_scores, metrics, *_ = await server._run_fixed_baseline_compare(
+            [], response_objs, "baseline", None, "prompt"
+        )
+
+        assert rewards == approx([3.0])
+        assert clean_scores == [None]
+        assert metrics["genrm_parse_failure_rate_per_group"] == 0.0
+        assert metrics["genrm_rubric_parse_failure_rate_per_group"] == 1.0
 
 
 class TestRunSingleComparison:
@@ -462,3 +541,53 @@ class TestRunSingleComparison:
 
         body = self._get_sent_body(mock_client)
         assert "principle" not in body.metadata
+
+    def test_rubric_and_overall_scores_are_kept_separately(self):
+        server, mock_client = self._make_server()
+        server.config.score_source = "rubric_mean"
+        answer = {
+            "rubric_evaluations": [
+                {"rubric_id": 1, "score_1": 5, "score_2": 2, "ranking": 1},
+                {"rubric_id": 2, "score_1": 3, "score_2": 4, "ranking": 5},
+            ],
+            "overall": {"score_1": 2, "score_2": 5, "ranking": 6},
+        }
+        mock_client.post.return_value.json.return_value["output"][0]["content"][0]["text"] = json.dumps(answer)
+
+        result = asyncio.run(
+            server._run_single_comparison(
+                [],
+                self._make_response_obj("one"),
+                self._make_response_obj("two"),
+                expected_rubric_ids=(1, 2),
+            )
+        )
+
+        assert result == approx((4.0, 3.0, 3.0, 2.0, 5.0, 6.0, 0.0, 0.0, 0.0))
+
+    def test_rubric_parse_failure_keeps_valid_overall_diagnostic(self):
+        server, _ = self._make_server()
+        server.config.score_source = "rubric_mean"
+        server.config.genrm_parse_retries = 0
+
+        result = asyncio.run(
+            server._run_single_comparison(
+                [],
+                self._make_response_obj("one"),
+                self._make_response_obj("two"),
+                expected_rubric_ids=(1,),
+            )
+        )
+
+        assert result == approx((3.0, 3.0, 3.5, 4.0, 2.0, 2.0, 0.0, 1.0, 0.0))
+
+    def test_rubric_mean_requires_explicit_ids(self):
+        server, _ = self._make_server()
+        server.config.score_source = "rubric_mean"
+
+        with pytest.raises(ValueError, match="requires expected_rubric_ids"):
+            asyncio.run(
+                server._run_single_comparison(
+                    [], self._make_response_obj("one"), self._make_response_obj("two")
+                )
+            )

@@ -37,6 +37,9 @@ genrm_compare_resources_server:
         temperature: 0.6
         top_p: 0.95
       
+      # "rollout_cohort" or "fixed_baseline" (metadata.baseline_response)
+      comparison_mode: rollout_cohort
+
       # Comparison strategy: "all_pairs" (C(n,2) comparisons) or "circular" (n comparisons)
       comparison_strategy: circular
       
@@ -49,6 +52,8 @@ genrm_compare_resources_server:
       
       # Aggregator method (only "simple_tiebreaker" is currently supported)
       aggregator_method: simple_tiebreaker
+      # rubric_mean requires expected_rubric_ids on each dataset record.
+      score_source: overall  # "overall" or "rubric_mean"
       
       # Bonus for shortest reasoning trace if in top percentile
       reasoning_bonus: 0.0

@@ -54,6 +54,9 @@ from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
+RESOURCE_ONLY_METADATA_KEYS = frozenset(
+    {"baseline_response", "baseline_model", "baseline_dataset_file", "baseline_row_index"}
+)
 
 
 class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
@@ -77,6 +80,16 @@ class SimpleAgentVerifyResponse(BaseVerifyResponse):
 class SimpleAgent(SimpleResponsesAPIAgent):
     config: SimpleAgentConfig
 
+    @staticmethod
+    def _strip_resource_only_metadata(
+        body: NeMoGymResponseCreateParamsNonStreaming,
+    ) -> NeMoGymResponseCreateParamsNonStreaming:
+        # Keep judge-only baseline data out of policy requests to avoid unnecessary payload.
+        metadata = dict(body.metadata or {})
+        for key in RESOURCE_ONLY_METADATA_KEYS:
+            metadata.pop(key, None)
+        return body.model_copy(update={"metadata": metadata or None})
+
     async def _create_episode(
         self,
         body: NeMoGymResponseCreateParamsNonStreaming,
@@ -93,6 +106,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         turns: list[TrajectoryTurn] = []
         trajectory_gaps: list[ObservationGap] = []
         body = body.model_copy(deep=True)
+        body = self._strip_resource_only_metadata(body)
 
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
@@ -289,7 +303,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         response = await self.server_client.post(
             server_name=self.config.name,
             url_path=self.url_path_for_run("/v1/responses", body),
-            json=body.responses_create_params,
+            json=self._strip_resource_only_metadata(body.responses_create_params),
             cookies=cookies,
         )
         await raise_for_status(response)
