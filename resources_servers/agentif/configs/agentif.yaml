@@ -15,6 +15,16 @@ agentif:
         temperature: 0.0
         top_p: 1.0
       judge_endpoint_max_concurrency: 32
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/agentif/data/example.jsonl
+        license: Creative Commons Attribution 4.0 International
+      # Build with `python resources_servers/agentif/prepare_agentif.py`.
+      - name: test
+        type: validation
+        jsonl_fpath: resources_servers/agentif/data/train.jsonl
+        license: Creative Commons Attribution 4.0 International
 
 judge_model:
   responses_api_models:
@@ -34,16 +44,6 @@ agentif_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/agentif/data/example.jsonl
-        license: Creative Commons Attribution 4.0 International
-      # Build with `python resources_servers/agentif/prepare_agentif.py`.
-      - name: test
-        type: validation
-        jsonl_fpath: resources_servers/agentif/data/train.jsonl
-        license: Creative Commons Attribution 4.0 International
 
 # Null defaults so OmegaConf resolves ${judge_*} without CLI overrides.
 # Recommended judge: gpt-4o-mini. Must stay at end of file for update_env_list.py.
