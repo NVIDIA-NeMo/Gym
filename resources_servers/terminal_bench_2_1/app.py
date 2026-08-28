@@ -9,7 +9,7 @@ from sys import stderr
 from tempfile import NamedTemporaryFile
 from time import time
 from traceback import format_exc
-from typing import Any, ClassVar, Dict, Optional, Tuple
+from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
 from fastapi import Request
 from pydantic import BaseModel
@@ -100,8 +100,23 @@ e70e44d1fe8835c4dff7c7a55bd6629b15e6a15b2ab7f2f49ee9e2dc016cc470  POVDOC.TAR.Z
 EOF""",
         ),
     ],
+}
+
+TEST_SH_PATCHES = {
     "terminal-bench/mcmc-sampling-stan": [
         ("sudo apt-get install -y \\\n    gfortran", "sudo apt-get install -y \\\n    cmake \\\n    gfortran"),
+    ],
+    "terminal-bench/pytorch-model-recovery": [
+        ("-w torch==2.7.1", "-w torch==2.7.1 --index https://download.pytorch.org/whl/cpu"),
+    ],
+    "terminal-bench/torch-tensor-parallelism": [
+        ("-w torch==2.7.0", "-w torch==2.7.0 --index https://download.pytorch.org/whl/cpu"),
+    ],
+    "terminal-bench/torch-pipeline-parallelism": [
+        ("-w torch==2.7.0", "-w torch==2.7.0 --index https://download.pytorch.org/whl/cpu"),
+    ],
+    "terminal-bench/mteb-retrieve": [
+        ("-w mteb==1.36.8", "-w mteb==1.36.8 --index https://download.pytorch.org/whl/cpu"),
     ],
 }
 
@@ -188,13 +203,15 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         )
 
     @contextmanager
-    def _patch_golden_patch_solve_sh(self, task_name: str, local_fpath: Path):
-        if task_name not in GOLDEN_PATCH_SOLVE_SH_PATCHES:
+    def _patch_golden_patch_solve_sh(
+        self, task_name: str, local_fpath: Path, patches: Dict[str, List[Tuple[str, str]]]
+    ):
+        if task_name not in patches or local_fpath.suffix != ".sh":
             yield local_fpath
             return
 
         content = local_fpath.read_text()
-        for old, new in GOLDEN_PATCH_SOLVE_SH_PATCHES[task_name]:
+        for old, new in patches[task_name]:
             content = content.replace(old, new)
 
         with NamedTemporaryFile(mode="w+", suffix=".sh", delete_on_close=False) as temp_file:
@@ -204,7 +221,12 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             yield temp_file.name
 
     async def _upload_folder(
-        self, sandbox: AsyncSandbox, local_dirpath: Path, target_dirpath: str, task_name: Optional[str] = None
+        self,
+        sandbox: AsyncSandbox,
+        local_dirpath: Path,
+        target_dirpath: str,
+        patches: Dict[str, List[Tuple[str, str]]],
+        task_name: Optional[str] = None,
     ) -> None:
         if not local_dirpath.is_absolute():
             local_dirpath = PARENT_DIR / local_dirpath
@@ -218,7 +240,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             mkdir_result = await sandbox.exec(f"mkdir -p {Path(target_fpath).parent}")
             assert mkdir_result.return_code == 0, mkdir_result
 
-            with self._patch_golden_patch_solve_sh(task_name, local_fpath) as new_local_fpath:
+            with self._patch_golden_patch_solve_sh(task_name, local_fpath, patches) as new_local_fpath:
                 await sandbox.upload(local_path=new_local_fpath, remote_path=target_fpath)
 
     async def verify(self, request: Request, body: TerminalBench21VerifyRequest) -> TerminalBench21VerifyResponse:
@@ -229,7 +251,9 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                 print(f"Creating eval sandbox for {body.task_name}", file=stderr)
             eval_sandbox, pty_session = await self._create_sandbox(body)
             cwd = (await eval_sandbox.exec("pwd")).stdout.strip()
-            await self._upload_folder(eval_sandbox, task_folder / "solution", cwd, task_name=body.task_name)
+            await self._upload_folder(
+                eval_sandbox, task_folder / "solution", cwd, GOLDEN_PATCH_SOLVE_SH_PATCHES, task_name=body.task_name
+            )
 
             if self.config.debug:
                 print(f"Running golden patch for {body.task_name}", file=stderr)
@@ -251,7 +275,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         if self.config.debug:
             print(f"Running tests for {body.task_name}", file=stderr)
         start_time = time()
-        await self._upload_folder(eval_sandbox, task_folder / "tests", "/tests")
+        await self._upload_folder(eval_sandbox, task_folder / "tests", "/tests", TEST_SH_PATCHES, body.task_name)
         eval_result = await eval_sandbox.pty.exec(
             "bash /tests/test.sh", session=pty_session, timeout_s=self.config.evaluation_timeout, detach=True
         )
