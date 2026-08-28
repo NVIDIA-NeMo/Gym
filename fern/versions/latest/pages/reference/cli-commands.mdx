@@ -49,6 +49,7 @@ gym env status                # show running servers
 gym eval prepare              # prepare benchmark data and dump it to disk
 gym eval run                  # collate data, start servers, and collect rollouts
 gym eval aggregate            # merge sharded rollout results
+gym eval health-check         # verify rollout artifact quality for an existing run
 gym eval profile              # compute a reward profile from rollouts
 gym eval reverify             # recompute rewards from existing rollouts without re-running inference
 
@@ -578,7 +579,8 @@ NeMo Gym Server Status:
 
 ## Evaluation
 
-Commands for running evaluations end to end: prepare data, collect rollouts, aggregate for sharded runs, and profile.
+Commands for running evaluations end to end: prepare data, collect rollouts, aggregate sharded runs, verify rollout health, and
+profile results.
 
 ### `gym eval prepare`
 
@@ -621,6 +623,10 @@ Collate data, start the servers, and collect rollouts. This is the main evaluati
 | `--temperature` | Sampling temperature. |
 | `--top-p` | Nucleus sampling top-p. |
 | `--max-output-tokens` | Maximum output tokens. |
+| `--disable-aggregation` | Skip aggregate metrics and the automatic health check. Use for shards that will be combined with `gym eval aggregate`. |
+| `--no-health-check` | Skip the automatic post-run health check. |
+| `--health-check-workers` | Number of rollout-health worker processes. Defaults to the smaller of the CPU count and 8. |
+| `--health-check-ignore` | Comma-separated health-check IDs to exclude from execution and verdict derivation. |
 
 ```bash
 # End-to-end: spin up servers, then collect rollouts for a benchmark
@@ -688,13 +694,16 @@ If you change the config, schema, or data between runs, the materialized inputs 
 
 ### `gym eval aggregate`
 
-Merge sharded rollout results into a single rollouts file with aggregate metrics. Reads every JSONL file matching `--input-glob`, recomputes aggregate metrics over the global union of records, and writes a `<output stem>_aggregate_metrics.json` next to the merged rollouts. Use this to combine shards produced by `gym eval run --no-serve +disable_aggregation=true`.
+Merge sharded rollout results into a single rollouts file with aggregate metrics. Reads every JSONL file matching `--input-glob`, recomputes aggregate metrics over the global union of records, and writes a `<output stem>_aggregate_metrics.json` next to the merged rollouts. Use this to combine shards produced by `gym eval run --no-serve --disable-aggregation`.
 
 | Option | Description |
 | --- | --- |
 | `--config PATH` | Config file to load. Repeatable. |
 | `--input-glob`, `-i` | Glob (or comma-separated globs) matching the rollout shards to aggregate. |
 | `--output`, `-o` | Path for the merged rollouts and aggregate-metrics file. |
+| `--no-health-check` | Skip the automatic post-aggregation health check. |
+| `--health-check-workers` | Number of rollout-health worker processes. Defaults to the smaller of the CPU count and 8. |
+| `--health-check-ignore` | Comma-separated health-check IDs to exclude from execution and verdict derivation. |
 
 ```bash
 gym eval aggregate \
@@ -703,6 +712,30 @@ gym eval aggregate \
     --input-glob 'results/rollouts-rs*-chunk*.jsonl' \
     --output results/rollouts.jsonl
 ```
+
+### `gym eval health-check`
+
+Verify rollout quality for an existing run directory. The command reads `<run-dir>/rollouts.jsonl` by default and writes
+`quality_summary.json` and `rollout_verdicts.jsonl` in the run directory.
+
+| Option | Description |
+| --- | --- |
+| `RUN_DIR` | Directory in which to write the health reports. |
+| `--rollouts-file PATH` | Rollout JSONL path. Relative paths resolve under `RUN_DIR`; absolute paths are used as written. Defaults to `rollouts.jsonl`. |
+| `--workers` | Number of worker processes. Defaults to the smaller of the CPU count and 8. |
+| `--ignore-checks`, `--ignore` | Comma-separated health-check IDs to exclude from execution and verdict derivation. |
+
+```bash
+gym eval health-check results/my-run
+
+# Select a nonstandard rollout filename and exclude one known check
+gym eval health-check results/my-run \
+    --rollouts-file evaluator_rollouts.jsonl \
+    --ignore-checks model_call_missing_token_counts
+```
+
+Refer to [Rollout Health Checks](/main/evaluation/rollout-health) for verdict semantics, evidence requirements, the complete check
+catalog, and report schemas.
 
 ### `gym eval profile`
 

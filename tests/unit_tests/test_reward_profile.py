@@ -552,3 +552,74 @@ class TestRewardProfile:
             }
         ]
         assert expected_agent_level_metrics == actual_agent_level_metrics
+
+    def _fan_out_row(self, task_idx: int, rollout_idx: int, agent: str) -> dict:
+        row = self._row(task_idx, rollout_idx)
+        row["agent_ref"] = {"name": agent}
+        return row
+
+    def test_profile_from_data_fan_out_groups_per_task_and_agent(self) -> None:
+        """Fan-out copies of a task share a task index but not an agent; each (task, agent)
+        pair must keep its own profile row instead of being pooled per task."""
+        # 2 tasks x 2 agents x 2 repeats; rollout indexes are unique within a task across
+        # agents, matching how fan-out stamps dispatch copies.
+        rows = [
+            self._fan_out_row(task, rollout, agent)
+            for task in (0, 1)
+            for rollout, agent in [(0, "agent_a"), (1, "agent_a"), (2, "agent_b"), (3, "agent_b")]
+        ]
+        rewards = {"agent_a": 1.0, "agent_b": 0.0}
+        results = [
+            self._result(row["_ng_task_index"], row["_ng_rollout_index"], reward=rewards[row["agent_ref"]["name"]])
+            for row in rows
+        ]
+
+        group_level_metrics, agent_level_metrics = RewardProfiler().profile_from_data(rows, results)
+
+        assert len(group_level_metrics) == 4
+        seen = {}
+        for group in group_level_metrics:
+            key = (group["_ng_task_index"], group["agent_ref"]["name"])
+            seen[key] = group
+            assert group["num_rollouts"] == 2
+            assert group["expected_num_rollouts"] == 2
+            assert group["mean/reward"] == rewards[group["agent_ref"]["name"]]
+            # The sample must be the materialized input row of the SAME agent.
+            assert group["sample"]["agent_ref"]["name"] == group["agent_ref"]["name"]
+        assert set(seen) == {(0, "agent_a"), (0, "agent_b"), (1, "agent_a"), (1, "agent_b")}
+
+        # Agent-level metrics keep their own split, one entry per agent.
+        by_agent = {m["agent_ref"]["name"]: m for m in agent_level_metrics}
+        assert by_agent["agent_a"]["mean/reward"] == 1.0
+        assert by_agent["agent_b"]["mean/reward"] == 0.0
+
+    def test_profile_from_data_single_agent_rows_carry_no_agent_ref(self) -> None:
+        """Without fan-out, output must stay byte-identical to before: plain per-task rows,
+        no agent_ref field added."""
+        rows = [self._row(0, 0), self._row(0, 1), self._row(1, 0), self._row(1, 1)]
+        results = [self._result(r["_ng_task_index"], r["_ng_rollout_index"]) for r in rows]
+
+        group_level_metrics, _ = RewardProfiler().profile_from_data(rows, results)
+
+        assert len(group_level_metrics) == 2
+        for group in group_level_metrics:
+            assert "agent_ref" not in group
+            assert "agent_name" not in group
+
+    def test_completion_summary_counts_per_task_and_agent_under_fan_out(self) -> None:
+        """One agent's missing rollouts must not hide behind another agent's completed ones."""
+        rows = [
+            self._fan_out_row(0, 0, "agent_a"),
+            self._fan_out_row(0, 1, "agent_a"),
+            self._fan_out_row(0, 2, "agent_b"),
+            self._fan_out_row(0, 3, "agent_b"),
+        ]
+        # agent_b's rollouts never completed.
+        results = [self._result(0, 0), self._result(0, 1)]
+
+        summary = RewardProfiler().profile_completion_summary(rows, results)
+
+        assert summary["total_input_rows"] == 2  # (task 0, agent_a) and (task 0, agent_b)
+        assert summary["complete_input_rows"] == 1
+        assert summary["missing_input_rows"] == 1
+        assert summary["partial_input_rows"] == 0

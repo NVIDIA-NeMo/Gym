@@ -20,12 +20,14 @@ import tempfile
 import time
 from contextlib import ExitStack
 from pathlib import Path
+from typing import Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 import responses_api_agents.swe_agents.app as swe_app
 from nemo_gym.config_types import ModelServerRef, OmegaConf
+from nemo_gym.global_config import CACHE_DIR_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -51,11 +53,23 @@ from responses_api_agents.swe_agents.app import (
     SWEBenchWrapperServerConfig,
     SWERebenchDatasetProcessor,
     _extract_instance_dict,
+    _extract_replay_system_content,
+    _parse_replay_messages,
     _render_opencode_user_message,
     _resolve_opencode_workspace_path,
     file_lock,
     runner_ray_remote,
     update_and_read_metrics,
+)
+from responses_api_agents.swe_agents.opencode_replay import (
+    build_replay_prefix_row,
+    build_replay_subagent_manifest,
+    completed_tool_turn_cut_indices,
+    extract_responses_task_records,
+    extract_task_spawn_records,
+    merge_replay_subagent_trajectories,
+    parse_replay_subagent_payload,
+    truncate_replay_subagent_payload,
 )
 
 
@@ -68,6 +82,30 @@ def _cleanup_swebench_results():
     yield
     for d in SWE_AGENTS_DIR.glob("swebench_results_*"):
         shutil.rmtree(d, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_setup_root(monkeypatch, tmp_path_factory):
+    """Resolve setup trees under a throwaway cache root instead of the machine's.
+
+    `resolve_setup_dir` / `_openhands_setup_target` prefer a pre-staged
+    install-relative `swe_agents/swe_*_setup/` tree while the global `cache_dir`
+    is unset (the pre-`cache_dir` layout). A checkout that has one baked next to
+    the package therefore hijacks every test that builds a processor, and the
+    OpenHands path goes on to run a real `git checkout` of the dummy SHA these
+    tests configure, which fails. Configuring `cache_dir` opts out of that
+    fallback, so resolution takes the cache-root branch these tests assert on
+    regardless of what is staged locally.
+
+    Tests that cover pre-staged resolution itself re-patch
+    `maybe_get_global_config_dict` inside the test body, which shadows this.
+    """
+    cache_root = tmp_path_factory.mktemp("gym_cache")
+    monkeypatch.setattr(
+        swe_app,
+        "maybe_get_global_config_dict",
+        lambda: {CACHE_DIR_KEY_NAME: str(cache_root)},
+    )
 
 
 ########################################
@@ -1075,6 +1113,57 @@ class TestOpenHandsHarnessProcessor:
             processor.get_run_command()
             assert "CAMEL_CASE_TOOL_NAMES=true" in self._read_agent_script(config)
 
+    def test_get_run_command_replay_messages_pins_system_prompt_and_arg(self) -> None:
+        replay_messages = [
+            {"role": "system", "content": "REPLAY-SYSTEM-PROMPT"},
+            {"role": "user", "content": "Fix bug"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {"id": "call_1", "type": "function", "function": {"name": "execute_bash", "arguments": "{}"}}
+                ],
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _make_instance_config(
+                tmpdir,
+                # Should be overridden unconditionally by the replay's own system message.
+                resolved_system_prompt_template="/path/to/agent_prompt_override_system.j2",
+                problem_info={
+                    "problem_statement": "Fix bug",
+                    "instance_id": "django__django-12345",
+                    "base_commit": "abc123",
+                    "dataset_name": "SWE-bench",
+                    "split": "test",
+                    "instance_dict": "{}",
+                    "container_formatter": ["docker://custom/{instance_id}"],
+                    "replay_messages": json.dumps(replay_messages),
+                },
+            )
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            processor = OpenHandsHarnessProcessor(config=config)
+            processor.get_run_command()
+
+            replay_path = config.persistent_dir / "replay_messages.json"
+            assert json.loads(replay_path.read_text()) == replay_messages
+
+            sp_path = config.persistent_dir / "replay_system_prompt.j2"
+            assert sp_path.read_text() == "REPLAY-SYSTEM-PROMPT"
+            assert config.resolved_system_prompt_template == str(sp_path)
+
+            script = self._read_agent_script(config)
+            assert "replay_messages.json" in script
+
+    def test_get_run_command_no_replay_messages_omits_replay_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _make_instance_config(tmpdir)
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            processor = OpenHandsHarnessProcessor(config=config)
+            processor.get_run_command()
+            assert not (config.persistent_dir / "replay_messages.json").exists()
+            assert "replay_messages.json" not in self._read_agent_script(config)
+
 
 ########################################
 # Workspace path + user-message resolver tests
@@ -1309,6 +1398,97 @@ class TestOpenCodeHarnessProcessor:
             with pytest.raises(AssertionError, match="opencode setup directory"):
                 OpenCodeHarnessProcessor(config=config).get_run_command()
 
+    def test_get_run_command_replay_messages_pins_system_prompt_and_arg(self, _stub_model_server_lookup) -> None:
+        replay_messages = [
+            {"role": "system", "content": "REPLAY-SYSTEM-PROMPT"},
+            {"role": "user", "content": "Fix bug"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}],
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._opencode_config(
+                tmpdir,
+                # Should be overridden unconditionally by the replay's own system message.
+                resolved_system_prompt_template="/path/to/agent_prompt_override_system.txt",
+                problem_info={
+                    "problem_statement": "Fix bug",
+                    "instance_id": "django__django-12345",
+                    "base_commit": "abc123",
+                    "dataset_name": "SWE-bench",
+                    "split": "test",
+                    "instance_dict": "{}",
+                    "container_formatter": ["docker://custom/{instance_id}"],
+                    "replay_messages": json.dumps(replay_messages),
+                },
+            )
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            processor = OpenCodeHarnessProcessor(config=config)
+            processor.get_run_command()
+
+            replay_path = config.persistent_dir / "replay_messages.json"
+            assert json.loads(replay_path.read_text()) == replay_messages
+
+            sp_path = config.persistent_dir / "replay_system_prompt.txt"
+            assert sp_path.read_text() == "REPLAY-SYSTEM-PROMPT"
+            assert config.resolved_system_prompt_template == str(sp_path)
+
+            script = self._read_agent_script(config)
+            assert "replay_messages.json" in script
+            # Positional arg ordering: system prompt (#12) must precede the
+            # replay path (#13) so run_infer.sh's shift index stays aligned.
+            assert script.index("/opencode_setup/opencode/system_prompt.txt") < script.index("replay_messages.json")
+
+    def test_get_run_command_no_replay_messages_omits_replay_file(self, _stub_model_server_lookup) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._opencode_config(tmpdir)
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            OpenCodeHarnessProcessor(config=config).get_run_command()
+            assert not (config.persistent_dir / "replay_messages.json").exists()
+            assert "replay_messages.json" not in self._read_agent_script(config)
+
+    def test_get_run_command_mounts_subagent_manifest_and_enables_task_tool(self, _stub_model_server_lookup) -> None:
+        replay_messages = [{"role": "user", "content": "Fix bug"}]
+        replay_subagents = {
+            "version": 1,
+            "root_session_id": "recorded_root",
+            "sessions": [
+                {
+                    "session_id": "recorded_child",
+                    "parent_session_id": "recorded_root",
+                    "spawn_call_id": "call_child",
+                    "spawn_index": 0,
+                    "messages": [{"role": "user", "content": "Inspect parser"}],
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._opencode_config(
+                tmpdir,
+                problem_info={
+                    "problem_statement": "Fix bug",
+                    "instance_id": "django__django-12345",
+                    "base_commit": "abc123",
+                    "dataset_name": "SWE-bench",
+                    "split": "test",
+                    "instance_dict": "{}",
+                    "container_formatter": ["docker://custom/{instance_id}"],
+                    "replay_messages": json.dumps(replay_messages),
+                    "replay_subagent_manifest": json.dumps(replay_subagents),
+                },
+            )
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            OpenCodeHarnessProcessor(config=config).get_run_command()
+
+            manifest_path = config.persistent_dir / "replay_subagents.json"
+            assert json.loads(manifest_path.read_text()) == replay_subagents
+            script = self._read_agent_script(config)
+            assert "ENABLE_SUBAGENTS=1" in script
+            assert "replay_subagents.json" in script
+            assert script.index("replay_messages.json") < script.index("replay_subagents.json")
+
 
 ########################################
 # _extract_instance_dict tests
@@ -1337,11 +1517,101 @@ class TestExtractInstanceDict:
 
 
 ########################################
+# Replay-message helper tests (shared by OpenHands + opencode harnesses)
+########################################
+
+
+class TestParseReplayMessages:
+    def test_parses_json_string(self):
+        messages = [{"role": "system", "content": "hi"}]
+        assert _parse_replay_messages({"replay_messages": json.dumps(messages)}) == messages
+
+    def test_passes_through_list(self):
+        messages = [{"role": "user", "content": "hi"}]
+        assert _parse_replay_messages({"replay_messages": messages}) == messages
+
+    def test_returns_none_on_invalid_json(self):
+        assert _parse_replay_messages({"replay_messages": "{not json"}) is None
+
+    def test_returns_none_when_missing(self):
+        assert _parse_replay_messages({}) is None
+
+
+class TestExtractReplaySystemContent:
+    def test_finds_first_system_message(self):
+        messages = [
+            {"role": "system", "content": "SYS-1"},
+            {"role": "system", "content": "SYS-2"},
+        ]
+        assert _extract_replay_system_content(messages) == "SYS-1"
+
+    def test_skips_non_system_and_empty_content(self):
+        messages = [
+            {"role": "user", "content": "hi"},
+            {"role": "system", "content": "   "},
+            {"role": "system", "content": "SYS-REAL"},
+        ]
+        assert _extract_replay_system_content(messages) == "SYS-REAL"
+
+    def test_returns_none_when_no_system_message(self):
+        assert _extract_replay_system_content([{"role": "user", "content": "hi"}]) is None
+
+
+########################################
+# _maybe_build_replay_messages tests
+########################################
+
+
+class TestMaybeBuildReplayMessages:
+    _TRAJECTORY_INPUT = [
+        {"type": "message", "role": "system", "content": "sys"},
+        {"type": "message", "role": "user", "content": "Fix bug"},
+        {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "bash",
+            "arguments": "{}",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "ok",
+        },
+    ]
+
+    def _body(self, input_items) -> NeMoGymResponseCreateParamsNonStreaming:
+        return NeMoGymResponseCreateParamsNonStreaming(model="test-model", input=input_items)
+
+    def test_returns_none_for_plain_seed_input(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        body = self._body([{"type": "message", "role": "user", "content": "Fix bug"}])
+        assert wrapper._maybe_build_replay_messages(body) is None
+
+    def test_builds_replay_messages_for_openhands(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        wrapper.config.agent_framework = "openhands"
+        body = self._body(self._TRAJECTORY_INPUT)
+        result = wrapper._maybe_build_replay_messages(body)
+        assert result is not None
+        messages = json.loads(result)
+        assert any(m.get("role") == "assistant" and m.get("tool_calls") for m in messages)
+
+    def test_builds_replay_messages_for_opencode(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        wrapper.config.agent_framework = "opencode"
+        body = self._body(self._TRAJECTORY_INPUT)
+        result = wrapper._maybe_build_replay_messages(body)
+        assert result is not None
+        messages = json.loads(result)
+        assert any(m.get("role") == "assistant" and m.get("tool_calls") for m in messages)
+
+
+########################################
 # Per-session host-copy + trajectory extractor tests
 ########################################
 
 
-def _write_completion(path: Path, *, session_id, parent_session_id, turn, content_text="hello"):
+def _write_completion(path: Path, *, session_id, parent_session_id, turn, content_text="hello", **metadata):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
@@ -1354,6 +1624,7 @@ def _write_completion(path: Path, *, session_id, parent_session_id, turn, conten
                 "parent_session_id": parent_session_id,
                 "turn": turn,
                 "timestamp": 1.0,
+                **metadata,
             }
         )
     )
@@ -1540,6 +1811,37 @@ class TestGetAllSessionTrajectories:
         )
         w = self._wrapper(tmp_path)
         assert w.get_all_session_trajectories_from_completions(tmp_path, inst) == []
+
+    def test_preserves_replay_linkage_and_global_order_metadata(self, tmp_path) -> None:
+        inst = "replayed"
+        comp_dir = tmp_path / inst / "llm_completions" / inst
+        _write_completion(
+            comp_dir / "child.json",
+            session_id="live_child",
+            parent_session_id="live_root",
+            turn=2,
+            recorded_session_id="recorded_child",
+            recorded_parent_session_id="recorded_root",
+            spawn_call_id="call_child",
+            spawn_index=1,
+            subagent_type="explore",
+            replay_prefix_message_count=7,
+            global_turn=12,
+            session_start_global_turn=8,
+        )
+
+        out = self._wrapper(tmp_path).get_all_session_trajectories_from_completions(tmp_path, inst)
+        for key, value in {
+            "recorded_session_id": "recorded_child",
+            "recorded_parent_session_id": "recorded_root",
+            "spawn_call_id": "call_child",
+            "spawn_index": 1,
+            "subagent_type": "explore",
+            "replay_prefix_message_count": 7,
+            "global_turn": 12,
+            "session_start_global_turn": 8,
+        }.items():
+            assert out[0][key] == value
 
     def test_returns_empty_when_dir_missing(self, tmp_path) -> None:
         w = self._wrapper(tmp_path)
@@ -2521,6 +2823,14 @@ class TestSWEBenchWrapperRun:
     @pytest.mark.asyncio
     async def test_run_resolved(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
+        subagents = [
+            {
+                "session_id": "child",
+                "parent_session_id": "root",
+                "messages": [{"role": "user", "content": "inspect"}],
+                "tools": [],
+            }
+        ]
 
         mock_response = NeMoGymResponse(
             id="swebench-test",
@@ -2535,6 +2845,7 @@ class TestSWEBenchWrapperRun:
                 "input": "[]",
                 "metrics": json.dumps({"resolved": True, "patch_exists": True}),
                 "instance_config": _make_instance_config(tempfile.mkdtemp()).model_dump_json(),
+                "subagent_trajectories": json.dumps(subagents),
             },
         )
 
@@ -2559,6 +2870,8 @@ class TestSWEBenchWrapperRun:
             result = await wrapper.run(body)
             assert isinstance(result, SWEBenchVerifyResponse)
             assert result.reward == 1.0
+            assert result.subagent_trajectories == subagents
+            assert json.loads(result.responses_create_params.metadata["subagent_trajectories"]) == subagents
 
     @pytest.mark.asyncio
     async def test_run_not_resolved(self, monkeypatch) -> None:
@@ -2633,3 +2946,359 @@ class TestLoadRebenchLogParsers:
 
             mod = _load_rebench_log_parsers(rebench_dir)
             assert "lib_test" in mod.NAME_TO_PARSER
+
+
+########################################
+# opencode replay manifest / prefix-row / merge tests
+# (migrated from may_test_opencode_replay.py)
+########################################
+
+
+def _task_call(call_id: str, prompt: str, subagent_type: str = "general") -> dict:
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {
+            "name": "task",
+            "arguments": json.dumps(
+                {
+                    "description": prompt,
+                    "prompt": prompt,
+                    "subagent_type": subagent_type,
+                }
+            ),
+        },
+    }
+
+
+def _task_result(call_id: str, session_id: str) -> dict:
+    return {
+        "role": "tool",
+        "tool_call_id": call_id,
+        "content": f"task_id: {session_id} (for resuming)\n\n<task_result>done</task_result>",
+    }
+
+
+def _responses_task_call(call_id: str, prompt: str, task_id: Optional[str] = None) -> dict:
+    arguments = {"description": prompt, "prompt": prompt, "subagent_type": "general"}
+    if task_id is not None:
+        arguments["task_id"] = task_id
+    return {
+        "type": "function_call",
+        "name": "task",
+        "call_id": call_id,
+        "arguments": json.dumps(arguments),
+    }
+
+
+def _responses_task_result(call_id: str, session_id: str) -> dict:
+    return {
+        "type": "function_call_output",
+        "call_id": call_id,
+        "output": f"task_id: {session_id} (for resuming)\n\n<task_result>done</task_result>",
+    }
+
+
+def test_extract_task_spawns_uses_parent_message_and_tool_order() -> None:
+    messages = [
+        {"role": "user", "content": "root"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [_task_call("call_a", "A"), _task_call("call_b", "B", "explore")],
+        },
+        # Tool results can finish in the opposite order.
+        _task_result("call_b", "session_b"),
+        _task_result("call_a", "session_a"),
+    ]
+
+    spawns = extract_task_spawn_records(messages)
+    assert [(spawn["spawn_call_id"], spawn["spawn_index"]) for spawn in spawns] == [
+        ("call_a", 0),
+        ("call_b", 1),
+    ]
+    assert [spawn["child_session_id"] for spawn in spawns] == ["session_a", "session_b"]
+
+
+def test_responses_task_records_and_cut_preserve_parallel_call_order() -> None:
+    items = [
+        {"type": "reasoning", "summary": []},
+        _responses_task_call("call_a", "A"),
+        _responses_task_call("call_b", "B"),
+        # Results deliberately finish in the opposite order.
+        _responses_task_result("call_b", "session_b"),
+        _responses_task_result("call_a", "session_a"),
+        {"type": "function_call", "name": "read", "call_id": "call_read", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "call_read", "output": "content"},
+    ]
+
+    records = extract_responses_task_records(items)
+    assert [(record["spawn_call_id"], record["child_session_id"]) for record in records] == [
+        ("call_a", "session_a"),
+        ("call_b", "session_b"),
+    ]
+    assert completed_tool_turn_cut_indices(items, require_task=True) == [4]
+    assert completed_tool_turn_cut_indices(items) == [4, 6]
+
+
+def test_truncate_payload_keeps_only_completed_child_invocations_and_nested_branches() -> None:
+    child_messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "first result"},
+        {"role": "user", "content": "resume"},
+        {"role": "assistant", "content": None, "tool_calls": [_task_call("call_nested", "nested")]},
+        _task_result("call_nested", "session_nested"),
+        {"role": "assistant", "content": "resume result"},
+    ]
+    payload = {
+        "root_session_id": "session_root",
+        "sessions": [
+            {
+                "session_id": "session_nested",
+                "parent_session_id": "session_child",
+                "messages": [{"role": "user", "content": "nested"}, {"role": "assistant", "content": "done"}],
+            },
+            {
+                "session_id": "session_child",
+                "parent_session_id": "session_root",
+                "messages": child_messages,
+            },
+        ],
+    }
+    first_call = extract_responses_task_records(
+        [_responses_task_call("call_child", "first"), _responses_task_result("call_child", "session_child")]
+    )
+    first_prefix = truncate_replay_subagent_payload(first_call, payload)
+    assert first_prefix is not None
+    assert [session["session_id"] for session in first_prefix["sessions"]] == ["session_child"]
+    assert first_prefix["sessions"][0]["messages"] == child_messages[:3]
+
+    resumed_calls = extract_responses_task_records(
+        [
+            _responses_task_call("call_child", "first"),
+            _responses_task_result("call_child", "session_child"),
+            _responses_task_call("call_resume", "resume", task_id="session_child"),
+            _responses_task_result("call_resume", "session_child"),
+        ]
+    )
+    resumed_prefix = truncate_replay_subagent_payload(resumed_calls, payload)
+    assert resumed_prefix is not None
+    assert [session["session_id"] for session in resumed_prefix["sessions"]] == [
+        "session_child",
+        "session_nested",
+    ]
+    assert resumed_prefix["sessions"][0]["messages"] == child_messages
+
+
+def test_build_prefix_row_moves_legacy_subagents_into_request_metadata() -> None:
+    row = {
+        "responses_create_params": {
+            "input": [{"role": "user", "content": "root"}],
+            "metadata": {"instance_id": "example"},
+        },
+        "response": {
+            "output": [
+                _responses_task_call("call_a", "A"),
+                _responses_task_call("call_b", "B"),
+                _responses_task_result("call_b", "session_b"),
+                _responses_task_result("call_a", "session_a"),
+                {"type": "message", "role": "assistant", "content": "later"},
+            ]
+        },
+        # Metadata order intentionally differs from parent task-call order.
+        "subagent_trajectories": [
+            {
+                "session_id": "session_b",
+                "parent_session_id": "session_root",
+                "messages": [{"role": "user", "content": "B"}, {"role": "assistant", "content": "b"}],
+            },
+            {
+                "session_id": "session_a",
+                "parent_session_id": "session_root",
+                "messages": [{"role": "user", "content": "A"}, {"role": "assistant", "content": "a"}],
+            },
+        ],
+        "reward": 1.0,
+    }
+
+    prefix = build_replay_prefix_row(row, source_line=96)
+    assert set(prefix) == {"responses_create_params", "replay_provenance"}
+    assert prefix["replay_provenance"] == {
+        "cut_output_index": 3,
+        "source_line": 96,
+        "strategy": "first-task-batch",
+    }
+    assert len(prefix["responses_create_params"]["input"]) == 5
+    payload = json.loads(prefix["responses_create_params"]["metadata"]["subagent_trajectories"])
+    assert [session["session_id"] for session in payload["sessions"]] == ["session_a", "session_b"]
+
+
+def test_build_manifest_links_parallel_children_by_task_call_not_metadata_order() -> None:
+    main_messages = [
+        {"role": "user", "content": "root"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [_task_call("call_a", "A"), _task_call("call_b", "B", "explore")],
+        },
+        _task_result("call_a", "session_a"),
+        _task_result("call_b", "session_b"),
+    ]
+    payload = {
+        # Deliberately reverse the metadata array relative to task-call order.
+        "sessions": [
+            {
+                "session_id": "session_b",
+                "parent_session_id": "session_root",
+                "messages": [{"role": "user", "content": "B"}, {"role": "assistant", "content": "b"}],
+            },
+            {
+                "session_id": "session_a",
+                "parent_session_id": "session_root",
+                "messages": [{"role": "user", "content": "A"}, {"role": "assistant", "content": "a"}],
+            },
+        ]
+    }
+
+    manifest = build_replay_subagent_manifest(main_messages, payload)
+    assert manifest is not None
+    assert manifest["root_session_id"] == "session_root"
+    assert [session["session_id"] for session in manifest["sessions"]] == ["session_a", "session_b"]
+    by_id = {session["session_id"]: session for session in manifest["sessions"]}
+    assert (by_id["session_a"]["spawn_call_id"], by_id["session_a"]["spawn_index"]) == ("call_a", 0)
+    assert (
+        by_id["session_b"]["spawn_call_id"],
+        by_id["session_b"]["spawn_index"],
+        by_id["session_b"]["subagent_type"],
+    ) == ("call_b", 1, "explore")
+
+
+def test_build_manifest_links_nested_child_in_its_parent_messages() -> None:
+    main_messages = [
+        {"role": "user", "content": "root"},
+        {"role": "assistant", "content": None, "tool_calls": [_task_call("call_child", "child")]},
+        _task_result("call_child", "session_child"),
+    ]
+    child_messages = [
+        {"role": "user", "content": "child"},
+        {"role": "assistant", "content": None, "tool_calls": [_task_call("call_nested", "nested", "explore")]},
+        _task_result("call_nested", "session_nested"),
+    ]
+    manifest = build_replay_subagent_manifest(
+        main_messages,
+        {
+            "sessions": [
+                {
+                    "session_id": "session_nested",
+                    "parent_session_id": "session_child",
+                    "messages": [{"role": "user", "content": "nested"}],
+                },
+                {
+                    "session_id": "session_child",
+                    "parent_session_id": "session_root",
+                    "messages": child_messages,
+                },
+            ]
+        },
+    )
+
+    assert manifest is not None
+    assert [session["session_id"] for session in manifest["sessions"]] == ["session_child", "session_nested"]
+    by_id = {session["session_id"]: session for session in manifest["sessions"]}
+    assert by_id["session_child"]["spawn_call_id"] == "call_child"
+    assert by_id["session_nested"]["spawn_call_id"] == "call_nested"
+    assert by_id["session_nested"]["parent_session_id"] == "session_child"
+
+
+def test_build_manifest_falls_back_to_unique_prompt_when_task_result_is_missing() -> None:
+    main_messages = [
+        {"role": "user", "content": "root"},
+        {"role": "assistant", "content": None, "tool_calls": [_task_call("call_interrupted", "child")]},
+    ]
+    manifest = build_replay_subagent_manifest(
+        main_messages,
+        {
+            "sessions": [
+                {
+                    "session_id": "session_child",
+                    "parent_session_id": "session_root",
+                    "messages": [{"role": "user", "content": "child"}],
+                }
+            ]
+        },
+    )
+    assert manifest is not None
+    assert manifest["sessions"][0]["spawn_call_id"] == "call_interrupted"
+
+
+def test_parse_payload_accepts_legacy_json_list() -> None:
+    sessions = [{"session_id": "child"}]
+    assert parse_replay_subagent_payload({"subagent_trajectories": json.dumps(sessions)}) == {
+        "version": 1,
+        "sessions": sessions,
+    }
+
+
+def test_merge_carries_original_prefix_and_appends_only_live_continuation() -> None:
+    original = {
+        "version": 1,
+        "root_session_id": "recorded_root",
+        "sessions": [
+            {
+                "session_id": "recorded_child",
+                "parent_session_id": "recorded_root",
+                "spawn_call_id": "call_child",
+                "spawn_index": 0,
+                "messages": [
+                    {"role": "user", "content": "child"},
+                    {"role": "assistant", "content": "recorded"},
+                ],
+            }
+        ],
+    }
+    captured = [
+        {
+            "session_id": "live_child",
+            "parent_session_id": "live_root",
+            "recorded_session_id": "recorded_child",
+            "replay_prefix_message_count": 2,
+            "messages": [
+                {"role": "user", "content": "child"},
+                {"role": "assistant", "content": "recorded"},
+                {"role": "assistant", "content": "live continuation"},
+            ],
+            "tools": [{"name": "read"}],
+        }
+    ]
+
+    merged = merge_replay_subagent_trajectories(original, captured)
+    assert len(merged) == 1
+    assert merged[0]["session_id"] == "recorded_child"
+    assert merged[0]["live_session_id"] == "live_child"
+    assert [message["content"] for message in merged[0]["messages"]] == [
+        "child",
+        "recorded",
+        "live continuation",
+    ]
+
+
+def test_merge_reparents_a_new_live_child_to_the_stable_recorded_root() -> None:
+    manifest = {
+        "version": 1,
+        "root_session_id": "recorded_root",
+        "sessions": [],
+    }
+    captured = [
+        {
+            "session_id": "new_live_child",
+            "parent_session_id": "live_root",
+            "recorded_parent_session_id": "recorded_root",
+            "spawn_call_id": "new_call",
+            "spawn_index": 2,
+            "messages": [{"role": "user", "content": "new work"}],
+        }
+    ]
+
+    merged = merge_replay_subagent_trajectories(manifest, captured)
+    assert merged[0]["parent_session_id"] == "recorded_root"

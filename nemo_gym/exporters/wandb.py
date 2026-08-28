@@ -69,7 +69,8 @@ class WandbExporter(BaseExporter):
         self._active_run().config.update(OmegaConf.to_container(config_dict))
 
     def _log_metrics(self, metrics: dict[str, Any], step: Optional[int] = None) -> None:
-        self._active_run().log(metrics, step=step)
+        # @bxyu-nvidia: Commit here so the rollouts show up in W&B on the current step, rather than being flushed in the next step
+        self._active_run().log(metrics, step=step, commit=True)
 
     def _log_rollouts(self, rollouts: list[dict[str, Any]]) -> None:
         # One JSON blob per row: rollouts have no stable column set across environments.

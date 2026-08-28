@@ -15,8 +15,6 @@
 name: Unit tests
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
   workflow_call:
     inputs:
       base-ref:
@@ -90,22 +88,16 @@ jobs:
           done
           exit 1
 
-      - name: Core unit tests
-        if: needs.detect.outputs.run_full == 'true'
-        run: ./scripts/ci/core_unit_tests.sh
-
-      - name: Setup public sandbox test environment
-        if: needs.detect.outputs.run_full == 'true'
+      # Unconditional (not gated on run_full) and merged into one step, matching
+      # full-test-suite.yml's "Test" step, so the coverage gate below runs on every PR.
+      - name: Core + sandbox unit tests (coverage gate)
         run: |
+          ./scripts/ci/core_unit_tests.sh
           source ./scripts/ci/setup_dev.sh
           uv sync --extra dev --extra sandbox --extra openshell
-
-      # Sandbox is public-GitHub-only and is intentionally outside scripts/ci contract v3.
-      - name: Sandbox unit tests
-        if: needs.detect.outputs.run_full == 'true'
-        run: |
           source .venv/bin/activate
-          pytest --cov=. --cov-append --cov-report=term-missing --durations=10 -m sandbox
+          pytest --cov=. --cov-append --cov-report=term-missing \
+            --cov-fail-under="$(python3 scripts/ci/cov_fail_under.py)" --durations=10 -m sandbox
 
       # The changed-server optimization is specific to GitHub pull requests; internal
       # GitLab merge requests always run the full eight-shard server suite.

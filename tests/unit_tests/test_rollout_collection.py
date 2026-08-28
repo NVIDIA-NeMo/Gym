@@ -18,11 +18,13 @@ from asyncio import Future
 from collections import Counter
 from copy import deepcopy
 from pathlib import Path
+from threading import get_ident
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
 import pytest
 import yaml
+from omegaconf import OmegaConf
 
 import nemo_gym.rollout_collection
 import nemo_gym.token_id_capture.delivery
@@ -35,11 +37,16 @@ from nemo_gym.rollout_collection import (
     _DEFAULT_MAX_ROLLOUT_ATTEMPTS,
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
+    NG_PERF_KEY,
+    NG_TRAJECTORY_KEY,
+    E2ERolloutCollectionConfig,
     RolloutAggregationConfig,
     RolloutAggregationHelper,
     RolloutCollectionConfig,
     RolloutCollectionHelper,
+    _attach_ng_perf,
     _attach_trajectory_record,
+    _build_ng_perf,
     _build_trajectory_record,
     _expand_input_glob,
     _failures_path_for,
@@ -337,6 +344,331 @@ class TestRolloutCollection:
             sanitized = _rollout_for_export(malformed_result)
             assert b"secret" not in orjson.dumps(sanitized)
 
+    def test_build_ng_perf_absent_without_trajectory(self) -> None:
+        assert _build_ng_perf({}, rollout_latency_ms=12.0) is None
+        assert _build_ng_perf({NG_TRAJECTORY_KEY: "not-a-dict"}, rollout_latency_ms=12.0) is None
+
+    def test_build_ng_perf_absent_when_trajectory_invalid(self) -> None:
+        result = {NG_TRAJECTORY_KEY: {"invocations": [{"invocation_id": "root"}, {"invocation_id": "root"}]}}
+        assert _build_ng_perf(result, rollout_latency_ms=12.0) is None
+
+    def test_build_ng_perf_absent_without_invocations(self) -> None:
+        result = {NG_TRAJECTORY_KEY: {"task_id": "t", "rollout_id": "t-0", "invocations": []}}
+        assert _build_ng_perf(result, rollout_latency_ms=12.0) is None
+
+    def test_build_ng_perf_sums_owned_calls_and_matched_tool_calls(self) -> None:
+        result = {
+            NG_TRAJECTORY_KEY: {
+                "task_id": "t",
+                "rollout_id": "t-0",
+                "invocations": [
+                    {
+                        "invocation_id": "root",
+                        "model_calls": [{"model_call_id": "call-1"}],
+                    },
+                    {
+                        "invocation_id": "sub",
+                        "model_calls": [{"model_call_id": "call-2"}, {"model_call_id": "unresolved-response"}],
+                    },
+                ],
+                "tool_calls": [
+                    {"invocation_id": "root", "tool_call_id": "t1"},
+                    {"invocation_id": "sub", "tool_call_id": "t2"},
+                    {"invocation_id": "sub", "tool_call_id": "t3"},
+                    # Orphaned: no invocation in this trajectory owns "ghost".
+                    {"invocation_id": "ghost", "tool_call_id": "t4"},
+                ],
+                "model_calls": [
+                    {
+                        "model_call_id": "call-1",
+                        "token_stats": {
+                            "prompt_tokens": 100,
+                            "completion_tokens": 20,
+                            "cached_tokens": 10,
+                        },
+                    },
+                    {
+                        "model_call_id": "call-2",
+                        "token_stats": {
+                            "prompt_tokens": 50,
+                            "completion_tokens": 5,
+                            "reasoning_tokens": 3,
+                        },
+                    },
+                    # Present in raw capture but never referenced by any invocation's
+                    # model_calls (e.g. compaction-owned, or unjoined) -- must not be summed.
+                    {
+                        "model_call_id": "unowned",
+                        "token_stats": {"prompt_tokens": 999, "completion_tokens": 999},
+                    },
+                ],
+            }
+        }
+
+        ng_perf = _build_ng_perf(result, rollout_latency_ms=1234.5)
+
+        assert ng_perf == {
+            "num_turns": 2,
+            "num_tool_calls": 3,
+            "token_observability_coverage": 1.0,
+            "prompt_tokens": 150,
+            "cached_prompt_tokens": 10,
+            "completion_tokens": 25,
+            "reasoning_tokens": 3,
+            "total_latency_ms": 1234.5,
+        }
+
+    def test_build_ng_perf_omits_absent_token_fields_and_latency(self) -> None:
+        # No model_calls/tool_calls at all on the trajectory, and no independent latency
+        # measurement, so every optional ng_perf field must be *absent*, not present-as-None.
+        result = {
+            NG_TRAJECTORY_KEY: {
+                "task_id": "t",
+                "rollout_id": "t-0",
+                "invocations": [{"invocation_id": "root"}],
+            }
+        }
+
+        ng_perf = _build_ng_perf(result, rollout_latency_ms=None)
+
+        for absent_key in (
+            "prompt_tokens",
+            "cached_prompt_tokens",
+            "completion_tokens",
+            "reasoning_tokens",
+            "total_latency_ms",
+        ):
+            assert absent_key not in ng_perf
+        assert ng_perf == {"num_turns": 1, "num_tool_calls": 0, "token_observability_coverage": 0.0}
+
+    def test_build_ng_perf_dedupes_model_call_claimed_by_two_invocations(self) -> None:
+        # Simulates a join_model_call_observations conflict: the losing invocation keeps an
+        # unresolved ref pointing at a model_call_id another invocation already claimed. Tokens
+        # for that call must be counted once, not twice.
+        result = {
+            NG_TRAJECTORY_KEY: {
+                "task_id": "t",
+                "rollout_id": "t-0",
+                "invocations": [
+                    {"invocation_id": "root", "model_calls": [{"model_call_id": "shared"}]},
+                    {"invocation_id": "sub", "model_calls": [{"model_call_id": "shared"}]},
+                ],
+                "model_calls": [
+                    {"model_call_id": "shared", "token_stats": {"prompt_tokens": 100, "completion_tokens": 10}},
+                ],
+            }
+        }
+
+        ng_perf = _build_ng_perf(result, rollout_latency_ms=None)
+
+        # Token dedup must not erase the losing invocation from the turn count: the shared
+        # call contributes one owned-call turn to "root", and "sub" -- a real conversation
+        # left with no owned calls -- still counts as at least one turn.
+        assert ng_perf["num_turns"] == 2
+        assert ng_perf["prompt_tokens"] == 100
+        assert ng_perf["completion_tokens"] == 10
+        assert ng_perf["token_observability_coverage"] == 0.5
+
+    def test_ng_perf_matches_model_calls_by_response_id_pair_like_simple_agent(self) -> None:
+        # Integration test: simple_agent sets result["ng_trajectory"] directly (see
+        # responses_api_agents/simple_agent/app.py), bypassing join_model_call_observations
+        # entirely -- so its ModelCallRef is never canonicalized with a model_call_id and only
+        # ever carries (model_ref, response_id). Token fields must still populate.
+        row = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+        result = {
+            NG_TRAJECTORY_KEY: {
+                "task_id": "0",
+                "rollout_id": "0-0",
+                "invocations": [
+                    {
+                        "invocation_id": "root",
+                        "model_calls": [
+                            {
+                                "model_ref": {"type": "responses_api_models", "name": "policy_model"},
+                                "response_id": "resp_123",
+                            }
+                        ],
+                    }
+                ],
+            },
+            "ng_model_call_capture": {
+                "calls": [
+                    {
+                        "model_call_id": "captured-1",
+                        "response_id": "resp_123",
+                        "model_ref": {"type": "responses_api_models", "name": "policy_model"},
+                        "tokens_in": 100,
+                        "tokens_out": 20,
+                    }
+                ]
+            },
+        }
+
+        _attach_trajectory_record(row, result)
+        ng_perf = _build_ng_perf(result, rollout_latency_ms=None)
+
+        assert ng_perf["prompt_tokens"] == 100
+        assert ng_perf["completion_tokens"] == 20
+
+    def test_ng_perf_does_not_guess_an_ambiguous_response_id_match(self) -> None:
+        # Two captured calls share the same (model_ref, response_id) pair -- the ref must
+        # resolve to no match rather than guessing either one, so its tokens stay uncounted.
+        row = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+        result = {
+            NG_TRAJECTORY_KEY: {
+                "task_id": "0",
+                "rollout_id": "0-0",
+                "invocations": [
+                    {
+                        "invocation_id": "root",
+                        "model_calls": [
+                            {
+                                "model_ref": {"type": "responses_api_models", "name": "policy_model"},
+                                "response_id": "resp_dup",
+                            }
+                        ],
+                    }
+                ],
+            },
+            "ng_model_call_capture": {
+                "calls": [
+                    {
+                        "model_call_id": "captured-1",
+                        "response_id": "resp_dup",
+                        "model_ref": {"type": "responses_api_models", "name": "policy_model"},
+                        "tokens_in": 100,
+                        "tokens_out": 20,
+                    },
+                    {
+                        "model_call_id": "captured-2",
+                        "response_id": "resp_dup",
+                        "model_ref": {"type": "responses_api_models", "name": "policy_model"},
+                        "tokens_in": 999,
+                        "tokens_out": 999,
+                    },
+                ]
+            },
+        }
+
+        _attach_trajectory_record(row, result)
+        ng_perf = _build_ng_perf(result, rollout_latency_ms=None)
+
+        assert "prompt_tokens" not in ng_perf
+        assert "completion_tokens" not in ng_perf
+
+    def test_build_ng_perf_counts_explicit_turns_over_invocations(self) -> None:
+        # simple_agent-style trajectory: the whole multi-turn loop runs under a single "root"
+        # invocation with one TrajectoryTurn per step. num_turns must count the turns (3), not
+        # the invocations (1) -- otherwise tokens-per-turn degenerates into total tokens.
+        result = {
+            NG_TRAJECTORY_KEY: {
+                "task_id": "t",
+                "rollout_id": "t-0",
+                "invocations": [{"invocation_id": "root", "model_calls": [{"model_call_id": "call-1"}]}],
+                "turns": [
+                    {
+                        "invocation_id": "root",
+                        "task_id": "t",
+                        "rollout_id": "t-0",
+                        "turn_no": turn_no,
+                        "timestamp": 1.0,
+                        "step_count": 0,
+                    }
+                    for turn_no in (1, 2, 3)
+                ],
+                "model_calls": [
+                    {"model_call_id": "call-1", "token_stats": {"prompt_tokens": 100, "completion_tokens": 30}},
+                ],
+            }
+        }
+
+        ng_perf = _build_ng_perf(result, rollout_latency_ms=None)
+
+        assert ng_perf["num_turns"] == 3
+        assert ng_perf["completion_tokens"] == 30
+        assert ng_perf["token_observability_coverage"] == pytest.approx(1 / 3)
+
+    def test_build_ng_perf_sums_turns_across_invocations_with_per_invocation_fallback(self) -> None:
+        # Hybrid trajectory: "root" emits explicit TrajectoryTurn records (2 turns), "sub-a"
+        # emits none but owns 4 resolved model calls, "sub-b" emits nothing at all. Each
+        # invocation contributes its own best turn count: 2 + 4 + 1 = 7.
+        result = {
+            NG_TRAJECTORY_KEY: {
+                "task_id": "t",
+                "rollout_id": "t-0",
+                "invocations": [
+                    {"invocation_id": "root"},
+                    {"invocation_id": "sub-a", "model_calls": [{"model_call_id": f"call-{i}"} for i in range(4)]},
+                    {"invocation_id": "sub-b"},
+                ],
+                "turns": [
+                    {
+                        "invocation_id": "root",
+                        "task_id": "t",
+                        "rollout_id": "t-0",
+                        "turn_no": turn_no,
+                        "timestamp": 1.0,
+                        "step_count": 0,
+                    }
+                    for turn_no in (1, 2)
+                ],
+                "model_calls": [
+                    {"model_call_id": f"call-{i}", "token_stats": {"completion_tokens": 10}} for i in range(4)
+                ],
+            }
+        }
+
+        ng_perf = _build_ng_perf(result, rollout_latency_ms=None)
+
+        assert ng_perf["num_turns"] == 7
+        assert ng_perf["completion_tokens"] == 40
+        assert ng_perf["token_observability_coverage"] == pytest.approx(4 / 7)
+
+    def test_attach_ng_perf_absent_when_observability_disabled(self) -> None:
+        result = {
+            "_ng_rollout_latency_ms": 42.0,
+            NG_TRAJECTORY_KEY: {
+                "task_id": "t",
+                "rollout_id": "t-0",
+                "invocations": [{"invocation_id": "root"}],
+            },
+        }
+
+        _attach_ng_perf(result, observability_enabled=False)
+
+        assert NG_PERF_KEY not in result
+        assert "_ng_rollout_latency_ms" not in result
+
+    def test_attach_ng_perf_sets_ng_perf_when_enabled(self) -> None:
+        result = {
+            "_ng_rollout_latency_ms": 42.0,
+            NG_TRAJECTORY_KEY: {
+                "task_id": "t",
+                "rollout_id": "t-0",
+                "invocations": [{"invocation_id": "root"}],
+            },
+        }
+
+        _attach_ng_perf(result, observability_enabled=True)
+
+        assert result[NG_PERF_KEY] == {
+            "num_turns": 1,
+            "num_tool_calls": 0,
+            "token_observability_coverage": 0.0,
+            "total_latency_ms": 42.0,
+        }
+        assert "_ng_rollout_latency_ms" not in result
+
+    def test_attach_ng_perf_swallows_build_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # An unexpected assembly failure must never take down rollout collection over an observability side-channel.
+        result = {"_ng_rollout_latency_ms": 42.0, NG_TRAJECTORY_KEY: {}}
+        monkeypatch.setattr(nemo_gym.rollout_collection, "_build_ng_perf", MagicMock(side_effect=ValueError))
+
+        _attach_ng_perf(result, observability_enabled=True)
+
+        assert NG_PERF_KEY not in result
+        assert "_ng_rollout_latency_ms" not in result
+
     @pytest.mark.parametrize("request_debug_enabled", [True, False])
     async def test_run_examples_logs_failed_run_when_request_debug_enabled(
         self,
@@ -356,6 +688,7 @@ class TestRolloutCollection:
 
         mock_server_client = MagicMock()
         mock_server_client.post = AsyncMock(return_value=response)
+        mock_server_client.global_config_dict = OmegaConf.create({"my_agent": {"responses_api_agents": {"impl": {}}}})
 
         monkeypatch.setattr(
             nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
@@ -386,6 +719,25 @@ class TestRolloutCollection:
             assert "do not log this" not in captured.out
         else:
             assert "[rollout_collection] /run failed" not in captured.out
+
+    async def test_run_examples_stamps_independent_rollout_latency(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        row = {AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+        response = MagicMock()
+        response.status = 200
+
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(return_value=response)
+        mock_server_client.global_config_dict = OmegaConf.create({"my_agent": {"responses_api_agents": {"impl": {}}}})
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
+        )
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"response": {}}))
+
+        _, result = await next(RolloutCollectionHelper().run_examples([row]))
+
+        assert isinstance(result["_ng_rollout_latency_ms"], float)
+        assert result["_ng_rollout_latency_ms"] >= 0
 
     def test_preprocess_rows_with_prompt_config(self, tmp_path: Path) -> None:
         """prompt_config builds responses_create_params.input from template."""
@@ -898,9 +1250,38 @@ class TestRolloutCollection:
                 },
                 "key_metrics": {"mean/abc usage": 1.0},
                 "group_level_metrics": actual_aggregate_metrics[0]["group_level_metrics"],
+                "perf_summary": None,
             }
         ]
         assert expected_aggregate_metrics == actual_aggregate_metrics
+
+    async def test_run_from_config_clears_failure_sidecar_on_fresh_run(
+        self, tmp_path: Path, empty_global_config: MagicMock
+    ) -> None:
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my agent"}}) + "\n"
+        )
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+        failures_fpath = _failures_path_for(output_jsonl_fpath)
+        failures_fpath.write_text(json.dumps({"_ng_failure_class": "stale_failure"}) + "\n")
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            resume_from_cache=False,
+            disable_aggregation=True,
+        )
+
+        class Helper(RolloutCollectionHelper):
+            def run_examples(self, examples, *args, **kwargs):
+                future = Future()
+                future.set_result((examples[0], {"reward": 1.0}))
+                return [future]
+
+        await Helper().run_from_config(config)
+
+        assert failures_fpath.read_bytes() == b""
 
     @pytest.mark.parametrize("resume_from_cache", [False, True])
     async def test_run_from_config_creates_missing_output_dir(
@@ -1534,6 +1915,64 @@ class TestRolloutCollection:
             assert "ng_trajectory" not in item
             assert "usage" in item["response"]
 
+    async def test_call_aggregate_metrics_includes_perf_summary_when_present(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """perf_summary must survive _call_aggregate_metrics' hand-picked agent_entry dict --
+        it's easy to add a field to AggregateMetrics and forget this call site only forwards an
+        explicit allowlist rather than the whole model."""
+        agg = AggregateMetrics(
+            agent_metrics={"mean/reward": 0.5},
+            key_metrics={"mean/reward": 0.5},
+            group_level_metrics=[{"mean/reward": 1.0}],
+            perf_summary={"mean_num_turns": 3.0, "total_latency_mean_ms": 1000.0},
+        )
+
+        mock_response = AsyncMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.read = AsyncMock(return_value=orjson.dumps(agg.model_dump()))
+        mock_response.status = 200
+
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(return_value=mock_response)
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
+        )
+        helper = RolloutCollectionHelper()
+
+        rows = [{AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}]
+        results = [{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0}]
+
+        metrics_fpath = await helper._call_aggregate_metrics(results, rows, tmp_path / "output.jsonl")
+
+        written = json.loads(metrics_fpath.read_text())
+        assert written[0]["perf_summary"] == {"mean_num_turns": 3.0, "total_latency_mean_ms": 1000.0}
+
+    async def test_call_aggregate_metrics_omits_perf_summary_when_absent(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        agg = AggregateMetrics(agent_metrics={"mean/reward": 0.5}, key_metrics={"mean/reward": 0.5})
+
+        mock_response = AsyncMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.read = AsyncMock(return_value=orjson.dumps(agg.model_dump()))
+        mock_response.status = 200
+
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(return_value=mock_response)
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
+        )
+        helper = RolloutCollectionHelper()
+
+        rows = [{AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}]
+        results = [{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0}]
+
+        metrics_fpath = await helper._call_aggregate_metrics(results, rows, tmp_path / "output.jsonl")
+
+        written = json.loads(metrics_fpath.read_text())
+        assert "perf_summary" not in written[0]
+
     async def test_call_aggregate_metrics_multiple_agents(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -1714,6 +2153,8 @@ class TestDisableAggregationAndCallerTaskIndex:
         # Rollouts file written (proves the rollout phase ran); aggregator file absent.
         assert output_jsonl_fpath.exists()
         assert not (tmp_path / "output_aggregate_metrics.json").exists()
+        assert not (tmp_path / "quality_summary.json").exists()
+        assert not (tmp_path / "rollout_verdicts.jsonl").exists()
 
     def test_preprocess_honors_caller_task_index(self, tmp_path: Path) -> None:
         """A row arriving with `_ng_task_index` pre-set is used verbatim — the
@@ -1858,6 +2299,53 @@ class TestRolloutAggregationHelper:
         # though output_jsonl_fpath is used to derive the metrics path.
         assert not output_fpath.exists()
         assert (tmp_path / "rollouts_aggregate_metrics.json").exists()
+
+    async def test_health_failure_does_not_fail_aggregation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        shard = tmp_path / "shard.jsonl"
+        shard.write_text(
+            json.dumps(
+                {
+                    AGENT_REF_KEY_NAME: {"name": "a"},
+                    TASK_INDEX_KEY_NAME: 0,
+                    ROLLOUT_INDEX_KEY_NAME: 0,
+                    "response": {"usage": {}},
+                    "reward": 0.5,
+                }
+            )
+            + "\n"
+        )
+        output_fpath = tmp_path / "rollouts.jsonl"
+
+        async def fake_call(self, results, rows, output_fpath):
+            metrics_path = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
+            metrics_path.write_text("[]")
+            return metrics_path
+
+        caller_thread = get_ident()
+        health_thread = None
+
+        def broken_health_check(*args, **kwargs):
+            nonlocal health_thread
+            health_thread = get_ident()
+            raise RuntimeError("health failed")
+
+        monkeypatch.setattr(RolloutCollectionHelper, "_call_aggregate_metrics", fake_call)
+        monkeypatch.setattr("nemo_gym.rollout_health.run_health_checks", broken_health_check)
+        config = RolloutAggregationConfig(
+            input_glob=str(shard),
+            output_jsonl_fpath=str(output_fpath),
+            merge_shards=True,
+        )
+
+        metrics_path = await RolloutAggregationHelper().run_from_config(config)
+
+        assert metrics_path.exists()
+        assert output_fpath.exists()
+        assert health_thread is not None
+        assert health_thread != caller_thread
+        assert "Rollout health checks failed after aggregation" in caplog.text
 
 
 class TestTokenCaptureRetention:
@@ -2140,3 +2628,528 @@ class TestRolloutCarriesTokenIds:
     )
     def test_false_without_them(self, response) -> None:
         assert rollout_carries_token_ids({"response": response}) is False
+
+
+class TestE2EInputJsonlFpathRejected:
+    def test_e2e_config_rejects_input_jsonl_fpath(self) -> None:
+        with pytest.raises(ConfigError, match=r"not supported when serving end-to-end"):
+            E2ERolloutCollectionConfig.model_validate(
+                {
+                    "output_jsonl_fpath": "out.jsonl",
+                    "split": "train",
+                    "input_jsonl_fpath": "my_data.jsonl",
+                }
+            )
+
+    def test_e2e_config_accepts_without_input_jsonl_fpath(self) -> None:
+        config = E2ERolloutCollectionConfig.model_validate({"output_jsonl_fpath": "out.jsonl", "split": "train"})
+        assert config.split == "train"
+
+    def test_no_serve_config_still_accepts_input_jsonl_fpath(self) -> None:
+        config = RolloutCollectionConfig.model_validate(
+            {"output_jsonl_fpath": "out.jsonl", "input_jsonl_fpath": "my_data.jsonl"}
+        )
+        assert config.input_jsonl_fpath == "my_data.jsonl"
+
+
+class TestAgentMapRouting:
+    """Pins the agent_map / agent_name routing contract (see dataset-decoupling RFC).
+
+    These exist to fail loudly if the precedence semantics are ever changed silently
+    (the #761 failure mode, where override quietly became backfill).
+    """
+
+    def _write_rows(self, tmp_path, rows):
+        fpath = tmp_path / "input.jsonl"
+        fpath.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        return fpath
+
+    def _config(self, tmp_path, fpath, **kwargs):
+        return RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath), output_jsonl_fpath=str(tmp_path / "out.jsonl"), **kwargs
+        )
+
+    def _rcp_row(self, agent=None, content="q"):
+        row = {"responses_create_params": {"input": [{"role": "user", "content": content}]}}
+        if agent is not None:
+            row["agent_ref"] = {"name": agent}
+        return row
+
+    def test_agent_name_overrides_existing_agent_ref(self, tmp_path) -> None:
+        """agent_name re-routes ALL rows (restored #568 semantics), warning about the override."""
+        fpath = self._write_rows(tmp_path, [self._rcp_row("old_agent"), self._rcp_row()])
+        config = self._config(tmp_path, fpath, agent_name="new_agent")
+        with pytest.warns(UserWarning, match="overrode agent_ref"):
+            rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert [r["agent_ref"]["name"] for r in rows] == ["new_agent", "new_agent"]
+
+    def test_agent_name_is_sugar_for_agent_map_default(self, tmp_path) -> None:
+        config = self._config(tmp_path, self._write_rows(tmp_path, [self._rcp_row()]), agent_name="a")
+        assert config.agent_map == {"_default": "a"}
+
+    def test_agent_name_conflicting_with_agent_map_default_raises(self, tmp_path) -> None:
+        fpath = self._write_rows(tmp_path, [self._rcp_row()])
+        with pytest.raises(ValueError, match="conflicts with agent_map._default"):
+            self._config(tmp_path, fpath, agent_name="a", agent_map={"_default": "b"})
+
+    def test_agent_map_specific_beats_default(self, tmp_path) -> None:
+        fpath = self._write_rows(tmp_path, [self._rcp_row("x"), self._rcp_row("y"), self._rcp_row()])
+        config = self._config(tmp_path, fpath, agent_map={"x": "mapped_x", "_default": "fallback"})
+        with pytest.warns(UserWarning, match="overrode agent_ref"):
+            rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert [r["agent_ref"]["name"] for r in rows] == ["mapped_x", "fallback", "fallback"]
+
+    def test_agent_map_without_default_leaves_unmapped_rows_alone(self, tmp_path) -> None:
+        fpath = self._write_rows(tmp_path, [self._rcp_row("x"), self._rcp_row("y")])
+        config = self._config(tmp_path, fpath, agent_map={"x": "mapped_x"})
+        with pytest.warns(UserWarning, match="overrode agent_ref"):
+            rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert [r["agent_ref"]["name"] for r in rows] == ["mapped_x", "y"]
+
+    def test_row_agent_ref_wins_when_no_map(self, tmp_path) -> None:
+        fpath = self._write_rows(tmp_path, [self._rcp_row("x")])
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, self._config(tmp_path, fpath))
+        assert rows[0]["agent_ref"]["name"] == "x"
+
+    def test_missing_agent_still_hard_errors(self, tmp_path) -> None:
+        fpath = self._write_rows(tmp_path, [self._rcp_row()])
+        config = self._config(tmp_path, fpath, agent_map={"x": "y"})
+        with pytest.raises(ValueError, match="No agent specified"):
+            RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+    def test_identity_mapping_does_not_warn(self, tmp_path) -> None:
+        fpath = self._write_rows(tmp_path, [self._rcp_row("a")])
+        config = self._config(tmp_path, fpath, agent_name="a")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert rows[0]["agent_ref"]["name"] == "a"
+
+
+class TestValidateAgentNames:
+    def _rows(self, *names):
+        return [{"agent_ref": {"name": n}} for n in names]
+
+    def _cfg(self, **entries):
+        return OmegaConf.create(
+            {name: {"responses_api_agents": {"impl": {}}} for name in entries.get("agents", [])}
+            | entries.get("extra", {})
+        )
+
+    def test_all_known_passes(self) -> None:
+        cfg = self._cfg(agents=["agent_a", "agent_b"])
+        RolloutCollectionHelper._validate_agent_names(self._rows("agent_a", "agent_b"), cfg)
+
+    def test_unknown_agent_raises_with_suggestion(self) -> None:
+        cfg = self._cfg(agents=["math_with_judge_simple_agent"])
+        with pytest.raises(ValueError, match="did you mean 'math_with_judge_simple_agent'"):
+            RolloutCollectionHelper._validate_agent_names(self._rows("math_with_judge_simple_agnet"), cfg)
+
+    def test_unknown_agent_without_close_match_raises(self) -> None:
+        cfg = self._cfg(agents=["a"])
+        with pytest.raises(ValueError, match="not present in the running config"):
+            RolloutCollectionHelper._validate_agent_names(self._rows("zzz_completely_unrelated"), cfg)
+
+    def test_non_agent_instance_raises(self) -> None:
+        """Routing to an existing but non-agent instance (e.g. agent_map to an RS name) must fail
+        pre-dispatch: /run only exists on agent servers."""
+        cfg = self._cfg(agents=["math_agent"], extra={"math_rs": {"resources_servers": {"impl": {}}}})
+        with pytest.raises(ValueError, match="exists but is not an agent instance"):
+            RolloutCollectionHelper._validate_agent_names(self._rows("math_rs"), cfg)
+
+
+# A merged config shaped like real ones: one RS instance, agents pointing at RSes via the
+# resources_server.name edge, plus a self-contained agent that declares no RS.
+_RESOLVER_CONFIG = {
+    "math_rs": {"resources_servers": {"math_rs_impl": {"entrypoint": "app.py"}}},
+    "math_agent": {
+        "responses_api_agents": {
+            "simple_agent": {"resources_server": {"type": "resources_servers", "name": "math_rs"}}
+        }
+    },
+    "tau2_agent": {"responses_api_agents": {"tau2": {"entrypoint": "app.py"}}},
+    "shared_rs": {"resources_servers": {"impl": {}}},
+    "shared_agent_a": {"responses_api_agents": {"a": {"resources_server": {"name": "shared_rs"}}}},
+    "shared_agent_b": {"responses_api_agents": {"b": {"resources_server": {"name": "shared_rs"}}}},
+    "orphan_rs": {"resources_servers": {"impl": {}}},
+}
+
+
+class TestResolveTaskSources:
+    """Pins the task_source -> agent resolution contract (dataset-decoupling RFC)."""
+
+    def _resolve(self, rows):
+        RolloutCollectionHelper.resolve_task_sources(rows, OmegaConf.create(_RESOLVER_CONFIG))
+        return rows
+
+    def test_rs_task_source_inverts_to_unique_agent(self) -> None:
+        rows = [{"task_source": "math_rs"}]
+        assert self._resolve(rows)[0]["agent_ref"] == {"name": "math_agent"}
+
+    def test_agent_task_source_routes_directly(self) -> None:
+        """Self-contained environments: the declaring instance IS the agent."""
+        rows = [{"task_source": "tau2_agent"}]
+        assert self._resolve(rows)[0]["agent_ref"] == {"name": "tau2_agent"}
+
+    def test_existing_agent_ref_wins_over_task_source(self) -> None:
+        rows = [{"task_source": "math_rs", "agent_ref": {"name": "tau2_agent"}}]
+        assert self._resolve(rows)[0]["agent_ref"] == {"name": "tau2_agent"}
+
+    def test_no_task_source_rows_is_noop(self) -> None:
+        rows = [{"agent_ref": {"name": "math_agent"}}]
+        assert self._resolve(rows) == [{"agent_ref": {"name": "math_agent"}}]
+
+    def test_unknown_task_source_raises_with_suggestion(self) -> None:
+        with pytest.raises(ValueError, match="did you mean 'math_rs'"):
+            self._resolve([{"task_source": "math_rss"}])
+
+    def test_ambiguous_rs_raises_naming_agent_map(self) -> None:
+        with pytest.raises(ValueError, match=r"2 agents reference this resources server.*agent_map"):
+            self._resolve([{"task_source": "shared_rs"}])
+
+    def test_rs_with_no_agent_raises(self) -> None:
+        with pytest.raises(ValueError, match="no agent in the running config references"):
+            self._resolve([{"task_source": "orphan_rs"}])
+
+    def test_task_source_survives_resolution(self) -> None:
+        """The stamp stays on the row (provenance); only agent_ref is added."""
+        rows = self._resolve([{"task_source": "math_rs"}])
+        assert rows[0]["task_source"] == "math_rs"
+
+    def test_legacy_agent_ref_rows_warn_deprecation(self) -> None:
+        """Rows routed purely by their baked-in agent_ref (no task_source) are the legacy
+        path, slated for removal after the deprecation cycle; each run warns once with a count."""
+        rows = [{"agent_ref": {"name": "math_agent"}}, {"agent_ref": {"name": "math_agent"}}]
+        with pytest.warns(DeprecationWarning, match="2 rows routed via their baked-in agent_ref"):
+            self._resolve(rows)
+        assert all(r["agent_ref"] == {"name": "math_agent"} for r in rows)
+
+    def test_task_source_rows_do_not_warn(self) -> None:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            self._resolve([{"task_source": "math_rs"}])
+
+
+class TestFanOut:
+    def _write_rows(self, tmp_path, rows):
+        fpath = tmp_path / "input.jsonl"
+        fpath.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        return fpath
+
+    def _rcp_row(self, **extra):
+        return {"responses_create_params": {"input": [{"role": "user", "content": "q"}]}, **extra}
+
+    def test_fan_out_by_task_source_emits_one_copy_per_agent(self, tmp_path) -> None:
+        fpath = self._write_rows(tmp_path, [self._rcp_row(task_source="shared_rs")])
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            fan_out={"shared_rs": ["shared_agent_a", "shared_agent_b"]},
+        )
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert [r["agent_ref"]["name"] for r in rows] == ["shared_agent_a", "shared_agent_b"]
+        assert [r[ROLLOUT_INDEX_KEY_NAME] for r in rows] == [0, 1]
+        assert len({r[TASK_INDEX_KEY_NAME] for r in rows}) == 1
+
+    def test_fan_out_by_agent_ref_name(self, tmp_path) -> None:
+        fpath = self._write_rows(tmp_path, [self._rcp_row(agent_ref={"name": "agent_a"})])
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            fan_out={"agent_a": ["agent_x", "agent_y"]},
+        )
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert [r["agent_ref"]["name"] for r in rows] == ["agent_x", "agent_y"]
+
+    def test_fan_out_composes_with_per_agent_num_repeats(self, tmp_path) -> None:
+        fpath = self._write_rows(tmp_path, [self._rcp_row(task_source="shared_rs")])
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            fan_out={"shared_rs": ["shared_agent_a", "shared_agent_b"]},
+            num_repeats={"shared_agent_a": 2, "shared_agent_b": 1},
+        )
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert [r["agent_ref"]["name"] for r in rows] == ["shared_agent_a", "shared_agent_a", "shared_agent_b"]
+        assert [r[ROLLOUT_INDEX_KEY_NAME] for r in rows] == [0, 1, 2]
+
+    async def test_fanned_copies_dispatch_to_distinct_agents(self, tmp_path, monkeypatch) -> None:
+        """End-to-end through run_examples: each fan-out copy is POSTed to its own agent server."""
+        fpath = self._write_rows(tmp_path, [self._rcp_row(task_source="shared_rs")])
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            fan_out={"shared_rs": ["shared_agent_a", "shared_agent_b"]},
+        )
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+        posted = []
+
+        async def fake_post(server_name, url_path, **kwargs):
+            posted.append(server_name)
+            response = MagicMock()
+            response.ok = True
+            response.read = AsyncMock(return_value=b"{}")
+            return response
+
+        mock_client = MagicMock()
+        mock_client.post = fake_post
+        mock_client.global_config_dict = OmegaConf.create(
+            {name: {"responses_api_agents": {"impl": {}}} for name in ("shared_agent_a", "shared_agent_b")}
+        )
+        monkeypatch.setattr(nemo_gym.rollout_collection, "setup_server_client_utils", lambda *a, **k: mock_client)
+        for fut in RolloutCollectionHelper().run_examples(rows):
+            await fut
+        assert sorted(posted) == ["shared_agent_a", "shared_agent_b"]
+
+    def test_fan_out_keys_match_data_side_name_and_win_over_agent_map(self, tmp_path) -> None:
+        """fan_out keys match the name the DATA carries (pre-override); its targets are final,
+        so a competing agent_map rewrite does not leak into fanned copies."""
+        fpath = self._write_rows(tmp_path, [self._rcp_row(agent_ref={"name": "agent_a"})])
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            agent_map={"agent_a": "agent_z"},
+            fan_out={"agent_a": ["agent_x", "agent_y"]},
+        )
+        with pytest.warns(UserWarning, match="overrode agent_ref"):
+            rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert [r["agent_ref"]["name"] for r in rows] == ["agent_x", "agent_y"]
+
+    def test_unmatched_rows_pass_through_fan_out(self, tmp_path) -> None:
+        fpath = self._write_rows(tmp_path, [self._rcp_row(agent_ref={"name": "other"})])
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            fan_out={"shared_rs": ["shared_agent_a"]},
+        )
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert [r["agent_ref"]["name"] for r in rows] == ["other"]
+
+
+class TestTaskSourcePreprocess:
+    def _write_rows(self, tmp_path, rows):
+        fpath = tmp_path / "input.jsonl"
+        fpath.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        return fpath
+
+    def _rcp_row(self, **extra):
+        return {"responses_create_params": {"input": [{"role": "user", "content": "q"}]}, **extra}
+
+    def test_task_source_row_defers_resolution(self, tmp_path) -> None:
+        """Preprocess leaves task_source rows without agent_ref; resolution happens at dispatch prep."""
+        fpath = self._write_rows(tmp_path, [self._rcp_row(task_source="math_rs")])
+        config = RolloutCollectionConfig(input_jsonl_fpath=str(fpath), output_jsonl_fpath=str(tmp_path / "o.jsonl"))
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert "agent_ref" not in rows[0]
+        assert rows[0]["task_source"] == "math_rs"
+
+    def test_agent_map_keyed_by_task_source(self, tmp_path) -> None:
+        fpath = self._write_rows(tmp_path, [self._rcp_row(task_source="math_rs")])
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "o.jsonl"),
+            agent_map={"math_rs": "some_agent"},
+        )
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert rows[0]["agent_ref"] == {"name": "some_agent"}
+
+    def test_agent_default_covers_task_source_rows(self, tmp_path) -> None:
+        fpath = self._write_rows(tmp_path, [self._rcp_row(task_source="math_rs")])
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath), output_jsonl_fpath=str(tmp_path / "o.jsonl"), agent_name="z"
+        )
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert rows[0]["agent_ref"] == {"name": "z"}
+
+    def test_agent_map_task_source_key_matches_dual_stamped_row(self, tmp_path) -> None:
+        """Derived artifacts carry BOTH task_source and a resolved agent_ref; a map entry
+        keyed by either must re-route them (agent-name entry wins over task_source entry)."""
+        fpath = self._write_rows(tmp_path, [self._rcp_row(task_source="math_rs", agent_ref={"name": "math_agent"})])
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "o.jsonl"),
+            agent_map={"math_rs": "swe_agent"},
+        )
+        with pytest.warns(UserWarning, match="overrode agent_ref"):
+            rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert rows[0]["agent_ref"] == {"name": "swe_agent"}
+
+    def test_agent_map_agent_key_beats_task_source_key(self, tmp_path) -> None:
+        fpath = self._write_rows(tmp_path, [self._rcp_row(task_source="math_rs", agent_ref={"name": "math_agent"})])
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "o.jsonl"),
+            agent_map={"math_agent": "by_agent", "math_rs": "by_source"},
+        )
+        with pytest.warns(UserWarning, match="overrode agent_ref"):
+            rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert rows[0]["agent_ref"] == {"name": "by_agent"}
+
+    def test_num_repeats_keyed_by_task_source(self, tmp_path) -> None:
+        fpath = self._write_rows(tmp_path, [self._rcp_row(task_source="math_rs")])
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "o.jsonl"),
+            num_repeats={"math_rs": 3},
+        )
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert len(rows) == 3
+
+    async def test_run_from_config_resolves_task_source_before_materialized_write(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """task_source-only rows must be resolved to an agent BEFORE the materialized-inputs
+        file is written: custom drivers (e.g. gdpval's orchestrator) read agent_ref from it."""
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", lambda: {})
+
+        source_row = {"responses_create_params": {"input": []}, "task_source": "math_rs"}
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes(orjson.dumps(source_row) + b"\n")
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            disable_aggregation=True,
+        )
+
+        mock_client = MagicMock()
+        mock_client.global_config_dict = OmegaConf.create(
+            {
+                "math_rs": {"resources_servers": {"impl": {}}},
+                "math_agent": {"responses_api_agents": {"impl": {"resources_server": {"name": "math_rs"}}}},
+            }
+        )
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return mock_client
+
+            def run_examples(self, examples, *args, **kwargs):
+                future = Future()
+                future.set_result((examples[0], {"response": {}}))
+                return [future]
+
+        await Helper().run_from_config(config)
+
+        [materialized] = [orjson.loads(line) for line in config.materialized_jsonl_fpath.read_bytes().splitlines()]
+        assert materialized["agent_ref"] == {"name": "math_agent"}
+        assert materialized["task_source"] == "math_rs"
+
+
+class TestFanOutValidation:
+    """fan_out misconfiguration must fail loudly at config time, not drop rows silently."""
+
+    def _config(self, tmp_path, **kwargs):
+        return RolloutCollectionConfig(
+            input_jsonl_fpath=str(tmp_path / "in.jsonl"), output_jsonl_fpath=str(tmp_path / "out.jsonl"), **kwargs
+        )
+
+    def test_empty_target_list_rejected(self, tmp_path) -> None:
+        with pytest.raises(ValueError, match="empty list"):
+            self._config(tmp_path, fan_out={"math": []})
+
+    def test_duplicate_targets_rejected(self, tmp_path) -> None:
+        with pytest.raises(ValueError, match="more than once.*agent_a"):
+            self._config(tmp_path, fan_out={"math": ["agent_a", "agent_a", "agent_b"]})
+
+
+class TestNumRepeatsKeyPrecedence:
+    """num_repeats keys match the dispatched agent OR the row's original routing key; the
+    dispatched agent wins on conflict. Pins the documented agent_map+num_repeats combination."""
+
+    def _write_rows(self, tmp_path, rows):
+        fpath = tmp_path / "input.jsonl"
+        fpath.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        return fpath
+
+    def _config(self, tmp_path, fpath, **kwargs):
+        return RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath), output_jsonl_fpath=str(tmp_path / "out.jsonl"), **kwargs
+        )
+
+    def _ts_row(self, task_source="math"):
+        return {"responses_create_params": {"input": [{"role": "user", "content": "q"}]}, "task_source": task_source}
+
+    def test_agent_map_composes_with_source_keyed_num_repeats(self, tmp_path) -> None:
+        """agent_map={math: math_agent} + num_repeats={math: 3}: rows route to math_agent AND
+        repeat 3 times via their original routing key."""
+        fpath = self._write_rows(tmp_path, [self._ts_row("math")])
+        config = self._config(tmp_path, fpath, agent_map={"math": "math_agent"}, num_repeats={"math": 3})
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert len(rows) == 3
+        assert all(r["agent_ref"]["name"] == "math_agent" for r in rows)
+
+    def test_target_keyed_num_repeats_still_matches(self, tmp_path) -> None:
+        fpath = self._write_rows(tmp_path, [self._ts_row("math")])
+        config = self._config(tmp_path, fpath, agent_map={"math": "math_agent"}, num_repeats={"math_agent": 2})
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert len(rows) == 2
+
+    def test_dispatched_agent_wins_over_routing_key(self, tmp_path) -> None:
+        fpath = self._write_rows(tmp_path, [self._ts_row("math")])
+        config = self._config(
+            tmp_path, fpath, agent_map={"math": "math_agent"}, num_repeats={"math": 5, "math_agent": 2}
+        )
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert len(rows) == 2
+
+    def test_fan_out_composes_with_source_keyed_num_repeats(self, tmp_path) -> None:
+        """fan_out={math: [a, b]} + num_repeats={math: 2}: each fanned copy repeats 2 times."""
+        fpath = self._write_rows(tmp_path, [self._ts_row("math")])
+        config = self._config(tmp_path, fpath, fan_out={"math": ["agent_a", "agent_b"]}, num_repeats={"math": 2})
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert len(rows) == 4
+        by_agent = Counter(r["agent_ref"]["name"] for r in rows)
+        assert by_agent == {"agent_a": 2, "agent_b": 2}
+
+    def test_source_keyed_entry_does_not_trigger_typo_warning(self, tmp_path) -> None:
+        fpath = self._write_rows(tmp_path, [self._ts_row("math")])
+        config = self._config(tmp_path, fpath, agent_map={"math": "math_agent"}, num_repeats={"math": 3})
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+    def test_missing_key_error_names_both_candidates(self, tmp_path) -> None:
+        fpath = self._write_rows(tmp_path, [self._ts_row("math")])
+        config = self._config(tmp_path, fpath, agent_map={"math": "math_agent"}, num_repeats={"other": 1})
+        with pytest.raises(ValueError, match="math_agent / math"):
+            RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+
+class TestPreprocessExamples:
+    """Public preprocessing entry point for direct run_examples callers (e.g. NeMo RL): applies
+    agent_map/fan_out/num_repeats to caller-held rows without touching the filesystem."""
+
+    def _ts_row(self, task_source="math"):
+        return {"responses_create_params": {"input": [{"role": "user", "content": "q"}]}, "task_source": task_source}
+
+    def test_applies_all_knobs(self) -> None:
+        examples = [self._ts_row("math"), self._ts_row("other")]
+        rows = RolloutCollectionHelper().preprocess_examples(
+            examples,
+            agent_map={"other": "other_agent"},
+            fan_out={"math": ["agent_a", "agent_b"]},
+            num_repeats={"math": 2, "_default": 1},
+        )
+        by_agent = Counter(r["agent_ref"]["name"] for r in rows)
+        assert by_agent == {"agent_a": 2, "agent_b": 2, "other_agent": 1}
+        # Rollout indexes enumerate copies within each task.
+        assert sorted(r["_ng_rollout_index"] for r in rows if r["_ng_task_index"] == 0) == [0, 1, 2, 3]
+
+    def test_does_not_mutate_inputs(self) -> None:
+        examples = [self._ts_row("math")]
+        snapshot = json.dumps(examples, sort_keys=True)
+        RolloutCollectionHelper().preprocess_examples(examples, num_repeats=3)
+        assert json.dumps(examples, sort_keys=True) == snapshot
+
+    def test_resolves_task_sources_when_config_given(self) -> None:
+        cfg = OmegaConf.create(_RESOLVER_CONFIG)
+        rows = RolloutCollectionHelper().preprocess_examples(
+            [self._ts_row("math_rs")], global_config_dict=cfg, num_repeats=2
+        )
+        assert len(rows) == 2
+        assert all(r["agent_ref"]["name"] == "math_agent" for r in rows)
+
+    def test_validates_knobs_like_the_cli(self) -> None:
+        with pytest.raises(ValueError, match="empty list"):
+            RolloutCollectionHelper().preprocess_examples([self._ts_row()], fan_out={"math": []})

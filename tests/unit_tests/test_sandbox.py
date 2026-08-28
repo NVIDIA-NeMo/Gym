@@ -1742,3 +1742,97 @@ async def test_pty_exec_marker_edges() -> None:
         with pytest.raises(ValueError, match="fixed at pty.create"):
             await sandbox.pty.exec("x", session=ScriptedSession("0"), **kwargs)
     await sandbox.stop()
+
+
+class _DetachRunnerSession:
+    """Facade-level fake: records the detached run and returns a canned result."""
+
+    def __init__(self, *, hang: bool = False, exit_code: int | None = 7) -> None:
+        self.commands: list[str] = []
+        self.closed = False
+        self.reattaches = 0
+        self.mode = "pipe"
+        self._hang = hang
+        self._exit_code = exit_code
+
+    async def run_detached(self, command: str, *, poll_interval_s: float = 15.0) -> tuple[bytes, int | None]:
+        self.commands.append(command)
+        if self._hang:
+            await asyncio.sleep(3600)
+        return b"merged-output", self._exit_code
+
+    async def reattach(self) -> None:
+        self.reattaches += 1
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+async def test_pty_exec_detach_returns_merged_output() -> None:
+    sandbox = AsyncSandbox(PlainSandboxProvider())
+    await sandbox.start(SandboxSpec(image="image:tag"))
+    session = _DetachRunnerSession()
+
+    result = await sandbox.pty.exec("make", session=session, detach=True, timeout_s=5)
+
+    assert (result.stdout, result.stderr, result.return_code) == ("merged-output", None, 7)
+    assert session.commands == ["make"]
+    assert not session.closed, "an explicit session stays the caller's"
+    await sandbox.stop()
+
+
+async def test_pty_exec_detach_mangled_exit_maps_to_pty_error() -> None:
+    sandbox = AsyncSandbox(PlainSandboxProvider())
+    await sandbox.start(SandboxSpec(image="image:tag"))
+
+    result = await sandbox.pty.exec("make", session=_DetachRunnerSession(exit_code=None), detach=True, timeout_s=5)
+
+    assert (result.return_code, result.error_type) == (125, "pty")
+    await sandbox.stop()
+
+
+async def test_pty_exec_detach_private_session_is_closed_and_not_default() -> None:
+    from nemo_gym.sandbox import SandboxPtySpec
+
+    class DetachProvider(PlainSandboxProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.sessions: list[_DetachRunnerSession] = []
+
+        async def create_pty(self, handle: SandboxHandle, spec: SandboxPtySpec) -> _DetachRunnerSession:
+            assert spec.env == {"A": "1"}
+            session = _DetachRunnerSession(exit_code=0)
+            self.sessions.append(session)
+            return session
+
+    provider = DetachProvider()
+    sandbox = AsyncSandbox(provider)
+    await sandbox.start(SandboxSpec(image="image:tag"))
+
+    result = await sandbox.pty.exec("make", detach=True, env={"A": "1"}, timeout_s=5)
+
+    assert result.return_code == 0
+    assert len(provider.sessions) == 1 and provider.sessions[0].closed
+    assert sandbox.pty._default_session is None, "a detached exec's private session must not become the default"
+    await sandbox.stop()
+
+
+async def test_pty_exec_detach_timeout_mirrors_exec_and_repairs_session() -> None:
+    sandbox = AsyncSandbox(PlainSandboxProvider())
+    await sandbox.start(SandboxSpec(image="image:tag"))
+    session = _DetachRunnerSession(hang=True)
+
+    result = await sandbox.pty.exec("stuck", session=session, detach=True, timeout_s=0.05)
+
+    assert (result.return_code, result.error_type) == (125, "timeout")
+    assert not session.closed, "an explicit session is the caller's to discard"
+    assert session.reattaches == 1, "a timeout must leave the session attached"
+    await sandbox.stop()
+
+
+async def test_pty_exec_detach_requires_a_capable_session() -> None:
+    sandbox = AsyncSandbox(PlainSandboxProvider())
+    await sandbox.start(SandboxSpec(image="image:tag"))
+    with pytest.raises(NotImplementedError, match="detached execution"):
+        await sandbox.pty.exec("make", session=_LiveShellSession(), detach=True)
+    await sandbox.stop()
