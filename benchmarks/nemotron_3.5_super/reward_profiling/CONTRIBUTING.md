@@ -141,13 +141,8 @@ If you want a *committed* subset — your dataset has 200k rows and only 10k bel
 that is `limit` on your entry, or `materialize.limit_per_entry` for a manifest-wide default. Set
 `materialize.sample: random` with a `seed` if the first N rows would be a biased sample.
 
-**Do not smoke-test with `gym eval run --limit` instead.** It looks equivalent and is not.
-`--limit` takes the first N rows of the whole input at collection time; `LIMIT_PER_ENTRY` takes N
-rows from *each* entry at prepare time. Identical for your one-entry manifest, wrong the moment you
-test against the full sweep in step 04 — entries are laid out as contiguous blocks in manifest
-order, so `--limit 72` there covers 2 of 36 environments instead of all 36. It fails silently: you
-get rollouts, rewards and a clean profile for `tau_pivot`, and conclude your entry passed when it
-never ran.
+Not `gym eval run --limit`, which looks equivalent: it takes the first N rows of the whole input,
+so against the full sweep in step 04 it never reaches your entry ([why](./README.md#gotchas)).
 
 Then profile and read the result:
 
