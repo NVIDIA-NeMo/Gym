@@ -30,9 +30,9 @@ import asyncio
 import json
 import logging
 import shlex
+import sys
 import uuid
 from collections.abc import AsyncIterator
-from sys import stderr
 from typing import Any
 from urllib.parse import urlencode
 
@@ -383,7 +383,7 @@ class OpenSandboxPtySession:
                 print(
                     "PTY output exceeded the server's retained window while detached; "
                     "run bulk-output commands attached or through the exec API instead",
-                    file=stderr,
+                    file=sys.stderr,
                 )
             if needle in buffer:
                 break
