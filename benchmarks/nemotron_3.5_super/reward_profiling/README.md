@@ -252,7 +252,10 @@ Expect ~30s to a healthy sandbox, ~4 min to all servers ready, and ~16 min to th
 
 ### 04a - Collating finished / unfinished data
 
-If sharded, merge first — this is also what makes a reshard safe:
+`03_run_sharded.sh` does both of these when its last shard finishes. Run them by hand to look at a
+run in progress, or to finish one whose watcher you killed — both are safe on partial data.
+
+Merge first; this is also what makes a reshard safe:
 
 ```bash
 SWEEP_DIR=<sweep> bash $R/scripts/04_merge_shards.sh
