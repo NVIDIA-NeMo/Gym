@@ -1313,39 +1313,22 @@ class TestAgentSelector:
         _, overrides = _dispatch_for(monkeypatch, ["env", "start", "--benchmark", "gpqa"])
         assert overrides == [f"+config_paths=[{WORKING_DIR / 'benchmarks/gpqa/config.yaml'}]"]
 
-    def test_eval_run_no_serve_names_a_running_instance(self, monkeypatch: MonkeyPatch) -> None:
-        target, overrides = _dispatch_for(
-            monkeypatch, ["eval", "run", "--no-serve", "--agent-instance", "gpqa_mcqa_simple_agent"]
-        )
-        assert target == "nemo_gym.cli.eval:collect_rollouts"
-        assert overrides == ["+agent_name=gpqa_mcqa_simple_agent"]
-
-    def test_eval_run_no_serve_accepts_a_name_that_is_not_an_agent_config(self, monkeypatch: MonkeyPatch) -> None:
-        # Instance names are per-environment and never resolve as agent configs; --no-serve must not try.
-        _, overrides = _dispatch_for(
-            monkeypatch, ["eval", "run", "--no-serve", "--agent-instance", "not_an_agent_dir"]
-        )
-        assert overrides == ["+agent_name=not_an_agent_dir"]
-
-    def test_short_alias_still_names_a_running_instance(self, monkeypatch: MonkeyPatch) -> None:
-        with pytest.warns(DeprecationWarning, match="use `--agent-instance`"):
-            _, overrides = _dispatch_for(monkeypatch, ["eval", "run", "-a", "gpqa_mcqa_simple_agent"])
-        assert overrides == ["+agent_name=gpqa_mcqa_simple_agent"]
-
     def test_agent_type_resolves_to_config_path(self, monkeypatch: MonkeyPatch) -> None:
         _, overrides = _dispatch_for(monkeypatch, ["env", "start", "--agent-type", "hermes_agent"])
         assert overrides == [f"+config_paths=[{WORKING_DIR / self.HERMES}]"]
 
-    def test_agent_instance_names_a_running_instance(self, monkeypatch: MonkeyPatch) -> None:
-        target, overrides = _dispatch_for(
-            monkeypatch, ["eval", "run", "--no-serve", "--agent-instance", "gpqa_mcqa_simple_agent"]
-        )
+    def test_agent_still_names_a_running_instance(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(monkeypatch, ["eval", "run", "--no-serve", "-a", "gpqa_mcqa_simple_agent"])
         assert target == "nemo_gym.cli.eval:collect_rollouts"
         assert overrides == ["+agent_name=gpqa_mcqa_simple_agent"]
 
-    def test_agent_instance_works_in_serve_mode_too(self, monkeypatch: MonkeyPatch) -> None:
-        _, overrides = _dispatch_for(monkeypatch, ["eval", "run", "--agent-instance", "gpqa_mcqa_simple_agent"])
-        assert overrides == ["+agent_name=gpqa_mcqa_simple_agent"]
+    def test_agent_and_agent_type_are_independent(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(
+            monkeypatch, ["eval", "run", "--agent-type", "hermes_agent", "--agent", "gpqa_mcqa_simple_agent"]
+        )
+        paths, others = _split_overrides(overrides)
+        assert paths == {str(WORKING_DIR / self.HERMES)}
+        assert others == {"+agent_name=gpqa_mcqa_simple_agent"}
 
     def test_agent_type_is_rejected_with_no_serve(self, monkeypatch: MonkeyPatch, capsys) -> None:
         monkeypatch.setattr(cli_main, "dispatch", lambda target, overrides: None)
@@ -1355,19 +1338,6 @@ class TestAgentSelector:
             cli_main.main()
 
         assert "cannot be combined with `--no-serve`" in capsys.readouterr().err
-
-    @pytest.mark.parametrize("extra", [[], ["--no-serve"]])
-    def test_deprecated_agent_still_names_a_running_instance(self, monkeypatch: MonkeyPatch, extra) -> None:
-        with pytest.warns(DeprecationWarning, match="use `--agent-instance`"):
-            _, overrides = _dispatch_for(monkeypatch, ["eval", "run", *extra, "--agent", "math_agent"])
-
-        assert overrides == ["+agent_name=math_agent"]
-
-    def test_agent_abbreviates_to_agent_type_on_env_commands(self, monkeypatch: MonkeyPatch, recwarn) -> None:
-        _, overrides = _dispatch_for(monkeypatch, ["env", "start", "--agent", "hermes_agent"])
-
-        assert overrides == [f"+config_paths=[{WORKING_DIR / self.HERMES}]"]
-        assert not [w for w in recwarn if issubclass(w.category, DeprecationWarning)]
 
     def test_unknown_name_suggests_a_close_one(self, monkeypatch: MonkeyPatch, capsys) -> None:
         monkeypatch.setattr(cli_main, "dispatch", lambda target, overrides: None)

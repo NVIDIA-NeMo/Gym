@@ -19,7 +19,6 @@ import logging
 import os
 import re
 import sys
-import warnings
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -444,13 +443,6 @@ AGENT_TYPE = Flag(
     translate_to_hydra=lambda args: _translate_agent_type(args),
 )
 
-AGENT_INSTANCE = _value_flag("agent-instance", "agent_name", "Name of the agent instance to collect rollouts with.")
-
-DEPRECATED_AGENT = Flag(
-    register=lambda p: p.add_argument("--agent", "-a", dest="agent", help=argparse.SUPPRESS),
-    translate_to_hydra=lambda args: _translate_deprecated_agent(args),
-)
-
 
 def _translate_agent_type(args: argparse.Namespace) -> list[str]:
     """`--agent-type` picks the harness to compose, which is already fixed once the servers are up."""
@@ -460,22 +452,9 @@ def _translate_agent_type(args: argparse.Namespace) -> list[str]:
     if getattr(args, "no_serve", False):
         raise ValueError(
             "`--agent-type` chooses which agent runs the task, which is settled once the servers are "
-            "running, so it cannot be combined with `--no-serve`. Use `--agent-instance` to name one of them."
+            "running, so it cannot be combined with `--no-serve`. Use `--agent` to name one of them."
         )
     return [f"+config_paths=[{_asset_config_path('agent-type', name)}]"]
-
-
-def _translate_deprecated_agent(args: argparse.Namespace) -> list[str]:
-    """`--agent` named the instance to collect rollouts with; `--agent-instance` says so unambiguously."""
-    name = getattr(args, "agent", None)
-    if not name:
-        return []
-    warnings.warn(
-        "`--agent` is deprecated and will be removed; use `--agent-instance` instead.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return [f"+agent_name={name}"]
 
 
 # `--search-dir`: extra component-search roots. `main()` folds these into the `NEMO_GYM_EXTRA_ROOTS` env
@@ -868,8 +847,7 @@ COMMANDS = {
             ),
             _bool_flag("resume", "resume_from_cache", "Resume from cached rollouts instead of recollecting."),
             AGENT_TYPE,
-            AGENT_INSTANCE,
-            DEPRECATED_AGENT,
+            _value_flag("agent", "agent_name", "Agent to collect rollouts with.", aliases=("-a",)),
             _value_flag("input", "input_jsonl_fpath", "Input tasks JSONL file.", aliases=("-i",)),
             _value_flag("output", "output_jsonl_fpath", "Output rollouts JSONL file.", aliases=("-o",)),
             _value_flag("limit", "limit", "Maximum number of tasks to run."),
