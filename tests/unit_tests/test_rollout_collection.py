@@ -3421,6 +3421,15 @@ _RESOLVER_CONFIG = {
     "shared_agent_a": {"responses_api_agents": {"a": {"resources_server": {"name": "shared_rs"}}}},
     "shared_agent_b": {"responses_api_agents": {"b": {"resources_server": {"name": "shared_rs"}}}},
     "orphan_rs": {"resources_servers": {"impl": {}}},
+    # Dataset-level `agent:` pins (the escape hatch for ambiguous configs).
+    "pinned_rs": {"resources_servers": {"impl": {"datasets": [{"agent": "pinned_agent_b"}]}}},
+    "pinned_agent_a": {"responses_api_agents": {"a": {"resources_server": {"name": "pinned_rs"}}}},
+    "pinned_agent_b": {"responses_api_agents": {"b": {"resources_server": {"name": "pinned_rs"}}}},
+    "mispinned_rs": {"resources_servers": {"impl": {"datasets": [{"agent": "math_agent"}]}}},
+    "conflict_rs": {
+        "resources_servers": {"impl": {"datasets": [{"agent": "shared_agent_a"}, {"agent": "shared_agent_b"}]}}
+    },
+    "mispinned_agent": {"responses_api_agents": {"a": {"datasets": [{"agent": "math_agent"}]}}},
 }
 
 
@@ -3459,6 +3468,25 @@ class TestResolveTaskSources:
     def test_rs_with_no_agent_raises(self) -> None:
         with pytest.raises(ValueError, match="no agent in the running config references"):
             self._resolve([{"task_source": "orphan_rs"}])
+
+    def test_agent_pin_disambiguates_shared_rs(self) -> None:
+        """The dataset-level `agent:` pin reaches dispatch: an RS referenced by two agents routes
+        to the pinned one instead of erroring as ambiguous."""
+        rows = [{"task_source": "pinned_rs"}]
+        assert self._resolve(rows)[0]["agent_ref"] == {"name": "pinned_agent_b"}
+
+    def test_agent_pin_not_referencing_the_rs_raises(self) -> None:
+        """A pin naming an agent wired to a different RS must not silently re-route."""
+        with pytest.raises(ValueError, match="no agent of that name references resources server 'mispinned_rs'"):
+            self._resolve([{"task_source": "mispinned_rs"}])
+
+    def test_conflicting_agent_pins_raise_naming_agent_map(self) -> None:
+        with pytest.raises(ValueError, match=r"conflicting agents.*agent_map"):
+            self._resolve([{"task_source": "conflict_rs"}])
+
+    def test_agent_pin_on_agent_declared_dataset_must_name_the_declarer(self) -> None:
+        with pytest.raises(ValueError, match="the pin would silently not apply"):
+            self._resolve([{"task_source": "mispinned_agent"}])
 
     def test_task_source_survives_resolution(self) -> None:
         """The stamp stays on the row (provenance); only agent_ref is added."""
