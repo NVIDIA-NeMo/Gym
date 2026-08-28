@@ -32,6 +32,7 @@ import logging
 import shlex
 import uuid
 from collections.abc import AsyncIterator
+from sys import stderr
 from typing import Any
 from urllib.parse import urlencode
 
@@ -379,8 +380,6 @@ class OpenSandboxPtySession:
             # before accepting the marker: a mid-stream hole must not come
             # back as silently truncated output.
             if self._replay_gap:
-                from sys import stderr
-
                 print(
                     "PTY output exceeded the server's retained window while detached; "
                     "run bulk-output commands attached or through the exec API instead",
