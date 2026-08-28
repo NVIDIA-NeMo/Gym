@@ -77,7 +77,9 @@ PY_SBATCH
 # this rather than tripping it.
 for _required in MODEL CONTAINER; do
     if [[ -z "${!_required:-}" ]]; then
-        echo "ERROR: $_required is required, and the manifest's srun block does not set it." >&2
+        # MODEL comes from the manifest's vllm block, CONTAINER from its srun block.
+        _blk=$([[ "$_required" == "MODEL" ]] && echo vllm || echo srun)
+        echo "ERROR: $_required is required, and the manifest's $_blk block does not set it." >&2
         echo "       See the header of $0 for the full argument list." >&2
         exit 2
     fi
