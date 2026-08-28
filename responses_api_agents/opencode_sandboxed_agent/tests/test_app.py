@@ -45,7 +45,9 @@ from nemo_gym.rollout_observability import (
     ToolCallObservation,
 )
 from nemo_gym.sandbox import SandboxHandle
+from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from responses_api_agents.opencode_sandboxed_agent import app as app_module
 from responses_api_agents.opencode_sandboxed_agent.app import (
     OpenCodeSandboxedAgent,
     OpenCodeSandboxedAgentConfig,
@@ -77,6 +79,32 @@ class TestOpenCodeSandboxedAgent:
             opencode_max_context_window=0,
             token_id_capture=True,
         )
+
+    async def test_start_sandbox_derives_cpu_cap_env_from_cpu_limit(self, monkeypatch: MonkeyPatch) -> None:
+        sandbox = MagicMock()
+        sandbox.start = AsyncMock()
+        monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
+        monkeypatch.setattr(app_module, "create_provider", lambda *_: MagicMock())
+        monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
+        monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
+        monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
+
+        async def created_spec(sandbox_config: Dict[str, Any]) -> Any:
+            config = self._create_config()
+            config.sandbox_config = sandbox_config
+            server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+            await server._start_sandbox()
+            return sandbox.start.await_args.args[0]
+
+        # Floored to whole cores; every cap gets the same value.
+        spec = await created_spec({"resources": {"cpu": 2.7, "memory_mib": 8192}})
+        assert spec.env == {name: "2" for name in CPU_CAP_ENV_VARS}
+        spec = await created_spec({"resources": {"cpu": 0.5}})
+        assert spec.env["OMP_NUM_THREADS"] == "1"
+
+        # Opt-out and no-cpu-limit paths inject nothing.
+        assert (await created_spec({"resources": {"cpu": 2}, "derive_cpu_env": False})).env == {}
+        assert (await created_spec({"resources": {"memory_mib": 8192}})).env == {}
 
     @fixture
     def opencode_export_test_data(self) -> Dict[str, Any]:

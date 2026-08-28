@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import math
 import re
+import statistics
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -652,6 +653,104 @@ def _group_by_task(verify_responses: List[Dict[str, Any]]) -> List[List[Dict[str
     return [groups[k] for k in sorted(groups)]
 
 
+def _stat(values: List[float], stat: str) -> float:
+    if stat == "mean":
+        return statistics.fmean(values)
+    if stat == "median":
+        return statistics.median(values)
+    if stat == "total":
+        return sum(values)
+    if stat == "std":
+        return statistics.pstdev(values)
+    if stat == "min":
+        return min(values)
+    if stat == "max":
+        return max(values)
+    if stat.startswith("p"):
+        # Series.quantile() default (linear interpolation) matches numpy.percentile's default
+        # and, unlike statistics.quantiles, handles a single-value series with no special-casing.
+        return float(Series(values).quantile(int(stat[1:]) / 100))
+    raise ValueError(f"Unknown stat {stat!r}")
+
+
+# Per-rollout ng_perf token fields, each summarized with the same mean/median/total stats
+# (simpler than RFC R3's literal per-field list, which asymmetrically omits median/total for
+# some fields). Result keys are f"{stat}_{field}" except total_latency_ms, which uses
+# total_latency_{stat}_ms -- see the dedicated block in compute_perf_summary.
+_PERF_SUMMARY_TOKEN_FIELDS: Tuple[str, ...] = (
+    "prompt_tokens",
+    "cached_prompt_tokens",
+    "completion_tokens",
+    "reasoning_tokens",
+)
+_PERF_SUMMARY_TOKEN_STATS: Tuple[str, ...] = ("mean", "median", "total")
+_PERF_SUMMARY_NUM_TURNS_STATS: Tuple[str, ...] = ("mean", "median", "std", "min", "p90", "max")
+_PERF_SUMMARY_LATENCY_STATS: Tuple[str, ...] = ("p50", "p90", "p99", "mean")
+
+
+def compute_perf_summary(ng_perf_records: List[Dict[str, Any]], total_rollouts: int) -> Optional[Dict[str, Any]]:
+    """Aggregate per-rollout ``ng_perf`` dicts into the ``perf_summary`` block (RFC R3).
+
+    ``total_rollouts`` is the full rollout count for this batch, including rollouts that never
+    produced ``ng_perf`` at all -- the denominator for ``overall_observability_coverage`` and
+    ``token_observability_coverage``.
+
+    Returns ``None`` when there are no rollouts at all, or when none of them carried ``ng_perf``
+    (observability off for the whole run, or on but nothing was collected) -- perf_summary is
+    absent rather than present with a 0.0 coverage either way; a coverage value, when present, is
+    always > 0. Every other stat is included only when at least one rollout reported the
+    underlying field (a provider that never reports cache usage yields no
+    ``mean_cached_prompt_tokens``, for example).
+    """
+    if total_rollouts <= 0 or not ng_perf_records:
+        return None
+
+    def _values(key: str) -> List[float]:
+        return [record[key] for record in ng_perf_records if isinstance(record.get(key), (int, float))]
+
+    summary: Dict[str, Any] = {
+        "overall_observability_coverage": len(ng_perf_records) / total_rollouts,
+        "token_observability_coverage": sum(
+            1
+            for record in ng_perf_records
+            if isinstance(record.get("token_observability_coverage"), (int, float))
+            and record["token_observability_coverage"] > 0
+        )
+        / total_rollouts,
+    }
+
+    for field in _PERF_SUMMARY_TOKEN_FIELDS:
+        values = _values(field)
+        if not values:
+            continue
+        for stat in _PERF_SUMMARY_TOKEN_STATS:
+            summary[f"{stat}_{field}"] = _stat(values, stat)
+
+    num_turns_values = _values("num_turns")
+    if num_turns_values:
+        for stat in _PERF_SUMMARY_NUM_TURNS_STATS:
+            summary[f"{stat}_num_turns"] = _stat(num_turns_values, stat)
+
+    # Per-rollout ratio, then distribution of that ratio across rollouts.
+    tokens_per_turn = [
+        record["completion_tokens"] / record["num_turns"]
+        for record in ng_perf_records
+        if isinstance(record.get("completion_tokens"), (int, float))
+        and isinstance(record.get("num_turns"), (int, float))
+        and record["num_turns"] > 0
+    ]
+    if tokens_per_turn:
+        summary["mean_tokens_per_turn"] = _stat(tokens_per_turn, "mean")
+        summary["median_tokens_per_turn"] = _stat(tokens_per_turn, "median")
+
+    latency_values = _values("total_latency_ms")
+    if latency_values:
+        for stat in _PERF_SUMMARY_LATENCY_STATS:
+            summary[f"total_latency_{stat}_ms"] = _stat(latency_values, stat)
+
+    return summary
+
+
 def compute_aggregate_metrics(
     verify_responses: List[Dict[str, Any]],
     compute_metrics_fn=None,
@@ -727,10 +826,13 @@ def compute_aggregate_metrics(
     else:
         key_metrics = {k: v for k, v in serialized_agent.items() if k.startswith("mean/")}
 
+    ng_perf_records = [vr["ng_perf"] for vr in verify_responses if isinstance(vr.get("ng_perf"), dict)]
+
     return AggregateMetrics(
         group_level_metrics=serialized_group,
         agent_metrics=serialized_agent,
         key_metrics=key_metrics,
+        perf_summary=compute_perf_summary(ng_perf_records, total_rollouts=len(verify_responses)),
     )
 
 
