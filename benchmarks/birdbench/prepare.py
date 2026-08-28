@@ -151,7 +151,7 @@ def _format_entries(dev_json_path: Path, tables_info: dict[str, str], out_fpath:
     with open(out_fpath, "w") as f_out:
         for i, entry in enumerate(entries):
             row = {
-                "question": entry["question"],
+                "question": entry["evidence"] + "\n" + entry["question"],
                 "gt_sql": entry["SQL"],
                 "sql_context": tables_info[entry["db_id"]],
                 "difficulty": entry["difficulty"],
