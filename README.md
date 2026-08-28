@@ -28,6 +28,7 @@ If you're scoring model outputs with a stateless check and don't need scale or t
 - Use your own agents or choose from built-in harnesses
 - Scale to thousands of concurrent environments
 - Train with the RL framework of your choice
+- Optional OpenTelemetry tracing across the agent, model, and resources servers
 - Battle-tested in production Nemotron training
 
 ![NeMo Gym Product Overview](fern/assets/images/product_overview.png)
@@ -391,6 +392,7 @@ The Dataset column links to publicly available datasets (e.g., on HuggingFace). 
 - **[Environment Tutorials](https://docs.nvidia.com/nemo/gym/main/environment-tutorials)** - Build custom environments
 - **[Training Tutorials](https://docs.nvidia.com/nemo/gym/tutorials/training-tutorials)** - Train with NeMo Gym environments
 - **[API Reference](https://docs.nvidia.com/nemo/gym/main/api/reference/api-reference)** - Complete class and function reference
+- **[Observability](https://docs.nvidia.com/nemo/gym/main/observability)** - OpenTelemetry traces, metrics, and distributed tracing
 
 
 ## 🤝 Community & Support

@@ -68,6 +68,8 @@ from nemo_gym.server_utils import (
     BaseServer,
     SimpleServer,
 )
+from nemo_gym.telemetry.endpoints import traced_endpoint
+from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.token_id_capture import (
     CaptureContext,
     capture_tokens,
@@ -175,15 +177,24 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             num_workers=self.config.num_workers,
         )
 
-        app.post("/v1/chat/completions")(self.chat_completions_dispatch)
+        model_attributes = {"nemo.gym.server.name": self.config.name}
+        app.post("/v1/chat/completions")(
+            traced_endpoint(
+                GymSpanGroup.MODEL_CALL, "gym.model.chat_completions", self.chat_completions_dispatch, model_attributes
+            )
+        )
 
-        app.post("/v1/responses")(self.responses_dispatch)
+        app.post("/v1/responses")(
+            traced_endpoint(GymSpanGroup.MODEL_CALL, "gym.model.responses", self.responses_dispatch, model_attributes)
+        )
 
         # Every Gym model server speaks the Anthropic Messages API by default, mapping
         # Messages <-> Responses around its own responses() implementation. This lets blackbox
         # harnesses that require an Anthropic endpoint (e.g. the Claude Code CLI) target any
         # model server directly.
-        app.post("/v1/messages")(self.messages)
+        app.post("/v1/messages")(
+            traced_endpoint(GymSpanGroup.MODEL_CALL, "gym.model.messages", self.messages, model_attributes)
+        )
 
         return app
 

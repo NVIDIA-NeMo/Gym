@@ -34,6 +34,7 @@ from nemo_gym.openai_utils import (
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.rollout_correlation import RolloutContextMiddleware
 from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
+from nemo_gym.telemetry.endpoints import traced_verify_endpoint
 
 
 NEMO_GYM_MCP_SESSION_TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
@@ -144,7 +145,13 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         app.add_middleware(RolloutContextMiddleware)
 
         app.post("/seed_session")(self.seed_session)
-        app.post("/verify")(judge_failsafe(self.verify))
+        # Wrapped outside judge_failsafe so the span covers the failsafe's own handling too.
+        app.post("/verify")(
+            traced_verify_endpoint(
+                judge_failsafe(self.verify),
+                static_attributes={"nemo.gym.server.name": self.config.name},
+            )
+        )
         app.post("/aggregate_metrics")(self.aggregate_metrics)
         app.get("/reverify_mode")(self.get_reverify_mode)
 

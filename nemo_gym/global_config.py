@@ -57,7 +57,12 @@ from nemo_gym.config_types import (
 )
 from nemo_gym.exporters import setup_exporters
 from nemo_gym.secret_utils import recursively_hide_secrets
-from nemo_gym.telemetry.setup import TELEMETRY_KEY_NAME
+from nemo_gym.telemetry.setup import (
+    TELEMETRY_KEY_NAME,
+    configure_telemetry_env,
+    server_venv_requirements,
+    telemetry_config_from_global_config,
+)
 
 
 _GLOBAL_CONFIG_DICT = None
@@ -1155,6 +1160,14 @@ Found global config dict yaml:
                     "openai from nemo-gym's own constraint (the parent and the servers then run "
                     "different openai versions across the HTTP boundary)."
                 )
+            # Telemetry, when enabled. Server venvs install nemo-gym[dev], not
+            # nemo-gym[telemetry], so without this the orchestrator would export spans and
+            # every server process would silently have no telemetry at all — a trace with a
+            # hole in the middle. Translating the config into the environment first is what
+            # lets server_venv_requirements() see that telemetry is on.
+            configure_telemetry_env(telemetry_config_from_global_config(global_config_dict))
+            head_server_deps.extend(server_venv_requirements())
+
             global_config_dict[HEAD_SERVER_DEPS_KEY_NAME] = head_server_deps
 
             # Constrain python version since ray is sensitive to this.
