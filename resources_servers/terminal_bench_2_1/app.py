@@ -197,13 +197,6 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
     ) -> TerminalBench21SeedSessionResponse:
         eval_sandbox, pty_session = await self._create_sandbox(body)
         self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = eval_sandbox, pty_session
-        # Hand the terminal over without leaving our client attached: a socket
-        # idling through the whole agent phase is the one most likely to go
-        # half-open, and the next attach would then have to evict a peer that
-        # can no longer answer. The server-side session keeps running; a later
-        # user reattaches (or attaches fresh with takeover) when it needs it.
-        if hasattr(pty_session, "detach"):
-            await pty_session.detach()
 
         return TerminalBench21SeedSessionResponse(
             sandbox_handle=eval_sandbox._handle.sandbox_id, pty_session_id=pty_session.session_id
