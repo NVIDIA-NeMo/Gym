@@ -512,6 +512,13 @@ class TrainDataProcessor(BaseModel):
             datasets,
         ) in local_datasets_not_found.items():  # pragma: no cover
             for d in datasets:
+                if not isinstance(d, DatasetConfig):
+                    # Benchmark datasets have no registry identifiers; their file comes from
+                    # their prepare_script (`gym eval prepare`), not a download.
+                    raise ValueError(
+                        f"Benchmark dataset {d.name!r} ({d.jsonl_fpath}) is missing on disk. Run "
+                        f"`gym eval prepare` (its prepare_script is {d.prepare_script}) before collating."
+                    )
                 if d.gitlab_identifier and d.huggingface_identifier:
                     backend = config.data_source
                 elif not d.gitlab_identifier:
@@ -695,7 +702,9 @@ class TrainDataProcessor(BaseModel):
                 aggregate_metrics = state.metrics.aggregate()
 
                 aggregate_metrics_dict = aggregate_metrics.model_dump(mode="json", by_alias=True)
-                aggregate_metrics_dict = d.model_dump(mode="json") | aggregate_metrics_dict
+                # The agent: pin is routing config, not dataset identity; excluding it keeps
+                # pre-pin metrics sidecars valid (no conflict churn from the decoupling).
+                aggregate_metrics_dict = d.model_dump(mode="json", exclude={"agent"}) | aggregate_metrics_dict
 
                 data_fpath = Path(d.jsonl_fpath)
                 metrics_fpath = data_fpath.with_name(f"{data_fpath.stem}_metrics.json")
@@ -908,7 +917,9 @@ This could be due to a change in how metrics are calculated, leading to outdated
                 None,
             )
             if d is not None:
-                aggregate_metrics_dict = d.model_dump(mode="json") | aggregate_metrics_dict
+                # The agent: pin is routing config, not dataset identity; excluding it keeps
+                # pre-pin metrics sidecars valid (no conflict churn from the decoupling).
+                aggregate_metrics_dict = d.model_dump(mode="json", exclude={"agent"}) | aggregate_metrics_dict
 
             parent = Path(config.output_dirpath)
             parent.mkdir(exist_ok=True, parents=True)

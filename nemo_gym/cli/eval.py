@@ -51,6 +51,7 @@ from nemo_gym.global_config import (
     GlobalConfigDictParserConfig,
     get_first_server_config_dict,
     get_global_config_dict,
+    resolve_dataset_agent,
 )
 
 
@@ -214,11 +215,17 @@ def prepare_benchmark() -> None:
     )
     prepare_benchmark_config = PrepareBenchmarkConfig.model_validate(global_config_dict)
 
+    # A benchmark dataset may be declared by an agent block (legacy) or a resources server
+    # block (decoupled layout). `resolve_dataset_agent` is the same resolver rollout dispatch
+    # uses, so preparation and rollout always agree.
     benchmarks_dict: Dict[str, BenchmarkConfig] = dict()
     inspected_server_instances: List[str] = []
     for server_instance_name in global_config_dict:
         server_config = global_config_dict[server_instance_name]
-        if not isinstance(server_config, (dict, DictConfig)) or "responses_api_agents" not in server_config:
+        if not isinstance(server_config, (dict, DictConfig)):
+            continue
+        is_agent = "responses_api_agents" in server_config
+        if not is_agent and "resources_servers" not in server_config:
             continue
 
         inspected_server_instances.append(server_instance_name)
@@ -243,10 +250,17 @@ def prepare_benchmark() -> None:
 
         dataset = datasets[0]
 
-        benchmarks_dict[server_instance_name] = BenchmarkConfig(
+        try:
+            agent_name = resolve_dataset_agent(global_config_dict, str(server_instance_name), pin=dataset.agent)
+        except ConfigError as e:
+            raise ConfigError(f"Benchmark dataset {dataset.name!r}: {e}") from e
+
+        # Keyed by the declaring instance: two declarations may resolve to the same agent, and
+        # keying by agent would silently drop all but the last.
+        benchmarks_dict[str(server_instance_name)] = BenchmarkConfig(
             name=dataset.name,
             path=Path(""),
-            agent_name=server_instance_name,
+            agent_name=agent_name,
             num_repeats=dataset.num_repeats,
             dataset=dataset,
         )
