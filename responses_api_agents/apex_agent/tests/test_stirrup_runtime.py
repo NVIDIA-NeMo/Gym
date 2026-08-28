@@ -1,9 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import zipfile
 from inspect import getsource
 from pathlib import Path
+from types import SimpleNamespace
 
 from pydantic import BaseModel
 
@@ -50,6 +52,45 @@ def test_vision_model_keeps_tool_images_unchanged() -> None:
         )
         is content
     )
+
+
+def test_partial_result_checkpoint_preserves_completed_turns_and_usage(tmp_path: Path) -> None:
+    class FakeMessage:
+        def __init__(self, role: str, content: str, *, input_tokens: int = 0, answer_tokens: int = 0) -> None:
+            self.role = role
+            self.content = content
+            self.token_usage = SimpleNamespace(input=input_tokens, answer=answer_tokens, reasoning=0)
+
+        def model_dump(self, *, mode: str) -> dict[str, str]:
+            assert mode == "json"
+            return {"role": self.role, "content": self.content}
+
+    session = SimpleNamespace(
+        _current_run_state=SimpleNamespace(
+            full_msg_history=[[FakeMessage("user", "task")]],
+            msgs=[FakeMessage("assistant", "partial answer", input_tokens=11, answer_tokens=5)],
+        )
+    )
+    destination = tmp_path / "partial_result.json"
+
+    assert stirrup_runtime.write_partial_result_checkpoint(session, destination)
+    checkpoint = json.loads(destination.read_text(encoding="utf-8"))
+
+    assert checkpoint["completed"] is False
+    assert checkpoint["completion_status"] == "running"
+    assert checkpoint["trajectory"] == [
+        {"role": "user", "content": "task"},
+        {"role": "assistant", "content": "partial answer"},
+    ]
+    assert checkpoint["n_input_tokens"] == 11
+    assert checkpoint["n_output_tokens"] == 5
+
+
+def test_partial_result_checkpoint_waits_for_stirrup_state(tmp_path: Path) -> None:
+    destination = tmp_path / "partial_result.json"
+
+    assert not stirrup_runtime.write_partial_result_checkpoint(SimpleNamespace(), destination)
+    assert not destination.exists()
 
 
 def test_tool_output_uses_head_and_tail_excerpt() -> None:

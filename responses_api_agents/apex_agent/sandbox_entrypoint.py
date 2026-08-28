@@ -41,6 +41,10 @@ except ImportError:  # Imported as a Gym package during host-side tests.
 
 ROOT = Path("/app/apex-gym")
 OUTPUT = ROOT / "output"
+# Keep the recovery checkpoint on the sandbox provider's host-mounted staging
+# directory. Direct Apptainer execution terminates the container on timeout, so
+# files under its private root can no longer be copied out afterward.
+PARTIAL_RESULT_PATH = Path("/sandbox/partial_result.json")
 _MCP_RESPOND_ASSERTION = '        assert not self._completed, "Request already responded to"\n'
 _MCP_RESPOND_GUARD = "        if self._completed:\n            return\n"
 _GATEWAY_URL_PATTERN = re.compile(r"Uvicorn running on http://127\.0\.0\.1:(\d+)")
@@ -125,7 +129,11 @@ async def main() -> None:
             gateway_config(config.get("foundry_services") or [], config.get("edgar_user_agent")), gateway_url
         )
         initial_manifest = write_snapshot(OUTPUT / "initial.zip")
-        result: dict[str, Any] = await run_stirrup_rollout(config, gateway_url)
+        result: dict[str, Any] = await run_stirrup_rollout(
+            config,
+            gateway_url,
+            checkpoint_path=PARTIAL_RESULT_PATH,
+        )
         final_manifest = write_snapshot(OUTPUT / "final.zip")
         result.update(
             {
@@ -140,7 +148,12 @@ async def main() -> None:
             json.dumps(result, indent=2, ensure_ascii=False, default=str),
             encoding="utf-8",
         )
-    except Exception:
+    except BaseException:
+        try:
+            if not (OUTPUT / "final.zip").is_file():
+                write_snapshot(OUTPUT / "final.zip")
+        except Exception:
+            pass
         if gateway.returncode is not None:
             gateway_log.flush()
             detail = gateway_log_path.read_text(encoding="utf-8", errors="replace")[-4000:]

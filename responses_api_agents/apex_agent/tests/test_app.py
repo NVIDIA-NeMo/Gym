@@ -12,6 +12,7 @@ from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.apex_agent.app import (
     NG_FAILURE_CLASS_KEY,
+    NG_FAILURE_TERMINAL_KEY,
     ApexAgent,
     ApexAgentConfig,
     ApexAgentRunRequest,
@@ -103,7 +104,49 @@ def test_timeout_failure_is_routed_as_retryable_infra() -> None:
 def test_non_timeout_failure_is_not_misclassified_as_timeout() -> None:
     payload = _agent()._failure(_body(), "sandbox Stirrup rollout exited: command failed", return_code=1).model_dump()
 
-    assert NG_FAILURE_CLASS_KEY not in payload
+    assert payload[NG_FAILURE_CLASS_KEY] == "apex_error"
+    assert payload[NG_FAILURE_CLASS_KEY] != "timeout_exceeded"
+
+
+def test_failure_preserves_partial_trajectory_and_usage() -> None:
+    trajectory = [{"role": "assistant", "content": "work in progress"}]
+    payload = (
+        _agent()
+        ._failure(
+            _body(),
+            "sandbox failed",
+            partial_result={
+                "trajectory": trajectory,
+                "completion_status": "error",
+                "n_input_tokens": 12,
+                "n_output_tokens": 7,
+                "n_reasoning_tokens": 3,
+            },
+        )
+        .model_dump()
+    )
+
+    assert payload["apex_trajectory"] == trajectory
+    assert payload["apex_completion_status"] == "error"
+    assert payload["response"]["apex_trajectory"] == trajectory
+    assert payload["response"]["usage"]["input_tokens"] == 12
+    assert payload["response"]["usage"]["output_tokens"] == 7
+
+
+def test_terminal_failure_is_marked_for_sidecar_without_retry() -> None:
+    payload = (
+        _agent()
+        ._failure(
+            _body(),
+            "maximum turns reached",
+            failure_class="agent_incomplete",
+            failure_terminal=True,
+        )
+        .model_dump()
+    )
+
+    assert payload[NG_FAILURE_CLASS_KEY] == "agent_incomplete"
+    assert payload[NG_FAILURE_TERMINAL_KEY] is True
 
 
 async def test_run_classifies_sandbox_timeout_for_retry(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
@@ -140,6 +183,19 @@ async def test_run_classifies_sandbox_timeout_for_retry(monkeypatch: MonkeyPatch
         async def upload(self, *_args) -> None:
             return None
 
+        async def download(self, _source: str, destination: Path) -> None:
+            destination.write_text(
+                json.dumps(
+                    {
+                        "trajectory": [{"role": "assistant", "content": "partial"}],
+                        "completion_status": "running",
+                        "n_input_tokens": 4,
+                        "n_output_tokens": 2,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
         async def exec(self, *_args, **_kwargs):
             return self._exec_results.pop(0)
 
@@ -151,6 +207,7 @@ async def test_run_classifies_sandbox_timeout_for_retry(monkeypatch: MonkeyPatch
     assert payload[NG_FAILURE_CLASS_KEY] == "timeout_exceeded"
     assert "_ng_failure_terminal" not in payload
     assert "_ng_no_persist" not in payload
+    assert payload["apex_trajectory"] == [{"role": "assistant", "content": "partial"}]
 
 
 def test_run_request_preserves_task_input_files() -> None:
@@ -197,7 +254,8 @@ def test_sandbox_runner_uses_archipelago_gateway_and_stirrup() -> None:
     assert "configure_gateway(" in source
     assert '"0"' in source
     assert "_discover_gateway_url(" in source
-    assert "run_stirrup_rollout(config, gateway_url)" in source
+    assert "run_stirrup_rollout(" in source
+    assert "checkpoint_path=PARTIAL_RESULT_PATH" in source
     assert 'write_snapshot(OUTPUT / "initial.zip")' in source
     assert "overlay_task_files(task_files_zip, scratch)" in source
     assert source.index("overlay_task_files(task_files_zip, scratch)") < source.index(

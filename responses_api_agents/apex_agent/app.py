@@ -50,7 +50,9 @@ _STIRRUP_SETUP_PATH = Path(__file__).with_name("setup_stirrup.sh")
 _STIRRUP_REQUIREMENTS_PATH = Path(__file__).with_name("stirrup-requirements.txt")
 _GUEST_ROOT = "/app/apex-gym"
 _STIRRUP_ROOT = "/app/stirrup-runtime"
+_GUEST_PARTIAL_RESULT_PATH = "/sandbox/partial_result.json"
 NG_FAILURE_CLASS_KEY = "_ng_failure_class"
+NG_FAILURE_TERMINAL_KEY = "_ng_failure_terminal"
 
 
 class ApexAgentConfig(BaseResponsesAPIAgentConfig):
@@ -349,23 +351,42 @@ class ApexAgent(SimpleResponsesAPIAgent):
         body: ApexAgentRunRequest,
         error: str,
         return_code: int | None = None,
-        failure_class: Optional[str] = None,
+        failure_class: str = "apex_error",
+        failure_terminal: bool = False,
+        partial_result: Optional[dict[str, Any]] = None,
     ) -> ApexAgentVerifyResponse:
         LOG.error("Apex rollout failed for task %s: %s", body.task_id, error)
         try:
             model = self._policy_model()
         except RuntimeError:
             model = body.responses_create_params.model or "error"
-        response = self._response_from_result({"final_answer": ""}, model)
+        partial_result = partial_result or {"final_answer": ""}
+        response = self._response_from_result(partial_result, model)
         payload = body.model_dump() | {
             "response": response,
             "reward": 0.0,
             "apex_error": error,
             "container_exit_code": return_code,
+            "apex_trajectory": partial_result.get("trajectory") or [],
+            "apex_completion_status": partial_result.get("completion_status"),
         }
-        if failure_class is not None:
-            payload[NG_FAILURE_CLASS_KEY] = failure_class
+        payload[NG_FAILURE_CLASS_KEY] = failure_class
+        if failure_terminal:
+            payload[NG_FAILURE_TERMINAL_KEY] = True
         return ApexAgentVerifyResponse.model_validate(payload)
+
+    @staticmethod
+    async def _recover_partial_result(
+        sandbox: AsyncSandbox,
+        destination: Path,
+    ) -> dict[str, Any] | None:
+        try:
+            await sandbox.download(_GUEST_PARTIAL_RESULT_PATH, destination)
+            recovered = json.loads(destination.read_text(encoding="utf-8"))
+        except Exception as exc:
+            LOG.debug("No recoverable Apex trajectory checkpoint was available: %s", exc)
+            return None
+        return recovered if isinstance(recovered, dict) else None
 
     def _persist_ungraded_snapshots(
         self,
@@ -398,9 +419,15 @@ class ApexAgent(SimpleResponsesAPIAgent):
     async def run(self, request: Request, body: ApexAgentRunRequest) -> ApexAgentVerifyResponse:
         instruction = instruction_from_input(body.responses_create_params)
         if not instruction:
-            return self._failure(body, "task input contains no user instruction")
+            return self._failure(
+                body,
+                "task input contains no user instruction",
+                failure_class="invalid_task_input",
+                failure_terminal=True,
+            )
 
         async with self._semaphore:
+            result: dict[str, Any] | None = None
             try:
                 policy_model = self._policy_model()
                 await self._ensure_runtime_setup()
@@ -409,6 +436,7 @@ class ApexAgent(SimpleResponsesAPIAgent):
                     world_zip = scratch_path / "world.zip"
                     task_files_zip = scratch_path / "task_files.zip"
                     result_path = scratch_path / "result.json"
+                    partial_result_path = scratch_path / "partial_result.json"
                     initial_snapshot_path = scratch_path / "initial.zip"
                     snapshot_path = scratch_path / "final.zip"
                     seed = await self.server_client.post(
@@ -455,11 +483,15 @@ class ApexAgent(SimpleResponsesAPIAgent):
                         )
                         if process.return_code != 0:
                             detail = (process.stderr or process.stdout or "")[-4000:]
+                            result = await self._recover_partial_result(sandbox, partial_result_path)
                             return self._failure(
                                 body,
                                 f"sandbox Stirrup rollout exited: {detail}",
                                 process.return_code,
-                                failure_class="timeout_exceeded" if process.error_type == "timeout" else None,
+                                failure_class="timeout_exceeded"
+                                if process.error_type == "timeout"
+                                else "sandbox_error",
+                                partial_result=result,
                             )
                         await sandbox.download(f"{_GUEST_ROOT}/output/result.json", result_path)
                         await sandbox.download(f"{_GUEST_ROOT}/output/initial.zip", initial_snapshot_path)
@@ -475,12 +507,18 @@ class ApexAgent(SimpleResponsesAPIAgent):
                                     body,
                                     f"{name} artifact snapshot is {len(data)} bytes; "
                                     f"limit is {self.config.max_snapshot_bytes}",
+                                    failure_class="snapshot_too_large",
+                                    failure_terminal=True,
+                                    partial_result=result,
                                 )
                     if not result.get("completed"):
                         output_dir = self._persist_ungraded_snapshots(body, result, initial_snapshot, snapshot)
                         failure = self._failure(
                             body,
                             f"Stirrup did not submit a completed Finish call (status={result.get('completion_status')})",
+                            failure_class="agent_incomplete",
+                            failure_terminal=True,
+                            partial_result=result,
                         )
                         if output_dir is not None:
                             failure.artifact_output_dir = str(output_dir)
@@ -496,16 +534,24 @@ class ApexAgent(SimpleResponsesAPIAgent):
                         "apex_trajectory": result.get("trajectory") or [],
                     }
             except Exception as exc:
-                return self._failure(body, str(exc))
+                return self._failure(body, str(exc), partial_result=result)
 
-        verify = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/verify",
-            json=payload,
-            cookies=cookies,
-        )
-        await raise_for_status(verify)
-        return ApexAgentVerifyResponse.model_validate(await get_response_json(verify))
+        try:
+            verify = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/verify",
+                json=payload,
+                cookies=cookies,
+            )
+            await raise_for_status(verify)
+            return ApexAgentVerifyResponse.model_validate(await get_response_json(verify))
+        except Exception as exc:
+            return self._failure(
+                body,
+                f"Apex verification failed: {exc}",
+                failure_class="verification_error",
+                partial_result=result,
+            )
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         response = await self.server_client.post(

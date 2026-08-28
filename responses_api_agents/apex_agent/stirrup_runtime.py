@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import zipfile
+from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -22,6 +23,7 @@ TOOL_OUTPUT_TOKEN_BUDGET = 24_000
 TOOL_OUTPUT_ESTIMATED_CHARACTERS_PER_TOKEN = 4
 TOOL_OUTPUT_HEAD_CHARACTERS = 20_000
 TOOL_OUTPUT_TAIL_CHARACTERS = 5_000
+PARTIAL_RESULT_CHECKPOINT_INTERVAL_SECONDS = 1.0
 
 _STANDARD_SERVERS: dict[str, tuple[str, str, str]] = {
     "pdfs": ("pdfs", "pdf_server", "APP_PDF_ROOT"),
@@ -314,7 +316,64 @@ def _token_usage(history: list[list[Any]]) -> tuple[int, int, int]:
     return input_tokens, output_tokens, reasoning_tokens
 
 
-async def run_stirrup_rollout(config: dict[str, Any], gateway_url: str) -> dict[str, Any]:
+def partial_result_from_session(session: Any, *, completion_status: str = "running") -> dict[str, Any] | None:
+    """Project Stirrup's latest completed-turn cache state into a recoverable rollout result."""
+    state = getattr(session, "_current_run_state", None)
+    if state is None:
+        return None
+    history = [*getattr(state, "full_msg_history", []), list(getattr(state, "msgs", []))]
+    input_tokens, output_tokens, reasoning_tokens = _token_usage(history)
+    return {
+        "final_answer": "",
+        "completion_status": completion_status,
+        "completed": False,
+        "n_input_tokens": input_tokens,
+        "n_output_tokens": output_tokens,
+        "n_reasoning_tokens": reasoning_tokens,
+        "trajectory": _serialize_history(history),
+        "tool_metadata": {},
+    }
+
+
+def write_partial_result_checkpoint(
+    session: Any,
+    destination: Path,
+    *,
+    completion_status: str = "running",
+    error: str | None = None,
+) -> bool:
+    """Atomically retain the latest completed Stirrup turns for crash recovery."""
+    result = partial_result_from_session(session, completion_status=completion_status)
+    if result is None:
+        return False
+    if error is not None:
+        result["checkpoint_error"] = error
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.tmp")
+    temporary.write_text(json.dumps(result, ensure_ascii=False, default=str), encoding="utf-8")
+    os.replace(temporary, destination)
+    return True
+
+
+async def _checkpoint_partial_result(session: Any, destination: Path) -> None:
+    checkpointed_state: Any = None
+    while True:
+        current_state = getattr(session, "_current_run_state", None)
+        if current_state is not None and current_state is not checkpointed_state:
+            try:
+                if write_partial_result_checkpoint(session, destination):
+                    checkpointed_state = current_state
+            except Exception:
+                pass
+        await asyncio.sleep(PARTIAL_RESULT_CHECKPOINT_INTERVAL_SECONDS)
+
+
+async def run_stirrup_rollout(
+    config: dict[str, Any],
+    gateway_url: str,
+    *,
+    checkpoint_path: Path | None = None,
+) -> dict[str, Any]:
     """Run one 200-turn Stirrup session against the Archipelago MCP gateway."""
     from typing import Annotated, Literal
 
@@ -558,11 +617,32 @@ async def run_stirrup_rollout(config: dict[str, Any], gateway_url: str) -> dict[
     managed_tools.attach(agent)
 
     async with agent.session() as session:
-        finish_params, history, metadata = await session.run(config["instruction"])
+        checkpoint_task = (
+            asyncio.create_task(_checkpoint_partial_result(session, checkpoint_path))
+            if checkpoint_path is not None
+            else None
+        )
+        try:
+            finish_params, history, metadata = await session.run(config["instruction"])
+        except BaseException as exc:
+            if checkpoint_path is not None:
+                with suppress(Exception):
+                    write_partial_result_checkpoint(
+                        session,
+                        checkpoint_path,
+                        completion_status="error",
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+            raise
+        finally:
+            if checkpoint_task is not None:
+                checkpoint_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await checkpoint_task
 
     input_tokens, output_tokens, reasoning_tokens = _token_usage(history)
     completion_status = getattr(finish_params, "status", None)
-    return {
+    result = {
         "final_answer": getattr(finish_params, "final_answer", "") if finish_params is not None else "",
         "completion_status": completion_status or "max_turns",
         "completed": completion_status == "completed",
@@ -572,3 +652,9 @@ async def run_stirrup_rollout(config: dict[str, Any], gateway_url: str) -> dict[
         "trajectory": _serialize_history(history),
         "tool_metadata": metadata,
     }
+    if checkpoint_path is not None:
+        with suppress(Exception):
+            temporary = checkpoint_path.with_name(f".{checkpoint_path.name}.tmp")
+            temporary.write_text(json.dumps(result, ensure_ascii=False, default=str), encoding="utf-8")
+            os.replace(temporary, checkpoint_path)
+    return result
