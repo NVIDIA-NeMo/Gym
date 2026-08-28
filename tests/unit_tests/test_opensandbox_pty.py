@@ -125,8 +125,10 @@ class FakeHttpClient:
         self.delete_calls.append((url, headers))
         return FakeResponse(200)
 
-    async def ws_connect(self, url: str, *, headers: dict[str, str]) -> FakeWs:
+    async def ws_connect(self, url: str, *, headers: dict[str, str], heartbeat: float | None = None) -> FakeWs:
         self.ws_calls.append((url, headers))
+        self.ws_heartbeats: list[float | None] = getattr(self, "ws_heartbeats", [])
+        self.ws_heartbeats.append(heartbeat)
         if isinstance(self._ws_error, list):
             if self._ws_error:
                 raise self._ws_error.pop(0)
@@ -581,6 +583,24 @@ async def test_provider_attach_pty_reuses_endpoint(monkeypatch: pytest.MonkeyPat
     handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=FakeRaw())
     session = await provider.attach_pty(handle, "s-7", takeover=True, since=10)
     assert client.ws_calls[0][0] == "wss://server/v1/sandboxes/sb-1/proxy/44772/pty/s-7/ws?takeover=1&since=10"
+    await session.close()
+
+
+async def test_pty_sockets_dial_with_heartbeat() -> None:
+    # Silent half-open sockets are what takeover timeouts are made of; every
+    # PTY dial requests websocket heartbeats so a dead peer is detected and
+    # re-dialed instead of dangling until the next takeover.
+    from nemo_gym.sandbox.providers.opensandbox.pty import attach_pty_session
+
+    client = FakeHttpClient(ws=FakeWs([CONNECTED]))
+    session = await attach_pty_session(
+        client=client,  # type: ignore[arg-type]
+        base_url="http://server/base",
+        headers={},
+        session_id="s-1",
+        request_timeout_s=5.0,
+    )
+    assert client.ws_heartbeats == [pty_module._PTY_WS_HEARTBEAT_S]
     await session.close()
 
 
