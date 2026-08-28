@@ -132,24 +132,22 @@ graded, 16/16 test plans, no build or seeding failures:
 | app | reward | plans graded |
 | --- | --- | --- |
 | barber | 1.00 | 3/3 |
-| quiz | 1.00 | 3/3 |
-| notes | 1.00 | 3/3 |
 | market_place | 0.97 | 3/3 |
-| wedding | 0.20 | 4/4 |
+| notes | 0.93 | 3/3 |
+| quiz | 0.67 | 3/3 |
+| wedding | 0.36 | 4/4 |
 
-Mean 0.834. The spread is the point: `wedding` well below the rest shows the scale is not
-saturated, and `market_place` at 0.97 shows partial credit works. `data/example_rollouts.jsonl`
-holds this run.
+Mean 0.785. The spread matters more than the mean: `wedding` well below the rest shows the
+scale is not saturated. `data/example_rollouts.jsonl` holds this run.
 
-The reward tracks model capability. An earlier run of `notes` with a weaker policy model
-scored 0.0 with 0/19 steps, its app unreachable because the build produced no output, while
-the stronger model scores 1.0 on the same task with the same graders.
+The reward tracks model capability. An earlier run with a weaker policy model scored 0.0 on
+`notes` with 0/19 steps, its app unreachable because the build produced no output, while the
+stronger model scores near the top of the range on the same task with the same graders.
 
-Reward also varies across repeats of the *same* model, because the model does not build the
-same app twice: `notes` has scored both 0.00 and 1.00, and `wedding` both 0.20 and 0.51. That
-is a property to quantify during reward profiling rather than a defect. Profiling with repeats
-is also what would separate this build-to-build variance from any variance contributed by the
-LLM-driven verifier, which is not yet measured.
+Reward varies across repeats of the same model, because the model does not build the same app
+twice: `notes` and `wedding` have each spanned most of the range across runs. That is a
+property to quantify during reward profiling rather than a defect, and profiling with repeats
+is what would separate build-to-build variance from any variance in the LLM-driven verifier.
 
 `verified: false` still stands: that flag means baselined and reviewed, which needs a
 profiling sweep across many tasks and repeats, not five single rollouts.
