@@ -383,9 +383,9 @@ def prefix_merging(entries: list[TokenEntry], terminal_call_id: str | None = Non
             terminal_chain_status = "not_captured"
         else:
             terminal_path = path_to(terminal_node)
-            if any(node.quarantined for node in terminal_path):
-                # A quarantined boundary on the delivered path is not
-                # repairable by attribution. The consumer masks.
+            if any(node.quarantined or node.unresolved_boundary for node in terminal_path):
+                # An unresolved boundary on the delivered path is not repairable by attribution.
+                # The consumer masks it.
                 terminal_chain_status = "broken"
             else:
                 terminal_chain = chain_from(terminal_path)
