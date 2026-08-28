@@ -22,6 +22,7 @@ import pytest
 
 from resources_servers.swebench_pro.verification import (
     VerificationInputs,
+    apply_opensandbox_runtime_parity,
     assemble_workspace_files,
     create_entryscript,
     grade_output,
@@ -44,6 +45,27 @@ def make_inputs(**overrides) -> VerificationInputs:
     }
     values.update(overrides)
     return VerificationInputs(**values)
+
+
+def exec_result(*, return_code: int = 0, stdout: str = "", stderr: str = "") -> SimpleNamespace:
+    return SimpleNamespace(return_code=return_code, stdout=stdout, stderr=stderr)
+
+
+def verification_side_effects(
+    output: str,
+    *,
+    test_stdout: str = "test stdout",
+    test_stderr: str = "test stderr",
+    status_codes: tuple[int, ...] = (0, 0, 0, 0, 0, 0, 0, 0),
+) -> list[SimpleNamespace]:
+    return [
+        exec_result(),
+        exec_result(return_code=status_codes[-1], stdout="run"),
+        exec_result(stdout=test_stdout),
+        exec_result(stdout=test_stderr),
+        *(exec_result(stdout=f"{code}\n") for code in status_codes),
+        exec_result(stdout=output),
+    ]
 
 
 def test_parse_string_list_accepts_json_python_and_lists() -> None:
@@ -77,6 +99,9 @@ def test_create_entryscript_matches_upstream_contract() -> None:
     assert "bash /workspace/run_script.sh a.py,b.py" in script
     assert "export FOO=bar" in script
     assert "go mod download" not in script
+    assert "printf '%s\\n' \"$RESET_STATUS\" > /workspace/reset_status" in script
+    assert "printf '%s\\n' \"$TEST_STATUS\" > /workspace/test_status" in script
+    assert "printf '%s\\n' \"$PARSER_STATUS\" > /workspace/parser_status" in script
 
 
 def test_create_entryscript_prefetches_go_modules_before_tests() -> None:
@@ -96,6 +121,85 @@ def test_create_entryscript_does_not_prefetch_non_go_tasks() -> None:
     inputs = make_inputs(repo_language="Python", prefetch_go_modules=True)
 
     assert "go mod download" not in create_entryscript(asdict(inputs))
+
+
+def test_create_entryscript_scopes_runtime_environment_parity() -> None:
+    flipt = create_entryscript(
+        asdict(
+            make_inputs(
+                instance_id="instance_flipt-io__flipt-690672523398c2b6f6e4562f0bf9868664ab894f",
+                runtime_parity_adaptations=True,
+            )
+        )
+    )
+    nodebb = create_entryscript(
+        asdict(
+            make_inputs(
+                instance_id=("instance_NodeBB__NodeBB-04998908ba6721d64eba79ae3b65a351dcfbc5b5-vnan"),
+                runtime_parity_adaptations=True,
+            )
+        )
+    )
+    unrelated_flipt = create_entryscript(
+        asdict(
+            make_inputs(
+                instance_id="instance_flipt-io__flipt-another-task",
+                runtime_parity_adaptations=True,
+            )
+        )
+    )
+    unrelated_nodebb = create_entryscript(
+        asdict(
+            make_inputs(
+                instance_id="instance_NodeBB__NodeBB-another-task-vnan",
+                runtime_parity_adaptations=True,
+            )
+        )
+    )
+
+    assert 'OTEL_*) unset "$variable"' in flipt
+    assert "dns-result-order=ipv4first" in nodebb
+    assert "OTEL_" not in unrelated_flipt
+    assert "dns-result-order=ipv4first" not in unrelated_nodebb
+
+
+def test_runtime_parity_waits_for_nodebb_redis_pong() -> None:
+    run_script = """#!/bin/bash
+set -e
+  while ! redis-cli ping; do
+    echo "Waiting for Redis to start..."
+    sleep 1
+  done
+"""
+
+    adapted = apply_opensandbox_runtime_parity(
+        "instance_NodeBB__NodeBB-eb49a64974ca844bca061744fb3383f5d13b02ad-vnan",
+        run_script,
+    )
+
+    assert 'until [ "$(redis-cli ping 2>/dev/null)" = "PONG" ]' in adapted
+    assert "while ! redis-cli ping" not in adapted
+    assert apply_opensandbox_runtime_parity("instance_NodeBB__NodeBB-another-task-vnan", run_script) == run_script
+
+
+def test_runtime_parity_starts_qutebrowser_xvfb_explicitly() -> None:
+    run_script = "#!/bin/bash\nset -e\nexport PYTEST_QT_API=pyqt5\npytest tests/unit\n"
+
+    adapted = apply_opensandbox_runtime_parity(
+        "instance_qutebrowser__qutebrowser-f631cd4422744160d9dcf7a0455da532ce973315"
+        "-v35616345bb8052ea303186706cec663146f0f184",
+        run_script,
+    )
+
+    assert "Xvfb :99" in adapted
+    assert "pytest -p no:xvfb tests/unit" in adapted
+    assert (
+        apply_opensandbox_runtime_parity(
+            "instance_qutebrowser__qutebrowser-another-task",
+            run_script,
+        )
+        == run_script
+    )
 
 
 def test_assemble_workspace_files_embeds_prepared_assets() -> None:
@@ -128,24 +232,15 @@ async def test_run_verification_returns_resolved_result(tmp_path) -> None:
             {"name": "test_old", "status": "PASSED"},
         ]
     }
-    sandbox = SimpleNamespace(
-        exec=AsyncMock(
-            side_effect=[
-                SimpleNamespace(return_code=0, stdout="", stderr=""),
-                SimpleNamespace(return_code=0, stdout="run", stderr=""),
-                SimpleNamespace(return_code=0, stdout="test stdout", stderr=""),
-                SimpleNamespace(return_code=0, stdout="test stderr", stderr=""),
-                SimpleNamespace(return_code=0, stdout="0\n", stderr=""),
-                SimpleNamespace(return_code=0, stdout=json.dumps(output), stderr=""),
-            ]
-        )
-    )
+    sandbox = SimpleNamespace(exec=AsyncMock(side_effect=verification_side_effects(json.dumps(output))))
 
     result = await run_verification(sandbox, make_inputs(), tmp_path, timeout_s=30)
 
     assert result.completed
     assert result.resolved
     assert result.patch_applied
+    assert result.test_exit_code == 0
+    assert result.parser_exit_code == 0
     assert result.test_output == "STDOUT:\ntest stdout\n\nSTDERR:\ntest stderr"
     assert json.loads((tmp_path / "output.json").read_text()) == output
 
@@ -154,14 +249,12 @@ async def test_run_verification_returns_resolved_result(tmp_path) -> None:
 async def test_run_verification_rejects_malformed_parser_output(tmp_path) -> None:
     sandbox = SimpleNamespace(
         exec=AsyncMock(
-            side_effect=[
-                SimpleNamespace(return_code=0, stdout="", stderr=""),
-                SimpleNamespace(return_code=1, stdout="", stderr="failed"),
-                SimpleNamespace(return_code=0, stdout="", stderr=""),
-                SimpleNamespace(return_code=0, stdout="failed", stderr=""),
-                SimpleNamespace(return_code=0, stdout="1\n", stderr=""),
-                SimpleNamespace(return_code=0, stdout="not-json", stderr=""),
-            ]
+            side_effect=verification_side_effects(
+                "not-json",
+                test_stdout="",
+                test_stderr="failed",
+                status_codes=(0, 0, 1, 0, 0, 0, 1, 1),
+            )
         )
     )
 
@@ -171,3 +264,23 @@ async def test_run_verification_rejects_malformed_parser_output(tmp_path) -> Non
     assert not result.resolved
     assert result.test_output == "STDOUT:\n\n\nSTDERR:\nfailed"
     assert "invalid JSON" in result.error
+
+
+@pytest.mark.asyncio
+async def test_run_verification_marks_setup_failure_incomplete(tmp_path) -> None:
+    output = {"tests": [{"name": "test_new", "status": "PASSED"}, {"name": "test_old", "status": "PASSED"}]}
+    sandbox = SimpleNamespace(
+        exec=AsyncMock(
+            side_effect=verification_side_effects(
+                json.dumps(output),
+                status_codes=(0, 0, 0, 0, 1, 0, 0, 0),
+            )
+        )
+    )
+
+    result = await run_verification(sandbox, make_inputs(), tmp_path, timeout_s=30)
+
+    assert not result.completed
+    assert not result.resolved
+    assert result.test_setup_exit_code == 1
+    assert result.error == "Failed verification phase(s): test setup"

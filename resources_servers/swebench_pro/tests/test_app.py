@@ -71,6 +71,7 @@ def make_server(*, golden: bool, apply_anti_cheating: bool = True) -> SWEBenchPr
         is_verifying_golden_patch=golden,
         apply_anti_cheating=apply_anti_cheating,
         prefetch_go_modules=True,
+        enable_opensandbox_runtime_parity=True,
     )
     return SWEBenchProResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
@@ -85,6 +86,14 @@ def test_golden_patch_verify_and_cleanup(monkeypatch: MonkeyPatch) -> None:
             resolved=True,
             patch_applied=True,
             test_results={"tests": []},
+            reset_exit_code=0,
+            checkout_exit_code=0,
+            patch_exit_code=0,
+            runtime_setup_exit_code=0,
+            test_setup_exit_code=0,
+            prefetch_exit_code=0,
+            test_exit_code=0,
+            parser_exit_code=0,
         )
     )
     monkeypatch.setattr(server, "_create_sandbox", create)
@@ -97,6 +106,9 @@ def test_golden_patch_verify_and_cleanup(monkeypatch: MonkeyPatch) -> None:
     assert response.json()["model_patch"] == "gold patch"
     assert response.json()["resolved"] is True
     assert verify.await_args.kwargs["inputs"].prefetch_go_modules is True
+    assert verify.await_args.kwargs["inputs"].runtime_parity_adaptations is True
+    assert response.json()["test_exit_code"] == 0
+    assert response.json()["parser_exit_code"] == 0
     create.assert_awaited_once()
     sandbox.stop.assert_awaited_once()
 

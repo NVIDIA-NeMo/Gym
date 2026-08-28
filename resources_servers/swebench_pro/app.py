@@ -51,6 +51,7 @@ class SWEBenchProResourcesServerConfig(BaseResourcesServerConfig):
     is_verifying_golden_patch: bool = False
     apply_anti_cheating: bool = True
     prefetch_go_modules: bool = False
+    enable_opensandbox_runtime_parity: bool = False
     evaluation_timeout: int | None = None
     image_repository: str = "docker.io/jefzda/sweap-images"
     sandbox_provider: str
@@ -111,6 +112,14 @@ class SWEBenchProVerifyResponse(BaseVerifyResponse):
     test_output: str
     error: str | None
     log_dir: str
+    reset_exit_code: int | None = None
+    checkout_exit_code: int | None = None
+    patch_exit_code: int | None = None
+    runtime_setup_exit_code: int | None = None
+    test_setup_exit_code: int | None = None
+    prefetch_exit_code: int | None = None
+    test_exit_code: int | None = None
+    parser_exit_code: int | None = None
 
 
 class SWEBenchProResourcesServer(SimpleResourcesServer):
@@ -193,6 +202,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             instance_dockerfile=body.instance_dockerfile,
             repo_language=body.repo_language,
             prefetch_go_modules=self.config.prefetch_go_modules,
+            runtime_parity_adaptations=self.config.enable_opensandbox_runtime_parity,
         )
 
     async def seed_session(
@@ -299,6 +309,14 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             "test_output": result.test_output,
             "error": extraction_error or result.error,
             "log_dir": str(run_log_dir),
+            "reset_exit_code": result.reset_exit_code,
+            "checkout_exit_code": result.checkout_exit_code,
+            "patch_exit_code": result.patch_exit_code,
+            "runtime_setup_exit_code": result.runtime_setup_exit_code,
+            "test_setup_exit_code": result.test_setup_exit_code,
+            "prefetch_exit_code": result.prefetch_exit_code,
+            "test_exit_code": result.test_exit_code,
+            "parser_exit_code": result.parser_exit_code,
         }
         return SWEBenchProVerifyResponse.model_validate(response_data)
 
