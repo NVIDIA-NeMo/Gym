@@ -6,10 +6,25 @@ set -euo pipefail
 NUM_PREFILL_NODES=$NUM_PREFILL_NODES
 NUM_DECODE_NODES=$NUM_DECODE_NODES
 MODEL=$MODEL
+MODEL_NAME="${MODEL_NAME:-$MODEL}"
 CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
 VLLM_CONFIG=$VLLM_CONFIG
 SLURM_COMMENT="${SLURM_COMMENT:-}"
+OPENSANDBOX_DOMAIN="${OPENSANDBOX_DOMAIN:-}"
+OPENSANDBOX_API_KEY="${OPENSANDBOX_API_KEY:-}"
+OPENSANDBOX_PROTOCOL="${OPENSANDBOX_PROTOCOL:-http}"
+
+# The checkout this script ships in; a caller running a copy of it names its own.
+gym_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
+if [[ "${1:-}" == "--gym-root" ]]; then
+    if [[ -z "${2:-}" ]]; then
+        echo "--gym-root needs a path" >&2
+        exit 2
+    fi
+    gym_root=$2
+    shift 2
+fi
 
 should_run_eval=$(( $# > 0 ))
 if (( should_run_eval )); then
@@ -38,6 +53,9 @@ set -euo pipefail
 source /opt/Gym_venv/bin/activate
 cd /opt/Gym
 
+export NEMO_GYM_RUN_ID="\$SLURM_JOB_ID"
+export NEMO_GYM_USER="\${NEMO_GYM_USER:-\$SLURM_JOB_USER}"
+
 gym eval prepare $@ +use_cached_prepared_benchmarks=true
 
 experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%d_%H%M%S)
@@ -65,7 +83,7 @@ gym eval run \
     ++reuse_existing_data_preparation=true \
     ++policy_base_url=http://\$(getent hosts "\$ROUTER_NODE" | awk 'NR == 1 {print \$1}'):$ROUTER_SERVER_PORT/v1 \
     ++policy_api_key=dummy_api_key \
-    ++policy_model_name=$MODEL \
+    ++policy_model_name=$MODEL_NAME \
     ++upload_rollouts=false \
     ++global_aiohttp_connector_limit_per_host=16384 \
     ++port_range_low=63000 \
@@ -150,14 +168,14 @@ if (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
     # Prefill
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
+    vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
         --host \$this_node_hostname \
         --port $WORKER_SERVER_PORT
 else
     # Decode
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
+    vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
         --host \$this_node_hostname \
         --port $WORKER_SERVER_PORT
 fi
@@ -185,10 +203,16 @@ srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 \
 server_step=\$!
 
 cleanup_server() {
+    job_status=\$?
+    trap - EXIT INT TERM
+    set +e
     kill "\$server_step" 2>/dev/null || true
     wait "\$server_step" 2>/dev/null || true
+    exit "\$job_status"
 }
-trap cleanup_server EXIT INT TERM
+trap cleanup_server EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 if (( $should_run_eval )); then
     # No need to wait for endpoint since Gym will wait for model endpoints to spin up before proceeding.
@@ -227,12 +251,9 @@ if (( $should_run_eval )); then
         echo "vLLM server step exited unexpectedly with status \$completed_status" >&2
         kill "\$eval_step" 2>/dev/null || true
         wait "\$eval_step" 2>/dev/null || true
-        trap - EXIT INT TERM
         exit "\$completed_status"
     fi
 
-    cleanup_server
-    trap - EXIT INT TERM
     exit "\$completed_status"
 fi
 
@@ -241,16 +262,64 @@ EOF
 )
 
 # --segment > 0 otherwise the engine will hang on the second or third engine step.
-vllm_command="$pd_command" \
-eval_command="$eval_command" \
-batch_command="$batch_command" \
-sbatch \
-    --nodes=$NUM_NODES \
-    --time=04:00:00 \
-    --job-name=gym-$EXPERIMENT_NAME-$USER \
-    --output=slurm-logs/%j-%x.log \
-    --ntasks-per-node=1 \
-    --comment="$SLURM_COMMENT" \
-    --exclusive \
-    --segment=$NUM_NODES \
-    --wrap 'exec bash -lc "$batch_command"'
+submit_dir=$(pwd -P)
+# An exported connection is sent as arguments; otherwise env.yaml is read.
+if [[ -n "$OPENSANDBOX_DOMAIN" ]]; then
+    cleanup_connection=(--domain "$OPENSANDBOX_DOMAIN" --api-key "$OPENSANDBOX_API_KEY" --protocol "$OPENSANDBOX_PROTOCOL")
+else
+    cleanup_connection=(--connection-config "$gym_root/env.yaml")
+fi
+cleanup_user=${NEMO_GYM_USER:-$USER}
+main_job_id=$(
+    NEMO_GYM_USER="$cleanup_user" \
+    vllm_command="$pd_command" \
+    eval_command="$eval_command" \
+    batch_command="$batch_command" \
+    sbatch \
+        --parsable \
+        --nodes=$NUM_NODES \
+        --time=04:00:00 \
+        --job-name=gym-$EXPERIMENT_NAME-$USER \
+        --output=slurm-logs/%j-%x.log \
+        --ntasks-per-node=1 \
+        --comment="$SLURM_COMMENT" \
+        --exclusive \
+        --segment=$NUM_NODES \
+        --wrap 'exec bash -lc "$batch_command"'
+)
+main_job_id=${main_job_id%%;*}
+
+if (( should_run_eval )); then
+    if ! cleanup_job_id=$(
+        sbatch \
+            --parsable \
+            --dependency=afterany:"$main_job_id" \
+            --partition=cpu \
+            --qos=cpu-short \
+            --gres=none \
+            --gpus-per-node=0 \
+            --nodes=1 \
+            --ntasks=1 \
+            --cpus-per-task=1 \
+            --mem=256M \
+            --time=00:30:00 \
+            --job-name="gym-cleanup-$main_job_id" \
+            --output="$submit_dir/slurm-logs/%j-gym-cleanup-$main_job_id.log" \
+            "$gym_root/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py" \
+            "${cleanup_connection[@]}" \
+            --run-id "$main_job_id" \
+            --user "$cleanup_user" \
+            --reap
+    ); then
+        echo "Submitted batch job $main_job_id"
+        echo "Failed to submit the sandbox-cleanup job for batch job $main_job_id;" \
+            "it is running and its sandboxes will need reaping by hand" >&2
+        exit 0
+    fi
+    cleanup_job_id=${cleanup_job_id%%;*}
+fi
+
+echo "Submitted batch job $main_job_id"
+if (( should_run_eval )); then
+    echo "Submitted cleanup job $cleanup_job_id for batch job $main_job_id"
+fi

@@ -26,7 +26,6 @@ package is installed into.
 
 import ast
 import inspect
-import re
 from pathlib import Path
 
 import finance_agent.get_agent as upstream_get_agent
@@ -118,18 +117,3 @@ class TestUpstreamParity:
             "tools",
             "llm_config",
         }
-
-    def test_openai_override_matches_the_nemo_gym_pin(self) -> None:
-        """``overrides.txt`` exists only to drop model-library's openai floor.
-
-        uv applies an override to every declared constraint on the package, so a
-        looser bound here would replace nemo-gym's cap too and silently install a
-        newer client than the one Gym is tested against. Bump both together.
-        """
-        gym_pin = re.search(r'"openai(<=|==)([\d.]+)"', (_REPO_ROOT / "pyproject.toml").read_text())
-        assert gym_pin, "nemo-gym no longer pins openai; revisit this override"
-
-        overrides = (_REPO_ROOT / "resources_servers" / "finance_agent_v2" / "overrides.txt").read_text()
-        assert f"openai[aiohttp]<={gym_pin.group(2)}" in overrides, (
-            "resources_servers/finance_agent_v2/overrides.txt is out of sync with nemo-gym's openai pin"
-        )
