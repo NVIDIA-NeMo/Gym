@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import json
+import warnings
 from asyncio import Future, Semaphore
 from collections import Counter, defaultdict
 from contextlib import nullcontext
@@ -25,17 +26,17 @@ import orjson
 from omegaconf import DictConfig
 from pydantic import BaseModel, Field, model_validator
 from tqdm.asyncio import tqdm
-from wandb import Table
 
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest, ReverifyMode
-from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError
+from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError, UploadRolloutsConfigMixin
+from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
-    get_wandb_run,
+    TASK_SOURCE_KEY_NAME,
 )
 from nemo_gym.path_utils import failures_path_for
 from nemo_gym.rollout_collection import (
@@ -43,7 +44,7 @@ from nemo_gym.rollout_collection import (
     NG_NO_PERSIST_KEY,
     NG_TERMINAL_KEY,
     _get_max_rollout_attempts,
-    _rollout_for_wandb,
+    _rollout_for_export,
 )
 from nemo_gym.server_utils import (
     ServerClient,
@@ -67,7 +68,7 @@ _RECOVERY_TWO_SOURCES_WARNING = (
 )
 
 
-class RolloutReverificationConfig(BaseNeMoGymCLIConfig):
+class RolloutReverificationConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
     materialized_inputs_jsonl_fpath: str = Field(
         description="The file path of the materialized inputs as output by `gym eval run`."
     )
@@ -97,10 +98,6 @@ class RolloutReverificationConfig(BaseNeMoGymCLIConfig):
         default=None,
         ge=1,
         description="Maximum number of examples to re-verify (omit for no limit). When combined with resume_from_cache, already-completed rows within the limit count against it, so fewer (or zero) rows may actually be re-verified.",
-    )
-    upload_rollouts_to_wandb: bool = Field(
-        default=True,
-        description="Upload the rollouts to W&B. Sometimes this should be off because the rollouts are massive. Default: True",
     )
     overwrite: bool = Field(
         default=False,
@@ -190,7 +187,8 @@ def _agent_to_rs_mapping_from_resources_only_config(
     global_config_dict: Union[Dict[str, Any], "DictConfig"],
 ) -> Dict[str, str]:
     # The rollout rows still carry agent names that were never started, so fall back to the
-    # single resources server for EVERY requested key.
+    # single resources server for EVERY requested key — loudly, since this also absorbs typos
+    # and stale agent names that would otherwise be routing errors.
     resources_server_names = [
         str(name)
         for name, block in global_config_dict.items()
@@ -198,6 +196,12 @@ def _agent_to_rs_mapping_from_resources_only_config(
     ]
     if len(resources_server_names) == 1:
         only = resources_server_names[0]
+        warnings.warn(
+            f"reverify: config has no agent blocks; routing EVERY rollout agent name to the only "
+            f"resources server {only!r}. Mismatched or stale agent names cannot be detected in "
+            "this mode.",
+            stacklevel=2,
+        )
         return defaultdict(lambda: only)  # any key → the one resources server instance
     if not resources_server_names:
         raise ConfigError("reverify: no resources server found in the config.")
@@ -205,6 +209,32 @@ def _agent_to_rs_mapping_from_resources_only_config(
         f"reverify: multiple resources servers {resources_server_names} and no agent blocks to "
         "route by. Use a config with agent blocks."
     )
+
+
+def _rs_for_row(
+    row: Dict[str, Any],
+    agent_to_rs: Dict[str, str],
+    global_config_dict: Union[Dict[str, Any], "DictConfig"],
+) -> str:
+    """The resources server that verifies this row.
+
+    A task_source naming a resources server is authoritative (it is the declaring instance the
+    dataset was stamped with — no agent indirection needed). Otherwise fall back to the rollout's
+    agent_ref via the config's agent->rs edges.
+    """
+    ts = row.get(TASK_SOURCE_KEY_NAME)
+    if ts is not None:
+        block = global_config_dict.get(ts)
+        if isinstance(block, (dict, DictConfig)) and "resources_servers" in block:
+            return str(ts)
+    agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+    try:
+        return agent_to_rs[agent_name]
+    except KeyError:
+        raise ConfigError(
+            f"reverify: cannot find a resources server for row (agent_ref.name={agent_name!r}, "
+            f"task_source={ts!r}). Known agents: {sorted(agent_to_rs)}."
+        ) from None
 
 
 def _build_agent_to_resources_server_mapping(
@@ -454,7 +484,7 @@ def _run_verification_payloads(
 
     async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
         async with semaphore:
-            rs_name = agent_to_rs[row[AGENT_REF_KEY_NAME]["name"]]
+            rs_name = _rs_for_row(row, agent_to_rs, server_client.global_config_dict)
             res = await server_client.post(server_name=rs_name, url_path="/verify", json=row)
             try:
                 await raise_for_status(
@@ -559,15 +589,19 @@ async def _call_aggregate_metrics(
 
     server_client = setup_server_client()
     agent_to_rs = _build_agent_to_resources_server_mapping(server_client.global_config_dict)
-    # Group results by agent name
-    agent_results: Dict[str, List[Dict]] = {}
+    # Group results per (agent, resources server), routing each row with the SAME resolver used
+    # for /verify (_rs_for_row: task_source authoritative, agent_ref via config edges as the
+    # fallback). Routing aggregation independently by the agent's configured server allowed a
+    # remapped row to be verified by one server and aggregated by another.
+    agent_results: Dict[Tuple[str, str], List[Dict]] = {}
     for row, result in zip(rows, results):
         agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
         if not agent_name:
             continue
-        agent_results.setdefault(agent_name, []).append(result)
+        rs_name = _rs_for_row(row, agent_to_rs, server_client.global_config_dict)
+        agent_results.setdefault((agent_name, rs_name), []).append(result)
 
-    async def _fetch_agent_metrics(agent_name: str, agent_result_list: List[Dict]) -> Dict:
+    async def _fetch_agent_metrics(agent_name: str, rs_name: str, agent_result_list: List[Dict]) -> Dict:
         # Strip heavyweight fields before sending, but preserve response.usage
         stripped = []
         for r in agent_result_list:
@@ -579,7 +613,7 @@ async def _call_aggregate_metrics(
 
         agg_request = AggregateMetricsRequest(verify_responses=stripped)
         agg_response = await server_client.post(
-            server_name=agent_to_rs[agent_name],
+            server_name=rs_name,
             url_path="/aggregate_metrics",
             json=agg_request,
         )
@@ -596,7 +630,9 @@ async def _call_aggregate_metrics(
         return agent_entry
 
     all_agent_metrics: List[Dict] = []
-    tasks = [_fetch_agent_metrics(name, results_list) for name, results_list in agent_results.items()]
+    tasks = [
+        _fetch_agent_metrics(name, rs_name, results_list) for (name, rs_name), results_list in agent_results.items()
+    ]
     for coro in asyncio.as_completed(tasks):
         agent_entry = await coro
         all_agent_metrics.append(agent_entry)
@@ -619,8 +655,7 @@ async def _call_aggregate_metrics(
                 if isinstance(v, primitive_types)
             }
         )
-    if get_wandb_run():  # pragma: no cover
-        get_wandb_run().log(metrics_to_log)
+    export_metrics(metrics_to_log)
 
     # Write single file with all agents
     metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
@@ -666,14 +701,14 @@ def _load_reverified_results(output_fpath: Path) -> Tuple[List[Dict], List[Dict]
     """Load the full main jsonl (cached + newly re-verified successes), sorted by (task, rollout).
 
     Returns ``(results, rows)``: ``results`` are the parsed rows — the source of truth used for both
-    the W&B rollouts export and the aggregate-metrics payload; ``rows`` is a minimal ``{AGENT_REF}``
-    projection used only to route each result to its resources server. Read once and reused for both
-    so the file is never read twice.
+    the W&B rollouts export and the aggregate-metrics payload; ``rows`` is a minimal
+    ``{agent_ref, task_source}`` projection used only to route each result to its resources server
+    (with the same resolver as /verify). Read once and reused for both so the file is never read twice.
     """
     with output_fpath.open("rb") as f:
         results = [orjson.loads(line) for line in f if line.strip()]
     results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
-    rows = [{AGENT_REF_KEY_NAME: r.get(AGENT_REF_KEY_NAME)} for r in results]
+    rows = [{k: r[k] for k in (AGENT_REF_KEY_NAME, TASK_SOURCE_KEY_NAME) if k in r} for r in results]
     return results, rows
 
 
@@ -730,6 +765,10 @@ class RolloutReverificationHelper(BaseModel):
                 result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
                 result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
                 result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
+                # Keep task_source alongside agent_ref: aggregation routes with the same resolver
+                # as /verify (task_source authoritative), so it must survive into the output file.
+                if TASK_SOURCE_KEY_NAME in row:
+                    result[TASK_SOURCE_KEY_NAME] = row[TASK_SOURCE_KEY_NAME]
                 if SKILLS_REF_KEY_NAME in row:
                     result[SKILLS_REF_KEY_NAME] = row[SKILLS_REF_KEY_NAME]
 
@@ -772,14 +811,12 @@ class RolloutReverificationHelper(BaseModel):
             failures_file.close()
 
         # Read the full main jsonl (cached + newly re-verified successes) ONCE — the source of truth,
-        # reused for both the W&B rollouts export and aggregate metrics so the file is never re-read.
+        # reused for both the rollouts export and aggregate metrics so the file is never re-read.
         results, agg_rows = _load_reverified_results(output_fpaths.output)
 
-        if config.upload_rollouts_to_wandb and (wandb_run := get_wandb_run()):  # pragma: no cover
-            print("Uploading rollouts to W&B. This may take a few minutes if your data is large.")
-            wandb_run.log(
-                {"Rollouts": Table(data=[[orjson.dumps(_rollout_for_wandb(r))] for r in results], columns=["Rollout"])}
-            )
+        if config.upload_rollouts and get_exporters():  # pragma: no cover
+            print("Uploading rollouts. This may take a few minutes if your data is large.")
+            export_rollouts([_rollout_for_export(r) for r in results])
 
         # Compute and write aggregate metrics via /aggregate_metrics on each agent server
         if config.disable_aggregation:

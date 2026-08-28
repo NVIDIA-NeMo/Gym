@@ -45,6 +45,7 @@ from nemo_gym.global_config import (
     get_first_server_config_dict,
     get_global_config_dict,
 )
+from nemo_gym.secret_utils import recursively_hide_secrets
 from nemo_gym.server_utils import (
     DictConfig,
 )
@@ -110,10 +111,10 @@ class TestGlobalConfig:
         monkeypatch.delenv("UV_CACHE_DIR", raising=False)
         probe = MagicMock(side_effect=AssertionError("offline resolution must not probe sockets"))
         hostname = MagicMock(side_effect=AssertionError("offline resolution must not resolve hostnames"))
-        wandb_init = MagicMock(side_effect=AssertionError("offline resolution must not initialize W&B"))
+        setup_exporters = MagicMock(side_effect=AssertionError("offline resolution must not start exporters"))
         monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", probe)
         monkeypatch.setattr(nemo_gym.global_config, "gethostbyname", hostname)
-        monkeypatch.setattr(nemo_gym.global_config.wandb, "init", wandb_init)
+        monkeypatch.setattr(nemo_gym.global_config, "setup_exporters", setup_exporters)
         monkeypatch.setattr(WANDBConfig, "is_available", PropertyMock(return_value=True))
 
         config = GlobalConfigDictParser().parse(
@@ -134,7 +135,7 @@ class TestGlobalConfig:
         assert config.worker.resources_servers.example.host == "127.0.0.1"
         probe.assert_not_called()
         hostname.assert_not_called()
-        wandb_init.assert_not_called()
+        setup_exporters.assert_not_called()
         assert "UV_CACHE_DIR" not in nemo_gym.global_config.environ
 
     def _mock_parse_environment(self, monkeypatch: MonkeyPatch, config_dict: "DictConfig") -> None:
@@ -1441,7 +1442,7 @@ contested: second_inner
                 "not": "not",
             }
         )
-        GlobalConfigDictParser()._recursively_hide_secrets(dict_config)
+        recursively_hide_secrets(dict_config)
         assert OmegaConf.to_container(dict_config) == {
             "dict": {"key": "****", "not": "not"},
             "list": [{"key": "****", "not": "not"}],
@@ -1838,6 +1839,25 @@ class TestConfigLoadErrors:
         parser = GlobalConfigDictParser()
         config = DictConfig({"my_server": {"resources_servers": {"x": {"entrypoint": "app.py", "domain": "other"}}}})
         parser.raise_on_no_server_instances(config)
+
+    def test_all_repo_configs_load_without_duplicate_keys(self) -> None:
+        # OmegaConf.load (the loader `gym env start` actually uses) rejects duplicate YAML keys,
+        # but a plain PyYAML parse silently allows them (last-writer-wins). A repeated key like a
+        # second `datasets:` block can land unnoticed and only surface at runtime. Sweep every real
+        # config in the repo so this fails fast in CI instead.
+        repo_root = Path(__file__).resolve().parents[2]
+        config_dirs = ("responses_api_agents", "resources_servers", "nemo_gym/sandbox/providers")
+        config_paths = [p for d in config_dirs for p in (repo_root / d).rglob("*.yaml")]
+        assert config_paths, "no config files discovered -- sweep dirs may have moved"
+
+        failures = []
+        for path in config_paths:
+            try:
+                OmegaConf.load(path)
+            except Exception as e:
+                failures.append(f"{path.relative_to(repo_root)}: {e}")
+
+        assert not failures, "malformed config(s) found:\n" + "\n".join(failures)
 
 
 class TestOpenAIVersionMatchesNemoGymConstraint:

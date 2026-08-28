@@ -25,18 +25,15 @@ from pathlib import Path
 from platform import python_version
 from random import randint
 from socket import gethostbyname, gethostname, socket
-from typing import ClassVar, List, Optional, Tuple, Type
+from typing import ClassVar, Dict, List, Optional, Tuple, Type
 
 import hydra
 import rich
-import wandb
-import wandb.util
 from omegaconf import MISSING, DictConfig, ListConfig, OmegaConf, open_dict
 from omegaconf.errors import InterpolationResolutionError
 from openai import __version__ as openai_version
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from ray import __version__ as ray_version
-from wandb import Run
 
 from nemo_gym import CACHE_DIR, RESULTS_DIR, WORKING_DIR, _resolve_under_cwd_or_install, component_search_roots
 from nemo_gym.config_types import (
@@ -50,11 +47,13 @@ from nemo_gym.config_types import (
     NoServerInstancesError,
     ServerInstanceConfig,
     ServerRefNotFoundError,
-    WANDBConfig,
     is_almost_server,
     is_server_ref,
     maybe_get_server_instance_config,
 )
+from nemo_gym.exporters import setup_exporters
+from nemo_gym.secret_utils import recursively_hide_secrets
+from nemo_gym.telemetry.setup import TELEMETRY_KEY_NAME
 
 
 _GLOBAL_CONFIG_DICT = None
@@ -97,6 +96,9 @@ JSON_OUTPUT_KEY_NAME = "json"
 QUERY_KEY_NAME = "query"
 OBSERVABILITY_ENABLED_KEY_NAME = "observability_enabled"
 MODEL_CALL_CAPTURE_DIR_KEY_NAME = "model_call_capture_dir"
+# Run-wide training-token capture settings.
+# See ``nemo_gym/token_id_capture/config.py``.
+TOKEN_ID_CAPTURE_BLOCK = "token_id_capture"
 COMPONENT_NAME_KEY_NAME = "component_name"
 SKIP_VERIFICATION_KEY_NAME = "skip_verification"
 SKIP_VERIFICATION_REWARD_KEY_NAME = "skip_verification_reward"
@@ -131,9 +133,11 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     QUERY_KEY_NAME,
     OBSERVABILITY_ENABLED_KEY_NAME,
     MODEL_CALL_CAPTURE_DIR_KEY_NAME,
+    TOKEN_ID_CAPTURE_BLOCK,
     COMPONENT_NAME_KEY_NAME,
     SKIP_VERIFICATION_KEY_NAME,
     SKIP_VERIFICATION_REWARD_KEY_NAME,
+    TELEMETRY_KEY_NAME,
 ]
 
 # Data keys
@@ -142,9 +146,17 @@ ROLLOUT_INDEX_KEY_NAME = "_ng_rollout_index"
 # Resume re-dispatch attempt counter (0 on the first attempt); distinguishes retries of the same
 # (task, rollout) so their captured model calls stay separable.
 ATTEMPT_INDEX_KEY_NAME = "_ng_attempt_index"
+# An explicit capture id replaces the task and rollout derivation.
+# Set it when dispatches reuse task and rollout indices.
+# Otherwise two dispatches would share one capture key.
+ROLLOUT_ID_KEY_NAME = "_ng_rollout_id"
 RESPONSES_CREATE_PARAMS_KEY_NAME = "responses_create_params"
 RESPONSE_KEY_NAME = "response"
 AGENT_REF_KEY_NAME = "agent_ref"
+# The config instance that declares the row's dataset (a resources server normally; the agent
+# itself for self-contained environments). Stamped into derived artifacts at collate/load time;
+# resolved to an agent at dispatch time. See the dataset-decoupling RFC.
+TASK_SOURCE_KEY_NAME = "task_source"
 SKILLS_REF_KEY_NAME = "skills_ref"
 
 POLICY_BASE_URL_KEY_NAME = "policy_base_url"
@@ -153,16 +165,6 @@ POLICY_MODEL_NAME_KEY_NAME = "policy_model_name"
 POLICY_MODEL_KEY_NAME = "policy_model"
 
 DEFAULT_HEAD_SERVER_PORT = 11000
-
-
-# W&B
-# Increase row limit since some of our rollouts are pretty hefty
-wandb.util.VALUE_BYTES_LIMIT = 10_000_000
-_WANDB_RUN: Optional[Run] = None
-
-
-def get_wandb_run() -> Optional[Run]:
-    return _WANDB_RUN
 
 
 # HuggingFace
@@ -537,25 +539,6 @@ For example, on the command line:
 {override_examples}"""
         )
 
-    def _recursively_hide_secrets(self, dict_config: DictConfig) -> None:
-        with open_dict(dict_config):
-            self._recursively_hide_secrets_helper(dict_config)
-
-    def _recursively_hide_secrets_helper(self, dict_config: DictConfig) -> None:
-        for k, v in list(dict_config.items()):
-            if isinstance(v, (DictConfig, dict)):
-                self._recursively_hide_secrets_helper(v)
-            elif isinstance(v, (ListConfig, list)):
-                if "token" in k or "key" in k:
-                    dict_config[k] = ["****"] * len(v)
-                else:
-                    for inner_v in v:
-                        if isinstance(inner_v, (DictConfig, dict)):
-                            self._recursively_hide_secrets_helper(inner_v)
-            else:
-                if "token" in k or "key" in k:
-                    dict_config[k] = "****"
-
     def _recursively_swap_keys(self, dict_config: DictConfig) -> None:
         frozen_dict_config = deepcopy(dict_config)
         with open_dict(dict_config):
@@ -760,7 +743,7 @@ Pass each config with --config (it builds the list for you), e.g.:
             error_on_almost_servers = global_config_dict.get("error_on_almost_servers", True)
             if error_on_almost_servers:
                 config_dict_to_log = deepcopy(global_config_dict)
-                self._recursively_hide_secrets(config_dict_to_log)
+                recursively_hide_secrets(config_dict_to_log)
                 config_to_log_yaml = OmegaConf.to_yaml(config_dict_to_log)
 
                 error_msg = f"""Found {len(almost_servers)} almost-server(s) with validation errors. Fix the issues above or set error_on_almost_servers=false to bypass this error.
@@ -891,24 +874,11 @@ Found global config dict yaml:
             global_config_dict.setdefault(UV_VENV_DIR_KEY_NAME, str(WORKING_DIR))
 
         if parse_config.hide_secrets:  # pragma: no cover
-            self._recursively_hide_secrets(global_config_dict)
+            recursively_hide_secrets(global_config_dict)
 
-        # Set up W&B and log config. This must happen at the very last step.
-        wandb_config = WANDBConfig.model_validate(global_config_dict)
-        if wandb_config.is_available and not parse_config.offline:  # pragma: no cover
-            environ["WANDB_API_KEY"] = wandb_config.wandb_api_key
-
-            global _WANDB_RUN
-            _WANDB_RUN = wandb.init(
-                project=wandb_config.wandb_project,
-                name=wandb_config.wandb_name,
-                dir=str(Path(global_config_dict[RESULTS_DIR_KEY_NAME]) / "wandb"),
-            )
-
-            # Log params
-            config_dict_to_log = deepcopy(global_config_dict)
-            self._recursively_hide_secrets(config_dict_to_log)
-            _WANDB_RUN.config.update(OmegaConf.to_container(config_dict_to_log))
+        # Set up exporters and log config. This must happen at the very last step.
+        if not parse_config.offline:  # pragma: no cover
+            setup_exporters(global_config_dict)
 
         return global_config_dict
 
@@ -1049,6 +1019,28 @@ def get_first_server_config_dict(global_config_dict: DictConfig, top_level_path:
     server_config_dict = list(server_config_dict.values())[0]
 
     return server_config_dict
+
+
+def agents_by_resources_server(global_config_dict: DictConfig) -> Dict[str, List[str]]:
+    """Invert the agent -> resources_server edges of a merged config.
+
+    Returns {resources server instance name: [agent instance names referencing it]}. This is the
+    lookup that routes task_source-stamped rows to an agent (and, transitionally, lets collate
+    dual-stamp a legacy agent_ref). Template placeholders (``name: ???``) and malformed blocks are
+    skipped: they are not routable candidates.
+    """
+    result: Dict[str, List[str]] = defaultdict(list)
+    for instance_name, block in global_config_dict.items():
+        if not isinstance(block, DictConfig) or "responses_api_agents" not in block:
+            continue
+        try:
+            inner = get_first_server_config_dict(global_config_dict, instance_name)
+            rs_name = (inner.get("resources_server") or {}).get("name")
+        except Exception:
+            continue
+        if isinstance(rs_name, str):
+            result[rs_name].append(str(instance_name))
+    return result
 
 
 def find_open_port(
