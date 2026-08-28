@@ -1087,7 +1087,8 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                 if response.status in RATE_LIMIT_ERROR_CODES:
                     max_num_tries += 1
 
-                content = (await response.content.read()).decode()
+                response_content = await response.content.read()
+                content = response_content.decode(errors="replace")
                 kind = "rate_limit" if response.status in RATE_LIMIT_ERROR_CODES else "server_error"
                 print(
                     f"[model_retry url={request_kwargs.get('url')} status={response.status} kind={kind} try={tries} max_tries={max_num_tries} error_msg={content[:200]}]",
@@ -1098,8 +1099,9 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             else:
                 return response
 
-        # We've exited the loop
-        await raise_for_status(response)
+        # We've exited the loop. Preserve how many provider requests were made so
+        # the exception middleware can include that evidence in the structured error.
+        await raise_for_status(response, content=response_content, retry_count=tries - 1)
 
     async def _raise_for_status(self, response: ClientResponse, request_kwargs: Dict[str, Any]) -> None:
         if not response.ok and _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:

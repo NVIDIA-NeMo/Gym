@@ -26,9 +26,12 @@ from typing import (
     get_origin,
     get_type_hints,
 )
+from unittest.mock import AsyncMock, MagicMock
 
 import openai
 import pytest
+from aiohttp import ClientResponseError, RequestInfo
+from multidict import CIMultiDict
 from openai.types.chat.completion_create_params import CompletionCreateParamsNonStreaming
 from openai.types.responses import (
     EasyInputMessage,
@@ -64,6 +67,7 @@ from openai.types.responses.response_output_item import (
     McpListTools,
 )
 from pydantic import ValidationError
+from yarl import URL
 
 from nemo_gym.openai_utils import (
     RESPONSES_TO_TRAIN,
@@ -123,6 +127,48 @@ def _response_with_output(output: list) -> dict:
 class TestOpenAIUtils:
     async def test_NeMoGymAsyncOpenAI(self) -> None:
         NeMoGymAsyncOpenAI(api_key="abc", base_url="https://api.openai.com/v1")
+
+    async def test_request_with_retry_preserves_final_body_and_retry_count(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        request_info = RequestInfo(
+            url=URL("https://api.fireworks.ai/inference/v1/chat/completions"),
+            method="POST",
+            headers=CIMultiDict(),
+            real_url=URL("https://api.fireworks.ai/inference/v1/chat/completions"),
+        )
+
+        def response(body: bytes):
+            value = MagicMock()
+            value.status = 500
+            value.ok = False
+            value.request_info = request_info
+            value.headers = CIMultiDict({"x-request-id": "fw-request-123"})
+            value.content.read = AsyncMock(return_value=body)
+            value.raise_for_status.side_effect = ClientResponseError(
+                request_info=request_info,
+                history=(),
+                status=500,
+                message="upstream failed",
+                headers=value.headers,
+            )
+            return value
+
+        responses = [response(b"first"), response(b"second"), response(b"final body")]
+        request_mock = AsyncMock(side_effect=responses)
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request_mock)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", AsyncMock())
+
+        client = NeMoGymAsyncOpenAI(api_key="provider-key", base_url="https://api.fireworks.ai/inference/v1")
+        with pytest.raises(ClientResponseError) as exc_info:
+            await client._request_with_retry(
+                method="POST",
+                url="https://api.fireworks.ai/inference/v1/chat/completions",
+            )
+
+        assert request_mock.await_count == 3
+        assert exc_info.value.response_content == b"final body"
+        assert exc_info.value.retry_count == 2
 
 
 class TestNeMoGymResponseCreateParamsNonStreaming:

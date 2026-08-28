@@ -12,12 +12,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 import multiprocessing
 import socket
 from concurrent.futures import ProcessPoolExecutor
 from unittest.mock import AsyncMock, MagicMock
 
 from aiohttp import ClientOSError, ClientResponseError, RequestInfo
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from multidict import CIMultiDict, CIMultiDictProxy
 from omegaconf import OmegaConf
 from pytest import MonkeyPatch, raises
@@ -25,6 +28,7 @@ from yarl import URL
 
 import nemo_gym.global_config
 import nemo_gym.server_utils
+from nemo_gym.config_types import BaseRunServerInstanceConfig
 from nemo_gym.global_config import (
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
@@ -103,6 +107,7 @@ class TestServerUtils:
             restored_error = executor.submit(_return_exception_from_child_process, error).result()
 
         assert isinstance(restored_error, ClientResponseError)
+        assert restored_error.retry_count == 0
         assert str(restored_error) == str(error)
         assert restored_error.status == 500
         assert restored_error.message == "verifier failed"
@@ -115,6 +120,115 @@ class TestServerUtils:
         assert isinstance(restored_error.headers, CIMultiDict)
         assert restored_error.headers.getall("retry-after") == ["10", "20"]
         assert restored_error.headers.getall("SET-COOKIE") == ["session=abc", "preferences=dark"]
+
+    def test_exception_middleware_preserves_sanitized_upstream_error(self, capsys) -> None:
+        class TestSimpleServer(SimpleServer):
+            def setup_webserver(self):
+                raise AssertionError
+
+        server = TestSimpleServer(
+            config=BaseRunServerInstanceConfig(name="policy_model", host="", port=0, entrypoint=""),
+            server_client=ServerClient(
+                head_server_config=BaseServerConfig(host="", port=0),
+                global_config_dict=DictConfig({}),
+            ),
+        )
+        app = FastAPI()
+        server.setup_exception_middleware(app)
+
+        @app.get("/fail")
+        async def fail():
+            headers = CIMultiDict(
+                {
+                    "x-request-id": "fw-request-123",
+                    "authorization": "Bearer provider-secret",
+                }
+            )
+            request_info = RequestInfo(
+                url=URL("https://user:pass@api.fireworks.ai/inference/v1/chat/completions?api_key=secret"),
+                method="POST",
+                headers=headers,
+                real_url=URL("https://user:pass@api.fireworks.ai/inference/v1/chat/completions?api_key=secret"),
+            )
+            error = ClientResponseError(
+                request_info=request_info,
+                history=(),
+                status=429,
+                message="rate limited",
+                headers=headers,
+            )
+            error.response_content = b'{"error":{"message":"capacity exhausted","api_key":"provider-secret"}}'
+            error.retry_count = 2
+            raise error
+
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.get("/fail")
+
+        assert response.status_code == 429
+        assert response.json() == {
+            "detail": {
+                "type": "upstream_http_error",
+                "status": 429,
+                "provider": "api.fireworks.ai",
+                "endpoint": "https://api.fireworks.ai/inference/v1/chat/completions",
+                "response_body": {
+                    "error": {
+                        "message": "capacity exhausted",
+                        "api_key": "[REDACTED]",
+                    }
+                },
+                "server": "policy_model",
+                "request_id": "fw-request-123",
+                "retry_count": 2,
+            }
+        }
+        log = capsys.readouterr().out
+        assert "Upstream request failed" in log
+        assert "provider-secret" not in log
+        assert "user:pass" not in log
+
+    def test_exception_middleware_preserves_nested_upstream_error(self) -> None:
+        class TestSimpleServer(SimpleServer):
+            def setup_webserver(self):
+                raise AssertionError
+
+        server = TestSimpleServer(
+            config=BaseRunServerInstanceConfig(name="agent", host="", port=0, entrypoint=""),
+            server_client=ServerClient(
+                head_server_config=BaseServerConfig(host="", port=0),
+                global_config_dict=DictConfig({}),
+            ),
+        )
+        nested = {
+            "type": "upstream_http_error",
+            "status": 503,
+            "provider": "api.fireworks.ai",
+            "endpoint": "https://api.fireworks.ai/inference/v1/chat/completions",
+            "response_body": {"error": "unavailable"},
+            "server": "policy_model",
+            "request_id": "fw-request-456",
+            "retry_count": 2,
+        }
+        app = FastAPI()
+        server.setup_exception_middleware(app)
+
+        @app.get("/fail")
+        async def fail():
+            request_info = RequestInfo(
+                url=URL("http://policy-model/v1/responses"),
+                method="POST",
+                headers=CIMultiDict(),
+                real_url=URL("http://policy-model/v1/responses"),
+            )
+            error = ClientResponseError(request_info=request_info, history=(), status=503, message="unavailable")
+            error.response_content = json.dumps({"detail": nested}).encode()
+            raise error
+
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.get("/fail")
+
+        assert response.status_code == 503
+        assert response.json() == {"detail": nested}
 
     def test_global_aiohttp_client_request_debug_enabled(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)

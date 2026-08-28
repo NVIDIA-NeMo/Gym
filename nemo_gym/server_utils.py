@@ -26,6 +26,7 @@ from pathlib import Path
 from threading import Thread
 from traceback import format_exc, print_exc
 from typing import Any, List, Literal, NamedTuple, Optional, TextIO, Tuple, Type, Union, Unpack
+from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 import orjson
@@ -284,9 +285,12 @@ Sleeping 0.5s and retrying...
             await asyncio.sleep(0.5)
 
 
-async def raise_for_status(response: ClientResponse) -> None:  # pragma: no cover
+async def raise_for_status(
+    response: ClientResponse, content: Optional[bytes] = None, retry_count: int = 0
+) -> None:  # pragma: no cover
     if not response.ok:
-        content = await response.content.read()
+        if content is None:
+            content = await response.content.read()
         if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
             print(f"""Request info: {response.request_info}
 Response content: {content}""")
@@ -296,6 +300,7 @@ Response content: {content}""")
         except ClientResponseError as e:
             # Set the response content here so we have access to it down the line.
             e.response_content = content
+            e.retry_count = retry_count
             # aiohttp stores unpicklable multidict proxies in this exception.
             # Preserve request details as pickle-safe values for cross-process propagation.
             request_info = e.request_info
@@ -479,6 +484,103 @@ def _has_injected_global_config_env() -> bool:
 
 SESSION_ID_KEY = "session_id"
 
+_UPSTREAM_REQUEST_ID_HEADERS = (
+    "x-request-id",
+    "request-id",
+    "x-fireworks-request-id",
+    "fireworks-request-id",
+    "x-fw-request-id",
+    "fw-request-id",
+)
+_SENSITIVE_UPSTREAM_FIELD_PARTS = (
+    "api_key",
+    "apikey",
+    "authorization",
+    "credential",
+    "password",
+    "secret",
+    "token",
+)
+_MAX_UPSTREAM_ERROR_TEXT_LENGTH = 4096
+
+
+def _sanitize_upstream_url(url: object) -> str:
+    """Return the request endpoint without credentials, query values, or fragments."""
+    try:
+        split = urlsplit(str(url))
+        host = split.hostname or ""
+        if split.port is not None:
+            host = f"{host}:{split.port}"
+        return urlunsplit((split.scheme, host, split.path, "", ""))
+    except (TypeError, ValueError):
+        return "unknown"
+
+
+def _sanitize_upstream_response(value: object) -> object:
+    if isinstance(value, dict):
+        return {
+            key: (
+                "[REDACTED]"
+                if any(part in str(key).lower() for part in _SENSITIVE_UPSTREAM_FIELD_PARTS)
+                else _sanitize_upstream_response(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_sanitize_upstream_response(item) for item in value]
+    if isinstance(value, str):
+        return value[:_MAX_UPSTREAM_ERROR_TEXT_LENGTH]
+    return value
+
+
+def _decode_upstream_response_content(content: object) -> object:
+    if isinstance(content, bytes):
+        text = content.decode("utf-8", errors="replace")
+    elif isinstance(content, str):
+        text = content
+    else:
+        return repr(content)
+
+    try:
+        return _sanitize_upstream_response(json.loads(text))
+    except json.JSONDecodeError:
+        return text[:_MAX_UPSTREAM_ERROR_TEXT_LENGTH]
+
+
+def format_client_response_error(error: ClientResponseError, server: Optional[str] = None) -> dict[str, Any]:
+    """Format a sanitized, structured error for an upstream HTTP failure."""
+    response = _decode_upstream_response_content(getattr(error, "response_content", None))
+    if (
+        isinstance(response, dict)
+        and isinstance(response.get("detail"), dict)
+        and response["detail"].get("type") == "upstream_http_error"
+    ):
+        return response["detail"]
+
+    request_info = getattr(error, "request_info", None)
+    raw_endpoint = getattr(request_info, "real_url", None) or getattr(request_info, "url", None)
+    endpoint = _sanitize_upstream_url(raw_endpoint)
+    try:
+        provider = urlsplit(endpoint).hostname or "unknown"
+    except ValueError:
+        provider = "unknown"
+    headers = getattr(error, "headers", None) or {}
+    request_id = next((headers.get(name) for name in _UPSTREAM_REQUEST_ID_HEADERS if headers.get(name)), None)
+
+    detail: dict[str, Any] = {
+        "type": "upstream_http_error",
+        "status": error.status,
+        "provider": provider,
+        "endpoint": endpoint,
+        "response_body": response,
+    }
+    if server is not None:
+        detail["server"] = server
+    if request_id is not None:
+        detail["request_id"] = request_id
+    detail["retry_count"] = getattr(error, "retry_count", 0)
+    return detail
+
 
 class BaseServer(BaseModel):
     """
@@ -644,11 +746,10 @@ class SimpleServer(BaseServer):
                     "Please use `nemo_gym.server_utils.raise_for_status` for HTTP exceptions!"
                 )
 
-                response_content = f"Hit an exception in {self.get_session_middleware_key()} calling an inner server: {e.response_content}"
-                if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
-                    print(response_content)
+                error_detail = format_client_response_error(e, server=self.config.name)
+                print(f"Upstream request failed: {json.dumps(error_detail, ensure_ascii=False)}", flush=True)
 
-                return JSONResponse(content=response_content, status_code=500)
+                return JSONResponse(content={"detail": error_detail}, status_code=e.status)
             except Exception as e:
                 print(
                     f"""🚨 Caught an exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception
