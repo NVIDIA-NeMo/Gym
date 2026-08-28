@@ -1,20 +1,48 @@
 #!/bin/bash
-# Run one sweep across several jobs, then merge the results back.
+# 03 - Run one sweep across N jobs, watch them, resubmit failures, then merge and profile.
 #
 # One job cannot use 256 nodes: --segment needs a topology-contiguous allocation and an NVL72 rack
 # is 18 nodes, and a single driver at 512 x decode_nodes concurrency would exceed the aiohttp
 # per-host connector limit long before the GPUs saturated. N identical jobs over disjoint slices is
-# the shape that scales. With the P4D12 default of 16 nodes, NUM_SHARDS=16 is a 256-node run.
+# the shape that scales. At the 16-node default, NUM_SHARDS=16 is a 256-node run.
 #
-#   MODEL=<checkpoint> CONTAINER=<sqsh> SWEEP_DIR=<out>/<nickname> NUM_SHARDS=16 \
-#   SANDBOX_CONTAINER=<sandbox sqsh> \
-#   bash benchmarks/nemotron_3.5_super/reward_profiling/scripts/03_run_sharded.sh
+# USAGE
+#   MODEL=<ckpt> CONTAINER=<sqsh> SANDBOX_CONTAINER=<sandbox sqsh> \
+#     SWEEP_DIR=<out>/<nickname> NUM_SHARDS=16 bash $R/scripts/03_run_sharded.sh
 #
-# Safe to re-run. Shards carry whatever the parent sweep has already collected, and merge
-# deduplicates on the same (task, rollout) key Gym resumes on, so a rerun resumes rather than
-# recollecting. To change the shard count mid-run: merge first, then re-run this with a new
-# NUM_SHARDS -- shard_sweep carries from the parent, not from the old shards.
+# REQUIRED + OPTIONAL
+#   everything 03_run_single.sh takes -- it submits one 03_run_single.sh per shard -- plus:
+#   NUM_SHARDS    how many jobs                            (default: 16)
+#                 1 is legitimate: it is how a single-job run gets resubmission
+#   SHARDS_DIR    where shard_NNN/ go                      (default: SWEEP_DIR/shards)
+#   POLL_S        seconds between squeue checks            (default: 60)
+#   MAX_ROUNDS    resubmissions per shard before giving up (default: 4)
+#
+# This runs in the FOREGROUND for hours, so detach it. It locks the shards directory and refuses
+# to start twice -- each watcher resubmits independently, so several pile up jobs against the
+# node limit:
+#
+#   setsid nohup bash -lc "... bash $R/scripts/03_run_sharded.sh" > watcher.log 2>&1 &
+#
+# Safe to re-run. Shards carry whatever the parent has already collected, and merge deduplicates
+# on the same (task, rollout) key Gym resumes on, so a rerun resumes rather than recollecting. To
+# change the shard count mid-run: merge first, then re-run with a new NUM_SHARDS -- shard_sweep
+# carries from the parent, not from the old shards.
 set -euo pipefail
+
+# One watcher per sweep. Each instance resubmits dead shards independently, so a second one
+# doubles the submissions and they pile up against the account's node limit -- observed with three
+# watchers holding six jobs against a four-node cap. The lock is the sweep directory, so different
+# sweeps still run concurrently. flock releases it when this shell exits, however it exits.
+_lock_dir=${SHARDS_DIR:-${SWEEP_DIR:-/tmp}}
+mkdir -p "$_lock_dir" 2>/dev/null || true
+exec {_lock_fd}>"$_lock_dir/.watcher.lock"
+if ! flock -n "$_lock_fd"; then
+    echo "ERROR: another 03_run_sharded.sh is already watching $_lock_dir." >&2
+    echo "       Two watchers resubmit the same shards independently. Stop that one first:" >&2
+    echo "         ps -eo pid,args | grep '[0]3_run_shard[e]d'" >&2
+    exit 2
+fi
 
 for _required in MODEL CONTAINER SWEEP_DIR; do
     if [[ -z "${!_required:-}" ]]; then
@@ -102,7 +130,7 @@ while :; do
         submit_output=$(
             EXPERIMENT_NAME="${EXPERIMENT_NAME:-rp}-$shard_name" \
             SWEEP_DIR="$shard_dir" \
-            bash "$RP_DIR/scripts/03_run.sh"
+            bash "$RP_DIR/scripts/03_run_single.sh"
         )
         job_id=$(grep -oE '[0-9]+$' <<<"$submit_output" | tail -1)
         live_jobs[$job_id]=$shard_name

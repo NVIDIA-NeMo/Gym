@@ -67,7 +67,13 @@ def main(argv: list[str] | None = None) -> int:
     mat.add_argument(
         "--jobs", type=int, default=None, help="Worker processes (default: one per CPU, capped at entries)."
     )
-    mat.add_argument("--limit-per-entry", type=int, default=None, help="Take at most N source rows per entry.")
+    mat.add_argument(
+        "--limit-per-entry",
+        type=int,
+        default=None,
+        help="Cap every entry at N source rows, for smoke runs. Lowers a manifest limit but never "
+        "raises one; set materialize.limit_per_entry or entry.limit for a committed subset.",
+    )
     mat.add_argument("--overwrite", action="store_true", help="Replace an existing materialized file.")
     mat.add_argument(
         "--shuffle",

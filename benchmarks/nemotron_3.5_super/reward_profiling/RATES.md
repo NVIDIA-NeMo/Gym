@@ -70,7 +70,7 @@ Summing the lanes instead gives 23,178-24,409 GPU-hours, and the gap is the poin
 together: a judge rollout blocked on the gateway and a sandbox rollout blocked on uWSGI hold no GPU
 while they wait, so they fill time the GPU-bound environments would leave idle.
 
-Disk, one-time per (manifest, checkpoint): `01_prepare_sweep.sh` writes **291.5 GB** in ~2,087 s
+Disk, one-time per (manifest, checkpoint): `01_materialize.sh` writes **291.5 GB** in ~2,087 s
 (5,808,968 rows from 726,121 source rows, 36 workers). Sharding copies it, so peak is **~583 GB**.
 
 ## Caveats

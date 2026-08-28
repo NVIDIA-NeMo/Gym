@@ -28,7 +28,9 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import shutil
+import zlib
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -86,6 +88,10 @@ class MaterializeReport:
     # overrides. Carried here rather than in sweep_config.yaml because that file configures
     # gym env start, and these belong to gym eval run.
     gym_eval_run: Dict[str, Any] = field(default_factory=dict)
+    # SBATCH_* the launchers export where their own environment does not already set them.
+    sbatch: Dict[str, str] = field(default_factory=dict)
+    # CONTAINER / SANDBOX_CONTAINER / MOUNTS, applied the same way.
+    srun: Dict[str, str] = field(default_factory=dict)
 
     @property
     def total_source_rows(self) -> int:
@@ -104,6 +110,8 @@ class MaterializeReport:
             "nickname": self.nickname,
             "shuffle_seed": self.shuffle_seed,
             "gym_eval_run": self.gym_eval_run,
+            "sbatch": self.sbatch,
+            "srun": self.srun,
             "total_source_rows": self.total_source_rows,
             "total_materialized_rows": self.total_materialized_rows,
             "entries": {
@@ -123,27 +131,60 @@ class MaterializeReport:
         return self.report_fpath
 
 
-def _count_rows(path: str, limit: Optional[int]) -> int:
+def _count_rows(path: str, limit: Optional[int], exact: bool = False) -> int:
+    """Rows this entry contributes: ``min(total, limit)``.
+
+    ``head`` can stop at the limit; ``random`` cannot, because it has to see every row before it
+    knows which to keep. Both return the same number, so task-index offsets are unaffected.
+    """
     n = 0
     with open(path, "rb") as handle:
         for line in handle:
             if line.strip():
                 n += 1
-                if limit is not None and n >= limit:
+                if not exact and limit is not None and n >= limit:
                     break
-    return n
+    return n if limit is None else min(n, limit)
 
 
-def _expand_entry(args: Tuple[str, str, str, Optional[str], int, int, Optional[int]]) -> Tuple[str, int, int]:
+def _select_random(handle, limit: int, seed: int) -> List[bytes]:
+    """Reservoir-sample ``limit`` lines, returned in original file order.
+
+    Holds ``limit`` lines rather than the file. Order is restored afterwards so task indices stay
+    meaningful, and the seed is mixed with the entry label by the caller so adding an entry does
+    not reshuffle its neighbours.
+    """
+    rng = random.Random(seed)
+    reservoir: List[Tuple[int, bytes]] = []
+    seen = 0
+    for line in handle:
+        if not line.strip():
+            continue
+        if len(reservoir) < limit:
+            reservoir.append((seen, line))
+        else:
+            j = rng.randrange(seen + 1)
+            if j < limit:
+                reservoir[j] = (seen, line)
+        seen += 1
+    reservoir.sort()
+    return [line for _, line in reservoir]
+
+
+def _expand_entry(
+    args: Tuple[str, str, str, Optional[str], int, int, Optional[int], str, int],
+) -> Tuple[str, int, int]:
     """Write one entry's rows into its own part file. Runs in a worker process."""
-    label, data, part_path, override, repeats, task_offset, limit = args
+    label, data, part_path, override, repeats, task_offset, limit, sample, seed = args
     src_rows = 0
     written = 0
     with open(data, "rb") as source, open(part_path, "wb") as sink:
+        if sample == "random" and limit is not None:
+            source = iter(_select_random(source, limit, seed))
         for line in source:
             if not line.strip():
                 continue
-            if limit is not None and src_rows >= limit:
+            if sample == "head" and limit is not None and src_rows >= limit:
                 break
             row = orjson.loads(line)
             ref = row.get(AGENT_REF_KEY)
@@ -186,10 +227,26 @@ def materialize(
         for entry in manifest.entries
     }
 
+    # Resolution, lowest to highest: manifest.materialize.limit_per_entry -> entry.limit ->
+    # the limit_per_entry argument (which a launcher sets from LIMIT_PER_ENTRY). The last is a
+    # smoke-run cap, so it takes the smaller of the two rather than raising a committed limit.
+    spec = manifest.materialize
+    limits = {}
+    for entry in manifest.entries:
+        declared = spec.limit_for(entry)
+        if limit_per_entry is None:
+            limits[entry.label] = declared
+        elif declared is None:
+            limits[entry.label] = limit_per_entry
+        else:
+            limits[entry.label] = min(declared, limit_per_entry)
+
     # Task indices are laid out as contiguous per-entry ranges in manifest order, so the assignment
     # depends only on the manifest and the data -- never on worker scheduling.
     print(f"counting rows across {len(manifest.entries)} entries...", flush=True)
-    counts = [_count_rows(entry.data, limit_per_entry) for entry in manifest.entries]
+    counts = [
+        _count_rows(entry.data, limits[entry.label], exact=spec.sample == "random") for entry in manifest.entries
+    ]
     offsets: List[int] = []
     running = 0
     for count in counts:
@@ -209,7 +266,11 @@ def materialize(
             entry.agent_ref_override,
             repeats_by_entry[entry.label],
             offsets[index],
-            limit_per_entry,
+            limits[entry.label],
+            spec.sample,
+            # Mixed with the label so adding an entry does not reshuffle its neighbours'
+            # selections, which would invalidate resume keys across the whole sweep.
+            spec.seed + (zlib.crc32(entry.label.encode()) & 0xFFFFFFFF),
         )
         for index, entry in enumerate(manifest.entries)
     ]
@@ -267,6 +328,8 @@ def materialize(
         nickname=manifest.nickname,
         shuffle_seed=shuffle_seed,
         gym_eval_run=manifest.gym_eval_run.overrides(),
+        sbatch=manifest.sbatch.env(),
+        srun=manifest.srun.env(),
         rows_per_entry=rows_per_entry,
         materialized_per_entry=materialized_per_entry,
         num_repeats_per_entry=repeats_by_entry,

@@ -1,16 +1,25 @@
 #!/bin/bash
-# End-to-end invariant test for the shard / reshard / merge / split / profile pipeline.
+# Assert the shard / reshard / merge / split / profile invariants against a real sweep.
 #
-#   SWEEP_DIR=<a sweep with real rollouts> bash .../scripts/06_selftest.sh
+# Run after changing anything in nemo_gym/sweep/. Read-only with respect to SWEEP_DIR: everything
+# happens on a scratch copy.
 #
-# Copies the sweep to scratch and drives it through a sequence of shard counts, asserting after
-# every step that no rollout was lost, duplicated, or filed under a shard that does not own it.
-# Uses real collected rollouts rather than synthetic rows, because the failures worth catching --
-# a rollout whose task index falls outside its shard, a reshard that silently drops the work of a
-# layout that was never merged -- only appear once inputs and rollouts disagree in the ways real
-# collection makes them disagree.
+# USAGE
+#   SWEEP_DIR=<a sweep with rollouts> bash $R/scripts/debug_selftest.sh
 #
-# Read-only with respect to SWEEP_DIR. Set KEEP=1 to leave the scratch copy behind.
+# REQUIRED
+#   SWEEP_DIR     a sweep directory with a non-empty rollouts.jsonl
+#
+# OPTIONAL
+#   SHAPES        shard counts to cycle through           (default: "4 7 2 9 3 5")
+#   PROFILE_JOBS  passed to 05_profile.sh                 (default: 12)
+#   KEEP=1        leave the scratch copy behind for inspection
+#
+# Asserts after every reshape that inputs partition exactly, every rollout sits in the shard
+# owning its input, collected work survives, and merge round-trips; then that the split attributes
+# every row to an entry inside its task_index_range, and that profiling yields one row per source
+# task. Uses real collected rollouts rather than synthetic rows, because the failures worth
+# catching only appear once inputs and rollouts disagree the way collection makes them disagree.
 set -euo pipefail
 
 SWEEP_DIR=${SWEEP_DIR:?set SWEEP_DIR to a sweep directory that has rollouts.jsonl}

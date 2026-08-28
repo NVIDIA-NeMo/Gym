@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -58,6 +58,10 @@ class SweepEntry(BaseModel):
     # The rewrite is applied while concatenating and recorded in the build report.
     agent_ref_override: Optional[str] = None
     num_repeats: Optional[int] = Field(default=None, ge=1)
+    # How much of this dataset is in scope, overriding materialize.limit_per_entry. Part of what
+    # the sweep *is*, so it is committed -- unlike a smoke run's LIMIT_PER_ENTRY, which is a
+    # property of one invocation and belongs on the command line.
+    limit: Optional[int] = Field(default=None, ge=1)
     # Free-form provenance (row counts, source paths, measured throughput). Never interpreted.
     notes: Dict[str, Any] = Field(default_factory=dict)
 
@@ -111,6 +115,78 @@ class GymEvalRun(BaseModel):
         return dict(self.model_extra or {})
 
 
+class Materialize(BaseModel):
+    """What ``nemo_gym.sweep materialize`` reads, i.e. how the input file gets built.
+
+    Separate from ``gym_eval_run`` because these are decided before collection exists: they
+    determine which rows are in the sweep at all, not how the sweep is run.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Rows to take from every entry, unless the entry sets its own ``limit``. Unset means all.
+    limit_per_entry: Optional[int] = Field(default=None, ge=1)
+    # ``head`` takes the first N and can stop reading there, which is why it is the default and
+    # what a smoke run wants. ``random`` must read the whole file to sample it -- 36.9 GB here --
+    # but the first N rows of a sorted dataset are a biased subset, so prefer it when the limit is
+    # a deliberate subset rather than a smoke test.
+    sample: Literal["head", "random"] = "head"
+    # Seeds ``random`` per entry label, so selection is reproducible and does not shift when
+    # another entry is added.
+    seed: int = 0
+
+    def limit_for(self, entry: "SweepEntry") -> Optional[int]:
+        return entry.limit if entry.limit is not None else self.limit_per_entry
+
+
+class Sbatch(BaseModel):
+    """Slurm settings for the launchers, which shell out to ``sbatch``.
+
+    Keys are free-form and become ``SBATCH_<KEY>`` in the launcher's environment, which is how
+    sbatch takes them -- ``account`` -> ``SBATCH_ACCOUNT``, ``timelimit`` -> ``SBATCH_TIMELIMIT``.
+    Not enumerated, so any option sbatch reads from the environment works without a schema change.
+    See ``man sbatch``, INPUT ENVIRONMENT VARIABLES, for the list.
+
+    A launcher exports these only where its own environment does not already set the variable, so
+    precedence stays manifest -> script env var -> command line.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    def env(self) -> Dict[str, str]:
+        return {f"SBATCH_{key.upper()}": str(value) for key, value in (self.model_extra or {}).items()}
+
+
+class Srun(BaseModel):
+    """Container settings for the launchers, which shell out to ``srun --container-image``.
+
+    The container belongs with the manifest because it is built *from* it: ``sweep container-config``
+    unions every entry's ``config_paths`` and the resulting image has exactly this manifest's
+    servers baked in. Running a manifest against an image built for a different one is the failure
+    that presents as a hang rather than an error, so naming it here keeps the two together.
+
+    ``MODEL`` deliberately stays a launcher argument: the checkpoint is what you are profiling, not
+    part of what the sweep is.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Reward-profiling sqsh, i.e. CONTAINER.
+    container: Optional[str] = None
+    # nemo-skills sandbox sqsh, i.e. SANDBOX_CONTAINER. Required by ns_tools and math_formal_lean.
+    sandbox_container: Optional[str] = None
+    # Passed through to --container-mounts.
+    mounts: Optional[str] = None
+
+    def env(self) -> Dict[str, str]:
+        pairs = {
+            "CONTAINER": self.container,
+            "SANDBOX_CONTAINER": self.sandbox_container,
+            "MOUNTS": self.mounts,
+        }
+        return {key: value for key, value in pairs.items() if value}
+
+
 class SweepManifest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -121,6 +197,9 @@ class SweepManifest(BaseModel):
     # a single invocation.
     num_shards: Optional[int] = Field(default=None, ge=1)
 
+    materialize: Materialize = Field(default_factory=Materialize)
+    sbatch: Sbatch = Field(default_factory=Sbatch)
+    srun: Srun = Field(default_factory=Srun)
     gym_env_start: GymEnvStart = Field(default_factory=GymEnvStart)
     gym_eval_run: GymEvalRun = Field(default_factory=GymEvalRun)
 

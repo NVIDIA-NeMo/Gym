@@ -1,16 +1,55 @@
 #!/bin/bash
-# Reward profiling in one job: a vLLM prefill/decode endpoint plus the Gym sweep driver.
+# 03 - Reward profiling in one Slurm job: a vLLM prefill/decode endpoint plus the Gym sweep driver.
 #
-# Forked from ../sbatch_external_vllm.sh. The vLLM half is unchanged; the eval half runs the
-# sweep instead of a benchmark split. Run 01_prepare_sweep.sh first to produce SWEEP_DIR.
-
+# Forked from ../sbatch_external_vllm.sh; the vLLM half is unchanged, the eval half runs a sweep
+# instead of a benchmark split. Run 01_materialize.sh first to produce SWEEP_DIR. Profiles inside
+# the job when collection finishes, so a completed job leaves a profile behind; use 05_profile.sh
+# to profile a run that was killed, or to re-profile after a merge.
+#
+# USAGE
+#   MODEL=<ckpt> CONTAINER=<eval sqsh> SANDBOX_CONTAINER=<sandbox sqsh> \
+#     SWEEP_DIR=<out>/<nickname> bash $R/scripts/03_run_single.sh
+#
+# REQUIRED
+#   SWEEP_DIR         the OUT_DIR/<nickname> directory 01 wrote
+#   MODEL             served checkpoint path, also used as policy_model_name
+#   CONTAINER         reward-profiling sqsh (../../build_eval_container.sh with SKIP_PREPARE=1)
+#                     may come from the manifest's srun block instead, as may SANDBOX_CONTAINER
+#                     and MOUNTS; SBATCH_* may come from its sbatch block. An env var set here wins
+#
+# Does not resubmit itself. For retries on a single job use 03_run_sharded.sh with NUM_SHARDS=1.
+#
+# OPTIONAL - shape
+#   NUM_PREFILL_NODES / NUM_DECODE_NODES   1 / 2. Nodes = P + D, capped ~16 by --segment
+#   WALLTIME                               04:00:00
+#   SBATCH_ACCOUNT / _GRES / _QOS          nemotron_n4_post / gpu:4 / interactive
+#                                          read by sbatch from the environment, so exported here
+#
+# OPTIONAL - sandbox lane (ns_tools, math_formal_lean)
+#   SANDBOX_CONTAINER  a nemo-skills sandbox sqsh. Without one those entries read
+#                      NEMO_SKILLS_SANDBOX_HOST/PORT, fall back to 127.0.0.1:6000 where nothing
+#                      listens, and fail with a bare 500 per rollout rather than at startup
+#   SANDBOX_PORT / SANDBOX_WORKERS         6000 / 32
+#
+# OPTIONAL - throughput
+#   NUM_SAMPLES_IN_PARALLEL   512 x decode_nodes, or the manifest's value if it sets one
+#   MAX_NUM_SEQS_PER_DECODE_ENGINE         512
+#   ALLOW_PARTIAL_ROLLOUTS                 True
+#   ENV_PORT_RANGE_LOW / _HIGH             20000 / 30000, or the manifest's gym_env_start
+#   SERVERS_READY_TIMEOUT_S / ENV_START_ATTEMPTS   1800 / 4
+#   ENV_YAML / MOUNTS / LOG_DIR            $PWD/env.yaml / /lustre:/lustre / SWEEP_DIR/slurm-logs
+#
+# The sandbox image runs nginx over N uWSGI workers on ONE node, hashing X-Session-ID so a
+# stateful IPython session stays pinned to a worker. It does not span nodes and
+# NEMO_SKILLS_SANDBOX_HOST takes a single host, so sandbox capacity is one node's worth --
+# measured at 483 rollouts/hr on 32 workers. Scaling past that needs a balancer in front.
 set -euo pipefail
 
 # Input arguments and validation
 # Required:
 #   MODEL        served checkpoint path (also used as policy_model_name)
 #   CONTAINER    reward-profiling sqsh (built by ../../build_eval_container.sh with SKIP_PREPARE=1)
-#   SWEEP_DIR    <out-dir>/<nickname> written by 01_prepare_sweep.sh
+#   SWEEP_DIR    <out-dir>/<nickname> written by 01_materialize.sh
 #
 # Optional, with defaults below. SBATCH_ACCOUNT / SBATCH_PARTITION / SBATCH_QOS / SBATCH_GRES are
 # read by sbatch itself from the environment, so they are exported rather than passed as flags.
@@ -24,9 +63,39 @@ set -euo pipefail
 # single host, so sandbox capacity is currently one node's worth. Scaling past that needs a
 # balancer in front of several sandbox nodes; measured at 483 rollouts/hr on 32 workers, and the
 # sandbox lane is ~42% of total sweep cost, so this is the first thing to grow.
-for _required in MODEL CONTAINER SWEEP_DIR; do
+# SWEEP_DIR first and on its own: it is the path to the manifest's own output, so unlike MODEL and
+# CONTAINER it cannot be supplied by the manifest.
+if [[ -z "${SWEEP_DIR:-}" ]]; then
+    echo "ERROR: SWEEP_DIR is required. See the header of $0 for the full argument list." >&2
+    exit 2
+fi
+
+# Slurm and container settings the manifest declared, applied only where this environment does
+# not already set the variable -- so precedence stays manifest -> script env var -> command line. Free-form, so a
+# manifest can set any SBATCH_* sbatch reads without a change here.
+while IFS='=' read -r _k _v; do
+    [[ -n "$_k" ]] || continue
+    [[ -n "${!_k:-}" ]] || export "$_k=$_v"
+done < <(python - "$SWEEP_DIR" <<'PY_SBATCH'
+import json, sys
+from pathlib import Path
+try:
+    doc = json.loads((Path(sys.argv[1]) / "sweep_report.json").read_text())
+except OSError:
+    doc = {}
+for block in ("sbatch", "srun"):
+    for key, value in (doc.get(block) or {}).items():
+        print(f"{key}={value}")
+PY_SBATCH
+)
+
+
+# Checked after the manifest has had its say, so a manifest that names its own container satisfies
+# this rather than tripping it.
+for _required in MODEL CONTAINER; do
     if [[ -z "${!_required:-}" ]]; then
-        echo "ERROR: $_required is required. See the header of $0 for the full argument list." >&2
+        echo "ERROR: $_required is required, and the manifest's srun block does not set it." >&2
+        echo "       See the header of $0 for the full argument list." >&2
         exit 2
     fi
 done
@@ -175,7 +244,7 @@ SERVERS_READY_TIMEOUT_S=${SERVERS_READY_TIMEOUT_S:-1200}
 ENV_PORT_RANGE_LOW=${ENV_PORT_RANGE_LOW:-20000}
 ENV_PORT_RANGE_HIGH=${ENV_PORT_RANGE_HIGH:-30000}
 
-# 1, always: 01_prepare_sweep.sh already wrote num_repeats copies of every row, so anything higher
+# 1, always: 01_materialize.sh already wrote num_repeats copies of every row, so anything higher
 # would multiply them again.
 NUM_REPEATS=${NUM_REPEATS:-1}
 
@@ -212,7 +281,7 @@ ROUTER_SERVER_PORT=8000
 WORKER_SERVER_PORT=8001
 
 eval_command=$(cat <<EOF
-# Activate the container's Gym venv. SWEEP_DIR holds the artifacts 01_prepare_sweep.sh wrote.
+# Activate the container's Gym venv. SWEEP_DIR holds the artifacts 01_materialize.sh wrote.
 source /opt/Gym_venv/bin/activate
 cd /opt/Gym
 

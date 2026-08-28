@@ -33,11 +33,11 @@ R=benchmarks/nemotron_3.5_super/reward_profiling
 uv venv && uv sync --extra dev && source .venv/bin/activate
 
 # 1. manifest -> one materialized input file
-MANIFEST=$R/manifests/nemotron_3_ultra.yaml bash $R/scripts/01_prepare_sweep.sh
+MANIFEST=$R/manifests/nemotron_3_ultra.yaml bash $R/scripts/01_materialize.sh
 
 # 2. one Slurm job: serves vLLM, starts Gym, collects, profiles
 MODEL=<checkpoint> CONTAINER=<eval sqsh> SANDBOX_CONTAINER=<sandbox sqsh> \
-  SWEEP_DIR=$R/outputs/sweeps/nemotron_3_ultra bash $R/scripts/03_run.sh
+  SWEEP_DIR=$R/outputs/sweeps/nemotron_3_ultra bash $R/scripts/03_run_single.sh
 
 # 3. profile (also run automatically at the end of step 2; safe on a partial run)
 SWEEP_DIR=$R/outputs/sweeps/nemotron_3_ultra bash $R/scripts/05_profile.sh
@@ -115,26 +115,43 @@ arm64 build exists: `/lustre/fsw/portfolios/llmservice/users/igitman/images/nemo
 
 ## 02 - Create a Manifest
 The manifest is the highest-level config of what environments are being profiled, and parameterizes any judge, sandbox, or config overrides needed.
-Four top-level keys. The middle two are named for the command they configure:
+Seven top-level keys. Every block but `nickname` and `entries` is named for the command it
+configures, so where a setting goes follows from which command consumes it:
 
 1. **nickname** — names the run; artifacts land in `<OUT_DIR>/<nickname>/`
-2. **gym_env_start** — becomes `sweep_config.yaml`, passed as `--config`
+2. **materialize** — which rows are in the sweep at all, read by `01_materialize.sh`
+    - `limit_per_entry`: rows to take from every entry. Unset means all
+    - `sample`: `head` (default) or `random`. `head` stops reading at the limit, so it is what a
+      smoke run wants; `random` must read the whole file, but the first N rows of a sorted dataset
+      are a biased subset, so prefer it when the limit is a deliberate subset
+    - `seed`: seeds `random`, mixed with each entry's label so adding an entry does not reshuffle
+      its neighbours and invalidate their resume keys
+3. **sbatch** — Slurm settings for the launchers, which shell out to `sbatch`
+    - free-form: each key becomes `SBATCH_<KEY>`, which is how sbatch takes them.
+      `account`, `partition`, `qos`, `gres`, `timelimit`, `reservation`, `comment`, and anything
+      else listed under INPUT ENVIRONMENT VARIABLES in `man sbatch`
+    - applied only where the launcher's own environment does not already set the variable
+4. **srun** — containers, for `srun --container-image`
+    - `container`, `sandbox_container`, `mounts`. The container belongs here because it is built
+      *from* this manifest, so the two stay together. `MODEL` stays a launcher argument: the
+      checkpoint is what you are profiling, not part of what the sweep is
+5. **gym_env_start** — becomes `sweep_config.yaml`, passed as `--config`
     - `config_paths`: sweep-wide configs merged ahead of every entry's own. Usually just the model
       server, e.g. `responses_api_models/vllm_model/configs/vllm_model.yaml`
     - any other key: ordinary Gym config, spliced in verbatim. A config overrides whatever its own
       `config_paths` pulled in, so these beat every file — which is how a judge gets rebound
       without editing an upstream config. Do it here rather than in a file: the container is built
       from a Gym ref and has no copy of this repo, so a repo-relative path will not resolve inside it
-3. **gym_eval_run** — runtime settings, emitted as `++key=value`
+6. **gym_eval_run** — runtime settings, emitted as `++key=value`
     - `num_repeats`: rollouts per task; the spread across them is the profile. Applied by
-      01_prepare_sweep.sh, which writes this many copies of each row into the materialized inputs,
+      01_materialize.sh, which writes this many copies of each row into the materialized inputs,
       so collection itself runs with `++num_repeats=1`
     - anything else Gym takes, e.g. `num_samples_in_parallel`
     - precedence, lowest to highest: **manifest → script env var → command line**. A launcher
       passes `++` only when its env var is set, so these are defaults rather than something
       silently clobbered. `num_samples_in_parallel` is the exception: the launcher computes
       `512 × decode_nodes`, since only it knows the job's shape
-4. **entries** — the environments to be profiled
+7. **entries** — the environments to be profiled
     - `label` (required): nickname of profiled env
     - `agent` (required): `agent_ref` of the data
     - `configs`: gym configs defining the agent and its resources server. The agent must be
@@ -143,6 +160,8 @@ Four top-level keys. The middle two are named for the command they configure:
     - `owner` (optional): owner of environment
     - `num_repeats` (optional): overrides the default. Resolved per agent, so entries sharing an
       agent share a value
+    - `limit` (optional): rows to take from this dataset, overriding `materialize.limit_per_entry`.
+      Committed, unlike `LIMIT_PER_ENTRY`, which caps a single smoke run and never raises this
 
 ```yaml
 nickname: my_sweep
@@ -153,6 +172,20 @@ gym_env_start:
   math_judge_model:              # bind a judge without touching upstream configs
     responses_api_models: {...}
 
+materialize:
+  limit_per_entry: 10000         # optional; unset means every row
+  sample: random                 # head (default) | random
+  seed: 0
+
+sbatch:                          # optional; each key becomes SBATCH_<KEY>
+  account: nemotron_n3_post
+  qos: interactive
+  timelimit: "04:00:00"
+
+srun:                            # optional
+  container: /lustre/.../eval.sqsh
+  sandbox_container: /lustre/.../nemo-skills-sandbox-0.7.1-arm64.sqsh
+
 gym_eval_run:
   num_repeats: 8
   num_samples_in_parallel: 512
@@ -162,6 +195,7 @@ entries:
     agent: my_simple_agent
     configs: [resources_servers/my_env/configs/my_env.yaml]
     data: /path/to/data.jsonl
+    limit: 500                   # optional; overrides materialize.limit_per_entry
 ```
 
 Validate before running — it checks the configs exist, the agent is declared, and the data parses:
@@ -180,7 +214,7 @@ and each row is stamped with a globally unique `_ng_task_index` plus its manifes
 
 ```bash
 R=benchmarks/nemotron_3.5_super/reward_profiling
-MANIFEST=$R/manifests/<name>.yaml bash $R/scripts/01_prepare_sweep.sh
+MANIFEST=$R/manifests/<name>.yaml bash $R/scripts/01_materialize.sh
 # -> $R/outputs/sweeps/<nickname>/
 ```
 
@@ -188,7 +222,7 @@ Then run it. One job serves the policy itself:
 
 ```bash
 MODEL=<ckpt> CONTAINER=<eval sqsh> SANDBOX_CONTAINER=<sandbox sqsh> \
-  SWEEP_DIR=$R/outputs/sweeps/<nickname> bash $R/scripts/03_run.sh
+  SWEEP_DIR=$R/outputs/sweeps/<nickname> bash $R/scripts/03_run_single.sh
 ```
 
 Or against a policy already served somewhere — no Slurm, no GPUs:
@@ -208,7 +242,7 @@ SWEEP_DIR=<sweep> NUM_SHARDS=16 bash $R/scripts/02_shard.sh   # deal
 SWEEP_DIR=<sweep> bash $R/scripts/04_merge_shards.sh          # unshard
 ```
 
-Each shard directory is a complete SWEEP_DIR, so `03_run.sh` runs against one unmodified. Rows are
+Each shard directory is a complete SWEEP_DIR, so `03_run_single.sh` runs against one unmodified. Rows are
 dealt round-robin, so every shard carries every environment and none inherits a whole slow one.
 
 This works because `_ng_task_index` is stamped before sharding and Gym never rewrites it, so shard
@@ -220,7 +254,7 @@ into the parent and snapshots it to `snapshots/<UTC>/` before touching a shard d
 carries that work into the new layout. To check that on your own data:
 
 ```bash
-SWEEP_DIR=<sweep> bash $R/scripts/06_selftest.sh
+SWEEP_DIR=<sweep> bash $R/scripts/debug_selftest.sh
 ```
 
 It drives a scratch copy through six shard counts (4→7→2→9→3→5), asserting after each that inputs
@@ -311,7 +345,7 @@ SWEEP_DIR=<sweep> bash $R/scripts/05_profile.sh
 ```
 
 `VLLM_JOBID`/`CONTAINER` are an alternative, not a requirement — they borrow a container from any
-live allocation to get `gym` on PATH, which is how `03_run.sh` calls this at the end of its job:
+live allocation to get `gym` on PATH, which is how `03_run_single.sh` calls this at the end of its job:
 
 ```bash
 SWEEP_DIR=<sweep> CONTAINER=<sqsh> VLLM_JOBID=<any live job> bash $R/scripts/05_profile.sh
@@ -375,22 +409,22 @@ scripts/         numbered by run order; see below.
 
 | script | does | when |
 |---|---|---|
-| `01_prepare_sweep.sh` | manifest -> one materialized input | always |
+| `01_materialize.sh` | manifest -> one materialized input | always |
 | `02_shard.sh` | deal into N sweep dirs, one per job | only to exceed one job's node count |
-| `03_run.sh` | one job: vLLM + Gym + collect + profile | single-job runs, and what the sharded runner submits |
+| `03_run_single.sh` | one job: vLLM + Gym + collect + profile | single-job runs, and what the sharded runner submits |
 | `03_run_sharded.sh` | submit + watch + resubmit N shards, then merge and profile | sharded runs |
 | `03_run_endpoint.sh` | collect against any OpenAI-compatible URL, no Slurm | an endpoint someone else is serving |
 | `03_run_attached.sh` | collect inside an already-running vLLM Slurm job | debugging against a warm allocation |
 | `04_merge_shards.sh` | unshard: merge rollouts back into the parent | after individually-launched shards, or before resharding |
 | `05_profile.sh` | split by entry, profile each and the whole sweep | mid-run, or after a merge |
-| `06_selftest.sh` | assert the shard/reshard/merge/split/profile invariants | after changing the sweep machinery |
+| `debug_selftest.sh` | assert the shard/reshard/merge/split/profile invariants | after changing the sweep machinery |
 
 The `03_` variants differ on two axes, not one:
 
 | | serves the policy | jobs |
 |---|---|---|
-| `03_run.sh` | yes, its own P/D stack | 1 |
-| `03_run_sharded.sh` | yes, via `03_run.sh` | N |
+| `03_run_single.sh` | yes, its own P/D stack | 1 |
+| `03_run_sharded.sh` | yes, via `03_run_single.sh` | N |
 | `03_run_endpoint.sh` | no, you give it a URL | 0 -- no Slurm at all |
 | `03_run_attached.sh` | no, uses a running job's | 0 -- srun into yours |
 
@@ -429,6 +463,10 @@ rewards before a run finishes.
 
 ### Gotchas
 
+- **Run exactly one `03_run_sharded.sh` per sweep.** Each watcher resubmits dead shards
+  independently, so a second one doubles the submissions and they pile up against the account's
+  node limit. It now takes a lock on the shards directory and refuses to start twice, but it still
+  runs in the foreground — detach it with `setsid nohup ... &`.
 - `--no-serve` is required for collection. Without it `--input` is silently replaced by the
   collated split.
 - **Do not use `gym eval run --limit` to smoke-test a sweep.** It takes the first N rows of the
@@ -442,6 +480,6 @@ rewards before a run finishes.
   reports which entries those are.
 - Set `num_samples_in_parallel` explicitly; unset means unbounded concurrency.
 - `export` in `.bashrc` only reaches a login shell, and a bare `VAR=value` reaches nothing. Judge
-  keys read via `${oc.env:VAR}` need a real export; `03_run.sh` and `05_profile.sh` both check.
+  keys read via `${oc.env:VAR}` need a real export; `03_run_single.sh` and `05_profile.sh` both check.
 - `agent_ref_override` rewrites `agent_ref` while concatenating. Use it only to deliberately run a
   dataset through a different agent; the override is recorded in the build report.

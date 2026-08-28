@@ -1,16 +1,31 @@
 #!/bin/bash
-# Split a sweep by manifest entry and reward-profile each, plus the sweep as a whole.
+# 05 - Split the sweep by manifest entry, then reward-profile each entry and the whole sweep.
 #
-#   SWEEP_DIR=<outputs/sweeps>/<nickname> CONTAINER=<sqsh> VLLM_JOBID=<jobid> \
-#   bash .../scripts/05_profile.sh
+# No GPU and no Slurm: the profiler is CPU-only. Safe on a partial sweep -- partial groups are
+# kept and the completion percentage is reported.
 #
-# VLLM_JOBID/CONTAINER are only needed to get a container with gym on PATH; the profiler itself
-# needs no GPU, so --gpus=0 against any live allocation is enough. Omit them if gym is already on
-# PATH (e.g. inside the container).
+# USAGE
+#   source .venv/bin/activate
+#   SWEEP_DIR=<sweep> bash $R/scripts/05_profile.sh
 #
-# Safe on a partial sweep: ++allow_partial_rollouts=True keeps groups that have some but not all
-# repeats, and the profiler reports the completion percentage. 03_run.sh runs this at the end of a
-# job; use it directly to profile mid-run or after merging shards.
+# REQUIRED
+#   SWEEP_DIR     a sweep directory with rollouts.jsonl
+#
+# OPTIONAL
+#   PROFILE_JOBS  labels profiled concurrently            (default: 8)
+#                 each label is a separate `gym` process and on Lustre interpreter start dominates
+#                 (~45s vs ~5s in the container), so this is most of the wall time
+#   VLLM_JOBID    borrow a container from this live job instead of using the local venv
+#   CONTAINER     the sqsh to use with VLLM_JOBID
+#   ENV_YAML      config whose ${oc.env:VAR} keys are checked  (default: <repo>/env.yaml)
+#
+# OUTPUT
+#   SWEEP_DIR/by_label/<label>/profile.txt                per-entry
+#   SWEEP_DIR/rollouts_reward_profiling.jsonl             one row per source task
+#   SWEEP_DIR/rollouts_agent_metrics.json                 the same, aggregated per agent
+#
+# Checks up front that `gym eval profile` imports and that env.yaml's variables are exported,
+# because either failing writes the same error into all 36 profile.txt files instead of once.
 set -euo pipefail
 
 SWEEP_DIR=${SWEEP_DIR:?set SWEEP_DIR to the <out-dir>/<nickname> directory}

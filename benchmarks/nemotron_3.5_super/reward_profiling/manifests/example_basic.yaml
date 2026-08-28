@@ -6,6 +6,11 @@ nickname: example_basic
 gym_env_start:
   config_paths:
     - responses_api_models/vllm_model/configs/vllm_model.yaml
+# Which rows enter the sweep, read by `01_materialize.sh`. Unset means every row.
+# materialize:
+#   limit_per_entry: 500     # per entry; `sample: random` and `seed:` also available
+#                            # an entry can override with its own `limit:`
+
 # Runtime settings for `gym eval run --no-serve`.
 gym_eval_run:
   num_repeats: 8

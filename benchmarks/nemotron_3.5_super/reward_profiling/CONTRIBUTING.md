@@ -11,7 +11,7 @@
     - a. [Non-judge environments.](#03a---non-judge-environments)
     - b. [Judge environments.](#03b---judge-environments)
     - c. [Sandbox environments.](#03c---sandbox-environments)
-4. [Adding a manifest entry into manifests/nemotron_3_5_super.yaml](#04---adding-a-manifest-entry-into-manifestsnemotron35superyaml)
+4. [Adding a manifest entry into manifests/nemotron_3_5_super.yaml](#04---adding-a-manifest-entry-into-manifestsnemotron_3_5_superyaml)
 
 Contribute your environment as a one-entry manifest first, prove it runs, then add it to the shared
 manifest. A one-entry manifest fails in seconds; the same mistake in the shared one costs a full
@@ -111,15 +111,19 @@ Two extra things, in [`manifests/example_sandbox_judge.yaml`](./manifests/exampl
 
 ```bash
 MANIFEST=$R/manifests/<yours>.yaml OUT_DIR=$R/outputs/sweeps/<name> LIMIT_PER_ENTRY=8 \
-  bash $R/scripts/01_prepare_sweep.sh
+  bash $R/scripts/01_materialize.sh
 
 MODEL=<ckpt> CONTAINER=<eval sqsh> \
-  SWEEP_DIR=$R/outputs/sweeps/<name>/<nickname> bash $R/scripts/03_run.sh
+  SWEEP_DIR=$R/outputs/sweeps/<name>/<nickname> bash $R/scripts/03_run_single.sh
 ```
 
 `LIMIT_PER_ENTRY=8` takes only the first 8 rows of your dataset instead of all of them, so at
 `num_repeats: 8` that is 64 rollouts — enough to exercise every code path in minutes. Drop it for
 a real run. Every other variable is in [README § Common knobs](./README.md#05---reference).
+
+If you want a *committed* subset — your dataset has 200k rows and only 10k belong in the sweep —
+that is `limit` on your entry, or `materialize.limit_per_entry` for a manifest-wide default. Set
+`materialize.sample: random` with a `seed` if the first N rows would be a biased sample.
 
 **Do not smoke-test with `gym eval run --limit` instead.** It looks equivalent and is not.
 `--limit` takes the first N rows of the whole input at collection time; `LIMIT_PER_ENTRY` takes N
@@ -150,13 +154,13 @@ Nothing extra.
 
 Export the keys `env.yaml` interpolates, e.g. `NVI_KEY_EVALUATOR`. A bare `VAR=value` in `.bashrc`
 is a shell variable, not an environment one, so sbatch never sees it — and `export` in `.bashrc`
-only reaches a login shell. `03_run.sh` and `05_profile.sh` both check this up front and name what
+only reaches a login shell. `03_run_single.sh` and `05_profile.sh` both check this up front and name what
 is missing.
 
 ### 03c - Sandbox environments.
 
 Pass `SANDBOX_CONTAINER=<nemo-skills sqsh>`. Without it `ns_tools` falls back to `127.0.0.1:6000`,
-where nothing listens, and every rollout fails with a bare 500. `03_run.sh` starts one and waits
+where nothing listens, and every rollout fails with a bare 500. `03_run_single.sh` starts one and waits
 for `/health` before collecting, so watch that gate rather than the rollout count.
 
 The sandbox is one node only — sessions pin to a worker by `X-Session-ID` consistent hashing, so it

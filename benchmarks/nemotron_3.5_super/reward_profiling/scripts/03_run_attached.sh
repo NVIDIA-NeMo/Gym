@@ -1,18 +1,36 @@
 #!/bin/bash
-# Collect reward-profiling rollouts against an already-running vLLM endpoint.
+# 03 - Collect against an already-running vLLM Slurm job. The fast loop when iterating.
 #
-# Starts every Gym server for the sweep, then resumes from the materialized inputs written by
-# 01_prepare_sweep.sh. `--resume` is not optional: without it rollout collection clears the output
-# and re-expands from scratch, and a sweep this size will not finish inside one allocation.
+# Starts every Gym server for the sweep inside that job's allocation, then resumes from the
+# materialized inputs. Does not allocate anything itself.
 #
-#   VLLM_JOBID=<jobid> \
-#   SWEEP_DIR=<outputs/sweeps>/<nickname> \
-#   POLICY_MODEL_NAME=<checkpoint-path> \
-#   bash .../scripts/run_rollouts.sh
+# USAGE
+#   VLLM_JOBID=<jobid> SWEEP_DIR=<out>/<nickname> POLICY_MODEL_NAME=<ckpt> \
+#     bash $R/scripts/03_run_attached.sh
+#
+# REQUIRED
+#   VLLM_JOBID          a running job serving the policy
+#   SWEEP_DIR           the OUT_DIR/<nickname> directory 01 wrote
+#   POLICY_MODEL_NAME   the served checkpoint path
+#   CONTAINER           sqsh to run the Gym servers in
+#
+# OPTIONAL
+#   GYM_CONFIG    config inside SWEEP_DIR                  (default: sweep_config.yaml)
+#   CONCURRENCY   num_samples_in_parallel                  (default: 128)
+#   ROUTER_PORT   where the vLLM router listens            (default: 8000)
+#   MOUNTS        container mounts                         (default: /lustre:/lustre)
+#   ENV_YAML      mounted so judges resolve their keys     (default: $PWD/env.yaml)
+#
+# `--resume` is not optional: without it rollout collection clears the output and re-expands from
+# scratch, and a sweep this size will not finish inside one allocation.
+#
+# Secrets reach Gym through env.yaml, auto-loaded from its working directory. The judge lane needs
+# it -- judge bindings interpolate ${nv_inference_api_key}, which env.yaml resolves from the shell.
+# Without the mount the config fails to parse rather than failing at judge time.
 set -euo pipefail
 
 VLLM_JOBID=${VLLM_JOBID:?set VLLM_JOBID to the running vLLM job}
-SWEEP_DIR=${SWEEP_DIR:?set SWEEP_DIR to <out-dir>/<nickname> from 01_prepare_sweep.sh}
+SWEEP_DIR=${SWEEP_DIR:?set SWEEP_DIR to <out-dir>/<nickname> from 01_materialize.sh}
 POLICY_MODEL_NAME=${POLICY_MODEL_NAME:?set POLICY_MODEL_NAME to the served checkpoint path}
 CONTAINER=${CONTAINER:?set CONTAINER to the reward-profiling sqsh}
 GYM_CONFIG=${GYM_CONFIG:-sweep_config.yaml}

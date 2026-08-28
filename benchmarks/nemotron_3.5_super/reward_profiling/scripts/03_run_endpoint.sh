@@ -1,25 +1,31 @@
 #!/bin/bash
-# Run a sweep against any OpenAI-compatible endpoint. No Slurm, no sbatch, no GPUs.
+# 03 - Run a sweep against any OpenAI-compatible endpoint. No Slurm, no sbatch, no GPUs.
 #
 # The other 03_ scripts allocate and serve the policy themselves. This one takes a URL, so the
 # model is somebody else's problem -- a vLLM already running anywhere reachable, an internal
-# gateway, a hosted API. All that runs locally is the Gym servers and the collection driver, which
-# are CPU-only.
+# gateway, a hosted API. Only the Gym servers and the collection driver run locally, both CPU-only.
 #
-#   SWEEP_DIR=<outputs/sweeps>/<nickname> \
-#   POLICY_BASE_URL=http://host:8000/v1 \
-#   POLICY_MODEL_NAME=<model or checkpoint path> \
-#   POLICY_API_KEY=<key>                     \
-#   bash .../scripts/03_run_endpoint.sh
+# USAGE
+#   SWEEP_DIR=<out>/<nickname> POLICY_BASE_URL=http://host:8000/v1 \
+#     POLICY_MODEL_NAME=<model> POLICY_API_KEY=<key> bash $R/scripts/03_run_endpoint.sh
 #
-# Needs `gym` on PATH: run it inside the eval container, or with the Gym venv activated. It does
-# not shell out to srun, so there is nothing to schedule and nothing to wait for.
+# REQUIRED
+#   SWEEP_DIR               the OUT_DIR/<nickname> directory 01 wrote
+#   POLICY_BASE_URL         e.g. http://host:8000/v1
+#   POLICY_MODEL_NAME       the served model
 #
-# For the sandbox entries (ns_tools, math_formal_lean) also set NEMO_SKILLS_SANDBOX_HOST/PORT at a
-# reachable nemo-skills sandbox. Without one those entries fail per rollout rather than at startup.
+# OPTIONAL
+#   POLICY_API_KEY          dummy_api_key
+#   NUM_SAMPLES_IN_PARALLEL 128
+#   SERVERS_READY_TIMEOUT_S 1800
+#   ENV_PORT_RANGE_LOW/HIGH 20000 / 30000
+#
+# Needs `gym` on PATH: activate the venv (see README 00) or run inside the eval container.
+# For the sandbox entries also set NEMO_SKILLS_SANDBOX_HOST/PORT at a reachable sandbox; without
+# one they fail per rollout rather than at startup.
 set -euo pipefail
 
-SWEEP_DIR=${SWEEP_DIR:?set SWEEP_DIR to the <out-dir>/<nickname> directory 01_prepare_sweep.sh wrote}
+SWEEP_DIR=${SWEEP_DIR:?set SWEEP_DIR to the <out-dir>/<nickname> directory 01_materialize.sh wrote}
 POLICY_BASE_URL=${POLICY_BASE_URL:?set POLICY_BASE_URL, e.g. http://host:8000/v1}
 POLICY_MODEL_NAME=${POLICY_MODEL_NAME:?set POLICY_MODEL_NAME to the served model}
 POLICY_API_KEY=${POLICY_API_KEY:-dummy_api_key}
@@ -71,7 +77,7 @@ if ! grep -q "servers ready!" "$env_start_log" 2>/dev/null; then
     exit 1
 fi
 
-# num_repeats=1 because 01_prepare_sweep.sh already wrote num_repeats copies of every row.
+# num_repeats=1 because 01_materialize.sh already wrote num_repeats copies of every row.
 echo ">>> collecting"
 gym eval run --no-serve --resume \
     --input "$SWEEP_DIR/rollouts_materialized_inputs.jsonl" \

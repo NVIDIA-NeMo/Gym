@@ -19,12 +19,14 @@ from __future__ import annotations
 import collections
 import itertools
 import json
+from pathlib import Path
 
 import pytest
 import yaml
 
 from nemo_gym.sweep.build import build_sweep, container_config
-from nemo_gym.sweep.manifest import SweepValidationError, load_manifest, validate_manifest
+from nemo_gym.sweep.manifest import SweepManifest, SweepValidationError, load_manifest, validate_manifest
+from nemo_gym.sweep.materialize import materialize
 from nemo_gym.sweep.shard import SweepShardError, merge_shards, reshard, shard_sweep
 from nemo_gym.sweep.split import SweepSplitError, split_sweep
 
@@ -905,3 +907,103 @@ def test_first_shard_takes_no_snapshot(tmp_path):
     result = shard_sweep(d, num_shards=2)
     assert result.snapshot_dir is None
     assert result.absorbed_rollouts == 0
+
+
+# --- limit_per_entry: manifest default, per-entry override, smoke-run cap -------------------
+
+
+def _limit_fixture(tmp_path, rows_per_dataset=20):
+    """Two datasets whose rows are individually identifiable, so selection can be asserted."""
+    for name in ("a", "b"):
+        (tmp_path / f"{name}.jsonl").write_text(
+            "".join(
+                json.dumps({"agent_ref": {"name": f"{name}_agent"}, "row": i}) + "\n" for i in range(rows_per_dataset)
+            )
+        )
+        (tmp_path / f"{name}.yaml").write_text(f"responses_api_agents:\n  {name}_agent:\n    entrypoint: app.py\n")
+
+    def build(**materialize_spec):
+        return SweepManifest.model_validate(
+            {
+                "nickname": "t",
+                "materialize": materialize_spec,
+                "gym_eval_run": {"num_repeats": 1},
+                "entries": [
+                    {
+                        "label": "a",
+                        "agent": "a_agent",
+                        "configs": [str(tmp_path / "a.yaml")],
+                        "data": str(tmp_path / "a.jsonl"),
+                    },
+                    {
+                        "label": "b",
+                        "agent": "b_agent",
+                        "configs": [str(tmp_path / "b.yaml")],
+                        "data": str(tmp_path / "b.jsonl"),
+                        "limit": 3,
+                    },
+                ],
+            }
+        )
+
+    return build
+
+
+def _rows_by_label(out_dir):
+    got = {}
+    for line in open(Path(out_dir) / "t" / "rollouts_materialized_inputs.jsonl"):
+        row = json.loads(line)
+        got.setdefault(row["_ng_sweep_label"], []).append(row["row"])
+    return got
+
+
+def test_entry_limit_overrides_the_manifest_default(tmp_path):
+    build = _limit_fixture(tmp_path)
+    materialize(build(limit_per_entry=5), tmp_path / "out")
+    got = _rows_by_label(tmp_path / "out")
+    assert len(got["a"]) == 5, "entry without its own limit takes the manifest default"
+    assert len(got["b"]) == 3, "entry.limit wins over materialize.limit_per_entry"
+
+
+def test_head_takes_the_first_rows(tmp_path):
+    build = _limit_fixture(tmp_path)
+    materialize(build(limit_per_entry=5), tmp_path / "out")
+    assert _rows_by_label(tmp_path / "out")["a"] == [0, 1, 2, 3, 4]
+
+
+def test_cli_limit_caps_but_never_raises_a_committed_limit(tmp_path):
+    """LIMIT_PER_ENTRY is a smoke-run cap. Widening it must not pull in rows the manifest excluded."""
+    build = _limit_fixture(tmp_path)
+    materialize(build(limit_per_entry=5), tmp_path / "lower", limit_per_entry=2)
+    assert [len(v) for v in _rows_by_label(tmp_path / "lower").values()] == [2, 2]
+
+    materialize(build(limit_per_entry=5), tmp_path / "higher", limit_per_entry=99)
+    got = _rows_by_label(tmp_path / "higher")
+    assert len(got["a"]) == 5 and len(got["b"]) == 3
+
+
+def test_random_sampling_is_seeded_ordered_and_per_entry(tmp_path):
+    build = _limit_fixture(tmp_path)
+    materialize(build(limit_per_entry=5, sample="random", seed=7), tmp_path / "one")
+    materialize(build(limit_per_entry=5, sample="random", seed=7), tmp_path / "two")
+    materialize(build(limit_per_entry=5, sample="random", seed=8), tmp_path / "three")
+    first, same, other = (_rows_by_label(tmp_path / d) for d in ("one", "two", "three"))
+
+    assert first["a"] != [0, 1, 2, 3, 4], "random must not coincide with head"
+    assert first == same, "a seed must reproduce its selection, or resume keys move between runs"
+    assert first["a"] != other["a"], "a different seed must select differently"
+    assert first["a"] == sorted(first["a"]), "rows stay in file order so task indices stay meaningful"
+    assert first["a"][:3] != first["b"], "the seed is mixed with the label, so entries differ"
+
+
+def test_random_sampling_still_honours_the_entry_limit(tmp_path):
+    build = _limit_fixture(tmp_path)
+    materialize(build(limit_per_entry=5, sample="random", seed=1), tmp_path / "out")
+    got = _rows_by_label(tmp_path / "out")
+    assert len(got["a"]) == 5 and len(got["b"]) == 3
+
+
+def test_limit_larger_than_the_dataset_is_not_an_error(tmp_path):
+    build = _limit_fixture(tmp_path, rows_per_dataset=4)
+    materialize(build(limit_per_entry=50), tmp_path / "out")
+    assert len(_rows_by_label(tmp_path / "out")["a"]) == 4

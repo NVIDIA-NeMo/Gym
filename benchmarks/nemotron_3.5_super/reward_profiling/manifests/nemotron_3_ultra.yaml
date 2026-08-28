@@ -133,6 +133,14 @@ gym_env_start:
         disable_session_restore: true
 
 
+# Which rows enter the sweep, read by `01_materialize.sh`.
+# Unset limits mean every row of every dataset, which is what a real profiling run wants.
+# Uncomment to commit a subset -- LIMIT_PER_ENTRY is for smoke runs and only lowers these.
+# materialize:
+#   limit_per_entry: 10000   # rows per entry, unless the entry sets its own `limit`
+#   sample: random           # head (default, stops reading at the limit) | random (reads all)
+#   seed: 0                  # seeds `random`; mixed with each entry's label
+
 # Runtime settings for `gym eval run --no-serve`.
 gym_eval_run:
   num_repeats: 8

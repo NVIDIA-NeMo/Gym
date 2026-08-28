@@ -1,16 +1,34 @@
 #!/bin/bash
-# Validate a sweep manifest and expand it into Gym's materialized-inputs file.
+# 01 - Validate a manifest and materialize it into Gym's materialized-inputs file.
 #
-# Run once per (manifest, checkpoint). The result is reusable: every later rollout job resumes
-# from it and skips preprocessing, which is otherwise ~100 minutes single-threaded for a full
-# sweep. Expansion is parallel across entries.
+# Run once per (manifest, checkpoint). Every later rollout job resumes from the result and skips
+# preprocessing, which is otherwise ~100 min single-threaded for the full sweep.
 #
-# Everything this benchmark writes goes under reward_profiling/outputs/, which is gitignored.
-# OUT_DIR defaults to outputs/sweeps; the sweep dir is OUT_DIR/<nickname>, and that is what
-# SWEEP_DIR must point at when running 03_run.sh.
+# USAGE
+#   MANIFEST=$R/manifests/nemotron_3_ultra.yaml bash $R/scripts/01_materialize.sh
 #
-#   MANIFEST=benchmarks/nemotron_3.5_super/reward_profiling/manifests/nemotron_3_ultra.yaml \
-#   bash benchmarks/nemotron_3.5_super/reward_profiling/scripts/01_prepare_sweep.sh
+# REQUIRED
+#   MANIFEST          path to a sweep manifest yaml
+#
+# OPTIONAL
+#   OUT_DIR           where <nickname>/ is written        (default: <benchmark>/outputs/sweeps)
+#                     the sweep dir is OUT_DIR/<nickname>; that is what SWEEP_DIR points at later
+#   LIMIT_PER_ENTRY   cap every entry at N source rows, for smoke runs. 8 exercises every code
+#                     path in minutes. Lowers a manifest limit, never raises one -- for a
+#                     committed subset set materialize.limit_per_entry or entry.limit in the
+#                     manifest instead. NOT the same as `gym eval run --limit`, which takes the
+#                     first N rows of the whole file and so would cover only the first entry
+#   JOBS              worker processes                    (default: one per CPU, capped at entries)
+#   OVERWRITE=1       replace an existing materialized file
+#   GYM_SITE_PACKAGES a venv's site-packages, if nemo_gym is not already importable
+#
+# OUTPUT
+#   OUT_DIR/<nickname>/rollouts_materialized_inputs.jsonl   expanded inputs
+#   OUT_DIR/<nickname>/rollouts.jsonl                       empty; completes the --resume gate
+#   OUT_DIR/<nickname>/sweep_config.yaml                    passed to `gym env start --config`
+#   OUT_DIR/<nickname>/sweep_report.json                    per-entry counts and task_index_range
+#
+# Outputs are gitignored.
 set -euo pipefail
 
 MANIFEST=${MANIFEST:?set MANIFEST to a sweep manifest yaml}
