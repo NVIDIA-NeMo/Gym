@@ -16,6 +16,7 @@ import re
 from typing import Any, Dict, List, Tuple
 
 from fastapi import FastAPI
+from pydantic import ConfigDict
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -33,6 +34,10 @@ class FormatVerificationResourcesServerConfig(BaseResourcesServerConfig):
 class FormatVerificationVerifyRequest(TaskData, BaseVerifyRequest):
     # Redeclared: verify() dispatches on verifier.get("type") and reads it as a plain dict,
     # so the task_data union types must not replace it on the wire.
+    # Explicit ignore preserves the wire's pre-existing handling of UNDECLARED fields
+    # (they are dropped, as before this refactor). Fields TaskData declares are typed and
+    # kept. Flipping undeclared-field handling to allow is a separate, per-server decision.
+    model_config = ConfigDict(extra="ignore")
     verifier: Dict[str, Any]
 
 

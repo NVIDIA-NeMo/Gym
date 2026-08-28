@@ -43,7 +43,10 @@ class WorkbenchResponse(BaseModel):
 
 
 class WorkbenchVerifyRequest(TaskData, BaseVerifyRequest):
-    pass
+    # Explicit ignore preserves the wire's pre-existing handling of UNDECLARED fields
+    # (they are dropped, as before this refactor). Fields TaskData declares are typed and
+    # kept. Flipping undeclared-field handling to allow is a separate, per-server decision.
+    model_config = ConfigDict(extra="ignore")
 
 
 class WorkbenchVerifyResponse(BaseVerifyResponse):

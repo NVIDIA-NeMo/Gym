@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import yaml
-from pydantic import PrivateAttr
+from pydantic import ConfigDict, PrivateAttr
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -168,7 +168,10 @@ class ProofVerificationResourcesServerConfig(BaseResourcesServerConfig):
 
 
 class ProofVerificationVerifyRequest(TaskData, BaseVerifyRequest):
-    pass
+    # Explicit ignore preserves the wire's pre-existing handling of UNDECLARED fields
+    # (they are dropped, as before this refactor). Fields TaskData declares are typed and
+    # kept. Flipping undeclared-field handling to allow is a separate, per-server decision.
+    model_config = ConfigDict(extra="ignore")
 
 
 class ProofVerificationVerifyResponse(BaseVerifyResponse):

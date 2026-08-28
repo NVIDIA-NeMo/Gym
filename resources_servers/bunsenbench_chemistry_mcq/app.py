@@ -10,6 +10,8 @@ import unicodedata
 from collections import defaultdict
 from typing import Any, ClassVar, Optional
 
+from pydantic import ConfigDict
+
 from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
 from resources_servers.bunsenbench_chemistry_mcq.task_data import TaskData
@@ -29,7 +31,10 @@ class BunsenChemResourcesServerConfig(MCQAResourcesServerConfig):
 
 
 class BunsenChemVerifyRequest(TaskData, MCQAVerifyRequest):
-    pass
+    # Explicit ignore preserves the wire's pre-existing handling of UNDECLARED fields
+    # (they are dropped, as before this refactor). Fields TaskData declares are typed and
+    # kept. Flipping undeclared-field handling to allow is a separate, per-server decision.
+    model_config = ConfigDict(extra="ignore")
 
 
 class BunsenChemVerifyResponse(MCQAVerifyResponse):

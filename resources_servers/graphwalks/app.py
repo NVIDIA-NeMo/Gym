@@ -35,6 +35,8 @@ import json
 import re
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+from pydantic import ConfigDict
+
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
@@ -54,6 +56,10 @@ class GraphWalksResourcesServerConfig(BaseResourcesServerConfig):
 
 
 class GraphWalksVerifyRequest(TaskData, BaseVerifyRequest):
+    # Explicit ignore preserves the wire's pre-existing handling of UNDECLARED fields
+    # (they are dropped, as before this refactor). Fields TaskData declares are typed and
+    # kept. Flipping undeclared-field handling to allow is a separate, per-server decision.
+    model_config = ConfigDict(extra="ignore")
     expected_answer: str
     n_tokens: Optional[int] = None
 

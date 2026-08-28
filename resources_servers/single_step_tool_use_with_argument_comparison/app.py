@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from fastapi import FastAPI
+from pydantic import ConfigDict
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -39,6 +40,10 @@ class SingleStepToolUseArgumentComparisonRunRequest(TaskData, BaseRunRequest):
     # Redeclared to keep the verification_utils action classes on the wire: the comparators
     # isinstance-check and pattern-match those exact classes, so the task_data mirror types
     # must not replace them here.
+    # Explicit ignore preserves the wire's pre-existing handling of UNDECLARED fields
+    # (they are dropped, as before this refactor). Fields TaskData declares are typed and
+    # kept. Flipping undeclared-field handling to allow is a separate, per-server decision.
+    model_config = ConfigDict(extra="ignore")
     expected_action: ExpectedAction
 
 

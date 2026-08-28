@@ -17,7 +17,7 @@ import math
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -43,7 +43,10 @@ class ClickResponse(BaseModel):
 
 
 class CircleClickVerifyRequest(TaskData, BaseVerifyRequest):
-    pass
+    # Explicit ignore preserves the wire's pre-existing handling of UNDECLARED fields
+    # (they are dropped, as before this refactor). Fields TaskData declares are typed and
+    # kept. Flipping undeclared-field handling to allow is a separate, per-server decision.
+    model_config = ConfigDict(extra="ignore")
 
 
 class CircleClickVerifyResponse(BaseVerifyResponse):
