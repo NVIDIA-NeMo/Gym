@@ -88,38 +88,38 @@ one only when an entry pulls in a server the image does not have — see
 
 ## 02 - Create a Manifest
 The manifest is the highest-level config of what environments are being profiled, and parameterizes any judge, sandbox, or config overrides needed.
-Eight top-level keys, plus `num_shards`. Every block but `nickname` and `entries` is named for the command it
-configures, so where a setting goes follows from which command consumes it:
+Every block but `nickname`, `num_shards` and `entries` is named for the command it configures, so
+where a setting goes follows from which command consumes it. The manifest lists them in this order:
+the things you tune first, then the deployment config, then the data.
 
 1. **nickname** — names the run; artifacts land in `<OUT_DIR>/<nickname>/`
-2. **materialize** — which rows are in the sweep at all, read by `01_materialize.sh`
+2. **num_shards** — Slurm jobs to split across, i.e. `NUM_SHARDS`
+    - nodes = `num_shards × (vllm.prefill_nodes + vllm.decode_nodes)`, so 16 shards at 1+2 is 48
+      nodes. One job cannot exceed ~16 nodes: `--segment` needs a topology-contiguous allocation
+      and an NVL72 rack is 18
+3. **vllm** — what gets served, i.e. `vllm serve <model>`
+    - `model`, also passed as `++policy_model_name` so the served name and the routed name agree.
+      `MODEL=<ckpt>` overrides it — change `nickname` too, or the runs collide
+    - `prefill_nodes` / `decode_nodes`: decode is the throughput-limiting side, widen it first
+    - `config` (the vLLM arg script), `max_num_seqs` (the launcher derives
+      `num_samples_in_parallel` from it, so they move together)
+4. **materialize** — which rows are in the sweep at all, read by `01_materialize.sh`
     - `limit_per_entry`: rows to take from every entry. Unset means all
     - `sample`: `head` (default) or `random`. `head` stops reading at the limit, so it is what a
       smoke run wants; `random` must read the whole file, but the first N rows of a sorted dataset
       are a biased subset, so prefer it when the limit is a deliberate subset
     - `seed`: seeds `random`, mixed with each entry's label so adding an entry does not reshuffle
       its neighbours and invalidate their resume keys
-3. **sbatch** — Slurm settings for the launchers, which shell out to `sbatch`
+5. **sbatch** — Slurm settings for the launchers, which shell out to `sbatch`
     - free-form: each key becomes `SBATCH_<KEY>`, which is how sbatch takes them.
       `account`, `partition`, `qos`, `gres`, `timelimit`, `reservation`, `comment`, and anything
       else listed under INPUT ENVIRONMENT VARIABLES in `man sbatch`
     - applied only where the launcher's own environment does not already set the variable
-4. **srun** — containers, for `srun --container-image`
+6. **srun** — containers, for `srun --container-image`
     - `container`, `sandbox_container`, `mounts`. The container belongs here because it is built
-      *from* this manifest, so the two stay together. `MODEL` stays a launcher argument: the
-      checkpoint is what you are profiling, not part of what the sweep is
-5. **gym_env_start** — becomes `sweep_config.yaml`, passed as `--config`
-    - `config_paths`: sweep-wide configs merged ahead of every entry's own. Usually just the model
-      server, e.g. `responses_api_models/vllm_model/configs/vllm_model.yaml`
-    - any other key: ordinary Gym config, spliced in verbatim. A config overrides whatever its own
-      `config_paths` pulled in, so these beat every file — which is how a judge gets rebound
-      without editing an upstream config. Do it here rather than in a file: the container is built
-      from a Gym ref and has no copy of this repo, so a repo-relative path will not resolve inside it
-6. **gym_eval_profile** — settings for `gym eval profile`
-    - `allow_partial_rollouts` (default true), `jobs` (concurrent labels), plus any `++` the
-      profiler takes. Separate from `gym_eval_run` because they are different commands:
-      `allow_partial_rollouts` exists only on the profiler, so putting it under `gym_eval_run`
-      sends it to collection where nothing reads it
+      *from* this manifest, so the two stay together
+    - `sandbox_port`, `sandbox_workers`: the sandbox is one node, and workers is the only axis
+      that scales it, since sessions pin to a worker by `X-Session-ID`
 7. **gym_eval_run** — runtime settings, emitted as `++key=value`
     - `num_repeats`: rollouts per task; the spread across them is the profile. Applied by
       01_materialize.sh, which writes this many copies of each row into the materialized inputs,
@@ -129,7 +129,19 @@ configures, so where a setting goes follows from which command consumes it:
       passes `++` only when its env var is set, so these are defaults rather than something
       silently clobbered. `num_samples_in_parallel` is the exception: the launcher computes
       `512 × decode_nodes`, since only it knows the job's shape
-8. **entries** — the environments to be profiled
+8. **gym_eval_profile** — settings for `gym eval profile`
+    - `allow_partial_rollouts` (default true), `jobs` (concurrent labels), plus any `++` the
+      profiler takes. Separate from `gym_eval_run` because they are different commands:
+      `allow_partial_rollouts` exists only on the profiler, so putting it under `gym_eval_run`
+      sends it to collection where nothing reads it
+9. **gym_env_start** — becomes `sweep_config.yaml`, passed as `--config`
+    - `config_paths`: sweep-wide configs merged ahead of every entry's own. Usually just the model
+      server, e.g. `responses_api_models/vllm_model/configs/vllm_model.yaml`
+    - any other key: ordinary Gym config, spliced in verbatim. A config overrides whatever its own
+      `config_paths` pulled in, so these beat every file — which is how a judge gets rebound
+      without editing an upstream config. Do it here rather than in a file: the container is built
+      from a Gym ref and has no copy of this repo, so a repo-relative path will not resolve inside it
+10. **entries** — the environments to be profiled
     - `label` (required): nickname of profiled env
     - `agent` (required): `agent_ref` of the data
     - `configs`: gym configs defining the agent and its resources server. The agent must be

@@ -1,3 +1,5 @@
+
+
 # The reward-profiling sweep: every environment, one Gym deployment, one input file.
 #
 # Rows carry their own agent_ref and rollout collection dispatches per row, so 36 environments
@@ -11,6 +13,59 @@
 # Provenance: data_gym/ultra_v3_sets/260603_ultra_v3_set_final.
 
 nickname: nemotron_3_5_super
+
+# How many Slurm jobs the sweep is split across, i.e. NUM_SHARDS. Nodes = num_shards x
+# (vllm.prefill_nodes + vllm.decode_nodes), so this is 16 x 3 = 48 nodes. One job cannot exceed
+# ~16 nodes: --segment needs a topology-contiguous allocation and an NVL72 rack is 18.
+num_shards: 16
+
+# What gets served, i.e. `vllm serve <model>`; also passed as ++policy_model_name.
+# Pinned so the manifest is reproducible on its own and a run needs no arguments at all. Profiling
+# a different checkpoint means MODEL=<ckpt> on the command line, which overrides this -- change
+# `nickname` too, or the new run's artifacts land in the same directory as the old one's.
+vllm:
+  model: /lustre/fsw/portfolios/llmservice/users/abukharin/super35_dualds0821_pure_lm_ab/hf_text/full_generalist_prod/iter_6500
+  # Nodes per shard = prefill + decode, so this is 3. Capped near 16 by --segment, which needs a
+  # topology-contiguous allocation and an NVL72 rack is 18 nodes. Decode limits throughput, so
+  # widen that side first.
+  prefill_nodes: 1
+  decode_nodes: 2
+
+# Which rows enter the sweep, read by `01_materialize.sh`.
+# Unset limits mean every row of every dataset, which is what a real profiling run wants.
+# Uncomment to commit a subset -- LIMIT_PER_ENTRY is for smoke runs and only lowers these.
+# materialize:
+#   limit_per_entry: 10000   # rows per entry, unless the entry sets its own `limit`
+#   sample: random           # head (default, stops reading at the limit) | random (reads all)
+#   seed: 0                  # seeds `random`; mixed with each entry's label
+
+# Slurm settings, read by the launchers that shell out to `sbatch`. Each key becomes
+# SBATCH_<KEY>, so anything under INPUT ENVIRONMENT VARIABLES in `man sbatch` works. A launcher's
+# own env var wins, so override per run without editing this file.
+sbatch:
+  account: nemotron_n3_post
+  qos: interactive
+  timelimit: "04:00:00"
+
+# Containers, for `srun --container-image`.
+srun:
+  # Only one arm64 build of the sandbox exists; ns_tools and math_formal_lean need it, and without
+  # it they fall back to 127.0.0.1:6000 and fail with a bare 500 per rollout.
+  sandbox_container: /lustre/fsw/portfolios/llmservice/users/igitman/images/nemo-skills-sandbox-0.7.1-arm64.sqsh
+  # Built by ../../build_eval_container.sh from configs/container_config.yaml, which is generated
+  # from this manifest -- so the image has exactly these entries' servers baked in. Rebuild and
+  # update this when an entry pulls in a new server; running against an image built for a different
+  # manifest presents as a hang, not an error. Override with CONTAINER for a one-off.
+  container: "/lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/Gym-github_worktrees/reward-profiling/results/vllm/vllm-openai:v0.27.1___tomer_with_gym_all.sqsh"
+
+# Runtime settings for `gym eval run --no-serve`.
+gym_eval_run:
+  num_repeats: 8
+
+# Settings for `gym eval profile`. Kept apart from gym_eval_run because they are different
+# commands -- allow_partial_rollouts exists only on the profiler.
+gym_eval_profile:
+  allow_partial_rollouts: true
 
 # Becomes sweep_config.yaml, passed to `gym env start --config`.
 gym_env_start:
@@ -101,7 +156,6 @@ gym_env_start:
           type: responses_api_models
           name: nl2bash_judge_model
 
-
   # The shipped ns_tools.yaml registers only math_with_judge. Our rows carry per-row verifier_type
   # of mcqa and equivalence_llm_judge, and an unregistered name is a hard failure --
   # "ValueError: Unknown verifier: mcqa" surfaces to the driver as a bare 500 from the agent.
@@ -122,59 +176,6 @@ gym_env_start:
         # Carried over from the pre-sweep configs, which note it improves stability: after a
         # sandbox worker restarts, replaying the session is what tends to wedge the tool call.
         disable_session_restore: true
-
-
-# Which rows enter the sweep, read by `01_materialize.sh`.
-# Unset limits mean every row of every dataset, which is what a real profiling run wants.
-# Uncomment to commit a subset -- LIMIT_PER_ENTRY is for smoke runs and only lowers these.
-# materialize:
-#   limit_per_entry: 10000   # rows per entry, unless the entry sets its own `limit`
-#   sample: random           # head (default, stops reading at the limit) | random (reads all)
-#   seed: 0                  # seeds `random`; mixed with each entry's label
-
-
-# Slurm settings, read by the launchers that shell out to `sbatch`. Each key becomes
-# SBATCH_<KEY>, so anything under INPUT ENVIRONMENT VARIABLES in `man sbatch` works. A launcher's
-# own env var wins, so override per run without editing this file.
-sbatch:
-  account: nemotron_n3_post
-  qos: interactive
-  timelimit: "04:00:00"
-
-
-# Containers, for `srun --container-image`.
-srun:
-  # Only one arm64 build of the sandbox exists; ns_tools and math_formal_lean need it, and without
-  # it they fall back to 127.0.0.1:6000 and fail with a bare 500 per rollout.
-  sandbox_container: /lustre/fsw/portfolios/llmservice/users/igitman/images/nemo-skills-sandbox-0.7.1-arm64.sqsh
-  # Built by ../../build_eval_container.sh from configs/container_config.yaml, which is generated
-  # from this manifest -- so the image has exactly these entries' servers baked in. Rebuild and
-  # update this when an entry pulls in a new server; running against an image built for a different
-  # manifest presents as a hang, not an error. Override with CONTAINER for a one-off.
-  container: "/lustre/fsw/portfolios/llmservice/users/jkyi/current/nemo/Gym-github_worktrees/reward-profiling/results/vllm/vllm-openai:v0.27.1___tomer_with_gym_all.sqsh"
-
-
-# What gets served, i.e. `vllm serve <model>`; also passed as ++policy_model_name.
-# Pinned so the manifest is reproducible on its own and a run needs no arguments at all. Profiling
-# a different checkpoint means MODEL=<ckpt> on the command line, which overrides this -- change
-# `nickname` too, or the new run's artifacts land in the same directory as the old one's.
-vllm:
-  model: /lustre/fsw/portfolios/llmservice/users/abukharin/super35_dualds0821_pure_lm_ab/hf_text/full_generalist_prod/iter_6500
-  # Nodes per shard = prefill + decode, so this is 3. Capped near 16 by --segment, which needs a
-  # topology-contiguous allocation and an NVL72 rack is 18 nodes. Decode limits throughput, so
-  # widen that side first.
-  prefill_nodes: 1
-  decode_nodes: 2
-
-# Settings for `gym eval profile`. Kept apart from gym_eval_run because they are different
-# commands -- allow_partial_rollouts exists only on the profiler.
-gym_eval_profile:
-  allow_partial_rollouts: true
-
-# Runtime settings for `gym eval run --no-serve`.
-gym_eval_run:
-  num_repeats: 8
-
 
 entries:
 
@@ -244,7 +245,6 @@ entries:
     data: /lustre/fs1/portfolios/llmservice/projects/llmservice_modelalignment_ppo/users/jiaqiz/data/gym/all_super_env/calendar_v2/calendar_out.jsonl
     owner: ???
 
-
   # ==========================================================================
   # Reasoning (7)
   # ==========================================================================
@@ -297,7 +297,6 @@ entries:
     data: /lustre/fsw/portfolios/llmservice/users/jiaqiz/data/gym/ether0/train_curriculum_10k.jsonl
     owner: ???
 
-
   # ==========================================================================
   # Long context (1)
   # ==========================================================================
@@ -307,7 +306,6 @@ entries:
       - resources_servers/equivalence_rule/configs/lc.yaml
     data: /lustre/fsw/portfolios/llmservice/users/fjia/rl/nano_v3/data/mrcr/processed_p67_sampled_10pct_shuf_rl_fmt.train.jsonl
     owner: fjia
-
 
   # ==========================================================================
   # Usability / format adherence (9)
