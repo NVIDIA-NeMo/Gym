@@ -297,14 +297,3 @@ def merge_shards(shards_dir: str | Path, output_fpath: Optional[str | Path] = No
                 result.shards_empty.append(d.name)
 
     return result
-
-
-def reshard(sweep_dir: str | Path, num_shards: int, out_dir: Optional[str | Path] = None) -> ShardResult:
-    """Re-deal the original materialized input into a different shard count.
-
-    Always works from the parent sweep's input rather than from the existing shards, so changing
-    the count is not lossy and does not compound rounding. Merge the old shards back into the
-    parent first: ``shard_sweep`` carries the parent's rollouts into the new layout, so the work
-    survives the change of count only if it is in the parent when you reshard.
-    """
-    return shard_sweep(sweep_dir, num_shards, out_dir=out_dir)

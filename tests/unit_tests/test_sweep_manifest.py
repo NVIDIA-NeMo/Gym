@@ -35,7 +35,7 @@ from nemo_gym.sweep.manifest import (
     validate_manifest,
 )
 from nemo_gym.sweep.materialize import materialize
-from nemo_gym.sweep.shard import SweepShardError, merge_shards, reshard, shard_sweep
+from nemo_gym.sweep.shard import SweepShardError, merge_shards, shard_sweep
 from nemo_gym.sweep.split import SweepSplitError, split_sweep
 
 
@@ -766,7 +766,7 @@ def test_merge_reports_a_shard_that_collected_nothing(tmp_path):
 def test_reshard_to_a_different_count_is_lossless(tmp_path):
     d, rows = _materialized(tmp_path, n_tasks=12, repeats=2)
     shard_sweep(d, num_shards=3)
-    again = reshard(d, num_shards=5)
+    again = shard_sweep(d, num_shards=5)  # resharding is just sharding again
     assert again.total_rows == len(rows)
     assert len(again.shard_dirs) == 5
 

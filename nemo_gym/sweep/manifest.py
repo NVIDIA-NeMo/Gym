@@ -475,12 +475,14 @@ def validate_manifest(
                 f"({', '.join(entry.configs)}). Add the config that defines it, or fix the name."
             )
 
-        if not check_data:
-            continue
-
+        # Existence is checked even under --skip-data: stat is free, and a typo'd path silently
+        # passing a "fast config check" is the thing --skip-data would otherwise hide.
         data_path = Path(entry.data)
         if not data_path.is_file():
             errors.append(f"[{entry.label}] data not found: {entry.data}")
+            continue
+
+        if not check_data:
             continue
 
         counts = observed_agents(data_path, sample_rows=sample_rows)
@@ -495,6 +497,14 @@ def validate_manifest(
                 f"[{entry.label}] data declares agent_ref {sorted(unexpected)} but the manifest "
                 f"says '{entry.agent}'. Fix the pairing, or set agent_ref_override to rewrite it."
             )
+
+    # Sweep-wide config_paths land in sweep_config.yaml and are also what container-config bakes
+    # into the image. A typo here is not caught until gym env start parses it inside the container,
+    # after the allocation and spin-up.
+    for config in manifest.gym_env_start.config_paths:
+        config_path = config if Path(config).is_absolute() else repo_root / config
+        if not Path(config_path).is_file():
+            errors.append(f"[gym_env_start] config_paths entry not found: {config}")
 
     for agent, entries in manifest.entries_by_agent().items():
         if len(entries) > 1:

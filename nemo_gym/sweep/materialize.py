@@ -84,6 +84,10 @@ class MaterializeReport:
     task_index_ranges: Dict[str, Tuple[int, int]]
     nickname: str = ""
     num_shards: Optional[int] = None
+    # How each entry was limited and how rows were picked. Without these a sweep dir cannot
+    # explain why an entry has 300 rows -- a manifest limit, a smoke cap, or a short file.
+    limits: Dict[str, Optional[int]] = field(default_factory=dict)
+    sample: str = "head"
     shuffle_seed: int = 0
     # Settings the manifest declared for the collection command, for a launcher to pass as ++
     # overrides. Carried here rather than in sweep_config.yaml because that file configures
@@ -114,6 +118,8 @@ class MaterializeReport:
             "materialized_bytes": self.materialized_fpath.stat().st_size if self.materialized_fpath.exists() else None,
             "nickname": self.nickname,
             "num_shards": self.num_shards,
+            "limits": self.limits,
+            "sample": self.sample,
             "shuffle_seed": self.shuffle_seed,
             "gym_eval_run": self.gym_eval_run,
             "sbatch": self.sbatch,
@@ -350,6 +356,8 @@ def materialize(
         },
         nickname=manifest.nickname,
         num_shards=manifest.num_shards,
+        limits=limits,
+        sample=spec.sample,
         shuffle_seed=shuffle_seed,
         gym_eval_run=manifest.gym_eval_run.overrides(),
         sbatch=manifest.sbatch.env(),
