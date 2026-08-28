@@ -1101,3 +1101,60 @@ def test_split_raises_rather_than_succeeding_with_zero_labels(tmp_path):
     (tmp_path / "rollouts_materialized_inputs.jsonl").write_text("")
     with pytest.raises(SweepSplitError, match="wrong directory"):
         split_sweep(tmp_path)
+
+
+# --- error and edge paths a real sweep dir can present --------------------------------------
+
+
+def test_split_reports_an_unreadable_report(tmp_path):
+    (tmp_path / "sweep_report.json").write_text("{ not json")
+    with pytest.raises(SweepSplitError, match="Could not read"):
+        split_sweep(tmp_path)
+
+
+def test_split_rejects_a_report_predating_task_index_range(tmp_path):
+    """A build-produced directory has entries, but as a list rather than the per-entry mapping."""
+    (tmp_path / "sweep_report.json").write_text(json.dumps({"entries": ["alpha"]}))
+    with pytest.raises(SweepSplitError, match="no per-entry mapping"):
+        split_sweep(tmp_path)
+
+
+def test_split_rejects_an_entry_without_a_range(tmp_path):
+    (tmp_path / "sweep_report.json").write_text(json.dumps({"entries": {"alpha": {}}}))
+    with pytest.raises(SweepSplitError, match="no task_index_range"):
+        split_sweep(tmp_path)
+
+
+def test_split_skips_unparseable_rows_rather_than_dying(tmp_path):
+    """A truncated final line is normal in a killed run; it must not lose the rest of the file."""
+    d, _ = _materialized(tmp_path, n_tasks=2, repeats=1, labels=("alpha",))
+    (d / "sweep_report.json").write_text(json.dumps({"entries": {"alpha": {"task_index_range": [0, 1]}}}))
+    with open(d / "rollouts.jsonl", "w") as f:
+        f.write(json.dumps({"_ng_task_index": 0, "_ng_rollout_index": 0}) + "\n")
+        f.write('{"_ng_task_index": 1, "_ng_rol')  # truncated mid-write
+    result = split_sweep(d)
+    assert result.counts["alpha"].rollouts == 1
+    assert result.unmapped_rollouts == 1
+
+
+def test_split_tolerates_a_missing_rollouts_file(tmp_path):
+    """Splitting a sweep that has not collected yet reports zeros rather than raising."""
+    d, _ = _materialized(tmp_path, n_tasks=2, repeats=1, labels=("alpha",))
+    (d / "sweep_report.json").write_text(json.dumps({"entries": {"alpha": {"task_index_range": [0, 1]}}}))
+    (d / "rollouts.jsonl").unlink()
+    assert split_sweep(d).counts["alpha"].rollouts == 0
+
+
+def test_merge_rejects_a_directory_with_no_shards(tmp_path):
+    with pytest.raises(SweepShardError, match="No shard_. directories"):
+        merge_shards(tmp_path)
+
+
+def test_merge_skips_unparseable_rollout_rows(tmp_path):
+    """Same truncation case, on the merge side."""
+    shard = tmp_path / "shard_000"
+    shard.mkdir()
+    with open(shard / "rollouts.jsonl", "w") as f:
+        f.write(json.dumps({"_ng_task_index": 0, "_ng_rollout_index": 0}) + "\n")
+        f.write("{ truncated")
+    assert merge_shards(tmp_path).merged == 1
