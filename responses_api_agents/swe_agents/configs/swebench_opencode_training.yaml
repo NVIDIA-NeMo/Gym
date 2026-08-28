@@ -27,6 +27,7 @@ swe_agents_train:
 
       agent_prompt_overrides:
         - user_prompt_template: responses_api_agents/swe_agents/prompts/opencode_harness/user_prompt.txt
+        - system_prompt_template: responses_api_agents/swe_agents/prompts/opencode_harness/system_prompt.txt
           agent_cls: OpenCodeAgent
           diversify_tool_names: false
 
