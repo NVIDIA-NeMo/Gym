@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from contextlib import contextmanager
+from copy import deepcopy
 from glob import glob
 from pathlib import Path
 from sys import stderr
@@ -147,7 +148,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         if self.config.sandbox_config.get("derive_cpu_env", True):
             env = cpu_cap_env(sandbox_resources.cpu) | env
 
-        provider_options = self.config.sandbox_config.get("provider_options") or {}
+        provider_options = deepcopy(self.config.sandbox_config.get("provider_options") or {})
         self._patch_sandbox_provider_options_for_instances(
             verify_request.task_name, sandbox_resources, provider_options
         )
