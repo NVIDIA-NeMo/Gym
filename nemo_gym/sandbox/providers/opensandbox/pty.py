@@ -55,6 +55,11 @@ WS_CLOSE_POLICY_VIOLATION = 1008
 # window; the tail rides out per-replica informer lag (each retry re-rolls the
 # load-balanced replica, so 404 "pod IP not yet available" clears quickly).
 _PTY_RETRY_DELAYS = (0.25, 0.5, 1.0, 2.0, 4.0, 8.0)
+# A takeover that finds a half-open peer waits out execd's eviction timeout
+# before the policy-violation close arrives, so these are spaced in seconds,
+# not fractions: the stale client is torn down in the background and a later
+# attempt lands.
+_PTY_TAKEOVER_RETRY_DELAYS = (2.0, 5.0, 10.0)
 
 # Mirrors execd's shell pick (bash when available, else sh) for env-only specs.
 _DEFAULT_SHELL_SNIPPET = 'exec "$(command -v bash || echo sh)"'
