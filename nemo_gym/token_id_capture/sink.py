@@ -139,6 +139,10 @@ async def capture_tokens(response: Any) -> None:
             # Preserve content for text-based training penalties.
             output_items=content_items,
             token_item_index=token_item_index,
+            # Observe the served payload's own id; never mint one.
+            # The Anthropic mapping reuses this id on its outer envelope,
+            # so the recorded id matches what the client received in every dialect.
+            response_id=str(payload.get("id") or "") or None,
             created_at=time.time(),
         )
     except Exception:
