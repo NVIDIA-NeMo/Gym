@@ -403,7 +403,7 @@ rewards before a run finishes.
 | variable | script | |
 |---|---|---|
 | `MANIFEST`, `OUT_DIR` | 01 | input manifest, where `<nickname>/` lands |
-| `LIMIT_PER_ENTRY` | 01 | take N source rows per entry. Use `8` for a smoke run |
+| `LIMIT_PER_ENTRY` | 01 | take N source rows from *each* entry. Use `8` for a smoke run. Not the same as `gym eval run --limit` |
 | `NUM_SHARDS` | 02, 03_run_sharded | how many jobs to split across |
 | `MODEL`, `CONTAINER` | 03 | checkpoint path, eval sqsh |
 | `SANDBOX_CONTAINER` | 03 | required by `ns_tools` and `math_formal_lean` |
@@ -430,6 +430,11 @@ rewards before a run finishes.
 
 - `--no-serve` is required for collection. Without it `--input` is silently replaced by the
   collated split.
+- **Do not use `gym eval run --limit` to smoke-test a sweep.** It takes the first N rows of the
+  whole file, and materialize lays entries out as contiguous blocks in manifest order, so
+  `--limit 72` here covers 2 of 36 environments — all of them `tau_pivot`. `LIMIT_PER_ENTRY` at
+  prepare takes N rows from *each* entry, so the same 72 tasks cover all 36. The failure is silent:
+  you get rollouts, rewards and a clean profile for one environment and conclude the sweep works.
 - Pass `--resume` and a stable output path. Rollout collection clears the output file otherwise,
   and a sweep of this size will not finish inside one `batch` allocation.
 - `num_repeats` resolves per agent, so entries sharing an agent share a repeat count. `validate`
