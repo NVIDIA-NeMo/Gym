@@ -83,6 +83,11 @@ visgym_agent:
         follow it. If the task already looks solved, the correct action is
         ('stop', 'stop').
       datasets:
-        - name: requested_envs_smoke
+        # Keep the checked-in config runnable from a clean checkout. Generate
+        # the requested multi-environment blend with
+        # `python environments/visgym/prepare.py multienv
+        # --max-output-tokens 2048`, then point this dataset at the generated
+        # combined manifest for training.
+        - name: maze_2d_example
           type: example
-          jsonl_fpath: data/requested_env_manifests/requested_envs_combined_smoke_160_t2048.jsonl
+          jsonl_fpath: data/maze_2d_easy_example.jsonl

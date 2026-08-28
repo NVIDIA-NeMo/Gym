@@ -24,6 +24,7 @@ configuration and task data without creating another server implementation.
 
 | Component | Location | Responsibility |
 | --- | --- | --- |
+| Environment bundle | `environments/visgym` | Provides the canonical config and data-preparation entry point. |
 | Resource server | `resources_servers/visgym` | Owns environment instances, renders observations, applies actions, and accumulates reward. |
 | Rollout agent | `responses_api_agents/visgym_agent` | Alternates model calls with environment steps and extracts actions from model text. |
 | Model server | `responses_api_models/vllm_model` | Generates policy responses and preserves token information needed for on-policy training. |
@@ -40,6 +41,13 @@ VisGym observation
   -> resources server /step
   -> next observation and reward
 ```
+
+The generic `gymnasium` server and agent remain the right choice for string
+observations and function-call actions. VisGym keeps a specialized pair because
+it must transport multimodal image messages, parse boxed text actions, drain a
+final accumulated training reward, and preserve exact prompt/generation token
+metadata across every turn. Reusing the generic pair would require changing its
+public request and response schemas for all existing consumers.
 
 ## Environment lifecycle
 
@@ -195,7 +203,7 @@ Task rows may be preloaded with `task_jsonl_fpaths` or passed inline to
 
 ## Maze-size curriculum dataset
 
-The committed curriculum increases maze size in four ordered stages:
+The generated curriculum increases maze size in four ordered stages:
 
 | Stage | Maze size | Rows | Seed range | Horizon cap |
 | --- | --- | ---: | --- | ---: |
@@ -213,7 +221,7 @@ The full curriculum is ~8 MB across five files, so it is generated rather than
 committed. Build it (deterministically) before training:
 
 ```bash
-resources_servers/visgym/scripts/create_maze_curriculum.py
+python environments/visgym/prepare.py maze
 ```
 
 Then use the combined manifest for ordered curriculum training:
@@ -222,9 +230,10 @@ Then use the combined manifest for ordered curriculum training:
 data/maze_2d_easy_curriculum_5x5_7x7_9x9_11x11_1280each_t1024.jsonl
 ```
 
-The committed `maze_2d_easy_curriculum_5x5_7x7_9x9_*` fixtures (64 rows per
-stage) and `maze_2d_easy_smoke.jsonl` are small enough to use directly for
-smoke runs.
+Generated curriculum files are gitignored. The minimal
+`maze_2d_easy_example.jsonl` and `maze_2d_easy_smoke.jsonl` fixtures remain
+committed so clean clones can validate the environment without preparing the
+training set.
 
 Rows 0-1279 are 5x5, rows 1280-2559 are 7x7, rows 2560-3839 are 9x9, and rows
 3840-5119 are 11x11. NeMo-RL must use `data.shuffle=false`; shuffling the
@@ -237,7 +246,7 @@ repeat, or evaluate one stage independently. The manifest index records stage
 paths, row counts, seed ranges, and horizon caps:
 
 ```text
-data/maze_2d_easy_curriculum_5x5_7x7_9x9_11x11_manifest_index.json
+data/maze_2d_easy_curriculum_5x5_7x7_9x9_11x11_manifest_index_t1024.json
 ```
 
 Each row includes `curriculum_name`, `curriculum_stage`, `maze_size`, and
@@ -247,7 +256,7 @@ without parsing task IDs.
 Regenerate the dataset deterministically from the Gym repository root:
 
 ```bash
-resources_servers/visgym/scripts/create_maze_curriculum.py
+python environments/visgym/prepare.py maze
 ```
 
 The generator accepts `--sizes`, `--samples-per-stage`, `--seed-base`,
@@ -255,16 +264,17 @@ The generator accepts `--sizes`, `--samples-per-stage`, `--seed-base`,
 unique, odd, and strictly increasing. For example:
 
 ```bash
-resources_servers/visgym/scripts/create_maze_curriculum.py \
+python environments/visgym/prepare.py maze \
   --sizes 5,7,9,11 \
   --samples-per-stage 1280
 ```
 
 ## Configuration
 
-`configs/visgym_maze2d_thinking_agent.yaml` defines both the resource server and
-the rollout agent. A model-server config must be loaded alongside it. For
-NeMo-RL training, the effective NeMo-Gym configuration contains:
+`environments/visgym/config.yaml` is the canonical runnable environment config.
+The configs under `resources_servers/visgym/configs` are specialized training
+variants. A model-server config must be loaded alongside them. For NeMo-RL
+training, the effective NeMo-Gym configuration contains:
 
 ```yaml
 config_paths:
@@ -302,10 +312,7 @@ that the published source cannot be installed by `uv` at all. What is
 distributed is the script plus the pinned revision, and the wheel is
 reproduced from those.
 
-Most users never run this by hand. The NeMo-RL launcher
-(`examples/nemo_gym/nemotron-3-super-omni/visgym_launch.sh`) checks for the
-wheel and builds it when it is missing, into the code snapshot the job runs
-from. To build it explicitly:
+Build the wheel before starting the resources server:
 
 ```bash
 resources_servers/visgym/scripts/build_visgym_wheel.sh

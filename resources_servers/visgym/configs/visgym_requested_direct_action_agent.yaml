@@ -38,6 +38,10 @@ visgym_agent:
         Output exactly one legal action tuple inside \boxed{ and }, with no
         reasoning or other text. Never omit the action.
       datasets:
-        - name: requested_envs_smoke
+        # Keep the checked-in config runnable from a clean checkout. Generate
+        # the requested multi-environment blend with
+        # `python environments/visgym/prepare.py multienv`, then point this
+        # dataset at the generated combined manifest for training.
+        - name: maze_2d_example
           type: example
-          jsonl_fpath: data/requested_env_manifests/requested_envs_combined_smoke_224_h20_t1024.jsonl
+          jsonl_fpath: data/maze_2d_easy_example.jsonl

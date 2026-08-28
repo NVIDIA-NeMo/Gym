@@ -70,8 +70,8 @@ VALID_ACTIONS = {
 
 GENERATE_HINT = (
     "Generate them first:\n"
-    "  resources_servers/visgym/scripts/create_fourteen_env_data.py\n"
-    "  resources_servers/visgym/scripts/create_fourteen_env_data.py "
+    "  python environments/visgym/prepare.py multienv\n"
+    "  python environments/visgym/prepare.py multienv "
     "--horizon-cap 20 --skip-assets"
 )
 
@@ -229,14 +229,15 @@ def test_requested_asset_fixtures_exist() -> None:
     assert (refcoco_dir / "refs(unc).p").is_file()
 
 
-def test_requested_agent_config_uses_combined_smoke_manifest() -> None:
+def test_requested_agent_config_uses_committed_example() -> None:
     config_path = VISGYM_ROOT / "configs" / "visgym_requested_direct_action_agent.yaml"
     config = OmegaConf.to_container(OmegaConf.load(config_path), resolve=True)
     agent = config["visgym_agent"]["responses_api_agents"]["visgym_agent"]
     assert agent["done_if_no_boxed_answer"] is True
     assert agent["max_steps"] >= 35
     dataset_path = VISGYM_ROOT / agent["datasets"][0]["jsonl_fpath"]
-    assert len(load_rows(dataset_path)) == len(SLUGS) * 16
+    assert dataset_path == VISGYM_ROOT / "data" / "maze_2d_easy_example.jsonl"
+    assert len(load_rows(dataset_path)) == 1
 
 
 def test_requested_robotics_wheels_carry_their_assets() -> None:

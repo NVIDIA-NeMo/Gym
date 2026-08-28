@@ -458,7 +458,14 @@ def _resolve_asset_kwargs(env_kwargs: dict[str, Any]) -> dict[str, Any]:
 
 
 class VisGymResourcesServer(SimpleResourcesServer):
-    """Env-id-parametric server wrapping VisGym/Gymnasium envs."""
+    """Env-id-parametric server wrapping VisGym/Gymnasium envs.
+
+    ``resources_servers.gymnasium.GymnasiumServer`` intentionally exposes a
+    string-observation/model-response contract. VisGym's observations are
+    multimodal messages and its actions are already-parsed strings, followed
+    by an explicit reward-drain request. Keeping this server specialized avoids
+    widening the generic server's public schemas for unrelated environments.
+    """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 

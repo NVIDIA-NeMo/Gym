@@ -362,6 +362,15 @@ class TextActionAgentRunRequest(BaseRunRequest):
 
 
 class TextActionAgent(SimpleResponsesAPIAgent):
+    """Run VisGym's multimodal, boxed-text action protocol.
+
+    The generic ``gymnasium_agent`` handles string observations and function
+    calls. This agent additionally preserves response token metadata between
+    image turns, retries truncated boxed actions, and performs VisGym's final
+    reward drain, so substituting the generic agent would make training
+    trajectories semantically different.
+    """
+
     config: TextActionAgentConfig
 
     async def _close_session(self, env_id: str) -> None:

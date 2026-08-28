@@ -13,14 +13,15 @@ from resources_servers.visgym.schemas import VisGymTaskRow
 
 
 VISGYM_ROOT = Path(__file__).resolve().parents[1]
-GENERATOR = VISGYM_ROOT / "scripts" / "create_maze_curriculum.py"
+GYM_ROOT = VISGYM_ROOT.parents[1]
+PREPARE = GYM_ROOT / "environments" / "visgym" / "prepare.py"
 # The generator's default budget; the index carries it so two variants cannot
 # overwrite each other's index.
 INDEX_NAME = "maze_2d_easy_curriculum_5x5_7x7_9x9_11x11_manifest_index_t1024.json"
 
 
 def _generate_curriculum(output_dir: Path) -> Path:
-    """Run the committed generator and return the manifest index it wrote.
+    """Run the canonical prepare entry point and return its manifest index.
 
     The full curriculum is 5120 rows across five files (~8 MB), so it is
     generated on demand instead of being committed. The generator is pure and
@@ -28,7 +29,7 @@ def _generate_curriculum(output_dir: Path) -> Path:
     test_curriculum_generator_is_deterministic.
     """
     subprocess.run(
-        [sys.executable, str(GENERATOR), "--output-dir", str(output_dir)],
+        [sys.executable, str(PREPARE), "maze", "--output-dir", str(output_dir)],
         check=True,
         capture_output=True,
         text=True,
