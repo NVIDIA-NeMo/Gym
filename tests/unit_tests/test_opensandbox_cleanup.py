@@ -846,3 +846,25 @@ def test_cli_reports_a_failure_from_arguments(
     stderr = capsys.readouterr().err
     assert "OpenSandbox cleanup failed: down" in stderr
     assert TEST_ACCESS_KEY not in stderr
+
+
+def test_slurm_launcher_falls_back_to_the_checkout_env_yaml(tmp_path: Path) -> None:
+    """No exported connection, so the checkout's own env.yaml is used."""
+    calls_path, env = install_sbatch_stub(tmp_path)
+    env.pop("OPENSANDBOX_DOMAIN", None)
+    env.pop("OPENSANDBOX_API_KEY", None)
+
+    result = subprocess.run(
+        ["bash", str(SBATCH_SCRIPT), "--config", "benchmark.yaml"],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    _main_call, cleanup_call = read_sbatch_calls(calls_path)
+    repo_root = SBATCH_SCRIPT.resolve().parents[2]
+    assert cleanup_call[cleanup_call.index("--connection-config") + 1] == f"{repo_root}/env.yaml"
+    assert "--domain" not in cleanup_call
+    assert "--api-key" not in cleanup_call
