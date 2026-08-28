@@ -798,7 +798,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         result_stdout = (result.stdout if result else "") or ""
         result_stderr = (result.stderr if result else "") or ""
-        opencode_finished = "OpenCode run finished" in result_stdout
+        opencode_finished = "OpenCode run finished" in result_stdout.rsplit("Shell: ", maxsplit=1)[1]
 
         if collect_observations and observations is not None:
             agent_sandbox_observation = self._agent_sandbox_observation(
