@@ -20,12 +20,14 @@ import threading
 import pytest
 
 from nemo_gym.token_id_capture import (
+    ParentResolutionStatus,
     TokenCaptureSnapshot,
     assert_prefix_contiguity,
-    per_request,
+    compute_digest,
     prefix_merging,
     project_chain_to_output_items,
     project_main_chain_response,
+    stamp_lineage,
     token_id_capture_dirs_from_config,
     trajectories_for_rollout,
     trajectories_from_source,
@@ -34,8 +36,8 @@ from nemo_gym.token_id_capture.records import TokenEntry
 from nemo_gym.token_id_capture.store import TokenCaptureStore
 
 
-def _entry(mcid, prompt, gen, lp=None, created_at=0.0):
-    return TokenEntry(
+def _entry(mcid, prompt, gen, parent=None, lp=None, created_at=0.0):
+    e = TokenEntry(
         rollout_id="t0-r0",
         model_call_id=mcid,
         model="m",
@@ -46,14 +48,19 @@ def _entry(mcid, prompt, gen, lp=None, created_at=0.0):
         # Chain selection uses this value.
         created_at=created_at,
     )
+    # Stamp the way a current writer does: every record carries a decision.
+    # (Pre-v3 unstamped records no longer exist and are refused by readers.)
+    status = ParentResolutionStatus.RESOLVED if parent is not None else ParentResolutionStatus.ROOT
+    stamp_lineage(e, parent, parent_resolution=status)
+    return e
 
 
 # This append-only rollout has three calls.
 # Each prompt extends the previous prompt and generation.
 # Interstitial tokens represent tool output or a new user turn.
 CALL1 = _entry("c1", [1, 2, 3], [10, 11])
-CALL2 = _entry("c2", [1, 2, 3, 10, 11, 4, 5], [12])
-CALL3 = _entry("c3", [1, 2, 3, 10, 11, 4, 5, 12, 6], [13, 14])
+CALL2 = _entry("c2", [1, 2, 3, 10, 11, 4, 5], [12], parent="c1")
+CALL3 = _entry("c3", [1, 2, 3, 10, 11, 4, 5, 12, 6], [13, 14], parent="c2")
 APPEND_ONLY = [CALL1, CALL2, CALL3]
 
 
@@ -88,7 +95,8 @@ def test_prefix_merging_handles_a_thousand_turns_without_recursive_traversal():
     prompt = [1]
     for turn in range(1_100):
         generation = [10_000 + turn]
-        entries.append(_entry(f"call-{turn:04d}", list(prompt), generation))
+        parent = f"call-{turn - 1:04d}" if turn else None
+        entries.append(_entry(f"call-{turn:04d}", list(prompt), generation, parent=parent))
         prompt.extend(generation)
         prompt.append(20_000 + turn)
 
@@ -107,23 +115,6 @@ def test_order_independent():
     a = project_main_chain_response("t0-r0", prefix_merging(APPEND_ONLY), model="m")
     b = project_main_chain_response("t0-r0", prefix_merging(shuffled), model="m")
     assert a["output"] == b["output"]
-
-
-def test_per_request_marks_the_same_generated_tokens():
-    # Both builders identify the same sampled tokens.
-    merged = prefix_merging(APPEND_ONLY)
-    per_req = per_request(APPEND_ONLY)
-    assert len(per_req.chains) == 3
-
-    merged_tokens = _generated_tokens(project_main_chain_response("t0-r0", merged, model="m"))
-    per_req_tokens = sorted(
-        tok
-        for chain in per_req.chains
-        for item in project_chain_to_output_items(chain)
-        for tok in (item.get("generation_token_ids") or [])
-    )
-    assert merged_tokens == sorted([10, 11, 12, 13, 14])
-    assert per_req_tokens == sorted([10, 11, 12, 13, 14])
 
 
 def test_projection_is_prefix_contiguous():
@@ -180,9 +171,9 @@ def test_contiguity_assert_catches_a_gap():
         assert_prefix_contiguity(broken)
 
 
-def _content_entry(mcid, prompt, gen, text):
+def _content_entry(mcid, prompt, gen, text, parent=None):
     lp = [-0.1] * len(gen)
-    return TokenEntry(
+    entry = TokenEntry(
         rollout_id="t0-r0",
         model_call_id=mcid,
         model="m",
@@ -200,12 +191,15 @@ def _content_entry(mcid, prompt, gen, text):
             }
         ],
     )
+    status = ParentResolutionStatus.RESOLVED if parent is not None else ParentResolutionStatus.ROOT
+    stamp_lineage(entry, parent, parent_resolution=status)
+    return entry
 
 
 def test_projection_carries_content_and_stays_contiguous():
     entries = [
         _content_entry("c1", [1, 2, 3], [10, 11], "first turn"),
-        _content_entry("c2", [1, 2, 3, 10, 11, 4, 5], [12], "second turn"),
+        _content_entry("c2", [1, 2, 3, 10, 11, 4, 5], [12], "second turn", parent="c1"),
     ]
     out = prefix_merging(entries)
     resp = project_main_chain_response("t0-r0", out, model="m")
@@ -397,30 +391,6 @@ def test_consumer_masks_an_external_source_failure():
     assert "transport unavailable" in built["error"]
 
 
-def test_single_response_consumer_rejects_per_request_builder():
-    class Source:
-        async def freeze(self, rollout_id):
-            return TokenCaptureSnapshot(
-                rollout_id=rollout_id,
-                entries=(APPEND_ONLY[0],),
-                incomplete=False,
-                snapshot_id="snapshot-3",
-                version=1,
-            )
-
-        async def drop(self, rollout_id, *, snapshot_id, version):
-            return True
-
-        async def close(self):
-            return None
-
-    built = asyncio.run(trajectories_from_source("t0-r0", Source(), builder="per_request"))
-
-    assert built["mask_sample"] is True
-    assert built["rebuilt_response"] is None
-    assert "not supported by single-response delivery" in built["error"]
-
-
 def test_consumer_noop_when_disabled_or_absent(tmp_path):
     assert token_id_capture_dirs_from_config({}) == []
     assert trajectories_for_rollout("t0-r0", []) is None
@@ -429,34 +399,6 @@ def test_consumer_noop_when_disabled_or_absent(tmp_path):
     missing = trajectories_for_rollout("missing", dirs)
     assert missing["mask_sample"] is True
     assert missing["rebuilt_response"] is None
-
-
-def test_ambiguous_parents_are_quarantined():
-    # Two roots have identical cumulative sequences.
-    # A call extends that shared sequence.
-    # Its parent is ambiguous.
-    # The builder quarantines the subtree.
-    a = _entry("a", [1, 2], [7, 8])
-    b = _entry("b", [1, 2], [7, 8])
-    child = _entry("child", [1, 2, 7, 8, 9], [20])
-    out = prefix_merging([a, b, child])
-    assert "child" in out.quarantined
-    # Every emitted chain excludes the quarantined child.
-    for chain in out.chains:
-        assert all(link.entry.model_call_id != "child" for link in chain.links)
-
-
-def test_ambiguous_retry_evidence_cannot_collapse_to_an_empty_success(tmp_path):
-    store = TokenCaptureStore(tmp_path)
-    for entry in (
-        _entry("a", [1, 2], [7, 8]),
-        _entry("b", [1, 2], [7, 8]),
-        _entry("child", [1, 2, 7, 8, 9], [20]),
-    ):
-        store.append(entry)
-    built = trajectories_for_rollout("t0-r0", [tmp_path])
-    assert built["mask_sample"] is True
-    assert built["rebuilt_response"] is None
 
 
 # --- side calls and chain selection -------------------------------------------
@@ -474,7 +416,9 @@ def test_the_earliest_root_becomes_the_delivered_chain():
     # This short auxiliary call starts after the first agent turn completes.
     side = _entry("side", [9000, 9001], [7, 7, 7], created_at=200.0)
     real_1 = _entry("real1", list(range(100, 160)), [200, 201, 202, 203], created_at=100.0)
-    real_2 = _entry("real2", list(range(100, 160)) + [200, 201, 202, 203, 500], [300, 301, 302], created_at=150.0)
+    real_2 = _entry(
+        "real2", list(range(100, 160)) + [200, 201, 202, 203, 500], [300, 301, 302], parent="real1", created_at=150.0
+    )
 
     out = prefix_merging([side, real_1, real_2])
     main = next(c for c in out.chains if c.chain_id == "main")
@@ -548,9 +492,10 @@ def test_post_compaction_chain_is_reported_as_dropped():
     Metrics report the remaining chain.
     """
     call_1 = _entry("c1", [1, 2, 3], [4, 5])
-    call_2 = _entry("c2", [1, 2, 3, 4, 5, 6], [7])
-    # The compacted prompt does not extend a captured sequence.
+    call_2 = _entry("c2", [1, 2, 3, 4, 5, 6], [7], parent="c1")
+    # A compacted context resolves UNRESOLVED at request time (edited history).
     call_3 = _entry("c3", [90, 91], [92, 93, 94, 95])
+    stamp_lineage(call_3, None, parent_resolution=ParentResolutionStatus.UNRESOLVED)
 
     out = prefix_merging([call_1, call_2, call_3])
     assert out.notes.chains == 2
@@ -596,7 +541,7 @@ def test_incomplete_capture_masks_the_rollout(tmp_path):
 def test_clean_rollout_is_not_masked_and_reports_full_delivery(tmp_path):
     store = TokenCaptureStore(tmp_path)
     store.append(_entry("c1", [1, 2, 3], [4, 5]))
-    store.append(_entry("c2", [1, 2, 3, 4, 5, 6], [7]))
+    store.append(_entry("c2", [1, 2, 3, 4, 5, 6], [7], parent="c1"))
 
     built = trajectories_for_rollout("t0-r0", [tmp_path])
     assert built["mask_sample"] is False
@@ -680,6 +625,137 @@ def test_the_builder_runs_once_per_rollout(tmp_path, monkeypatch):
 
     assert calls == ["prefix_merging"]
     assert built["metrics"]["n_calls"] == 2
+
+
+def _with_lineage(entry, parent_call_id=None):
+    status = ParentResolutionStatus.RESOLVED if parent_call_id is not None else ParentResolutionStatus.ROOT
+    stamp_lineage(entry, parent_call_id, parent_resolution=status)
+    return entry
+
+
+def test_recorded_parent_link_resolves_a_final_call_retry_exactly():
+    """Use a recorded parent link to resolve retries exactly.
+
+    The siblings share a prompt and differ only in their generation.
+    Prefix matching cannot identify which generation the harness kept.
+    The next call's parent link identifies the survivor.
+    """
+    root = _with_lineage(_entry("root", [1, 2], [3]))
+    kept = _with_lineage(_entry("kept", [1, 2, 3, 4], [5]), parent_call_id="root")
+    dropped = _with_lineage(_entry("dropped", [1, 2, 3, 4], [9]), parent_call_id="root")
+    # The next call explicitly continues ``kept``.
+    nxt = _with_lineage(_entry("next", [1, 2, 3, 4, 5, 6], [7]), parent_call_id="kept")
+
+    out = prefix_merging([root, kept, dropped, nxt])
+    main = next(c for c in out.chains if c.chain_id == "main")
+    assert [link.entry.model_call_id for link in main.links] == ["root", "kept", "next"]
+    assert "dropped" in out.quarantined
+    # Exact resolution leaves no retry unresolved.
+    assert out.notes.unresolved_retries == []
+
+
+def test_unresolvable_final_retry_is_flagged_not_silently_tie_broken():
+    """Report a final-call retry that has no successor."""
+    root = _with_lineage(_entry("root", [1, 2], [3]))
+    a = _with_lineage(_entry("a", [1, 2, 3, 4], [5]), parent_call_id="root")
+    b = _with_lineage(_entry("b", [1, 2, 3, 4], [9]), parent_call_id="root")
+
+    out = prefix_merging([root, a, b])
+    assert sorted(out.notes.unresolved_retries) == ["a", "b"]
+
+
+def test_a_stale_parent_link_becomes_an_incomplete_fragment():
+    """Preserve a call without inventing an edge across a digest mismatch."""
+    root = _with_lineage(_entry("root", [1, 2], [3]))
+    child = _entry("child", [1, 2, 3, 4], [5])
+    stamp_lineage(child, "root", parent_resolution=ParentResolutionStatus.RESOLVED)
+    # Simulate a stale record by corrupting the parent digest.
+    root.digest = compute_digest([42, 42, 42])
+
+    out = prefix_merging([root, child])
+    assert out.notes.parent_link_failures == {"parent_digest_mismatch": 1}
+    assert out.notes.unresolved_parent_calls == ["child"]
+    assert sorted([link.entry.model_call_id for chain in out.chains for link in chain.links]) == ["child", "root"]
+    assert "child" not in out.quarantined
+
+
+def test_a_missing_filtered_parent_recovers_through_prefix_matching():
+    """Recover a verified ancestor when the recorded parent is absent.
+
+    The builder filters calls that generated no tokens.
+    A child can therefore name a parent that is missing from the build.
+    Prefix matching may reconnect that child to a verified surviving ancestor.
+    A digest mismatch remains an unresolved boundary.
+    """
+    root = _with_lineage(_entry("root", [1, 2], [3]))
+    empty = _with_lineage(_entry("empty", [1, 2, 3, 4], []), parent_call_id="root")
+    child = _with_lineage(_entry("child", [1, 2, 3, 4, 5], [6]), parent_call_id="empty")
+
+    out = prefix_merging([root, empty, child])
+
+    assert out.notes.parent_link_failures == {"parent_call_id_missing_recovered": 1}
+    assert out.notes.unresolved_parent_calls == []
+    assert len(out.chains) == 1
+    assert "child" not in out.quarantined
+
+
+def test_a_duplicated_snapshot_entry_is_one_call():
+    """Collapse identical entries delivered by an at-least-once transport.
+
+    A duplicate must not become a second root that masks a complete rollout.
+    """
+    root = _with_lineage(_entry("root", [1, 2], [3]))
+    child = _with_lineage(_entry("child", [1, 2, 3, 4], [5]), parent_call_id="root")
+    duplicate = _with_lineage(_entry("child", [1, 2, 3, 4], [5]), parent_call_id="root")
+
+    out = prefix_merging([root, child, duplicate])
+
+    assert len(out.chains) == 1
+    assert out.notes.unresolved_parent_calls == []
+
+
+def test_unresolved_parent_never_uses_prefix_fallback():
+    root = _with_lineage(_entry("root", [1, 2], [3]))
+    child = _entry("child", [1, 2, 3, 4], [5])
+    stamp_lineage(child, None, parent_resolution=ParentResolutionStatus.UNRESOLVED)
+
+    out = prefix_merging([root, child])
+
+    assert len(out.chains) == 2
+    assert out.notes.unresolved_parent_calls == ["child"]
+
+
+def test_explicit_root_never_uses_prefix_fallback():
+    first = _with_lineage(_entry("first", [1, 2], [3]))
+    root = _with_lineage(_entry("root", [1, 2, 3, 4], [5]))
+
+    out = prefix_merging([first, root])
+
+    assert len(out.chains) == 2
+    assert out.notes.unresolved_parent_calls == []
+
+
+def test_a_recorded_parent_is_verified_not_trusted():
+    """Quarantine a recorded parent with unrelated tokens."""
+    previous_attempt = _entry("old", [1, 2, 3], [4, 5])
+    this_attempt = _entry("new", [90, 91, 92, 93], [94], parent="old")
+
+    out = prefix_merging([previous_attempt, this_attempt])
+
+    assert "parent_digest_mismatch" in out.notes.parent_link_failures
+    for chain in out.chains:
+        assert [link.entry.model_call_id for link in chain.links] != ["old", "new"]
+
+
+def test_a_correct_parent_link_is_used():
+    """Use a recorded parent link that passes verification."""
+    parent = _entry("p", [1, 2], [3, 4])
+    child = _entry("c", [1, 2, 3, 4, 5], [6], parent="p")
+
+    out = prefix_merging([parent, child])
+
+    assert out.notes.parent_link_failures == {}
+    assert any([link.entry.model_call_id for link in chain.links] == ["p", "c"] for chain in out.chains)
 
 
 def test_a_chain_that_breaks_is_split_and_reported():

@@ -69,10 +69,13 @@ from nemo_gym.rollout_collection import (
     loads_jsonl_line,
 )
 from nemo_gym.token_id_capture import (
+    LineageResolution,
+    ParentResolutionStatus,
     TokenCaptureSnapshot,
     TokenCaptureStore,
     TokenEntry,
     clear_token_captures_for_rollouts,
+    stamp_lineage,
 )
 from nemo_gym.token_id_capture.delivery import (
     MASK_SAMPLE_KEY,
@@ -82,6 +85,19 @@ from nemo_gym.token_id_capture.delivery import (
     retire_rollout_token_capture,
     rollout_carries_token_ids,
 )
+
+
+class _StubLineageStore:
+    """Satisfy the normal custom-sink contract in collector-only tests."""
+
+    async def resolve(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
+        return LineageResolution(ParentResolutionStatus.ROOT)
+
+    def is_process_shared(self) -> bool:
+        return True
+
+    async def close(self) -> None:
+        pass
 
 
 @pytest.fixture
@@ -2133,6 +2149,7 @@ class TestRolloutCollection:
                     "all_agents": True,
                     "sink": "framework.capture:Sink",
                     "rebuild_response": True,
+                    "lineage_store": f"{__name__}:_StubLineageStore",
                 }
             },
         )
@@ -2192,6 +2209,7 @@ class TestRolloutCollection:
                     "all_agents": True,
                     "sink": "framework.capture:Sink",
                     "rebuild_response": True,
+                    "lineage_store": f"{__name__}:_StubLineageStore",
                 }
             },
         )
@@ -3040,17 +3058,17 @@ class TestFinalizeRolloutTokenCapture:
 
     @staticmethod
     def _capture(store: TokenCaptureStore) -> None:
-        store.append(
-            TokenEntry(
-                rollout_id="0-0",
-                model_call_id="c1",
-                prompt_token_ids=[1, 2, 3],
-                generation_token_ids=[4, 5],
-                generation_log_probs=[-0.1, -0.2],
-                output_items=[{"type": "message", "role": "assistant", "content": []}],
-                token_item_index=0,
-            )
+        entry = TokenEntry(
+            rollout_id="0-0",
+            model_call_id="c1",
+            prompt_token_ids=[1, 2, 3],
+            generation_token_ids=[4, 5],
+            generation_log_probs=[-0.1, -0.2],
+            output_items=[{"type": "message", "role": "assistant", "content": []}],
+            token_item_index=0,
         )
+        stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
+        store.append(entry)
 
     async def test_rebuilds_a_rollout_that_has_no_token_ids(self, tmp_path: Path) -> None:
         store = TokenCaptureStore(tmp_path)
