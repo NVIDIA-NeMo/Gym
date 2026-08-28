@@ -116,7 +116,11 @@ MODEL=<ckpt> CONTAINER=<eval sqsh> \
   SWEEP_DIR=$R/outputs/sweeps/<name>/<nickname> bash $R/scripts/03_run.sh
 ```
 
-`LIMIT_PER_ENTRY=8` exercises every code path in minutes. Then profile and read the result:
+`LIMIT_PER_ENTRY=8` takes only the first 8 rows of your dataset instead of all of them, so at
+`num_repeats: 8` that is 64 rollouts — enough to exercise every code path in minutes. Drop it for
+a real run. Every other variable is in [README § Common knobs](./README.md#05---reference).
+
+Then profile and read the result:
 
 ```bash
 SWEEP_DIR=$R/outputs/sweeps/<name>/<nickname> bash $R/scripts/05_profile.sh
@@ -161,7 +165,7 @@ Once your entry runs clean alone, move it into
 - **Merge your `gym_env_start` keys into the shared block**, reusing the judge anchors already
   defined there rather than declaring a second endpoint for the same model.
 - **Regenerate the container config** if you added a server, and rebuild.
-- **Re-validate, then re-run with `LIMIT_PER_ENTRY=2` over the whole manifest.** Your entry can
+- **Re-validate, then re-run with `LIMIT_PER_ENTRY=2` over the whole manifest** (2 rows per entry, so 576 rollouts across all 36). Your entry can
   resolve alone and still collide once composed with 35 others — a port, a judge binding, or a
   server that was never baked into the container.
 
