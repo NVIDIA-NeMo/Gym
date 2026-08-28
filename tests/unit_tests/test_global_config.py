@@ -2126,6 +2126,21 @@ class TestComposeUnboundAgent:
         # critpt accepts no agent the others do, so there is nothing to recommend.
         assert "No single agent satisfies all of them." in message
 
+    def test_recommendation_accounts_for_targets_that_accept_the_selection(self) -> None:
+        """An instance that accepts the selected agent still constrains what could replace it."""
+        config = self._guarded_config("hermes_agent")
+        config["strict_resources_server"] = DictConfig(
+            {"resources_servers": {"scicode": {"entrypoint": "app.py", "allowed_agents": ["scicode_agent"]}}}
+        )
+        config["strict_agent"] = DictConfig(self._environment_agent("strict_resources_server"))
+
+        with raises(UnsupportedAgentPairingError) as error:
+            GlobalConfigDictParser().compose_unbound_agent(config)
+
+        message = str(error.value)
+        assert "No single agent satisfies all of them." in message
+        assert "Select one of" not in message, "scicode_agent would only move the failure to gpqa"
+
     def test_recommends_the_agent_every_rejected_instance_accepts(self) -> None:
         config = self._guarded_config("scicode_agent", "simple_agent")
         config["critpt_resources_server"] = DictConfig(

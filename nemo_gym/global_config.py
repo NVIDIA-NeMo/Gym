@@ -26,7 +26,7 @@ from pathlib import Path
 from platform import python_version
 from random import randint
 from socket import gethostbyname, gethostname, socket
-from typing import ClassVar, Dict, List, Optional, Tuple, Type
+from typing import ClassVar, Dict, List, Optional, Set, Tuple, Type
 
 import hydra
 import rich
@@ -673,10 +673,14 @@ Duplicate config paths:
         if self._pairing_override_enabled(global_config_dict):
             return
 
+        restrictions: List[Set[str]] = []
         rejected: List[Tuple[_AgentInstance, List[str]]] = []
         for target in targets:
             allowed = self._allowed_agents(global_config_dict, target)
-            if allowed is not None and source.agent_type not in allowed:
+            if allowed is None:
+                continue
+            restrictions.append(set(allowed))
+            if source.agent_type not in allowed:
                 rejected.append((target, allowed))
         if not rejected:
             return
@@ -688,7 +692,7 @@ Duplicate config paths:
             f"and accepts {', '.join(allowed)}"
             for target, allowed in rejected
         )
-        supported = sorted(set.intersection(*(set(allowed) for _, allowed in rejected)))
+        supported = sorted(set.intersection(*restrictions))
         remedy = f"Select one of: {', '.join(supported)}." if supported else "No single agent satisfies all of them."
         raise UnsupportedAgentPairingError(
             f"""'{source.agent_type}' is not declared compatible with {len(rejected)} of the agent instance(s) """
