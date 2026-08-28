@@ -243,10 +243,20 @@ class Vllm(BaseModel):
     model: Optional[str] = None
     # The vLLM arg script the launcher sources, i.e. VLLM_CONFIG.
     config: Optional[str] = None
+    # Prefill/decode split, i.e. NUM_PREFILL_NODES / NUM_DECODE_NODES. One job's nodes are the sum,
+    # capped near 16 because --segment needs a topology-contiguous allocation and an NVL72 rack is
+    # 18. Decode is the throughput-limiting side, so widen that one first.
+    prefill_nodes: Optional[int] = Field(default=None, ge=1)
+    decode_nodes: Optional[int] = Field(default=None, ge=1)
 
     def env(self) -> Dict[str, str]:
-        pairs = {"MODEL": self.model, "VLLM_CONFIG": self.config}
-        return {key: value for key, value in pairs.items() if value}
+        pairs = {
+            "MODEL": self.model,
+            "VLLM_CONFIG": self.config,
+            "NUM_PREFILL_NODES": self.prefill_nodes,
+            "NUM_DECODE_NODES": self.decode_nodes,
+        }
+        return {key: str(value) for key, value in pairs.items() if value is not None}
 
 
 class SweepManifest(BaseModel):

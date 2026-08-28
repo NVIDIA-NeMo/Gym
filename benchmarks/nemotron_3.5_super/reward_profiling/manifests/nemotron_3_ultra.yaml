@@ -160,6 +160,11 @@ srun:
 # `nickname` too, or the new run's artifacts land in the same directory as the old one's.
 vllm:
   model: /lustre/fsw/portfolios/llmservice/users/abukharin/super35_dualds0821_pure_lm_ab/hf_text/full_generalist_prod/iter_6500
+  # Nodes per shard = prefill + decode, so this is 3. Capped near 16 by --segment, which needs a
+  # topology-contiguous allocation and an NVL72 rack is 18 nodes. Decode limits throughput, so
+  # widen that side first.
+  prefill_nodes: 1
+  decode_nodes: 2
 
 # Runtime settings for `gym eval run --no-serve`.
 gym_eval_run:
