@@ -14,6 +14,8 @@
 set -euo pipefail
 
 SWEEP_DIR=${SWEEP_DIR:?set SWEEP_DIR to the <out-dir>/<nickname> directory}
+# Exported so the xargs children below see them.
+export SWEEP_DIR VLLM_JOBID="${VLLM_JOBID:-}" CONTAINER="${CONTAINER:-}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 cd "$REPO_ROOT"
 
@@ -32,6 +34,44 @@ if ! python -c "import orjson, nemo_gym" >/dev/null 2>&1; then
     fi
 fi
 
+# The check above covers the split below, which only needs nemo_gym itself. `gym eval profile`
+# reaches much further -- through nemo_gym.cli.eval into openai_utils -- so a venv pinned to an
+# older openai than pyproject.toml imports fine here and then fails once per label, writing the
+# same ImportError into 36 profile.txt files. Fail once, up front, with the real error instead.
+if [[ -z "${VLLM_JOBID:-}" ]]; then
+    if ! profile_import_error=$(python -c "import nemo_gym.cli.eval" 2>&1); then
+        echo "ERROR: 'gym eval profile' cannot run here, though nemo_gym itself imports:" >&2
+        echo "$profile_import_error" | tail -3 >&2
+        echo >&2
+        echo "       Usually a stale venv: this branch pins openai==2.44.0 (pyproject.toml)." >&2
+        echo "       Either sync one   -- uv venv && uv sync --extra dev, then re-run" >&2
+        echo "       or use a container -- VLLM_JOBID=<live jobid> CONTAINER=<sqsh> $0" >&2
+        exit 2
+    fi
+fi
+
+# env.yaml interpolates ${oc.env:VAR} for judge keys. The profiler resolves the same config, so an
+# unset one fails identically in all 36 labels -- each writing the same KeyError into its own
+# profile.txt. Check once. A bare `VAR=value` in .bashrc is the usual cause: it is a shell variable,
+# not an environment one, so a non-login shell never exports it.
+ENV_YAML=${ENV_YAML:-$REPO_ROOT/env.yaml}
+if [[ -z "${VLLM_JOBID:-}" && -f "$ENV_YAML" ]]; then
+    _missing=$(python - "$ENV_YAML" <<'PY_ENVVARS'
+import os, re, sys
+from pathlib import Path
+text = Path(sys.argv[1]).read_text()
+names = sorted(set(re.findall(r"\$\{oc\.env:([A-Za-z_][A-Za-z0-9_]*)", text)))
+print(" ".join(n for n in names if not os.environ.get(n)))
+PY_ENVVARS
+)
+    if [[ -n "$_missing" ]]; then
+        echo "ERROR: $ENV_YAML interpolates environment variables that are not exported:" >&2
+        for _v in $_missing; do echo "         $_v" >&2; done
+        echo "       Export them first. 'export VAR=...' in .bashrc only reaches a login shell," >&2
+        echo "       so run this under 'bash -lc' or export them in the current one." >&2
+        exit 2
+    fi
+fi
 
 python -m nemo_gym.sweep split "$SWEEP_DIR"
 
@@ -49,17 +89,31 @@ profile_cmd() {
     fi
 }
 
-for label_dir in "$SWEEP_DIR"/by_label/*/; do
-    [[ -d "$label_dir" ]] || continue
-    label="$(basename "$label_dir")"
+profile_one() {
+    local label_dir=${1%/}
+    local label; label="$(basename "$label_dir")"
     if [[ ! -s "$label_dir/rollouts.jsonl" ]]; then
         echo "  $label: no rollouts, skipping"
-        continue
+        return 0
     fi
-    profile_cmd "$label_dir/rollouts_materialized_inputs.jsonl" "$label_dir/rollouts.jsonl" \
-                "$label_dir/profile.txt" || echo "  $label: profile failed, see $label_dir/profile.txt" >&2
-    echo "  $label: $(grep -m1 'completion:' "$label_dir/profile.txt" 2>/dev/null || echo done)"
-done
+    if profile_cmd "$label_dir/rollouts_materialized_inputs.jsonl" "$label_dir/rollouts.jsonl" \
+                   "$label_dir/profile.txt"; then
+        echo "  $label: $(grep -m1 'completion:' "$label_dir/profile.txt" 2>/dev/null || echo done)"
+    else
+        echo "  $label: profile FAILED, see $label_dir/profile.txt" >&2
+        return 1
+    fi
+}
+export -f profile_one profile_cmd
+
+# One `gym eval profile` per label, and each pays a full interpreter start. Off Lustre that is
+# ~45s even though the profiling itself is trivial, so 36 labels serially take half an hour while
+# the same work inside the container takes three minutes. Imports are page-cached after the first
+# process, so running them concurrently recovers most of it.
+PROFILE_JOBS=${PROFILE_JOBS:-8}
+printf '%s\0' "$SWEEP_DIR"/by_label/*/ \
+    | xargs -0 -P "$PROFILE_JOBS" -I{} bash -c 'profile_one "$@"' _ {} \
+    || echo ">>> some labels failed; see the FAILED lines above" >&2
 
 echo ">>> whole sweep"
 profile_cmd "$SWEEP_DIR/rollouts_materialized_inputs.jsonl" "$SWEEP_DIR/rollouts.jsonl" \
