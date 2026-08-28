@@ -88,7 +88,7 @@ one only when an entry pulls in a server the image does not have — see
 
 ## 02 - Create a Manifest
 The manifest is the highest-level config of what environments are being profiled, and parameterizes any judge, sandbox, or config overrides needed.
-Seven top-level keys. Every block but `nickname` and `entries` is named for the command it
+Eight top-level keys, plus `num_shards`. Every block but `nickname` and `entries` is named for the command it
 configures, so where a setting goes follows from which command consumes it:
 
 1. **nickname** — names the run; artifacts land in `<OUT_DIR>/<nickname>/`
@@ -115,7 +115,12 @@ configures, so where a setting goes follows from which command consumes it:
       `config_paths` pulled in, so these beat every file — which is how a judge gets rebound
       without editing an upstream config. Do it here rather than in a file: the container is built
       from a Gym ref and has no copy of this repo, so a repo-relative path will not resolve inside it
-6. **gym_eval_run** — runtime settings, emitted as `++key=value`
+6. **gym_eval_profile** — settings for `gym eval profile`
+    - `allow_partial_rollouts` (default true), `jobs` (concurrent labels), plus any `++` the
+      profiler takes. Separate from `gym_eval_run` because they are different commands:
+      `allow_partial_rollouts` exists only on the profiler, so putting it under `gym_eval_run`
+      sends it to collection where nothing reads it
+7. **gym_eval_run** — runtime settings, emitted as `++key=value`
     - `num_repeats`: rollouts per task; the spread across them is the profile. Applied by
       01_materialize.sh, which writes this many copies of each row into the materialized inputs,
       so collection itself runs with `++num_repeats=1`
@@ -124,7 +129,7 @@ configures, so where a setting goes follows from which command consumes it:
       passes `++` only when its env var is set, so these are defaults rather than something
       silently clobbered. `num_samples_in_parallel` is the exception: the launcher computes
       `512 × decode_nodes`, since only it knows the job's shape
-7. **entries** — the environments to be profiled
+8. **entries** — the environments to be profiled
     - `label` (required): nickname of profiled env
     - `agent` (required): `agent_ref` of the data
     - `configs`: gym configs defining the agent and its resources server. The agent must be

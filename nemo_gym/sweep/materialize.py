@@ -83,6 +83,7 @@ class MaterializeReport:
     # back to the entry and dataset it came from -- especially when several entries share an agent.
     task_index_ranges: Dict[str, Tuple[int, int]]
     nickname: str = ""
+    num_shards: Optional[int] = None
     shuffle_seed: int = 0
     # Settings the manifest declared for the collection command, for a launcher to pass as ++
     # overrides. Carried here rather than in sweep_config.yaml because that file configures
@@ -94,6 +95,8 @@ class MaterializeReport:
     srun: Dict[str, str] = field(default_factory=dict)
     # MODEL / VLLM_CONFIG, applied the same way.
     vllm: Dict[str, str] = field(default_factory=dict)
+    # ALLOW_PARTIAL_ROLLOUTS / PROFILE_JOBS, plus any ++ the profiler takes.
+    gym_eval_profile: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def total_source_rows(self) -> int:
@@ -110,11 +113,13 @@ class MaterializeReport:
             "config_fpath": str(self.config_fpath),
             "materialized_bytes": self.materialized_fpath.stat().st_size if self.materialized_fpath.exists() else None,
             "nickname": self.nickname,
+            "num_shards": self.num_shards,
             "shuffle_seed": self.shuffle_seed,
             "gym_eval_run": self.gym_eval_run,
             "sbatch": self.sbatch,
             "srun": self.srun,
             "vllm": self.vllm,
+            "gym_eval_profile": self.gym_eval_profile,
             "total_source_rows": self.total_source_rows,
             "total_materialized_rows": self.total_materialized_rows,
             "entries": {
@@ -344,11 +349,13 @@ def materialize(
             entry.label: (offsets[i], offsets[i] + counts[i] - 1) for i, entry in enumerate(manifest.entries)
         },
         nickname=manifest.nickname,
+        num_shards=manifest.num_shards,
         shuffle_seed=shuffle_seed,
         gym_eval_run=manifest.gym_eval_run.overrides(),
         sbatch=manifest.sbatch.env(),
         srun=manifest.srun.env(),
         vllm=manifest.vllm.env(),
+        gym_eval_profile={**manifest.gym_eval_profile.env(), **manifest.gym_eval_profile.overrides()},
         rows_per_entry=rows_per_entry,
         materialized_per_entry=materialized_per_entry,
         num_repeats_per_entry=repeats_by_entry,

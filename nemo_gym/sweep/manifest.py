@@ -218,14 +218,20 @@ class Srun(BaseModel):
     sandbox_container: Optional[str] = None
     # Passed through to --container-mounts.
     mounts: Optional[str] = None
+    # Sandbox tier, i.e. SANDBOX_PORT / SANDBOX_WORKERS. One node only -- sessions pin to a worker
+    # by X-Session-ID, so workers is the only axis that scales here.
+    sandbox_port: Optional[int] = Field(default=None, ge=1)
+    sandbox_workers: Optional[int] = Field(default=None, ge=1)
 
     def env(self) -> Dict[str, str]:
         pairs = {
             "CONTAINER": self.container,
             "SANDBOX_CONTAINER": self.sandbox_container,
             "MOUNTS": self.mounts,
+            "SANDBOX_PORT": self.sandbox_port,
+            "SANDBOX_WORKERS": self.sandbox_workers,
         }
-        return {key: value for key, value in pairs.items() if value}
+        return {key: str(value) for key, value in pairs.items() if value is not None}
 
 
 class Vllm(BaseModel):
@@ -248,6 +254,9 @@ class Vllm(BaseModel):
     # 18. Decode is the throughput-limiting side, so widen that one first.
     prefill_nodes: Optional[int] = Field(default=None, ge=1)
     decode_nodes: Optional[int] = Field(default=None, ge=1)
+    # Concurrent sequences per decode engine, i.e. MAX_NUM_SEQS_PER_DECODE_ENGINE. The launcher
+    # derives num_samples_in_parallel from it, so raising one without the other leaves capacity idle.
+    max_num_seqs: Optional[int] = Field(default=None, ge=1)
 
     def env(self) -> Dict[str, str]:
         pairs = {
@@ -255,8 +264,35 @@ class Vllm(BaseModel):
             "VLLM_CONFIG": self.config,
             "NUM_PREFILL_NODES": self.prefill_nodes,
             "NUM_DECODE_NODES": self.decode_nodes,
+            "MAX_NUM_SEQS_PER_DECODE_ENGINE": self.max_num_seqs,
         }
         return {key: str(value) for key, value in pairs.items() if value is not None}
+
+
+class GymEvalProfile(BaseModel):
+    """Settings for ``gym eval profile``, emitted as ``++key=value``.
+
+    Separate from ``gym_eval_run`` because they are different commands: ``allow_partial_rollouts``
+    exists only on the profiler (``reward_profile.py:42``), so putting it under ``gym_eval_run``
+    sends it to collection, where Hydra force-adds it and nothing reads it.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    # Keep groups that have some but not all of their repeats. True by default here because a
+    # sweep this size is normally profiled before its tail finishes.
+    allow_partial_rollouts: bool = True
+    # Labels profiled concurrently, i.e. PROFILE_JOBS.
+    jobs: Optional[int] = Field(default=None, ge=1)
+
+    def env(self) -> Dict[str, str]:
+        out = {"ALLOW_PARTIAL_ROLLOUTS": str(self.allow_partial_rollouts)}
+        if self.jobs is not None:
+            out["PROFILE_JOBS"] = str(self.jobs)
+        return out
+
+    def overrides(self) -> Dict[str, Any]:
+        return dict(self.model_extra or {})
 
 
 class SweepManifest(BaseModel):
@@ -265,14 +301,15 @@ class SweepManifest(BaseModel):
     # Identifies this run and scopes every artifact it writes, so profiling the same blend
     # against a different checkpoint never collides.
     nickname: str
-    # Split the concatenated input into N files. Leave unset to emit one file and run the sweep as
-    # a single invocation.
+    # How many jobs the sweep is split across, i.e. NUM_SHARDS. Nodes = num_shards x
+    # (vllm.prefill_nodes + vllm.decode_nodes). Leave unset for the launcher's default.
     num_shards: Optional[int] = Field(default=None, ge=1)
 
     materialize: Materialize = Field(default_factory=Materialize)
     sbatch: Sbatch = Field(default_factory=Sbatch)
     srun: Srun = Field(default_factory=Srun)
     vllm: Vllm = Field(default_factory=Vllm)
+    gym_eval_profile: GymEvalProfile = Field(default_factory=GymEvalProfile)
     gym_env_start: GymEnvStart = Field(default_factory=GymEnvStart)
     gym_eval_run: GymEvalRun = Field(default_factory=GymEvalRun)
 

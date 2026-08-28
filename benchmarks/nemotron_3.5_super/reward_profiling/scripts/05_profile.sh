@@ -87,6 +87,24 @@ PY_ENVVARS
     fi
 fi
 
+# Container and profile settings the manifest declared, applied only where this environment
+# leaves them unset -- so a standalone profile behaves like the one 03_run_single.sh runs.
+while IFS='=' read -r _k _v; do
+    [[ -n "$_k" ]] || continue
+    [[ -n "${!_k:-}" ]] || export "$_k=$_v"
+done < <(python - "$SWEEP_DIR" <<'PY_MANIFEST'
+import json, sys
+from pathlib import Path
+try:
+    doc = json.loads((Path(sys.argv[1]) / "sweep_report.json").read_text())
+except OSError:
+    doc = {}
+for block in ("srun", "gym_eval_profile"):
+    for key, value in (doc.get(block) or {}).items():
+        print(f"{key}={value}")
+PY_MANIFEST
+)
+
 python -m nemo_gym.sweep split "$SWEEP_DIR"
 
 profile_cmd() {

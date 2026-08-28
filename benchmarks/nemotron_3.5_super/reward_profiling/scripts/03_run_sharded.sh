@@ -57,7 +57,18 @@ for _required in MODEL SWEEP_DIR; do
     fi
 done
 
-NUM_SHARDS=${NUM_SHARDS:-16}
+# num_shards from the manifest when this environment does not set it. Nodes = NUM_SHARDS x
+# (vllm.prefill_nodes + vllm.decode_nodes), so 16 shards at the default 1+2 is 48 nodes.
+_manifest_shards=$(python - "$SWEEP_DIR" <<'PY_SHARDS'
+import json, sys
+from pathlib import Path
+try:
+    print(json.loads((Path(sys.argv[1]) / "sweep_report.json").read_text()).get("num_shards") or "")
+except OSError:
+    print("")
+PY_SHARDS
+)
+NUM_SHARDS=${NUM_SHARDS:-${_manifest_shards:-16}}
 SHARDS_DIR=${SHARDS_DIR:-$SWEEP_DIR/shards}
 RP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_ROOT="$(cd "$RP_DIR/../../.." && pwd)"

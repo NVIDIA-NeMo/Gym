@@ -166,6 +166,11 @@ vllm:
   prefill_nodes: 1
   decode_nodes: 2
 
+# Settings for `gym eval profile`. Kept apart from gym_eval_run because they are different
+# commands -- allow_partial_rollouts exists only on the profiler.
+gym_eval_profile:
+  allow_partial_rollouts: true
+
 # Runtime settings for `gym eval run --no-serve`.
 gym_eval_run:
   num_repeats: 8
