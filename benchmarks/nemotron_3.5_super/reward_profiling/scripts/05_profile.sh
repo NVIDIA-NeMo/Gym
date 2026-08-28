@@ -35,33 +35,14 @@ export SWEEP_DIR VLLM_JOBID="${VLLM_JOBID:-}" CONTAINER="${CONTAINER:-}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 cd "$REPO_ROOT"
 
-# nemo_gym needs its dependencies importable. Inside the eval container that is automatic; on a
-# login node it is not, and the failure is otherwise a bare ModuleNotFoundError from deep inside
-# the CLI. GYM_SITE_PACKAGES points PYTHONPATH at a venv's site-packages if you are not in one.
-if ! python -c "import orjson, nemo_gym" >/dev/null 2>&1; then
-    if [[ -n "${GYM_SITE_PACKAGES:-}" ]]; then
-        export PYTHONPATH="$REPO_ROOT:$GYM_SITE_PACKAGES${PYTHONPATH:+:$PYTHONPATH}"
-    fi
-    if ! python -c "import orjson, nemo_gym" >/dev/null 2>&1; then
-        echo "ERROR: cannot import nemo_gym and its deps." >&2
-        echo "       Run inside the eval container, activate the Gym venv, or set" >&2
-        echo "       GYM_SITE_PACKAGES=<venv>/lib/python3.*/site-packages" >&2
-        exit 2
-    fi
-fi
-
-# The check above only proves nemo_gym loads; `gym eval profile` also pulls nemo_gym.cli.eval
-# into openai_utils, so a stale openai pin passes there and then fails once per label. Fail here.
-if [[ -z "${VLLM_JOBID:-}" ]]; then
-    if ! profile_import_error=$(python -c "import nemo_gym.cli.eval" 2>&1); then
-        echo "ERROR: 'gym eval profile' cannot run here, though nemo_gym itself imports:" >&2
-        echo "$profile_import_error" | tail -3 >&2
-        echo >&2
-        echo "       Usually a stale venv: this branch pins openai==2.44.0 (pyproject.toml)." >&2
-        echo "       Either sync one   -- uv venv && uv sync --extra dev, then re-run" >&2
-        echo "       or use a container -- VLLM_JOBID=<live jobid> CONTAINER=<sqsh> $0" >&2
-        exit 2
-    fi
+# `gym eval profile` is an executable, not a module, so the import check above is not enough:
+# with GYM_SITE_PACKAGES set but no venv active it passes, and then every label fails with
+# "command not found" -- 36 identical errors instead of one. Activate the venv first (README 00).
+if [[ -z "${VLLM_JOBID:-}" ]] && ! command -v gym >/dev/null 2>&1; then
+    echo "ERROR: 'gym' is not on PATH." >&2
+    echo "       source .venv/bin/activate  (see README 00 - Setup), or borrow a container with" >&2
+    echo "       VLLM_JOBID=<live jobid> CONTAINER=<sqsh>." >&2
+    exit 2
 fi
 
 # env.yaml interpolates ${oc.env:VAR} for judge keys. The profiler resolves the same config, so an

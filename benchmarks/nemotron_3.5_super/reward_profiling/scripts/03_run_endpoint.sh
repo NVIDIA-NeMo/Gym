@@ -29,17 +29,18 @@ POLICY_BASE_URL=${POLICY_BASE_URL:?set POLICY_BASE_URL, e.g. http://host:8000/v1
 POLICY_MODEL_NAME=${POLICY_MODEL_NAME:?set POLICY_MODEL_NAME to the served model}
 POLICY_API_KEY=${POLICY_API_KEY:-dummy_api_key}
 
-if ! command -v gym >/dev/null 2>&1; then
-    echo "ERROR: 'gym' is not on PATH. Run this inside the eval container, or activate the Gym venv." >&2
-    exit 2
-fi
-
 NUM_SAMPLES_IN_PARALLEL=${NUM_SAMPLES_IN_PARALLEL:-128}
 SERVERS_READY_TIMEOUT_S=${SERVERS_READY_TIMEOUT_S:-1800}
 ENV_PORT_RANGE_LOW=${ENV_PORT_RANGE_LOW:-20000}
 ENV_PORT_RANGE_HIGH=${ENV_PORT_RANGE_HIGH:-30000}
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 cd "$REPO_ROOT"
+
+if ! command -v gym >/dev/null 2>&1; then
+    echo "ERROR: 'gym' is not on PATH." >&2
+    echo "       source .venv/bin/activate  (see README 00 - Setup), or run in the eval container." >&2
+    exit 2
+fi
 
 env_start_log=$SWEEP_DIR/env_start.log
 : > "$env_start_log"
