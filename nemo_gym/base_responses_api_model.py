@@ -71,15 +71,19 @@ from nemo_gym.server_utils import (
 from nemo_gym.token_id_capture import (
     CaptureContext,
     capture_tokens,
+    current_capture_context,
+    installed_lineage_store,
     installed_token_sink,
     register_call_intent,
     reset_token_sink,
+    resolve_parent,
     set_token_sink,
 )
 
 # The store factory needs Gym's server stack.
 # The leaf package does not re-export it.
 from nemo_gym.token_id_capture.config import token_id_capture_config
+from nemo_gym.token_id_capture.lineage import FileLineageStore
 from nemo_gym.token_id_capture.store import make_token_store
 
 
@@ -88,6 +92,65 @@ logger = logging.getLogger(__name__)
 
 # Stateless; shared by every model server's default /v1/messages handler.
 _ANTHROPIC_CONVERTER = AnthropicConverter()
+
+
+def _request_messages(body: Any) -> list[dict]:
+    """Return the conversation carried by any supported dialect.
+
+    Lineage uses model-authored turns to identify the parent call.
+    Chat and Anthropic use ``messages``.
+    Responses uses ``input``.
+    The request envelope is prepended as a pseudo-turn because it also shapes the prompt.
+    """
+    if body is None:
+        return []
+    getter = body.get if isinstance(body, dict) else lambda key, default=None: getattr(body, key, default)
+    messages = getter("messages", None)
+    if isinstance(messages, list):
+        turns = [m if isinstance(m, dict) else m.model_dump() for m in messages if m is not None]
+    else:
+        items = getter("input", None)
+        turns = (
+            [i if isinstance(i, dict) else i.model_dump() for i in items if i is not None]
+            if isinstance(items, list)
+            else []
+        )
+    return _request_envelope(getter) + turns
+
+
+# This role cannot collide with a dialect role.
+# It is not assistant-authored and does not affect the lookup fingerprint.
+_ENVELOPE_ROLE = "_ng_request_envelope"
+
+
+def _request_envelope(getter: Any) -> list[dict]:
+    """Return prompt-shaping request fields that are not turns.
+
+    Instructions and tools can be siblings of the message list.
+    The chat template renders both into the prompt.
+    Including them prevents prefix reuse across different request envelopes.
+    """
+    instructions = getter("instructions", None)
+    tools = getter("tools", None)
+    if not instructions and not tools:
+        return []
+    envelope = {"instructions": _plain(instructions), "tools": _plain(tools)}
+    return [{"role": _ENVELOPE_ROLE, "content": json.dumps(envelope, sort_keys=True, default=str)}]
+
+
+def _plain(value: Any) -> Any:
+    """Reduce a request field to plain data so equal schemas serialize equally.
+
+    Handlers can expose tools as dictionaries or Pydantic models.
+    Normalization keeps an unchanged schema stable across handlers.
+    """
+    if hasattr(value, "model_dump"):
+        return value.model_dump()
+    if isinstance(value, (list, tuple)):
+        return [_plain(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _plain(item) for key, item in value.items()}
+    return value
 
 
 class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
@@ -109,6 +172,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             capture_config,
             model_server_name=self.config.name,
             global_config_dict=self.server_client.global_config_dict,
+            num_workers=self.config.num_workers,
         )
 
         app.post("/v1/chat/completions")(self.chat_completions_dispatch)
@@ -210,12 +274,22 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # chat_completions() signatures vary across servers: some take a leading `request`, some
         # only `body`. Dispatch on whichever this server declares so the shared dispatch works for
         # all of them.
-        await register_call_intent()
+        # Resolve the parent from the received request before dispatch.
+        # Exact prefix supply and capture share this decision.
+        if current_capture_context() is not None:
+            request_messages = _request_messages(params)
+            await resolve_parent(request_messages)
+            await register_call_intent()
+        else:
+            request_messages = None
         if "request" in inspect.signature(self.chat_completions).parameters:
             completion = await self.chat_completions(request=request, body=params)
         else:
             completion = await self.chat_completions(body=params)
-        await capture_tokens(completion)
+        await capture_tokens(
+            completion,
+            request_messages=request_messages,
+        )
         return completion
 
     async def messages(self, request: Request, body: dict = Body()):
@@ -244,7 +318,14 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # responses() signatures vary across servers: some take a leading `request`, some only
         # `body`. Dispatch on whichever this server declares so the default messages() works for
         # all of them.
-        await register_call_intent()
+        # Resolve the parent from the received request before dispatch.
+        # Exact prefix supply and capture share this decision.
+        if current_capture_context() is not None:
+            request_messages = _request_messages(params)
+            await resolve_parent(request_messages)
+            await register_call_intent()
+        else:
+            request_messages = None
         if "request" in inspect.signature(self.responses).parameters:
             response = await self.responses(request=request, body=params)
         else:
@@ -252,7 +333,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # Capture before streaming dispatch wraps the response.
         # Anthropic mapping drops the token fields.
         # The assembled response still carries them here for every dialect.
-        await capture_tokens(response)
+        await capture_tokens(
+            response,
+            request_messages=request_messages,
+        )
         return response
 
 
@@ -1068,6 +1152,7 @@ class _CaptureMiddleware:
         model_server_name: str | None,
         token_store: Any = None,
         configured_sink: Any = None,
+        lineage_store: Any = None,
         token_capture_enabled: bool = False,
     ) -> None:
         self._app = app
@@ -1077,6 +1162,7 @@ class _CaptureMiddleware:
         self._token_store = token_store
         # Built from token_id_capture.sink, once, in this process.
         self._configured_sink = configured_sink
+        self._lineage_store = lineage_store
         # Capture may have no destination in this process.
         # A framework may stage records from its inference worker.
         # This process still resolves the capture identity.
@@ -1138,7 +1224,12 @@ class _CaptureMiddleware:
         sink_token = None
         if capture_wanted:
             sink_token = set_token_sink(
-                CaptureContext(rollout_id=rollout_id, model_call_id=model_call_id, token_sink=token_sink)
+                CaptureContext(
+                    rollout_id=rollout_id,
+                    model_call_id=model_call_id,
+                    token_sink=token_sink,
+                    lineage_store=self._lineage_store,
+                )
             )
 
         # Training-only capture has no evaluation record.
@@ -1308,6 +1399,7 @@ def install_model_call_capture(
     *,
     model_server_name: str | None = None,
     global_config_dict: Any = None,
+    num_workers: int | None = None,
 ) -> None:
     """Install model-call capture middleware.
 
@@ -1319,22 +1411,36 @@ def install_model_call_capture(
     That path provides a request-scoped token sink.
     The model server records token ids from its complete response.
     Consumers access records through ``TokenSource.freeze``.
-    There is no HTTP token reader.
     """
+    capture_settings = token_id_capture_config(global_config_dict) if global_config_dict is not None else None
     token_store = make_token_store(global_config_dict) if global_config_dict is not None else None
     # Build this sink at app startup.
     # Each uvicorn worker constructs its own sink.
     # Spawned workers do not inherit a launcher-installed sink.
-    configured_sink = (
-        token_id_capture_config(global_config_dict).build_sink() if global_config_dict is not None else None
-    )
-    owned_sinks = [sink for sink in (configured_sink, token_store) if sink is not None]
+    configured_sink = capture_settings.build_sink() if capture_settings is not None else None
+    configured_lineage = capture_settings.build_lineage_store() if capture_settings is not None else None
+    lineage_store = configured_lineage or installed_lineage_store()
+    default_lineage = None
+    if lineage_store is None and token_store is not None:
+        default_lineage = FileLineageStore(token_store.root)
+        lineage_store = default_lineage
+    if capture_settings is not None and capture_settings.enabled and (num_workers or 1) > 1:
+        if lineage_store is None or not lineage_store.is_process_shared():
+            raise ValueError(
+                "token_id_capture with num_workers > 1 requires a process-shared lineage resolver "
+                "over the same backend used by the token sink"
+            )
+    owned_endpoints = [
+        endpoint
+        for endpoint in (configured_sink, token_store, configured_lineage, default_lineage)
+        if endpoint is not None
+    ]
 
-    async def _close_token_sinks() -> None:
-        for sink in owned_sinks:
-            await sink.close()
+    async def _close_capture_endpoints() -> None:
+        for endpoint in owned_endpoints:
+            await endpoint.close()
 
-    if owned_sinks:
+    if owned_endpoints:
         original_lifespan = app.router.lifespan_context
 
         @asynccontextmanager
@@ -1343,7 +1449,7 @@ def install_model_call_capture(
                 async with original_lifespan(application) as state:
                     yield state
             finally:
-                await _close_token_sinks()
+                await _close_capture_endpoints()
 
         app.router.lifespan_context = _capture_lifespan
     app.add_middleware(
@@ -1352,9 +1458,8 @@ def install_model_call_capture(
         model_server_name=model_server_name,
         token_store=token_store,
         configured_sink=configured_sink,
-        token_capture_enabled=(
-            token_id_capture_config(global_config_dict).enabled if global_config_dict is not None else False
-        ),
+        lineage_store=lineage_store,
+        token_capture_enabled=capture_settings.enabled if capture_settings is not None else False,
     )
 
 
@@ -1368,6 +1473,11 @@ def model_call_capture_dirs_from_config(global_config_dict: Any) -> list[Path]:
         return []
     assert config.model_call_capture_dir is not None  # enforced by ModelCallCaptureConfig
     return [config.model_call_capture_dir]
+
+
+def observability_enabled_from_config(global_config_dict: Any) -> bool:
+    """Return the run-wide ``observability_enabled`` flag directly, without going through capture dirs."""
+    return ModelCallCaptureConfig.model_validate(global_config_dict).observability_enabled
 
 
 def _store_for_rollout(rollout_id: str, capture_dirs: list[Path]) -> Optional[CaptureStore]:

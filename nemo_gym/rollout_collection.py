@@ -29,6 +29,7 @@ from time import time
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
+from aiohttp import ClientError
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, Field, field_validator, model_validator
 from tqdm.asyncio import tqdm
@@ -39,6 +40,7 @@ from nemo_gym.base_responses_api_model import (
     clear_model_call_captures_for_rollouts,
     merge_model_call_capture_into_record,
     model_call_capture_dirs_from_config,
+    observability_enabled_from_config,
 )
 from nemo_gym.config_types import (
     BaseNeMoGymCLIConfig,
@@ -50,6 +52,8 @@ from nemo_gym.config_types import (
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
+    AGENT_SERVER_TYPE_KEY_NAME,
+    ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
     ATTEMPT_INDEX_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
@@ -58,7 +62,9 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
     agents_by_resources_server,
+    allowed_agents_for,
     get_global_config_dict,
+    pairing_override_enabled,
 )
 from nemo_gym.path_utils import failures_path_for
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
@@ -66,6 +72,7 @@ from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
     AgentInvocation,
     AgentObservationBundle,
+    ModelCallRef,
     ObservationGap,
     ToolCallObservation,
     TrajectoryModelCall,
@@ -119,7 +126,9 @@ logger = logging.getLogger(__name__)
 # New contract:
 #   - Successes go to the main jsonl (``output_jsonl_fpath``).
 #   - Failures go to a sidecar (``<output_stem>_failures.jsonl``), one row
-#     per attempt, with ``_ng_failure_class`` set.
+#     per attempt, with ``_ng_failure_class`` set. An ``agent_run_error`` or
+#     ``agent_request_failed`` row holds no reward and no response: there was
+#     no rollout. The two differ in whether the agent answered at all.
 #   - ``kill_shaped`` failures (Slurm SIGTERM, Ray actor died, OOM, ...) go
 #     NOWHERE: the absence of a row is the canonical signal. Resume's
 #     set-difference re-dispatches them naturally; per-task timeout bounds
@@ -134,7 +143,12 @@ logger = logging.getLogger(__name__)
 NG_FAILURE_CLASS_KEY = "_ng_failure_class"
 NG_NO_PERSIST_KEY = "_ng_no_persist"
 NG_TERMINAL_KEY = "_ng_failure_terminal"
+AGENT_REQUEST_FAILED_FAILURE_CLASS = "agent_request_failed"
+AGENT_RUN_ERROR_FAILURE_CLASS = "agent_run_error"
+_NO_RESULT_FAILURE_CLASSES = frozenset({AGENT_REQUEST_FAILED_FAILURE_CLASS, AGENT_RUN_ERROR_FAILURE_CLASS})
 NG_TRAJECTORY_KEY = "ng_trajectory"
+NG_PERF_KEY = "ng_perf"
+_NG_ROLLOUT_LATENCY_MS_KEY = "_ng_rollout_latency_ms"
 _MODEL_CALL_PAYLOAD_KEYS = ("request", "response", "request_raw", "response_raw")
 
 _DEFAULT_MAX_ROLLOUT_ATTEMPTS = 3
@@ -383,6 +397,141 @@ def _attach_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> No
         _strip_capture_payloads(result)
 
 
+def _build_ng_perf(result: dict[str, Any], *, rollout_latency_ms: Optional[float]) -> Optional[dict[str, Any]]:
+    """Assemble the per-rollout ``ng_perf`` summary from ``ng_trajectory``.
+
+    Returns ``None`` (``ng_perf`` stays absent) unless at least one reasoning turn was
+    observed: per-turn evidence is needed rather than just raw model-call capture,
+    so a rollout collected with observability disabled produces no ``ng_perf`` at all.
+
+    Token fields are summed only over model calls owned by a reasoning-turn ``AgentInvocation``,
+    excluding compaction calls -- mixing in compaction overhead would skew the token efficiency signal.
+
+    ``num_turns`` counts reasoning turns summed across all invocations (an ``AgentInvocation``
+    is one root-agent or subagent conversation that may span many turns). Each invocation
+    contributes its explicit ``TrajectoryTurn`` count when the harness emits turn records,
+    falling back to its owned model-call count (one assistant response per turn), then to 1
+    (an invocation that ran had at least one turn) -- so hybrid trajectories where only some
+    invocations report turns still count every conversation.
+
+    ``token_observability_coverage`` reports what fraction of those turns actually resolved to a
+    captured call: a turn whose ``ModelCallRef`` was unmatched or ambiguous silently loses its
+    tokens from the sums below, and this is the only signal that it happened.
+    """
+    raw_trajectory = result.get(NG_TRAJECTORY_KEY)
+    if not isinstance(raw_trajectory, dict):
+        return None
+    try:
+        trajectory = TrajectoryRecord.model_validate(raw_trajectory)
+    except Exception:
+        return None
+    if not trajectory.invocations:
+        return None
+
+    # Index captured calls by both identities ModelCallRef supports, mirroring
+    # join_model_call_observations: a ref may carry model_call_id, or the exact
+    # (model_ref, response_id) pair.
+    calls_by_id: dict[str, list[int]] = {}
+    calls_by_response: dict[tuple[str, str, str], list[int]] = {}
+    for index, call in enumerate(trajectory.model_calls):
+        if call.model_call_id:
+            calls_by_id.setdefault(call.model_call_id, []).append(index)
+        call_model_ref = call.response_metadata.model_ref
+        call_response_id = call.response_metadata.response_id
+        if call_model_ref is not None and call_response_id:
+            calls_by_response.setdefault((call_model_ref.type, call_model_ref.name, call_response_id), []).append(
+                index
+            )
+
+    def _match_call_index(ref: ModelCallRef) -> Optional[int]:
+        if ref.model_call_id:
+            candidates = [
+                index
+                for index in calls_by_id.get(ref.model_call_id, [])
+                if (
+                    ref.model_ref is None or ref.model_ref == trajectory.model_calls[index].response_metadata.model_ref
+                )
+                and (
+                    ref.response_id is None
+                    or ref.response_id == trajectory.model_calls[index].response_metadata.response_id
+                )
+            ]
+        elif ref.model_ref is not None and ref.response_id:
+            candidates = calls_by_response.get((ref.model_ref.type, ref.model_ref.name, ref.response_id), [])
+        else:
+            candidates = []
+        return candidates[0] if len(candidates) == 1 else None
+
+    # De-duplicate by matched call *position* rather than model_call_id; the id is
+    # optional because a (model_ref, response_id)-only match has none. One physical call
+    # can't be claimed twice even if two invocations' refs both resolve to it (e.g. a
+    # join_model_call_observations conflict that left a ref attached to its losing
+    # invocation, unremoved, just gap-flagged).
+    seen_positions: set[int] = set()
+    owned_calls = []
+    owned_calls_by_invocation: Counter = Counter()
+    for invocation in trajectory.invocations:
+        for ref in invocation.model_calls:
+            index = _match_call_index(ref)
+            if index is None or index in seen_positions:
+                continue
+            seen_positions.add(index)
+            owned_calls.append(trajectory.model_calls[index])
+            owned_calls_by_invocation[invocation.invocation_id] += 1
+    tool_calls_by_invocation = Counter(tool.invocation_id for tool in trajectory.tool_calls)
+    num_tool_calls = sum(
+        tool_calls_by_invocation.get(invocation.invocation_id, 0) for invocation in trajectory.invocations
+    )
+
+    def _sum_tokens(attr: str) -> Optional[int]:
+        values = [
+            getattr(call.token_stats, attr) for call in owned_calls if getattr(call.token_stats, attr) is not None
+        ]
+        return sum(values) if values else None
+
+    turns_by_invocation = Counter(turn.invocation_id for turn in trajectory.turns)
+    num_turns = sum(
+        turns_by_invocation.get(invocation.invocation_id, 0)
+        or owned_calls_by_invocation.get(invocation.invocation_id, 0)
+        or 1
+        for invocation in trajectory.invocations
+    )
+    ng_perf: dict[str, Any] = {
+        "num_turns": num_turns,
+        "num_tool_calls": num_tool_calls,
+        "token_observability_coverage": min(1.0, len(owned_calls) / num_turns),
+    }
+    for ng_perf_key, token_stats_attr in (
+        ("prompt_tokens", "prompt_tokens"),
+        ("cached_prompt_tokens", "cached_tokens"),
+        ("completion_tokens", "completion_tokens"),
+        ("reasoning_tokens", "reasoning_tokens"),
+    ):
+        value = _sum_tokens(token_stats_attr)
+        if value is not None:
+            ng_perf[ng_perf_key] = value
+
+    if isinstance(rollout_latency_ms, (int, float)):
+        ng_perf["total_latency_ms"] = rollout_latency_ms
+
+    return ng_perf
+
+
+def _attach_ng_perf(result: dict[str, Any], *, observability_enabled: bool) -> None:
+    rollout_latency_ms = result.pop(_NG_ROLLOUT_LATENCY_MS_KEY, None)
+    if not observability_enabled:
+        # ng_perf stays absent entirely when observability is off (OQ4): a caller who
+        # disabled it only wants the final score, not partial/best-effort perf evidence.
+        return
+    try:
+        ng_perf = _build_ng_perf(result, rollout_latency_ms=rollout_latency_ms)
+    except Exception:
+        logger.warning("Could not assemble ng_perf for a rollout.", exc_info=True)
+        return
+    if ng_perf is not None:
+        result[NG_PERF_KEY] = ng_perf
+
+
 def _get_max_rollout_attempts() -> int:
     """Read ``NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`` (positive int) or default to 3."""
     raw = os.environ.get("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS")
@@ -443,6 +592,15 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
     @classmethod
     def _validate_health_check_ignored_checks(cls, value):
         return _normalize_health_check_ignored_checks(value)
+
+    count_failure_classes_as_zero: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Failure classes from the failures sidecar to count in aggregate metrics, e.g. "
+            "['agent_run_error'], so a failed rollout lands in the denominator. A row that carries "
+            "no reward is scored zero for the metrics only; no artifact is changed."
+        ),
+    )
 
     rollout_collection_driver: Optional[str] = Field(
         default=None,
@@ -628,6 +786,85 @@ def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
         "agent_name": agent_ref.get("name") if isinstance(agent_ref, dict) else None,
     }
     return {k: v for k, v in summary.items() if v is not None}
+
+
+# Request failures that are data, not bugs. Anything else still propagates.
+_RUN_FAILURE_ERRORS = (ClientError, orjson.JSONDecodeError, TimeoutError)
+# Statuses something in front of the agent answers with; the agent itself returns 500.
+_AGENT_DID_NOT_RUN_STATUSES = frozenset({429, 502, 503, 504})
+_MAX_FAILURE_BODY_CHARS = 2000
+
+
+def _agent_request_failure_row(exc: BaseException, status: Optional[int]) -> Dict[str, Any]:
+    """One sidecar row for a `/run` call that came back without a result.
+
+    No reward and no response: an infrastructure failure is not a verifier score of zero, and a
+    placeholder would read as real generation data to token capture, aggregation and trainers.
+    The class says whether the rollout ran. A NeMo Gym agent answers 500 when its own handler
+    raises, so any status it answered with means the agent ran and broke, which is also how a
+    model server rejecting the model's own output arrives here. A gateway status, or no reply to
+    take a status from, says nothing about the rollout. Neither class carries a reward; an evaluation that wants the
+    first counted names it in ``count_failure_classes_as_zero``.
+    """
+    agent_ran = status is not None and status not in _AGENT_DID_NOT_RUN_STATUSES
+    body = getattr(exc, "response_content", None)
+    return {
+        NG_FAILURE_CLASS_KEY: (AGENT_RUN_ERROR_FAILURE_CLASS if agent_ran else AGENT_REQUEST_FAILED_FAILURE_CLASS),
+        "_ng_failure_type": type(exc).__name__,
+        "_ng_failure_message": str(exc) or repr(exc),
+        "_ng_failure_http_status": status,
+        "_ng_failure_response_body": _truncated_body(body),
+    }
+
+
+def _truncated_body(body: Optional[bytes]) -> Optional[str]:
+    """Decode at most the kept prefix, so a huge error page is never decoded in full."""
+    if not body:
+        return None
+    text = body[: _MAX_FAILURE_BODY_CHARS * 4].decode("utf-8", "replace")
+    return text[:_MAX_FAILURE_BODY_CHARS] + ("…" if len(body) > _MAX_FAILURE_BODY_CHARS else "")
+
+
+def _failure_rows_counted_as_zero(
+    failures_fpaths: List[Path], failure_classes: List[str], scored_keys: set
+) -> List[Dict[str, Any]]:
+    """Sidecar rows the caller opted to count in the metrics denominator.
+
+    The last attempt of a rollout is the one that stands, so it is selected across every failure
+    class before the wanted classes are picked out. Selecting the other way round would let a
+    stale attempt be counted after a later one landed in a class the caller did not ask for.
+
+    A row that already carries a ``reward`` is counted as it stands. A row that carries none
+    records that no rollout happened, so it is counted as a zero here and only here: the score
+    enters the metric input, never the sidecar or the rollouts jsonl, which keeps the artifacts
+    free of a verdict no verifier gave. A rollout that also succeeded is never counted.
+    """
+    if not failure_classes:
+        return []
+
+    latest_by_key: Dict[Tuple[Any, Any], Dict[str, Any]] = {}
+    for fpath in failures_fpaths:
+        if not fpath.exists():
+            continue
+        with fpath.open("rb") as f:
+            for line_no, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                row = loads_jsonl_line(line, fpath, line_no)
+                latest_by_key[(row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME))] = row
+
+    wanted = set(failure_classes)
+    counted = []
+    for key, row in latest_by_key.items():
+        if key in scored_keys or row.get(NG_FAILURE_CLASS_KEY) not in wanted:
+            continue
+        # Diagnostics stay in the sidecar: an HTTP status is a number, and the aggregator
+        # averages every number it is handed.
+        scored = {k: v for k, v in row.items() if not k.startswith("_ng_failure_")}
+        scored.setdefault("reward", 0.0)
+        counted.append(scored)
+    return counted
 
 
 class RolloutCollectionHelper(BaseModel):
@@ -1003,6 +1240,7 @@ class RolloutCollectionHelper(BaseModel):
         # into its record below (uniform across agents; no-op when capture is off / dirs absent).
         global_config = get_global_config_dict()
         capture_dirs = model_call_capture_dirs_from_config(global_config)
+        observability_enabled = observability_enabled_from_config(global_config)
         # Resolve the training-token store directory once.
         # Training capture is independent of evaluation capture.
         # An empty result disables training-token capture.
@@ -1054,11 +1292,13 @@ class RolloutCollectionHelper(BaseModel):
         agent_name_to_metrics = defaultdict(Counter)
         agent_name_to_counts = defaultdict(int)
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
+        dispatched_per_agent = Counter(counts_left)
         start_time = time()
 
         results_file = output_fpath.open("ab")
         failures_file = failures_fpath.open("ab")
-        for future in self.run_examples(input_rows, semaphore=semaphore):
+        failure_counts: Counter = Counter()
+        for future in self.run_examples(input_rows, semaphore=semaphore, route_failures_to_sidecar=True):
             row, result = await future
 
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
@@ -1075,9 +1315,14 @@ class RolloutCollectionHelper(BaseModel):
                 # Preserve an explicit id on the result just like the indices.
                 result[ROLLOUT_ID_KEY_NAME] = row[ROLLOUT_ID_KEY_NAME]
 
+            no_persist = bool(result.get(NG_NO_PERSIST_KEY))
+            failure_class = result.get(NG_FAILURE_CLASS_KEY)
+            # No rollout happened, so there is nothing to capture, tokenize or average.
+            no_result = failure_class in _NO_RESULT_FAILURE_CLASSES
+
             # Fold this rollout's captured model calls into its record (uniform across agents; no-op
             # when capture is off). Never alters the harness output/reward already in `result`.
-            if capture_dirs:
+            if capture_dirs and not no_result:
                 merge_model_call_capture_into_record(
                     result,
                     capture_dirs,
@@ -1087,12 +1332,17 @@ class RolloutCollectionHelper(BaseModel):
             if "ng_model_call_capture" in result or "ng_agent_observations" in result or NG_TRAJECTORY_KEY in result:
                 _attach_trajectory_record(row, result)
 
+            # Assembles ng_perf from ng_trajectory when observability is enabled;
+            # additionally drops the internal wall-clock timer key so it never
+            # leaks into a persisted rollout.
+            _attach_ng_perf(result, observability_enabled=observability_enabled)
+
             # Freeze and rebuild tokens only for participating agents.
             # This step does not retire the frozen snapshot.
             # It leaves harness output and reward unchanged.
             # Direct callers of run_examples finalize each record themselves.
             token_capture_build = None
-            if token_id_capture_enabled_for_agent(
+            if not no_result and token_id_capture_enabled_for_agent(
                 global_config,
                 (row.get(AGENT_REF_KEY_NAME) or {}).get("name"),
             ):
@@ -1124,9 +1374,6 @@ class RolloutCollectionHelper(BaseModel):
                             "mostly token-less data."
                         )
 
-            no_persist = bool(result.get(NG_NO_PERSIST_KEY))
-            failure_class = result.get(NG_FAILURE_CLASS_KEY)
-
             rows.append(row)
             results.append(result)
             serialized = orjson.dumps(result)
@@ -1138,6 +1385,7 @@ class RolloutCollectionHelper(BaseModel):
             elif failure_class is not None:
                 # Non-kill_shaped failure → sidecar. The aggregator only reads
                 # the main jsonl, so this keeps win-rate uncontaminated.
+                failure_counts[failure_class] += 1
                 failures_file.write(serialized + b"\n")
                 failures_file.flush()
             else:
@@ -1167,9 +1415,13 @@ class RolloutCollectionHelper(BaseModel):
                 counts_left.pop(row[AGENT_REF_KEY_NAME]["name"])
 
             agent_name = result["agent_ref"]["name"]
-            metrics = agent_name_to_metrics[agent_name]
-            metrics.update({k: v for k, v in result.items() if isinstance(v, (int, float)) and not k.startswith("_")})
-            agent_name_to_counts[agent_name] += 1
+            if not no_result:
+                # An infrastructure failure is not a score of zero, and not a sample either.
+                metrics = agent_name_to_metrics[agent_name]
+                metrics.update(
+                    {k: v for k, v in result.items() if isinstance(v, (int, float)) and not k.startswith("_")}
+                )
+                agent_name_to_counts[agent_name] += 1
 
             current_pct = 100 * len(results) / len(input_rows)
             if pcts_to_print and current_pct >= pcts_to_print[0]:
@@ -1188,7 +1440,7 @@ class RolloutCollectionHelper(BaseModel):
 """
                 for agent_name in sorted(agent_name_to_metrics):
                     metrics = agent_name_to_metrics[agent_name]
-                    agent_total_samples = counts_left[agent_name] + agent_name_to_counts[agent_name]
+                    agent_total_samples = dispatched_per_agent[agent_name]
                     agent_sample_pct = 100 * agent_name_to_counts[agent_name] / agent_total_samples
                     avg_metrics = {k: v / agent_name_to_counts[agent_name] for k, v in metrics.items()}
                     print_str += f"""Found {agent_name_to_counts[agent_name]} / {agent_total_samples} ({agent_sample_pct:.2f}%) rollouts for `{agent_name}`.
@@ -1211,6 +1463,19 @@ class RolloutCollectionHelper(BaseModel):
 
         results_file.close()
         failures_file.close()
+
+        coverage = ""
+        if failure_counts:
+            coverage = (
+                f"\nCoverage: {sum(failure_counts.values())} of {len(input_rows)} dispatched rollouts failed "
+                f"{dict(failure_counts)}, {len(persisted_results)} completed in total. "
+                f"Failure rows: {failures_fpath}"
+            )
+            if input_rows and not persisted_results:
+                raise RuntimeError(
+                    f"None of the {len(input_rows)} dispatched rollouts produced a result "
+                    f"{dict(failure_counts)}. Inspect {failures_fpath}; the run has no score to report."
+                )
         if owned_token_source is not None:
             await owned_token_source.close()
 
@@ -1235,14 +1500,23 @@ class RolloutCollectionHelper(BaseModel):
             aggregate_metrics_fpath = None
         else:
             print("Computing aggregate metrics")
+            counted = _failure_rows_counted_as_zero(
+                [failures_fpath],
+                config.count_failure_classes_as_zero,
+                {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in persisted_results},
+            )
+            if config.count_failure_classes_as_zero:
+                print(
+                    f"Counting {len(counted)} failure row(s) as scored zeros: {config.count_failure_classes_as_zero}"
+                )
             aggregate_metrics_fpath = await self._call_aggregate_metrics(
-                persisted_results, persisted_rows, output_fpath
+                persisted_results + counted, persisted_rows + counted, output_fpath
             )
 
         print(f"""Finished rollout collection! View results at:
 Fully materialized inputs: {config.materialized_jsonl_fpath}
 Rollouts: {output_fpath}
-Aggregate metrics: {aggregate_metrics_fpath}""")
+Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         if not config.disable_aggregation and not config.disable_health_check:
             from nemo_gym.rollout_health import format_health_report, run_health_checks
@@ -1322,7 +1596,10 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
                 "agent_metrics": agg_result.agent_metrics,
                 "key_metrics": agg_result.key_metrics,
                 "group_level_metrics": agg_result.group_level_metrics,
+                "repeat_level_metrics": agg_result.repeat_level_metrics,
             }
+            if agg_result.perf_summary is not None:
+                agent_entry["perf_summary"] = agg_result.perf_summary
             return agent_entry
 
         all_agent_metrics: List[Dict] = []
@@ -1469,11 +1746,52 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
             "Include the agent's config in the run, or re-route with +agent_map/+agent_name."
         )
 
+    @staticmethod
+    def _validate_agent_pairings(examples: List[Dict], global_config_dict: DictConfig) -> None:
+        """Fail before dispatch when a row points to agent incompatible with the resources server it runs on."""
+        if pairing_override_enabled(global_config_dict):
+            return
+        routes = {
+            (name, row.get(TASK_SOURCE_KEY_NAME))
+            for row in examples
+            if (name := (row.get(AGENT_REF_KEY_NAME) or {}).get("name")) is not None
+        }
+        rejected: Dict[Tuple[str, str], str] = {}
+        for agent, task_source in routes:
+            # indexing by name is safe because we already validated the agent names
+            agents = global_config_dict[agent][AGENT_SERVER_TYPE_KEY_NAME]
+            if not agents:
+                continue
+            # this is only one agent type per agent instance and the check it elsewhere
+            agent_type = str(next(iter(agents)))
+            reference = OmegaConf.select(agents[agent_type], "resources_server")
+            bound = reference.get("name") if isinstance(reference, DictConfig) else None
+            for verifier, relation in (
+                (task_source, "their task_source"),
+                (bound, "the resources server it runs against"),
+            ):
+                allowed = allowed_agents_for(global_config_dict, verifier)
+                if allowed is None or agent_type in allowed:
+                    continue
+                rejected[(agent, str(verifier))] = (
+                    f"  - rows routed to '{agent}' run '{agent_type}', but {relation} "
+                    f"'{verifier}' accepts only: {', '.join(allowed)}"
+                )
+        if not rejected:
+            return
+        raise ValueError(
+            "Rows would be scored by a verifier that does not accept the agent running them:\n"
+            + "\n".join(line for _, line in sorted(rejected.items()))
+            + "\n\nRoute these rows to an agent running one of the accepted types, or pass "
+            f"--allow-unsupported-pairing (or set {ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME}=1) to bypass the check."
+        )
+
     def run_examples(
         self,
         examples: List[Dict],
         head_server_config: Optional[BaseServerConfig] = None,
         semaphore: Optional[Semaphore] = None,
+        route_failures_to_sidecar: bool = False,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
@@ -1481,18 +1799,30 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         Rows are dispatched as given: task_sources are resolved and agent names validated here,
         but run-level knobs (``agent_map``, ``fan_out``, ``num_repeats``) are NOT applied — call
         ``preprocess_examples`` first if you need them.
+
+        ``route_failures_to_sidecar`` is set by managed collection (``run_from_config``), where a
+        failed `/run` becomes a failure row instead of ending every rollout still in flight.
+        Direct callers such as NeMo-RL leave it off and keep receiving the exception.
         """
         server_client = self.setup_server_client(head_server_config)
         self.resolve_task_sources(examples, server_client.global_config_dict)
         self._validate_agent_names(examples, server_client.global_config_dict)
+        self._validate_agent_pairings(examples, server_client.global_config_dict)
         semaphore = semaphore or nullcontext()
 
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:
-                res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
+                started_at = time()
+                res = None
                 try:
+                    res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
                     await raise_for_status(res)
-                except Exception:
+                    result = await get_response_json(res)
+                    # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
+                    # from summed model-call/tool latencies to account for additional overhead.
+                    result[_NG_ROLLOUT_LATENCY_MS_KEY] = (time() - started_at) * 1000
+                    return row, result
+                except Exception as e:
                     if is_global_aiohttp_client_request_debug_enabled():
                         print(
                             "[rollout_collection] /run failed "
@@ -1500,8 +1830,14 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
                             f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
                             flush=True,
                         )
-                    raise
-                return row, await get_response_json(res)
+                    if not route_failures_to_sidecar or not isinstance(e, _RUN_FAILURE_ERRORS):
+                        raise
+                    if res is not None:
+                        res.release()
+                    # The status comes from the error when it carries one, and from the response
+                    # when the body was the part that failed.
+                    status = getattr(e, "status", None) or getattr(res, "status", None)
+                    return row, _agent_request_failure_row(e, status)
 
         return tqdm.as_completed(
             map(_post_subroutine, examples),
@@ -1554,6 +1890,14 @@ class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
     merge_shards: bool = Field(
         default=True,
         description="Concatenate the matched shard JSONLs into output_jsonl_fpath alongside the metrics file.",
+    )
+    count_failure_classes_as_zero: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Failure classes from the failures sidecar to count in aggregate metrics, e.g. "
+            "['agent_run_error'], so a failed rollout lands in the denominator. A row that carries "
+            "no reward is scored zero for the metrics only; no artifact is changed."
+        ),
     )
     disable_health_check: bool = Field(
         default=False,
@@ -1629,9 +1973,18 @@ class RolloutAggregationHelper(BaseModel):
                 for r in results:
                     out.write(orjson.dumps(r) + b"\n")
 
+        counted = _failure_rows_counted_as_zero(
+            [failures_path_for(Path(path)) for path in input_paths],
+            config.count_failure_classes_as_zero,
+            {(r.get(TASK_INDEX_KEY_NAME), r.get(ROLLOUT_INDEX_KEY_NAME)) for r in results},
+        )
+        if config.count_failure_classes_as_zero:
+            print(f"Counting {len(counted)} failure row(s) as scored zeros: {config.count_failure_classes_as_zero}")
+
         # `_call_aggregate_metrics` only inspects each row's AGENT_REF_KEY_NAME, which results already carry.
         helper = RolloutCollectionHelper()
-        aggregate_metrics_fpath = await helper._call_aggregate_metrics(results, results, output_fpath)
+        scored = results + counted
+        aggregate_metrics_fpath = await helper._call_aggregate_metrics(scored, scored, output_fpath)
 
         print(f"""Finished rollout aggregation! View results at:
 Merged rollouts: {output_fpath if config.merge_shards else "<not merged>"}

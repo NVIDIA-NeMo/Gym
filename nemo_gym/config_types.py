@@ -180,6 +180,18 @@ class AlmostServerError(ConfigError, ValueError):
     `error_on_almost_servers` is set, so the run is aborted."""
 
 
+class AgentCompositionError(ConfigError, ValueError):
+    """A standalone agent config could not be composed onto the merged config's agent instances."""
+
+
+class UnsupportedAgentPairingError(ConfigError, ValueError):
+    """The selected agent is not one the environment's resources server declares support for."""
+
+
+class UnsupportedAgentOverrideError(ConfigError, ValueError):
+    """A command line override configures an agent that no instance ends up running."""
+
+
 ########################################
 # Dataset configs for handling and upload/download
 ########################################
@@ -857,6 +869,18 @@ class AggregateMetrics(BaseModel):
     key_metrics: Dict[str, Any] = Field(
         default_factory=dict,
         description="Headline metrics for this benchmark. Subset of agent_metrics.",
+    )
+    perf_summary: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Cross-rollout efficiency stats aggregated from each rollout's ng_perf field. "
+            "Absent (not null-valued keys) when no rollout in this batch carried ng_perf, "
+            "i.e. observability was disabled for the whole run."
+        ),
+    )
+    repeat_level_metrics: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Per-repeat summary stats (one dict per rollout_index).",
     )
 
 
