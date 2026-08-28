@@ -47,10 +47,10 @@ if ! flock -n "$_lock_fd"; then
     exit 2
 fi
 
-# Not CONTAINER: this script never uses it, it just passes the environment through to
-# 03_run_single.sh, which resolves it from the shard's sweep_report.json if the manifest names one.
-# Requiring it here would reject a manifest that supplies its own container.
-for _required in MODEL SWEEP_DIR; do
+# Only SWEEP_DIR. This script uses neither MODEL nor CONTAINER -- it passes the environment
+# through to 03_run_single.sh, which resolves both from the shard's sweep_report.json when the
+# manifest names them. Requiring them here rejects a manifest that supplies its own.
+for _required in SWEEP_DIR; do
     if [[ -z "${!_required:-}" ]]; then
         echo "ERROR: $_required is required. See the header of $0." >&2
         exit 2
