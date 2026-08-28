@@ -951,6 +951,10 @@ Full body: {json.dumps(exc.body, indent=4)}
             timeout_worker_healthcheck=global_config_dict.get(UVICORN_TIMEOUT_WORKER_HEALTHCHECK, 30),
             # Ensure server keepalive > client keepalive
             timeout_keep_alive=30,
+            # Parse HTTP with httptools (C bindings to llhttp) instead of pure-Python h11.
+            # uvicorn's "auto" only picks httptools when the wheel is importable and falls
+            # back to h11 silently; naming it makes a missing wheel fail loudly at startup.
+            http="httptools",
             access_log=uvicorn_logging_cfg.uvicorn_logging_show_200_ok,
         )
 
