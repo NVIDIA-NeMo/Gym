@@ -220,7 +220,22 @@ def materialize(
     output_fpath = out_dir / "rollouts.jsonl"
     materialized_fpath = output_fpath.with_stem(output_fpath.stem + "_materialized_inputs").with_suffix(".jsonl")
     if materialized_fpath.exists() and not overwrite:
-        raise SweepValidationError(f"{materialized_fpath} already exists. Pass overwrite=True to replace it.")
+        raise SweepValidationError(
+            f"{materialized_fpath} already exists. Re-run with --overwrite to replace it, or use a different nickname."
+        )
+
+    # Task indices are positional: they come from cumulative per-entry row counts, so adding an
+    # entry, changing a limit, or passing --limit-per-entry renumbers every task after that point.
+    # Rollouts collected under the old numbering would then be matched by --resume to different
+    # rows -- silently, since (task, rollout) pairs still look valid. Refuse rather than clear:
+    # those rollouts are GPU-hours, and deleting them should be the caller's explicit choice.
+    existing_rollouts = out_dir / "rollouts.jsonl"
+    if overwrite and existing_rollouts.is_file() and existing_rollouts.stat().st_size > 0:
+        raise SweepValidationError(
+            f"{existing_rollouts} already holds collected rollouts. Re-materializing renumbers "
+            f"_ng_task_index, so --resume would match those rollouts to the wrong rows. Use a new "
+            f"nickname, or delete that file first if the entries, limits and data are unchanged."
+        )
 
     repeats_by_entry = {
         entry.label: (entry.num_repeats if entry.num_repeats is not None else manifest.num_repeats)

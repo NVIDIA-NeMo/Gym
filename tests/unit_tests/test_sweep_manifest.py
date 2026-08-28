@@ -23,9 +23,17 @@ from pathlib import Path
 
 import pytest
 import yaml
+from pydantic import ValidationError as PydanticValidationError
 
 from nemo_gym.sweep.build import build_sweep, container_config
-from nemo_gym.sweep.manifest import SweepManifest, SweepValidationError, load_manifest, validate_manifest
+from nemo_gym.sweep.manifest import (
+    GymEvalRun,
+    Sbatch,
+    SweepManifest,
+    SweepValidationError,
+    load_manifest,
+    validate_manifest,
+)
 from nemo_gym.sweep.materialize import materialize
 from nemo_gym.sweep.shard import SweepShardError, merge_shards, reshard, shard_sweep
 from nemo_gym.sweep.split import SweepSplitError, split_sweep
@@ -1007,3 +1015,69 @@ def test_limit_larger_than_the_dataset_is_not_an_error(tmp_path):
     build = _limit_fixture(tmp_path, rows_per_dataset=4)
     materialize(build(limit_per_entry=50), tmp_path / "out")
     assert len(_rows_by_label(tmp_path / "out")["a"]) == 4
+
+
+# --- footguns that silently produce wrong numbers ---------------------------------------
+
+
+def test_rematerializing_over_collected_rollouts_is_refused(tmp_path):
+    """Task indices are positional, so a re-materialize renumbers them and --resume would match
+    already-collected rollouts to different rows -- with no error, since the keys stay valid."""
+    build = _limit_fixture(tmp_path)
+    materialize(build(limit_per_entry=5), tmp_path / "out")
+    rollouts = tmp_path / "out" / "t" / "rollouts.jsonl"
+    rollouts.write_text(json.dumps({"_ng_task_index": 0, "_ng_rollout_index": 0}) + "\n")
+
+    with pytest.raises(SweepValidationError, match="renumbers"):
+        materialize(build(limit_per_entry=10), tmp_path / "out", overwrite=True)
+
+
+def test_rematerializing_over_an_empty_rollouts_file_is_allowed(tmp_path):
+    """materialize touches an empty rollouts.jsonl itself, so that must not block a re-run."""
+    build = _limit_fixture(tmp_path)
+    materialize(build(limit_per_entry=5), tmp_path / "out")
+    materialize(build(limit_per_entry=10), tmp_path / "out", overwrite=True)
+    assert len(_rows_by_label(tmp_path / "out")["a"]) == 10
+
+
+def test_gym_eval_run_rejects_a_near_miss_key():
+    """`num_repeat` would leave num_repeats at 1 and forward a ++override nothing reads, giving a
+    reward profile with no spread."""
+    with pytest.raises(PydanticValidationError, match="did you mean 'num_repeats'"):
+        GymEvalRun.model_validate({"num_repeat": 8})
+
+
+def test_gym_eval_run_still_accepts_unrelated_keys():
+    """The passthrough is the point; only near-misses of a declared field are rejected."""
+    assert GymEvalRun.model_validate({"num_samples_in_parallel": 512}).overrides() == {"num_samples_in_parallel": 512}
+
+
+def test_sbatch_rejects_keys_that_are_not_shell_identifiers():
+    """Keys are upcased into SBATCH_<KEY>; a hyphen makes export fail inside a process
+    substitution, with nothing pointing back at the manifest."""
+    with pytest.raises(PydanticValidationError, match="not a valid shell identifier"):
+        Sbatch.model_validate({"cpus-per-task": 4})
+
+
+def test_validate_checks_the_agent_that_actually_dispatches(tmp_path):
+    """agent_ref_override rewrites every row before dispatch, so the override is the name that has
+    to be declared -- checking `agent` lets a typo through to run time."""
+    _write_config(tmp_path, "real.yaml", "real_agent")
+    data = tmp_path / "d.jsonl"
+    data.write_text(json.dumps({"agent_ref": {"name": "real_agent"}}) + "\n")
+    manifest = SweepManifest.model_validate(
+        {
+            "nickname": "t",
+            "entries": [
+                {
+                    "label": "a",
+                    "agent": "real_agent",
+                    "configs": ["real.yaml"],
+                    "data": str(data),
+                    "agent_ref_override": "typo_agent",
+                }
+            ],
+        }
+    )
+    with pytest.raises(SweepValidationError, match="agent_ref_override 'typo_agent'"):
+        validate_manifest(manifest, repo_root=str(tmp_path), check_data=False)

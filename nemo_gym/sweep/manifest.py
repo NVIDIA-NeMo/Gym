@@ -37,6 +37,19 @@ class SweepValidationError(Exception):
     """Raised when a manifest is internally inconsistent or disagrees with its data."""
 
 
+def _within_one_edit(a: str, b: str) -> bool:
+    """True when a and b differ by one insertion, deletion or substitution, and are not equal."""
+    if a == b or abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        return sum(x != y for x, y in zip(a, b)) == 1
+    short, long = (a, b) if len(a) < len(b) else (b, a)
+    for i in range(len(long)):
+        if short == long[:i] + long[i + 1 :]:
+            return True
+    return False
+
+
 class SweepEntry(BaseModel):
     """One (dataset, config) pair.
 
@@ -110,6 +123,22 @@ class GymEvalRun(BaseModel):
     # happens to need too.
     num_repeats: int = Field(default=1, ge=1)
 
+    @model_validator(mode="after")
+    def _reject_near_miss_keys(self) -> "GymEvalRun":
+        """Catch `num_repeat` for `num_repeats`, which otherwise costs a whole run.
+
+        Extra keys are forwarded verbatim as ``++key=value`` and Hydra force-adds unknown ones
+        without complaint, so a one-character typo leaves the real field at its default and the
+        override lands somewhere nothing reads. For num_repeats that means a reward profile with
+        one rollout per task -- no spread, which is the entire point of the run.
+        """
+        known = set(type(self).model_fields)
+        for key in self.model_extra or {}:
+            near = [k for k in known if _within_one_edit(key, k)]
+            if near:
+                raise ValueError(f"gym_eval_run has '{key}'; did you mean '{near[0]}'?")
+        return self
+
     def overrides(self) -> Dict[str, Any]:
         """Everything except num_repeats, which the launcher derives from the sweep report."""
         return dict(self.model_extra or {})
@@ -152,6 +181,18 @@ class Sbatch(BaseModel):
     """
 
     model_config = ConfigDict(extra="allow")
+
+    @model_validator(mode="after")
+    def _keys_are_shell_identifiers(self) -> "Sbatch":
+        """``cpus-per-task`` would become ``SBATCH_CPUS-PER-TASK``, which export rejects.
+
+        The launcher exports these inside a process substitution, so the failure surfaces as a bare
+        "not a valid identifier" with no mention of the manifest.
+        """
+        for key in self.model_extra or {}:
+            if not key.replace("_", "").isalnum():
+                raise ValueError(f"sbatch key '{key}' is not a valid shell identifier; use underscores")
+        return self
 
     def env(self) -> Dict[str, str]:
         return {f"SBATCH_{key.upper()}": str(value) for key, value in (self.model_extra or {}).items()}
@@ -323,10 +364,18 @@ def validate_manifest(
                 found_all_configs = False
                 continue
             declared |= _declared_top_level_keys(Path(config_path))
-        if found_all_configs and entry.agent not in declared:
+        # effective_agent, not agent: agent_ref_override rewrites every row before dispatch, so
+        # the override is the name that has to exist. Checking `agent` passes a typo'd override and
+        # fails the whole entry at run time instead.
+        if found_all_configs and entry.effective_agent not in declared:
+            which = (
+                f"agent_ref_override '{entry.agent_ref_override}'"
+                if entry.agent_ref_override
+                else f"agent '{entry.agent}'"
+            )
             errors.append(
-                f"[{entry.label}] agent '{entry.agent}' is not declared by any of its configs "
-                f"({', '.join(entry.configs)}). Add the config that defines it, or fix the agent name."
+                f"[{entry.label}] {which} is not declared by any of its configs "
+                f"({', '.join(entry.configs)}). Add the config that defines it, or fix the name."
             )
 
         if not check_data:
