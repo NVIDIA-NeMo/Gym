@@ -31,6 +31,7 @@ from nemo_gym.reward_profile import (
 )
 from resources_servers.bird_sql.eval_utils import execute_and_compare
 from resources_servers.bird_sql.setup_bird_sql import ensure_bird_sql
+from resources_servers.bird_sql.task_data import TaskData
 
 
 logger = logging.getLogger(__name__)
@@ -92,14 +93,8 @@ class BirdSqlResourcesServerConfig(BaseResourcesServerConfig):
     sql_execution_timeout_s: float = 30.0
 
 
-class BirdSqlVerifyRequest(BaseVerifyRequest):
+class BirdSqlVerifyRequest(TaskData, BaseVerifyRequest):
     model_config = ConfigDict(extra="allow")
-
-    question: str
-    gt_sql: str
-    db_id: str
-    difficulty: Optional[str] = None
-    id: Optional[int] = None
 
 
 class BirdSqlVerifyResponse(BaseVerifyResponse):

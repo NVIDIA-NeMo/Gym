@@ -51,6 +51,7 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from resources_servers.math_proof_judgement.task_data import TaskData
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +126,7 @@ class MathProofJudgementConfig(BaseResourcesServerConfig):
     """
 
 
-class MathProofJudgementRunRequest(BaseRunRequest):
+class MathProofJudgementRunRequest(TaskData, BaseRunRequest):
     """Run-time fields carried through the verify response for metrics.
 
     Besides the gold ``expected_judgement`` (always required), optional fields
@@ -133,11 +134,6 @@ class MathProofJudgementRunRequest(BaseRunRequest):
     """
 
     model_config = ConfigDict(extra="allow")
-
-    expected_judgement: Optional[str] = None
-    problem_id: Optional[str] = None
-    problem: Optional[str] = None
-    proof: Optional[str] = None
 
 
 class MathProofJudgementVerifyRequest(MathProofJudgementRunRequest, BaseVerifyRequest):

@@ -38,7 +38,12 @@ from resources_servers.indirect_prompt_injection.it_helpdesk_tools import TOOL_H
 from resources_servers.indirect_prompt_injection.legal_tools import TOOL_HANDLERS as LEGAL_HANDLERS
 from resources_servers.indirect_prompt_injection.logistics_tools import TOOL_HANDLERS as LOGISTICS_HANDLERS
 from resources_servers.indirect_prompt_injection.real_estate_tools import TOOL_HANDLERS as REAL_ESTATE_HANDLERS
+from resources_servers.indirect_prompt_injection.task_data import InjectionSpecData, TaskData
 from resources_servers.indirect_prompt_injection.verifier import check_injection_followed, extract_function_calls
+
+
+# Historical import name for the spec model, now defined in task_data.py.
+InjectionSpec = InjectionSpecData
 
 
 TOOL_HANDLERS = {
@@ -61,19 +66,6 @@ class IPIResourcesServerConfig(BaseResourcesServerConfig):
     pass
 
 
-class InjectionSpec(BaseModel):
-    model_config = ConfigDict(extra="allow")
-    goal: str
-    target_tool: str
-    target_args: Dict[str, Any]
-    verification_type: str
-    attack_strategy: str
-    attack_difficulty: str
-    vector: str
-    injection_text: str
-    category: str
-
-
 class IPISeedSessionRequest(BaseSeedSessionRequest):
     environment: Dict[str, Any]
     model_config = ConfigDict(extra="allow")
@@ -88,9 +80,7 @@ class ToolCallResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
-class IPIVerifyRequest(BaseVerifyRequest):
-    injection: InjectionSpec
-    required_tools: List[str] = Field(default_factory=list)
+class IPIVerifyRequest(TaskData, BaseVerifyRequest):
     model_config = ConfigDict(extra="allow")
 
 

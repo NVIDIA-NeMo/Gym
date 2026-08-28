@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import re
 from enum import Enum
-from typing import Any, List, Optional
+from typing import List, Optional
 
 from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict, Field
@@ -50,6 +50,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from resources_servers.multichallenge.task_data import TaskData
 
 
 class AggregationMode(str, Enum):
@@ -133,16 +134,10 @@ Analyze carefully, then respond with exactly [[YES]] or [[NO]] on the last line.
     no_label: str = Field(default="[[NO]]", description="Label indicating NO verdict")
 
 
-class MultiChallengeRunRequest(BaseRunRequest):
+class MultiChallengeRunRequest(TaskData, BaseRunRequest):
     """Run request payload for MultiChallenge tasks."""
 
     model_config = ConfigDict(extra="allow")
-
-    uuid: Optional[str | int] = None
-    task_id: Optional[int] = None
-    rubric: Optional[List[dict]] = None
-    context: Optional[str] = None
-    metadata: Optional[dict[str, Any]] = None
 
 
 class MultiChallengeVerifyRequest(MultiChallengeRunRequest, BaseVerifyRequest):

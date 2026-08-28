@@ -16,7 +16,7 @@ import json
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -39,6 +39,7 @@ from resources_servers.math_advanced_calculations.math_advanced_calculations_too
     sin,
     subtract,
 )
+from resources_servers.math_advanced_calculations.task_data import TaskData
 
 
 class MultiVerseMathHardResourcesServerConfig(BaseResourcesServerConfig):
@@ -56,11 +57,8 @@ class MultiVerseMathHardResponse(BaseModel):
     solution: float
 
 
-class MultiVerseMathHardVerifyRequest(BaseVerifyRequest):
-    ground_truth: list[float] | str
-    id: int
-    depth: int
-    breadth: int
+class MultiVerseMathHardVerifyRequest(TaskData, BaseVerifyRequest):
+    model_config = ConfigDict(extra="ignore")
 
 
 class MultiVerseMathHardVerifyResponse(BaseVerifyResponse):

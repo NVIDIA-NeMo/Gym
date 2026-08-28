@@ -67,6 +67,7 @@ from nemo_gym.reward_profile import (
     compute_subset_metrics,
     highest_k_metrics,
 )
+from resources_servers.arena_judge.task_data import TaskData
 
 
 logger = logging.getLogger(__name__)
@@ -135,7 +136,7 @@ class ArenaJudgeConfig(BaseResourcesServerConfig):
     sanitize_generations: bool = False
 
 
-class ArenaJudgeRunRequest(BaseRunRequest):
+class ArenaJudgeRunRequest(TaskData, BaseRunRequest):
     """Run request with per-task fields flowed through from the JSONL row.
 
     The JSONL rows produced by ``benchmarks/arena_hard_v2/prepare.py``
@@ -144,11 +145,6 @@ class ArenaJudgeRunRequest(BaseRunRequest):
     """
 
     model_config = ConfigDict(extra="allow")
-
-    question: Optional[str] = None
-    baseline_answer: Optional[str] = None
-    category: Optional[str] = None
-    uid: Optional[str] = None
 
 
 class ArenaJudgeVerifyRequest(ArenaJudgeRunRequest, BaseVerifyRequest):

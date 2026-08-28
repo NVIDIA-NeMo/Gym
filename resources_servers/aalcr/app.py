@@ -15,6 +15,8 @@
 
 from typing import Any, Dict, Optional
 
+from pydantic import ConfigDict
+
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
@@ -24,6 +26,7 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.judge import JudgeError, call_judge
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from resources_servers.aalcr.task_data import TaskData
 
 
 class AalcrResourcesServerConfig(BaseResourcesServerConfig):
@@ -31,16 +34,8 @@ class AalcrResourcesServerConfig(BaseResourcesServerConfig):
     judge_responses_create_params_overrides: Dict[str, Any]
 
 
-class AALCRVerifyRequest(BaseVerifyRequest):
-    document_category: str
-    document_set_id: str
-    question_id: int
-    question: str
-    answer: str
-    data_source_filenames: str
-    data_source_urls: str
-    input_tokens: int
-    input_tokens_band: str
+class AALCRVerifyRequest(TaskData, BaseVerifyRequest):
+    model_config = ConfigDict(extra="ignore")
 
 
 class AALCRVerifyResponse(AALCRVerifyRequest, BaseVerifyResponse):

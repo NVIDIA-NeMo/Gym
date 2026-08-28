@@ -55,6 +55,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from resources_servers.simpleqa.task_data import TaskData
 
 
 _DEFAULT_JUDGE_PROMPT_PATH = str(Path(__file__).parent / "prompts" / "judge.yaml")
@@ -133,12 +134,11 @@ class SimpleQAConfig(BaseResourcesServerConfig):
     )
 
 
-class SimpleQARunRequest(BaseRunRequest):
+class SimpleQARunRequest(TaskData, BaseRunRequest):
     model_config = ConfigDict(extra="allow")
 
     id: Optional[Union[int, str]] = None
     question: Optional[str] = None
-    expected_answer: Optional[str] = None
 
 
 class SimpleQAVerifyRequest(SimpleQARunRequest, BaseVerifyRequest):

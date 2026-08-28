@@ -13,9 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import re
-from typing import Any, Optional
+from typing import Optional
 
 from fastapi import FastAPI
+from pydantic import ConfigDict
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -24,6 +25,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from resources_servers.gui_coordinate.task_data import TaskData
 
 
 POINT_PATTERN = re.compile(r"<point>\s*\[?\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)\s*\]?\s*</point>")
@@ -33,10 +35,8 @@ class GuiCoordinateResourcesServerConfig(BaseResourcesServerConfig):
     pass
 
 
-class GuiCoordinateRunRequest(BaseRunRequest):
-    expected_answer: str  # "x,y" normalized 0-1 coordinates
-    max_dist: float = 0.15
-    metadata: Optional[dict[str, Any]] = None
+class GuiCoordinateRunRequest(TaskData, BaseRunRequest):
+    model_config = ConfigDict(extra="ignore")
 
 
 class GuiCoordinateVerifyRequest(GuiCoordinateRunRequest, BaseVerifyRequest):

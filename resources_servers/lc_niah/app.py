@@ -46,6 +46,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from resources_servers.lc_niah.task_data import TaskData
 
 
 class OverlapMetricRule(str, Enum):
@@ -67,10 +68,8 @@ class LCNIAHResourcesServerConfig(BaseResourcesServerConfig):
     overlap_grading_rule: OverlapGradingRule = OverlapGradingRule.MULTIPLY
 
 
-class LCNIAHRunRequest(BaseRunRequest):
-    model_config = ConfigDict(extra="allow")
-
-    expected_answer: str
+class LCNIAHRunRequest(TaskData, BaseRunRequest):
+    pass
 
 
 class LCNIAHVerifyRequest(LCNIAHRunRequest, BaseVerifyRequest):
