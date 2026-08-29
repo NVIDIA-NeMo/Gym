@@ -65,6 +65,8 @@ class LineageMatch:
     model_call_id: str
     cumulative_token_ids: tuple[int, ...]
     digest: str
+    staging_chain: tuple[str, ...] = ()
+    prev_len: int = 0
 
 
 @dataclass(frozen=True)
@@ -112,6 +114,26 @@ class LineageStore(Protocol):
         """Return whether separate model-server workers share committed entries."""
         ...
 
+    async def record(
+        self,
+        rollout_id: str,
+        model_call_id: str,
+        request_items: list[dict],
+        response_items: list[dict],
+        cumulative_token_ids: list[int],
+        digest: str,
+        *,
+        staging_chain: list[str] | None = None,
+    ) -> None:
+        """Publish a completed call for later request-time resolution.
+
+        Request and response items retain their wire representations.
+        Repeating a model call ID with the same payload is a no-op.
+        Reusing a model call ID with different data must fail.
+        Return only after every serving worker can read the record.
+        """
+        ...
+
     async def close(self) -> None:
         """Release resources. Idempotent.
 
@@ -128,7 +150,8 @@ class CaptureLedger(LineageStore, Protocol):
     the token-free ``CallRecord`` custody columns (passed to ``record`` as
     keyword arguments: ``parent_call_id``, ``staging_key``, ``weight_version``,
     ``prev_len``/``delta_len``/``cum_len``, ``staging_digest``,
-    ``extras_digest``, ``mode``, ``logical_request_id``, ``admitted_at``),
+    ``extras_digest``, ``mode``, ``logical_request_id``, ``admitted_at``,
+    ``staging_chain``),
     poison rows are
     appended with ``record_failure``, and the framework reads the rollout back
     token-free through ``manifest``.

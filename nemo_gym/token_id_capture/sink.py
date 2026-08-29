@@ -101,6 +101,7 @@ class CaptureContext:
     # byte-identical.
     admitted_at: float | None = None
     capture_admission: CaptureAdmission | None = None
+    parent_staging_chain: list[str] = field(default_factory=list)
     # The request items as received from the harness, stashed by
     # ``resolve_parent`` so the commit hook can publish the ledger row with
     # the exact representation the next request will echo.
@@ -229,6 +230,9 @@ async def resolve_parent(request_messages: list | None) -> None:
             ParentResolutionStatus.UNRESOLVED,
             reason="lookup_error",
         )
+    resolved_match = context.parent_resolution.match if context.parent_resolution is not None else None
+    if resolved_match is not None:
+        context.parent_staging_chain = list(resolved_match.staging_chain)
     if not context.external_staging or context.capture_admission is not None or context.lineage_store is None:
         return
 
@@ -241,9 +245,10 @@ async def resolve_parent(request_messages: list | None) -> None:
             rollout_id=context.rollout_id,
             model_call_id=context.model_call_id,
             parent_call_id=match.model_call_id,
-            prev_len=len(context.parent_tokens),
+            prev_len=match.prev_len,
             mode="token_in",
-            required_prefix_token_ids=list(context.parent_tokens),
+            required_prefix_token_ids=[],
+            staging_chain=list(match.staging_chain),
         )
         return
     is_root = context.parent_resolution is not None and context.parent_resolution.status == ParentResolutionStatus.ROOT

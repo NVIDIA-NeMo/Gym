@@ -70,6 +70,7 @@ class CaptureAdmission(_WireModel):
     prev_len: NonNegativeInt = 0
     mode: CaptureMode
     required_prefix_token_ids: list[StrictInt] = Field(default_factory=list)
+    staging_chain: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _validate_prefix_contract(self) -> Self:
@@ -78,9 +79,16 @@ class CaptureAdmission(_WireModel):
         if self.mode == "token_in":
             if self.parent_call_id is None or self.prev_len == 0:
                 raise ValueError("token_in admission requires a parent_call_id and prev_len > 0")
-            if len(self.required_prefix_token_ids) != self.prev_len:
+            # When staging_chain is supplied the worker fetches the prefix from TQ;
+            # required_prefix_token_ids is allowed to be empty on the wire.
+            if not self.staging_chain and len(self.required_prefix_token_ids) != self.prev_len:
                 raise ValueError("required_prefix_token_ids length must equal prev_len")
-        elif self.parent_call_id is not None or self.prev_len != 0 or self.required_prefix_token_ids:
+        elif (
+            self.parent_call_id is not None
+            or self.prev_len != 0
+            or self.required_prefix_token_ids
+            or self.staging_chain
+        ):
             raise ValueError("text admission must be a parentless root with no required prefix")
         return self
 
