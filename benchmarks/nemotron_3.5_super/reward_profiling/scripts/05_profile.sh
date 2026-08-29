@@ -96,10 +96,10 @@ profile_cmd() {
             --container-image="${CONTAINER:?set CONTAINER when using VLLM_JOBID}" \
             --container-mounts=/lustre:/lustre --container-workdir=/opt/Gym --no-container-mount-home \
             bash -lc "source /opt/Gym_venv/bin/activate && gym eval profile \
-                --inputs '$inputs' --rollouts '$rollouts' ++allow_partial_rollouts=True" > "$out" 2>&1
+                --inputs '$inputs' --rollouts '$rollouts' ++allow_partial_rollouts=${ALLOW_PARTIAL_ROLLOUTS:-True}" > "$out" 2>&1
     else
         gym eval profile --inputs "$inputs" --rollouts "$rollouts" \
-            ++allow_partial_rollouts=True > "$out" 2>&1
+            ++allow_partial_rollouts="${ALLOW_PARTIAL_ROLLOUTS:-True}" > "$out" 2>&1
     fi
 }
 

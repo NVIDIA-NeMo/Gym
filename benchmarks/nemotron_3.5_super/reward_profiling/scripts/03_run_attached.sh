@@ -82,6 +82,7 @@ srun --overlap --jobid="$VLLM_JOBID" --nodes=1 --ntasks=1 \
            +uv_venv_dir=/opt/uv_venvs +skip_venv_if_present=true
 
        gym eval profile \
+           ++allow_partial_rollouts=True \
            --inputs '$SWEEP_DIR/rollouts_materialized_inputs.jsonl' \
            --rollouts '$SWEEP_DIR/rollouts.jsonl'
      "

@@ -37,7 +37,10 @@ set -euo pipefail
 # doubles the submissions and they pile up against the account's node limit -- observed with three
 # watchers holding six jobs against a four-node cap. The lock is the sweep directory, so different
 # sweeps still run concurrently. flock releases it when this shell exits, however it exits.
-_lock_dir=${SHARDS_DIR:-${SWEEP_DIR:-/tmp}}
+# The sweep dir, never SHARDS_DIR: that is not defaulted until further down, so one watcher
+# with it set and one without would lock different files and both run -- the pile-up this
+# lock exists to prevent.
+_lock_dir=${SWEEP_DIR:?}
 mkdir -p "$_lock_dir" 2>/dev/null || true
 exec {_lock_fd}>"$_lock_dir/.watcher.lock"
 if ! flock -n "$_lock_fd"; then

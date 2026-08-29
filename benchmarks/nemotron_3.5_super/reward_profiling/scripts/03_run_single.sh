@@ -556,7 +556,7 @@ batch_command="$batch_command" \
 sbatch \
     --nodes=$NUM_NODES \
     --time=$WALLTIME \
-    --job-name=gym-$EXPERIMENT_NAME-$USER \
+    --job-name="${SBATCH_JOB_NAME:-gym-$EXPERIMENT_NAME-$USER}" \
     --output="$LOG_DIR/%j-%x.log" \
     --ntasks-per-node=1 \
     --comment="$SLURM_COMMENT" \

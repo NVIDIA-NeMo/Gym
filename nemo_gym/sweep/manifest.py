@@ -288,6 +288,23 @@ class GymEvalProfile(BaseModel):
     # Labels profiled concurrently, i.e. PROFILE_JOBS.
     jobs: Optional[int] = Field(default=None, ge=1)
 
+    @model_validator(mode="after")
+    def _extras_are_usable(self) -> "GymEvalProfile":
+        """The launchers export this block as environment variables, not ``++`` overrides.
+
+        So an extra key has to be a legal shell identifier, and a near-miss of a declared field
+        would otherwise sit there doing nothing while the real field kept its default -- the same
+        trap GymEvalRun and Sbatch already guard.
+        """
+        known = set(type(self).model_fields)
+        for key in self.model_extra or {}:
+            near = [k for k in known if _within_one_edit(key, k)]
+            if near:
+                raise ValueError(f"gym_eval_profile has '{key}'; did you mean '{near[0]}'?")
+            if not key.replace("_", "").isalnum():
+                raise ValueError(f"gym_eval_profile key '{key}' is not a valid shell identifier")
+        return self
+
     def env(self) -> Dict[str, str]:
         out = {"ALLOW_PARTIAL_ROLLOUTS": str(self.allow_partial_rollouts)}
         if self.jobs is not None:

@@ -22,7 +22,18 @@
 set -euo pipefail
 
 SWEEP_DIR=${SWEEP_DIR:?set SWEEP_DIR to the <out-dir>/<nickname> directory 01_materialize.sh wrote}
-NUM_SHARDS=${NUM_SHARDS:-16}
+# The manifest's num_shards when this environment does not set it, so running 02 standalone
+# deals the count the manifest declares rather than silently defaulting to 16.
+_manifest_shards=$(python - "$SWEEP_DIR" <<'PY_SHARDS' 2>/dev/null || true
+import json, sys
+from pathlib import Path
+try:
+    print(json.loads((Path(sys.argv[1]) / "sweep_report.json").read_text()).get("num_shards") or "")
+except OSError:
+    print("")
+PY_SHARDS
+)
+NUM_SHARDS=${NUM_SHARDS:-${_manifest_shards:-16}}
 SHARDS_DIR=${SHARDS_DIR:-$SWEEP_DIR/shards}
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 
