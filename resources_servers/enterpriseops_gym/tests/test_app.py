@@ -17,6 +17,7 @@
 import asyncio
 import contextlib
 import json
+import logging
 import time
 from typing import Any, Dict, List, Optional
 
@@ -214,6 +215,41 @@ class TestSeedToolVerify:
         assert result["overall_success"] is True  # parity-pinned upstream quirk
         assert result["num_verifiers_defined"] == 0
         assert result["num_verifiers_scored"] == 0
+
+    def test_mass_skip_warns_but_keeps_parity_scoring(self, gym_env, make_server, caplog) -> None:
+        """A gym_name typo skips every verifier. Parity scoring still says pass (upstream
+        all([]) behavior), but the condition must be visible in the logs -- otherwise a
+        config error is indistinguishable from a genuine 100% pass."""
+        stub_url, state = gym_env
+        server = make_server()
+        typo_gym = make_verifier("update_entitlement", "SELECT 1;", 1, gym_name="sn-csm-servr")
+        row = make_row(stub_url, [typo_gym, make_verifier("count_cases", "SELECT 2;", 2, gym_name="sn-csm-servr")])
+
+        with caplog.at_level(logging.WARNING, logger="resources_servers.enterpriseops_gym.app"):
+            with TestClient(server.setup_webserver()) as client:
+                result = run_agent_flow(client, row, do_tool_call=False)
+
+        # Scoring is deliberately unchanged: the parity metric keeps upstream all([]) == True.
+        assert result["reward"] == 1.0
+        assert result["overall_success"] is True
+        assert result["num_verifiers_defined"] == 2
+        assert result["num_verifiers_scored"] == 0
+        # ...but the mass skip is now visible, and the message names the culprit.
+        warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("All 2 verifier(s) skipped" in m and "sn-csm-servr" in m for m in warnings), warnings
+
+    def test_partial_skip_does_not_warn(self, gym_env, make_server, caplog) -> None:
+        """The warning must only fire on a total skip, not whenever one verifier is skipped."""
+        stub_url, state = gym_env
+        server = make_server()
+        row = make_row(stub_url, [make_verifier("orphan", "SELECT 1;", 1, gym_name="nonexistent-gym"), V_COUNT])
+
+        with caplog.at_level(logging.WARNING, logger="resources_servers.enterpriseops_gym.app"):
+            with TestClient(server.setup_webserver()) as client:
+                result = run_agent_flow(client, row, do_tool_call=False)
+
+        assert result["num_verifiers_scored"] == 1
+        assert not [r for r in caplog.records if "verifier(s) skipped" in r.message]
 
     def test_distinct_name_failure_fails_task(self, gym_env, make_server) -> None:
         stub_url, state = gym_env

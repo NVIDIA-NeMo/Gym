@@ -496,6 +496,19 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
 
         reward = float(strict_success) if self.config.strict_verifiers else float(overall_success)
 
+        # A `gym_servers_config` typo skips every verifier, and the parity path above then
+        # scores the task as a pass (all([]) is True — deliberate, PARITY.md §1). In the
+        # aggregate metrics that is indistinguishable from a genuine all-pass, so surface it.
+        # Logging only: scoring is intentionally unchanged.
+        if verifiers and total_verifiers == 0:
+            referenced = sorted({v["gym_name"] for v in verifiers if v.get("gym_name")})
+            logger.warning(
+                f"All {len(verifiers)} verifier(s) skipped for task "
+                f"{body.verifier_metadata.get('task_id')!r} (reward={reward}). Verifiers reference "
+                f"gym_name(s) {referenced}; this session has {sorted(state.gyms)}. Check "
+                "gym_servers_config/mcp_server_name if this was not intended."
+            )
+
         verify_response = EnterpriseOpsVerifyResponse(
             **body.model_dump(),
             reward=reward,
