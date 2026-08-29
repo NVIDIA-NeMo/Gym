@@ -114,3 +114,27 @@ def decode_routed_experts(payload: Any) -> RoutedExpertsFragment:
         num_layers=num_layers,
         topk=topk,
     )
+
+
+def routed_experts_token_count(payload: Any) -> int:
+    """Inspect the token dimension without materializing the route tensor."""
+    if not isinstance(payload, str):
+        if type(payload) is not list or not payload:
+            raise ValueError("legacy routed_experts must be a non-empty nested list")
+        return len(payload)
+    parts = payload.split(":", 3)
+    if len(parts) != 4 or parts[0] != ROUTED_EXPERTS_MAGIC:
+        raise ValueError(f"unsupported routed_experts envelope; expected {ROUTED_EXPERTS_MAGIC}")
+    _, dtype, shape_text, _ = parts
+    if dtype not in _DTYPE_FORMATS:
+        raise ValueError(f"unsupported routed_experts dtype {dtype!r}")
+    dimensions = shape_text.split("x")
+    if len(dimensions) != 3:
+        raise ValueError("routed_experts envelope shape must have three dimensions")
+    try:
+        token_count, num_layers, topk = (int(dimension) for dimension in dimensions)
+    except ValueError as error:
+        raise ValueError("routed_experts envelope shape must contain integers") from error
+    if token_count <= 0 or num_layers <= 0 or topk <= 0:
+        raise ValueError("routed_experts envelope dimensions must be positive")
+    return token_count
