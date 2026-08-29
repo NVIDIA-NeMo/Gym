@@ -31,6 +31,7 @@ def _row(
         extras_digest=EMPTY_EXTRAS_DIGEST,
         staging_key=f"r1/{model_call_id}",
         mode="text" if parent_call_id is None else "token_in",
+        response_id=f"chatcmpl-{model_call_id}",
         admitted_at=admitted_at,
     )
 
@@ -40,9 +41,7 @@ def _chain(*call_ids: str, start_at: float = 100.0) -> list[CallRecord]:
     parent = None
     prev_len = 0
     for offset, call_id in enumerate(call_ids):
-        rows.append(
-            _row(call_id, parent_call_id=parent, prev_len=prev_len, admitted_at=start_at + offset)
-        )
+        rows.append(_row(call_id, parent_call_id=parent, prev_len=prev_len, admitted_at=start_at + offset))
         parent = call_id
         prev_len += 10
     return rows

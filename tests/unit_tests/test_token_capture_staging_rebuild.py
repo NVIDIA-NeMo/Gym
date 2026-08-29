@@ -99,6 +99,7 @@ def _manifest_row(snapshot: StagedCallSnapshot, *, staging_key: str | None = Non
         mode=snapshot.mode,
         chain_hash=snapshot.chain_hash,
         cumulative_hash=snapshot.cumulative_hash,
+        response_id=f"chatcmpl-{snapshot.model_call_id}",
     )
 
 
@@ -113,6 +114,7 @@ def _receipt(
         terminal_model_call_id=terminal,
         manifest=[_manifest_row(snapshot) for snapshot in snapshots],
         capture_poisoned=poisoned,
+        terminal_selection="declared",
     )
 
 

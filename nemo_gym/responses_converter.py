@@ -782,7 +782,12 @@ class ResponsesConverter(BaseModel):
 
         # Chat Completion -> Response
         return NeMoGymResponse(
-            id=f"resp_{uuid4().hex}",
+            # Reuse the chat completion's envelope id instead of minting one.
+            # Token capture records the id of the served payload; the id the
+            # client keeps must match it for terminal attribution to join the
+            # scored response back to its captured call. A minted id here
+            # would break that join for the Responses dialect.
+            id=str(getattr(chat_completion, "id", "") or "") or f"resp_{uuid4().hex}",
             created_at=chat_completion.created,
             model=responses_create_params.model,
             object="response",

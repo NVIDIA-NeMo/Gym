@@ -315,15 +315,22 @@ def test_stage_result_and_receipt_validate_identity() -> None:
         extras_digest=payload["extras_digest"],
         staging_key="backend/key",
         mode=payload["mode"],
+        response_id="chatcmpl-call-1",
     )
     receipt = RolloutReceipt(
         rollout_id="rollout-1",
         terminal_model_call_id="call-1",
         manifest=[manifest],
+        terminal_selection="declared",
     )
     assert receipt.terminal_model_call_id == "call-1"
     with pytest.raises(ValidationError, match="absent"):
-        RolloutReceipt(rollout_id="rollout-1", terminal_model_call_id="ghost", manifest=[manifest])
+        RolloutReceipt(
+            rollout_id="rollout-1",
+            terminal_model_call_id="ghost",
+            manifest=[manifest],
+            terminal_selection="declared",
+        )
 
 
 def test_staging_namespace_has_no_serving_or_framework_dependencies() -> None:
