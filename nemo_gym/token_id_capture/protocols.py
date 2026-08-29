@@ -128,7 +128,8 @@ class CaptureLedger(LineageStore, Protocol):
     the token-free ``CallRecord`` custody columns (passed to ``record`` as
     keyword arguments: ``parent_call_id``, ``staging_key``, ``weight_version``,
     ``prev_len``/``delta_len``/``cum_len``, ``staging_digest``,
-    ``extras_digest``, ``mode``, ``logical_request_id``), poison rows are
+    ``extras_digest``, ``mode``, ``logical_request_id``, ``admitted_at``),
+    poison rows are
     appended with ``record_failure``, and the framework reads the rollout back
     token-free through ``manifest``.
     """
