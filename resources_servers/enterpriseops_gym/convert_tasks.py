@@ -17,7 +17,8 @@
 Sources: a local folder of EOG task configs (e.g. data/revised/csm in the EOG checkout) or
 the ServiceNow-AI/EnterpriseOps-Gym HuggingFace dataset (config=mode, split=domain).
 
-Tool schemas are baked in from per-domain tools/list snapshots (see snapshot_tools.py),
+Tool schemas are baked in from per-domain tools/list snapshots (fetched by prepare.py;
+see snapshot_tools.py for how they are captured),
 filtered by each task's selected_tools (empty = all tools, as upstream) minus
 restricted_tools, preserving snapshot (server) order and cleaning schemas with the EOG
 schema cleaner — matching the tool set the upstream harness would advertise to the model.
@@ -36,6 +37,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from resources_servers.enterpriseops_gym.prepare import PREPARE_COMMAND
 from resources_servers.enterpriseops_gym.schema_utils import clean_json_schema
 
 
@@ -62,8 +64,14 @@ def load_snapshots(snapshot_paths: List[Path]) -> Dict[str, List[Dict[str, Any]]
     """
     gym_tools: Dict[str, List[Dict[str, Any]]] = {}
     for snapshot_path in snapshot_paths:
-        with open(snapshot_path) as f:
-            snapshot = json.load(f)
+        try:
+            with open(snapshot_path) as f:
+                snapshot = json.load(f)
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(
+                f"Missing tool snapshot {snapshot_path}. Tool snapshots are not committed; "
+                f"fetch them with `{PREPARE_COMMAND}`."
+            ) from exc
         gym_tools[snapshot["gym_name"]] = snapshot["tools"]
     return gym_tools
 

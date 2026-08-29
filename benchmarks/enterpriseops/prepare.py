@@ -16,11 +16,14 @@
 
 Downloads the ServiceNow-AI/EnterpriseOps-Gym HuggingFace dataset (config = tool-set mode,
 split = domain) and converts every domain — including hybrid — into one combined NeMo Gym
-JSONL, baking in tool schemas from the per-domain snapshots shipped with the
-enterpriseops_gym resources server (see snapshot_tools.py there).
+JSONL, baking in tool schemas from the per-domain snapshots hosted alongside the
+enterpriseops_gym resources server (fetched by its prepare.py; see snapshot_tools.py
+there for how they are captured).
 
 Requires:
-- Egress to huggingface.co. If the Hub is unreachable and NEMO_GYM_EOG_LOCAL_TASKS is set
+- Egress to huggingface.co, for both the task dataset and the tool snapshots. Set
+  NEMO_GYM_EOG_TOOLS_DIR to a directory holding the seven snapshots to skip the
+  snapshot download. If the Hub is unreachable and NEMO_GYM_EOG_LOCAL_TASKS is set
   to an EnterpriseOps-Gym checkout's task folder root (containing <domain>/ task JSON
   dirs, e.g. data/revised), those local tasks are converted instead as a fallback.
 - The MCP gym Docker containers only at RUN time, not at prepare time.
@@ -37,6 +40,7 @@ from resources_servers.enterpriseops_gym.convert_tasks import (
     load_tasks_from_dir,
     load_tasks_from_hf,
 )
+from resources_servers.enterpriseops_gym.prepare import SNAPSHOT_FILENAMES, ensure_tool_snapshots
 
 
 BENCHMARK_DIR = Path(__file__).parent
@@ -49,24 +53,16 @@ HF_REPO_ID = os.getenv("NEMO_GYM_EOG_HF_DATASET", "ServiceNow-AI/EnterpriseOps-G
 MODE = "oracle"
 DOMAINS = ["calendar", "csm", "drive", "email", "hr", "itsm", "teams", "hybrid"]
 
-SNAPSHOTS_DIR = BENCHMARK_DIR.parent.parent / "resources_servers" / "enterpriseops_gym" / "data" / "tools"
-# All 7 gym snapshots; hybrid tasks reference multiple gyms, so hybrid uses the full union.
-DOMAIN_SNAPSHOTS: Dict[str, List[str]] = {
-    "calendar": ["calendar.json"],
-    "csm": ["csm.json"],
-    "drive": ["drive.json"],
-    "email": ["email.json"],
-    "hr": ["hr.json"],
-    "itsm": ["itsm.json"],
-    "teams": ["teams.json"],
-    "hybrid": ["calendar.json", "csm.json", "drive.json", "email.json", "hr.json", "itsm.json", "teams.json"],
-}
+# One snapshot per single-domain gym; hybrid tasks reference multiple gyms, so hybrid
+# uses the full union. Derived from SNAPSHOT_FILENAMES so the two cannot drift.
+DOMAIN_SNAPSHOTS: Dict[str, List[str]] = {Path(name).stem: [name] for name in SNAPSHOT_FILENAMES}
+DOMAIN_SNAPSHOTS["hybrid"] = list(SNAPSHOT_FILENAMES)
 
 LOCAL_TASKS_ENV_VAR = "NEMO_GYM_EOG_LOCAL_TASKS"
 
 
-def _convert_domain(domain: str, tasks, out_file) -> int:
-    snapshot_paths = [SNAPSHOTS_DIR / name for name in DOMAIN_SNAPSHOTS[domain]]
+def _convert_domain(domain: str, tasks, out_file, snapshots_dir: Path) -> int:
+    snapshot_paths = [snapshots_dir / name for name in DOMAIN_SNAPSHOTS[domain]]
     gym_tools = load_snapshots(snapshot_paths)
     num_written = 0
     for task_id, task in tasks:
@@ -80,13 +76,17 @@ def prepare() -> Path:
     """Download and convert the EnterpriseOps-Gym public split. Returns the output path."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+    # Fetch the tool schemas BEFORE opening the output file: a download failure here
+    # must not truncate an existing benchmark JSONL.
+    snapshots_dir = ensure_tool_snapshots()
+
     local_tasks_root = os.getenv(LOCAL_TASKS_ENV_VAR)
     total = 0
     with open(OUTPUT_FPATH, "w") as out_file:
         try:
             for domain in DOMAINS:
                 tasks = load_tasks_from_hf(HF_REPO_ID, MODE, domain)
-                count = _convert_domain(domain, tasks, out_file)
+                count = _convert_domain(domain, tasks, out_file, snapshots_dir)
                 print(f"{domain}: {count} tasks (HuggingFace)")
                 total += count
         except Exception as e:
@@ -105,7 +105,7 @@ def prepare() -> Path:
                 if not domain_dir.is_dir() or domain_dir.name not in DOMAIN_SNAPSHOTS:
                     continue
                 tasks = load_tasks_from_dir(domain_dir)
-                count = _convert_domain(domain_dir.name, tasks, out_file)
+                count = _convert_domain(domain_dir.name, tasks, out_file, snapshots_dir)
                 print(f"{domain_dir.name}: {count} tasks (local fallback)")
                 total += count
 

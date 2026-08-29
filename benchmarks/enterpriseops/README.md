@@ -10,9 +10,12 @@ HR, ITSM, Teams, Hybrid), graded by SQL verifiers on final database state. See
 1. The upstream MCP gym Docker containers running (7 domain servers; see the resources
    server README for ports) and the EOG checkout with `gym_dbs.zip` unzipped
    (`seed_sql_root` config).
-2. Hub egress at prepare time (`huggingface.co`). On machines without egress, set
-   `NEMO_GYM_EOG_LOCAL_TASKS=<EOG checkout>/data/revised` to convert the locally
-   committed task subset instead.
+2. Hub egress at prepare time (`huggingface.co`) for two datasets: the task split
+   (`ServiceNow-AI/EnterpriseOps-Gym`) and the tool schemas
+   (`nvidia/NeMo-Gym-EnterpriseOps-Assets`, fetched by the resources server's
+   `prepare.py`). On machines without egress, set `NEMO_GYM_EOG_LOCAL_TASKS=<EOG
+   checkout>/data/revised` for the tasks and `NEMO_GYM_EOG_TOOLS_DIR` for the schemas
+   (see the resources server README for the `hf download` one-liner).
 
 ## Usage
 

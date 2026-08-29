@@ -19,10 +19,14 @@ MCP servers. NeMo Gym dataset rows must carry full tool definitions, so we snaps
 domain's tools once and let the converter bake them into the dataset. This also removes the
 per-task tools/list discovery the upstream harness performs.
 
+Snapshots are published to the assets dataset rather than committed; `prepare.py` fetches
+them and owns `data/tools/`, so capture to a scratch path and follow "Refreshing the
+snapshots" in this server's README to publish a new revision.
+
 Usage:
     python resources_servers/enterpriseops_gym/snapshot_tools.py \
         --gym-url http://localhost:8001 --gym-name sn-csm-server \
-        --output resources_servers/enterpriseops_gym/data/tools/csm.json
+        --output /tmp/eog-tools/csm.json
 """
 
 import argparse
