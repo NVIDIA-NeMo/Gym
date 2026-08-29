@@ -12,10 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import asyncio
 import importlib
 import json
+import logging
+from collections.abc import Sequence
 from copy import deepcopy
 from multiprocessing import Pool
 from pathlib import Path
@@ -50,10 +51,14 @@ from nemo_gym.global_config import (
     GlobalConfigDictParserConfig,
     get_first_server_config_dict,
     get_global_config_dict,
+    resolve_dataset_agent,
 )
 
 
-# NOTE: `reward_profile`, `rollout_collection`, and `train_data_utils` are imported lazily inside the run/aggregate/
+logger = logging.getLogger(__name__)
+
+
+# NOTE: `reward_profile`, `rollout_collection`, `rollout_reverification` and `train_data_utils` are imported lazily inside the run/aggregate/
 # profile commands below: they pull in heavy deps (wandb, mlflow, anthropic) that the fast `list`/`search`
 # commands in this module must not pay for on every invocation.
 
@@ -210,11 +215,17 @@ def prepare_benchmark() -> None:
     )
     prepare_benchmark_config = PrepareBenchmarkConfig.model_validate(global_config_dict)
 
+    # A benchmark dataset may be declared by an agent block (legacy) or a resources server
+    # block (decoupled layout). `resolve_dataset_agent` is the same resolver rollout dispatch
+    # uses, so preparation and rollout always agree.
     benchmarks_dict: Dict[str, BenchmarkConfig] = dict()
     inspected_server_instances: List[str] = []
     for server_instance_name in global_config_dict:
         server_config = global_config_dict[server_instance_name]
-        if not isinstance(server_config, (dict, DictConfig)) or "responses_api_agents" not in server_config:
+        if not isinstance(server_config, (dict, DictConfig)):
+            continue
+        is_agent = "responses_api_agents" in server_config
+        if not is_agent and "resources_servers" not in server_config:
             continue
 
         inspected_server_instances.append(server_instance_name)
@@ -239,10 +250,17 @@ def prepare_benchmark() -> None:
 
         dataset = datasets[0]
 
-        benchmarks_dict[server_instance_name] = BenchmarkConfig(
+        try:
+            agent_name = resolve_dataset_agent(global_config_dict, str(server_instance_name), pin=dataset.agent)
+        except ConfigError as e:
+            raise ConfigError(f"Benchmark dataset {dataset.name!r}: {e}") from e
+
+        # Keyed by the declaring instance: two declarations may resolve to the same agent, and
+        # keying by agent would silently drop all but the last.
+        benchmarks_dict[str(server_instance_name)] = BenchmarkConfig(
             name=dataset.name,
             path=Path(""),
-            agent_name=server_instance_name,
+            agent_name=agent_name,
             num_repeats=dataset.num_repeats,
             dataset=dataset,
         )
@@ -340,7 +358,7 @@ def e2e_rollout_collection():  # pragma: no cover
         data_processor_config_dict["mode"] = "train_preparation"
 
         output_fpath = Path(e2e_rollout_collection_config.output_jsonl_fpath)
-        data_process_output_dir = output_fpath.parent / "preprocessed_datasets"
+        data_process_output_dir = output_fpath.with_suffix("") / "preprocessed_datasets"
         data_processor_config_dict["output_dirpath"] = str(data_process_output_dir)
 
     input_jsonl_fpath = data_process_output_dir / f"{e2e_rollout_collection_config.split}.jsonl"
@@ -379,6 +397,12 @@ def e2e_rollout_collection():  # pragma: no cover
     # ``rollout_collection_driver`` config field (a ``module.path:function``).
     # The default path runs the built-in single-pass helper.
     driver_path = e2e_rollout_collection_config.rollout_collection_driver
+    health_check_enabled = (
+        not rollout_collection_config.disable_aggregation and not rollout_collection_config.disable_health_check
+    )
+    # This E2E entry point prints health only after its server-shutdown phase.
+    # The no-serve entry point calls the collection helper directly.
+    rollout_collection_config.disable_health_check = True
 
     print(
         f"""Output artifacts:
@@ -388,6 +412,7 @@ def e2e_rollout_collection():  # pragma: no cover
 {f"Rollout collection driver: {driver_path}" if driver_path else ""}
 """
     )
+    collection_completed = False
     try:
         if driver_path:
             module_name, _, fn_name = driver_path.partition(":")
@@ -398,10 +423,25 @@ def e2e_rollout_collection():  # pragma: no cover
             asyncio.run(driver_fn(rollout_collection_config, resolved_config))
         else:
             asyncio.run(rch.run_from_config(rollout_collection_config))
+        collection_completed = True
     except KeyboardInterrupt:
         pass
     finally:
         rh.shutdown()
+
+    if health_check_enabled and collection_completed:
+        from nemo_gym.rollout_health import format_health_report, run_health_checks
+
+        try:
+            health_result = run_health_checks(
+                output_fpath,
+                workers=rollout_collection_config.health_check_workers,
+                ignored_checks=rollout_collection_config.health_check_ignored_checks,
+            )
+        except Exception:
+            logger.exception("Rollout health checks failed after collection; rollout artifacts are still available.")
+        else:
+            print(format_health_report(health_result))
 
 
 @exit_cleanly_on_config_error
@@ -418,10 +458,44 @@ def collect_rollouts():  # pragma: no cover
 def aggregate_rollouts():  # pragma: no cover
     from nemo_gym.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
 
-    config = RolloutAggregationConfig.model_validate(get_global_config_dict())
+    global_config = get_global_config_dict()
+    config = RolloutAggregationConfig.model_validate(global_config)
     rah = RolloutAggregationHelper()
 
     asyncio.run(rah.run_from_config(config))
+
+
+def health_check_rollouts(
+    run_dir: str | Path,
+    *,
+    rollout_file: str | Path | None = None,
+    workers: int | None = None,
+    ignored_checks: Sequence[str] = (),
+    json_output: bool = False,
+):
+    """Run rollout quality verification for an existing run directory."""
+    from nemo_gym.rollout_health import health_check_run_dir
+
+    return health_check_run_dir(
+        run_dir,
+        rollout_file=rollout_file,
+        workers=workers,
+        ignored_checks=ignored_checks,
+        json_output=json_output,
+    )
+
+
+@exit_cleanly_on_config_error
+def reverify_rollouts():  # pragma: no cover
+    from nemo_gym.rollout_reverification import RolloutReverificationConfig, RolloutReverificationHelper
+
+    rh = RunHelper()
+    rh.start(None)
+
+    config = RolloutReverificationConfig.model_validate(get_global_config_dict())
+    rrh = RolloutReverificationHelper()
+
+    asyncio.run(rrh.run_from_config(config))
 
 
 @exit_cleanly_on_config_error
@@ -451,16 +525,17 @@ def reward_profile():  # pragma: no cover
     results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
 
     rp = RewardProfiler()
-    group_level_metrics, agent_level_metrics = rp.profile_from_data(
+    group_level_metrics, agent_level_metrics, repeat_level_metrics = rp.profile_from_data(
         rows, results, allow_partial_rollouts=config.allow_partial_rollouts
     )
     completion_summary = rp.profile_completion_summary(rows, results)
-    reward_profiling_fpath, agent_level_metrics_fpath = rp.write_to_disk(
-        group_level_metrics, agent_level_metrics, Path(config.rollouts_jsonl_fpath)
+    reward_profiling_fpath, agent_level_metrics_fpath, repeat_level_metrics_fpath = rp.write_to_disk(
+        group_level_metrics, agent_level_metrics, repeat_level_metrics, Path(config.rollouts_jsonl_fpath)
     )
 
     print(f"""Profiling outputs:
 Reward profile completion: {completion_summary["completed_rollout_rows"]}/{completion_summary["expected_rollout_rows"]} rollout rows ({completion_summary["reward_profile_completion_pct"]:.2f}%)
 Input rows: {completion_summary["total_input_rows"]} total; {completion_summary["complete_input_rows"]} complete; {completion_summary["partial_input_rows"]} partial; {completion_summary["missing_input_rows"]} without rollouts dropped from output.
 Reward profiling outputs: {reward_profiling_fpath}
-Agent-level metrics: {agent_level_metrics_fpath}""")
+Agent-level metrics: {agent_level_metrics_fpath}
+Repeat-level metrics: {repeat_level_metrics_fpath}""")

@@ -13,6 +13,23 @@ Complete syntax and field specifications for NeMo Gym configuration files.
 | Server configs | `<server_type>/<implementation>/configs/*.yaml` | ✅ Committed |
 | env.yaml | Repository root (`./env.yaml`) | ❌ Gitignored (user creates) |
 
+### Artifact Roots (`results_dir`, `cache_dir`)
+
+Two **opt-in** top-level config keys that servers can consult for state that outlives a request:
+
+| Key | Default | Read today by |
+|-----|---------|---------------|
+| `results_dir` | `<working dir>/results` | the `swe_agents` server (per-run results) and the W&B run directory |
+| `cache_dir` | `<working dir>/cache` | the `swe_agents` server (setup trees) and the `uv_cache_dir` default |
+
+These are opt-in settings, not a global redirect: components that don't consult them (profiling output, rollout capture, logs, Hugging Face caches, other agents) keep their own locations, and the module-level `RESULTS_DIR`/`CACHE_DIR` constants remain unchanged defaults for such consumers. New artifact producers are encouraged to read these keys.
+
+Both are independently overridable (`results_dir=/shared/results cache_dir=/shared/cache`), and relative values are normalized to absolute paths at parse time so all server processes agree. `uv_venv_dir` keeps its own key and default.
+
+On multi-node deployments, the `swe_agents` server embeds these paths in commands executed from **other nodes**, so both roots must resolve to the same content at the same path on every node that runs rollout workers: use a shared filesystem, or pre-stage identical trees at the same path on each node (for example, baked into the container image). A cache that exists only on the head node breaks remote rollouts.
+
+Servers that pre-staged setup trees next to the package (the layout before `cache_dir` existed, for example baked container images) keep using those trees **only while `cache_dir` is left at its default** — explicitly configuring `cache_dir` opts out, and removing the pre-staged trees migrates a default-config deployment. Contents accumulate across runs; both directories are safe to delete when no run is active.
+
 ---
 
 ## Path Resolution and External Roots
@@ -182,6 +199,11 @@ use_absolute_ip: true           # Bind servers to the host's IP instead of 127.0
 
 # Optional: validation behavior
 error_on_almost_servers: true   # Exit on invalid configs (default: true)
+
+# Optional: experiment tracking (see Experiment Tracking below)
+wandb_project: gym-dev
+wandb_name: my-run
+wandb_api_key: your-wandb-key
 ```
 
 ### Multi-Node Configuration
@@ -191,6 +213,60 @@ error_on_almost_servers: true   # Exit on invalid configs (default: true)
 - **Default:** `false` — servers use `127.0.0.1` (localhost).
 - **When to use:** Set to `true` for multi-node setups (e.g. multi-node Ray clusters) where servers must communicate across machines.
 - **Effect:** Resolves and uses the host's IP address (`gethostbyname(gethostname())`) instead of localhost.
+
+---
+
+## Experiment Tracking
+
+Gym exports the resolved config, aggregate metrics, and rollouts to any tracking backend you
+configure. Weights & Biases and MLflow are both supported, and both can be on at once. A backend
+is used only when every key it needs is set; otherwise it is silently skipped.
+
+### Weights & Biases
+
+| Key | Required | Description |
+|-----|----------|-------------|
+| `wandb_project` | yes | W&B project to log to. |
+| `wandb_name` | yes | Run name. |
+| `wandb_api_key` | yes | W&B API key. |
+
+### MLflow
+
+| Key | Required | Description |
+|-----|----------|-------------|
+| `mlflow_tracking_uri` | yes | Tracking server URI. |
+| `mlflow_experiment_name` | yes | Experiment to log to. Created if it does not exist. |
+| `mlflow_run_name` | yes | Run name. |
+| `mlflow_tracking_token` | no | Bearer token. Omit for unauthenticated servers. |
+
+```bash
+gym eval run \
+    --benchmark gpqa \
+    --model-type openai_model \
+    +mlflow_tracking_uri=https://mlflow.example.com/ \
+    +mlflow_experiment_name=my-experiment \
+    +mlflow_run_name=gpqa
+```
+
+<Note>
+`mlflow_tracking_uri` and `mlflow_tracking_token` are shared with the GitLab model registry used by
+`gym dataset upload|download`. Setting only those two does not enable the exporter — it also needs
+an experiment and run name.
+</Note>
+
+### Rollout upload
+
+Rollouts are uploaded to every configured backend by default. Turn this off when they are large:
+
+```bash
+gym eval run ... +upload_rollouts=false
+```
+
+Metrics and config are still exported. The old name `upload_rollouts_to_wandb` is deprecated and will be removed in a future release.
+
+<Note>
+Exporting is best-effort. Errors that happen during export (e.g., unavailable server) are reported as warnings and the run continues.
+</Note>
 
 ---
 

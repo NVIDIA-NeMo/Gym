@@ -1,0 +1,68 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/openair_congestion/data/example.jsonl",
+    "num_repeats": 1,
+    "source": null,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": null,
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 5,
+        "Average": 8.0,
+        "Min": 8.0,
+        "Max": 8.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 1096.0,
+        "Min": 1096.0,
+        "Max": 1096.0,
+        "Standard deviation": 0.0
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "difficulty": {
+        "Total # non-null values": 5,
+        "Average": 0.6,
+        "Min": 0.5,
+        "Max": 0.7,
+        "Standard deviation": 0.071
+    },
+    "max_steps": {
+        "Total # non-null values": 5,
+        "Average": 16.0,
+        "Min": 16.0,
+        "Max": 16.0,
+        "Standard deviation": 0.0
+    },
+    "scenario_id": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "seed": {
+        "Total # non-null values": 5,
+        "Average": 7003.0,
+        "Min": 7001.0,
+        "Max": 7005.0,
+        "Standard deviation": 1.58
+    },
+    "tier": {
+        "unique_count": 1,
+        "total_count": 5
+    }
+}

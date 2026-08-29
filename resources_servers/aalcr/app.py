@@ -22,8 +22,8 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeError, call_judge
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import get_response_json
 
 
 class AalcrResourcesServerConfig(BaseResourcesServerConfig):
@@ -93,14 +93,17 @@ Reply only with CORRECT or INCORRECT."""
         judge_responses_create_params = dict(input=[{"role": "user", "content": judge_prompt}])
         judge_responses_create_params |= self.config.judge_responses_create_params_overrides
 
-        http_response = await self.server_client.post(
+        judge_response = await call_judge(
+            self.server_client,
             server_name=self.config.judge_model_server.name,
             url_path="/v1/responses",
             json=judge_responses_create_params,
+            response_model=NeMoGymResponse,
         )
-        judge_response = NeMoGymResponse.model_validate(await get_response_json(http_response))
-
         judge_response_text = judge_response.output_text.strip()
+        if not judge_response_text:
+            raise JudgeError("empty judge response")
+
         if judge_response_text == "CORRECT":
             invalid_judge_response = False
             reward = 1.0

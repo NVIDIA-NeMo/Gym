@@ -1,0 +1,14 @@
+# Pointer Agent overlay for OSWorld-Verified leaderboard alignment.
+#
+# Usage:
+#   python3 benchmarks/osworld/prepare.py --profile pointer ...
+#
+# The OSWorld leaderboard row is "Pointer Agent w/ Opus 4.7"; this runner keeps
+# OSWorld's native mm_agents.pointer.PointerAgent loop intact and only wraps it
+# in the Gym /run envelope.
+osworld_simple_agent:
+  responses_api_agents:
+    osworld_agent:
+      runner_name: pointer_agent
+      max_steps: 100
+      sleep_after_execution: 0.0

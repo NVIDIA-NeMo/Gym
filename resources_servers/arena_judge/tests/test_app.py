@@ -18,6 +18,7 @@ import pytest
 from pytest import approx, fixture
 
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
@@ -303,23 +304,21 @@ class TestArenaJudgeServer:
         assert result.invalid_base_gen is False
 
     @pytest.mark.asyncio
-    async def test_judge_call_exception_returns_invalid(self, config: ArenaJudgeConfig) -> None:
+    async def test_judge_call_exception_raises_judge_error(self, config: ArenaJudgeConfig) -> None:
         server_mock = MagicMock(spec=ServerClient)
         server_mock.post = AsyncMock(side_effect=RuntimeError("judge timeout"))
         server = ArenaJudgeServer(config=config, server_client=server_mock)
 
-        result = await server.verify(
-            ArenaJudgeVerifyRequest(
-                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
-                response=_make_response("ok"),
-                question="q",
-                baseline_answer="b",
-                category="hard_prompt",
+        with pytest.raises(JudgeError):
+            await server.verify(
+                ArenaJudgeVerifyRequest(
+                    responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+                    response=_make_response("ok"),
+                    question="q",
+                    baseline_answer="b",
+                    category="hard_prompt",
+                )
             )
-        )
-        assert result.reward == approx(0.0)
-        assert result.invalid_gen_base is True
-        assert result.invalid_base_gen is True
 
     @pytest.mark.asyncio
     async def test_unknown_category_falls_back_to_default(self, config: ArenaJudgeConfig) -> None:
