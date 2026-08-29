@@ -46,10 +46,13 @@ python resources_servers/enterpriseops_gym/convert_tasks.py \
     --output resources_servers/enterpriseops_gym/data/csm_revised.jsonl
 
 # Run servers + collect rollouts
-ng_run "+config_paths=[resources_servers/enterpriseops_gym/configs/enterpriseops_gym.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
-ng_collect_rollouts +agent_name=enterpriseops_gym_simple_agent \
-    +input_jsonl_fpath=resources_servers/enterpriseops_gym/data/csm_revised.jsonl \
-    +output_jsonl_fpath=results/enterpriseops_csm.jsonl
+gym env start \
+    --resources-server enterpriseops_gym \
+    --model-type openai_model
+gym eval run --no-serve \
+    --agent enterpriseops_gym_simple_agent \
+    --input resources_servers/enterpriseops_gym/data/csm_revised.jsonl \
+    --output results/enterpriseops_csm.jsonl
 ```
 
 ## Parity notes

@@ -17,14 +17,15 @@ HR, ITSM, Teams, Hybrid), graded by SQL verifiers on final database state. See
 ## Usage
 
 ```bash
-ng_prepare_benchmark "+config_paths=[benchmarks/enterpriseops/config.yaml]"
+gym eval prepare --benchmark enterpriseops
 
-ng_run "+config_paths=[benchmarks/enterpriseops/config.yaml,responses_api_models/openai_model/configs/openai_model.yaml]" \
+gym env start --benchmark enterpriseops --model-type openai_model \
     "++enterpriseops_benchmark_resources_server.resources_servers.enterpriseops_gym.seed_sql_root=<abs path to EOG checkout>"
 
-ng_collect_rollouts +agent_name=enterpriseops_benchmark_simple_agent \
-    +input_jsonl_fpath=benchmarks/enterpriseops/data/enterpriseops_oracle_benchmark.jsonl \
-    +output_jsonl_fpath=results/enterpriseops_oracle.jsonl
+gym eval run --no-serve \
+    --agent enterpriseops_benchmark_simple_agent \
+    --input benchmarks/enterpriseops/data/enterpriseops_oracle_benchmark.jsonl \
+    --output results/enterpriseops_oracle.jsonl
 ```
 
 Scoring: `reward` = EOG leaderboard parity (all name-collapsed verifiers pass). Aggregate

@@ -212,7 +212,7 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
         path = Path(seed_database_file)
         if path.is_absolute():
             return path
-        # ng_run forks servers with CWD = the server dir, but users naturally write
+        # `gym env start` forks servers with CWD = the server dir, but users naturally write
         # seed_sql_root relative to the gym repo root — try both.
         candidates = [
             Path(self.config.seed_sql_root) / path,

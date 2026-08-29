@@ -1,6 +1,6 @@
 # EnterpriseOps-Gym with the per-turn-telemetry agent (eval-team logging schema).
 # Adds a turn_logging_agent alongside the standard stack; collect with
-#   ng_collect_rollouts +agent_name=enterpriseops_gym_turn_logging_agent ...
+#   gym eval run --no-serve --agent enterpriseops_gym_turn_logging_agent ...
 # then export via export_eval_telemetry.py.
 # The metadata block below re-states the inherited server's metadata so the
 # README environment-table generator (scripts/update_env_list.py) can render

@@ -10,7 +10,7 @@ changes to the resources server, agent, or model server.
 
 Same stack as [PERF.md](PERF.md): `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8` on
 vLLM (4× H100, TP=4, reasoning enabled), live MCP container fleet, oracle public
-split. Rollouts collected with the stock `ng_collect_rollouts` +
+split. Rollouts collected with the stock `gym eval run --no-serve` +
 `enterpriseops_gym_simple_agent`.
 
 The one non-default switch RL needs:
@@ -101,8 +101,8 @@ silently matches zero rows.
 - **Restart the MCP fleet every ~200 task lifecycles** (fd leak, PARITY.md §6);
   a training loop's rollout phase hits this budget quickly.
 - **Point `RAY_TMPDIR` at a large scratch mount.** With the default `/tmp`, each
-  `ng_run` leaves a Ray session directory behind; orphaned `raylet`/`gcs_server`
-  processes also outlive `pkill -f ng_run` and pin deleted files until killed.
+  `gym env start` leaves a Ray session directory behind; orphaned `raylet`/`gcs_server`
+  processes also outlive `pkill -f gym` and pin deleted files until killed.
   A filled root disk here fails with Python's "No usable temporary directory".
 - **Watch syslog growth** on vLLM hosts (~GB/day observed); vacuum journals and
   truncate before multi-day runs.

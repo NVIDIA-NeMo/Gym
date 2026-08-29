@@ -28,7 +28,7 @@ from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
 
 
 # The server's outbound MCP calls lazily build the global aiohttp client, which reads the
-# global config. Outside ng_run there is no head server and Hydra would try to parse
+# global config. Outside `gym env start` there is no head server and Hydra would try to parse
 # pytest's argv (and SystemExit) — pre-seed the documented child-process env var instead.
 environ.setdefault(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, "{}")
 

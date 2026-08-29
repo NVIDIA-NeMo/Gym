@@ -120,6 +120,6 @@ benchmark are correspondingly noisier; report mean@5.
 - The upstream runner (`utils/task_queue_worker.py`) never retrieves task results, so
   task exceptions are silently dropped (~2 tasks/pass observed); its executor also leaves
   orphaned database files when seeding fails mid-retry.
-- `ng_collect_rollouts` aborts the batch on a terminal `/run` error; reruns with
-  `+resume_from_cache=true` complete exactly the missing tasks. A continue-on-error
+- `gym eval run --no-serve` aborts the batch on a terminal `/run` error; reruns with
+  `--resume` complete exactly the missing tasks. A continue-on-error
   collection mode would remove the manual resume step.

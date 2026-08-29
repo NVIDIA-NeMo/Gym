@@ -47,7 +47,7 @@ my_turn_logging_agent:
         jsonl_fpath: resources_servers/my_resources_server/data/example.jsonl
 ```
 
-Collect rollouts with `+agent_name=my_turn_logging_agent`; each output row's verify
+Collect rollouts with `--agent my_turn_logging_agent`; each output row's verify
 response carries the `turns` list.
 
 ## Tests
