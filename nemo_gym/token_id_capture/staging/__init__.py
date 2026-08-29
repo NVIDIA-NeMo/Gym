@@ -20,6 +20,10 @@ This namespace is separate from Gym's complete-record ``TokenSink`` and
 framework storage without importing serving or framework dependencies.
 """
 
+from nemo_gym.token_id_capture.staging.attribution import (
+    TerminalAttribution,
+    resolve_terminal,
+)
 from nemo_gym.token_id_capture.staging.capture import (
     ActiveCall,
     CaptureError,
@@ -105,6 +109,7 @@ __all__ = [
     "StagingSink",
     "StagingSource",
     "StreamingUnsupportedError",
+    "TerminalAttribution",
     "TerminalSelection",
     "WeightVersionProvider",
     "WeightVersionSpan",
@@ -120,6 +125,7 @@ __all__ = [
     "linearize",
     "load_golden_vectors",
     "routed_experts_token_count",
+    "resolve_terminal",
     "select_terminal_call",
     "staging_key",
     "verify_and_linearize",

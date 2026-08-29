@@ -218,8 +218,7 @@ class CommitCoords(_DigestWireModel):
         if self.disposition == "staged":
             if any(value is None for value in staged_payload):
                 raise ValueError(
-                    "staged coordinates require digest, extras_digest, staging_key, "
-                    "chain_hash, and cumulative_hash"
+                    "staged coordinates require digest, extras_digest, staging_key, chain_hash, and cumulative_hash"
                 )
             if self.delta_len == 0:
                 raise ValueError("staged coordinates require a non-empty delta")
@@ -245,13 +244,27 @@ class CallRecord(_DigestWireModel):
     mode: CaptureMode = "token_in"
     chain_hash: DigestHex | None = None
     cumulative_hash: DigestHex | None = None
-    # The commit-time request binding (client header when present, else the
-    # response id). Receipt assembly selects the terminal row by this value.
+    # The served response envelope id, recorded by the model server before the
+    # response leaves the process. Possession of this id proves which served
+    # response the agent kept: terminal attribution joins the scored
+    # ``response.id`` to exactly one manifest row through it.
+    response_id: Identifier
+    # The client correlation header (``x-nemo-gym-logical-request-id``) when
+    # the harness sent one. Attribution never reads it; it remains for
+    # observability joins only.
     logical_request_id: Identifier | None = None
-    # Wall-clock admission time stamped by the model-server middleware. Rows
-    # written before this column existed carry ``None``. Heuristic terminal
-    # selection orders candidate roots by this value.
+    # Wall-clock admission time stamped by the model-server middleware.
+    # Heuristic terminal selection orders candidate roots by this value.
     admitted_at: StrictFloat | None = None
+    # Content-witness keys: ``assistant_fingerprint`` over this call's own
+    # output items, and over request + output (the cumulative reading).
+    # ``None`` means the content was unfingerprintable — a legitimate
+    # abstention, not a schema gap.
+    output_fingerprint: DigestHex | None = None
+    continuation_fingerprint: DigestHex | None = None
+    # Canonicalization version of the fingerprints above; 0 means none were
+    # recorded. Attribution ignores fingerprints from a different version.
+    fingerprint_version: NonNegativeInt = 0
 
     @model_validator(mode="after")
     def _validate_lengths(self) -> Self:
@@ -293,9 +306,14 @@ class RolloutReceipt(_DigestWireModel):
     capture_poisoned: bool = False
     failure_reason: str | None = None
     # How ``terminal_model_call_id`` was chosen: ``declared`` when the agent
-    # reported the response it kept, ``heuristic`` when selection inferred it
-    # from the manifest, ``None`` for receipts predating this column.
-    terminal_selection: Literal["declared", "heuristic"] | None = None
+    # named the response it kept, ``response_id``/``content`` when a witness
+    # joined the scored response to a manifest row, ``heuristic`` when the
+    # parent-link walk inferred it (also stamped on failed selections — it
+    # names the last stage attempted).
+    terminal_selection: Literal["declared", "response_id", "content", "heuristic"]
+    # The witness abstention/corroboration trail from attribution, kept on
+    # success and failure alike so per-method metrics stay diagnosable.
+    terminal_attribution_reason: str | None = None
 
     @model_validator(mode="after")
     def _validate_manifest(self) -> Self:
