@@ -67,6 +67,30 @@ class TestBaseResponsesAPIModel:
         model = TestSimpleResponsesAPIModel(config=config, server_client=server_client)
         model.setup_webserver()
 
+    def test_embeddings_default_not_implemented(self) -> None:
+        # A policy-only server exposes /v1/embeddings but the base default rejects it with 501,
+        # since it has no embeddings backend to pass the request through to.
+        config = BaseResponsesAPIModelConfig(host="", port=0, openai_api_key="123", entrypoint="", name="")
+
+        class TestSimpleResponsesAPIModel(SimpleResponsesAPIModel):
+            async def chat_completions(
+                self, request: NeMoGymResponseCreateParamsNonStreaming
+            ) -> NeMoGymChatCompletion:
+                raise NotImplementedError
+
+            async def responses(self, request: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
+                raise NotImplementedError
+
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {}
+        model = TestSimpleResponsesAPIModel(config=config, server_client=server_client)
+        client = TestClient(model.setup_webserver())
+
+        response = client.post("/v1/embeddings", json={"input": "hello", "model": "text-embedding-3-small"})
+
+        assert response.status_code == 501
+        assert "does not support the embeddings endpoint" in response.json()["detail"]
+
 
 def _capture_config(tmp_path, *, enabled: bool = True) -> ModelCallCaptureConfig:
     return ModelCallCaptureConfig(

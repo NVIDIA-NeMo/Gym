@@ -25,6 +25,7 @@ from time import time
 from typing import Any, Dict
 
 from fastapi import Request
+from openai.types import CreateEmbeddingResponse
 from pydantic import Field
 
 from nemo_gym.base_responses_api_model import (
@@ -116,6 +117,17 @@ class InferenceProvider(SimpleResponsesAPIModel):
                 ) + (choice_dict["message"].get("content") or "")
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
+
+    async def embeddings(self, body: dict = Body()) -> CreateEmbeddingResponse:
+        # Force float output: this endpoint's response schema is CreateEmbeddingResponse
+        # (embedding: List[float]) and cannot represent base64. OpenAI SDK clients default to
+        # encoding_format="base64" on the wire, which would otherwise fail response validation.
+        body_dict = body | {"model": self.config.model, "encoding_format": "float"}
+        if self.config.extra_body:
+            body_dict = self.config.extra_body | body_dict
+        async with self._semaphore:
+            embedding_dict = await self._client.create_embeddings(**body_dict)
+        return CreateEmbeddingResponse.model_validate(embedding_dict)
 
 
 if __name__ == "__main__":

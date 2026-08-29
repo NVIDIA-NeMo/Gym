@@ -41,9 +41,10 @@ from typing import Any, Mapping, Optional
 from uuid import uuid4
 
 import orjson
-from fastapi import Body, FastAPI, Request
+from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
+from openai.types import CreateEmbeddingResponse
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from nemo_gym.anthropic_converter import AnthropicConverter
@@ -196,6 +197,11 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             traced_endpoint(GymSpanGroup.MODEL_CALL, "gym.model.messages", self.messages, model_attributes)
         )
 
+        # OpenAI-compatible embeddings. Servers backed by an embeddings-capable provider
+        # (e.g. openai_model, inference_provider) override embeddings(); the base default
+        # returns 501 so a policy-only server advertises the route but rejects the call.
+        app.post("/v1/embeddings")(self.embeddings)
+
         return app
 
     @abstractmethod
@@ -302,6 +308,17 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             request_messages=request_messages,
         )
         return completion
+
+    async def embeddings(self, body: dict = Body()) -> CreateEmbeddingResponse:
+        """OpenAI-compatible ``POST /v1/embeddings`` default: 501 unless a server overrides it.
+
+        Servers backed by an embeddings-capable provider (e.g. ``openai_model``,
+        ``inference_provider``) override this to pass ``body`` through to the provider.
+        """
+        raise HTTPException(
+            status_code=501,
+            detail="This model server does not support the embeddings endpoint.",
+        )
 
     async def messages(self, request: Request, body: dict = Body()):
         """Default Anthropic Messages <-> Responses mapping shared by every Gym model server.
