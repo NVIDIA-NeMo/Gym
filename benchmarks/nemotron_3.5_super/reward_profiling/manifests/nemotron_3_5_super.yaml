@@ -146,9 +146,9 @@ gym_env_start:
           # Failure is silent, which is why this is generous rather than tight: parse_judge_grade
           # (resources_servers/abstention/app.py:218) falls back to "B" (INCORRECT) on anything it
           # cannot parse, so a judge truncated before its letter scores the rollout wrong rather
-          # than erroring. Upstream's 64 fits a bare letter and nothing else. Generous rather than
-          # tight on purpose: too high only costs latency on a runaway generation, and matching the
-          # ultra-3 branch keeps the measured rates in RATES.md comparable.
+          # than erroring. Upstream's 64 fits a bare letter and nothing else. Too high only costs
+          # latency on a runaway generation, and matching the ultra-3 branch keeps the measured
+          # rates in RATES.md comparable.
           max_output_tokens: 8192
 
   inverse_if:
