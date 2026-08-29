@@ -104,6 +104,11 @@ class RolloutTokenCapture:
         self._claim_completion(call)
         admission = call.admission
         try:
+            if (
+                admission.mode == "token_in"
+                and prompt_token_ids[: admission.prev_len] != admission.required_prefix_token_ids
+            ):
+                raise ValueError("generation prompt does not begin with the gate-authorized token prefix")
             token_ids_delta, token_mask_delta, logprobs_delta = build_staging_delta(
                 prompt_token_ids=prompt_token_ids,
                 generated_token_ids=generated_token_ids,

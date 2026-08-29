@@ -234,12 +234,38 @@ def test_missing_terminal_and_wrong_parent_length_are_rejected() -> None:
         verify_and_linearize(no_terminal, snapshots)
     assert error.value.code == "missing_terminal"
 
-    bad_main = receipt.manifest[2].model_copy(update={"prev_len": 2, "cum_len": 4})
     bad_snapshot = snapshots[2].model_copy(update={"prev_len": 2, "cum_len": 4})
+    bad_snapshot = bad_snapshot.model_copy(
+        update={
+            "digest": compute_staging_digest(
+                schema_version=bad_snapshot.schema_version,
+                digest_version=bad_snapshot.digest_version,
+                extras_digest_version=bad_snapshot.extras_digest_version,
+                rollout_id=bad_snapshot.rollout_id,
+                model_call_id=bad_snapshot.model_call_id,
+                parent_call_id=bad_snapshot.parent_call_id,
+                mode=bad_snapshot.mode,
+                prev_len=bad_snapshot.prev_len,
+                delta_len=bad_snapshot.delta_len,
+                cum_len=bad_snapshot.cum_len,
+                weight_version=bad_snapshot.weight_version,
+                token_ids_delta=bad_snapshot.token_ids_delta,
+                token_mask_delta=bad_snapshot.token_mask_delta,
+                generation_log_probs_delta=bad_snapshot.generation_log_probs_delta,
+                extras_digest=bad_snapshot.extras_digest,
+                chain_hash=bad_snapshot.chain_hash,
+                cumulative_hash=bad_snapshot.cumulative_hash,
+            )
+        }
+    )
+    bad_main = _manifest_row(
+        bad_snapshot,
+        staging_key=receipt.manifest[2].staging_key,
+    )
     wrong_length = receipt.model_copy(update={"manifest": [receipt.manifest[0], receipt.manifest[1], bad_main]})
     with pytest.raises(ReceiptVerificationError) as error:
         verify_and_linearize(wrong_length, [snapshots[0], snapshots[1], bad_snapshot])
-    assert error.value.code in {"invalid_snapshot", "parent_length_mismatch"}
+    assert error.value.code == "parent_length_mismatch"
 
 
 def _route_envelope(values: list[int], *, shape: str, dtype: str = "int16") -> str:

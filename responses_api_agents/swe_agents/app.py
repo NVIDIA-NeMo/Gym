@@ -69,7 +69,9 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.profiling import Profiler
-from nemo_gym.server_utils import get_first_server_config_dict
+from nemo_gym.rollout_correlation import current_rollout_id
+from nemo_gym.server_utils import apply_rollout_prefix, get_first_server_config_dict
+from nemo_gym.token_id_capture.staging.routes import routed_experts_token_count
 from responses_api_agents.swe_agents.opencode_replay import (
     build_replay_subagent_manifest,
     merge_replay_subagent_trajectories,
@@ -77,6 +79,10 @@ from responses_api_agents.swe_agents.opencode_replay import (
     parse_replay_subagent_payload,
 )
 from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
+
+
+OPENHANDS_CAPTURE_OVERLAY_DIR = Path(__file__).parent / "openhands_capture_overlay"
+OPENHANDS_CAPTURE_OVERLAY_MOUNT = "/nemo_gym_capture_overlay"
 
 
 ########################################
@@ -226,6 +232,8 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
 class SWEBenchWrapperServerConfig(BaseModel):
     ng_global_config_dict_str: str
     model_server_name: str
+    model_server_base_url: str
+    model_server_default_model: str
     swebench_setup_dir: Path
     r2e_gym_setup_dir: Path
     swe_rebench_setup_dir: Path
@@ -276,6 +284,10 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
     resolved_agent_cls: str = "CodeActAgent"
     resolved_diversify_tool_names: Optional[bool] = False
     resolved_camel_case_tool_names: Optional[bool] = False
+    ng_rollout_id: Optional[str] = None
+    # Route the sandboxed agent's model traffic through the token-capture URL
+    # prefix so the capture middleware attributes every call to the rollout.
+    token_capture_enabled: bool = False
 
     # Set later
     eval_command: Optional[ExecuteContainerCommandArgs] = None
@@ -331,6 +343,7 @@ class SWEBenchMetrics(BaseModel):
 class SWEBenchVerifyResponse(SWEBenchMetrics, BaseVerifyResponse):
     instance_config: SWEBenchWrapperInstanceConfig
     subagent_trajectories: Optional[List[Dict[str, Any]]] = None
+    terminal_logical_request_id: Optional[str] = None
 
 
 ########################################
@@ -1774,9 +1787,14 @@ AGENT_FRAMEWORK_COMMIT={commit} \\
         # openai_model proxy force-overrides). tomlkit refuses to serialize None,
         # so coerce to an empty string here; the value is unused once the proxy
         # substitutes its configured backend.
+        model_server_base_url = apply_rollout_prefix(
+            self.config.model_server_base_url,
+            self.config.ng_rollout_id,
+            token_capture=self.config.token_capture_enabled,
+        )
         llm_model_config = {
             "model": self.config.body.model or "",
-            "base_url": "",  # May need to populate this
+            "base_url": f"{model_server_base_url}/v1",
             "temperature": self.config.inference_params["temperature"],
             "top_p": self.config.inference_params["top_p"],
         }
@@ -1890,6 +1908,7 @@ AGENT_FRAMEWORK_COMMIT={commit} \\
             "cp /openhands_setup/miniforge3/bin/jq /usr/local/bin/jq 2>/dev/null || true && "
             # Use pre-built OpenHands
             "cd /openhands_setup/OpenHands && "
+            f"export PYTHONPATH={OPENHANDS_CAPTURE_OVERLAY_MOUNT}:${{PYTHONPATH:-}} && "
             "export RUNTIME=local && "
             f'date +"%s.%N" > {self.config.generation_apptainer_spinup_timestamp_mounted_fpath} && '
             f"{log_cmd}"
@@ -1897,6 +1916,7 @@ AGENT_FRAMEWORK_COMMIT={commit} \\
             f"export NEMO_GYM_METRICS_FPATH={self.config.base_mounted_dir}/nemo_gym_metrics.json && "
             f"export NEMO_GYM_CONFIG_DICT={self.config.ng_global_config_dict_str} && "
             f"export NEMO_GYM_MODEL_SERVER_NAME={self.config.model_server_name} &&"
+            f"export NEMO_GYM_MODEL_SERVER_BASE_URL={shlex.quote(model_server_base_url)} && "
             "export VIRTUAL_ENV=/openhands_setup/OpenHands/.venv && "
             "export PATH=$PATH:/openhands_setup/OpenHands/.venv/bin && "
             # CRITICAL: Configure poetry to only use the OpenHands venv (ignore external venvs)
@@ -2148,20 +2168,14 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             "OpenCodeHarnessProcessor.setup() ran in model_post_init."
         )
 
-        # openai_model.yaml uses `openai_model`; vllm_model.yaml uses `model`.
-        try:
-            model_server_cfg = get_first_server_config_dict(get_global_config_dict(), self.config.model_server_name)
-            model_server_base_url = f"http://{model_server_cfg.host}:{model_server_cfg.port}"
-            default_model_name = (
-                getattr(model_server_cfg, "openai_model", None) or getattr(model_server_cfg, "model", None) or ""
-            )
-        except Exception as e:
-            raise RuntimeError(
-                f"Could not resolve model server '{self.config.model_server_name}' for opencode bench: {e}"
-            )
+        model_server_base_url = apply_rollout_prefix(
+            self.config.model_server_base_url,
+            self.config.ng_rollout_id,
+            token_capture=self.config.token_capture_enabled,
+        )
 
         # Falls back to the policy model so opencode doesn't POST model=default.
-        effective_model = self.config.body.model or default_model_name
+        effective_model = self.config.body.model or self.config.model_server_default_model
         # temperature/top_p ride along; NeMo-RL asserts exact on-policy sampling params on every request.
         llm_model_cfg: Dict[str, Any] = {"model": effective_model}
         for key in ("temperature", "top_p"):
@@ -3002,7 +3016,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         # (on multinode deployments, from other nodes); resolved from the global
         # `results_dir` so runs can point it at a shared filesystem. The key is
         # absent only for hand-built config dicts that bypassed the parser.
-        configured_results_root = get_global_config_dict().get(RESULTS_DIR_KEY_NAME)
+        global_config_dict = get_global_config_dict()
+        configured_results_root = global_config_dict.get(RESULTS_DIR_KEY_NAME)
         results_root = Path(configured_results_root) if configured_results_root else RESULTS_DIR
         base_results_dir = results_root / f"swebench_results_{run_session_id}"
         base_results_dir.mkdir(parents=True, exist_ok=True)
@@ -3017,11 +3032,19 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         else:
             openhands_setup_dir = OpenHandsHarnessProcessor(config=self.config).setup()
 
+        model_server_config = get_first_server_config_dict(
+            global_config_dict,
+            self.config.model_server.name,
+        )
         self._swe_bench_wrapper_server_config = SWEBenchWrapperServerConfig(
             run_session_id=run_session_id,
             base_results_dir=base_results_dir,
-            ng_global_config_dict_str=shlex.quote(OmegaConf.to_yaml(get_global_config_dict())),
+            ng_global_config_dict_str=shlex.quote(OmegaConf.to_yaml(global_config_dict)),
             model_server_name=self.config.model_server.name,
+            model_server_base_url=f"http://{model_server_config.host}:{model_server_config.port}",
+            model_server_default_model=(
+                getattr(model_server_config, "openai_model", None) or getattr(model_server_config, "model", None) or ""
+            ),
             openhands_setup_dir=openhands_setup_dir,
             opencode_setup_dir=opencode_setup_dir,
             swebench_setup_dir=SweBenchDatasetProcessor(config=self.config).setup(),
@@ -3064,6 +3087,53 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         return messages, tools
 
+    @staticmethod
+    def _attach_routed_experts_from_completions(
+        messages: list,
+        completion_files: list[Path],
+    ) -> None:
+        """Attach only a full-sequence route tensor matching the selected chain."""
+        pending = [
+            message
+            for message in messages
+            if message.get("generation_token_ids") and message.get("routed_experts") is None
+        ]
+        if not pending:
+            return
+        for file_path in reversed(completion_files):
+            try:
+                data = json.loads(file_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            fields = data.get("provider_specific_fields") or {}
+            try:
+                response_message = (data.get("response") or {})["choices"][0]["message"] or {}
+            except (KeyError, IndexError, TypeError):
+                response_message = {}
+            full_routes = fields.get("routed_experts") or response_message.get("routed_experts")
+            if full_routes is None:
+                continue
+            prompt_token_ids = fields.get("prompt_token_ids") or response_message.get("prompt_token_ids")
+            generation_token_ids = fields.get("generation_token_ids") or response_message.get("generation_token_ids")
+            if not isinstance(prompt_token_ids, list) or not isinstance(generation_token_ids, list):
+                raise ValueError("routed_experts attachment requires final-call prompt and generation token IDs")
+            expected_tokens = len(prompt_token_ids) + len(generation_token_ids)
+            route_tokens = routed_experts_token_count(full_routes)
+            if route_tokens != expected_tokens:
+                raise ValueError(
+                    "final-call routed_experts token dimension does not match the "
+                    f"selected chain ({route_tokens} != {expected_tokens})"
+                )
+            for message in pending:
+                message["routed_experts"] = full_routes
+            return
+
+        print(
+            "routed_experts unavailable for tokenized SWE messages: "
+            f"messages={len(pending)} completion_files={len(completion_files)}",
+            flush=True,
+        )
+
     def get_openhands_trajectory_from_completions(self, trajectories_dir: Path, instance_id: str) -> tuple:
         """Extract the main session's trajectory for the API response.
 
@@ -3071,7 +3141,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         files; we return the main session (no parent_session_id). All other
         per-session files stay on disk for offline training pickup.
 
-        Returns (messages, tools, prefix_message_count). `prefix_message_count`
+        Returns (messages, tools, prefix_message_count, terminal_logical_request_id).
+        `prefix_message_count`
         is the number of chat messages the live model saw on its first call
         (= the replay prefix in chat-completion format, or just system+user for
         non-replay runs). Used by `_inner_responses` to split input/output at
@@ -3082,12 +3153,12 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         completions_dir = trajectories_dir / instance_id / "llm_completions" / instance_id
         if not completions_dir.exists():
             print(f"No llm_completions directory found: {completions_dir}", flush=True)
-            return messages, tools, 0
+            return messages, tools, 0, None
 
         completion_files = sorted(completions_dir.glob("*.json"))
         if not completion_files:
             print(f"No completion files found in: {completions_dir}", flush=True)
-            return messages, tools, 0
+            return messages, tools, 0, None
 
         # The FIRST completion file (lex-sorted on the timestamp suffix in the
         # filename) is the agent's first live LLM call. Its `messages` count is
@@ -3103,6 +3174,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         # Prefer the main session (no parent_session_id). Fall back to the
         # last file if the payload predates session tagging (openhands).
         main_data = None
+        main_session_id = None
         for fpath in completion_files:
             try:
                 with open(fpath, "r") as f:
@@ -3111,12 +3183,26 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 continue
             if "session_id" in data and data.get("parent_session_id") in (None, ""):
                 main_data = data
+                main_session_id = data.get("session_id")
         if main_data is None:
             with open(completion_files[-1], "r") as f:
                 main_data = orjson.loads(f.read())
 
+        selected_files = completion_files
+        if main_session_id is not None:
+            selected_files = []
+            for file_path in completion_files:
+                try:
+                    data = json.loads(file_path.read_text())
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if data.get("session_id") == main_session_id:
+                    selected_files.append(file_path)
         messages, tools = self._materialize_trajectory(main_data)
-        return messages, tools, first_prefix_count
+        self._attach_routed_experts_from_completions(messages, selected_files)
+        response_id = (main_data.get("response") or {}).get("id")
+        terminal_logical_request_id = str(response_id) if response_id else None
+        return messages, tools, first_prefix_count, terminal_logical_request_id
 
     def get_all_session_trajectories_from_completions(self, trajectories_dir: Path, instance_id: str) -> list[dict]:
         """All per-session trajectories on disk (opencode subagent capture).
@@ -3130,6 +3216,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         if not completions_dir.exists():
             return out
         by_session: dict[str, dict] = {}
+        files_by_session: dict[str, list[Path]] = {}
         for fpath in sorted(completions_dir.glob("*.json")):
             try:
                 with open(fpath, "r") as f:
@@ -3140,8 +3227,13 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             if not sess_id:
                 continue
             by_session[sess_id] = data
+            files_by_session.setdefault(sess_id, []).append(fpath)
         for sess_id, data in by_session.items():
             messages, tools = self._materialize_trajectory(data)
+            self._attach_routed_experts_from_completions(
+                messages,
+                files_by_session[sess_id],
+            )
             entry = {
                 "session_id": sess_id,
                 "parent_session_id": data.get("parent_session_id"),
@@ -3406,6 +3498,10 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                     f"--mount type=bind,src={openhands_dir}/logs,dst={openhands_dir}/logs",
                     f"--mount type=bind,src={openhands_dir}/evaluation/oh,dst=/openhands_setup/OpenHands/evaluation/oh",
                     f"--mount type=bind,src={openhands_dir}/evaluation/oh,dst={openhands_dir}/evaluation/oh",
+                    # OpenHands pins its own nemo-gym dependency. Keep that
+                    # dependency intact and inject only the external-process
+                    # capture routing compatibility patch via sitecustomize.
+                    f"--mount type=bind,src={OPENHANDS_CAPTURE_OVERLAY_DIR},dst={OPENHANDS_CAPTURE_OVERLAY_MOUNT},ro",
                     # Data
                     f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl",
                 ]
@@ -3721,6 +3817,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         # persistent_dir is mounted here in each container
         base_mounted_dir = Path("/trajectories_mount")
+        ng_rollout_id = current_rollout_id()
 
         params: SWEBenchWrapperInstanceConfig = SWEBenchWrapperInstanceConfig(
             **self.config.model_dump(),
@@ -3730,6 +3827,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             persistent_dir=persistent_dir,
             metrics_fpath=persistent_dir / "nemo_gym_metrics.json",
             base_mounted_dir=base_mounted_dir,
+            ng_rollout_id=ng_rollout_id,
+            token_capture_enabled=self._token_id_capture_enabled(),
             profiling_dir=persistent_dir / "profiling",
             profiling_mounted_dir=base_mounted_dir / "profiling",
             ray_queue_timestamp=time.time(),
@@ -3859,9 +3958,12 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             params.mask_sample = True
 
         trajectories_dir = params.persistent_dir / "trajectories"
-        chat_completions_trajectory, chat_completions_tools, prefix_msg_count = (
-            self.get_openhands_trajectory_from_completions(trajectories_dir, params.instance_id)
-        )
+        (
+            chat_completions_trajectory,
+            chat_completions_tools,
+            prefix_msg_count,
+            terminal_logical_request_id,
+        ) = self.get_openhands_trajectory_from_completions(trajectories_dir, params.instance_id)
 
         tools = [
             FunctionTool.model_validate(tool["function"] | {"type": "function"}) for tool in chat_completions_tools
@@ -3947,6 +4049,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 captured_subagents,
             )
             metadata["subagent_trajectories"] = orjson.dumps(subagent_trajectories).decode()
+        if terminal_logical_request_id is not None:
+            metadata["terminal_logical_request_id"] = terminal_logical_request_id
 
         return NeMoGymResponse(
             id=f"swebench-{params.instance_id}",
@@ -3984,6 +4088,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                     **(responses_create_params.get("metadata") or {}),
                     "subagent_trajectories": metadata["subagent_trajectories"],
                 }
+            terminal_logical_request_id = metadata.get("terminal_logical_request_id")
 
             return SWEBenchVerifyResponse(
                 responses_create_params=responses_create_params,
@@ -3994,6 +4099,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                     metadata["instance_config"]
                 ).model_dump(),
                 subagent_trajectories=subagent_trajectories,
+                terminal_logical_request_id=terminal_logical_request_id,
             )
 
 
