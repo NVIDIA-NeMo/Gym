@@ -47,6 +47,7 @@ def _custody(model_call_id: str, *, parent_call_id: str | None = None, prev_len:
         extras_digest=EMPTY_EXTRAS_DIGEST,
         mode="text" if parent_call_id is None else "token_in",
         logical_request_id=f"lr-{model_call_id}",
+        admitted_at=1_755_600_000.25,
     )
 
 
@@ -79,9 +80,20 @@ async def test_ledger_row_round_trips_token_free_manifest(store):
     assert record.model_call_id == "c1"
     assert record.staging_key == "r1/c1"
     assert record.logical_request_id == "lr-c1"
+    assert record.admitted_at == 1_755_600_000.25
     assert record.digest == STAGING_DIGEST
     # Cumulative token IDs stay off the manifest surface.
     assert "cumulative_token_ids" not in manifest.model_dump()["records"][0]
+
+
+@pytest.mark.asyncio
+async def test_legacy_row_without_admitted_at_still_validates(store):
+    custody = _custody("c1")
+    custody.pop("admitted_at")
+    await store.record("r1", "c1", [USER_1], [ASSISTANT_1], TOKENS_1, compute_digest(TOKENS_1), **custody)
+    manifest = RolloutManifest.model_validate(await store.manifest("r1"))
+    (record,) = manifest.records
+    assert record.admitted_at is None
 
 
 @pytest.mark.asyncio

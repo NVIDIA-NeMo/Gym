@@ -1320,6 +1320,7 @@ class _CaptureMiddleware:
                 delta_records=self._delta_records,
                 external_staging=self._external_staging,
                 logical_request_id=_scope_header(scope, LOGICAL_REQUEST_HEADER),
+                admitted_at=time.time(),
             )
             sink_token = set_token_sink(capture_context)
 
