@@ -1,8 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import ast
 import inspect
 import json
+import textwrap
 
 import pytest
 from pydantic import BaseModel, ValidationError
@@ -145,9 +147,15 @@ def test_validation_error_formatting_names_field_and_previews_arguments() -> Non
 def test_run_stirrup_rollout_installs_the_coercion_patch() -> None:
     # The sandbox runs stirrup_runtime.py standalone; the fix is inert unless
     # run_stirrup_rollout installs the patch before constructing the Agent.
-    source = inspect.getsource(stirrup_runtime.run_stirrup_rollout)
-    assert "install_tool_argument_coercion(Agent)" in source
-    assert source.index("install_tool_argument_coercion(Agent)") < source.index("agent = Agent(")
+    # AST-based so a commented-out call cannot satisfy the assertion.
+    tree = ast.parse(textwrap.dedent(inspect.getsource(stirrup_runtime.run_stirrup_rollout)))
+    call_linenos: dict[str, list[int]] = {"install_tool_argument_coercion": [], "Agent": []}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in call_linenos:
+            call_linenos[node.func.id].append(node.lineno)
+    assert call_linenos["install_tool_argument_coercion"]
+    assert call_linenos["Agent"]
+    assert min(call_linenos["install_tool_argument_coercion"]) < min(call_linenos["Agent"])
 
 
 async def test_patched_run_tool_coerces_mcp_arguments_but_never_finish_tools() -> None:

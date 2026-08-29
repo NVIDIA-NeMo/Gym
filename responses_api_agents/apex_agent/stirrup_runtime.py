@@ -236,6 +236,112 @@ def install_tool_argument_coercion(agent_cls: Any) -> None:
     agent_cls.run_tool = run_tool_with_argument_coercion
 
 
+def _schema_contains_ref(node: Any) -> bool:
+    """True when any dict anywhere in node carries a string-valued "$ref" key."""
+    if isinstance(node, dict):
+        return any(
+            (key == "$ref" and isinstance(value, str)) or _schema_contains_ref(value) for key, value in node.items()
+        )
+    if isinstance(node, list):
+        return any(_schema_contains_ref(item) for item in node)
+    return False
+
+
+def inline_schema_refs(schema: Any) -> Any:
+    """Return a copy of a JSON schema with $refs resolved inline; input is never mutated.
+
+    Local refs ("#/$defs/<name>" or "#/definitions/<name>") are resolved against the
+    schema's own root table of the matching spelling; non-local or unresolvable refs
+    stay as-is. Sibling keys next to a $ref overlay the resolved definition (siblings
+    win on conflict). Cyclic refs (direct or indirect) are left as $ref nodes, so
+    self-referential schemas neither hang nor blow the stack. The $defs/definitions
+    tables are dropped only when no $ref remains outside them. Every dict and list in
+    the result is rebuilt, so the output shares no mutable state with the input (each
+    inline site of the same definition is an independent copy). Acyclic ref chains can
+    still multiply nodes (each inline site is a copy), so expansion is capped by a node
+    budget; past it the original schema is returned unchanged. Never raises: any
+    unexpected error returns the original schema.
+    """
+    try:
+        if not isinstance(schema, dict):
+            return schema
+        definition_tables: dict[str, Any] = {}
+        for table_key in ("$defs", "definitions"):
+            table = schema.get(table_key)
+            if isinstance(table, dict):
+                for name, definition in table.items():
+                    definition_tables[f"#/{table_key}/{name}"] = definition
+
+        budget = [50_000]
+
+        def resolve(node: Any, expanding: frozenset[str]) -> Any:
+            budget[0] -= 1
+            if budget[0] < 0:
+                raise RecursionError("schema expansion budget exceeded")
+            if isinstance(node, list):
+                return [resolve(item, expanding) for item in node]
+            if not isinstance(node, dict):
+                return node
+            ref = node.get("$ref")
+            if isinstance(ref, str) and ref in definition_tables and ref not in expanding:
+                resolved = resolve(definition_tables[ref], expanding | {ref})
+                siblings = {key: resolve(value, expanding) for key, value in node.items() if key != "$ref"}
+                if isinstance(resolved, dict):
+                    return {**resolved, **siblings}
+                if not siblings:
+                    return resolved
+                # A non-dict definition cannot merge with sibling keys; keep the ref node.
+            return {key: resolve(value, expanding) for key, value in node.items()}
+
+        result = resolve(schema, frozenset())
+        stripped = {key: value for key, value in result.items() if key not in ("$defs", "definitions")}
+        return result if _schema_contains_ref(stripped) else stripped
+    except Exception:
+        return schema
+
+
+# GLM-family vLLM tool-call parsers reconstruct each argument's type from the
+# wire schema's properties[key].type; a property site that is a bare
+# {"$ref": "#/$defs/..."} carries no inline "type", so the parser
+# string-encodes the whole object server-side before the agent ever sees it.
+# Dereferencing $refs at the client boundary removes that trigger
+# (install_tool_argument_coercion stays as the safety net for parsers that
+# string-encode regardless of schema). ChatCompletionsClient and LiteLLMClient
+# bind to_openai_tools via `from stirrup.clients.utils import ...`, so
+# rebinding stirrup.clients.utils alone is not enough — each client module's
+# own namespace binding must be rebound too.
+def install_tool_schema_inlining() -> None:
+    """Patch stirrup's to_openai_tools so tool schemas reach the wire with $refs inlined."""
+    import stirrup.clients.utils as stirrup_client_utils
+
+    original_to_openai_tools = stirrup_client_utils.to_openai_tools
+    if getattr(original_to_openai_tools, "_apex_schema_inline_patch", False):
+        return
+
+    def to_openai_tools_with_inlined_refs(tools: Any) -> list[dict[str, Any]]:
+        entries = original_to_openai_tools(tools)
+        for entry in entries:
+            function = entry.get("function") if isinstance(entry, dict) else None
+            if isinstance(function, dict) and isinstance(function.get("parameters"), dict):
+                function["parameters"] = inline_schema_refs(function["parameters"])
+        return entries
+
+    to_openai_tools_with_inlined_refs._apex_schema_inline_patch = True
+
+    client_modules: list[Any] = [stirrup_client_utils]
+    with suppress(Exception):
+        import stirrup.clients.chat_completions_client as chat_completions_client_module
+
+        client_modules.append(chat_completions_client_module)
+    with suppress(Exception):
+        import stirrup.clients.litellm_client as litellm_client_module
+
+        client_modules.append(litellm_client_module)
+    for module in client_modules:
+        if hasattr(module, "to_openai_tools"):
+            module.to_openai_tools = to_openai_tools_with_inlined_refs
+
+
 def replace_tool_images_for_text_only_model(
     content: Any,
     *,
@@ -552,6 +658,7 @@ async def run_stirrup_rollout(
     from stirrup.tools.mcp import MCPConfig, MCPToolProvider, StreamableHttpServerConfig
 
     install_tool_argument_coercion(Agent)
+    install_tool_schema_inlining()
 
     class ToolNameParams(BaseModel):
         name: Annotated[str, Field(description="Exact MCP tool name from list_tools.")]
@@ -708,7 +815,7 @@ async def run_stirrup_rollout(
                 detail = {
                     "name": tool.name,
                     "description": tool.description,
-                    "parameters": tool.parameters.model_json_schema(),
+                    "parameters": inline_schema_refs(tool.parameters.model_json_schema()),
                     "active": self._active(tool.name),
                 }
                 return ToolResult(
