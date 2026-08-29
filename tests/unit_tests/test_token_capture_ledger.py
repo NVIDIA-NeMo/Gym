@@ -21,7 +21,11 @@ from nemo_gym.token_id_capture.sink import (
     resolve_parent,
     set_token_sink,
 )
-from nemo_gym.token_id_capture.staging.digest import EMPTY_EXTRAS_DIGEST
+from nemo_gym.token_id_capture.staging.digest import (
+    EMPTY_EXTRAS_DIGEST,
+    compute_chain_hash,
+    hash_token_ids,
+)
 from nemo_gym.token_id_capture.staging.records import RolloutManifest
 
 
@@ -34,6 +38,8 @@ ASSISTANT_SEEDED = {"role": "assistant", "content": "seeded turn nobody served"}
 
 TOKENS_1 = list(range(900))
 STAGING_DIGEST = "a" * 64
+CHAIN_HASH_1 = compute_chain_hash(None, TOKENS_1)
+CUMULATIVE_HASH_1 = hash_token_ids(TOKENS_1)
 
 
 def _custody(model_call_id: str, *, parent_call_id: str | None = None, prev_len: int = 0) -> dict:
@@ -50,17 +56,20 @@ def _custody(model_call_id: str, *, parent_call_id: str | None = None, prev_len:
         mode="text" if parent_call_id is None else "token_in",
         logical_request_id=f"lr-{model_call_id}",
         admitted_at=1_755_600_000.25,
+        chain_hash=CHAIN_HASH_1,
+        cumulative_hash=CUMULATIVE_HASH_1,
     )
 
 
 async def _record_call_1(store, rollout_id: str = "r1") -> None:
+    # Token-free custody row, exactly as the external commit hook writes it.
     await store.record(
         rollout_id,
         "c1",
         [USER_1],
         [ASSISTANT_1],
-        TOKENS_1,
-        compute_digest(TOKENS_1),
+        [],
+        CUMULATIVE_HASH_1,
         staging_chain=[f"{rollout_id}/c1"],
         **_custody("c1"),
     )
@@ -85,6 +94,8 @@ async def test_ledger_row_round_trips_token_free_manifest(store):
     assert record.logical_request_id == "lr-c1"
     assert record.admitted_at == 1_755_600_000.25
     assert record.digest == STAGING_DIGEST
+    assert record.chain_hash == CHAIN_HASH_1
+    assert record.cumulative_hash == CUMULATIVE_HASH_1
     # Cumulative token IDs stay off the manifest surface.
     assert "cumulative_token_ids" not in manifest.model_dump()["records"][0]
 
@@ -111,8 +122,8 @@ async def test_same_call_commit_is_idempotent_and_conflicts_raise(store):
             "c1",
             [USER_1],
             [ASSISTANT_1],
-            TOKENS_1 + [1],
-            compute_digest(TOKENS_1 + [1]),
+            [],
+            hash_token_ids(TOKENS_1 + [1]),
             **_custody("c1"),
         )
 
@@ -161,7 +172,9 @@ async def test_admission_match_uses_staging_chain_without_wire_prefix(store):
     assert admission.required_prefix_token_ids == []
     assert admission.staging_chain == ["r1/c1"]
     assert admission.prev_len == len(TOKENS_1)
+    assert admission.parent_chain_hash == CHAIN_HASH_1
     assert context.parent_staging_chain == ["r1/c1"]
+    assert context.parent_chain_hash == CHAIN_HASH_1
     assert context.request_items == [USER_1, ASSISTANT_1, USER_2]
 
 
@@ -169,13 +182,14 @@ async def test_admission_match_uses_staging_chain_without_wire_prefix(store):
 async def test_staging_chain_grows_across_external_calls(store):
     await _record_call_1(store)
     tokens_2 = TOKENS_1 + [901, 902]
+    chain_hash_2 = compute_chain_hash(CHAIN_HASH_1, [901, 902])
     await store.record(
         "r1",
         "c2",
         [USER_1, ASSISTANT_1, USER_2],
         [ASSISTANT_2],
-        tokens_2,
-        compute_digest(tokens_2),
+        [],
+        hash_token_ids(tokens_2),
         parent_call_id="c1",
         staging_key="r1/c2",
         weight_version=17,
@@ -186,6 +200,8 @@ async def test_staging_chain_grows_across_external_calls(store):
         extras_digest=EMPTY_EXTRAS_DIGEST,
         mode="token_in",
         staging_chain=["r1/c1", "r1/c2"],
+        chain_hash=chain_hash_2,
+        cumulative_hash=hash_token_ids(tokens_2),
     )
 
     context = await _admit(
@@ -200,6 +216,7 @@ async def test_staging_chain_grows_across_external_calls(store):
     assert admission.prev_len == len(tokens_2)
     assert admission.staging_chain == ["r1/c1", "r1/c2"]
     assert admission.required_prefix_token_ids == []
+    assert admission.parent_chain_hash == chain_hash_2
 
 
 @pytest.mark.asyncio
@@ -253,7 +270,11 @@ async def test_commit_ordering_parent_resolvable_only_after_record(store):
     assert await store.resolve("r1", [USER_1, ASSISTANT_1, USER_2]) is None
     await _record_call_1(store)
     match = await store.resolve("r1", [USER_1, ASSISTANT_1, USER_2])
-    assert match is not None and list(match.cumulative_token_ids) == TOKENS_1
+    assert match is not None
+    # Custody rows resolve token-free: continuity rides the chain hash.
+    assert list(match.cumulative_token_ids) == []
+    assert match.prev_len == len(TOKENS_1)
+    assert match.chain_hash == CHAIN_HASH_1
 
 
 @pytest.mark.asyncio
@@ -273,3 +294,35 @@ async def test_legacy_lineage_rows_do_not_enter_the_manifest(store):
     await store.record("r1", "c1", [USER_1], [ASSISTANT_1], TOKENS_1, compute_digest(TOKENS_1))
     manifest = RolloutManifest.model_validate(await store.manifest("r1"))
     assert manifest.records == [] and manifest.failures == []
+
+
+@pytest.mark.asyncio
+async def test_legacy_token_carrying_row_resolves_but_cannot_anchor_a_chain(tmp_path):
+    """Pre-chain external rows stay readable; extending them fails closed."""
+    import json
+
+    from nemo_gym.token_id_capture.lineage import assistant_fingerprint, conversation_digest
+
+    store = FileLineageStore(tmp_path)
+    legacy_row = {
+        "model_call_id": "c1",
+        "fingerprint": assistant_fingerprint([USER_1, ASSISTANT_1]),
+        "context_len": 1,
+        "context_digest": conversation_digest([USER_1]),
+        "cumulative_token_ids": TOKENS_1,
+        "digest": compute_digest(TOKENS_1),
+        **{key: value for key, value in _custody("c1").items() if key not in ("chain_hash", "cumulative_hash")},
+        "staging_chain": ["r1/c1"],
+    }
+    path = tmp_path / "r1.lineage.jsonl"
+    path.write_text(json.dumps(legacy_row, sort_keys=True, separators=(",", ":")) + "\n")
+
+    match = await store.resolve("r1", [USER_1, ASSISTANT_1, USER_2])
+    assert match is not None
+    assert list(match.cumulative_token_ids) == TOKENS_1
+    assert match.chain_hash == ""
+
+    context = await _admit(store, [USER_1, ASSISTANT_1, USER_2])
+    assert context.capture_admission is None
+    manifest = RolloutManifest.model_validate(await store.manifest("r1"))
+    assert [failure.reason for failure in manifest.failures] == [UNRESOLVED_PARENT_REASON]
