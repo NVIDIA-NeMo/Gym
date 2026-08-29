@@ -115,15 +115,22 @@ def shard_sweep(sweep_dir: str | Path, num_shards: int, out_dir: Optional[str | 
         if parent_rollouts.is_file():
             with open(parent_rollouts) as reader:
                 for line in reader:
-                    if line.strip():
+                    if not line.strip():
+                        continue
+                    try:
                         row = json.loads(line)
-                        seen_parent.add((row.get(TASK_INDEX_KEY), row.get(ROLLOUT_INDEX_KEY)))
+                    except ValueError:
+                        continue  # a job killed mid-write leaves a torn final line
+                    seen_parent.add((row.get(TASK_INDEX_KEY), row.get(ROLLOUT_INDEX_KEY)))
         with open(parent_rollouts, "a") as sink, open(out_dir / "_premerge.jsonl") as reader:
             for line in reader:
                 line = line.strip()
                 if not line:
                     continue
-                row = json.loads(line)
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
                 if (row.get(TASK_INDEX_KEY), row.get(ROLLOUT_INDEX_KEY)) in seen_parent:
                     continue
                 sink.write(line + "\n")

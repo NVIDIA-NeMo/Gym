@@ -1158,3 +1158,29 @@ def test_merge_skips_unparseable_rollout_rows(tmp_path):
         f.write(json.dumps({"_ng_task_index": 0, "_ng_rollout_index": 0}) + "\n")
         f.write("{ truncated")
     assert merge_shards(tmp_path).merged == 1
+
+
+def test_reshard_survives_a_rollouts_file_torn_mid_write(tmp_path):
+    """A killed job leaves a partial final line. The deal path already tolerated it; the absorb
+    path -- the one that runs on exactly that output -- did not, and crashed reshard with a raw
+    JSONDecodeError while carrying collected work."""
+    d, _ = _materialized(tmp_path, n_tasks=4, repeats=1, labels=("alpha",))
+    (d / "sweep_report.json").write_text(json.dumps({"entries": {"alpha": {"task_index_range": [0, 3]}}}))
+    first = shard_sweep(d, num_shards=2)
+    with open(first.shard_dirs[0] / "rollouts.jsonl", "w") as f:
+        f.write(json.dumps({"_ng_task_index": 0, "_ng_rollout_index": 0}) + "\n")
+        f.write('{"_ng_task_ind')
+
+    again = shard_sweep(d, num_shards=3)
+    assert len(again.shard_dirs) == 3
+    assert again.absorbed_rollouts == 1, "the one intact rollout must still be carried"
+
+
+def test_report_records_the_sampling_seed(tmp_path):
+    """limits and sample were recorded but not the seed, so a sweep dir could not say which rows
+    `sample: random` picked."""
+    build = _limit_fixture(tmp_path)
+    report = materialize(build(limit_per_entry=3, sample="random", seed=99), tmp_path / "out")
+    written = json.loads(Path(report.report_fpath).read_text())
+    assert written["sample"] == "random"
+    assert written["sample_seed"] == 99

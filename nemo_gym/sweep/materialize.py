@@ -88,6 +88,8 @@ class MaterializeReport:
     # explain why an entry has 300 rows -- a manifest limit, a smoke cap, or a short file.
     limits: Dict[str, Optional[int]] = field(default_factory=dict)
     sample: str = "head"
+    # The seed random sampling used. Without it a sweep dir cannot say which rows it picked.
+    sample_seed: int = 0
     shuffle_seed: int = 0
     # Settings the manifest declared for the collection command, for a launcher to pass as ++
     # overrides. Carried here rather than in sweep_config.yaml because that file configures
@@ -120,6 +122,7 @@ class MaterializeReport:
             "num_shards": self.num_shards,
             "limits": self.limits,
             "sample": self.sample,
+            "sample_seed": self.sample_seed,
             "shuffle_seed": self.shuffle_seed,
             "gym_eval_run": self.gym_eval_run,
             "sbatch": self.sbatch,
@@ -358,6 +361,7 @@ def materialize(
         num_shards=manifest.num_shards,
         limits=limits,
         sample=spec.sample,
+        sample_seed=spec.seed,
         shuffle_seed=shuffle_seed,
         gym_eval_run=manifest.gym_eval_run.overrides(),
         sbatch=manifest.sbatch.env(),
