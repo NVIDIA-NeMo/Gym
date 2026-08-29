@@ -18,6 +18,7 @@ import json
 import struct
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import aiohttp
 import pytest
@@ -764,6 +765,41 @@ async def test_provider_aclose_closes_live_pty_sessions(monkeypatch: pytest.Monk
     assert client.closed, "aclose must close PTY-owned aiohttp clients"
     assert ws.closed
     await session.close()
+
+
+async def test_provider_pause_detaches_only_the_target_sandbox_pty_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
+    pytest.importorskip("opensandbox", reason="opensandbox SDK is not installed")
+    from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
+
+    provider = OpenSandboxProvider(connection={"domain": "server", "protocol": "http"})
+    target_client = FakeHttpClient(ws=FakeWs([CONNECTED]))
+    other_client = FakeHttpClient(ws=FakeWs([CONNECTED]))
+    clients = iter([target_client, other_client])
+    monkeypatch.setattr(provider, "_pty_http_client", lambda: next(clients))
+    endpoint = SimpleNamespace(endpoint="server/base", headers={})
+    target_raw = SimpleNamespace(
+        get_endpoint=AsyncMock(return_value=endpoint),
+        pause=AsyncMock(),
+        get_info=AsyncMock(return_value=SimpleNamespace(status=SimpleNamespace(state="PAUSED"))),
+    )
+    other_raw = SimpleNamespace(get_endpoint=AsyncMock(return_value=endpoint))
+    target_handle = SandboxHandle("sb-target", "opensandbox", target_raw)
+    other_handle = SandboxHandle("sb-other", "opensandbox", other_raw)
+    target_session = await provider.create_pty(target_handle, SandboxPtySpec())
+    other_session = await provider.create_pty(other_handle, SandboxPtySpec())
+
+    await provider.pause(target_handle)
+
+    assert target_session.closed
+    assert target_client.closed
+    assert target_client.delete_calls == [], "pause must detach without ending the suspended process"
+    assert not other_session.closed
+    assert not other_client.closed
+    assert provider._pty_sessions == {other_session}
+    await provider.aclose()
 
 
 async def test_provider_tracks_sessions_strongly_and_prunes_closed(monkeypatch: pytest.MonkeyPatch) -> None:
