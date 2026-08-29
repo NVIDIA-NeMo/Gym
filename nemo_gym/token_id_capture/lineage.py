@@ -80,6 +80,7 @@ _CUSTODY_FIELDS = (
     "mode",
     "logical_request_id",
     "admitted_at",
+    "staging_chain",
 )
 
 
@@ -95,6 +96,7 @@ def _custody_columns(
     mode: str | None,
     logical_request_id: str | None,
     admitted_at: float | None,
+    staging_chain: list[str] | None = None,
 ) -> dict:
     """Return the ledger custody columns, or an empty dict for a lineage-only row."""
     if staging_key is None:
@@ -111,6 +113,7 @@ def _custody_columns(
         "mode": mode,
         "logical_request_id": logical_request_id,
         "admitted_at": admitted_at,
+        "staging_chain": list(staging_chain) if staging_chain else [],
     }
 
 
@@ -392,6 +395,8 @@ class LineageNode:
     context_digest: str = ""
     parent_call_id: str | None = None
     prompt_is_delta: bool = False
+    staging_key: str = ""
+    staging_chain: list[str] = field(default_factory=list)
 
 
 def stamp_continuation(entry: TokenEntry, request_items: list[dict]) -> TokenEntry:
@@ -456,6 +461,8 @@ class RolloutLineage:
                 model_call_id=node.call_id,
                 cumulative_token_ids=tuple(node.cum_tokens),
                 digest=node.digest,
+                staging_chain=tuple(node.staging_chain),
+                prev_len=node.cum_len,
             ),
         )
 
@@ -514,6 +521,9 @@ class RolloutLineage:
         cum_tokens: list[int],
         digest: str,
         context_len: int | None = None,
+        *,
+        staging_key: str = "",
+        parent_staging_chain: list[str] | None = None,
     ) -> None:
         """Build an in-memory entry for direct index tests."""
         request_len = context_len if context_len is not None else max(len(messages) - 1, 0)
@@ -531,6 +541,12 @@ class RolloutLineage:
             continuation_context_digest=conversation_digest(messages[:request_len]),
         )
         self.add_entry(entry)
+        if staging_key or parent_staging_chain:
+            # ``TokenEntry`` carries no custody metadata; stamp the indexed
+            # node so resolution can hand the chain to the next admission.
+            node = self.by_call_id[call_id]
+            node.staging_key = staging_key
+            node.staging_chain = list(parent_staging_chain) if parent_staging_chain else []
 
 
 class LineageIndex:
@@ -633,6 +649,7 @@ class InMemoryLineageStore:
         mode: str | None = None,
         logical_request_id: str | None = None,
         admitted_at: float | None = None,
+        staging_chain: list[str] | None = None,
     ) -> None:
         self.index.for_rollout(rollout_id).record(
             model_call_id,
@@ -640,6 +657,8 @@ class InMemoryLineageStore:
             cumulative_token_ids,
             digest,
             context_len=len(request_items),
+            staging_key=staging_key or "",
+            parent_staging_chain=staging_chain,
         )
         custody = _custody_columns(
             parent_call_id,
@@ -653,6 +672,7 @@ class InMemoryLineageStore:
             mode,
             logical_request_id,
             admitted_at,
+            staging_chain,
         )
         if custody:
             rows = self._ledgers.setdefault(rollout_id, [])
@@ -1062,6 +1082,8 @@ class FileLineageStore(IncrementalLineageStore):
             model_call_id=str(record["model_call_id"]),
             cumulative_token_ids=tuple(int(token) for token in record["cumulative_token_ids"]),
             digest=str(record["digest"]),
+            staging_chain=tuple(record.get("staging_chain") or []),
+            prev_len=int(record.get("cum_len") or 0),
         )
 
     async def record(
@@ -1084,6 +1106,7 @@ class FileLineageStore(IncrementalLineageStore):
         mode: str | None = None,
         logical_request_id: str | None = None,
         admitted_at: float | None = None,
+        staging_chain: list[str] | None = None,
     ) -> None:
         custody = _custody_columns(
             parent_call_id,
@@ -1097,6 +1120,7 @@ class FileLineageStore(IncrementalLineageStore):
             mode,
             logical_request_id,
             admitted_at,
+            staging_chain,
         )
         await asyncio.to_thread(
             self._record,

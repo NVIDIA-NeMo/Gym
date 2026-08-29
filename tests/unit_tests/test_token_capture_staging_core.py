@@ -187,6 +187,22 @@ def test_admission_uses_canonical_model_call_identity_and_exact_prefix() -> None
             mode="text",
             required_prefix_token_ids=[10, 11],
         )
+    chain_admission = CaptureAdmission(
+        rollout_id="r",
+        model_call_id="c",
+        parent_call_id="p",
+        prev_len=2,
+        mode="token_in",
+        staging_chain=["r/p"],
+    )
+    assert chain_admission.required_prefix_token_ids == []
+    with pytest.raises(ValidationError, match="text admission"):
+        CaptureAdmission(
+            rollout_id="r",
+            model_call_id="c",
+            mode="text",
+            staging_chain=["r/p"],
+        )
 
 
 def test_staged_record_and_snapshot_round_trip() -> None:
