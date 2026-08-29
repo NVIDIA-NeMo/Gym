@@ -76,6 +76,7 @@ class ResolvedJudge:
     max_native_pdf_pages: Optional[int] = None
     max_native_pdf_documents: Optional[int] = None
     max_native_pdf_bytes: Optional[int] = None
+    max_native_pdf_bytes_per_document: Optional[int] = None
     # Raster tiers are tried in order. The first complete request below the
     # provider wire cap is used; otherwise that judge is excluded pre-dispatch.
     raster_dpi_tiers: tuple[int, ...] = ()

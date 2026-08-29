@@ -1467,6 +1467,7 @@ class Judge:
     max_native_pdf_pages: Optional[int] = None
     max_native_pdf_documents: Optional[int] = None
     max_native_pdf_bytes: Optional[int] = None
+    max_native_pdf_bytes_per_document: Optional[int] = None
     raster_dpi_tiers: tuple[int, ...] = ()
     max_serialized_request_bytes: Optional[int] = None
 
@@ -1540,56 +1541,117 @@ def filter_media_eligible_judges(
     return eligible, exclusions
 
 
-def plan_native_pdf_overflow(sections: dict[str, list[dict]], *, native_page_cap: int, image_cap: int) -> dict:
-    """Choose the fewest PDF pages to rasterize to satisfy a native-page cap."""
+def plan_native_pdf_overflow(
+    sections: dict[str, list[dict]],
+    *,
+    native_page_cap: int,
+    native_pdf_bytes_per_document: int,
+    image_cap: int,
+) -> dict:
+    """Rasterize oversize PDFs and exactly enough pages for the page cap.
+
+    Any PDF above the provider's per-file limit is fully rasterized. For an
+    additional page-count overflow, whole small PDFs are rasterized first and
+    only the required prefix of the final document is rasterized. Every source
+    page remains represented while avoiding unnecessary image expansion.
+    """
     from resources_servers.gdpval.media_conversion import pdf_page_count
 
     prefix = "data:application/pdf;base64,"
     documents: list[dict] = []
+    existing_images = 0
     for section_name, blocks in sections.items():
         for block_index, block in enumerate(blocks):
             if block.get("type") != "image_url":
                 continue
             url = str((block.get("image_url") or {}).get("url", ""))
             if not url.startswith(prefix):
+                if url.startswith("data:image/"):
+                    existing_images += 1
                 continue
             payload = base64.b64decode(url[len(prefix) :], validate=True)
+            pages = pdf_page_count(payload)
+            if pages <= 0:
+                raise ValueError(f"native PDF has no pages: {section_name}/{block_index}")
             documents.append(
                 {
                     "section": section_name,
                     "block_index": block_index,
-                    "pages": pdf_page_count(payload),
+                    "pages": pages,
                     "bytes": len(payload),
                     "sha256": hashlib.sha256(payload).hexdigest(),
                 }
             )
     total_pages = sum(item["pages"] for item in documents)
     excess = max(0, total_pages - native_page_cap)
-    selected: list[dict] = []
-    if excess:
-        choices: dict[int, tuple[int, ...]] = {0: ()}
-        for index, item in enumerate(documents):
-            for subtotal, indices in list(choices.items())[::-1]:
-                candidate = subtotal + int(item["pages"])
-                prior = choices.get(candidate)
-                proposed = (*indices, index)
-                if prior is None or len(proposed) < len(prior):
-                    choices[candidate] = proposed
-        viable = [subtotal for subtotal in choices if subtotal >= excess]
-        if viable:
-            best = min(viable, key=lambda subtotal: (subtotal, len(choices[subtotal])))
-            selected = [documents[index] for index in choices[best]]
-    raster_pages = sum(item["pages"] for item in selected)
+    forced = {index for index, item in enumerate(documents) if item["bytes"] > native_pdf_bytes_per_document}
+    selected: list[dict] = [
+        {
+            **documents[index],
+            "raster_page_start": 0,
+            "raster_page_count": int(documents[index]["pages"]),
+            "native_page_count": 0,
+            "reason": "native_pdf_bytes_per_document",
+        }
+        for index in sorted(forced)
+    ]
+    forced_pages = sum(int(documents[index]["pages"]) for index in forced)
+    remaining = max(0, excess - forced_pages)
+    for index in sorted(range(len(documents)), key=lambda value: (documents[value]["pages"], value)):
+        if index in forced:
+            continue
+        if remaining <= 0:
+            break
+        document = documents[index]
+        raster_page_count = min(int(document["pages"]), remaining)
+        selected.append(
+            {
+                **document,
+                "raster_page_start": 0,
+                "raster_page_count": raster_page_count,
+                "native_page_count": int(document["pages"]) - raster_page_count,
+                "reason": "native_pdf_page_cap",
+            }
+        )
+        remaining -= raster_page_count
+    raster_pages = sum(int(item["raster_page_count"]) for item in selected)
     native_pages = total_pages - raster_pages
+    total_images_after = existing_images + raster_pages
     return {
-        "eligible": native_pages <= native_page_cap and raster_pages <= image_cap,
+        "eligible": (remaining == 0 and native_pages <= native_page_cap and total_images_after <= image_cap),
         "total_pdf_pages": total_pages,
         "native_page_cap": native_page_cap,
+        "native_pdf_bytes_per_document": native_pdf_bytes_per_document,
         "native_pages_after": native_pages,
         "raster_pages": raster_pages,
         "image_cap": image_cap,
+        "existing_images": existing_images,
+        "total_images_after": total_images_after,
         "selected": selected,
     }
+
+
+def _split_pdf_prefix(pdf_bytes: bytes, raster_page_count: int) -> tuple[bytes, bytes]:
+    """Return PDF byte streams for a non-empty prefix and suffix."""
+    try:
+        import fitz  # PyMuPDF
+    except ImportError as exc:
+        raise RuntimeError("PyMuPDF is required for native-PDF overflow splitting") from exc
+
+    source = fitz.open(stream=pdf_bytes, filetype="pdf")
+    prefix = fitz.open()
+    suffix = fitz.open()
+    try:
+        pages = int(source.page_count)
+        if not 0 < raster_page_count < pages:
+            raise ValueError(f"invalid PDF prefix split: {raster_page_count}/{pages}")
+        prefix.insert_pdf(source, from_page=0, to_page=raster_page_count - 1, links=True, annots=True)
+        suffix.insert_pdf(source, from_page=raster_page_count, to_page=pages - 1, links=True, annots=True)
+        return prefix.tobytes(garbage=0, deflate=False), suffix.tobytes(garbage=0, deflate=False)
+    finally:
+        suffix.close()
+        prefix.close()
+        source.close()
 
 
 def apply_native_pdf_overflow(
@@ -1600,10 +1662,12 @@ def apply_native_pdf_overflow(
     max_pages: int,
     include_text: bool,
 ) -> dict[str, list[dict]]:
-    """Apply a preflighted overflow plan without changing semantic sections."""
-    from resources_servers.gdpval.media_conversion import pdf_bytes_to_blocks
+    """Apply a preflighted overflow plan while retaining every PDF page."""
+    from resources_servers.gdpval.media_conversion import pdf_bytes_to_blocks, pdf_page_count
 
     selected = {(x["section"], int(x["block_index"])): x for x in plan.get("selected", [])}
+    if len(selected) != len(plan.get("selected", [])):
+        raise ValueError("overflow plan selects a PDF block more than once")
     prefix = "data:application/pdf;base64,"
     output: dict[str, list[dict]] = {}
     for section_name, blocks in sections.items():
@@ -1619,21 +1683,47 @@ def apply_native_pdf_overflow(
             payload = base64.b64decode(url[len(prefix) :], validate=True)
             if hashlib.sha256(payload).hexdigest() != item["sha256"]:
                 raise ValueError(f"overflow plan hash drift: {section_name}/{block_index}")
+            pages = pdf_page_count(payload)
+            if pages != int(item["pages"]):
+                raise ValueError(f"overflow plan page-count drift: {section_name}/{block_index}")
+            raster_page_start = int(item.get("raster_page_start", 0))
+            raster_page_count = int(item.get("raster_page_count", pages))
+            native_page_count = int(item.get("native_page_count", pages - raster_page_count))
+            if raster_page_start != 0 or raster_page_count <= 0 or raster_page_count > pages:
+                raise ValueError(f"invalid overflow page range: {section_name}/{block_index}")
+            if native_page_count != pages - raster_page_count:
+                raise ValueError(f"overflow plan page partition drift: {section_name}/{block_index}")
+            if native_page_count:
+                raster_payload, native_payload = _split_pdf_prefix(payload, raster_page_count)
+                if pdf_page_count(raster_payload) != raster_page_count:
+                    raise ValueError(f"overflow prefix page-count drift: {section_name}/{block_index}")
+                if pdf_page_count(native_payload) != native_page_count:
+                    raise ValueError(f"overflow suffix page-count drift: {section_name}/{block_index}")
+            else:
+                raster_payload = payload
+                native_payload = b""
             rendered = pdf_bytes_to_blocks(
-                payload,
+                raster_payload,
                 dpi=render_dpi,
                 max_pages=max_pages,
                 include_text=include_text,
             )
             image_count = sum(1 for x in rendered if x.get("type") == "image_url")
-            if image_count != item["pages"] or any(
+            if image_count != raster_page_count or any(
                 str(x.get("text", "")).startswith("[truncated: rendered") for x in rendered
             ):
                 raise ValueError(
                     f"overflow render mismatch {section_name}/{block_index}: "
-                    f"images={image_count} pages={item['pages']}"
+                    f"images={image_count} pages={raster_page_count}"
                 )
             converted.extend(rendered)
+            if native_payload:
+                converted.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": prefix + base64.b64encode(native_payload).decode("ascii")},
+                    }
+                )
         output[section_name] = converted
     return output
 

@@ -180,6 +180,10 @@ class JudgePanelMember(BaseModel):
     max_native_pdf_pages: Optional[int] = None
     max_native_pdf_documents: Optional[int] = None
     max_native_pdf_bytes: Optional[int] = None
+    # Provider limit for one native PDF document. Unlike the aggregate
+    # max_native_pdf_bytes eligibility ceiling, overflow mode rasterizes only
+    # documents above this lossless representation threshold.
+    max_native_pdf_bytes_per_document: Optional[int] = None
     # Tried in order for images_and_text. The first lossless projection below
     # max_serialized_request_bytes wins; otherwise this member is excluded.
     raster_dpi_tiers: Tuple[int, ...] = ()
@@ -490,6 +494,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     max_native_pdf_pages=member.max_native_pdf_pages,
                     max_native_pdf_documents=member.max_native_pdf_documents,
                     max_native_pdf_bytes=member.max_native_pdf_bytes,
+                    max_native_pdf_bytes_per_document=member.max_native_pdf_bytes_per_document,
                     raster_dpi_tiers=tuple(member.raster_dpi_tiers),
                     max_serialized_request_bytes=member.max_serialized_request_bytes,
                 )
@@ -816,6 +821,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 max_native_pdf_pages=rj.max_native_pdf_pages,
                 max_native_pdf_documents=rj.max_native_pdf_documents,
                 max_native_pdf_bytes=rj.max_native_pdf_bytes,
+                max_native_pdf_bytes_per_document=rj.max_native_pdf_bytes_per_document,
                 raster_dpi_tiers=rj.raster_dpi_tiers,
                 max_serialized_request_bytes=rj.max_serialized_request_bytes,
             )
@@ -946,9 +952,19 @@ class GDPValResourcesServer(SimpleResourcesServer):
                             }
                             if len(caps) != 1:
                                 raise ValueError(f"overflow judges require one explicit native page cap, got {caps}")
+                            byte_caps = {
+                                judge.max_native_pdf_bytes_per_document
+                                for judge in overflow_judges
+                                if judge.max_native_pdf_bytes_per_document is not None
+                            }
+                            if len(byte_caps) != 1:
+                                raise ValueError(
+                                    f"overflow judges require one explicit native PDF byte cap, got {byte_caps}"
+                                )
                             overflow_plan = plan_native_pdf_overflow(
                                 native,
                                 native_page_cap=caps.pop(),
+                                native_pdf_bytes_per_document=byte_caps.pop(),
                                 image_cap=self.config.judge_max_images_per_request,
                             )
                         matchup_judges, media_exclusions = filter_media_eligible_judges(
