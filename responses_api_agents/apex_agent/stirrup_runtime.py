@@ -12,7 +12,7 @@ import shutil
 import zipfile
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, get_args, get_origin
 
 
 FILESYSTEM_ROOT = Path("/filesystem")
@@ -66,6 +66,174 @@ def truncate_tool_text(text: str) -> str:
 def mcp_call_arguments(params: Any) -> dict[str, Any]:
     """Forward only concrete MCP arguments; omitted optional fields must stay omitted."""
     return params.model_dump(exclude_none=True)
+
+
+def _annotation_wants_structured_data(annotation: Any) -> bool:
+    """True when a field annotation expects a container or nested model, through Optional/Union/Annotated."""
+    if annotation in (list, dict, set, tuple):
+        return True
+    origin = get_origin(annotation)
+    if origin in (list, dict, set, frozenset, tuple):
+        return True
+    if origin is not None:
+        return any(_annotation_wants_structured_data(arg) for arg in get_args(annotation) if arg is not type(None))
+    return isinstance(annotation, type) and hasattr(annotation, "model_fields")
+
+
+def _nested_model_class(annotation: Any) -> Any:
+    """Resolve an annotation to a pydantic-model class (duck-typed), or None."""
+    if isinstance(annotation, type) and hasattr(annotation, "model_fields"):
+        return annotation
+    if get_origin(annotation) is not None:
+        for arg in get_args(annotation):
+            if arg is type(None):
+                continue
+            found = _nested_model_class(arg)
+            if found is not None:
+                return found
+    return None
+
+
+def _keys_known_to_model(data: dict[str, Any], model_cls: Any) -> bool:
+    """True when every key in data names a field (or alias) of model_cls.
+
+    MCP-generated models default to extra="ignore", so validation alone would
+    accept arbitrary keys and silently drop them; repairs must not manufacture
+    a "valid" call out of args the tool would never see.
+    """
+    fields = getattr(model_cls, "model_fields", None)
+    if not isinstance(fields, dict):
+        return False
+    known = set(fields)
+    for field in fields.values():
+        for alias in (getattr(field, "alias", None), getattr(field, "validation_alias", None)):
+            if isinstance(alias, str):
+                known.add(alias)
+    return set(data) <= known
+
+
+def coerce_tool_arguments(params_model: Any, arguments: str) -> str | None:
+    """Return a coerced JSON arguments string that validates against params_model, or None.
+
+    Empty/whitespace arguments are normalized to "{}" before evaluation (mirroring
+    stirrup's own normalization in Agent.run_tool). Arguments that already validate
+    return None (no change needed). Two repairs are attempted, and a candidate is
+    accepted only if it validates against params_model:
+    - unwrap top-level string values that JSON-decode to an object/array where the
+      field annotation expects structured data, and
+    - wrap flat arguments into the model's single required nested-model field.
+    Dict payloads destined for a nested model must only use keys that model knows
+    (see _keys_known_to_model). Never raises; any unexpected error returns None.
+    """
+    try:
+        normalized = arguments if arguments and arguments.strip() else "{}"
+        try:
+            params_model.model_validate_json(normalized)
+            return None
+        except Exception:
+            pass
+        try:
+            given = json.loads(normalized)
+        except ValueError:
+            return None
+        if not isinstance(given, dict):
+            return None
+        fields = getattr(params_model, "model_fields", None)
+        if not isinstance(fields, dict):
+            return None
+
+        unwrapped = dict(given)
+        changed = False
+        for key, value in given.items():
+            field = fields.get(key)
+            if field is None or not isinstance(value, str):
+                continue
+            if not _annotation_wants_structured_data(getattr(field, "annotation", None)):
+                continue
+            try:
+                parsed = json.loads(value)
+            except ValueError:
+                continue
+            if not isinstance(parsed, (dict, list)):
+                continue
+            nested = _nested_model_class(getattr(field, "annotation", None))
+            if isinstance(parsed, dict) and nested is not None and not _keys_known_to_model(parsed, nested):
+                continue
+            unwrapped[key] = parsed
+            changed = True
+
+        candidates: list[dict[str, Any]] = []
+        if changed:
+            candidates.append(unwrapped)
+        required = [name for name, field in fields.items() if field.is_required()]
+        if len(required) == 1 and required[0] not in given:
+            wrapper = required[0]
+            wrapper_model = _nested_model_class(getattr(fields[wrapper], "annotation", None))
+            if wrapper_model is not None:
+                if _keys_known_to_model(given, wrapper_model):
+                    candidates.append({wrapper: given})
+                if changed and _keys_known_to_model(unwrapped, wrapper_model):
+                    candidates.append({wrapper: unwrapped})
+
+        for candidate in candidates:
+            encoded = json.dumps(candidate)
+            try:
+                params_model.model_validate_json(encoded)
+            except Exception:
+                continue
+            return encoded
+        return None
+    except Exception:
+        return None
+
+
+def format_tool_argument_validation_error(exc: Any, arguments: str) -> str:
+    """Render pydantic validation detail so the model can self-correct when coercion cannot repair the args."""
+    errors = "; ".join(
+        f"{'.'.join(str(part) for part in error['loc']) or '<root>'}: {error['msg']} (type={error.get('type', '?')})"
+        for error in exc.errors()
+    )
+    preview = (arguments or "")[:500]
+    return f"Tool arguments are not valid: {errors}. Submitted arguments (first 500 chars): {preview!r}"
+
+
+# vLLM's glm47 tool-call parser string-encodes arguments for MCP tools whose
+# JSON schema wraps params in a bare-$ref property with no inline "type"
+# ({"request": "{\"code\": ...}"} or flat {"code": ...}). The typing bug is
+# serving-side, so the model cannot self-correct no matter how the error is
+# phrased; run_tool must repair the arguments instead (cf. vLLM PR #41801).
+# Finish tools are exempt: Agent.step() re-validates the ORIGINAL tool_call
+# for finish tools (stirrup agent.py:1261) outside any try/except, so a
+# coerced copy that only run_tool sees would crash step().
+def install_tool_argument_coercion(agent_cls: Any) -> None:
+    """Patch agent_cls.run_tool to coerce parser-mangled tool arguments and surface validation detail."""
+    original_run_tool = agent_cls.run_tool
+    if getattr(original_run_tool, "_apex_tool_arg_patch", False):
+        return
+
+    async def run_tool_with_argument_coercion(self: Any, tool_call: Any, run_metadata: Any) -> Any:
+        finish_tools = getattr(self, "_finish_tools", None) or {}
+        tool = self._active_tools.get(tool_call.name)
+        if tool is not None and tool_call.name not in finish_tools:
+            coerced = coerce_tool_arguments(tool.parameters, tool_call.arguments or "")
+            if coerced is not None:
+                tool_call = tool_call.model_copy(update={"arguments": coerced})
+        result_msg = await original_run_tool(self, tool_call, run_metadata)
+        if not getattr(result_msg, "args_was_valid", True) and result_msg.content == "Tool arguments are not valid":
+            tool = self._active_tools.get(tool_call.name)
+            if tool is not None:
+                args = tool_call.arguments if tool_call.arguments and tool_call.arguments.strip() else "{}"
+                try:
+                    tool.parameters.model_validate_json(args)
+                except Exception as exc:
+                    if hasattr(exc, "errors"):
+                        with suppress(Exception):
+                            detailed = format_tool_argument_validation_error(exc, tool_call.arguments or "")
+                            result_msg = result_msg.model_copy(update={"content": detailed})
+        return result_msg
+
+    run_tool_with_argument_coercion._apex_tool_arg_patch = True
+    agent_cls.run_tool = run_tool_with_argument_coercion
 
 
 def replace_tool_images_for_text_only_model(
@@ -382,6 +550,8 @@ async def run_stirrup_rollout(
     from stirrup.clients.chat_completions_client import ChatCompletionsClient
     from stirrup.core.models import ImageContentBlock, Tool, ToolProvider, ToolResult, ToolUseCountMetadata
     from stirrup.tools.mcp import MCPConfig, MCPToolProvider, StreamableHttpServerConfig
+
+    install_tool_argument_coercion(Agent)
 
     class ToolNameParams(BaseModel):
         name: Annotated[str, Field(description="Exact MCP tool name from list_tools.")]
