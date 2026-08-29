@@ -233,6 +233,10 @@ class CallRecord(_DigestWireModel):
     # The commit-time request binding (client header when present, else the
     # response id). Receipt assembly selects the terminal row by this value.
     logical_request_id: Identifier | None = None
+    # Wall-clock admission time stamped by the model-server middleware. Rows
+    # written before this column existed carry ``None``. Heuristic terminal
+    # selection orders candidate roots by this value.
+    admitted_at: StrictFloat | None = None
 
     @model_validator(mode="after")
     def _validate_lengths(self) -> Self:

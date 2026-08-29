@@ -1063,6 +1063,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 extras_digest=coords.extras_digest,
                 mode=admission.mode,
                 logical_request_id=context.logical_request_id or (str(payload["id"]) if payload.get("id") else None),
+                admitted_at=context.admitted_at,
             )
             mark_external_staging_committed(
                 rollout_id=coords.rollout_id,
