@@ -13,8 +13,10 @@ from nemo_gym.token_id_capture.staging.digest import (
     EXTRAS_DIGEST_VERSION,
     STAGING_DIGEST_VERSION,
     STAGING_SCHEMA_VERSION,
+    compute_chain_hash,
     compute_extras_digest,
     compute_staging_digest,
+    hash_token_ids,
 )
 from nemo_gym.token_id_capture.staging.rebuild import (
     ReceiptVerificationError,
@@ -37,6 +39,8 @@ def _snapshot(
     logprobs: list[float],
     weight_version: int = 7,
     extras: dict[str, Any] | None = None,
+    chain_hash: str | None = None,
+    cumulative_hash: str | None = None,
 ) -> StagedCallSnapshot:
     mode = "text" if parent_call_id is None else "token_in"
     extras_digest = compute_extras_digest(extras)
@@ -58,6 +62,8 @@ def _snapshot(
         token_mask_delta=masks,
         generation_log_probs_delta=logprobs,
         extras_digest=extras_digest,
+        chain_hash=chain_hash,
+        cumulative_hash=cumulative_hash,
     )
     return StagedCallSnapshot(
         rollout_id="rollout-1",
@@ -74,6 +80,8 @@ def _snapshot(
         generation_log_probs_delta=logprobs,
         extras=extras,
         extras_digest=extras_digest,
+        chain_hash=chain_hash,
+        cumulative_hash=cumulative_hash,
     )
 
 
@@ -312,3 +320,79 @@ def test_unknown_or_misaligned_route_envelope_is_rejected(payload: str, code: st
     with pytest.raises(ReceiptVerificationError) as error:
         verify_and_linearize(_receipt([root], terminal="root"), [root])
     assert error.value.code == code
+
+
+def _chained_pair() -> tuple[StagedCallSnapshot, StagedCallSnapshot]:
+    root_chain = compute_chain_hash(None, [10, 11, 12])
+    root = _snapshot(
+        "root",
+        token_ids=[10, 11, 12],
+        masks=[0.0, 0.0, 1.0],
+        logprobs=[0.0, 0.0, -0.1],
+        chain_hash=root_chain,
+        cumulative_hash=hash_token_ids([10, 11, 12]),
+    )
+    child = _snapshot(
+        "child",
+        parent_call_id="root",
+        prev_len=3,
+        token_ids=[20, 21],
+        masks=[0.0, 1.0],
+        logprobs=[0.0, -0.2],
+        chain_hash=compute_chain_hash(root_chain, [20, 21]),
+        cumulative_hash=hash_token_ids([10, 11, 12, 20, 21]),
+    )
+    return root, child
+
+
+def test_chained_receipt_verifies_and_linearizes() -> None:
+    root, child = _chained_pair()
+    row = verify_and_linearize(_receipt([root, child], terminal="child"), [root, child])
+    assert row.token_ids == [10, 11, 12, 20, 21]
+
+
+def test_broken_chain_link_is_rejected() -> None:
+    root, child = _chained_pair()
+    # A child whose declared chain hash does not extend the actual root delta.
+    wrong_chain = compute_chain_hash(compute_chain_hash(None, [99]), [20, 21])
+    bad_child = _snapshot(
+        "child",
+        parent_call_id="root",
+        prev_len=3,
+        token_ids=[20, 21],
+        masks=[0.0, 1.0],
+        logprobs=[0.0, -0.2],
+        chain_hash=wrong_chain,
+        cumulative_hash=child.cumulative_hash,
+    )
+    with pytest.raises(ReceiptVerificationError) as error:
+        verify_and_linearize(_receipt([root, bad_child], terminal="child"), [root, bad_child])
+    assert error.value.code == "chain_hash_mismatch"
+
+
+def test_terminal_cumulative_hash_mismatch_is_rejected() -> None:
+    root, child = _chained_pair()
+    bad_child = _snapshot(
+        "child",
+        parent_call_id="root",
+        prev_len=3,
+        token_ids=[20, 21],
+        masks=[0.0, 1.0],
+        logprobs=[0.0, -0.2],
+        chain_hash=child.chain_hash,
+        cumulative_hash=hash_token_ids([10, 11, 12, 20, 99]),
+    )
+    with pytest.raises(ReceiptVerificationError) as error:
+        verify_and_linearize(_receipt([root, bad_child], terminal="child"), [root, bad_child])
+    assert error.value.code == "cumulative_hash_mismatch"
+
+
+def test_hash_free_legacy_receipt_still_verifies() -> None:
+    root = _snapshot(
+        "root",
+        token_ids=[10, 11],
+        masks=[0.0, 1.0],
+        logprobs=[0.0, -0.1],
+    )
+    row = verify_and_linearize(_receipt([root], terminal="root"), [root])
+    assert row.token_ids == [10, 11]
