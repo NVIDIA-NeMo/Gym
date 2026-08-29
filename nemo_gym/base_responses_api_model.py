@@ -156,17 +156,14 @@ def _plain(value: Any) -> Any:
 
 
 def _orjson_dispatch_response(content: Any) -> Any:
-    """Serialize a finished non-streaming dispatch result with orjson.
+    """Serialize a completed non-streaming model response with orjson.
 
-    Returning a bare model or dict makes FastAPI run ``jsonable_encoder`` — a pure-Python
-    recursive walk with one function call per element — followed by stdlib ``json.dumps``.
-    On training responses the token-id and logprob arrays make that walk the dominant CPU
-    cost of the whole server. Building the response bytes here keeps the semantics
-    (``model_dump(mode="json")`` is exactly what ``jsonable_encoder`` does first for a
-    model) while FastAPI passes a finished ``Response`` through untouched.
+    FastAPI serializes a bare dictionary or Pydantic model with ``jsonable_encoder``.
+    That function recursively visits every token ID and log probability before standard-library ``json.dumps`` runs.
 
-    Anything that is already a ``Response`` (a server override that built its own) is
-    returned as-is.
+    Convert Pydantic models to JSON-compatible values before encoding the result.
+    Return the encoded bytes as a ``Response`` so FastAPI does not encode them again.
+    Preserve ``Response`` objects created by model-server overrides.
     """
     if isinstance(content, Response):
         return content
