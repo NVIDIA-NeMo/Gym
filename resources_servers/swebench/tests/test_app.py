@@ -21,13 +21,17 @@ import pytest
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
-from nemo_gym.sandbox import SandboxExecResult, SandboxHandle
+from nemo_gym.sandbox import SandboxExecResult, SandboxHandle, SandboxStatus
+from nemo_gym.sandbox.manifest import SandboxManifestRecord, append_manifest_record, read_manifest_records
 from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.swebench.app import (
     DockerContainer,
+    SWEBenchPauseResumeConfig,
     SwebenchResourcesServer,
     SwebenchResourcesServerConfig,
+    SWEBenchSeedSessionRequest,
+    SWEBenchVerifyRequest,
     SWEBenchVerifyResponse,
 )
 
@@ -45,6 +49,47 @@ def make_sandbox(
     sandbox.upload = AsyncMock(side_effect=upload_error)
     sandbox.stop = AsyncMock(side_effect=stop_error)
     return sandbox
+
+
+def make_seed_sandbox(sandbox_id: str = "sandbox-123", status: SandboxStatus = SandboxStatus.PAUSED) -> MagicMock:
+    sandbox = make_sandbox(exec_result=SandboxExecResult(stdout="/testbed", stderr="", return_code=0))
+    sandbox._handle = SandboxHandle(sandbox_id=sandbox_id, provider_name="test-provider", raw=None)
+    pty_session = MagicMock()
+    pty_session.session_id = "pty-1"
+    pty_session.close = AsyncMock()
+    sandbox.pty = MagicMock()
+    sandbox.pty.create = AsyncMock(return_value=pty_session)
+    sandbox.pty.exec = AsyncMock()
+    sandbox.status = AsyncMock(return_value=status)
+    sandbox.resume = AsyncMock()
+    return sandbox
+
+
+def make_seed_request(session_id: str = "sess-1", **raw_body: Any) -> MagicMock:
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: session_id}
+    request.json = AsyncMock(return_value=raw_body)
+    return request
+
+
+def instance_payload() -> dict[str, Any]:
+    return {
+        "repo": "astropy/astropy",
+        "instance_id": "my instance_id",
+        "base_commit": "my base_commit",
+        "patch": "my patch",
+        "test_patch": "my test_patch",
+        "problem_statement": "my problem_statement",
+        "hints_text": "",
+        "created_at": "my created_at",
+        "version": "4.3",
+        "FAIL_TO_PASS": "[]",
+        "PASS_TO_PASS": "[]",
+        "environment_setup_commit": "my environment_setup_commit",
+        "difficulty": "my difficulty",
+        "subset": "my subset",
+        "split": "my split",
+    }
 
 
 class TestApp:
@@ -268,3 +313,156 @@ class TestApp:
 
         assert observation.outcome == "sandbox_error"
         assert observation.error_type == "RuntimeError"
+
+    def _manifest_config(
+        self, tmp_path: Path, resume: bool = False, **overrides: Any
+    ) -> SwebenchResourcesServerConfig:
+        return SwebenchResourcesServerConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            sandbox_provider="test",
+            sandbox_config=dict(),
+            pause_resume={"manifest_fpath": str(tmp_path / "manifest.jsonl"), "resume": resume},
+            **overrides,
+        )
+
+    def test_pause_resume_config_requires_manifest_for_resume(self) -> None:
+        with pytest.raises(ValueError, match="requires pause_resume.manifest_fpath"):
+            SWEBenchPauseResumeConfig(resume=True)
+
+    async def test_seed_session_records_created_and_verify_records_done(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch
+    ) -> None:
+        config = self._manifest_config(tmp_path, apply_anti_cheating=False)
+        server = SwebenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        sandbox = make_seed_sandbox()
+        monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=sandbox))
+        request = make_seed_request(_ng_task_index=3, _ng_rollout_index=1)
+
+        response = await server.seed_session(request, SWEBenchSeedSessionRequest.model_validate(instance_payload()))
+
+        assert response.resumed is False
+        assert response.sandbox_handle == "sandbox-123"
+        assert response.pty_session_id == "pty-1"
+        records = read_manifest_records(tmp_path / "manifest.jsonl")
+        assert [(r.rollout_key, r.sandbox_id, r.status, r.rollout_index, r.instance_id) for r in records] == [
+            ("3-1", "sandbox-123", "created", 1, "my instance_id")
+        ]
+
+        monkeypatch.setattr(
+            "resources_servers.swebench.app.run_instance",
+            AsyncMock(return_value=dict(resolved=True, completed=True)),
+        )
+        verify_body = SWEBenchVerifyRequest.model_validate(
+            instance_payload()
+            | {
+                "responses_create_params": {"input": []},
+                "response": {
+                    "output": [],
+                    "id": "",
+                    "created_at": 0,
+                    "model": "",
+                    "object": "response",
+                    "parallel_tool_calls": False,
+                    "tool_choice": "auto",
+                    "tools": [],
+                },
+            }
+        )
+        verify_response = await server.verify(request, verify_body)
+
+        assert verify_response.resolved is True
+        records = read_manifest_records(tmp_path / "manifest.jsonl")
+        assert [(r.rollout_key, r.sandbox_id, r.status) for r in records[1:]] == [("3-1", "sandbox-123", "done")]
+        assert server._session_id_to_rollout_key == {}
+
+    async def test_seed_session_without_rollout_identity_skips_manifest(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch
+    ) -> None:
+        config = self._manifest_config(tmp_path, apply_anti_cheating=False)
+        server = SwebenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=make_seed_sandbox()))
+
+        response = await server.seed_session(
+            make_seed_request(), SWEBenchSeedSessionRequest.model_validate(instance_payload())
+        )
+
+        assert response.resumed is False
+        assert read_manifest_records(tmp_path / "manifest.jsonl") == []
+
+    def _paused_manifest(self, tmp_path: Path) -> Path:
+        manifest = tmp_path / "manifest.jsonl"
+        for status in ("created", "paused"):
+            append_manifest_record(
+                manifest,
+                SandboxManifestRecord(
+                    rollout_key="3-1",
+                    sandbox_id="sb-paused",
+                    status=status,
+                    instance_id="my instance_id",
+                    rollout_index=1,
+                ),
+            )
+        return manifest
+
+    @pytest.mark.parametrize("already_running", [False, True])
+    async def test_seed_session_resumes_paused_sandbox(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch, already_running: bool
+    ) -> None:
+        manifest = self._paused_manifest(tmp_path)
+        config = self._manifest_config(tmp_path, resume=True, apply_anti_cheating=True)
+        server = SwebenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        status = SandboxStatus.RUNNING if already_running else SandboxStatus.PAUSED
+        resumed_sandbox = make_seed_sandbox(sandbox_id="sb-paused", status=status)
+        monkeypatch.setattr("resources_servers.swebench.app.get_global_config_dict", lambda: {})
+        monkeypatch.setattr("resources_servers.swebench.app.resolve_provider_config", lambda *_: MagicMock())
+        monkeypatch.setattr("resources_servers.swebench.app.create_provider", lambda *_: MagicMock())
+        async_sandbox_cls = MagicMock()
+        async_sandbox_cls.connect = AsyncMock(return_value=resumed_sandbox)
+        monkeypatch.setattr("resources_servers.swebench.app.AsyncSandbox", async_sandbox_cls)
+        create_sandbox = AsyncMock()
+        monkeypatch.setattr(server, "_create_sandbox", create_sandbox)
+        request = make_seed_request(_ng_task_index=3, _ng_rollout_index=1)
+
+        response = await server.seed_session(request, SWEBenchSeedSessionRequest.model_validate(instance_payload()))
+
+        assert response.resumed is True
+        assert response.sandbox_handle == "sb-paused"
+        assert async_sandbox_cls.connect.await_args.args[0] == {"sandbox_id": "sb-paused"}
+        if already_running:
+            resumed_sandbox.resume.assert_not_awaited()
+        else:
+            resumed_sandbox.resume.assert_awaited_once()
+        create_sandbox.assert_not_awaited()
+        # Anti-cheating must not run on a resumed sandbox (its git reset --hard
+        # would wipe the restored work), but the conda activation still must.
+        resumed_sandbox.upload.assert_not_awaited()
+        resumed_sandbox.pty.exec.assert_awaited_once()
+        assert read_manifest_records(manifest)[-1].status == "resumed"
+
+    async def test_seed_session_falls_back_to_fresh_sandbox_when_resume_fails(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch
+    ) -> None:
+        manifest = self._paused_manifest(tmp_path)
+        config = self._manifest_config(tmp_path, resume=True, apply_anti_cheating=True)
+        server = SwebenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        monkeypatch.setattr("resources_servers.swebench.app.get_global_config_dict", lambda: {})
+        monkeypatch.setattr("resources_servers.swebench.app.resolve_provider_config", lambda *_: MagicMock())
+        monkeypatch.setattr("resources_servers.swebench.app.create_provider", lambda *_: MagicMock())
+        async_sandbox_cls = MagicMock()
+        async_sandbox_cls.connect = AsyncMock(side_effect=RuntimeError("sandbox expired"))
+        monkeypatch.setattr("resources_servers.swebench.app.AsyncSandbox", async_sandbox_cls)
+        fresh_sandbox = make_seed_sandbox()
+        monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=fresh_sandbox))
+        request = make_seed_request(_ng_task_index=3, _ng_rollout_index=1)
+
+        response = await server.seed_session(request, SWEBenchSeedSessionRequest.model_validate(instance_payload()))
+
+        assert response.resumed is False
+        assert response.sandbox_handle == "sandbox-123"
+        fresh_sandbox.upload.assert_awaited_once()  # anti-cheating runs on the fresh sandbox
+        records = read_manifest_records(manifest)
+        assert (records[-2].sandbox_id, records[-2].status) == ("sb-paused", "resume_failed")
+        assert (records[-1].sandbox_id, records[-1].status) == ("sandbox-123", "created")

@@ -22,7 +22,7 @@ from traceback import format_exc
 from typing import Any, Dict, Optional, Tuple
 
 from fastapi import Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from swebench.harness.run_evaluation import make_test_spec
 from swebench.harness.test_spec.test_spec import LATEST, TestSpec
 
@@ -35,10 +35,11 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.global_config import get_global_config_dict
+from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, get_global_config_dict
 from nemo_gym.rollout_observability import SandboxObservation
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
+from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, SandboxStatus, create_provider
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.sandbox.manifest import SandboxManifestRecord, append_manifest_record, latest_manifest_records
 from nemo_gym.sandbox.providers.base import SandboxPtySession
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import SESSION_ID_KEY
@@ -48,6 +49,24 @@ from resources_servers.swebench.swebench_patches import (
     patch_swebench_multilingual_sandbox,
     run_instance,
 )
+
+
+class SWEBenchPauseResumeConfig(BaseModel):
+    """Sandbox pause/resume flow (see nemo_gym.sandbox.manifest).
+
+    When manifest_fpath is set, every sandbox lifecycle transition is appended
+    there. When resume is true, seed_session resumes rollouts whose latest
+    manifest record is "paused" instead of creating fresh sandboxes.
+    """
+
+    manifest_fpath: Optional[str] = None
+    resume: bool = False
+
+    @model_validator(mode="after")
+    def _resume_requires_manifest(self) -> "SWEBenchPauseResumeConfig":
+        if self.resume and not self.manifest_fpath:
+            raise ValueError("pause_resume.resume=true requires pause_resume.manifest_fpath")
+        return self
 
 
 class SwebenchResourcesServerConfig(BaseResourcesServerConfig):
@@ -61,6 +80,8 @@ class SwebenchResourcesServerConfig(BaseResourcesServerConfig):
     sandbox_config: Dict[str, Any]
 
     clear_swebench_debug_logs: bool = True
+
+    pause_resume: SWEBenchPauseResumeConfig = Field(default_factory=SWEBenchPauseResumeConfig)
 
     def model_post_init(self, context: Any, /) -> None:
         if self.is_verifying_golden_patch and self.clear_swebench_debug_logs:
@@ -237,6 +258,21 @@ class SWEBenchSeedSessionRequest(SWEBenchInstanceRequest, BaseSeedSessionRequest
 class SWEBenchSeedSessionResponse(BaseSeedSessionResponse):
     sandbox_handle: str  # @bxyu-nvidia: Just a plain string URI for now for OpenSandbox backend.
     pty_session_id: str
+    # The sandbox was resumed from a paused snapshot; the agent should continue
+    # its previous session instead of installing and starting from scratch.
+    resumed: bool = False
+
+
+def _rollout_key_from_request(raw_body: Any) -> Optional[str]:
+    """Manifest identity: task and rollout indices without the attempt suffix,
+    so a re-dispatched attempt still matches its paused sandbox."""
+    if not isinstance(raw_body, dict):
+        return None
+    task_index = raw_body.get(TASK_INDEX_KEY_NAME)
+    rollout_index = raw_body.get(ROLLOUT_INDEX_KEY_NAME)
+    if task_index is None or rollout_index is None:
+        return None
+    return f"{task_index}-{rollout_index}"
 
 
 class SwebenchResourcesServer(SimpleResourcesServer):
@@ -246,6 +282,56 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         super().model_post_init(context)
 
         self._session_id_to_sandbox: Dict[str, Tuple[AsyncSandbox, SandboxPtySession]] = dict()
+        self._session_id_to_rollout_key: Dict[str, str] = dict()
+        self._resume_records: Dict[str, SandboxManifestRecord] = dict()
+        if self.config.pause_resume.resume:
+            self._resume_records = latest_manifest_records(Path(self.config.pause_resume.manifest_fpath))
+            num_paused = sum(1 for record in self._resume_records.values() if record.status == "paused")
+            print(f"Loaded resume manifest with {len(self._resume_records)} rollouts ({num_paused} paused)")
+
+    def _append_manifest(self, rollout_key: Optional[str], sandbox_id: str, status: str, instance_id: str) -> None:
+        if not self.config.pause_resume.manifest_fpath or rollout_key is None:
+            return
+        try:
+            rollout_index = int(rollout_key.rsplit("-", 1)[1])
+            append_manifest_record(
+                Path(self.config.pause_resume.manifest_fpath),
+                SandboxManifestRecord(
+                    rollout_key=rollout_key,
+                    sandbox_id=sandbox_id,
+                    status=status,
+                    instance_id=instance_id,
+                    rollout_index=rollout_index,
+                ),
+            )
+        except Exception:
+            print(f"Failed to append sandbox manifest record for {rollout_key}", format_exc(), file=sys.stderr)
+
+    async def _resume_paused_sandbox(self, rollout_key: Optional[str]) -> Optional[AsyncSandbox]:
+        """Resume the paused sandbox recorded for this rollout, or None to create fresh."""
+        record = self._resume_records.get(rollout_key) if rollout_key is not None else None
+        if record is None or record.status != "paused":
+            return None
+        global_config_dict = get_global_config_dict()
+        provider = create_provider(resolve_provider_config(self.config.sandbox_provider, global_config_dict))
+        try:
+            sandbox = await AsyncSandbox.connect({"sandbox_id": record.sandbox_id}, provider=provider)
+            # Idempotent w.r.t. seed_session retries: only resume if still paused.
+            if await sandbox.status() == SandboxStatus.PAUSED:
+                await sandbox.resume()
+            return sandbox
+        except Exception:
+            # Any resume failure (snapshot gone, sandbox expired, resume timeout,
+            # broken sandbox from a failed attempt) must not fail the rollout;
+            # record it and let seed_session create a fresh sandbox instead.
+            print(
+                f"Failed to resume paused sandbox {record.sandbox_id} for rollout {rollout_key}; "
+                "falling back to a fresh sandbox",
+                format_exc(),
+                file=sys.stderr,
+            )
+            self._append_manifest(rollout_key, record.sandbox_id, "resume_failed", record.instance_id or "")
+            return None
 
     async def _create_sandbox(self, test_spec: TestSpec) -> AsyncSandbox:
         # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
@@ -296,14 +382,23 @@ class SwebenchResourcesServer(SimpleResourcesServer):
 
     async def seed_session(self, request: Request, body: SWEBenchSeedSessionRequest) -> SWEBenchSeedSessionResponse:
         test_spec = self._make_test_spec(body)
-        eval_sandbox = await self._create_sandbox(test_spec)
+        rollout_key = _rollout_key_from_request(await request.json())
+        eval_sandbox = await self._resume_paused_sandbox(rollout_key)
+        resumed = eval_sandbox is not None
+        if eval_sandbox is None:
+            eval_sandbox = await self._create_sandbox(test_spec)
         pty_session = await eval_sandbox.pty.create()
-        self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = (eval_sandbox, pty_session)
+        session_id = request.session[SESSION_ID_KEY]
+        self._session_id_to_sandbox[session_id] = (eval_sandbox, pty_session)
+        if rollout_key is not None:
+            self._session_id_to_rollout_key[session_id] = rollout_key
 
         # @bxyu-nvidia: Activate the necessary conda environments for SWE Bench Verified Python instances
         await eval_sandbox.pty.exec("source /opt/miniconda3/bin/activate && conda activate testbed")
 
-        if self.config.apply_anti_cheating:
+        # Never on a resumed sandbox: the setup already ran there, and its
+        # `git reset --hard` would wipe the restored work in progress.
+        if self.config.apply_anti_cheating and not resumed:
             # Remove the current Git repo's future history beyond the current commit to prevent the model from cheating.
             wd = (await eval_sandbox.exec("pwd")).stdout.strip()
             anti_cheat_setup_fpath = Path(__file__).parent / "anti_cheat_setup.sh"
@@ -318,8 +413,16 @@ Stdout:
 Stderr:
 {result.stderr}""")
 
+        self._append_manifest(
+            rollout_key,
+            eval_sandbox._handle.sandbox_id,
+            "resumed" if resumed else "created",
+            test_spec.instance_id,
+        )
         return SWEBenchSeedSessionResponse(
-            sandbox_handle=eval_sandbox._handle.sandbox_id, pty_session_id=pty_session.session_id
+            sandbox_handle=eval_sandbox._handle.sandbox_id,
+            pty_session_id=pty_session.session_id,
+            resumed=resumed,
         )
 
     async def verify(self, request: Request, body: SWEBenchVerifyRequest) -> SWEBenchVerifyResponse:
@@ -355,6 +458,12 @@ Stderr:
             model_patch = body.patch
         else:
             original_sandbox, original_pty_session = self._session_id_to_sandbox.pop(request.session[SESSION_ID_KEY])
+            self._append_manifest(
+                self._session_id_to_rollout_key.pop(request.session[SESSION_ID_KEY], None),
+                original_sandbox._handle.sandbox_id,
+                "done",
+                test_spec.instance_id,
+            )
             try:
                 original_workdir = (await eval_sandbox.exec("pwd")).stdout.strip()
                 model_patch_result = await original_sandbox.exec(f"cd {original_workdir} && git --no-pager diff")

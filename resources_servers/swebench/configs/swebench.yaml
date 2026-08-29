@@ -15,6 +15,14 @@ swebench_resources_server:          # instance name — how agents/CLI refer to 
 
       evaluation_timeout: 1800
 
+      # Sandbox pause/resume flow (see nemo_gym/sandbox/manifest.py and
+      # scripts/sandbox_pause_resume.py). manifest_fpath appends per-rollout
+      # sandbox lifecycle transitions; resume: true makes seed_session resume
+      # sandboxes recorded as paused instead of creating fresh ones.
+      pause_resume:
+        manifest_fpath: null
+        resume: false
+
       sandbox_provider: sandbox
       sandbox_config:
         ttl_s: 18000

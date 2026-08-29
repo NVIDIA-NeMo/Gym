@@ -304,6 +304,63 @@ class TestOpenCodeSandboxedAgent:
         assert not any(key.startswith("_ng_") for key in server._sandbox_id_to_run_result[""])
         assert "XDG_DATA_HOME" not in sandbox_mock.exec.await_args_list[0].kwargs["command"]
 
+    @mark.parametrize("previous_session_found", [True, False])
+    async def test_responses_resumed_sandbox_continues_previous_session(
+        self, monkeypatch: MonkeyPatch, previous_session_found: bool
+    ) -> None:
+        server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=MagicMock(spec=ServerClient))
+
+        discovered = "/tmp/nemo-gym-opencode-abc\n" if previous_session_found else ""
+        sandbox_mock = MagicMock()
+        sandbox_mock.exec = AsyncMock(
+            side_effect=[
+                # XDG data dir discovery, then the export and pwd steps.
+                SimpleNamespace(stdout=discovered, stderr="", return_code=0, error_type=None),
+                SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
+                SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
+            ]
+        )
+        sandbox_mock.download = AsyncMock()
+        sandbox_mock.pty = MagicMock()
+        sandbox_mock.pty.exec = AsyncMock(
+            return_value=SimpleNamespace(
+                stdout="Shell: /bin/bash\nOpenCode run finished", stderr="", return_code=0, error_type=None
+            )
+        )
+        pty_mock = AsyncMock()
+        monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": (sandbox_mock, pty_mock)})
+        monkeypatch.setattr(server, "_sandbox_id_to_resumed", {"": True})
+        monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value=dict()))
+
+        await server.responses(
+            request=MagicMock(
+                session={SESSION_ID_KEY: "my resumed session"},
+                cookies={"sandbox_id": ""},
+                path_params={"rollout_id": "direct-call"},
+            ),
+            body=NeMoGymResponseCreateParamsNonStreaming(
+                input=[{"role": "user", "content": "solve the astropy bug"}],
+            ),
+        )
+
+        discovery_command = sandbox_mock.exec.await_args_list[0].args[0]
+        assert discovery_command.startswith("ls -d /tmp/nemo-gym-opencode-")
+        command = sandbox_mock.pty.exec.await_args.kwargs["command"]
+        # Reinstall only if the pause landed before the original install finished.
+        assert 'test -x "$HOME/.opencode/bin/opencode" || (' in command
+        if previous_session_found:
+            assert "--continue" in command
+            assert "XDG_DATA_HOME=/tmp/nemo-gym-opencode-abc" in command
+            assert shlex.quote(app_module.RESUME_CONTINUE_MESSAGE) in command
+            # The restored session already holds the task; it is not re-sent.
+            assert "solve the astropy bug" not in command
+        else:
+            # Nothing to continue: the rollout starts fresh in the restored sandbox.
+            assert "--continue" not in command
+            assert "XDG_DATA_HOME" not in command
+            assert shlex.quote("solve the astropy bug") in command
+        assert server._sandbox_id_to_run_result[""]["opencode_finished"] is True
+
     def test_agent_sandbox_observation_classifies_timeout_errors(self) -> None:
         server = OpenCodeSandboxedAgent(
             config=self._create_config(),
