@@ -23,7 +23,7 @@ move a blocking implementation off its event loop explicitly.
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from nemo_gym.token_id_capture.staging.records import StagedCallRecord, StagedCallSnapshot, StageResult
 
@@ -47,3 +47,42 @@ class WeightVersionProvider(Protocol):
     """Return the trainer-owned weight version stamped at call admission."""
 
     def __call__(self) -> int: ...
+
+
+class CaptureAdapter(Protocol):
+    """Extract engine-native capture material without owning its lifecycle."""
+
+    def enter_prefix(self, request_payload: dict[str, Any], prefix_ids: list[int]) -> dict[str, Any]:
+        """Attach an exact parent prefix to an engine request."""
+        ...
+
+    def extract_prompt_ids(self, response_payload: dict[str, Any]) -> list[int]:
+        """Return the exact prompt token IDs used for generation."""
+        ...
+
+    def extract_generation(self, response_payload: dict[str, Any]) -> tuple[list[int], list[float]]:
+        """Return exact generated token IDs and selected-token log probabilities."""
+        ...
+
+    def extract_extras(self, response_payload: dict[str, Any]) -> dict[str, Any] | None:
+        """Return optional versioned engine-native per-token material."""
+        ...
+
+
+def install_capture(
+    serving_layer: Any,
+    *,
+    sink: StagingSink,
+    weight_version_fn: WeightVersionProvider,
+    adapter: CaptureAdapter | None = None,
+) -> Any:
+    """Install worker-owned staging without importing serving dependencies."""
+    # Deferred to avoid the protocol/capture implementation import cycle.
+    from nemo_gym.token_id_capture.staging.capture import install_capture as _install
+
+    return _install(
+        serving_layer,
+        sink=sink,
+        weight_version_fn=weight_version_fn,
+        adapter=adapter,
+    )

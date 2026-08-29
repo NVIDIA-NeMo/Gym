@@ -125,6 +125,25 @@ def current_capture_context() -> CaptureContext | None:
     return _CAPTURE_CONTEXT.get()
 
 
+def mark_external_staging_committed(*, rollout_id: str, model_call_id: str) -> None:
+    """Mark the current call as durably recorded by a framework worker.
+
+    Call this only after the external staging sink has acknowledged the call.
+    Identity validation prevents a delayed or cross-request acknowledgement
+    from suppressing normal capture for a different request.
+    """
+    context = _CAPTURE_CONTEXT.get()
+    if context is None:
+        raise RuntimeError("no training-token capture context is active")
+    if context.rollout_id != rollout_id or context.model_call_id != model_call_id:
+        raise ValueError(
+            "external staging acknowledgement does not match the active capture "
+            f"context ({rollout_id}/{model_call_id} != "
+            f"{context.rollout_id}/{context.model_call_id})"
+        )
+    context.committed = True
+
+
 def reset_token_sink(token: Token) -> None:
     _CAPTURE_CONTEXT.reset(token)
 

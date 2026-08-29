@@ -20,6 +20,13 @@ This namespace is separate from Gym's complete-record ``TokenSink`` and
 framework storage without importing serving or framework dependencies.
 """
 
+from nemo_gym.token_id_capture.staging.capture import (
+    ActiveCall,
+    CaptureError,
+    CaptureHost,
+    RolloutTokenCapture,
+    StreamingUnsupportedError,
+)
 from nemo_gym.token_id_capture.staging.conformance import assert_golden_vectors, load_golden_vectors
 from nemo_gym.token_id_capture.staging.digest import (
     EMPTY_EXTRAS_DIGEST,
@@ -32,7 +39,13 @@ from nemo_gym.token_id_capture.staging.digest import (
     encode_token_ids,
     hash_token_ids,
 )
-from nemo_gym.token_id_capture.staging.protocols import StagingSink, StagingSource, WeightVersionProvider
+from nemo_gym.token_id_capture.staging.protocols import (
+    CaptureAdapter,
+    StagingSink,
+    StagingSource,
+    WeightVersionProvider,
+    install_capture,
+)
 from nemo_gym.token_id_capture.staging.records import (
     DIGEST_VERSION,
     SCHEMA_VERSION,
@@ -57,16 +70,22 @@ __all__ = [
     "STAGING_DIGEST_VERSION",
     "STAGING_SCHEMA_VERSION",
     "CallRecord",
+    "ActiveCall",
+    "CaptureAdapter",
+    "CaptureError",
+    "CaptureHost",
     "CaptureAdmission",
     "CaptureDisposition",
     "CaptureMode",
     "CommitCoords",
     "RolloutReceipt",
+    "RolloutTokenCapture",
     "StagedCallRecord",
     "StagedCallSnapshot",
     "StageResult",
     "StagingSink",
     "StagingSource",
+    "StreamingUnsupportedError",
     "WeightVersionProvider",
     "assert_golden_vectors",
     "build_staging_delta",
@@ -74,6 +93,7 @@ __all__ = [
     "compute_staging_digest",
     "encode_token_ids",
     "hash_token_ids",
+    "install_capture",
     "load_golden_vectors",
     "staging_key",
 ]
