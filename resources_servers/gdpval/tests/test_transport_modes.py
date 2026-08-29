@@ -282,3 +282,96 @@ class TestFingerprintTransportRepair:
         without_block = compute_fingerprint(cfg, self.REF_ELOS, self.DIST, resolved_global_config={})
         empty_block = compute_fingerprint(cfg, self.REF_ELOS, self.DIST, resolved_global_config={"multistage": {}})
         assert without_block == empty_block
+
+
+class TestOverflowRenderPageCap:
+    def test_ineligible_when_forced_raster_exceeds_render_page_cap(self) -> None:
+        big = _pdf_bytes(3)
+        sections = {"refs": [_pdf_block(big)]}
+        capped = plan_native_pdf_overflow(
+            sections,
+            native_page_cap=100,
+            native_pdf_bytes_per_document=len(big) - 1,
+            image_cap=50,
+            render_page_cap=2,
+        )
+        assert capped["eligible"] is False
+
+        roomy = plan_native_pdf_overflow(
+            sections,
+            native_page_cap=100,
+            native_pdf_bytes_per_document=len(big) - 1,
+            image_cap=50,
+            render_page_cap=3,
+        )
+        assert roomy["eligible"] is True
+        # An eligible plan renders successfully under the same page bound.
+        converted = apply_native_pdf_overflow(sections, roomy, render_dpi=36, max_pages=3, include_text=False)
+        rendered = [
+            b for b in converted["refs"] if str((b.get("image_url") or {}).get("url", "")).startswith("data:image/")
+        ]
+        assert len(rendered) == 3
+
+
+class TestOverflowAggregateCaps:
+    def test_plan_reports_post_overflow_aggregates(self) -> None:
+        short = _pdf_bytes(3)
+        long = _pdf_bytes(5)
+        sections = {"refs": [_pdf_block(short), _pdf_block(long)]}
+        plan = plan_native_pdf_overflow(
+            sections,
+            native_page_cap=6,
+            native_pdf_bytes_per_document=10**9,
+            image_cap=50,
+        )
+        # Prefix split keeps a native suffix, so both documents remain native.
+        assert plan["native_documents_after"] == 2
+        assert plan["native_bytes_after_bound"] == len(short) + len(long)
+
+        forced = plan_native_pdf_overflow(
+            {"refs": [_pdf_block(short), _pdf_block(long)]},
+            native_page_cap=100,
+            native_pdf_bytes_per_document=len(long) - 1,
+            image_cap=50,
+        )
+        # The long document is fully rasterized and leaves the native payload.
+        assert forced["native_documents_after"] == 1
+        assert forced["native_bytes_after_bound"] == len(short)
+
+    def test_overflow_judge_excluded_when_aggregate_caps_exceeded_after_overflow(self) -> None:
+        stats = {"pages": 8, "documents": 2, "bytes": 5_000}
+        plan = {"eligible": True, "native_documents_after": 2, "native_bytes_after_bound": 4_000}
+
+        capped_documents = _judge("gemini", media_mode="native_pdf_overflow_images", max_native_pdf_documents=1)
+        _, exclusions = filter_media_eligible_judges(
+            [capped_documents], native_stats=stats, estimated_images=0, image_cap=450, overflow_plan=plan
+        )
+        assert exclusions[0]["reason"] == "native_pdf_cap_after_overflow"
+
+        capped_bytes = _judge("gemini", media_mode="native_pdf_overflow_images", max_native_pdf_bytes=3_000)
+        _, exclusions = filter_media_eligible_judges(
+            [capped_bytes], native_stats=stats, estimated_images=0, image_cap=450, overflow_plan=plan
+        )
+        assert exclusions[0]["reason"] == "native_pdf_cap_after_overflow"
+
+        roomy = _judge(
+            "gemini",
+            media_mode="native_pdf_overflow_images",
+            max_native_pdf_documents=2,
+            max_native_pdf_bytes=4_000,
+        )
+        eligible, exclusions = filter_media_eligible_judges(
+            [roomy], native_stats=stats, estimated_images=0, image_cap=450, overflow_plan=plan
+        )
+        assert [j.name for j in eligible] == ["gemini"] and not exclusions
+
+    def test_legacy_plan_without_aggregates_stays_eligible(self) -> None:
+        judge = _judge("gemini", media_mode="native_pdf_overflow_images", max_native_pdf_documents=1)
+        eligible, exclusions = filter_media_eligible_judges(
+            [judge],
+            native_stats={"pages": 8, "documents": 2, "bytes": 5_000},
+            estimated_images=0,
+            image_cap=450,
+            overflow_plan={"eligible": True},
+        )
+        assert [j.name for j in eligible] == ["gemini"] and not exclusions

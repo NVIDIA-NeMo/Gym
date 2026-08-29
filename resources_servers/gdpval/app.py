@@ -966,6 +966,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                                 native_page_cap=caps.pop(),
                                 native_pdf_bytes_per_document=byte_caps.pop(),
                                 image_cap=self.config.judge_max_images_per_request,
+                                render_page_cap=self.config.judge_pdf_max_pages,
                             )
                         matchup_judges, media_exclusions = filter_media_eligible_judges(
                             matchup_judges,

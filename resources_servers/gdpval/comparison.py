@@ -1504,6 +1504,29 @@ def filter_media_eligible_judges(
                     }
                 )
                 continue
+            documents_after = overflow_plan.get("native_documents_after")
+            bytes_after = overflow_plan.get("native_bytes_after_bound")
+            over_aggregate = (
+                judge.max_native_pdf_documents is not None
+                and documents_after is not None
+                and documents_after > judge.max_native_pdf_documents
+            ) or (
+                judge.max_native_pdf_bytes is not None
+                and bytes_after is not None
+                and bytes_after > judge.max_native_pdf_bytes
+            )
+            if over_aggregate:
+                exclusions.append(
+                    {
+                        "mode": judge.media_mode,
+                        "judges": [judge.name],
+                        "pdf_stats": dict(native_stats),
+                        "native_documents_after": documents_after,
+                        "native_bytes_after_bound": bytes_after,
+                        "reason": "native_pdf_cap_after_overflow",
+                    }
+                )
+                continue
             eligible.append(judge)
             continue
         if judge.media_mode == "images_and_text" and estimated_images > image_cap:
@@ -1547,6 +1570,7 @@ def plan_native_pdf_overflow(
     native_page_cap: int,
     native_pdf_bytes_per_document: int,
     image_cap: int,
+    render_page_cap: Optional[int] = None,
 ) -> dict:
     """Rasterize oversize PDFs and exactly enough pages for the page cap.
 
@@ -1597,6 +1621,7 @@ def plan_native_pdf_overflow(
     ]
     forced_pages = sum(int(documents[index]["pages"]) for index in forced)
     remaining = max(0, excess - forced_pages)
+    fully_rasterized: set[int] = set(forced)
     for index in sorted(range(len(documents)), key=lambda value: (documents[value]["pages"], value)):
         if index in forced:
             continue
@@ -1613,16 +1638,30 @@ def plan_native_pdf_overflow(
                 "reason": "native_pdf_page_cap",
             }
         )
+        if raster_page_count == int(document["pages"]):
+            fully_rasterized.add(index)
         remaining -= raster_page_count
     raster_pages = sum(int(item["raster_page_count"]) for item in selected)
     native_pages = total_pages - raster_pages
     total_images_after = existing_images + raster_pages
+    # A fully rasterized document leaves the native payload entirely; a prefix
+    # split keeps a native suffix whose size is bounded by the original bytes.
+    native_documents_after = sum(1 for index in range(len(documents)) if index not in fully_rasterized)
+    native_bytes_after_bound = sum(
+        int(documents[index]["bytes"]) for index in range(len(documents)) if index not in fully_rasterized
+    )
+    render_ok = render_page_cap is None or all(int(item["raster_page_count"]) <= render_page_cap for item in selected)
     return {
-        "eligible": (remaining == 0 and native_pages <= native_page_cap and total_images_after <= image_cap),
+        "eligible": (
+            remaining == 0 and native_pages <= native_page_cap and total_images_after <= image_cap and render_ok
+        ),
         "total_pdf_pages": total_pages,
         "native_page_cap": native_page_cap,
         "native_pdf_bytes_per_document": native_pdf_bytes_per_document,
         "native_pages_after": native_pages,
+        "native_documents_after": native_documents_after,
+        "native_bytes_after_bound": native_bytes_after_bound,
+        "render_page_cap": render_page_cap,
         "raster_pages": raster_pages,
         "image_cap": image_cap,
         "existing_images": existing_images,
