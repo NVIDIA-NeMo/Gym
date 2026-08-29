@@ -37,10 +37,7 @@ from pathlib import Path
 
 
 DEFAULT_REPO_ID = "nvidia/NeMo-Gym-EnterpriseOps-Assets"
-# TODO(mcuevas): replace with the real commit SHA once the dataset repo is published.
-# Structurally valid (40 hex chars) so the pinning tests exercise the real code path,
-# but all-zeros so an unpublished pin can never be mistaken for a real one.
-DEFAULT_REVISION = "0000000000000000000000000000000000000000"  # pragma: allowlist secret
+DEFAULT_REVISION = "6a695749a5af988f9ec5cb6e61966dc43e668506"  # pragma: allowlist secret
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PREPARE_COMMAND = "python -m resources_servers.enterpriseops_gym.prepare"
 
