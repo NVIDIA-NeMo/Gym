@@ -16,6 +16,7 @@ from pydantic import ValidationError
 from pytest import raises, warns
 
 from nemo_gym.config_types import (
+    BenchmarkDatasetConfig,
     DatasetConfig,
     GitlabDatasetSource,
     HuggingFaceDatasetSource,
@@ -27,6 +28,26 @@ def _dataset(**extra) -> dict:
 
 
 class TestDatasetSource:
+    def test_benchmark_dataset_keeps_source_metadata(self) -> None:
+        with warns(DeprecationWarning, match="gitlab_identifier"):
+            cfg = BenchmarkDatasetConfig.model_validate(
+                {
+                    "name": "benchmark",
+                    "type": "benchmark",
+                    "jsonl_fpath": "data.jsonl",
+                    "prepare_script": "prepare.py",
+                    "gitlab_identifier": {
+                        "dataset_name": "benchmark",
+                        "version": "0.0.1",
+                        "artifact_fpath": "data.jsonl",
+                    },
+                    "license": "TBD",
+                }
+            )
+
+        assert isinstance(cfg.source, GitlabDatasetSource)
+        assert cfg.license == "TBD"
+
     def test_source_gitlab_backfills_legacy_identifier(self) -> None:
         cfg = DatasetConfig.model_validate(
             _dataset(

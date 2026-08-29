@@ -68,6 +68,7 @@ lmarena_v2_simple_agent:
   responses_api_agents:
     simple_agent:
       entrypoint: app.py
+      reuse_saved_response: false
       resources_server:
         type: resources_servers
         name: lmarena_v2

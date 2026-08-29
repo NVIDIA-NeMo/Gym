@@ -526,13 +526,11 @@ class DatasetConfig(BaseModel):
         return self
 
 
-class BenchmarkDatasetConfig(BaseModel):
-    name: str
+class BenchmarkDatasetConfig(DatasetConfig):
     type: Literal["benchmark"]
     jsonl_fpath: Path
     prepare_script: Path
     prompt_config: Optional[Path] = None
-    num_repeats: int = Field(default=1, ge=1)
     agent: Optional[str] = Field(
         default=None,
         description=(
