@@ -141,7 +141,7 @@ def test_native_retry_feedback_contains_error_and_no_image() -> None:
 
 
 @pytest.mark.asyncio
-async def test_native_parse_retry_injects_feedback_and_retry_temperature() -> None:
+async def test_native_parse_retry_injects_feedback_and_retry_temperature(caplog) -> None:
     agent = _agent(
         parse_retries=1,
         judge=True,
@@ -149,8 +149,6 @@ async def test_native_parse_retry_injects_feedback_and_retry_temperature() -> No
         native_parse_retry_temperature=0.2,
         model_retry_delay_secs=0,
     )
-    final_observation = _observation("https://example.test/final")
-    final_observation["screenshot"]["data_url"] = "data:image/png;base64,final"
     calls = _wire(
         agent,
         {
@@ -158,6 +156,75 @@ async def test_native_parse_retry_injects_feedback_and_retry_temperature() -> No
             "/v1/responses": [
                 _native_model_response("click", '{"coordinate":[0.2,0.3]}'),
                 _native_model_response("terminate", '{"status":"success","answer":"done"}'),
+            ],
+            "/step": [
+                {
+                    "operation_id": "step-0",
+                    "observation": _observation(),
+                    "execution_ok": True,
+                    "terminated": True,
+                }
+            ],
+            "/evaluate": [{"result": {"valid_sample": False, "failure_kind": "external_judge_required"}}],
+            "/verify": [
+                {
+                    "reward": 1.0,
+                    "raw_score": 1.0,
+                    "task_success": True,
+                    "mask_sample": False,
+                }
+            ],
+            "/close": [{"closed": True}],
+        },
+    )
+    request = MagicMock()
+    request.cookies = {}
+    body = WebAgentRunRequest(
+        responses_create_params={"input": [], "temperature": 0.1},
+        web_task=WebTask(
+            benchmark=WebBenchmark.WEBVOYAGER,
+            task_id="Allrecipes--0",
+            intent="Find a recipe",
+            start_urls=["https://example.test"],
+            runtime_profile="native_visual",
+            observation_profile="screenshot",
+            action_profile="native_toolcall",
+        ),
+    )
+
+    with caplog.at_level(logging.INFO, logger="nemo_gym.responses_api_agents.web_agent"):
+        result = await agent.run(request, body)
+
+    model_bodies = [call_body for _server, path, call_body in calls if path == "/v1/responses"]
+    assert result.model_turns == 2
+    assert len(model_bodies) == 2
+    assert model_bodies[0].temperature == 0.1
+    assert model_bodies[1].temperature == 0.2
+    assert sum("input_image" in json.dumps(item.model_dump()) for item in model_bodies[1].input) == 1
+    assert any(
+        getattr(item, "role", None) == "user" and "arguments.actions" in str(item.content)
+        for item in model_bodies[1].input
+    )
+    judge_body = next(call_body for _server, path, call_body in calls if path == "/verify")
+    assert judge_body["screenshots"] == ["data:image/png;base64,abc"]
+    assert judge_body["page_urls"] == ["https://example.test"]
+    assert "event=web_terminal_evidence_reused" in "\n".join(record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_native_nonterminal_action_that_terminates_retains_final_observation() -> None:
+    agent = _agent(judge=True)
+    final_observation = _observation("https://example.test/final")
+    final_observation["screenshot"]["data_url"] = "data:image/png;base64,final"
+    calls = _wire(
+        agent,
+        {
+            "/seed_session": [_seed("Allrecipes--0")],
+            "/v1/responses": [
+                _native_model_response(
+                    "computer",
+                    '{"actions":[{"action":"left_click","coordinate":[0.2,0.3]}]}',
+                )
             ],
             "/step": [
                 {
@@ -196,19 +263,16 @@ async def test_native_parse_retry_injects_feedback_and_retry_temperature() -> No
 
     result = await agent.run(request, body)
 
-    model_bodies = [call_body for _server, path, call_body in calls if path == "/v1/responses"]
-    assert result.model_turns == 2
-    assert len(model_bodies) == 2
-    assert model_bodies[0].temperature == 0.1
-    assert model_bodies[1].temperature == 0.2
-    assert sum("input_image" in json.dumps(item.model_dump()) for item in model_bodies[1].input) == 1
-    assert any(
-        getattr(item, "role", None) == "user" and "arguments.actions" in str(item.content)
-        for item in model_bodies[1].input
-    )
+    assert result.task_success is True
     judge_body = next(call_body for _server, path, call_body in calls if path == "/verify")
-    assert judge_body["screenshots"][-1] == "data:image/png;base64,final"
-    assert judge_body["page_urls"][-1] == "https://example.test/final"
+    assert judge_body["screenshots"] == [
+        "data:image/png;base64,abc",
+        "data:image/png;base64,final",
+    ]
+    assert judge_body["page_urls"] == [
+        "https://example.test",
+        "https://example.test/final",
+    ]
 
 
 @pytest.mark.asyncio

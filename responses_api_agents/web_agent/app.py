@@ -822,8 +822,22 @@ class WebAgent(SimpleResponsesAPIAgent):
                     time.monotonic() - environment_started,
                 )
                 native_status = step_data.info.get("native_status")
-                if native_status != BROWSER_TARGET_CLOSED_STATUS:
+                # Native terminate returns the previous observation unchanged;
+                # unlike a non-terminal action, it does not capture a new
+                # screenshot. Keep valid observations from actions that cause
+                # the environment to terminate, but do not duplicate evidence
+                # for an explicit terminate or append a closed-target result.
+                explicit_native_terminate = task.action_profile == WebActionProfile.NATIVE_TOOLCALL and action.terminal
+                if native_status != BROWSER_TARGET_CLOSED_STATUS and not explicit_native_terminate:
                     self._remember_evidence(observation, screenshot_history, url_history)
+                elif explicit_native_terminate:
+                    LOG.info(
+                        "event=web_terminal_evidence_reused benchmark=%s task=%s step=%d screenshots=%d",
+                        task.benchmark.value,
+                        task.task_id,
+                        step_index,
+                        len(screenshot_history),
+                    )
                 if native_status == CAPTCHA_BUDGET_EXHAUSTED_STATUS:
                     # The browser could not reach the site, so nothing the policy
                     # did is measurable. Mask instead of scoring a forced stop.
