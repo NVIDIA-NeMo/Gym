@@ -510,6 +510,12 @@ def compute_fingerprint(
             for name, block in resolved_global_config.items()
             if isinstance(block, Mapping) and component_types.intersection(block)
         }
+        # Transport-assignment repair rewrites which reference each task is
+        # judged against, so its settings must invalidate journals like any
+        # other planner input. Absent config hashes exactly as before.
+        transport_repair = (resolved_global_config.get("multistage") or {}).get("transport_assignment_repair")
+        if transport_repair is not None:
+            payload["transport_assignment_repair"] = jsonable(transport_repair)
     encoded = orjson.dumps(payload, option=orjson.OPT_SORT_KEYS)
     return hashlib.sha256(encoded).hexdigest()
 
