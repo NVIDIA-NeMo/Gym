@@ -29,7 +29,53 @@ POLICY_BASE_URL=${POLICY_BASE_URL:?set POLICY_BASE_URL, e.g. http://host:8000/v1
 POLICY_MODEL_NAME=${POLICY_MODEL_NAME:?set POLICY_MODEL_NAME to the served model}
 POLICY_API_KEY=${POLICY_API_KEY:-dummy_api_key}
 
-NUM_SAMPLES_IN_PARALLEL=${NUM_SAMPLES_IN_PARALLEL:-128}
+# Settings the manifest declared, applied only where this environment leaves them unset, so
+# precedence stays manifest -> env var -> command line as everywhere else.
+while IFS='=' read -r _k _v; do
+    [[ -n "$_k" ]] || continue
+    [[ -n "${!_k:-}" ]] || export "$_k=$_v"
+done < <(python - "$SWEEP_DIR" "srun,gym_eval_profile" <<'PY_MANIFEST'
+import json, sys
+from pathlib import Path
+try:
+    doc = json.loads((Path(sys.argv[1]) / "sweep_report.json").read_text())
+except OSError:
+    doc = {}
+for block in sys.argv[2].split(","):
+    for key, value in (doc.get(block) or {}).items():
+        print(f"{key}={value}")
+PY_MANIFEST
+)
+
+# The manifest's gym_eval_run keys, rendered as ++ overrides. Same treatment 03_run_single.sh
+# gives them; this script used to hardcode the port ranges and the connector limit, which the
+# manifest is supposed to own.
+MANIFEST_OVERRIDES=$(python - "$SWEEP_DIR" <<'PY_RUN'
+import json, os, sys
+from pathlib import Path
+try:
+    doc = json.loads((Path(sys.argv[1]) / "sweep_report.json").read_text())
+except OSError:
+    doc = {}
+out = []
+for key, value in (doc.get("gym_eval_run") or {}).items():
+    if key == "num_samples_in_parallel" or os.environ.get(key.upper()):
+        continue
+    out.append(f"++{key}={value}")
+print(" ".join(out))
+PY_RUN
+)
+
+_manifest_concurrency=$(python - "$SWEEP_DIR" <<'PY_C'
+import json, sys
+from pathlib import Path
+try:
+    print((json.loads((Path(sys.argv[1]) / "sweep_report.json").read_text()).get("gym_eval_run") or {}).get("num_samples_in_parallel", ""))
+except OSError:
+    print("")
+PY_C
+)
+NUM_SAMPLES_IN_PARALLEL=${NUM_SAMPLES_IN_PARALLEL:-${_manifest_concurrency:-128}}
 SERVERS_READY_TIMEOUT_S=${SERVERS_READY_TIMEOUT_S:-1800}
 ENV_PORT_RANGE_LOW=${ENV_PORT_RANGE_LOW:-20000}
 ENV_PORT_RANGE_HIGH=${ENV_PORT_RANGE_HIGH:-30000}
@@ -87,6 +133,7 @@ gym eval run --no-serve --resume \
     +nemo_gym_log_dir="$SWEEP_DIR/logs" \
     +uv_venv_dir=/opt/uv_venvs \
     +skip_venv_if_present=true \
+    $MANIFEST_OVERRIDES \
     ++global_aiohttp_connector_limit_per_host=16384 \
     ++port_range_low=63000 \
     ++port_range_high=64000

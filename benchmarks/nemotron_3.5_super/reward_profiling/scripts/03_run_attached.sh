@@ -32,8 +32,27 @@ set -euo pipefail
 
 VLLM_JOBID=${VLLM_JOBID:?set VLLM_JOBID to the running vLLM job}
 SWEEP_DIR=${SWEEP_DIR:?set SWEEP_DIR to <out-dir>/<nickname> from 01_materialize.sh}
-POLICY_MODEL_NAME=${POLICY_MODEL_NAME:?set POLICY_MODEL_NAME to the served checkpoint path}
-CONTAINER=${CONTAINER:?set CONTAINER to the reward-profiling sqsh}
+# Settings the manifest declared, applied only where this environment leaves them unset, so
+# precedence stays manifest -> env var -> command line as everywhere else.
+while IFS='=' read -r _k _v; do
+    [[ -n "$_k" ]] || continue
+    [[ -n "${!_k:-}" ]] || export "$_k=$_v"
+done < <(python - "$SWEEP_DIR" "srun,vllm,gym_eval_profile" <<'PY_MANIFEST'
+import json, sys
+from pathlib import Path
+try:
+    doc = json.loads((Path(sys.argv[1]) / "sweep_report.json").read_text())
+except OSError:
+    doc = {}
+for block in sys.argv[2].split(","):
+    for key, value in (doc.get(block) or {}).items():
+        print(f"{key}={value}")
+PY_MANIFEST
+)
+
+# vllm.model is the served checkpoint; this script calls the same thing POLICY_MODEL_NAME.
+POLICY_MODEL_NAME=${POLICY_MODEL_NAME:-${MODEL:?set POLICY_MODEL_NAME, or name it as vllm.model in the manifest}}
+CONTAINER=${CONTAINER:?set CONTAINER, or name it in the manifest srun block}
 GYM_CONFIG=${GYM_CONFIG:-sweep_config.yaml}
 CONCURRENCY=${CONCURRENCY:-128}
 ROUTER_PORT=${ROUTER_PORT:-8000}
