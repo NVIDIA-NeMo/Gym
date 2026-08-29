@@ -1,0 +1,375 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Maintainer-only script: schema + example-row selection for BIRD dev questions.
+
+Ports ``build_index.py`` + ``extract_values.py`` without their pyserini/Java dependency:
+BM25 search uses ``bm25s`` (pure-Python, numpy/scipy-backed) instead of pyserini's
+Lucene/Anserini index, so there's nothing to build and persist to disk ahead of time --
+each database's BM25 index is built in-memory and used immediately.
+
+Per database, two sources of "interesting" column values feed into row selection:
+- A baseline sample (``_sample_table_values``, matches ``extract_values.py``'s
+  ``sample_table_values``): a couple of distinct values per column, independent of any
+  question, computed once per database.
+- Per-question BM25 hits (``_relevant_hits_for_question``, matches ``extract_values.py``'s
+  ``retrieve_question_related_db_values``): column values whose text substring-matches the
+  question well.
+
+Unlike ``extract_values.py`` (which prints isolated per-column example values as
+``-- example: [...]`` comments), we look up one real row per interesting (table, column,
+value) -- keeping every shown row internally consistent -- and return it as an ``INSERT``
+statement, ready to slot into a schema dump the way ``prepare.py`` already renders one.
+
+Not part of ``prepare()`` and not run automatically -- ``prepare_with_bm25.py`` is what
+normally drives this module. Run directly only to produce the standalone
+``data/db_values.json`` artifact, e.g. for inspection.
+
+Usage::
+
+    pip install bm25s nltk
+    python -m benchmarks.birdbench.build_db_values
+"""
+
+import argparse
+import json
+import sqlite3
+from pathlib import Path
+from sqlite3 import Cursor
+from typing import Any, Dict, List, Tuple
+
+from resources_servers.bird_sql.setup_bird_sql import ensure_bird_sql
+
+
+BENCHMARK_DIR = Path(__file__).parent
+DATA_DIR = BENCHMARK_DIR / "data"
+OUTPUT_FPATH = DATA_DIR / "db_values.json"
+
+_VALUE_MAX_LEN = 40
+_SAMPLE_VALUES_PER_COLUMN = 2  # matches build_index.sh's --value_limit_num 2
+_NGRAM_MAX_N = 8
+_TOP_K_RETRIEVE = 10
+_TOP_K_KEEP = 20
+_SCORE_THRESHOLD = 0.85
+_MAX_ROWS_PER_TABLE = 10  # matches prepare.py's INSERT-chain truncation cap
+
+
+def _is_number(s: str) -> bool:
+    try:
+        float(s)
+        return True
+    except ValueError:
+        return False
+
+
+# --------------------------------------------------------------------------------------
+# Schema introspection
+# --------------------------------------------------------------------------------------
+
+
+def _table_names(cur: Cursor) -> List[str]:
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table';")
+    return [name for (name,) in cur.fetchall() if name != "sqlite_sequence"]
+
+
+def _column_names(cur: Cursor, table_name: str) -> List[str]:
+    cur.execute(f"PRAGMA table_info('{table_name}')")
+    return [row[1] for row in cur.fetchall()]
+
+
+def _create_table_statements(cur: Cursor, table_names: List[str]) -> Dict[str, str]:
+    """The database's own literal ``CREATE TABLE`` text -- no need to reconstruct DDL."""
+    cur.execute("SELECT name, sql FROM sqlite_master WHERE type='table' AND sql IS NOT NULL;")
+    return {name: sql for name, sql in cur.fetchall() if name in table_names}
+
+
+# --------------------------------------------------------------------------------------
+# Value sources: baseline per-column sample + per-question BM25 retrieval
+# --------------------------------------------------------------------------------------
+
+
+def _collect_column_values(cur: Cursor, table_names: List[str]) -> List[Dict[str, str]]:
+    """Distinct, non-numeric, short string values from every column -- the BM25 corpus."""
+    corpus: List[Dict[str, str]] = []
+    for table_name in table_names:
+        for column_name in _column_names(cur, table_name):
+            try:
+                cur.execute(f'SELECT DISTINCT "{column_name}" FROM "{table_name}" WHERE "{column_name}" IS NOT NULL;')
+            except sqlite3.OperationalError:
+                continue
+            for (value,) in cur.fetchall():
+                if not isinstance(value, str) or _is_number(value):
+                    continue
+                if 0 < len(value) <= _VALUE_MAX_LEN:
+                    corpus.append({"table": table_name, "column": column_name, "contents": value})
+    return corpus
+
+
+def _sample_table_values(cur: Cursor, table_names: List[str]) -> Dict[Tuple[str, str], List[Any]]:
+    """A couple of distinct values per column, independent of any question.
+
+    Matches ``extract_values.py``'s ``sample_table_values``: computed once per database, not
+    re-run per question.
+    """
+    sampled: Dict[Tuple[str, str], List[Any]] = {}
+    for table_name in table_names:
+        for column_name in _column_names(cur, table_name):
+            cur.execute(
+                f"""
+                SELECT "{column_name}" FROM (
+                    SELECT DISTINCT "{column_name}" FROM "{table_name}"
+                    WHERE "{column_name}" IS NOT NULL AND "{column_name}" != ''
+                ) LIMIT {_SAMPLE_VALUES_PER_COLUMN};
+                """
+            )
+            values = [row[0] for row in cur.fetchall()]
+            # Matches extract_values.py's sample_table_values: truncate long strings so an
+            # oversized sampled value doesn't itself balloon the shown row/prompt.
+            values = [v[:_VALUE_MAX_LEN] if isinstance(v, str) else v for v in values]
+            if values:
+                sampled[(table_name, column_name)] = values
+    return sampled
+
+
+def _obtain_n_grams(text: str, max_n: int) -> List[str]:
+    """Matches extract_values.py's obtain_n_grams exactly (same nltk tokenizer) -- unlike a
+    bare word-regex, nltk keeps punctuation as its own token, which matters here: BIRD's
+    evidence hints are full of literal single-character values ("bond_type = '#'"), and a
+    word-only tokenizer would silently drop the very tokens retrieval needs to find them.
+    """
+    import nltk
+    from nltk import ngrams
+    from nltk.tokenize import word_tokenize
+
+    # nltk >=3.8.2 needs the newer "punkt_tab" resource; older nltk (e.g. pinned by pyserini
+    # to stay Python-3.9-compatible) only knows the classic "punkt" resource, and can raise a
+    # raw OSError (not the usual LookupError) when asked to look up "punkt_tab" at all. Probe
+    # both defensively rather than hard-requiring one -- a failed *check* here shouldn't block
+    # tokenization if a compatible resource is already installed.
+    for resource in ("punkt_tab", "punkt"):
+        try:
+            nltk.data.find(f"tokenizers/{resource}")
+            break
+        except Exception:
+            try:
+                nltk.download(resource, quiet=True)
+                break
+            except Exception:
+                continue
+
+    tokens = word_tokenize(text)
+    return [" ".join(gram) for n in range(1, max_n + 1) for gram in ngrams(tokens, n)]
+
+
+def _substring_match_percentage(query: str, target: str) -> float:
+    """What fraction of ``query`` is covered by its longest substring found in ``target``."""
+    query, target = query.lower(), target.lower()
+    best = 0
+    for i in range(len(query)):
+        for j in range(i + 1, len(query) + 1):
+            if query[i:j] in target:
+                best = max(best, j - i)
+    return best / len(query) if query else 0.0
+
+
+def _build_retriever(corpus: List[Dict[str, str]]):
+    import bm25s
+
+    corpus_tokens = bm25s.tokenize([c["contents"] for c in corpus], stopwords=None, show_progress=False)
+    retriever = bm25s.BM25(corpus=corpus)
+    retriever.index(corpus_tokens, show_progress=False)
+    return retriever
+
+
+def _retrieve_hits_for_queries(retriever, queries: List[str]) -> Dict[str, List[Dict[str, str]]]:
+    import bm25s
+
+    unique_queries = list(dict.fromkeys(queries))
+    if not unique_queries:
+        return {}
+
+    k = min(_TOP_K_RETRIEVE, len(retriever.corpus))
+    query_tokens = bm25s.tokenize(unique_queries, stopwords=None, show_progress=False)
+    results, _scores = retriever.retrieve(query_tokens, k=k, show_progress=False)
+
+    query_to_hits: Dict[str, List[Dict[str, str]]] = {}
+    for row_idx, query in enumerate(unique_queries):
+        hits = [results[row_idx, col] for col in range(results.shape[1])]
+        seen = set()
+        deduped = []
+        for hit in hits:
+            key = (hit["table"], hit["column"], hit["contents"])
+            if key not in seen:
+                seen.add(key)
+                deduped.append(hit)
+        query_to_hits[query] = deduped
+    return query_to_hits
+
+
+def _relevant_hits_for_question(retriever, question: str) -> List[Dict[str, str]]:
+    """BM25 hits whose text substring-matches ``question`` well, deduped and capped."""
+    queries = _obtain_n_grams(question, _NGRAM_MAX_N) + [question]
+    query_to_hits = _retrieve_hits_for_queries(retriever, queries)
+
+    candidates: List[Dict[str, str]] = []
+    seen = set()
+    for query in queries:
+        for hit in query_to_hits.get(query, []):
+            key = (hit["table"], hit["column"], hit["contents"])
+            if key not in seen:
+                seen.add(key)
+                candidates.append(hit)
+
+    scored = []
+    for idx, hit in enumerate(candidates):
+        score = _substring_match_percentage(hit["contents"], question)
+        if score > _SCORE_THRESHOLD:
+            scored.append((score, len(hit["contents"]), idx, hit))
+    scored.sort(key=lambda s: s[:3], reverse=True)
+    return [hit for *_rest, hit in scored[:_TOP_K_KEEP]]
+
+
+# --------------------------------------------------------------------------------------
+# Row selection: turn "interesting" (table, column, value) pairs into real INSERT rows
+# --------------------------------------------------------------------------------------
+
+
+def _select_example_rows(
+    cur: Cursor,
+    table_names: List[str],
+    column_names_by_table: Dict[str, List[str]],
+    sampled_values: Dict[Tuple[str, str], List[Any]],
+    relevant_hits: List[Dict[str, str]],
+) -> Dict[str, List[str]]:
+    """One real row per interesting (table, column, value), rendered as an ``INSERT`` statement.
+
+    Keeps a row's other columns consistent with each other, unlike showing isolated per-column
+    example values. Quoting is done by SQLite's own ``quote()`` SQL function (same approach as
+    ``prepare.py``'s ``_iterdump_no_fk_check``) rather than reimplemented in Python, so every
+    column type (``NULL``, integer, real, blob, text) is rendered correctly.
+    """
+    from sqlite3.dump import _quote_name
+
+    interesting_by_table: Dict[str, List[Tuple[str, Any]]] = {t: [] for t in table_names}
+    for (table_name, column_name), values in sampled_values.items():
+        interesting_by_table[table_name].extend((column_name, v) for v in values)
+    for hit in relevant_hits:
+        interesting_by_table[hit["table"]].append((hit["column"], hit["contents"]))
+
+    statements_by_table: Dict[str, List[str]] = {}
+    for table_name, column_value_pairs in interesting_by_table.items():
+        insert_expr = "'INSERT INTO {0} VALUES(' || {1} || ')'".format(
+            _quote_name(table_name),
+            " || ',' || ".join(f"quote({_quote_name(c)})" for c in column_names_by_table[table_name]),
+        )
+
+        seen = set()
+        statements: List[str] = []
+        for column_name, value in column_value_pairs:
+            if len(statements) >= _MAX_ROWS_PER_TABLE:
+                break
+            try:
+                cur.execute(f'SELECT {insert_expr} FROM "{table_name}" WHERE "{column_name}" = ? LIMIT 1;', (value,))
+            except sqlite3.OperationalError:
+                continue
+            row = cur.fetchone()
+            if row is not None and row[0] not in seen:
+                seen.add(row[0])
+                statements.append(row[0] + ";")
+        if statements:
+            statements_by_table[table_name] = statements
+    return statements_by_table
+
+
+def build_sql_context(create_statements: Dict[str, str], insert_statements: List[str]) -> str:
+    """Schema dump + selected rows, rendered the way ``prepare.py``'s iterdump-based dump is.
+
+    Shared by ``prepare_with_bm25.py`` and ``prepare_with_bm25_pyserini.py`` so both engines
+    produce byte-identical formatting for the same ``(create_statements, insert_statements)``.
+    """
+    # sqlite_master.sql text has no trailing ";" -- add one so consecutive CREATE TABLEs don't
+    # run together into a single broken statement.
+    create_lines = [f"{sql};" for sql in create_statements.values()]
+    lines = ["BEGIN TRANSACTION;", *create_lines, *insert_statements, "COMMIT;"]
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------------------
+# Orchestration
+# --------------------------------------------------------------------------------------
+
+
+class DbHandle:
+    """Everything needed to answer questions against one database, computed once."""
+
+    def __init__(self, cur: Cursor):
+        self.cur = cur
+        self.table_names = _table_names(cur)
+        self.create_statements = _create_table_statements(cur, self.table_names)
+        self.column_names_by_table = {t: _column_names(cur, t) for t in self.table_names}
+        self.sampled_values = _sample_table_values(cur, self.table_names)
+        corpus = _collect_column_values(cur, self.table_names)
+        self.retriever = _build_retriever(corpus) if corpus else None
+
+    def insert_statements_for_question(self, question: str) -> List[str]:
+        relevant_hits = _relevant_hits_for_question(self.retriever, question) if self.retriever else []
+        statements_by_table = _select_example_rows(
+            self.cur, self.table_names, self.column_names_by_table, self.sampled_values, relevant_hits
+        )
+        return [statement for statements in statements_by_table.values() for statement in statements]
+
+
+def build_db_values(
+    dev_databases_dir: Path, dev_json_path: Path
+) -> Tuple[Dict[str, Dict[str, str]], List[Dict[str, Any]]]:
+    """Returns ``(create_statements_by_db, per_question_rows)``.
+
+    ``create_statements_by_db``: ``{db_id: {table_name: "CREATE TABLE ...;"}}``.
+    ``per_question_rows``: one ``{"id", "db_id", "insert_statements"}`` per BIRD dev row, in
+    ``dev.json`` order (so ``id`` aligns with ``prepare.py``'s row ids).
+    """
+    with open(dev_json_path) as f:
+        entries = json.load(f)
+
+    db_ids = sorted({entry["db_id"] for entry in entries})
+    db_handles: Dict[str, DbHandle] = {}
+    create_statements_by_db: Dict[str, Dict[str, str]] = {}
+    for db_id in db_ids:
+        print(f"Indexing {db_id} ...")
+        db_path = dev_databases_dir / db_id / f"{db_id}.sqlite"
+        conn = sqlite3.connect(str(db_path))
+        conn.text_factory = lambda b: b.decode(errors="ignore")
+        db_handles[db_id] = DbHandle(conn.cursor())
+        create_statements_by_db[db_id] = db_handles[db_id].create_statements
+
+    per_question_rows: List[Dict[str, Any]] = []
+    for i, entry in enumerate(entries):
+        # Matches prepare.py's row["question"]: evidence carries the literal-value hints
+        # (e.g. "triple type bonds refers to bond_type = '#'") that retrieval needs to find.
+        question = entry["evidence"] + "\n" + entry["question"]
+        insert_statements = db_handles[entry["db_id"]].insert_statements_for_question(question)
+        per_question_rows.append({"id": i, "db_id": entry["db_id"], "insert_statements": insert_statements})
+
+    return create_statements_by_db, per_question_rows
+
+
+def main() -> Path:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, default=OUTPUT_FPATH)
+    args = parser.parse_args()
+
+    dev_databases_dir = ensure_bird_sql()
+    dev_json_path = dev_databases_dir.parent / "dev.json"
+    if not dev_json_path.exists():
+        raise RuntimeError(f"Expected BIRD dev.json at {dev_json_path}")
+
+    create_statements_by_db, per_question_rows = build_db_values(dev_databases_dir, dev_json_path)
+
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    with open(args.output, "w") as f:
+        json.dump({"create_statements_by_db": create_statements_by_db, "rows": per_question_rows}, f, indent=2)
+    print(f"Wrote schema + example rows for {len(per_question_rows)} questions to {args.output}")
+    return args.output
+
+
+if __name__ == "__main__":
+    main()
