@@ -128,11 +128,13 @@ the things you tune first, then the deployment config, then the data.
     - anything else Gym takes, e.g. `num_samples_in_parallel`
     - precedence, lowest to highest: **manifest → script env var → command line**. A launcher
       passes `++` only when its env var is set, so these are defaults rather than something
-      silently clobbered. `num_samples_in_parallel` is the exception: the launcher computes
-      `512 × decode_nodes`, since only it knows the job's shape
+      silently clobbered. `num_samples_in_parallel` falls back to `512 × decode_nodes` when
+      neither the manifest nor the environment sets it, since only the launcher knows the shape
 8. **gym_eval_profile** — settings for `gym eval profile`
-    - `allow_partial_rollouts` (default true), `jobs` (concurrent labels), plus any `++` the
-      profiler takes. Separate from `gym_eval_run` because they are different commands:
+    - `allow_partial_rollouts` (default true) and `jobs` (concurrent labels). Unlike
+      `gym_eval_run`, extras here are exported as environment variables rather than `++`
+      overrides, so only these two are read. Separate from `gym_eval_run` because they are
+      different commands:
       `allow_partial_rollouts` exists only on the profiler, so putting it under `gym_eval_run`
       sends it to collection where nothing reads it
 9. **gym_env_start** — becomes `sweep_config.yaml`, passed as `--config`
@@ -193,7 +195,7 @@ entries:
 Validate before running — it checks the configs exist, the agent is declared, and the data parses:
 
 ```bash
-python -m nemo_gym.sweep validate manifests/<name>.yaml
+python -m nemo_gym.sweep validate $R/manifests/<name>.yaml
 ```
 
 See `manifests/example_basic.yaml`, `example_judge.yaml`, `example_sandbox_judge.yaml` for a
@@ -232,7 +234,7 @@ SWEEP_DIR=<sweep> POLICY_BASE_URL=http://host:8000/v1 POLICY_MODEL_NAME=<model> 
 ### 03a - Starting, resuming and monitoring a profiling job
 
 `03_run_sharded.sh` submits one job per shard and watches them. A shard whose job dies with work
-outstanding is resubmitted, up to `MAX_ROUNDS` (4). It merges and splits when all are done;
+outstanding is resubmitted, up to `MAX_ROUNDS` total attempts (4, so three retries). It merges and splits when all are done;
 each shard's own job profiles itself, so run `05_profile.sh` after for the whole sweep:
 
 ```bash
@@ -265,7 +267,7 @@ less <sweep>/shards/shard_000/env_start.log               # its 63 Gym servers
 
 Expect ~30s to a healthy sandbox, ~4 min to all servers ready, and ~16 min to the first rollout
 (vLLM weight loading dominates). Runs reach ~95% quickly then stall on a few slow environments
-(`lean`, `math_cot`); profile the partial result rather than waiting for the tail.
+(`reasoning_gym`, `lean`, `math_cot`); profile the partial result rather than waiting for the tail.
 
 ## 04 - Postprocess reward profiling outputs
 
@@ -316,7 +318,8 @@ SWEEP_DIR=<sweep> bash $R/scripts/05_profile.sh
 ```
 
 `VLLM_JOBID`/`CONTAINER` are an alternative, not a requirement — they borrow a container from any
-live allocation to get `gym` on PATH, which is how `03_run_single.sh` calls this at the end of its job:
+live allocation to get `gym` on PATH. `03_run_single.sh` profiles inline at the end of its own
+job rather than calling this; `03_run_endpoint.sh` does call it.
 
 ```bash
 SWEEP_DIR=<sweep> CONTAINER=<sqsh> VLLM_JOBID=<any live job> bash $R/scripts/05_profile.sh
@@ -417,7 +420,7 @@ rewards before a run finishes.
 | `SANDBOX_CONTAINER` | 03 | required by `ns_tools` and `math_formal_lean` |
 | `NUM_PREFILL_NODES`, `NUM_DECODE_NODES` | 03 | P/D split; nodes = P + D |
 | `SBATCH_ACCOUNT`, `SBATCH_GRES` | 03 | `nemotron_n4_post`, `gpu:4` — only when the manifest's `sbatch` block is silent |
-| `WALLTIME`, `MAX_ROUNDS` | 03 | per-job limit; resubmissions per shard (4) |
+| `WALLTIME`, `MAX_ROUNDS` | 03 | per-job limit; total attempts per shard (4 = first submission plus 3 retries) |
 | `PROFILE_JOBS` | 05 | concurrent label profiles (8) |
 
 ### Artifacts, in `outputs/sweeps/<nickname>/`
@@ -438,17 +441,17 @@ rewards before a run finishes.
 
 - **Run exactly one `03_run_sharded.sh` per sweep.** Each watcher resubmits dead shards
   independently, so a second one doubles the submissions and they pile up against the account's
-  node limit. It now takes a lock on the shards directory and refuses to start twice, but it still
+  node limit. It now takes a lock on the sweep directory and refuses to start twice, but it still
   runs in the foreground — detach it with `setsid nohup ... &`.
 - **Keep `policy_model.num_workers` at 16.** Gym's FastAPI servers default to one worker
-  (`server_utils.py:595`), and every rollout crosses the policy server, so at 512+ concurrency that
-  worker caps throughput regardless of GPU capacity. `server_utils.py:159` divides the aiohttp
-  connector limit by the worker count, so the two are tuned together.
+  (`server_utils.py:680`), and every rollout crosses the policy server, so at 512+ concurrency that
+  worker caps throughput regardless of GPU capacity. `server_utils.py:162-163` divides the aiohttp
+  connector limits by the worker count, so the two are tuned together.
 - `--no-serve` is required for collection. Without it `--input` is silently replaced by the
   collated split.
 - **Do not use `gym eval run --limit` to smoke-test a sweep.** It takes the first N rows of the
   whole file, and materialize lays entries out as contiguous blocks in manifest order, so
-  `--limit 72` here covers 2 of 36 environments — all of them `tau_pivot`. `LIMIT_PER_ENTRY` at
+  `--limit 72` here reaches only the first entry, `tau_pivot`, and never the other 35. `LIMIT_PER_ENTRY` at
   prepare takes N rows from *each* entry, so the same 72 tasks cover all 36. The failure is silent:
   you get rollouts, rewards and a clean profile for one environment and conclude the sweep works.
 - Pass `--resume` and a stable output path. Rollout collection clears the output file otherwise,
@@ -495,9 +498,8 @@ It follows the same flow from the [Super-v3.5 readme](../README.md), with one ch
 python -m nemo_gym.sweep container-config $R/manifests/*.yaml --out $R/configs/container_config.yaml
 
 # 1. make vllm container
-mkdir results/vllm
+mkdir -p results/vllm
 CONTAINER_IMAGE_PATH=vllm/vllm-openai:v0.27.1
-mkdir -p "$(dirname "$CONTAINER_IMAGE_PATH")"
 enroot import -o "results/$CONTAINER_IMAGE_PATH" "docker://${CONTAINER_IMAGE_PATH}"
 
 SLURM_ACCOUNT=nemotron_n3_post \

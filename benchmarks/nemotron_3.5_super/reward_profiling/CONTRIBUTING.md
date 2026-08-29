@@ -72,8 +72,8 @@ all manifests and rebuild, per [README.md § 01](./README.md#01---optional-creat
 
 ## 02 - Creating a single manifest file.
 
-Copy the closest `manifests/example_*.yaml` and change `entries`. Every entry needs `label`,
-`agent`, `configs`, `data`, and `owner` — `owner` is you, because the `/lustre` path stops
+Copy the closest `manifests/example_*.yaml` and change `entries`. Every entry needs `label`, `agent`,
+`configs` and `data`. `owner` is optional in the schema but expected for new entries — it is you, because the `/lustre` path stops
 identifying anyone once the data is copied or a blend is re-cut.
 
 ```bash

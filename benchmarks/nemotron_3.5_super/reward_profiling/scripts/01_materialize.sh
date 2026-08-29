@@ -5,7 +5,7 @@
 # preprocessing, which is otherwise ~100 min single-threaded for the full sweep.
 #
 # USAGE
-#   MANIFEST=$R/manifests/nemotron_3_ultra.yaml bash $R/scripts/01_materialize.sh
+#   MANIFEST=$R/manifests/nemotron_3_5_super.yaml bash $R/scripts/01_materialize.sh
 #
 # REQUIRED
 #   MANIFEST          path to a sweep manifest yaml
@@ -38,7 +38,7 @@ JOBS=${JOBS:-}
 LIMIT_PER_ENTRY=${LIMIT_PER_ENTRY:-}
 
 # Repeats are written out here rather than left to Gym, because every launcher resumes: --resume
-# keys the materialized inputs on (_ng_task_index, _ng_rollout_index) (rollout_collection.py:740),
+# keys the materialized inputs on (_ng_task_index, _ng_rollout_index) (global_config.py:173-174),
 # so a row without a rollout index dies with KeyError '_ng_rollout_index' ~90s in (job 6597590).
 args=(--out-dir "$OUT_DIR")
 [[ -n "$JOBS" ]] && args+=(--jobs "$JOBS")

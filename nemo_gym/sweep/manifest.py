@@ -276,7 +276,7 @@ class GymEvalProfile(BaseModel):
     """Settings for ``gym eval profile``, emitted as ``++key=value``.
 
     Separate from ``gym_eval_run`` because they are different commands: ``allow_partial_rollouts``
-    exists only on the profiler (``reward_profile.py:42``), so putting it under ``gym_eval_run``
+    exists only on the profiler (``reward_profile.py:45``), so putting it under ``gym_eval_run``
     sends it to collection, where Hydra force-adds it and nothing reads it.
     """
 

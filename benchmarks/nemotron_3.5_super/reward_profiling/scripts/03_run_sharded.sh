@@ -5,7 +5,7 @@
 # One job cannot use 256 nodes: --segment needs a topology-contiguous allocation and an NVL72 rack
 # is 18 nodes, and a single driver at 512 x decode_nodes concurrency would exceed the aiohttp
 # per-host connector limit long before the GPUs saturated. N identical jobs over disjoint slices is
-# the shape that scales. At the 16-node default, NUM_SHARDS=16 is a 256-node run.
+# the shape that scales. Nodes = NUM_SHARDS x (prefill + decode), so 16 shards at the 1+2 default is 48 nodes.
 #
 # USAGE
 #   MODEL=<ckpt> \
@@ -19,9 +19,9 @@
 #   POLL_S        seconds between squeue checks            (default: 60)
 #   EXPERIMENT_NAME  job-name prefix                       (default: rp)
 #   GYM_SITE_PACKAGES a venv's site-packages, if nemo_gym is not already importable
-#   MAX_ROUNDS    resubmissions per shard before giving up (default: 4)
+#   MAX_ROUNDS    total attempts per shard, first submission included (default: 4)
 #
-# This runs in the FOREGROUND for hours, so detach it. It locks the shards directory and refuses
+# This runs in the FOREGROUND for hours, so detach it. It locks the sweep directory and refuses
 # to start twice -- each watcher resubmits independently, so several pile up jobs against the
 # node limit:
 #

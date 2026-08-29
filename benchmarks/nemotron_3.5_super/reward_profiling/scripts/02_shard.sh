@@ -10,7 +10,7 @@
 #
 # REQUIRED
 #   SWEEP_DIR     the OUT_DIR/<nickname> directory 01 wrote
-#   NUM_SHARDS    how many shards to deal into
+#   (NUM_SHARDS is optional: the manifest's num_shards, else 16)
 #
 # OPTIONAL
 #   SHARDS_DIR    where shard_NNN/ go                     (default: SWEEP_DIR/shards)
