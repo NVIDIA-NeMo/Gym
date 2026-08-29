@@ -19,7 +19,13 @@ from nemo_gym.token_id_capture.sink import (
     reset_token_sink,
     set_token_sink,
 )
-from nemo_gym.token_id_capture.staging import CaptureAdmission, StagedCallRecord, StageResult
+from nemo_gym.token_id_capture.staging import (
+    CaptureAdmission,
+    StagedCallRecord,
+    StageResult,
+    compute_chain_hash,
+    hash_token_ids,
+)
 from nemo_gym.token_id_capture.staging.capture import (
     CaptureError,
     CaptureHost,
@@ -72,6 +78,10 @@ def _root(model_call_id: str = "c1") -> CaptureAdmission:
     )
 
 
+# The chain hash the root call [10, 11, 12] would have staged.
+_PARENT_CHAIN_HASH = compute_chain_hash(None, [10, 11, 12])
+
+
 def _child() -> CaptureAdmission:
     return CaptureAdmission(
         rollout_id="rollout-1",
@@ -80,6 +90,7 @@ def _child() -> CaptureAdmission:
         prev_len=3,
         mode="token_in",
         required_prefix_token_ids=[10, 11, 12],
+        parent_chain_hash=_PARENT_CHAIN_HASH,
     )
 
 
@@ -112,14 +123,18 @@ def test_root_stages_exact_full_delta_before_returning_coords() -> None:
     assert sink.events == ["stage"]
     assert coords.disposition == "staged"
     assert coords.staging_key == "backend/key"
-    assert coords.token_ids_delta == [10, 11, 12]
     assert (coords.prev_len, coords.delta_len, coords.cum_len) == (0, 3, 3)
+    assert coords.chain_hash == compute_chain_hash(None, [10, 11, 12])
+    assert coords.cumulative_hash == hash_token_ids([10, 11, 12])
     record = sink.records[0]
     assert record.mode == "text"
     assert record.weight_version == 7
+    assert record.token_ids_delta == [10, 11, 12]
     assert record.token_mask_delta == [0.0, 0.0, 1.0]
     assert record.generation_log_probs_delta == [0.0, 0.0, -0.25]
     assert record.digest == coords.digest
+    assert record.chain_hash == coords.chain_hash
+    assert record.cumulative_hash == coords.cumulative_hash
 
 
 def test_child_stages_only_tokens_after_verified_parent_prefix() -> None:
@@ -132,9 +147,11 @@ def test_child_stages_only_tokens_after_verified_parent_prefix() -> None:
         generated_logprobs=[-0.3, -0.4],
     )
 
-    assert coords.token_ids_delta == [20, 21, 22, 23]
     assert (coords.prev_len, coords.delta_len, coords.cum_len) == (3, 4, 7)
+    assert coords.chain_hash == compute_chain_hash(_PARENT_CHAIN_HASH, [20, 21, 22, 23])
+    assert coords.cumulative_hash == hash_token_ids([10, 11, 12, 20, 21, 22, 23])
     assert sink.records[0].parent_call_id == "c1"
+    assert sink.records[0].token_ids_delta == [20, 21, 22, 23]
     assert sink.records[0].token_mask_delta == [0.0, 0.0, 1.0, 1.0]
 
 
@@ -180,7 +197,8 @@ def test_sink_failure_poisons_capture_without_failing_completion(sink: _MemorySi
     )
     assert coords.disposition == "capture_failed"
     assert coords.staging_key is None
-    assert coords.token_ids_delta == []
+    assert coords.chain_hash is None
+    assert coords.cumulative_hash is None
 
 
 def test_bad_delta_poisons_capture_without_staging() -> None:

@@ -14,8 +14,10 @@ from nemo_gym.token_id_capture.staging.digest import (
     EXTRAS_DIGEST_VERSION,
     STAGING_DIGEST_VERSION,
     build_staging_delta,
+    compute_chain_hash,
     compute_extras_digest,
     compute_staging_digest,
+    hash_token_ids,
 )
 from nemo_gym.token_id_capture.staging.protocols import (
     CaptureAdapter,
@@ -117,6 +119,11 @@ class RolloutTokenCapture:
             )
             delta_len = len(token_ids_delta)
             cum_len = admission.prev_len + delta_len
+            # The prefix custody proof above makes prompt + generation the
+            # exact cumulative sequence, so both hashes are computable here
+            # without the gate ever materializing tokens.
+            chain_hash = compute_chain_hash(admission.parent_chain_hash, token_ids_delta)
+            cumulative_hash = hash_token_ids(list(prompt_token_ids) + list(generated_token_ids))
             extras_digest = compute_extras_digest(extras)
             digest = compute_staging_digest(
                 schema_version=admission.schema_version,
@@ -134,6 +141,8 @@ class RolloutTokenCapture:
                 token_mask_delta=token_mask_delta,
                 generation_log_probs_delta=logprobs_delta,
                 extras_digest=extras_digest,
+                chain_hash=chain_hash,
+                cumulative_hash=cumulative_hash,
             )
             record = StagedCallRecord(
                 rollout_id=admission.rollout_id,
@@ -150,6 +159,8 @@ class RolloutTokenCapture:
                 generation_log_probs_delta=logprobs_delta,
                 extras=extras,
                 extras_digest=extras_digest,
+                chain_hash=chain_hash,
+                cumulative_hash=cumulative_hash,
             )
         except (TypeError, ValueError, OverflowError):
             LOGGER.exception(
@@ -193,7 +204,8 @@ class RolloutTokenCapture:
             digest=digest,
             extras_digest=extras_digest,
             staging_key=result.staging_key,
-            token_ids_delta=token_ids_delta,
+            chain_hash=chain_hash,
+            cumulative_hash=cumulative_hash,
         )
 
     def complete_call_from_response(

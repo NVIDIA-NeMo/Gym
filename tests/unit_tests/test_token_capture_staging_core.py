@@ -167,6 +167,7 @@ def test_admission_uses_canonical_model_call_identity_and_exact_prefix() -> None
         prev_len=2,
         mode="token_in",
         required_prefix_token_ids=[10, 11],
+        parent_chain_hash="1" * 64,
     )
     assert admission.model_dump(mode="json")["model_call_id"] == "c"
     with pytest.raises(ValidationError, match="length must equal prev_len"):
@@ -177,6 +178,16 @@ def test_admission_uses_canonical_model_call_identity_and_exact_prefix() -> None
             prev_len=2,
             mode="token_in",
             required_prefix_token_ids=[10],
+            parent_chain_hash="1" * 64,
+        )
+    with pytest.raises(ValidationError, match="parent's chain hash"):
+        CaptureAdmission(
+            rollout_id="r",
+            model_call_id="c",
+            parent_call_id="p",
+            prev_len=2,
+            mode="token_in",
+            required_prefix_token_ids=[10, 11],
         )
     with pytest.raises(ValidationError, match="text admission"):
         CaptureAdmission(
@@ -194,6 +205,7 @@ def test_admission_uses_canonical_model_call_identity_and_exact_prefix() -> None
         prev_len=2,
         mode="token_in",
         staging_chain=["r/p"],
+        parent_chain_hash="1" * 64,
     )
     assert chain_admission.required_prefix_token_ids == []
     with pytest.raises(ValidationError, match="text admission"):
@@ -202,6 +214,13 @@ def test_admission_uses_canonical_model_call_identity_and_exact_prefix() -> None
             model_call_id="c",
             mode="text",
             staging_chain=["r/p"],
+        )
+    with pytest.raises(ValidationError, match="text admission"):
+        CaptureAdmission(
+            rollout_id="r",
+            model_call_id="c",
+            mode="text",
+            parent_chain_hash="1" * 64,
         )
 
 
@@ -257,9 +276,12 @@ def test_coords_enforce_staged_and_failed_shapes() -> None:
         digest=payload["digest"],
         extras_digest=payload["extras_digest"],
         staging_key="backend/key",
-        token_ids_delta=payload["token_ids_delta"],
+        chain_hash=payload["chain_hash"],
+        cumulative_hash=payload["cumulative_hash"],
     )
     assert staged.disposition == "staged"
+    with pytest.raises(ValidationError, match="chain_hash"):
+        CommitCoords.model_validate({**staged.model_dump(), "chain_hash": None})
     failed = CommitCoords(
         rollout_id="r",
         model_call_id="c",
