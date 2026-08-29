@@ -1,4 +1,5 @@
 # Prompt used for text-to-SQL.
+# Prompts adapted from 
 
 system: You are a data science expert. Below, you are provided with a database schema and a natural 
         language question. Your task is to understand the schema and generate a valid SQL query to answer the question.
