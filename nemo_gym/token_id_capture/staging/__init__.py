@@ -46,6 +46,14 @@ from nemo_gym.token_id_capture.staging.protocols import (
     WeightVersionProvider,
     install_capture,
 )
+from nemo_gym.token_id_capture.staging.rebuild import (
+    LinearizedRow,
+    RebuildError,
+    ReceiptVerificationError,
+    WeightVersionSpan,
+    linearize,
+    verify_and_linearize,
+)
 from nemo_gym.token_id_capture.staging.records import (
     DIGEST_VERSION,
     SCHEMA_VERSION,
@@ -78,6 +86,9 @@ __all__ = [
     "CaptureDisposition",
     "CaptureMode",
     "CommitCoords",
+    "LinearizedRow",
+    "ReceiptVerificationError",
+    "RebuildError",
     "RolloutReceipt",
     "RolloutTokenCapture",
     "StagedCallRecord",
@@ -87,6 +98,7 @@ __all__ = [
     "StagingSource",
     "StreamingUnsupportedError",
     "WeightVersionProvider",
+    "WeightVersionSpan",
     "assert_golden_vectors",
     "build_staging_delta",
     "compute_extras_digest",
@@ -94,6 +106,8 @@ __all__ = [
     "encode_token_ids",
     "hash_token_ids",
     "install_capture",
+    "linearize",
     "load_golden_vectors",
     "staging_key",
+    "verify_and_linearize",
 ]
