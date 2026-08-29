@@ -277,6 +277,10 @@ class RolloutReceipt(_DigestWireModel):
     manifest: list[CallRecord] = Field(default_factory=list)
     capture_poisoned: bool = False
     failure_reason: str | None = None
+    # How ``terminal_model_call_id`` was chosen: ``declared`` when the agent
+    # reported the response it kept, ``heuristic`` when selection inferred it
+    # from the manifest, ``None`` for receipts predating this column.
+    terminal_selection: Literal["declared", "heuristic"] | None = None
 
     @model_validator(mode="after")
     def _validate_manifest(self) -> Self:
