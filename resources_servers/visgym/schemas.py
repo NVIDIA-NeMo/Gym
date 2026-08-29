@@ -100,6 +100,27 @@ class VisGymResourcesServerConfig(BaseResourcesServerConfig):
         default=True,
         description="Call env.render() when reset/step observation is not image-like.",
     )
+    env_op_threadpool_size: int = Field(
+        default=128,
+        ge=1,
+        description=(
+            "Capacity of the anyio worker-thread pool that env.reset/step/render/close "
+            "and env construction run through. Starlette's run_in_threadpool defaults to "
+            "anyio's process-wide limiter (40 tokens), which becomes the throughput ceiling "
+            "for this single-process, stateful server well before generation capacity does. "
+            "Raise with node CPU headroom in mind -- each concurrent op is CPU-bound "
+            "(physics/rendering), not I/O-bound, so tokens beyond available cores just queue."
+        ),
+    )
+    cap_render_lib_threads: bool = Field(
+        default=True,
+        description=(
+            "Set OpenCV's internal thread count to 1 at startup. With env_op_threadpool_size "
+            "raised well above OpenCV's own default parallelism, each of many concurrent "
+            "render calls spawning its own OpenCV thread pool causes CPU oversubscription "
+            "that can net-negative throughput instead of improving it."
+        ),
+    )
 
 
 class VisGymEnvStateEasyInputMessage(NeMoGymEasyInputMessage):

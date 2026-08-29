@@ -17,6 +17,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+import anyio.to_thread
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from pydantic import ConfigDict, Field
@@ -496,6 +497,27 @@ class VisGymResourcesServer(SimpleResourcesServer):
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
+
+        @app.on_event("startup")
+        async def _raise_env_op_threadpool_capacity() -> None:
+            # run_in_threadpool (used by every env.reset/step/render/close call
+            # below) delegates to anyio's default worker-thread limiter, which
+            # defaults to 40 tokens process-wide. This single-process,
+            # stateful server (env_id_to_env can't be sharded across uvicorn
+            # workers) hits that ceiling long before generation capacity does,
+            # so raising it here -- from inside the running event loop, where
+            # the limiter actually lives -- is the direct fix. Must happen at
+            # startup, before any request claims a token.
+            limiter = anyio.to_thread.current_default_thread_limiter()
+            limiter.total_tokens = self.config.env_op_threadpool_size
+            if self.config.cap_render_lib_threads:
+                try:
+                    import cv2
+
+                    cv2.setNumThreads(1)
+                except ImportError:
+                    pass
+
         app.post("/step")(self.step)
         app.post("/close")(self.close)
         return app
