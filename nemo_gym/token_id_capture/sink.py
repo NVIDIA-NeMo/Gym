@@ -31,7 +31,7 @@ import threading
 import time
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from nemo_gym.token_id_capture.lineage import assistant_fingerprint, stamp_continuation
 from nemo_gym.token_id_capture.protocols import LineageResolution, LineageStore, TokenSink
@@ -46,6 +46,20 @@ from nemo_gym.token_id_capture.records import (
 
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from nemo_gym.token_id_capture.staging.records import CaptureAdmission
+
+# Wire field names between the Gym model server and a framework inference
+# worker: the typed admission rides the engine-bound request under
+# ``NG_CAPTURE_FIELD``; the worker's token-light acknowledgement rides the
+# response under ``NG_COMMIT_COORDS_FIELD``.
+NG_CAPTURE_FIELD = "ng_capture"
+NG_COMMIT_COORDS_FIELD = "ng_commit_coords"
+
+# Ledger poison reasons written by the model server.
+UNRESOLVED_PARENT_REASON = "unresolved_parent"
+UNCOMMITTED_CALL_REASON = "request_finished_without_staged_coordinates"
 
 
 @dataclass
@@ -77,6 +91,16 @@ class CaptureContext:
     # Resolve the parent once before dispatch.
     # Downstream inference and capture share this immutable decision.
     parent_resolution: LineageResolution | None = None
+    # A framework inference worker stages this call's tokens; the lineage
+    # store doubles as the rollout's capture ledger and admission is the
+    # strict tri-state of the lineage result.
+    external_staging: bool = False
+    logical_request_id: str | None = None
+    capture_admission: CaptureAdmission | None = None
+    # The request items as received from the harness, stashed by
+    # ``resolve_parent`` so the commit hook can publish the ledger row with
+    # the exact representation the next request will echo.
+    request_items: list[dict] | None = None
 
     @property
     def parent_call_id(self) -> str | None:
@@ -157,10 +181,19 @@ async def resolve_parent(request_messages: list | None) -> None:
     Return without work for untagged traffic.
     Every attempted resolution records a root, resolved, or unresolved decision.
     An unresolved decision includes its reason.
+
+    With external staging the lineage result is a strict tri-state admission:
+    a unique verified match admits ``token_in``; a ROOT resolution (or an
+    unresolved one on a rollout with no ledger rows — seeded assistant history)
+    admits a ``text`` root; anything else writes a poison row and leaves the
+    call unadmitted. An unresolved request is never silently converted into a
+    new root: the earlier policy-generated tokens would train as mask-zero
+    prompt tokens.
     """
     context = _CAPTURE_CONTEXT.get()
     if context is None or request_messages is None:
         return
+    context.request_items = list(request_messages)
     try:
         if not assistant_fingerprint(request_messages):
             context.parent_resolution = LineageResolution(ParentResolutionStatus.ROOT)
@@ -182,12 +215,51 @@ async def resolve_parent(request_messages: list | None) -> None:
         else:
             context.parent_resolution = await context.lineage_store.resolve(context.rollout_id, request_messages)
         _count_resolution(context.parent_resolution.status.value)
-    except Exception:
+    except Exception as error:
+        # Worker custody fails closed: an unresolved parent would silently
+        # break the ledger's chained-ancestry guarantees.
+        if context.external_staging:
+            raise RuntimeError(f"ledger lineage resolution failed for rollout {context.rollout_id}") from error
         logger.warning("Could not resolve a parent for rollout %s.", context.rollout_id, exc_info=True)
         context.parent_resolution = LineageResolution(
             ParentResolutionStatus.UNRESOLVED,
             reason="lookup_error",
         )
+    if not context.external_staging or context.capture_admission is not None or context.lineage_store is None:
+        return
+
+    # Deferred: staging.records pulls in the digest module.
+    from nemo_gym.token_id_capture.staging.records import CaptureAdmission
+
+    match = context.parent_resolution.match if context.parent_resolution is not None else None
+    if match is not None:
+        context.capture_admission = CaptureAdmission(
+            rollout_id=context.rollout_id,
+            model_call_id=context.model_call_id,
+            parent_call_id=match.model_call_id,
+            prev_len=len(context.parent_tokens),
+            mode="token_in",
+            required_prefix_token_ids=list(context.parent_tokens),
+        )
+        return
+    is_root = context.parent_resolution is not None and context.parent_resolution.status == ParentResolutionStatus.ROOT
+    if is_root or not await context.lineage_store.has_rows(context.rollout_id):
+        context.capture_admission = CaptureAdmission(
+            rollout_id=context.rollout_id,
+            model_call_id=context.model_call_id,
+            mode="text",
+        )
+        return
+    logger.warning(
+        "Unresolved parent for model call %s of rollout %s; poisoning the call.",
+        context.model_call_id,
+        context.rollout_id,
+    )
+    await context.lineage_store.record_failure(
+        context.rollout_id,
+        context.model_call_id,
+        UNRESOLVED_PARENT_REASON,
+    )
 
 
 async def register_call_intent() -> None:
@@ -221,6 +293,10 @@ async def capture_tokens(
     """
     context = _CAPTURE_CONTEXT.get()
     if context is None:
+        return
+    # Worker custody has already staged and committed through the external
+    # response hook. It must never fall back to a local/no-op token sink.
+    if context.external_staging:
         return
     # Guard response decoding and record validation.
     # Either failure leaves the rollout short one call.
