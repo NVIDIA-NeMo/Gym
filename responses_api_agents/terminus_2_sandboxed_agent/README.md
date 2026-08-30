@@ -1,0 +1,21 @@
+# Harbor Terminus 2 Agent
+
+This agent runs Harbor's `Terminus2` control loop in the task sandbox supplied by
+the NeMo Gym resources server. It adapts the small Harbor environment interface
+that Terminus uses (`exec` and `is_dir`) to `AsyncSandbox`; task state therefore
+remains owned by the resources server.
+
+```bash
+gym env start \
+    --config responses_api_models/vllm_model/configs/vllm_model.yaml \
+    --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
+    --config responses_api_agents/terminus_2/configs/terminus_2.yaml \
+    --config resources_servers/swebench/configs/swebench.yaml
+```
+
+To run one row from a benchmark JSONL after starting the servers:
+
+```bash
+python responses_api_agents/terminus_2/client.py \
+    +benchmark_jsonl=benchmarks/swebench/data/swebench_verified_benchmark.jsonl
+```
