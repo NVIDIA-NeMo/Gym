@@ -57,16 +57,18 @@ from nemo_gym.token_id_capture import (
     mark_external_staging_committed,
 )
 from nemo_gym.token_id_capture.config import token_id_capture_config
-from nemo_gym.token_id_capture.lineage import (
-    LINEAGE_FINGERPRINT_VERSION,
-    assistant_fingerprint,
-)
+from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION, assistant_fingerprint
 from nemo_gym.token_id_capture.records import (
     TOKEN_FIELDS,
     response_to_output_items,
     strip_token_fields,
 )
-from nemo_gym.token_id_capture.staging.records import CommitCoords
+from nemo_gym.token_id_capture.staging.records import (
+    INVALID_COMMIT_COORDS_REASON,
+    WORKER_CAPTURE_FAILED_REASON,
+    WORKER_MISSING_COMMIT_COORDS_REASON,
+    CommitCoords,
+)
 
 
 LOG = logging.getLogger("nemo_gym.vllm_model")
@@ -1031,7 +1033,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 await context.lineage_store.record_failure(
                     context.rollout_id,
                     context.model_call_id,
-                    "worker_response_missing_commit_coordinates",
+                    WORKER_MISSING_COMMIT_COORDS_REASON,
                 )
                 return
             coords = CommitCoords.model_validate(coords_payload)
@@ -1044,7 +1046,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 await context.lineage_store.record_failure(
                     context.rollout_id,
                     context.model_call_id,
-                    "worker_capture_failed",
+                    WORKER_CAPTURE_FAILED_REASON,
                 )
                 return
             if coords.parent_call_id != admission.parent_call_id or coords.prev_len != admission.prev_len:
@@ -1098,7 +1100,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 response_id=response_id,
                 output_fingerprint=output_fingerprint,
                 continuation_fingerprint=continuation_fingerprint,
-                fingerprint_version=LINEAGE_FINGERPRINT_VERSION,
+                fingerprint_version=FINGERPRINT_VERSION,
             )
             mark_external_staging_committed(
                 rollout_id=coords.rollout_id,
@@ -1117,7 +1119,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 await context.lineage_store.record_failure(
                     context.rollout_id,
                     context.model_call_id,
-                    "invalid_worker_commit_coordinates",
+                    INVALID_COMMIT_COORDS_REASON,
                 )
             except Exception:
                 LOG.exception(

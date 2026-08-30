@@ -24,10 +24,16 @@ chains or masking a healthy rollout.
 
 The join is **independent witnesses with corroboration**, not a trust
 hierarchy. The fact "which call was kept" is emitted in different places by
-different agent classes, so up to three witnesses testify:
+different agent classes, so up to four witnesses testify:
 
   explicit     — the caller names the kept call directly (a gate seal or an
-                 agent-declared terminal id).
+                 agent-declared terminal id). Soft: a miss is an abstention
+                 and other witnesses may still attribute.
+  declared     — the harness names the response it kept by served response
+                 id. Authoritative: a declared id that matches no record (or
+                 an ambiguous match) attributes nothing and never falls back,
+                 because the harness claimed a specific response and the
+                 records cannot confirm it.
   response_id  — the ``/run`` response's ``id`` equals the served id recorded
                  on exactly one entry. Possession of the id proves which
                  response the client actually received.
@@ -38,6 +44,12 @@ different agent classes, so up to three witnesses testify:
                  fingerprint of the entry's own output (a final-turn-only
                  response), and the transcript's trailing model-authored
                  block (a merged multi-turn transcript).
+
+This module serves both capture paths. Legacy ``TokenEntry`` records carry
+token arrays and ``output_items``; token-free custody rows (staging
+``CallRecord``) carry recorded ``output_fingerprint``/``cumulative_hash``
+columns instead. Records are duck-typed: a record with a ``staging_key`` is
+treated as a custody row.
 
 Each witness abstains rather than guesses (ambiguity inside a witness is an
 abstention, not a vote). The verdict then follows the stack's rule that claims
@@ -89,12 +101,15 @@ def resolve_terminal(
     entries: list[TokenEntry],
     response: dict | None,
     explicit_call_id: str | None = None,
+    *,
+    declared_response_id: str | None = None,
 ) -> TerminalAttribution:
     """Join the verified ``/run`` response to one captured model call.
 
-    ``entries`` is the frozen snapshot. ``response`` is the result's scored
-    response object (or ``None`` when the record carries none). This function
-    never raises: malformed content is an abstention, not an error.
+    ``entries`` is the frozen snapshot (``TokenEntry`` records or token-free
+    custody rows). ``response`` is the result's scored response object (or
+    ``None`` when the record carries none). This function never raises:
+    malformed content is an abstention, not an error.
     """
     reasons: list[str] = []
     by_call_id = {entry.model_call_id: entry for entry in entries}
@@ -108,6 +123,17 @@ def resolve_terminal(
             witnesses.append(("explicit", named))
         else:
             reasons.append("explicit_terminal_not_captured")
+
+    if declared_response_id:
+        declared_matches = [entry for entry in entries if entry.response_id == declared_response_id]
+        declared_winner = _collapse_identical(declared_matches)
+        if declared_winner is None:
+            # A declaration is authoritative: a miss (or an ambiguous match)
+            # masks and never falls back to weaker evidence — the harness
+            # claimed a specific response and the records cannot confirm it.
+            reasons.append("declared_ambiguous" if declared_matches else "declared_terminal_not_captured")
+            return TerminalAttribution(None, reason=",".join(reasons))
+        witnesses.append(("declared", declared_winner))
 
     if isinstance(response, dict):
         response_id = str(response.get("id") or "")
@@ -150,13 +176,23 @@ def resolve_terminal(
     return TerminalAttribution(named.model_call_id, method=method, reason=",".join(reasons))
 
 
+def _is_custody_row(entry: TokenEntry) -> bool:
+    """A token-free custody row stages its tokens externally under a key."""
+    return getattr(entry, "staging_key", None) is not None
+
+
 def _sequence_identity(entry: TokenEntry) -> tuple:
     """Identify an entry by its full token sequence.
 
-    A lineage-aware writer records a cumulative digest and length.
-    Records without one compare their token arrays directly.
-    Both identify the delivered sequence, which is what training consumes.
+    A custody row identifies by the worker's whole-sequence
+    ``cumulative_hash`` (with the chained ``chain_hash`` as a secondary key)
+    plus the cumulative length. A lineage-aware ``TokenEntry`` writer records
+    a cumulative digest and length; records without one compare their token
+    arrays directly. All identify the delivered sequence, which is what
+    training consumes.
     """
+    if _is_custody_row(entry):
+        return (entry.cumulative_hash, entry.chain_hash, entry.cum_len)
     digest = getattr(entry, "digest", None)
     cum_len = getattr(entry, "cum_len", None)
     if digest and cum_len is not None:
@@ -202,7 +238,7 @@ def _content_witness(entries: list[TokenEntry], response: dict, reasons: list[st
     items = [item for item in output if isinstance(item, dict)]
     try:
         target = assistant_fingerprint(items)
-    except ValueError:
+    except (TypeError, ValueError):
         reasons.append("response_output_unfingerprintable")
         return None
     if not target:
@@ -226,26 +262,43 @@ def _content_witness(entries: list[TokenEntry], response: dict, reasons: list[st
     if trailing and len(trailing) != len(items):
         try:
             tail = assistant_fingerprint(trailing)
-        except ValueError:
+        except (TypeError, ValueError):
             tail = ""
 
     matches: dict[str, TokenEntry] = {}
     cumulative_hit = False
+    custody_hit = False
     for entry in entries:
         continuation = getattr(entry, "continuation_fingerprint", None)
         version = getattr(entry, "fingerprint_version", None)
+        if _is_custody_row(entry):
+            # Custody rows record both fingerprints at commit time, so a row
+            # stamped with a different canonicalization version never matches.
+            if version != FINGERPRINT_VERSION:
+                continue
+            output_fingerprint = getattr(entry, "output_fingerprint", None)
+            if continuation and continuation == target:
+                matches[entry.model_call_id] = entry
+                custody_hit = True
+            if output_fingerprint and (output_fingerprint == target or (tail and output_fingerprint == tail)):
+                matches[entry.model_call_id] = entry
+                custody_hit = True
+            continue
         if continuation and continuation == target and (version is None or version == FINGERPRINT_VERSION):
             matches[entry.model_call_id] = entry
             cumulative_hit = True
         if entry.output_items:
             try:
                 own = assistant_fingerprint(list(entry.output_items))
-            except ValueError:
+            except (TypeError, ValueError):
                 continue
             if own and (own == target or (tail and own == tail)):
                 matches[entry.model_call_id] = entry
     winner = _collapse_identical(list(matches.values()))
     if winner is not None:
+        if custody_hit:
+            # Custody manifests label all three readings as one witness.
+            return ("content", winner)
         return ("content_cumulative" if cumulative_hit else "content_output", winner)
     reasons.append("content_ambiguous" if matches else "no_content_match")
     return None
