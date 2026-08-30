@@ -40,7 +40,7 @@ from typing import Any, Mapping, Optional
 from uuid import uuid4
 
 import orjson
-from fastapi import Body, FastAPI, Request
+from fastapi import Body, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, model_validator
@@ -74,6 +74,23 @@ logger = logging.getLogger(__name__)
 
 # Stateless; shared by every model server's default /v1/messages handler.
 _ANTHROPIC_CONVERTER = AnthropicConverter()
+
+
+def _orjson_dispatch_response(content: Any) -> Any:
+    """Serialize a completed non-streaming model response with orjson.
+
+    FastAPI serializes a bare dictionary or Pydantic model with ``jsonable_encoder``.
+    That function recursively visits every token ID and log probability before standard-library ``json.dumps`` runs.
+
+    Convert Pydantic models to JSON-compatible values before encoding the result.
+    Return the encoded bytes as a ``Response`` so FastAPI does not encode them again.
+    Preserve ``Response`` objects created by model-server overrides.
+    """
+    if isinstance(content, Response):
+        return content
+    if isinstance(content, BaseModel):
+        content = content.model_dump(mode="json")
+    return Response(content=orjson.dumps(content), media_type="application/json")
 
 
 class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
@@ -130,7 +147,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         """
         if not body.get("stream"):
             params = _validate_responses_params(body)
-            return await self._invoke_responses(request, params)
+            return _orjson_dispatch_response(await self._invoke_responses(request, params))
 
         cleaned, ns_map = sanitize_streaming_responses_body(body)
         try:
@@ -174,7 +191,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         """
         if body.get("stream") is not True:
             params = _validate_chat_params(body)
-            return await self._invoke_chat_completions(request, params)
+            return _orjson_dispatch_response(await self._invoke_chat_completions(request, params))
 
         cleaned, include_usage = sanitize_streaming_chat_body(body)
         params = _validate_chat_params(cleaned)
@@ -213,7 +230,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                 _ANTHROPIC_CONVERTER.anthropic_response_to_sse(anthropic_response),
                 media_type="text/event-stream",
             )
-        return anthropic_response
+        return _orjson_dispatch_response(anthropic_response)
 
     async def _invoke_responses(
         self, request: Request, params: NeMoGymResponseCreateParamsNonStreaming
