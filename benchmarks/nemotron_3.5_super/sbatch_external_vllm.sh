@@ -14,6 +14,16 @@ SLURM_COMMENT="${SLURM_COMMENT:-}"
 OPENSANDBOX_DOMAIN="${OPENSANDBOX_DOMAIN:-}"
 OPENSANDBOX_API_KEY="${OPENSANDBOX_API_KEY:-}"
 OPENSANDBOX_PROTOCOL="${OPENSANDBOX_PROTOCOL:-http}"
+SANDBOX_CONFIG="${SANDBOX_CONFIG:-}"
+
+# Hand-assembled --config lists keep omitting the sandbox provider config; for
+# OpenSandbox that silently flips the SDK to proxy-less sandbox health checks
+# that compute nodes cannot reach, and every create times out at ready_timeout.
+# Injected before the caller's args, so explicit --config / ++ overrides win.
+if [[ -z "$SANDBOX_CONFIG" && -n "$OPENSANDBOX_DOMAIN" && -n "$OPENSANDBOX_API_KEY" ]]; then
+    SANDBOX_CONFIG=nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+fi
+SANDBOX_CONFIG_ARG=${SANDBOX_CONFIG:+--config $SANDBOX_CONFIG}
 
 should_run_eval=$(( $# > 0 ))
 if (( should_run_eval )); then
@@ -45,7 +55,7 @@ cd /opt/Gym
 export NEMO_GYM_RUN_ID="\$SLURM_JOB_ID"
 export NEMO_GYM_USER="\${NEMO_GYM_USER:-\$SLURM_JOB_USER}"
 
-gym eval prepare $@ +use_cached_prepared_benchmarks=true
+gym eval prepare $SANDBOX_CONFIG_ARG $@ +use_cached_prepared_benchmarks=true
 
 experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%d_%H%M%S)
 # export_to_csv.py derives <base>_aggregate_metrics.json from this, so the
@@ -59,6 +69,7 @@ rollouts_fpath=\${ROLLOUTS_FPATH:-results/\$experiment_name.jsonl}
 # global_aiohttp_connector_limit_per_host: 16k concurrent requests should be enough. We can raise further if our inference is efficient enough to support.
 # port_range_low, port_range_high: Move into ephemeral ports
 gym eval run \
+    $SANDBOX_CONFIG_ARG \
     $@ \
     +wandb_project=$USER-gym-eval \
     +wandb_name=\$experiment_name \
