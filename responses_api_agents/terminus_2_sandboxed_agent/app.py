@@ -149,7 +149,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             context = AgentContext()
             agent = Terminus2(
                 logs_dir=Path(log_dir),
-                model_name=self.config.model_server.name,
+                model_name=f"openai/{self.config.model_server.name}",
                 api_base=model_base_url,
                 max_turns=self.config.max_turns,
                 parser_name=self.config.parser_name,
