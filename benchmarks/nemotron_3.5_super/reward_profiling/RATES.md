@@ -71,8 +71,41 @@ Summing the lanes instead gives 23,178-24,409 GPU-hours, and the gap is the poin
 together: a judge rollout blocked on the gateway and a sandbox rollout blocked on uWSGI hold no GPU
 while they wait, so they fill time the GPU-bound environments would leave idle.
 
-Disk, one-time per (manifest, checkpoint): `01_materialize.sh` writes **291.5 GB** in ~2,087 s
-(5,808,968 rows from 726,121 source rows, 36 workers). Sharding copies it, so peak is **~583 GB**.
+Disk, one-time per (manifest, checkpoint): `01_materialize.sh` writes **271.5 GB** in ~25 min
+(5,808,968 rows from 726,121 source rows, 36 workers). **Peak during the run is ~541 GB, roughly
+2x the final size**, because `_parts/` is not removed until concatenation finishes — budget for the
+peak, not the result. Sharding copies the file again, so a sharded run peaks near 815 GB.
+
+## P2D8 on full data (job 6706202, 2026-08-29)
+
+First run of the whole 5,808,968-rollout input at a production shape: 2 prefill + 8 decode = 10
+nodes, 40 GPUs, `nemotron_n4_post` on the `normal` queue.
+
+| | |
+|---|---|
+| steady-state | **7,013 rollouts/hr**, i.e. **175 per GPU-hr** |
+| driver concurrency | 4,096 (512 x 8 decode nodes) |
+| actually in flight at vLLM | ~33 per engine, so ~264 |
+| GPU KV cache usage | **4.5%**, `Waiting: 0 reqs` |
+
+**More decode nodes will not make this faster.** The GPUs are starved: 4.5% KV cache with nothing
+queued means vLLM is never the constraint. About 93% of the concurrency window is blocked upstream
+of it — on the judge gateway and on the single sandbox node, which was already serving 26 active
+sessions on one of its 32 workers.
+
+Per GPU this is *worse* than the 16-GPU mixed run (175 vs 351/GPU-hr), which is the same fact from
+the other side: 2.5x the GPUs bought 1.25x the throughput. Sizing the fleet from GPU count
+overstates what you get.
+
+Sizing at this shape, for reference rather than recommendation:
+
+```
+5,808,968 / 7,013 per hr = 828 h on 40 GPUs = 33,133 GPU-hours
+```
+
+That is twice the 16,540 estimated from the 16-GPU run, and the gap is starvation, not work.
+**Grow the sandbox tier and judge throughput before adding GPUs**; until those move, extra decode
+nodes are idle capacity.
 
 ## Caveats
 
