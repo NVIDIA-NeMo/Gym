@@ -40,10 +40,36 @@ from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import SESSION_ID_KEY
 from resources_servers.swebench_pro.verification import (
+    DEFAULT_ENVIRONMENT_REPAIRS,
     VerificationInputs,
     VerificationResult,
     assemble_workspace_files,
+    build_seed_normalization,
+    drop_patch_sections,
+    inconclusive_reason,
     run_verification,
+)
+
+
+# K8s maps localhost to ::1 and Node 17+ honours that, but servers under test bind IPv4.
+SANDBOX_ENV_OVERRIDES = {"NODE_OPTIONS": "--dns-result-order=ipv4first"}
+
+
+# Blanked on the spec so the agent sees a clean env; the entryscript unsets them for real.
+HARNESS_ENV_TO_SCRUB = (
+    "OTEL_SERVICE_NAME",
+    "OTEL_SERVICE_VERSION",
+    "OTEL_RESOURCE_ATTRIBUTES",
+    "OTEL_EXPORTER_OTLP_PROTOCOL",
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_HEADERS",
+    "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+    "OTEL_METRIC_EXPORT_INTERVAL",
+    "OTEL_TRACES_EXPORTER",
+    "OTEL_METRICS_EXPORTER",
+    "OTEL_LOGS_EXPORTER",
 )
 
 
@@ -52,6 +78,10 @@ class SWEBenchProResourcesServerConfig(BaseResourcesServerConfig):
     apply_anti_cheating: bool = True
     prefetch_go_modules: bool = False
     evaluation_timeout: int | None = None
+    # A verdict-less run is retried on a new sandbox; see `inconclusive_reason`.
+    inconclusive_verification_retries: int = 2
+    # Which container repairs to apply; see `ENVIRONMENT_REPAIRS`.
+    environment_repairs: tuple[str, ...] = DEFAULT_ENVIRONMENT_REPAIRS
     image_repository: str = "docker.io/jefzda/sweap-images"
     sandbox_provider: str
     sandbox_config: dict[str, Any]
@@ -119,6 +149,8 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
         self._session_id_to_sandbox: dict[str, AsyncSandbox] = {}
+        # Untracked files the image ships, per session. Leading underscore: pydantic needs it.
+        self._session_id_to_pristine_untracked: dict[str, frozenset[str]] = {}
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -138,6 +170,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
     async def shutdown(self) -> None:
         sandboxes = list(self._session_id_to_sandbox.values())
         self._session_id_to_sandbox.clear()
+        self._session_id_to_pristine_untracked.clear()
         for sandbox in sandboxes:
             try:
                 await sandbox.stop()
@@ -162,7 +195,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             ttl_s=self.config.sandbox_config.get("ttl_s"),
             ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s"),
             workdir="/app",
-            env={},
+            env=dict.fromkeys(HARNESS_ENV_TO_SCRUB, "") | SANDBOX_ENV_OVERRIDES,
             files=files or {},
             metadata=provider_metadata
             | self.config.sandbox_config.get("metadata", {})
@@ -193,12 +226,14 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             instance_dockerfile=body.instance_dockerfile,
             repo_language=body.repo_language,
             prefetch_go_modules=self.config.prefetch_go_modules,
+            environment_repairs=tuple(self.config.environment_repairs),
         )
 
     async def seed_session(
         self, request: Request, body: SWEBenchProSeedSessionRequest
     ) -> SWEBenchProSeedSessionResponse:
         session_id = request.session[SESSION_ID_KEY]
+        self._session_id_to_pristine_untracked.pop(session_id, None)
         previous = self._session_id_to_sandbox.pop(session_id, None)
         if previous is not None:
             try:
@@ -219,18 +254,47 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                     f"Failed to setup anti-cheating for {body.instance_id}. Return code: {result.return_code}\n"
                     f"Stdout:\n{result.stdout}\nStderr:\n{result.stderr}"
                 )
+        await self.normalize_sandbox_environment(sandbox, body.instance_id)
+        self._session_id_to_pristine_untracked[session_id] = await self.pristine_untracked_files(sandbox)
         self._session_id_to_sandbox[session_id] = sandbox
         return SWEBenchProSeedSessionResponse(sandbox_handle=sandbox._handle.sandbox_id)
 
+    async def normalize_sandbox_environment(self, sandbox: AsyncSandbox, instance_id: str) -> None:
+        """Give the agent container the same repairs the verifier gets; best effort."""
+        try:
+            script = build_seed_normalization(self.config.environment_repairs)
+            result = await sandbox.exec(f"bash -c {quote(script)}", timeout_s=300)
+            if result.return_code != 0:
+                print(
+                    f"Failed to normalize sandbox environment for {instance_id}. "
+                    f"Return code: {result.return_code}\nStderr:\n{result.stderr}",
+                    file=sys.stderr,
+                )
+        except Exception:
+            print(f"Failed to normalize sandbox environment for {instance_id}", format_exc(), file=sys.stderr)
+
+    async def pristine_untracked_files(self, sandbox: AsyncSandbox) -> frozenset[str]:
+        """List the untracked files ``/app`` holds before the agent touches it."""
+        try:
+            result = await sandbox.exec("git -C /app ls-files --others --exclude-standard")
+            if result.return_code != 0:
+                print(f"Failed to list pristine untracked files: {result.stderr}", file=sys.stderr)
+                return frozenset()
+            return frozenset(line.strip() for line in (result.stdout or "").splitlines() if line.strip())
+        except Exception:
+            print("Failed to list pristine untracked files", format_exc(), file=sys.stderr)
+            return frozenset()
+
     async def _extract_model_patch(self, session_id: str, base_commit: str) -> str:
         original_sandbox = self._session_id_to_sandbox.pop(session_id)
+        pristine_untracked = self._session_id_to_pristine_untracked.pop(session_id, frozenset())
         try:
             result = await original_sandbox.exec(
                 f"git -C /app add -N . && git -C /app --no-pager diff {quote(base_commit)}"
             )
             if result.return_code != 0:
                 raise RuntimeError(result.stderr or "git diff failed")
-            return result.stdout or ""
+            return drop_patch_sections(result.stdout or "", pristine_untracked)
         finally:
             try:
                 await original_sandbox.stop()
@@ -256,35 +320,53 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         }
 
         run_log_dir = Path(__file__).parent / "logs" / "run_evaluation" / session_id / body.instance_id
-        eval_sandbox: AsyncSandbox | None = None
-        start_time = time()
-        try:
-            eval_sandbox = await self._create_sandbox(body, files=sandbox_files)
-            eval_sandbox_start_time_taken = time() - start_time
-            verification_start = time()
-            result = await run_verification(
-                sandbox=eval_sandbox,
-                inputs=inputs,
-                log_dir=run_log_dir,
-                timeout_s=self.config.evaluation_timeout,
+        eval_sandbox_start_time_taken = 0.0
+        patch_verification_time_taken = 0.0
+        attempts = 1 + max(self.config.inconclusive_verification_retries, 0)
+        for attempt in range(1, attempts + 1):
+            eval_sandbox: AsyncSandbox | None = None
+            start_time = time()
+            try:
+                eval_sandbox = await self._create_sandbox(body, files=sandbox_files)
+                eval_sandbox_start_time_taken = time() - start_time
+                verification_start = time()
+                result = await run_verification(
+                    sandbox=eval_sandbox,
+                    inputs=inputs,
+                    log_dir=run_log_dir,
+                    timeout_s=self.config.evaluation_timeout,
+                )
+                patch_verification_time_taken = time() - verification_start
+            except Exception as exc:
+                eval_sandbox_start_time_taken = time() - start_time
+                patch_verification_time_taken = 0.0
+                result = VerificationResult(
+                    completed=False,
+                    resolved=False,
+                    patch_applied=False,
+                    test_results=None,
+                    error=f"Verification failed: {exc}",
+                )
+            finally:
+                if eval_sandbox is not None:
+                    try:
+                        await eval_sandbox.stop()
+                    except Exception:
+                        print("Failed to stop verification sandbox", format_exc(), file=sys.stderr)
+
+            reason = inconclusive_reason(result, asdict(inputs))
+            if reason is None or attempt == attempts:
+                if reason is not None:
+                    print(
+                        f"Verification for {body.instance_id} still inconclusive after {attempt} attempt(s): {reason}",
+                        file=sys.stderr,
+                    )
+                break
+            print(
+                f"Retrying verification for {body.instance_id} on a new sandbox "
+                f"(attempt {attempt}/{attempts} was inconclusive: {reason})",
+                file=sys.stderr,
             )
-            patch_verification_time_taken = time() - verification_start
-        except Exception as exc:
-            eval_sandbox_start_time_taken = time() - start_time
-            patch_verification_time_taken = 0.0
-            result = VerificationResult(
-                completed=False,
-                resolved=False,
-                patch_applied=False,
-                test_results=None,
-                error=f"Verification failed: {exc}",
-            )
-        finally:
-            if eval_sandbox is not None:
-                try:
-                    await eval_sandbox.stop()
-                except Exception:
-                    print("Failed to stop verification sandbox", format_exc(), file=sys.stderr)
 
         response_data = body.model_dump() | {
             "reward": float(result.resolved),
