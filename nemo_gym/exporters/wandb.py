@@ -52,6 +52,8 @@ class WandbExporter(BaseExporter):
         self.run = wandb.init(
             project=self.config.wandb_project,
             name=self.config.wandb_name,
+            id=self.config.wandb_run_id,
+            resume=self.config.wandb_resume,
             dir=str(Path(self.global_config_dict[RESULTS_DIR_KEY_NAME]) / "wandb"),
         )
 

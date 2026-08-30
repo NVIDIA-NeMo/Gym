@@ -1309,6 +1309,18 @@ class RolloutCollectionHelper(BaseModel):
         agent_name_to_counts = defaultdict(int)
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
         dispatched_per_agent = Counter(counts_left)
+        # Rows loaded from cache (resume_from_cache) count toward progress so a resumed run
+        # reports cumulative metrics and its chart continues from where the prior run stopped,
+        # instead of restarting at zero over only the newly dispatched rows.
+        for cached_row, cached_result in zip(rows, results):
+            cached_agent_name = cached_row[AGENT_REF_KEY_NAME]["name"]
+            agent_name_to_metrics[cached_agent_name].update(
+                {k: v for k, v in cached_result.items() if isinstance(v, (int, float)) and not k.startswith("_")}
+            )
+            agent_name_to_counts[cached_agent_name] += 1
+            dispatched_per_agent[cached_agent_name] += 1
+        n_cached = len(results)
+        n_total_rows = n_cached + len(input_rows)
         start_time = time()
 
         results_file = output_fpath.open("ab")
@@ -1439,15 +1451,15 @@ class RolloutCollectionHelper(BaseModel):
                 )
                 agent_name_to_counts[agent_name] += 1
 
-            current_pct = 100 * len(results) / len(input_rows)
+            current_pct = 100 * len(results) / n_total_rows
             if pcts_to_print and current_pct >= pcts_to_print[0]:
                 while pcts_to_print and current_pct >= pcts_to_print[0]:
                     pcts_to_print.pop(0)
 
                 time_taken_s = time() - start_time
                 time_taken = timedelta(seconds=int(time_taken_s))
-                rollouts_per_min = len(results) / (time_taken_s / 60)
-                print_str = f"Finished {len(results)} / {len(input_rows)} rollouts ({int(current_pct)}%) in {time_taken} ({rollouts_per_min:.2f} rollouts/min). "
+                rollouts_per_min = (len(results) - n_cached) / (time_taken_s / 60)
+                print_str = f"Finished {len(results)} / {n_total_rows} rollouts ({int(current_pct)}%) in {time_taken} ({rollouts_per_min:.2f} rollouts/min). "
 
                 top_left = counts_left.most_common()
                 top_left_str = "\n".join(f"{i + 1}. {k}: {v}" for i, (k, v) in enumerate(top_left))

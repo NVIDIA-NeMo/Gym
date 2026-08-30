@@ -820,6 +820,10 @@ class WANDBConfig(ExporterConfig):
     wandb_project: Optional[str] = None
     wandb_name: Optional[str] = None
     wandb_api_key: Optional[str] = None
+    # Optional fixed run id + resume mode ("allow"/"must") so a relaunched eval
+    # (e.g. resume_from_cache) continues the same W&B run instead of starting a new one.
+    wandb_run_id: Optional[str] = None
+    wandb_resume: Optional[str] = None
 
     @property
     def is_available(self) -> bool:
