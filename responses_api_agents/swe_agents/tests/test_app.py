@@ -175,7 +175,6 @@ def _make_instance_config(tmpdir: str, **overrides) -> SWEBenchWrapperInstanceCo
         ng_global_config_dict_str="'{}'",
         model_server_name="test_model",
         model_server_base_url="http://test-host:12345",
-        model_server_default_model="test-model",
         openhands_setup_dir=Path(tmpdir) / "openhands",
         swebench_setup_dir=Path(tmpdir) / "swebench",
         swebench_multilingual_setup_dir=Path(tmpdir) / "swebench_multilingual",
@@ -354,7 +353,6 @@ class TestSWEBenchWrapperServerConfig:
             ng_global_config_dict_str="'{}'",
             model_server_name="test_model",
             model_server_base_url="http://test-host:12345",
-            model_server_default_model="test-model",
             openhands_setup_dir=Path("/tmp/openhands"),
             swebench_setup_dir=Path("/tmp/swebench"),
             r2e_gym_setup_dir=Path("/tmp/r2e"),
@@ -1070,7 +1068,10 @@ class TestOpenHandsHarnessProcessor:
             config.persistent_dir.mkdir(parents=True, exist_ok=True)
             processor = OpenHandsHarnessProcessor(config=config)
             processor.get_run_command()
-            assert "LOG_LEVEL=DEBUG" in self._read_agent_script(config)
+            script = self._read_agent_script(config)
+            assert "LOG_LEVEL=DEBUG" in script
+            assert "NEMO_GYM_MODEL_SERVER_BASE_URL" not in script
+            assert "nemo_gym_capture_overlay" not in script
 
     def test_get_run_command_routes_capture_when_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1321,7 +1322,7 @@ class TestOpenCodeHarnessProcessor:
 
         def _fake(_global, name):
             assert name == "test_model"
-            return type("Cfg", (), {"host": "test-host", "port": 12345})()
+            return type("Cfg", (), {"host": "test-host", "port": 12345, "model": "test-model"})()
 
         monkeypatch.setattr(swe_app, "get_first_server_config_dict", _fake)
         monkeypatch.setattr(swe_app, "get_global_config_dict", MagicMock(return_value=OmegaConf.create({})))
@@ -2359,7 +2360,7 @@ class TestSWEBenchWrapperBuildApptainerCommand:
     def test_basic_command(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
         with tempfile.TemporaryDirectory() as tmpdir:
-            params = _make_instance_config(tmpdir)
+            params = _make_instance_config(tmpdir, token_capture_enabled=True)
             params.persistent_dir.mkdir(parents=True, exist_ok=True)
             (params.persistent_dir / "container_scripts").mkdir(parents=True, exist_ok=True)
 
@@ -2581,7 +2582,6 @@ class TestSWEBenchWrapperGetOpenhandsTrajectory:
                 "provider_specific_fields": {
                     "prompt_token_ids": [1, 2],
                     "generation_token_ids": [3, 4],
-                    "routed_experts": [[[0, 1]], [[2, 3]], [[4, 5]], [[6, 7]]],
                 },
                 "response": {
                     "choices": [
@@ -2601,12 +2601,6 @@ class TestSWEBenchWrapperGetOpenhandsTrajectory:
             assert len(messages) == 3  # system, user, assistant
             assert messages[2]["role"] == "assistant"
             assert messages[2]["prompt_token_ids"] == [1, 2]
-            assert messages[2]["routed_experts"] == [
-                [[0, 1]],
-                [[2, 3]],
-                [[4, 5]],
-                [[6, 7]],
-            ]
             assert len(tools) == 1
 
     def test_no_completions_dir(self, monkeypatch) -> None:
