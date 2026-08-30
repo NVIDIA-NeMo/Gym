@@ -286,6 +286,93 @@ def build_sql_context(create_statements: Dict[str, str], insert_statements: List
 
 
 # --------------------------------------------------------------------------------------
+# Alternate rendering: per-column YAML schema (data type, description, sampled values)
+# --------------------------------------------------------------------------------------
+
+_MAX_VALUES_PER_COLUMN = 6  # matches extract_values.py's (deleted) per-column example cap
+
+
+def _column_types(cur: Cursor, table_name: str) -> Dict[str, str]:
+    """{column_name: declared SQLite type}, e.g. "TEXT", "INTEGER", "REAL"."""
+    cur.execute(f"PRAGMA table_info('{table_name}')")
+    return {row[1]: row[2] for row in cur.fetchall()}
+
+
+def _column_descriptions(description_dir: Path, table_name: str) -> Dict[str, str]:
+    """{original_column_name: description} from BIRD's ``database_description/<table>.csv``.
+
+    ``original_column_name`` is the real, queryable SQLite identifier -- used to align CSV
+    rows to actual columns. The description is the CSV's ``column_name`` (a cleaned/renamed
+    label BIRD provides), falling back to ``column_description`` (a full sentence) when
+    ``column_name`` is blank, which it is for a large fraction of rows.
+    """
+    csv_path = description_dir / f"{table_name}.csv"
+    if not csv_path.exists():
+        return {}
+
+    import csv as csv_module
+
+    descriptions: Dict[str, str] = {}
+    # BIRD's CSVs aren't all clean UTF-8 -- replace undecodable bytes rather than crash.
+    with open(csv_path, encoding="utf-8-sig", errors="replace", newline="") as f:
+        for row in csv_module.DictReader(f):
+            original_column_name = (row.get("original_column_name") or "").strip()
+            if not original_column_name:
+                continue
+            column_name = (row.get("column_name") or "").strip()
+            descriptions[original_column_name] = column_name or (row.get("column_description") or "").strip()
+    return descriptions
+
+
+def _select_column_values(
+    sampled_values: Dict[Tuple[str, str], List[Any]],
+    relevant_hits: List[Dict[str, str]],
+) -> Dict[Tuple[str, str], List[Any]]:
+    """Per-column values for the YAML view: relevant hits first (question-specific, so they
+    should survive the cap), then baseline samples filling any remaining room, deduped, capped
+    at ``_MAX_VALUES_PER_COLUMN`` -- matches extract_values.py's (deleted) ``obtain_db_details``
+    value-merging order.
+    """
+    values_by_column: Dict[Tuple[str, str], List[Any]] = {}
+    for hit in relevant_hits:
+        key = (hit["table"], hit["column"])
+        bucket = values_by_column.setdefault(key, [])
+        if hit["contents"] not in bucket:
+            bucket.append(hit["contents"])
+    for key, values in sampled_values.items():
+        bucket = values_by_column.setdefault(key, [])
+        for value in values:
+            if value not in bucket:
+                bucket.append(value)
+    return {key: values[:_MAX_VALUES_PER_COLUMN] for key, values in values_by_column.items()}
+
+
+def build_yaml_context(
+    table_names: List[str],
+    column_types_by_table: Dict[str, Dict[str, str]],
+    descriptions_by_table: Dict[str, Dict[str, str]],
+    values_by_column: Dict[Tuple[str, str], List[Any]],
+) -> str:
+    """Per-table, per-column schema: name, data type, description, sampled values."""
+    import yaml
+
+    doc = []
+    for table_name in table_names:
+        columns = [
+            {
+                column_name: {
+                    "data_type": data_type,
+                    "description": descriptions_by_table.get(table_name, {}).get(column_name, ""),
+                    "sampled_values": values_by_column.get((table_name, column_name), []),
+                }
+            }
+            for column_name, data_type in column_types_by_table[table_name].items()
+        ]
+        doc.append({table_name: columns})
+    return yaml.safe_dump(doc, sort_keys=False, allow_unicode=True)
+
+
+# --------------------------------------------------------------------------------------
 # Orchestration
 # --------------------------------------------------------------------------------------
 
@@ -293,21 +380,33 @@ def build_sql_context(create_statements: Dict[str, str], insert_statements: List
 class DbHandle:
     """Everything needed to answer questions against one database, computed once."""
 
-    def __init__(self, cur: Cursor):
+    def __init__(self, cur: Cursor, description_dir: Path):
         self.cur = cur
         self.table_names = _table_names(cur)
         self.create_statements = _create_table_statements(cur, self.table_names)
         self.column_names_by_table = {t: _column_names(cur, t) for t in self.table_names}
+        self.column_types_by_table = {t: _column_types(cur, t) for t in self.table_names}
+        self.descriptions_by_table = {t: _column_descriptions(description_dir, t) for t in self.table_names}
         self.sampled_values = _sample_table_values(cur, self.table_names)
         corpus = _collect_column_values(cur, self.table_names)
         self.retriever = _build_retriever(corpus) if corpus else None
 
+    def relevant_hits_for_question(self, question: str) -> List[Dict[str, str]]:
+        return _relevant_hits_for_question(self.retriever, question) if self.retriever else []
+
     def insert_statements_for_question(self, question: str) -> List[str]:
-        relevant_hits = _relevant_hits_for_question(self.retriever, question) if self.retriever else []
+        relevant_hits = self.relevant_hits_for_question(question)
         statements_by_table = _select_example_rows(
             self.cur, self.table_names, self.column_names_by_table, self.sampled_values, relevant_hits
         )
         return [statement for statements in statements_by_table.values() for statement in statements]
+
+    def yaml_context_for_question(self, question: str) -> str:
+        relevant_hits = self.relevant_hits_for_question(question)
+        values_by_column = _select_column_values(self.sampled_values, relevant_hits)
+        return build_yaml_context(
+            self.table_names, self.column_types_by_table, self.descriptions_by_table, values_by_column
+        )
 
 
 def build_db_values(
@@ -330,7 +429,7 @@ def build_db_values(
         db_path = dev_databases_dir / db_id / f"{db_id}.sqlite"
         conn = sqlite3.connect(str(db_path))
         conn.text_factory = lambda b: b.decode(errors="ignore")
-        db_handles[db_id] = DbHandle(conn.cursor())
+        db_handles[db_id] = DbHandle(conn.cursor(), dev_databases_dir / db_id / "database_description")
         create_statements_by_db[db_id] = db_handles[db_id].create_statements
 
     per_question_rows: List[Dict[str, Any]] = []
