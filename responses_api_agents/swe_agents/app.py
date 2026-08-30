@@ -3102,8 +3102,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             return
         for file_path in reversed(completion_files):
             try:
-                data = json.loads(file_path.read_text())
-            except (OSError, json.JSONDecodeError):
+                data = orjson.loads(file_path.read_bytes())
+            except (OSError, orjson.JSONDecodeError):
                 continue
             fields = data.get("provider_specific_fields") or {}
             try:
@@ -3193,8 +3193,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             selected_files = []
             for file_path in completion_files:
                 try:
-                    data = json.loads(file_path.read_text())
-                except (OSError, json.JSONDecodeError):
+                    data = orjson.loads(file_path.read_bytes())
+                except (OSError, orjson.JSONDecodeError):
                     continue
                 if data.get("session_id") == main_session_id:
                     selected_files.append(file_path)
