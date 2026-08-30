@@ -4,6 +4,7 @@
 import asyncio
 import json
 import tempfile
+from os import environ
 from pathlib import Path
 from time import time
 from types import SimpleNamespace
@@ -140,10 +141,14 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         pty_session: SandboxPtySession | None,
     ) -> NeMoGymResponse:
         instruction = _instruction(body.input)
+
         model_base_url = (
             self.base_url_for_run(base_url=get_server_url(self.config.model_server.name), body=await request.json())
             + "/v1"
         )
+        # Dummy api key for LiteLLM to use
+        environ["OPENAI_API_KEY"] = "dummy"
+
         with tempfile.TemporaryDirectory(prefix="nemo-gym-terminus-2-") as log_dir:
             environment = NeMoGymSandboxEnvironment(sandbox, Path(log_dir), pty_session)
             context = AgentContext()
