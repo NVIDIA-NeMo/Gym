@@ -2,23 +2,20 @@
 # SPDX-License-Identifier: Apache-2.0
 """Maintainer-only script: schema + example-row selection for BIRD dev questions.
 
-Ports ``build_index.py`` + ``extract_values.py`` without their pyserini/Java dependency:
-BM25 search uses ``bm25s`` (pure-Python, numpy/scipy-backed) instead of pyserini's
-Lucene/Anserini index, so there's nothing to build and persist to disk ahead of time --
-each database's BM25 index is built in-memory and used immediately.
+BM25 search over each database's distinct column values uses ``bm25s`` (pure-Python,
+numpy/scipy-backed, no JVM) -- each database's index is built in-memory and used
+immediately, with nothing persisted to disk ahead of time.
 
 Per database, two sources of "interesting" column values feed into row selection:
-- A baseline sample (``_sample_table_values``, matches ``extract_values.py``'s
-  ``sample_table_values``): a couple of distinct values per column, independent of any
-  question, computed once per database.
-- Per-question BM25 hits (``_relevant_hits_for_question``, matches ``extract_values.py``'s
-  ``retrieve_question_related_db_values``): column values whose text substring-matches the
-  question well.
+- A baseline sample (``_sample_table_values``): a couple of distinct values per column,
+  independent of any question, computed once per database.
+- Per-question BM25 hits (``_relevant_hits_for_question``): column values whose text
+  substring-matches the question well.
 
-Unlike ``extract_values.py`` (which prints isolated per-column example values as
-``-- example: [...]`` comments), we look up one real row per interesting (table, column,
-value) -- keeping every shown row internally consistent -- and return it as an ``INSERT``
-statement, ready to slot into a schema dump the way ``prepare.py`` already renders one.
+Rather than printing isolated per-column example values as ``-- example: [...]`` comments,
+we look up one real row per interesting (table, column, value) -- keeping every shown row
+internally consistent -- and return it as an ``INSERT`` statement, ready to slot into a
+schema dump the way ``prepare.py`` already renders one.
 
 Not part of ``prepare()`` and not run automatically -- ``prepare_with_bm25.py`` is what
 normally drives this module. Run directly only to produce the standalone
@@ -45,7 +42,7 @@ DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "db_values.json"
 
 _VALUE_MAX_LEN = 40
-_SAMPLE_VALUES_PER_COLUMN = 2  # matches build_index.sh's --value_limit_num 2
+_SAMPLE_VALUES_PER_COLUMN = 2  # baseline sample size per column, independent of any question
 _NGRAM_MAX_N = 8
 _TOP_K_RETRIEVE = 10
 _TOP_K_KEEP = 20
@@ -107,8 +104,7 @@ def _collect_column_values(cur: Cursor, table_names: List[str]) -> List[Dict[str
 def _sample_table_values(cur: Cursor, table_names: List[str]) -> Dict[Tuple[str, str], List[Any]]:
     """A couple of distinct values per column, independent of any question.
 
-    Matches ``extract_values.py``'s ``sample_table_values``: computed once per database, not
-    re-run per question.
+    Computed once per database, not re-run per question.
     """
     sampled: Dict[Tuple[str, str], List[Any]] = {}
     for table_name in table_names:
@@ -122,8 +118,8 @@ def _sample_table_values(cur: Cursor, table_names: List[str]) -> Dict[Tuple[str,
                 """
             )
             values = [row[0] for row in cur.fetchall()]
-            # Matches extract_values.py's sample_table_values: truncate long strings so an
-            # oversized sampled value doesn't itself balloon the shown row/prompt.
+            # Truncate long strings so an oversized sampled value doesn't itself balloon
+            # the shown row/prompt.
             values = [v[:_VALUE_MAX_LEN] if isinstance(v, str) else v for v in values]
             if values:
                 sampled[(table_name, column_name)] = values
@@ -131,20 +127,20 @@ def _sample_table_values(cur: Cursor, table_names: List[str]) -> Dict[Tuple[str,
 
 
 def _obtain_n_grams(text: str, max_n: int) -> List[str]:
-    """Matches extract_values.py's obtain_n_grams exactly (same nltk tokenizer) -- unlike a
-    bare word-regex, nltk keeps punctuation as its own token, which matters here: BIRD's
-    evidence hints are full of literal single-character values ("bond_type = '#'"), and a
-    word-only tokenizer would silently drop the very tokens retrieval needs to find them.
+    """Word n-grams via nltk's tokenizer -- unlike a bare word-regex, nltk keeps punctuation
+    as its own token, which matters here: BIRD's evidence hints are full of literal
+    single-character values ("bond_type = '#'"), and a word-only tokenizer would silently
+    drop the very tokens retrieval needs to find them.
     """
     import nltk
     from nltk import ngrams
     from nltk.tokenize import word_tokenize
 
-    # nltk >=3.8.2 needs the newer "punkt_tab" resource; older nltk (e.g. pinned by pyserini
-    # to stay Python-3.9-compatible) only knows the classic "punkt" resource, and can raise a
-    # raw OSError (not the usual LookupError) when asked to look up "punkt_tab" at all. Probe
-    # both defensively rather than hard-requiring one -- a failed *check* here shouldn't block
-    # tokenization if a compatible resource is already installed.
+    # nltk >=3.8.2 needs the newer "punkt_tab" resource; older nltk (e.g. pinned to stay
+    # compatible with an older Python) only knows the classic "punkt" resource, and can raise
+    # a raw OSError (not the usual LookupError) when asked to look up "punkt_tab" at all.
+    # Probe both defensively rather than hard-requiring one -- a failed *check* here shouldn't
+    # block tokenization if a compatible resource is already installed.
     for resource in ("punkt_tab", "punkt"):
         try:
             nltk.data.find(f"tokenizers/{resource}")
@@ -281,11 +277,7 @@ def _select_example_rows(
 
 
 def build_sql_context(create_statements: Dict[str, str], insert_statements: List[str]) -> str:
-    """Schema dump + selected rows, rendered the way ``prepare.py``'s iterdump-based dump is.
-
-    Shared by ``prepare_with_bm25.py`` and ``prepare_with_bm25_pyserini.py`` so both engines
-    produce byte-identical formatting for the same ``(create_statements, insert_statements)``.
-    """
+    """Schema dump + selected rows, rendered the way ``prepare.py``'s iterdump-based dump is."""
     # sqlite_master.sql text has no trailing ";" -- add one so consecutive CREATE TABLEs don't
     # run together into a single broken statement.
     create_lines = [f"{sql};" for sql in create_statements.values()]
