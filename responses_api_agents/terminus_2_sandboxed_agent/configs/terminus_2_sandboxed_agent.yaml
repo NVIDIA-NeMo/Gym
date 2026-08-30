@@ -1,6 +1,6 @@
-terminus_2_1_agent:
+terminus_2_sandboxed_agent:
   responses_api_agents:
-    terminus_2_1_agent:
+    terminus_2_sandboxed_agent:
       entrypoint: app.py
       num_workers: 4
       resources_server:
