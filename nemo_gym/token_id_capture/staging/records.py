@@ -50,6 +50,39 @@ def staging_key(rollout_id: str, model_call_id: str) -> str:
     return f"{rollout_id}/{model_call_id}"
 
 
+# --- reason-code vocabulary ------------------------------------------------
+# The complete set of machine-readable reasons a manifest can carry. Poison
+# reasons ride ``ManifestFailure.reason`` / ``RolloutReceipt.failure_reason``
+# and fail linearization closed; selection reasons ride
+# ``TerminalSelection.reason`` from the parent-link fallback walk. Values are
+# wire contract: the framework switches on them, so never repurpose one.
+
+# The gate could not admit the call: the request fingerprint matched no
+# committed ledger row (or matched ambiguously). Written by ``resolve_parent``.
+UNRESOLVED_PARENT_REASON = "unresolved_parent"
+# The request was admitted but returned without worker commit coordinates.
+# Written by the capture middleware's uncommitted-call handler.
+UNCOMMITTED_CALL_REASON = "request_finished_without_staged_coordinates"
+# The worker's response carried no ``ng_commit_coords`` acknowledgement.
+WORKER_MISSING_COMMIT_COORDS_REASON = "worker_response_missing_commit_coordinates"
+# The worker acknowledged the call with ``disposition="capture_failed"``.
+WORKER_CAPTURE_FAILED_REASON = "worker_capture_failed"
+# The worker's commit coordinates failed identity validation against the
+# admitted capture context.
+INVALID_COMMIT_COORDS_REASON = "invalid_worker_commit_coordinates"
+# A committed ledger row lacks the served response id the witnesses join on.
+LEDGER_ROW_MISSING_RESPONSE_ID_REASON = "ledger_row_missing_response_id"
+
+# Terminal-selection outcomes from the no-witness parent-link walk
+# (``staging.terminal.select_terminal_call``).
+TERMINAL_SELECTED = "selected"
+TERMINAL_NO_RECORDS = "no_records"
+TERMINAL_DUPLICATE_CALL_ID = "duplicate_call_id"
+TERMINAL_ORPHANED_ROW = "orphaned_row"
+TERMINAL_NO_ROOT = "no_root"
+TERMINAL_AMBIGUOUS = "ambiguous_terminal"
+
+
 class _WireModel(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 

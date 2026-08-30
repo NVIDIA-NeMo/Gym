@@ -20,10 +20,6 @@ This namespace is separate from Gym's complete-record ``TokenSink`` and
 framework storage without importing serving or framework dependencies.
 """
 
-from nemo_gym.token_id_capture.staging.attribution import (
-    TerminalAttribution,
-    resolve_terminal,
-)
 from nemo_gym.token_id_capture.staging.capture import (
     ActiveCall,
     CaptureError,
@@ -79,6 +75,18 @@ from nemo_gym.token_id_capture.staging.routes import (
     routed_experts_token_count,
 )
 from nemo_gym.token_id_capture.staging.terminal import TerminalSelection, select_terminal_call
+
+# The witness-corroboration engine is shared with the legacy capture path;
+# custody rows are recognized there by their ``staging_key`` and matched
+# through recorded ``output_fingerprint``/``cumulative_hash`` columns. The
+# harness's ``declared_response_id`` is authoritative: a declared id the
+# ledger cannot confirm attributes nothing and never falls back. Attribution
+# never reads tokens — a wrong attribution can only name a chain whose every
+# digest ``verify_and_linearize`` still checks downstream.
+from nemo_gym.token_id_capture.terminal import (
+    TerminalAttribution,
+    resolve_terminal,
+)
 
 
 __all__ = [

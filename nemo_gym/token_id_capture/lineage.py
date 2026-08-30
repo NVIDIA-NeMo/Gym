@@ -42,12 +42,9 @@ Ambiguous matches remain unresolved rather than risking tokens from the wrong ca
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import hashlib
 import json
 import os
-import re
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -64,12 +61,6 @@ FINGERPRINT_VERSION = 1
 
 _FINGERPRINT_DOMAIN = b"nemo-gym-lineage"
 _CONTEXT_DOMAIN = b"nemo-gym-lineage-context"
-
-# Canonicalization version of ``assistant_fingerprint``. Stamped on ledger
-# custody rows beside the recorded fingerprints; terminal attribution ignores
-# fingerprints stamped with a different version. Increment when the hash
-# layout or content normalization changes.
-LINEAGE_FINGERPRINT_VERSION = 1
 
 # Names of the token-free CallRecord custody columns a ledger row carries.
 # ``staging_digest`` is the worker's staged-record digest; the row's ``digest``
@@ -150,6 +141,7 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
     """
     # Deferred: staging.records pulls in the digest module; lineage stays light.
     from nemo_gym.token_id_capture.staging.records import (
+        LEDGER_ROW_MISSING_RESPONSE_ID_REASON,
         CallRecord,
         ManifestFailure,
         RolloutManifest,
@@ -173,7 +165,7 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
                 failures.append(
                     ManifestFailure(
                         model_call_id=str(row["model_call_id"]),
-                        reason="ledger_row_missing_response_id",
+                        reason=LEDGER_ROW_MISSING_RESPONSE_ID_REASON,
                     )
                 )
                 continue
@@ -1055,28 +1047,16 @@ class FileLineageStore(IncrementalLineageStore):
     # instead of TokenEntry JSONL, so resolution falls back to those rows
     # when the incremental entry index has no match.
 
-    @staticmethod
-    def _validate_rollout_id(rollout_id: str) -> None:
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", rollout_id):
-            raise ValueError(f"unsafe rollout_id {rollout_id!r}")
-
     def _ledger_path(self, rollout_id: str) -> Path:
-        self._validate_rollout_id(rollout_id)
-        return self._ledger_root / f"{rollout_id}.lineage.jsonl"
+        from nemo_gym.token_id_capture.store import validate_rollout_id
 
-    def _ledger_lock_path(self, rollout_id: str) -> Path:
-        self._validate_rollout_id(rollout_id)
-        return self._ledger_root / f"{rollout_id}.lineage.lock"
+        return self._ledger_root / f"{validate_rollout_id(rollout_id)}.lineage.jsonl"
 
-    @contextmanager
     def _locked(self, rollout_id: str):
-        lock_path = self._ledger_lock_path(rollout_id)
-        with lock_path.open("a+b") as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        # Ledger rows share the token store's per-rollout lock file. The two
+        # record families are never both written for one rollout, so one lock
+        # discipline covers both and no second lock file is minted.
+        return self._store._locked(rollout_id)
 
     def _read(self, rollout_id: str) -> list[dict]:
         path = self._ledger_path(rollout_id)

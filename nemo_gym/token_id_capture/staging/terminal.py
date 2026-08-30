@@ -20,15 +20,24 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Sequence
 
-from nemo_gym.token_id_capture.staging.records import CallRecord
+from nemo_gym.token_id_capture.staging.records import (
+    TERMINAL_AMBIGUOUS,
+    TERMINAL_DUPLICATE_CALL_ID,
+    TERMINAL_NO_RECORDS,
+    TERMINAL_NO_ROOT,
+    TERMINAL_ORPHANED_ROW,
+    TERMINAL_SELECTED,
+    CallRecord,
+)
 
 
-SELECTED = "selected"
-NO_RECORDS = "no_records"
-DUPLICATE_CALL_ID = "duplicate_call_id"
-ORPHANED_ROW = "orphaned_row"
-NO_ROOT = "no_root"
-AMBIGUOUS_TERMINAL = "ambiguous_terminal"
+# Local aliases: the selection vocabulary lives with the wire schemas.
+SELECTED = TERMINAL_SELECTED
+NO_RECORDS = TERMINAL_NO_RECORDS
+DUPLICATE_CALL_ID = TERMINAL_DUPLICATE_CALL_ID
+ORPHANED_ROW = TERMINAL_ORPHANED_ROW
+NO_ROOT = TERMINAL_NO_ROOT
+AMBIGUOUS_TERMINAL = TERMINAL_AMBIGUOUS
 
 
 @dataclass(frozen=True)

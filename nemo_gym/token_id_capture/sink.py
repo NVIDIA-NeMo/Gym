@@ -43,6 +43,9 @@ from nemo_gym.token_id_capture.records import (
     stamp_lineage,
     strip_token_fields,
 )
+from nemo_gym.token_id_capture.staging.records import (
+    UNRESOLVED_PARENT_REASON,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -56,10 +59,6 @@ if TYPE_CHECKING:
 # response under ``NG_COMMIT_COORDS_FIELD``.
 NG_CAPTURE_FIELD = "ng_capture"
 NG_COMMIT_COORDS_FIELD = "ng_commit_coords"
-
-# Ledger poison reasons written by the model server.
-UNRESOLVED_PARENT_REASON = "unresolved_parent"
-UNCOMMITTED_CALL_REASON = "request_finished_without_staged_coordinates"
 
 
 @dataclass
