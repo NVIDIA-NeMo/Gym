@@ -620,7 +620,10 @@ def test_responses_to_chat_completion_model_and_max_tokens_and_tools(converter: 
     assert params.max_tokens == 128
     assert params.tools[0]["type"] == "function"
     assert params.tools[0]["function"]["name"] == "get_weather"
-    assert params.tools[0]["function"]["strict"] is True
+    # `strict` must not reach the engine: self-hosted chat templates render
+    # unknown function-definition keys into the prompt (off-policy prompt
+    # perturbation for every tool-bearing request).
+    assert "strict" not in params.tools[0]["function"]
 
 
 @pytest.mark.parametrize(
