@@ -4,7 +4,6 @@
 import asyncio
 import json
 import tempfile
-from contextlib import suppress
 from pathlib import Path
 from time import time
 from types import SimpleNamespace
@@ -12,6 +11,8 @@ from typing import Any
 from uuid import uuid4
 
 from fastapi import Request
+from harbor.agents.terminus_2 import Terminus2
+from harbor.models.agent.context import AgentContext
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
@@ -131,15 +132,6 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         pty_session = await sandbox.pty.attach(session_id=pty_session_id, takeover=True)
         return sandbox, pty_session
 
-    @staticmethod
-    def _harbor_types() -> tuple[Any, Any]:
-        try:
-            from harbor.agents.terminus_2 import Terminus2
-            from harbor.models.agent.context import AgentContext
-        except ImportError as exc:
-            raise RuntimeError("Harbor is required; install this agent's requirements.txt") from exc
-        return Terminus2, AgentContext
-
     async def _execute(
         self,
         request: Request,
@@ -147,7 +139,6 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         sandbox: AsyncSandbox,
         pty_session: SandboxPtySession | None,
     ) -> NeMoGymResponse:
-        Terminus2, AgentContext = self._harbor_types()
         instruction = _instruction(body.input)
         model_base_url = (
             self.base_url_for_run(base_url=get_server_url(self.config.model_server.name), body=await request.json())
@@ -172,15 +163,14 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                 record_terminal_session=False,
                 store_all_messages=True,
             )
-            try:
-                async with asyncio.timeout(self.config.sandbox_timeout):
-                    await environment.exec("mkdir -p /logs/agent", user="root")
-                    await agent.setup(environment)
-                    await agent.run(instruction, environment, context)
-            finally:
-                if getattr(agent, "_session", None) is not None:
-                    with suppress(Exception):
-                        await agent._session.stop()
+
+            await environment.exec("mkdir -p /logs/agent", user="root")
+            await agent.setup(environment)
+
+            async with asyncio.timeout(self.config.sandbox_timeout):
+                await agent.run(instruction, environment, context)
+
+            await agent._session.stop()
 
         messages = (context.metadata or {}).get("all_messages", [])
         final_content = ""
