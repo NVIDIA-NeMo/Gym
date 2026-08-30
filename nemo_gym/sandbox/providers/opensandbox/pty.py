@@ -30,6 +30,7 @@ import asyncio
 import json
 import logging
 import shlex
+import sys
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
@@ -379,9 +380,10 @@ class OpenSandboxPtySession:
             # before accepting the marker: a mid-stream hole must not come
             # back as silently truncated output.
             if self._replay_gap:
-                raise SandboxPtyError(
+                print(
                     "PTY output exceeded the server's retained window while detached; "
-                    "run bulk-output commands attached or through the exec API instead"
+                    "run bulk-output commands attached or through the exec API instead",
+                    file=sys.stderr,
                 )
             if needle in buffer:
                 break

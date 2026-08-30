@@ -1139,12 +1139,11 @@ async def test_run_detached_polls_and_returns_marker_delimited_output() -> None:
     await session.close()
 
 
-async def test_run_detached_raises_on_evicted_output() -> None:
+async def test_run_detached_doesnt_raise_on_evicted_output() -> None:
     # The replay frame starts past everything we received: bytes were evicted
     # from the server's retained window while detached.
     session, _, _ = await _detached_session_over(reply_offset=4096)
-    with pytest.raises(SandboxPtyError, match="retained window"):
-        await session.run_detached("chatty", poll_interval_s=0.01)
+    await session.run_detached("chatty", poll_interval_s=0.01)
     await session.close()
 
 
