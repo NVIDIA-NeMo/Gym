@@ -37,7 +37,7 @@ from pathlib import Path
 
 
 DEFAULT_REPO_ID = "nvidia/NeMo-Gym-EnterpriseOps-Assets"
-DEFAULT_REVISION = "6a695749a5af988f9ec5cb6e61966dc43e668506"  # pragma: allowlist secret
+DEFAULT_REVISION = "8918dc64b8575d5ff476e62e1cc3687523ab59c2"  # pragma: allowlist secret
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PREPARE_COMMAND = "python -m resources_servers.enterpriseops_gym.prepare"
 
