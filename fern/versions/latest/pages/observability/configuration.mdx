@@ -1,0 +1,148 @@
+---
+title: "Configuration"
+description: ""
+position: 2
+---
+Telemetry is configured through a top-level `telemetry:` block in your NeMo Gym config, or
+through environment variables. Environment variables always win.
+
+## Install
+
+Telemetry ships as an optional extra:
+
+```bash
+uv sync --extra dev --extra telemetry
+```
+
+Without this extra, `nemo-lens` is absent, every instrumentation site is a no-op, and
+NeMo Gym behaves exactly as it does today.
+
+## The `telemetry:` Block
+
+```yaml
+telemetry:
+  enabled: true
+  service_name: nemo-gym
+  span_groups: default
+  exporter: otlp
+```
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `enabled` | `false` | Master switch. When false, every site is a no-op. |
+| `service_name` | `nemo-gym` | The `service.name` reported to your backend. |
+| `service_name_per_server` | `true` | Append each server's config name, producing `nemo-gym/policy_model` and so on. |
+| `span_groups` | `default` | Which spans exist. See [Span Groups](/observability/span-groups). |
+| `exporter` | `otlp` | `otlp` or `console`. |
+| `traces_enabled` | `true` | Emit spans. |
+| `metrics_enabled` | `true` | Emit metrics. |
+| `logs_enabled` | `false` | Bridge Python logging to OpenTelemetry logs. |
+| `export_strategy` | `all_ranks` | Which processes export. See below. |
+| `export_rank` | `-1` | For `single_rank`: which rank exports. `-1` means the last rank. |
+| `run_id` | generated | Correlates every process of one run. |
+
+### Why `service_name_per_server` Defaults to True
+
+NeMo Gym starts several server processes. If they all report the same `service.name`, a
+backend's service map collapses them into one node and you lose the ability to ask "how
+slow is the model server." With the default, each process reports
+`nemo-gym/<server name>`, and the unsuffixed name remains available as the
+`nemo.gym.service_group` resource attribute so you can still group the fleet.
+
+### Why `export_strategy` Defaults to `all_ranks`
+
+NeMo-RL and Megatron-LM default to `single_rank`, because they run one process tree where
+rank 0 sees a representative slice of the work. NeMo Gym is different: each server is an
+independent process and is rank 0 of its own world of one. Silencing any of them puts a
+hole in the middle of every distributed trace, so all of them export.
+
+Set `single_rank` only if you are running NeMo Gym inside a larger ranked job and know
+what you are filtering.
+
+## Environment Variables
+
+Every field maps to an environment variable, and environment variables take precedence
+over the config block. This lets you enable telemetry for one run without editing a shared
+config file.
+
+| Variable | Maps To |
+| --- | --- |
+| `NEMO_GYM_OTEL_ENABLED` | `enabled` |
+| `NEMO_GYM_OTEL_SPAN_GROUPS` | `span_groups` |
+| `NEMO_GYM_OTEL_EXPORTER` | `exporter` |
+| `NEMO_GYM_OTEL_TRACES_ENABLED` | `traces_enabled` |
+| `NEMO_GYM_OTEL_METRICS_ENABLED` | `metrics_enabled` |
+| `NEMO_GYM_OTEL_LOGS_ENABLED` | `logs_enabled` |
+| `NEMO_GYM_OTEL_EXPORT_STRATEGY` | `export_strategy` |
+| `NEMO_GYM_OTEL_RUN_ID` | `run_id` |
+| `OTEL_SERVICE_NAME` | `service_name` |
+
+`NEMO_LENS_*` works as a fallback for any of the `NEMO_GYM_OTEL_*` names, so
+`NEMO_LENS_ENABLED=1` turns telemetry on. A `NEMO_GYM_OTEL_*` variable beats its
+`NEMO_LENS_*` equivalent.
+
+Boolean variables accept `1`, `true`, `yes`, `on` and their negations.
+
+## Exporters
+
+### Console
+
+```bash
+NEMO_GYM_OTEL_EXPORTER=console
+```
+
+Writes one JSON object per line to stdout. Useful for local development and for confirming
+that instrumentation works before a collector exists. Because each record is a single
+line, the output pipes into `jq` directly.
+
+### OTLP
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+```
+
+The standard `OTEL_EXPORTER_OTLP_*` variables are read by the OpenTelemetry SDK, so any
+OTLP-compatible backend or an OpenTelemetry Collector works. gRPC is the default protocol.
+Set `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf` to use HTTP instead.
+
+## How Settings Reach Each Server
+
+NeMo Gym starts its servers as separate processes. They share no memory with the
+orchestrator, so the `telemetry:` block is translated into `NEMO_GYM_OTEL_*` environment
+variables before any server is spawned, and each server reads that environment back on
+startup.
+
+Two consequences are worth knowing:
+
+- A variable you export in your shell reaches every server, because the orchestrator
+  copies its own environment into each child.
+- The orchestrator generates one `run_id` and shares it with the fleet, so every process
+  in a run reports the same `nemo.run.id` resource attribute.
+
+## Resource Attributes
+
+Every span and metric carries these process-lifetime attributes:
+
+| Attribute | Example |
+| --- | --- |
+| `service.name` | `nemo-gym/policy_model` |
+| `nemo.gym.service_group` | `nemo-gym` |
+| `nemo.gym.server.name` | `policy_model` |
+| `nemo.gym.server.type` | `responses_api_models` |
+| `nemo.gym.version` | `0.5.1` |
+| `nemo.run.id` | `4f2a91c0be31` |
+
+## Verify That It Works
+
+Enable telemetry with the console exporter and drive one rollout. Each server process
+prints span records to stdout. Confirm that spans from different servers share one
+`trace_id`:
+
+```bash
+grep -h '"trace_id"' *.log | jq -r .trace_id | sort | uniq -c
+```
+
+One trace ID with several spans means propagation is working. Several trace IDs with one
+span each means it is not — see
+[Distributed Tracing](/observability/distributed-tracing) for what to check.

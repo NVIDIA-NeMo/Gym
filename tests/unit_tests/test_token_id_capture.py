@@ -36,12 +36,13 @@ import orjson
 import pytest
 from fastapi import Body, Request
 from fastapi.testclient import TestClient
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
     CaptureStore,
     SimpleResponsesAPIModel,
+    _request_messages,
     read_model_call_records,
 )
 from nemo_gym.openai_utils import (
@@ -52,25 +53,48 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.token_id_capture import (
+    TOKEN_ENTRY_MIN_SCHEMA_VERSION,
     TOKEN_ENTRY_RECORD_SCHEMA_VERSION,
     TOKEN_FIELDS,
     CaptureContext,
+    LineageResolution,
+    ParentResolutionStatus,
     TokenCaptureStore,
     TokenEntry,
     TokenIdCaptureConfig,
     capture_tokens,
     commit_entry,
+    compute_digest,
+    cumulative_tokens,
     current_capture_context,
     extract_token_fields,
     install_token_sink,
     register_call_intent,
     reset_token_sink,
+    resolve_parent,
     set_token_sink,
+    stamp_continuation,
+    stamp_lineage,
 )
 from nemo_gym.token_id_capture.config import token_id_capture_enabled_for_agent
+from nemo_gym.token_id_capture.lineage import (
+    FileLineageStore,
+    LineageIndex,
+    RolloutLineage,
+    assistant_fingerprint,
+    conversation_digest,
+)
 from nemo_gym.token_id_capture.protocols import TokenSource
 from nemo_gym.token_id_capture.store import make_token_store
 
+
+_ASSISTANT_TURN = {
+    "role": "assistant",
+    "content": "checking",
+    "tool_calls": [{"function": {"name": "search", "arguments": '{"q":"alpha"}'}}],
+}
+
+_MSG_ARGS = {"model": "downstream-model", "max_tokens": 64}
 
 PTOKS = [1, 2, 3]
 GTOKS = [4, 5]
@@ -142,6 +166,24 @@ def test_token_entry_rejects_mismatched_generation_arrays():
             prompt_token_ids=PTOKS,
             generation_token_ids=GTOKS,
             generation_log_probs=[-0.1],
+        )
+
+
+def test_token_entry_rejects_inconsistent_parent_resolution():
+    common = {
+        "rollout_id": "r0",
+        "model_call_id": "c0",
+        "prompt_token_ids": PTOKS,
+        "generation_token_ids": GTOKS,
+        "generation_log_probs": LPS,
+    }
+    with pytest.raises(ValidationError, match="requires parent_call_id"):
+        TokenEntry(**common, parent_resolution=ParentResolutionStatus.RESOLVED)
+    with pytest.raises(ValidationError, match="cannot carry parent_call_id"):
+        TokenEntry(
+            **common,
+            parent_resolution=ParentResolutionStatus.ROOT,
+            parent_call_id="parent",
         )
 
 
@@ -237,15 +279,15 @@ def test_dangling_call_intent_marks_frozen_snapshot_incomplete(tmp_path):
 def test_committed_call_satisfies_its_intent(tmp_path):
     store = TokenCaptureStore(tmp_path)
     asyncio.run(store.begin_call("complete", "c1"))
-    store.append(
-        TokenEntry(
-            rollout_id="complete",
-            model_call_id="c1",
-            prompt_token_ids=PTOKS,
-            generation_token_ids=GTOKS,
-            generation_log_probs=LPS,
-        )
+    entry = TokenEntry(
+        rollout_id="complete",
+        model_call_id="c1",
+        prompt_token_ids=PTOKS,
+        generation_token_ids=GTOKS,
+        generation_log_probs=LPS,
     )
+    stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
+    asyncio.run(store.put(entry))
 
     snapshot = store.freeze_now("complete")
 
@@ -309,15 +351,15 @@ def test_token_store_freeze_is_atomic_and_conditional_drop_is_race_safe(tmp_path
 def test_token_store_sweeps_only_old_retired_tombstones(tmp_path):
     store = TokenCaptureStore(tmp_path)
     for rollout_id in ("old", "recent", "live"):
-        store.append(
-            TokenEntry(
-                rollout_id=rollout_id,
-                model_call_id=f"{rollout_id}-c1",
-                prompt_token_ids=PTOKS,
-                generation_token_ids=GTOKS,
-                generation_log_probs=LPS,
-            )
+        entry = TokenEntry(
+            rollout_id=rollout_id,
+            model_call_id=f"{rollout_id}-c1",
+            prompt_token_ids=PTOKS,
+            generation_token_ids=GTOKS,
+            generation_log_probs=LPS,
         )
+        stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
+        store.append(entry)
     for rollout_id in ("old", "recent"):
         snapshot = store.freeze_now(rollout_id)
         assert asyncio.run(store.drop(rollout_id, snapshot_id=snapshot.snapshot_id, version=snapshot.version))
@@ -340,9 +382,11 @@ def test_token_store_recovers_state_lag_from_the_durable_jsonl_tail(tmp_path):
         generation_token_ids=GTOKS,
         generation_log_probs=LPS,
     )
+    stamp_lineage(first, None, parent_resolution=ParentResolutionStatus.ROOT)
     store.append(first)
     state_after_first = store.state_path_for("lag").read_bytes()
-    store.append(first.model_copy(update={"model_call_id": "c2"}))
+    second = first.model_copy(update={"model_call_id": "c2"})
+    store.append(second)
 
     store.state_path_for("lag").write_bytes(state_after_first)
     snapshot = store.freeze_now("lag")
@@ -355,7 +399,14 @@ def test_token_store_recovers_state_lag_from_the_durable_jsonl_tail(tmp_path):
 
 
 def _block(**kwargs) -> dict:
-    return {"token_id_capture": {"enabled": True, "rebuild_response": False, **kwargs}}
+    return {
+        "token_id_capture": {
+            "enabled": True,
+            "rebuild_response": False,
+            "allow_unresolved_continuations": True,
+            **kwargs,
+        }
+    }
 
 
 def test_config_disabled_needs_no_dir():
@@ -401,7 +452,7 @@ def test_mask_fraction_limit_defaults_off_and_parses():
 
 def test_agent_capture_selection_uses_static_agent_config_or_all_agents():
     config = {
-        "token_id_capture": {"enabled": True, "rebuild_response": False},
+        "token_id_capture": {"enabled": True, "rebuild_response": False, "allow_unresolved_continuations": True},
         "captured": {"responses_api_agents": {"implementation": {"token_id_capture": True}}},
         "ordinary": {"responses_api_agents": {"implementation": {"token_id_capture": False}}},
     }
@@ -435,7 +486,13 @@ def test_config_rejects_an_unknown_key():
 
 def test_config_accepts_a_sink_without_constructing_the_consumer_source():
     config = TokenIdCaptureConfig.model_validate(
-        {"token_id_capture": {"enabled": True, "sink": f"{__name__}:_ConfiguredSink"}}
+        {
+            "token_id_capture": {
+                "enabled": True,
+                "sink": f"{__name__}:_ConfiguredSink",
+                "allow_unresolved_continuations": True,
+            }
+        }
     )
     assert config.token_id_capture.sink == f"{__name__}:_ConfiguredSink"
 
@@ -520,9 +577,15 @@ class _CapturingModel(SimpleResponsesAPIModel):
         return _training_chat_completion()
 
 
-def _server(global_config_dict) -> SimpleResponsesAPIModel:
+def _server(global_config_dict, *, num_workers: int | None = None) -> SimpleResponsesAPIModel:
     return _CapturingModel(
-        config=BaseResponsesAPIModelConfig(host="0.0.0.0", port=8099, entrypoint="", name="srv"),
+        config=BaseResponsesAPIModelConfig(
+            host="0.0.0.0",
+            port=8099,
+            entrypoint="",
+            name="srv",
+            num_workers=num_workers,
+        ),
         server_client=MagicMock(spec=ServerClient, global_config_dict=global_config_dict),
     )
 
@@ -533,6 +596,23 @@ def _both_enabled(tmp_path) -> dict:
         "model_call_capture_dir": str(tmp_path),
         "token_id_capture": {"enabled": True, "dir": str(tmp_path)},
     }
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("/v1/responses", {"input": "hi"}),
+        ("/v1/chat/completions", {"messages": [{"role": "user", "content": "hi"}]}),
+    ],
+)
+def test_disabled_capture_does_not_serialize_request_messages(path, body):
+    client = TestClient(_server({}).setup_webserver())
+    with patch(
+        "nemo_gym.base_responses_api_model._request_messages",
+        side_effect=AssertionError("disabled capture serialized request messages"),
+    ):
+        response = client.post(path, json=body)
+    assert response.status_code == 200
 
 
 def test_responses_call_captures_tokens_joined_to_eval_record(tmp_path):
@@ -737,7 +817,7 @@ def _external_mode(tmp_path) -> dict:
     """Capture on, no destination in this process: records are staged elsewhere."""
     return {
         "observability_enabled": False,
-        "token_id_capture": {"enabled": True, "rebuild_response": False},
+        "token_id_capture": {"enabled": True, "rebuild_response": False, "allow_unresolved_continuations": True},
     }
 
 
@@ -903,7 +983,7 @@ def installed_sink():
 
 def test_installed_sink_receives_entries_without_a_capture_dir(installed_sink):
     """The framework path: capture on, no directory anywhere, records still arrive."""
-    config = {"token_id_capture": {"enabled": True, "rebuild_response": False}}
+    config = {"token_id_capture": {"enabled": True, "rebuild_response": False, "allow_unresolved_continuations": True}}
     client = TestClient(_server(config).setup_webserver())
     resp = client.post("/ng-rollout/task0-sink0/training-token-capture/v1/responses", json={"input": "hi"})
     assert resp.status_code == 200
@@ -938,30 +1018,32 @@ def test_installed_sink_is_marked_incomplete_through_the_protocol(installed_sink
         raise RuntimeError("transport down")
 
     monkeypatch.setattr(installed_sink, "put", boom)
-    client = TestClient(_server({"token_id_capture": {"enabled": True, "rebuild_response": False}}).setup_webserver())
+    client = TestClient(
+        _server(
+            {"token_id_capture": {"enabled": True, "rebuild_response": False, "allow_unresolved_continuations": True}}
+        ).setup_webserver()
+    )
     resp = client.post("/ng-rollout/task0-sink1/training-token-capture/v1/responses", json={"input": "hi"})
     assert resp.status_code == 200  # capture never fails the model call
     assert installed_sink.incomplete == [("task0-sink1", installed_sink.incomplete[0][1])]
 
 
-def test_a_sink_without_mark_incomplete_is_logged_not_swallowed(caplog):
-    """The signal cannot be lost quietly: that is the outcome the failure path exists to stop."""
+def test_a_sink_without_mark_incomplete_is_refused_at_install():
+    """Reject a sink that cannot report a lost call.
+
+    Without ``mark_incomplete``, a failed write could leave no durable evidence.
+    Installation rejects that sink before it can silently lose capture records.
+    """
 
     class _PutOnlySink:
         async def put(self, entry):
             raise RuntimeError("transport down")
 
-    install_token_sink(_PutOnlySink())
-    try:
-        client = TestClient(
-            _server({"token_id_capture": {"enabled": True, "rebuild_response": False}}).setup_webserver()
-        )
-        with caplog.at_level(logging.ERROR):
-            resp = client.post("/ng-rollout/task0-sink2/training-token-capture/v1/responses", json={"input": "hi"})
-        assert resp.status_code == 200
-        assert any("does not implement mark_incomplete" in r.message for r in caplog.records)
-    finally:
-        install_token_sink(None)
+    from nemo_gym.token_id_capture import installed_token_sink
+
+    with pytest.raises(TypeError, match="mark_incomplete"):
+        install_token_sink(_PutOnlySink())
+    assert installed_token_sink() is None
 
 
 def test_commit_entry_records_a_call_with_no_token_fields_on_the_response(installed_sink):
@@ -983,11 +1065,14 @@ def test_commit_entry_records_a_call_with_no_token_fields_on_the_response(instal
     finally:
         reset_token_sink(token)
     assert len(installed_sink.entries) == 1
-    assert installed_sink.entries[0].generation_token_ids == GTOKS
+    # The commit step stamps lineage even when the caller skips extraction.
+    assert installed_sink.entries[0].cum_len == len(PTOKS) + len(GTOKS)
+    assert installed_sink.entries[0].digest
 
 
 def test_records_carry_a_schema_version():
     """Writer and reader are different processes and may be different repositories."""
+    assert TOKEN_ENTRY_RECORD_SCHEMA_VERSION == 1
     entry = TokenEntry(
         rollout_id="r",
         model_call_id="c",
@@ -1014,7 +1099,15 @@ def test_a_malformed_token_payload_does_not_fail_the_model_call(installed_sink):
 
     with patch("nemo_gym.token_id_capture.sink.TokenEntry", _bad_entry):
         client = TestClient(
-            _server({"token_id_capture": {"enabled": True, "rebuild_response": False}}).setup_webserver()
+            _server(
+                {
+                    "token_id_capture": {
+                        "enabled": True,
+                        "rebuild_response": False,
+                        "allow_unresolved_continuations": True,
+                    }
+                }
+            ).setup_webserver()
         )
         resp = client.post("/ng-rollout/task0-bad0/training-token-capture/v1/responses", json={"input": "hi"})
 
@@ -1024,6 +1117,698 @@ def test_a_malformed_token_payload_does_not_fail_the_model_call(installed_sink):
         "the rollout lost a call and must not look complete"
     )
     assert entry_ctor is TokenEntry  # patch scoped
+
+
+def test_capture_stamps_cum_len_and_digest(tmp_path):
+    client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
+    client.post("/ng-rollout/lineage0-roll0/training-token-capture/v1/responses", json={"input": "hi"})
+    (entry,) = TokenCaptureStore(tmp_path).read_entries("lineage0-roll0")
+    assert entry.cum_len == len(PTOKS) + len(GTOKS)
+    assert entry.digest == compute_digest(PTOKS + GTOKS)
+    # A missing parent link makes the builder match strict token prefixes.
+    assert entry.parent_call_id is None
+
+
+def test_digest_round_trip_and_stamp_lineage():
+    entry = TokenEntry(
+        rollout_id="r",
+        model_call_id="c",
+        prompt_token_ids=[1, 2],
+        generation_token_ids=[3],
+        generation_log_probs=[-0.5],
+    )
+    stamp_lineage(entry, "parent-1")
+    assert cumulative_tokens(entry) == [1, 2, 3]
+    assert entry.cum_len == 3
+    assert entry.parent_call_id == "parent-1"
+    assert entry.digest == compute_digest([1, 2, 3])
+    # Distinct sequences must not collide.
+    # The empty sequence has a stable digest.
+    assert compute_digest([1, 2, 3]) != compute_digest([1, 2, 4])
+    assert compute_digest([]) == compute_digest([])
+    with pytest.raises(ValueError):
+        compute_digest([-1])
+
+
+def test_fingerprint_ignores_non_assistant_turns():
+    """Use only model-authored turns for lineage lookup."""
+    a = assistant_fingerprint([{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}])
+    b = assistant_fingerprint([{"role": "user", "content": "DIFFERENT"}, {"role": "assistant", "content": "a"}])
+    assert a == b != ""
+    # A request without an assistant turn starts a new conversation.
+    assert assistant_fingerprint([{"role": "user", "content": "q"}]) == ""
+
+
+def test_fingerprint_survives_tool_argument_reserialization():
+    """Match tool arguments across equivalent JSON serializations."""
+    compact = [
+        {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "f", "arguments": '{"b":1,"a":2}'}}]}
+    ]
+    pretty = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"function": {"name": "f", "arguments": '{\n  "a": 2,\n  "b": 1\n}'}}],
+        }
+    ]
+    assert assistant_fingerprint(compact) == assistant_fingerprint(pretty)
+
+
+def test_lineage_resolves_the_parent_across_a_turn():
+    lineage = RolloutLineage()
+    first_request = [{"role": "user", "content": "hello"}]
+    lineage.record("call-1", first_request + [{"role": "assistant", "content": "hi"}], [1, 2, 3], "d1")
+
+    # The next request echoes the assistant turn.
+    second_request = first_request + [{"role": "assistant", "content": "hi"}, {"role": "user", "content": "more"}]
+    parent = lineage.resolve(second_request)
+    assert parent.status == ParentResolutionStatus.RESOLVED
+    assert parent.match is not None and parent.match.model_call_id == "call-1"
+    assert parent.match.cumulative_token_ids == (1, 2, 3)
+
+
+def test_lineage_record_is_idempotent():
+    lineage = RolloutLineage()
+    messages = [{"role": "assistant", "content": "hi"}]
+    lineage.record("call-1", messages, [1, 2, 3], "d1")
+    lineage.record("call-1", messages, [1, 2, 3], "d1")
+
+    parent = lineage.resolve(messages)
+    assert parent.status == ParentResolutionStatus.RESOLVED
+    assert parent.match is not None and parent.match.model_call_id == "call-1"
+
+
+def test_lineage_rejects_a_conflicting_call_identity():
+    lineage = RolloutLineage()
+    lineage.record("call-1", [{"role": "assistant", "content": "a"}], [1], "d1")
+
+    with pytest.raises(ValueError, match="conflicting lineage record"):
+        lineage.record("call-1", [{"role": "assistant", "content": "b"}], [2], "d2")
+
+
+def test_lineage_misses_on_a_rewritten_history():
+    """Treat compacted or rewritten model history as unresolved."""
+    lineage = RolloutLineage()
+    lineage.record("call-1", [{"role": "assistant", "content": "hi"}], [1, 2, 3], "d1")
+    assert (
+        lineage.resolve([{"role": "assistant", "content": "a summary of the above"}]).status
+        == ParentResolutionStatus.UNRESOLVED
+    )
+
+
+def test_lineage_refuses_an_ambiguous_parent():
+    """Refuse to guess between calls with identical output."""
+    lineage = RolloutLineage()
+    messages = [{"role": "assistant", "content": "same"}]
+    lineage.record("call-a", messages, [1, 2], "da")
+    lineage.record("call-b", messages, [3, 4], "db")
+    assert lineage.resolve(messages).status == ParentResolutionStatus.UNRESOLVED
+
+
+def test_lineage_is_a_tree_so_forks_get_the_parent_not_the_previous_call():
+    """Resolve both branches to their shared parent.
+
+    A running cursor would give the second branch the first branch's generation.
+    Exact prefix supply would then consume the wrong cumulative tokens.
+    """
+    lineage = RolloutLineage()
+    shared = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "plan"}]
+    lineage.record("parent", shared, [1, 2, 3], "dp")
+    lineage.record(
+        "branch-a",
+        shared + [{"role": "user", "content": "a"}, {"role": "assistant", "content": "A"}],
+        [1, 2, 3, 4],
+        "da",
+    )
+
+    # The second branch continues the shared parent.
+    second = shared + [{"role": "user", "content": "b"}]
+    parent = lineage.resolve(second)
+    assert parent.status == ParentResolutionStatus.RESOLVED
+    assert parent.match is not None and parent.match.model_call_id == "parent"
+    assert parent.match.cumulative_token_ids == (1, 2, 3)
+
+
+def test_lineage_index_is_bounded():
+    """Bound worker-local lineage for abandoned rollouts."""
+    index = LineageIndex(max_rollouts=3)
+    for i in range(10):
+        index.for_rollout(f"r{i}")
+    assert len(index) == 3
+
+
+def _put_shared_file_entry(
+    root: str,
+    rollout_id: str = "process-shared",
+    model_call_id: str = "child-process-call",
+    response_text: str = "hi",
+) -> None:
+    request = [{"role": "user", "content": "hello"}]
+    entry = TokenEntry(
+        rollout_id=rollout_id,
+        model_call_id=model_call_id,
+        prompt_token_ids=[1, 2],
+        generation_token_ids=[3],
+        generation_log_probs=[-0.1],
+        output_items=[{"role": "assistant", "content": response_text}],
+    )
+    stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
+    stamp_continuation(entry, request)
+    TokenCaptureStore(root).append(entry)
+
+
+def _put_shared_file_delta_chain(root: str, depth: int) -> tuple[list[dict], list[int]]:
+    """Write a resolved delta chain and return its next request and cumulative tokens."""
+    rollout_id = "delta-chain"
+    request = [{"role": "user", "content": "start"}]
+    cumulative: list[int] = []
+    store = TokenCaptureStore(root)
+    for index in range(depth):
+        output = [{"role": "assistant", "content": f"answer-{index}"}]
+        parent_call_id = f"call-{index - 1}" if index else None
+        parent_resolution = ParentResolutionStatus.RESOLVED if index else ParentResolutionStatus.ROOT
+        prompt_tokens = [10 + index]
+        generation_tokens = [100 + index]
+        cumulative = cumulative + prompt_tokens + generation_tokens
+        entry = TokenEntry(
+            rollout_id=rollout_id,
+            model_call_id=f"call-{index}",
+            prompt_token_ids=prompt_tokens,
+            generation_token_ids=generation_tokens,
+            generation_log_probs=[-0.1],
+            output_items=output,
+            parent_call_id=parent_call_id,
+            parent_resolution=parent_resolution,
+            prompt_is_delta=index > 0,
+        )
+        stamp_continuation(entry, request)
+        stamp_lineage(
+            entry,
+            parent_call_id,
+            parent_resolution=parent_resolution,
+            cumulative=cumulative,
+        )
+        store.append(entry)
+        request.extend(output)
+        request.append({"role": "user", "content": f"continue-{index}"})
+    return request, cumulative
+
+
+async def test_file_lineage_resolves_across_independent_worker_instances(tmp_path):
+    reader = FileLineageStore(tmp_path)
+    request = [{"role": "user", "content": "hello"}]
+    response = [{"role": "assistant", "content": "hi"}]
+    _put_shared_file_entry(str(tmp_path), "shared-rollout", "call-1")
+
+    parent = await reader.resolve("shared-rollout", request + response + [{"role": "user", "content": "next"}])
+
+    assert parent.status == ParentResolutionStatus.RESOLVED
+    assert parent.match is not None
+    assert parent.match.model_call_id == "call-1"
+    assert parent.match.cumulative_token_ids == (1, 2, 3)
+
+
+async def test_file_lineage_batch_loads_and_flattens_a_delta_chain(tmp_path):
+    request, expected_tokens = _put_shared_file_delta_chain(str(tmp_path), depth=100)
+    resolver = FileLineageStore(tmp_path)
+
+    with patch.object(resolver, "_load_entries", wraps=resolver._load_entries) as load_entries:
+        resolution = await resolver.resolve("delta-chain", request)
+
+    assert resolution.status == ParentResolutionStatus.RESOLVED
+    assert resolution.match is not None
+    assert resolution.match.model_call_id == "call-99"
+    assert resolution.match.cumulative_token_ids == tuple(expected_tokens)
+    load_entries.assert_called_once()
+    assert len(load_entries.call_args.args[1]) == 100
+
+
+async def test_file_lineage_reuses_the_latest_materialized_parent(tmp_path):
+    request, expected_tokens = _put_shared_file_delta_chain(str(tmp_path), depth=100)
+    resolver = FileLineageStore(tmp_path)
+    assert (await resolver.resolve("delta-chain", request)).status == ParentResolutionStatus.RESOLVED
+
+    output = [{"role": "assistant", "content": "answer-100"}]
+    expected_tokens.extend([110, 200])
+    entry = TokenEntry(
+        rollout_id="delta-chain",
+        model_call_id="call-100",
+        prompt_token_ids=[110],
+        generation_token_ids=[200],
+        generation_log_probs=[-0.1],
+        output_items=output,
+        parent_call_id="call-99",
+        parent_resolution=ParentResolutionStatus.RESOLVED,
+        prompt_is_delta=True,
+    )
+    stamp_continuation(entry, request)
+    stamp_lineage(
+        entry,
+        "call-99",
+        parent_resolution=ParentResolutionStatus.RESOLVED,
+        cumulative=expected_tokens,
+    )
+    TokenCaptureStore(tmp_path).append(entry)
+    request.extend(output)
+    request.append({"role": "user", "content": "continue-100"})
+
+    with patch.object(resolver, "_load_entries", wraps=resolver._load_entries) as load_entries:
+        resolution = await resolver.resolve("delta-chain", request)
+
+    assert resolution.match is not None
+    assert resolution.match.cumulative_token_ids == tuple(expected_tokens)
+    assert len(load_entries.call_args.args[1]) == 1
+
+
+async def test_file_lineage_cache_is_lru_and_keeps_nodes_metadata_only(tmp_path):
+    resolver = FileLineageStore(tmp_path, max_cached_rollouts=2)
+    continuation = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+        {"role": "user", "content": "next"},
+    ]
+    for rollout_id in ("r-a", "r-b", "r-c"):
+        _put_shared_file_entry(str(tmp_path), rollout_id, f"{rollout_id}-c1")
+
+    await resolver.resolve("r-a", continuation)
+    await resolver.resolve("r-b", continuation)
+    await resolver.resolve("r-a", continuation)
+    await resolver.resolve("r-c", continuation)
+
+    assert "r-a" in resolver._cache
+    assert "r-b" not in resolver._cache
+    node = resolver._cache["r-a"][2].by_call_id["r-a-c1"]
+    assert node.cum_tokens is None
+    assert node.entry_offset >= 0
+
+    cold = await resolver.resolve("r-b", continuation)
+    assert cold.status == ParentResolutionStatus.RESOLVED
+    assert cold.match is not None
+    assert cold.match.cumulative_token_ids == (1, 2, 3)
+
+
+async def test_file_lineage_materialized_cache_has_a_global_token_bound(tmp_path):
+    resolver = FileLineageStore(tmp_path, max_cached_tokens=4)
+    continuation = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+        {"role": "user", "content": "next"},
+    ]
+    for rollout_id in ("r-a", "r-b"):
+        _put_shared_file_entry(str(tmp_path), rollout_id, f"{rollout_id}-c1")
+        assert (await resolver.resolve(rollout_id, continuation)).status == ParentResolutionStatus.RESOLVED
+
+    assert "r-a" not in resolver._materialized
+    assert resolver._materialized["r-b"][1] == (1, 2, 3)
+    assert resolver._materialized_tokens == 3
+
+
+def test_file_lineage_uses_bounded_striped_locks(tmp_path):
+    resolver = FileLineageStore(tmp_path)
+
+    for index in range(10_000):
+        resolver._rollout_lock(f"r-{index}")
+
+    assert len(resolver._rollout_locks) == 256
+
+
+async def test_file_lineage_appends_without_rewriting_prior_records(tmp_path):
+    _put_shared_file_entry(str(tmp_path), "shared-rollout", "call-1", "first")
+    path = tmp_path / "shared-rollout.tokens.jsonl"
+    first_payload = path.read_bytes()
+    first_inode = path.stat().st_ino
+
+    _put_shared_file_entry(str(tmp_path), "shared-rollout", "call-2", "second")
+
+    payload = path.read_bytes()
+    assert path.stat().st_ino == first_inode
+    assert payload.startswith(first_payload)
+    assert len(payload.splitlines()) == 2
+
+
+async def test_file_lineage_resolves_across_spawned_worker_processes(tmp_path):
+    context = multiprocessing.get_context("spawn")
+    process = context.Process(target=_put_shared_file_entry, args=(str(tmp_path),))
+    process.start()
+    process.join(timeout=10)
+    assert process.exitcode == 0
+
+    store = FileLineageStore(tmp_path)
+    parent = await store.resolve(
+        "process-shared",
+        [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+            {"role": "user", "content": "next"},
+        ],
+    )
+    assert parent.status == ParentResolutionStatus.RESOLVED
+    assert parent.match is not None and parent.match.model_call_id == "child-process-call"
+
+
+async def test_failed_token_commit_never_becomes_resolver_visible(tmp_path, monkeypatch):
+    token_store = TokenCaptureStore(tmp_path)
+    resolver = FileLineageStore(tmp_path)
+    request = [{"role": "user", "content": "hello"}]
+    entry = TokenEntry(
+        rollout_id="failed-publication",
+        model_call_id="call-1",
+        prompt_token_ids=[1, 2],
+        generation_token_ids=[3],
+        generation_log_probs=[-0.1],
+        output_items=[{"role": "assistant", "content": "hi"}],
+    )
+    stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
+    stamp_continuation(entry, request)
+
+    monkeypatch.setattr(token_store, "append", MagicMock(side_effect=RuntimeError("write failed")))
+    with pytest.raises(RuntimeError, match="write failed"):
+        await token_store.put(entry)
+
+    resolution = await resolver.resolve(
+        entry.rollout_id,
+        request + entry.output_items + [{"role": "user", "content": "next"}],
+    )
+    assert resolution.status == ParentResolutionStatus.UNRESOLVED
+
+
+async def test_retirement_invalidates_warm_worker_indexes(tmp_path):
+    _put_shared_file_entry(str(tmp_path), "retired-rollout", "call-1")
+    resolver = FileLineageStore(tmp_path)
+    continuation = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+        {"role": "user", "content": "next"},
+    ]
+    assert (await resolver.resolve("retired-rollout", continuation)).status == ParentResolutionStatus.RESOLVED
+
+    token_store = TokenCaptureStore(tmp_path)
+    lock_inode = token_store.lock_path_for("retired-rollout").stat().st_ino
+    snapshot = await token_store.freeze("retired-rollout")
+    assert await token_store.drop(
+        "retired-rollout",
+        snapshot_id=snapshot.snapshot_id,
+        version=snapshot.version,
+    )
+
+    assert (await resolver.resolve("retired-rollout", continuation)).status == ParentResolutionStatus.UNRESOLVED
+    assert token_store.lock_path_for("retired-rollout").stat().st_ino == lock_inode
+    with pytest.raises(RuntimeError, match="retired"):
+        _put_shared_file_entry(str(tmp_path), "retired-rollout", "late-call")
+
+
+def test_served_calls_link_to_their_parent(tmp_path):
+    """Record the echoed first call as the second call's parent."""
+    client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
+    first = [{"role": "user", "content": "hello"}]
+    client.post("/ng-rollout/lin0-roll0/training-token-capture/v1/chat/completions", json={"messages": first})
+    entries = TokenCaptureStore(tmp_path).read_entries("lin0-roll0")
+    assert len(entries) == 1 and entries[0].parent_call_id is None
+    assert entries[0].parent_resolution == ParentResolutionStatus.ROOT
+    assert entries[0].continuation_fingerprint
+    assert entries[0].continuation_context_digest
+
+    content = entries[0].output_items[0]["content"]
+    served_text = content if isinstance(content, str) else content[0]["text"]
+    second = first + [{"role": "assistant", "content": served_text}, {"role": "user", "content": "more"}]
+    client.post("/ng-rollout/lin0-roll0/training-token-capture/v1/chat/completions", json={"messages": second})
+
+    entries = TokenCaptureStore(tmp_path).read_entries("lin0-roll0")
+    assert len(entries) == 2
+    assert entries[1].parent_call_id == entries[0].model_call_id
+    assert entries[1].parent_resolution == ParentResolutionStatus.RESOLVED
+
+
+def test_separate_model_worker_instances_share_committed_lineage(tmp_path):
+    config = _both_enabled(tmp_path)
+    worker_a = TestClient(_server(config, num_workers=2).setup_webserver())
+    worker_b = TestClient(_server(config, num_workers=2).setup_webserver())
+    first = [{"role": "user", "content": "hello"}]
+
+    worker_a.post("/ng-rollout/two-workers/training-token-capture/v1/chat/completions", json={"messages": first})
+    first_entry = TokenCaptureStore(tmp_path).read_entries("two-workers")[0]
+    content = first_entry.output_items[0]["content"]
+    served_text = content if isinstance(content, str) else content[0]["text"]
+    second = first + [{"role": "assistant", "content": served_text}, {"role": "user", "content": "more"}]
+    worker_b.post("/ng-rollout/two-workers/training-token-capture/v1/chat/completions", json={"messages": second})
+
+    entries = TokenCaptureStore(tmp_path).read_entries("two-workers")
+    assert len(entries) == 2
+    assert entries[1].parent_resolution == ParentResolutionStatus.RESOLVED
+    assert entries[1].parent_call_id == entries[0].model_call_id
+
+
+def test_served_calls_do_not_link_across_a_changed_system_prompt(tmp_path):
+    """Reject lineage across a changed system prompt.
+
+    Anthropic sends the system prompt beside the message list.
+    Reusing the old prefix would continue instructions that the harness did not send.
+    """
+    client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
+    store = TokenCaptureStore(tmp_path)
+
+    def call(rollout, system, messages):
+        client.post(
+            f"/ng-rollout/{rollout}/training-token-capture/v1/messages",
+            json={"system": system, "messages": messages, **_MSG_ARGS},
+        )
+
+    first = [{"role": "user", "content": "hello"}]
+    call("sys0", "SYSTEM ONE", first)
+    served = store.read_entries("sys0")[0]
+    content = served.output_items[0]["content"]
+    echoed = content if isinstance(content, str) else content[0]["text"]
+    second = first + [{"role": "assistant", "content": echoed}, {"role": "user", "content": "more"}]
+
+    # Same conversation, different instructions.
+    call("sys0", "SYSTEM TWO", second)
+    entries = store.read_entries("sys0")
+    assert len(entries) == 2
+    assert entries[1].parent_call_id is None
+    assert entries[1].parent_resolution == ParentResolutionStatus.UNRESOLVED
+
+    # Unchanged instructions preserve the link.
+    call("sys1", "SYSTEM ONE", first)
+    call("sys1", "SYSTEM ONE", second)
+    linked = store.read_entries("sys1")
+    assert len(linked) == 2
+    assert linked[1].parent_call_id == linked[0].model_call_id
+    assert linked[1].parent_resolution == ParentResolutionStatus.RESOLVED
+
+
+async def test_lineage_lookup_failure_is_persisted_as_unresolved(tmp_path):
+    class _FailingResolver:
+        async def resolve(self, rollout_id, request_items):
+            raise RuntimeError("resolver unavailable")
+
+        def is_process_shared(self):
+            return True
+
+        async def close(self):
+            pass
+
+    store = TokenCaptureStore(tmp_path)
+    context = CaptureContext(
+        rollout_id="lookup-failure",
+        model_call_id="call-1",
+        token_sink=store,
+        lineage_store=_FailingResolver(),
+    )
+    request = [{"role": "assistant", "content": "prior output"}, {"role": "user", "content": "continue"}]
+    token = set_token_sink(context)
+    try:
+        await resolve_parent(request)
+        await capture_tokens(
+            {
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": "next output",
+                        "prompt_token_ids": PTOKS,
+                        "generation_token_ids": GTOKS,
+                        "generation_log_probs": LPS,
+                    }
+                ]
+            },
+            request_messages=request,
+        )
+    finally:
+        reset_token_sink(token)
+
+    entry = store.read_entries("lookup-failure")[0]
+    assert entry.parent_resolution == ParentResolutionStatus.UNRESOLVED
+    assert entry.parent_call_id is None
+
+
+def test_a_changed_tool_schema_breaks_the_link():
+    """Reject lineage across a changed tool schema."""
+    turn = [{"role": "user", "content": "hi"}, _ASSISTANT_TURN]
+    with_search = _request_messages({"messages": turn, "tools": [{"name": "search"}]})
+    with_bash = _request_messages({"messages": turn, "tools": [{"name": "bash"}]})
+
+    lineage = RolloutLineage()
+    lineage.record("call-1", with_search, [1, 2, 3], "d1")
+    assert (
+        lineage.resolve(with_search + [{"role": "user", "content": "next"}]).status == ParentResolutionStatus.RESOLVED
+    )
+    assert (
+        lineage.resolve(with_bash + [{"role": "user", "content": "next"}]).status == ParentResolutionStatus.UNRESOLVED
+    )
+
+
+def test_the_envelope_does_not_change_the_lookup_key():
+    """Exclude the request envelope from the assistant fingerprint."""
+    turn = [{"role": "user", "content": "hi"}, _ASSISTANT_TURN]
+    plain = _request_messages({"messages": turn})
+    enveloped = _request_messages({"messages": turn, "instructions": "be brief"})
+    assert len(enveloped) == len(plain) + 1
+    assert assistant_fingerprint(enveloped) == assistant_fingerprint(plain) != ""
+
+
+def test_the_envelope_is_stable_across_dict_and_model_tools():
+    """Normalize equivalent dictionary and model tool schemas."""
+
+    class _Tool(BaseModel):
+        name: str
+
+    as_dicts = _request_messages({"messages": [], "tools": [{"name": "search"}]})
+    as_models = _request_messages({"messages": [], "tools": [_Tool(name="search")]})
+    assert as_dicts == as_models
+
+
+def test_fingerprint_matches_across_openai_and_anthropic_tool_shapes():
+    """Match equivalent OpenAI and Anthropic tool-call shapes.
+
+    OpenAI records calls in ``tool_calls``.
+    Anthropic echoes calls in ``tool_use`` content blocks.
+    """
+    recorded = [
+        {
+            "role": "assistant",
+            "content": "Let me compute that.",
+            "tool_calls": [{"id": "c1", "function": {"name": "Bash", "arguments": '{"command":"echo 6"}'}}],
+        }
+    ]
+    echoed = [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Let me compute that."},
+                {"type": "tool_use", "id": "c1", "name": "Bash", "input": {"command": "echo 6"}},
+            ],
+        }
+    ]
+    assert assistant_fingerprint(recorded) == assistant_fingerprint(echoed) != ""
+
+
+def test_fingerprint_agrees_across_all_three_dialects():
+    """Hash equivalent turns identically across all dialects.
+
+    Chat puts tool calls on the message.
+    Anthropic nests tool calls in content blocks.
+    Responses emits roleless ``function_call`` items.
+    """
+
+    anthropic = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "c1", "name": "Bash", "input": {"cmd": "ls"}}]},
+    ]
+    chat = [
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{"id": "c1", "function": {"name": "Bash", "arguments": '{"cmd":"ls"}'}}],
+        },
+    ]
+    responses = [
+        {"type": "message", "role": "user", "content": "hi"},
+        {"type": "function_call", "name": "Bash", "arguments": '{"cmd":"ls"}', "call_id": "c1"},
+    ]
+
+    assert assistant_fingerprint(anthropic) == assistant_fingerprint(chat) == assistant_fingerprint(responses)
+    assert assistant_fingerprint(responses) != ""
+
+
+def test_responses_tool_calls_are_distinguished():
+    """Distinguish Responses turns with different tool arguments."""
+
+    def turn(cmd):
+        return [
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "checking"}]},
+            {"type": "function_call", "name": "Bash", "arguments": '{"cmd":"%s"}' % cmd, "call_id": "c1"},
+        ]
+
+    assert assistant_fingerprint(turn("ls")) != assistant_fingerprint(turn("rm -rf /"))
+
+
+def test_tool_call_identity_changes_the_fingerprint():
+    def turn(call_id):
+        return [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "function": {"name": "Bash", "arguments": '{"cmd":"ls"}'},
+                    }
+                ],
+            }
+        ]
+
+    assert assistant_fingerprint(turn("call-a")) != assistant_fingerprint(turn("call-b"))
+
+
+def test_multimodal_content_changes_the_conversation_digest():
+    def request(url):
+        return [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "describe"},
+                    {"type": "input_image", "image_url": url},
+                ],
+            }
+        ]
+
+    assert conversation_digest(request("https://example/a.png")) != conversation_digest(
+        request("https://example/b.png")
+    )
+
+
+def test_non_object_request_items_fail_closed():
+    with pytest.raises(ValueError, match="not an object"):
+        conversation_digest([{"role": "user", "content": "ok"}, "unsupported"])
+
+
+def test_lineage_resolves_a_tool_using_turn_echoed_in_anthropic_shape():
+    lineage = RolloutLineage()
+    produced = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{"id": "c1", "function": {"name": "Bash", "arguments": '{"command":"factor 420"}'}}],
+    }
+    lineage.record("call-1", [{"role": "user", "content": "factor 420"}, produced], [1, 2, 3], "d1")
+
+    # The harness echoes the turn as Anthropic blocks.
+    # The harness then appends the tool result.
+    next_request = [
+        {"role": "user", "content": "factor 420"},
+        {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": "c1", "name": "Bash", "input": {"command": "factor 420"}}],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": "c1", "content": "420: 2 2 3 5 7"}],
+        },
+    ]
+    parent = lineage.resolve(next_request)
+    assert parent.status == ParentResolutionStatus.RESOLVED
+    assert parent.match is not None and parent.match.model_call_id == "call-1"
+    assert parent.match.cumulative_token_ids == (1, 2, 3)
 
 
 @pytest.mark.parametrize("bad", ["", "a/b", "../escape", "a b"])
@@ -1048,7 +1833,7 @@ def test_a_record_is_readable_as_soon_as_put_returns(tmp_path):
         generation_log_probs=[-0.1],
     )
     asyncio.run(store.put(entry))
-    assert [entry.model_call_id for entry in asyncio.run(store.freeze("r0")).entries] == ["c1"]
+    assert [e.model_call_id for e in store.read_entries("r0")] == ["c1"]
 
 
 def test_a_rollout_that_lost_a_call_is_distinguishable_from_a_complete_one(tmp_path):
@@ -1084,6 +1869,20 @@ class _ConfiguredSink:
 
     async def mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None:
         pass
+
+    async def close(self) -> None:
+        pass
+
+
+class _ConfiguredLineage:
+    def __init__(self, namespace: str = "") -> None:
+        self.namespace = namespace
+
+    async def resolve(self, rollout_id: str, request_items: list[dict]):
+        return LineageResolution(ParentResolutionStatus.ROOT)
+
+    def is_process_shared(self) -> bool:
+        return True
 
     async def close(self) -> None:
         pass
@@ -1128,6 +1927,7 @@ def test_a_configured_sink_receives_entries(tmp_path):
             "enabled": True,
             "rebuild_response": False,
             "sink": f"{__name__}:_ConfiguredSink",
+            "allow_unresolved_continuations": True,
         }
     }
     client = TestClient(_server(config).setup_webserver())
@@ -1149,6 +1949,7 @@ def test_a_configured_sink_wins_over_an_installed_one(installed_sink):
             "enabled": True,
             "rebuild_response": False,
             "sink": f"{__name__}:_ConfiguredSink",
+            "allow_unresolved_continuations": True,
         }
     }
     client = TestClient(_server(config).setup_webserver())
@@ -1171,6 +1972,35 @@ def test_a_sink_receives_its_configured_kwargs():
     assert (sink.endpoint, sink.shard) == ("https://dp", 3)
 
 
+def test_a_lineage_store_receives_its_configured_kwargs():
+    config = TokenIdCaptureConfig.model_validate(
+        _block(
+            lineage_store=f"{__name__}:_ConfiguredLineage",
+            lineage_store_kwargs={"namespace": "training-run"},
+        )
+    )
+    lineage = config.build_lineage_store()
+    assert lineage.namespace == "training-run"
+
+
+def test_multi_worker_custom_capture_requires_shared_lineage():
+    config = _block(sink=f"{__name__}:_ConfiguredSink")
+    with pytest.raises(ValueError, match="process-shared lineage resolver"):
+        _server(config, num_workers=2).setup_webserver()
+
+
+def test_multi_worker_custom_capture_accepts_configured_shared_lineage():
+    config = _block(
+        sink=f"{__name__}:_ConfiguredSink",
+        lineage_store=f"{__name__}:_ConfiguredLineage",
+    )
+    _server(config, num_workers=2).setup_webserver()
+
+
+def test_multi_worker_file_capture_uses_process_shared_lineage(tmp_path):
+    _server(_both_enabled(tmp_path), num_workers=2).setup_webserver()
+
+
 def test_a_sink_given_kwargs_it_cannot_take_is_refused_at_startup():
     config = TokenIdCaptureConfig.model_validate(_block(sink=f"{__name__}:_KwargSink", sink_kwargs={"nope": 1}))
     with pytest.raises(ValueError, match="sink_kwargs"):
@@ -1185,6 +2015,7 @@ def test_a_sink_that_cannot_report_failures_is_refused_at_startup():
                 "enabled": True,
                 "rebuild_response": False,
                 "sink": f"{__name__}:_NotASink",
+                "allow_unresolved_continuations": True,
             }
         }
     )
@@ -1204,6 +2035,7 @@ def test_a_sink_whose_protocol_member_is_not_callable_is_refused():
                 "enabled": True,
                 "rebuild_response": False,
                 "sink": f"{__name__}:_NotCallableSink",
+                "allow_unresolved_continuations": True,
             }
         }
     )
@@ -1217,7 +2049,14 @@ def test_a_sink_whose_protocol_member_is_not_callable_is_refused():
 )
 def test_a_malformed_sink_path_is_refused_at_startup(target, expected):
     config = TokenIdCaptureConfig.model_validate(
-        {"token_id_capture": {"enabled": True, "rebuild_response": False, "sink": target}}
+        {
+            "token_id_capture": {
+                "enabled": True,
+                "rebuild_response": False,
+                "sink": target,
+                "allow_unresolved_continuations": True,
+            }
+        }
     )
     with pytest.raises(ValueError, match=expected):
         config.build_sink()
@@ -1263,7 +2102,7 @@ def test_the_store_is_a_token_source(tmp_path):
             generation_log_probs=[-0.1],
         )
     )
-    assert [entry.model_call_id for entry in asyncio.run(store.freeze("r0")).entries] == ["c1"]
+    assert [e.model_call_id for e in store.read_entries("r0")] == ["c1"]
 
     # A colocated source can detect a capture failure.
     # This prevents training on an incomplete rollout.
@@ -1283,10 +2122,17 @@ def _entry_fields(**overrides):
     )
 
 
-def test_a_record_older_than_this_reader_is_accepted():
-    """Use defaults for fields absent from older records."""
-    entry = TokenEntry(**_entry_fields(schema_version=TOKEN_ENTRY_RECORD_SCHEMA_VERSION - 1))
-    assert entry.generation_token_ids == [2]
+def test_a_record_below_the_schema_floor_is_refused():
+    with pytest.raises(ValidationError, match="below the supported minimum"):
+        TokenEntry(**_entry_fields(schema_version=TOKEN_ENTRY_MIN_SCHEMA_VERSION - 1))
+
+
+def test_omitted_optional_schema_fields_use_safe_defaults():
+    entry = TokenEntry(**_entry_fields())
+
+    assert entry.prompt_is_delta is False
+    assert entry.prefix_requested is False
+    assert entry.prefix_supplied is False
 
 
 def test_a_record_newer_than_this_reader_is_refused():
@@ -1306,3 +2152,204 @@ def test_a_newer_record_in_the_store_fails_the_read_rather_than_being_skipped(tm
 
     with pytest.raises(ValidationError):
         store.read_entries("r0")
+
+
+def test_digest_and_cum_len_are_filled_for_every_entry():
+    """Stamp cumulative length and digest on every entry."""
+    empty = TokenEntry(
+        rollout_id="r",
+        model_call_id="e",
+        prompt_token_ids=[],
+        generation_token_ids=[],
+        generation_log_probs=[],
+    )
+    stamp_lineage(empty, None)
+    assert empty.cum_len == 0 and empty.digest == compute_digest([])
+
+    normal = TokenEntry(
+        rollout_id="r",
+        model_call_id="n",
+        prompt_token_ids=[1, 2],
+        generation_token_ids=[3],
+        generation_log_probs=[-0.1],
+    )
+    stamp_lineage(normal, None)
+    assert normal.cum_len == 3 and normal.digest == compute_digest([1, 2, 3])
+
+
+def test_a_rewritten_conversation_does_not_resolve_to_the_original_call():
+    """Reject an assistant match when the earlier conversation changed."""
+    lineage = RolloutLineage()
+    original = [{"role": "user", "content": "solve task ALPHA"}]
+    lineage.record("call-1", original + [_ASSISTANT_TURN], cum_tokens=[1, 2, 3], digest="d1")
+
+    compacted = [{"role": "user", "content": "SUMMARY: we were working on task BETA"}, _ASSISTANT_TURN]
+
+    assert lineage.resolve(compacted).status == ParentResolutionStatus.UNRESOLVED
+
+
+def test_appending_a_tool_result_still_resolves():
+    """Resolve a continuation after it appends a tool result."""
+    lineage = RolloutLineage()
+    sent = [{"role": "user", "content": "q"}]
+    lineage.record("call-1", sent + [_ASSISTANT_TURN], cum_tokens=[1, 2, 3], digest="d1")
+
+    continuation = sent + [_ASSISTANT_TURN, {"role": "tool", "content": "search result"}]
+
+    resolved = lineage.resolve(continuation)
+    assert resolved.status == ParentResolutionStatus.RESOLVED
+    assert resolved.match is not None and resolved.match.model_call_id == "call-1"
+
+
+def test_two_calls_with_identical_output_resolve_to_neither():
+    """Resolve neither call when their outputs are identical."""
+    lineage = RolloutLineage()
+    messages = [{"role": "user", "content": "q"}, _ASSISTANT_TURN]
+    lineage.record("call-1", messages, cum_tokens=[1, 2], digest="d1")
+    lineage.record("call-2", messages, cum_tokens=[9, 9], digest="d2")
+
+    assert lineage.resolve(messages).status == ParentResolutionStatus.UNRESOLVED
+
+
+def test_identical_retries_with_the_same_tokens_share_one_parent():
+    lineage = RolloutLineage()
+    messages = [{"role": "user", "content": "q"}, _ASSISTANT_TURN]
+    lineage.record("call-2", messages, cum_tokens=[1, 2], digest="same")
+    lineage.record("call-1", messages, cum_tokens=[1, 2], digest="same")
+
+    resolved = lineage.resolve(messages)
+
+    assert resolved.status == ParentResolutionStatus.RESOLVED
+    assert resolved.match is not None
+    assert resolved.match.model_call_id == "call-1"
+    assert resolved.match.cumulative_token_ids == (1, 2)
+
+
+def test_a_conversation_with_no_model_turn_starts_a_new_root():
+    """Start a new root when the request has no model-authored turn."""
+    lineage = RolloutLineage()
+    lineage.record("call-1", [{"role": "user", "content": "q"}, _ASSISTANT_TURN], cum_tokens=[1], digest="d")
+
+    assert lineage.resolve([{"role": "user", "content": "a brand new task"}]).status == ParentResolutionStatus.ROOT
+    assert assistant_fingerprint([{"role": "user", "content": "q"}]) == ""
+
+
+def test_two_forks_of_one_call_both_resolve_to_it():
+    """Resolve two forks to the same parent and cumulative tokens."""
+    lineage = RolloutLineage()
+    base = [{"role": "user", "content": "q"}, _ASSISTANT_TURN]
+    lineage.record("parent", base, cum_tokens=[1, 2, 3], digest="dp")
+
+    a = lineage.resolve(base + [{"role": "tool", "content": "branch A"}])
+    b = lineage.resolve(base + [{"role": "tool", "content": "branch B"}])
+
+    assert a.status == b.status == ParentResolutionStatus.RESOLVED
+    assert a.match is not None and b.match is not None
+    assert a.match.model_call_id == b.match.model_call_id == "parent"
+    assert a.match.cumulative_token_ids == b.match.cumulative_token_ids == (1, 2, 3)
+
+
+def test_recording_a_child_does_not_mutate_its_parent():
+    """Keep a parent immutable while recording children."""
+    lineage = RolloutLineage()
+    base = [{"role": "user", "content": "q"}, _ASSISTANT_TURN]
+    lineage.record("parent", base, cum_tokens=[1, 2, 3], digest="dp")
+    before = list(lineage.by_call_id["parent"].cum_tokens)
+
+    for i in range(5):
+        lineage.record(f"child-{i}", base + [{"role": "tool", "content": str(i)}], [7, 7], "dc")
+
+    assert lineage.by_call_id["parent"].cum_tokens == before
+
+
+def test_an_evicted_rollout_resolves_to_nothing_rather_than_to_another_rollout():
+    """Resolve an evicted rollout to nothing."""
+    index = LineageIndex(max_rollouts=2, max_tokens=10_000_000)
+    for name in ("r1", "r2", "r3"):
+        index.for_rollout(name).record(name, [{"role": "user", "content": "q"}, _ASSISTANT_TURN], [1], "d")
+
+    assert (
+        index.for_rollout("r1").resolve([{"role": "user", "content": "q"}, _ASSISTANT_TURN]).status
+        == ParentResolutionStatus.UNRESOLVED
+    )
+
+
+def test_the_last_rollout_is_kept_even_over_budget():
+    """Keep the only rollout even when it exceeds the token budget."""
+    index = LineageIndex(max_rollouts=1, max_tokens=1)
+    messages = [{"role": "user", "content": "q"}, _ASSISTANT_TURN]
+    index.for_rollout("r1").record("c1", messages, [1] * 100, "d")
+
+    assert index.for_rollout("r1").resolve(messages).status == ParentResolutionStatus.RESOLVED
+
+
+def test_a_response_echoed_as_several_items_still_resolves():
+    """Resolve a response echoed as several items.
+
+    A Responses harness can echo assistant text and a tool call as separate items.
+    Indexing the served items preserves that shape.
+    """
+    served = [
+        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "let me look"}]},
+        {"type": "function_call", "name": "search", "arguments": '{"q":"x"}'},
+    ]
+    sent = [{"role": "user", "content": "find x"}]
+    lineage = RolloutLineage()
+    lineage.record("call-1", sent + served, cum_tokens=[1, 2, 3], digest="d", context_len=len(sent))
+
+    continuation = sent + served + [{"type": "function_call_output", "output": "42"}]
+
+    resolved = lineage.resolve(continuation)
+    assert resolved.status == ParentResolutionStatus.RESOLVED
+    assert resolved.match is not None and resolved.match.model_call_id == "call-1"
+
+
+def test_reasoning_the_harness_drops_does_not_break_resolution():
+    """Ignore standalone reasoning that the harness does not echo."""
+    served = [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "answer"}]}]
+    sent = [{"role": "user", "content": "q"}]
+    lineage = RolloutLineage()
+    lineage.record(
+        "call-1",
+        sent + [{"type": "reasoning", "summary": [{"type": "summary_text", "text": "thinking"}]}] + served,
+        cum_tokens=[1, 2],
+        digest="d",
+        context_len=len(sent),
+    )
+
+    resolved = lineage.resolve(sent + served)
+    assert resolved.status == ParentResolutionStatus.RESOLVED
+    assert resolved.match is not None and resolved.match.model_call_id == "call-1"
+
+
+@pytest.mark.parametrize(
+    "before, after",
+    [
+        # Responses stores the payload under ``output``.
+        (
+            [{"type": "function_call_output", "call_id": "c1", "output": "42 files"}],
+            [{"type": "function_call_output", "call_id": "c1", "output": "[truncated]"}],
+        ),
+        # Anthropic stores the payload under ``content``.
+        (
+            [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "c1", "content": "42 files"}]}],
+            [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "c1", "content": "[truncated]"}]}],
+        ),
+        # Chat stores the payload as plain content.
+        (
+            [{"role": "tool", "tool_call_id": "c1", "content": "42 files"}],
+            [{"role": "tool", "tool_call_id": "c1", "content": "[truncated]"}],
+        ),
+    ],
+)
+def test_a_rewritten_tool_result_changes_the_conversation_digest(before, after):
+    """Change the digest when an earlier tool result changes."""
+    assert conversation_digest(before) != conversation_digest(after)
+
+
+def test_the_fingerprint_still_ignores_tool_results():
+    """Exclude appended tool results from the lookup fingerprint."""
+    turn = [{"role": "assistant", "content": "ok"}]
+    assert assistant_fingerprint(turn) == assistant_fingerprint(
+        turn + [{"type": "function_call_output", "output": "42 files"}]
+    )

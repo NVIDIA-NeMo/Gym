@@ -60,6 +60,12 @@ def request_body() -> dict:
     }
 
 
+def fake_pty(session_id: str = "pty-session") -> SimpleNamespace:
+    """A stand-in for ``sandbox.pty``; seed_session opens a terminal for the agent."""
+    session = SimpleNamespace(session_id=session_id, close=AsyncMock())
+    return SimpleNamespace(create=AsyncMock(return_value=session))
+
+
 def make_server(*, golden: bool, apply_anti_cheating: bool = True) -> SWEBenchProResourcesServer:
     config = SWEBenchProResourcesServerConfig(
         host="0.0.0.0",
@@ -163,6 +169,7 @@ async def test_seed_session_applies_shared_anti_cheat_setup(monkeypatch: MonkeyP
     server = make_server(golden=False)
     sandbox = SimpleNamespace(
         _handle=SimpleNamespace(sandbox_id="sandbox-id"),
+        pty=fake_pty(),
         upload=AsyncMock(),
         exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="", stderr="")),
     )
@@ -189,6 +196,7 @@ async def test_seed_session_can_skip_anti_cheat_setup(monkeypatch: MonkeyPatch) 
     server = make_server(golden=False, apply_anti_cheating=False)
     sandbox = SimpleNamespace(
         _handle=SimpleNamespace(sandbox_id="sandbox-id"),
+        pty=fake_pty(),
         upload=AsyncMock(),
         exec=AsyncMock(),
     )
@@ -262,6 +270,7 @@ async def test_seed_session_normalizes_the_agent_environment_before_snapshotting
         upload=AsyncMock(),
         stop=AsyncMock(),
         _handle=SimpleNamespace(sandbox_id="sandbox-id"),
+        pty=fake_pty(),
     )
     server._create_sandbox = AsyncMock(return_value=sandbox)
     request = SimpleNamespace(session={SESSION_ID_KEY: "session"})
@@ -287,6 +296,7 @@ async def test_seed_session_survives_a_container_it_cannot_normalize() -> None:
         upload=AsyncMock(),
         stop=AsyncMock(),
         _handle=SimpleNamespace(sandbox_id="sandbox-id"),
+        pty=fake_pty(),
     )
     server._create_sandbox = AsyncMock(return_value=sandbox)
     request = SimpleNamespace(session={SESSION_ID_KEY: "session"})
@@ -294,6 +304,47 @@ async def test_seed_session_survives_a_container_it_cannot_normalize() -> None:
     # A container that cannot be normalized is still worth running.
     await server.seed_session(request, SWEBenchProSeedSessionRequest.model_validate(request_body()))
     assert server._session_id_to_sandbox["session"] is sandbox
+
+
+@pytest.mark.asyncio
+async def test_seed_session_returns_the_pty_session_the_agent_attaches_to() -> None:
+    """The agent needs both ids; given only one it silently builds its own sandbox instead."""
+    server = make_server(golden=False)
+    sandbox = SimpleNamespace(
+        exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="", stderr="")),
+        upload=AsyncMock(),
+        stop=AsyncMock(),
+        _handle=SimpleNamespace(sandbox_id="sandbox-id"),
+        pty=fake_pty("pty-id"),
+    )
+    server._create_sandbox = AsyncMock(return_value=sandbox)
+    request = SimpleNamespace(session={SESSION_ID_KEY: "session"})
+
+    response = await server.seed_session(request, SWEBenchProSeedSessionRequest.model_validate(request_body()))
+
+    assert response.sandbox_handle == "sandbox-id"
+    assert response.pty_session_id == "pty-id"
+    sandbox.pty.create.assert_awaited_once()
+    assert server._session_id_to_pty["session"].session_id == "pty-id"
+
+
+@pytest.mark.asyncio
+async def test_extract_model_patch_closes_the_pty_before_stopping_the_sandbox() -> None:
+    """A session that outlives its sandbox leaks its connection to the sandbox API."""
+    server = make_server(golden=False)
+    order: list[str] = []
+    session = SimpleNamespace(session_id="pty-id", close=AsyncMock(side_effect=lambda: order.append("close")))
+    sandbox = SimpleNamespace(
+        exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="", stderr="")),
+        stop=AsyncMock(side_effect=lambda: order.append("stop")),
+    )
+    server._session_id_to_sandbox["session"] = sandbox
+    server._session_id_to_pty["session"] = session
+
+    await server._extract_model_patch("session", "abc123")
+
+    assert order == ["close", "stop"], "the terminal must be closed before its sandbox goes away"
+    assert "session" not in server._session_id_to_pty
 
 
 @pytest.mark.asyncio

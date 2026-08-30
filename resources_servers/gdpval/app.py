@@ -904,6 +904,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
             group_level_metrics=base.group_level_metrics,
             agent_metrics=merged_agent,
             key_metrics=merged_key,
+            repeat_level_metrics=base.repeat_level_metrics,
         )
 
 

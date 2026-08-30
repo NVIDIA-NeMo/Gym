@@ -22,7 +22,12 @@ Unattributed rollouts keep the strict single-chain policy bit-for-bit.
 
 import asyncio
 
-from nemo_gym.token_id_capture import TokenCaptureStore, TokenEntry
+from nemo_gym.token_id_capture import (
+    ParentResolutionStatus,
+    TokenCaptureStore,
+    TokenEntry,
+    stamp_lineage,
+)
 from nemo_gym.token_id_capture.builder import run_builder
 from nemo_gym.token_id_capture.consumer import _assemble
 from nemo_gym.token_id_capture.delivery import (
@@ -55,10 +60,11 @@ def _entry(
     text: str | None = None,
     response_id: str | None = None,
     created_at: float = 0.0,
+    parent_call_id: str | None = None,
     **extra,
 ) -> TokenEntry:
     output_items = [_assistant_item(text)] if text is not None else []
-    return TokenEntry(
+    entry = TokenEntry(
         rollout_id="r",
         model_call_id=call_id,
         prompt_token_ids=prompt,
@@ -70,13 +76,24 @@ def _entry(
         created_at=created_at,
         **extra,
     )
+    status = ParentResolutionStatus.RESOLVED if parent_call_id else ParentResolutionStatus.ROOT
+    stamp_lineage(entry, parent_call_id, parent_resolution=status)
+    return entry
 
 
 def _chain_entries() -> list[TokenEntry]:
     """Two chained calls: call2 continues call1's cumulative sequence."""
     return [
         _entry("call1", [1, 2], [3, 4], text="step one", response_id="resp_1", created_at=2.0),
-        _entry("call2", [1, 2, 3, 4, 5, 6], [7, 8], text="final answer", response_id="resp_2", created_at=3.0),
+        _entry(
+            "call2",
+            [1, 2, 3, 4, 5, 6],
+            [7, 8],
+            text="final answer",
+            response_id="resp_2",
+            created_at=3.0,
+            parent_call_id="call1",
+        ),
     ]
 
 
@@ -281,7 +298,14 @@ def test_attributed_terminal_delivers_the_verified_chain_and_excludes_aux():
 
 def test_terminal_truncates_calls_served_after_the_kept_response():
     entries = _chain_entries() + [
-        _entry("call3", [1, 2, 3, 4, 5, 6, 7, 8, 9], [10], text="post-terminal", created_at=4.0),
+        _entry(
+            "call3",
+            [1, 2, 3, 4, 5, 6, 7, 8, 9],
+            [10],
+            text="post-terminal",
+            created_at=4.0,
+            parent_call_id="call2",
+        ),
     ]
     out = run_builder(entries, terminal_call_id="call2")
     assert out.notes.terminal_chain == "delivered"
@@ -353,7 +377,15 @@ def test_assemble_broken_terminal_chain_masks():
     # Attribution succeeds but the terminal's ancestry is quarantined.
     e1a = _entry("dup_a", [1, 2], [3, 4], text="same", created_at=1.0)
     e1b = _entry("dup_b", [1, 2], [3, 4], text="same", created_at=1.5)
-    child = _entry("child", [1, 2, 3, 4, 9], [10], text="final", response_id="resp_child", created_at=2.0)
+    child = _entry(
+        "child",
+        [1, 2, 5, 6, 9],
+        [10],
+        text="final",
+        response_id="resp_child",
+        created_at=2.0,
+        parent_call_id="dup_a",
+    )
     built = _assemble(
         "r",
         [e1a, e1b, child],
