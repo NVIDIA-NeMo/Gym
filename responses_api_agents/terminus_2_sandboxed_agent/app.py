@@ -210,22 +210,18 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
 
     async def run(self, request: Request, body: Terminus2AgentRunRequest) -> Terminus2AgentVerifyResponse:
         cookies = request.cookies
-        seed = await self.server_client.post(
+        seed_session_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/seed_session",
             json=body.model_dump(),
             cookies=cookies,
         )
-        await raise_for_status(seed)
-        cookies = cookies | seed.cookies
-        seed_result = await seed.json()
+        await raise_for_status(seed_session_response)
+        cookies = cookies | seed_session_response.cookies
+        seed_session_result = await seed_session_response.json()
 
-        sandbox_id = seed_result.get("sandbox_handle")
-        pty_session_id = seed_result.get("pty_session_id")
-        if not isinstance(sandbox_id, str):
-            raise RuntimeError("Resources server did not return sandbox_handle from /seed_session")
-        if not isinstance(pty_session_id, str):
-            raise RuntimeError("Resources server did not return pty_session_id from /seed_session")
+        sandbox_id = seed_session_result["sandbox_handle"]
+        pty_session_id = seed_session_result["pty_session_id"]
 
         sandbox, pty_session = await self._connect_sandbox(sandbox_id, pty_session_id)
         session_key = request.session[SESSION_ID_KEY]
@@ -241,7 +237,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         )
         await raise_for_status(verification)
 
-        self._session_sandboxes.pop(session_key, None)
+        self._session_sandboxes.pop(session_key)
         await pty_session.close()
         await sandbox.stop()
 
