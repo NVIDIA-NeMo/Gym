@@ -89,8 +89,6 @@ from nemo_gym.token_id_capture.records import (
 from nemo_gym.token_id_capture.sink import (
     NG_CAPTURE_FIELD,
     NG_COMMIT_COORDS_FIELD,
-    UNCOMMITTED_CALL_REASON,
-    UNRESOLVED_PARENT_REASON,
     CaptureContext,
     capture_health_snapshot,
     capture_tokens,
@@ -101,6 +99,10 @@ from nemo_gym.token_id_capture.sink import (
     reset_token_sink,
     resolve_parent,
     set_token_sink,
+)
+from nemo_gym.token_id_capture.staging.records import (
+    UNCOMMITTED_CALL_REASON,
+    UNRESOLVED_PARENT_REASON,
 )
 from nemo_gym.token_id_capture.store import TokenCaptureStore, make_token_store, validate_rollout_id
 

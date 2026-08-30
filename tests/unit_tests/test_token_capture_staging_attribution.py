@@ -24,8 +24,8 @@ policy (``select_terminal_call``) remains the no-witness fallback.
 import pydantic
 import pytest
 
-from nemo_gym.token_id_capture.lineage import LINEAGE_FINGERPRINT_VERSION, assistant_fingerprint
-from nemo_gym.token_id_capture.staging.attribution import resolve_terminal
+from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION, assistant_fingerprint
+from nemo_gym.token_id_capture.staging import resolve_terminal
 from nemo_gym.token_id_capture.staging.records import CallRecord
 
 
@@ -49,7 +49,7 @@ def _row(
     request_texts: list[str] | None = None,
     cumulative_hash: str | None = None,
     chain_hash: str | None = None,
-    fingerprint_version: int = LINEAGE_FINGERPRINT_VERSION,
+    fingerprint_version: int = FINGERPRINT_VERSION,
 ) -> CallRecord:
     output_fingerprint = assistant_fingerprint([_assistant_item(text)]) if text is not None else None
     continuation_fingerprint = (
