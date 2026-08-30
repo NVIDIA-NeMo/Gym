@@ -16,6 +16,7 @@
 
 import asyncio
 import logging
+import os
 import re
 import shlex
 from collections.abc import Mapping
@@ -706,17 +707,21 @@ class OpenSandboxProvider:
             max_keepalive_connections=max_keepalive,
             keepalive_expiry=self._connection.keepalive_expiry_s,
         )
+        # OPENSANDBOX_INSECURE_TLS=1 disables certificate verification — for
+        # validating endpoints that terminate TLS with certs the client cannot
+        # verify. Never set it for production endpoints.
+        verify = os.environ.get("OPENSANDBOX_INSECURE_TLS", "").strip() != "1"
         if self._connection.transport_backend == "aiohttp":
             try:
                 from httpx_aiohttp import AiohttpTransport
 
-                return AiohttpTransport(limits=limits, retries=self._connection.connect_retries)
+                return AiohttpTransport(verify=verify, limits=limits, retries=self._connection.connect_retries)
             except ImportError:
                 LOGGER.warning(
                     "connection.transport_backend=aiohttp requested but httpx-aiohttp "
                     "is not installed; falling back to the httpx transport"
                 )
-        return httpx.AsyncHTTPTransport(limits=limits, retries=self._connection.connect_retries)
+        return httpx.AsyncHTTPTransport(verify=verify, limits=limits, retries=self._connection.connect_retries)
 
     async def _retire_closed_pty_sessions(self) -> None:
         """Release sessions that ended on their own; their aiohttp client is
@@ -1443,6 +1448,10 @@ class OpenSandboxProvider:
     def _pty_http_client(self) -> Any:
         import aiohttp
 
+        # Same OPENSANDBOX_INSECURE_TLS contract as _build_transport: PTY
+        # sessions own their aiohttp clients, so they need their own opt-out.
+        if os.environ.get("OPENSANDBOX_INSECURE_TLS", "").strip() == "1":
+            return aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False))
         return aiohttp.ClientSession()
 
     async def _pty_target(self, handle: SandboxHandle) -> tuple[str, dict[str, str], float | None]:
