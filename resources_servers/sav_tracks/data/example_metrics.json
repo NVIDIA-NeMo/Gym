@@ -1,0 +1,19 @@
+{
+  "name": "example",
+  "type": "example",
+  "jsonl_fpath": "resources_servers/sav_tracks/data/example.jsonl",
+  "num_repeats": 1,
+  "source": null,
+  "gitlab_identifier": null,
+  "huggingface_identifier": null,
+  "license": null,
+  "Number of examples": 5,
+  "task": {
+    "unique_count": 3,
+    "total_count": 5
+  },
+  "coordinate_space": {
+    "unique_count": 1,
+    "total_count": 5
+  }
+}
