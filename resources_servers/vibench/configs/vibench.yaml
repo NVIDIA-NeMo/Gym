@@ -12,7 +12,10 @@ vibench_resources_server:
       # Absolute path to a ViBench checkout. Grading shells into
       # _harness/runner/scripts/run-seed.py then run-evaluate-post-seeding.py inside it.
       # (Not run-seed-then-evaluate.py -- see the comment above SEED_SCRIPT in app.py.)
-      vibench_repo_root: ${oc.env:VIBENCH_REPO_ROOT}
+      # Defaulted so the config resolves without the variable set: data tooling and CI load
+      # this file without ever starting the server, and a bare ${oc.env:...} makes that fail
+      # with a config interpolation error. Set VIBENCH_REPO_ROOT to a real checkout to run.
+      vibench_repo_root: ${oc.env:VIBENCH_REPO_ROOT,/nonexistent/set-VIBENCH_REPO_ROOT}
 
       # Shared with the agent: it writes built-app tarballs here, this server unpacks them.
       # A plain path is enough because grading already needs a local Docker daemon, so both
