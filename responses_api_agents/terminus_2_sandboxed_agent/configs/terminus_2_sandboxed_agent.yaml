@@ -33,5 +33,6 @@ terminus_2_sandboxed_agent:
         provider_options: {}
         metadata:
           harness: terminus-2
+      remote_tmux_binary_path: null
 
       datasets: []

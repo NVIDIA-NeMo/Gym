@@ -4,11 +4,12 @@
 import asyncio
 import json
 import logging
+import sys
 import tempfile
 from pathlib import Path
 from time import time
 from types import SimpleNamespace
-from typing import Any, Tuple
+from typing import Any, Optional, Tuple
 from uuid import uuid4
 
 from fastapi import Request
@@ -61,9 +62,11 @@ class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
     debug: bool = False
     model_context_limit: int = 1_000_000
     model_output_limit: int | None = None
+
     sandbox_provider: str
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_timeout: float
+    remote_tmux_binary_path: Optional[str]
 
 
 class Terminus2AgentRunRequest(BaseRunRequest):
@@ -289,10 +292,19 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             )
 
             await environment.exec("mkdir -p /logs/agent", user="root")
-            tmux_install_result = await sandbox.pty.exec(
-                "apt update && apt install -y tmux", session=pty_session, timeout_s=240
-            )
-            assert tmux_install_result.return_code == 0, tmux_install_result
+            if self.config.remote_tmux_binary_path:
+                tmux_install_result = await sandbox.pty.exec(
+                    f"""mkdir -p /usr/local/bin \
+&& mv {self.config.remote_tmux_binary_path} /usr/local/bin/tmux \
+&& tmux -V""",
+                    session=pty_session,
+                )
+                assert tmux_install_result.return_code == 0, tmux_install_result
+            else:
+                print(
+                    "Downloading and installing tmux in the sandbox. Please consider mounting or uploading the appropriate tmux binary instead!",
+                    file=sys.stderr,
+                )
             await agent.setup(environment)
 
             try:
