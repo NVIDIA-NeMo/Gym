@@ -58,25 +58,25 @@ CHECK_REGISTRY: tuple[CheckSpec, ...] = (
         id="model_call_zero_completion_tokens",
         evaluation_scope=CheckScope.ROLLOUT,
         subject=CheckSubject.MODEL_CALL,
-        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.BOUND_CALLS}),
+        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.OWNED_MODEL_CALLS}),
     ),
     CheckSpec(
         id="model_call_missing_token_counts",
         evaluation_scope=CheckScope.ROLLOUT,
         subject=CheckSubject.MODEL_CALL,
-        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.BOUND_CALLS}),
+        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.OWNED_MODEL_CALLS}),
     ),
     CheckSpec(
         id="trajectory_capture_mismatch",
         evaluation_scope=CheckScope.ROLLOUT,
         subject=CheckSubject.TRAJECTORY_CAPTURE,
-        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.BOUND_CALLS}),
+        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.OWNED_MODEL_CALLS}),
     ),
     CheckSpec(
         id="model_call_failed",
         evaluation_scope=CheckScope.ROLLOUT,
         subject=CheckSubject.MODEL_CALL,
-        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.BOUND_CALLS}),
+        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.OWNED_MODEL_CALLS}),
     ),
     CheckSpec(
         id="rollout_token_count_mismatch",
@@ -88,7 +88,7 @@ CHECK_REGISTRY: tuple[CheckSpec, ...] = (
         id="model_call_runaway_generation",
         evaluation_scope=CheckScope.ROLLOUT,
         subject=CheckSubject.MODEL_CALL,
-        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.BOUND_CALLS}),
+        reads=frozenset({CheckInput.RECORD, CheckInput.TRAJECTORY, CheckInput.OWNED_MODEL_CALLS}),
     ),
     CheckSpec(
         id="task_consistently_unhealthy",
@@ -304,18 +304,38 @@ def _call_identity(call: dict[str, Any]) -> str | None:
     return None
 
 
-def _canonical_model_call_references(trajectory: dict[str, Any]) -> tuple[tuple[str, dict[str, Any]], ...]:
-    """Return explicit model-call references from canonical TrajectoryTurn records only."""
-    return tuple(
+def _canonical_model_call_references(
+    trajectory: dict[str, Any], *, include_invocations: bool = False
+) -> tuple[tuple[str, dict[str, Any]], ...]:
+    """Return exact call references from canonical turns and, when requested, invocations."""
+    turn_references = tuple(
         (reference, raw_reference)
         for turn in trajectory.get("turns") or []
         for raw_reference in turn.get("model_calls") or []
         if isinstance(raw_reference, dict) and (reference := _call_ref_key(raw_reference)) is not None
     )
+    if not include_invocations:
+        return turn_references
+    seen_references = {reference for reference, _ in turn_references}
+    invocation_references: list[tuple[str, dict[str, Any]]] = []
+    for reference, raw_reference in (
+        (reference, raw_reference)
+        for invocation in trajectory.get("invocations") or []
+        for raw_reference in invocation.get("model_calls") or []
+        if isinstance(raw_reference, dict) and (reference := _call_ref_key(raw_reference)) is not None
+    ):
+        if reference in seen_references:
+            continue
+        seen_references.add(reference)
+        invocation_references.append((reference, raw_reference))
+    return (*turn_references, *invocation_references)
 
 
-def _bind_policy_calls(trajectory: dict[str, Any], calls: list[dict[str, Any]]) -> _CallBindings:
-    reference_items = _canonical_model_call_references(trajectory)
+def _bind_policy_calls(
+    trajectory: dict[str, Any], calls: list[dict[str, Any]], *, include_invocations: bool = False
+) -> _CallBindings:
+    turn_reference_keys = {reference for reference, _ in _canonical_model_call_references(trajectory)}
+    reference_items = _canonical_model_call_references(trajectory, include_invocations=include_invocations)
     references = tuple(reference for reference, _ in reference_items)
     calls_by_call_id: dict[str, list[dict[str, Any]]] = defaultdict(list)
     calls_by_response: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
@@ -357,6 +377,7 @@ def _bind_policy_calls(trajectory: dict[str, Any], calls: list[dict[str, Any]]) 
         matched_calls=tuple(matched_calls),
         missing_references=tuple(missing_references),
         duplicated_references=tuple(duplicated_references),
+        terminal_ordered=not include_invocations or set(references) <= turn_reference_keys,
     )
 
 
@@ -525,7 +546,9 @@ def _model_call_failed(bindings: _CallBindings, subject: dict[str, int | str]) -
             detail={
                 "status": call.get("status_code"),
                 "error_category": call.get("error_category"),
-                "terminal": bindings.complete and position == len(bindings.matched_calls) - 1,
+                "terminal": (
+                    bindings.complete and bindings.terminal_ordered and position == len(bindings.matched_calls) - 1
+                ),
             },
         )
         for position, call in enumerate(bindings.matched_calls)
