@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 from time import time
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Tuple
 from uuid import uuid4
 
 from fastapi import Request
@@ -76,6 +76,8 @@ class Terminus2AgentVerifyRequest(BaseVerifyRequest):
 
 class Terminus2AgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
+
+    terminus2_completed: bool
 
 
 class NeMoGymSandboxEnvironment:
@@ -248,7 +250,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         body: NeMoGymResponseCreateParamsNonStreaming,
         sandbox: AsyncSandbox,
         pty_session: SandboxPtySession | None,
-    ) -> NeMoGymResponse:
+    ) -> Tuple[NeMoGymResponse, bool]:
         instruction = _instruction(body.input)
 
         model_base_url = (
@@ -284,10 +286,14 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             await environment.exec("mkdir -p /logs/agent", user="root")
             await agent.setup(environment)
 
-            async with asyncio.timeout(self.config.sandbox_timeout):
-                await agent.run(instruction, environment, context)
-
-            await agent._session.stop()
+            try:
+                async with asyncio.timeout(self.config.sandbox_timeout):
+                    await agent.run(instruction, environment, context)
+                terminus2_completed = True
+            except TimeoutError:
+                terminus2_completed = False
+            finally:
+                await agent._session.stop()
 
         usage = NeMoGymResponseUsage(
             input_tokens=context.n_input_tokens or 0,
@@ -306,12 +312,13 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,
             usage=usage,
-        )
+        ), terminus2_completed
 
     async def responses(self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
         session_key = request.session[SESSION_ID_KEY]
         sandbox, pty_session = self._session_sandboxes[session_key]
-        return await self._execute(request, body, sandbox, pty_session)
+        response, _ = await self._execute(request, body, sandbox, pty_session)
+        return response
 
     async def run(self, request: Request, body: Terminus2AgentRunRequest) -> Terminus2AgentVerifyResponse:
         cookies = request.cookies
@@ -332,7 +339,9 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         session_key = request.session[SESSION_ID_KEY]
         self._session_sandboxes[session_key] = (sandbox, pty_session)
 
-        response = await self._execute(request, body.responses_create_params, sandbox, pty_session)
+        response, terminus2_completed = await self._execute(
+            request, body.responses_create_params, sandbox, pty_session
+        )
 
         verification = await self.server_client.post(
             server_name=self.config.resources_server.name,
@@ -346,7 +355,9 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         await pty_session.close()
         await sandbox.stop()
 
-        return Terminus2AgentVerifyResponse.model_validate(await get_response_json(verification))
+        result = await get_response_json(verification)
+        result["terminus2_completed"] = terminus2_completed
+        return Terminus2AgentVerifyResponse.model_validate(result)
 
 
 if __name__ == "__main__":

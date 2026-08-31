@@ -43,7 +43,9 @@ async def test_sandbox_environment_adapts_exec_and_is_dir():
         return SimpleNamespace(stdout="output", stderr=None, return_code=0)
 
     sandbox.exec = exec
-    environment = NeMoGymSandboxEnvironment(sandbox, logs_dir=SimpleNamespace())
+    environment = NeMoGymSandboxEnvironment(
+        sandbox, logs_dir=SimpleNamespace(), pty_session=None, session_id="session-1"
+    )
 
     result = await environment.exec("pwd", timeout_sec=12, user="root", cwd="/work", env={"A": "B"})
 
@@ -67,7 +69,9 @@ async def test_sandbox_environment_uses_seeded_pty_for_stateful_commands():
         return SimpleNamespace(stdout="output", stderr=None, return_code=0)
 
     sandbox.pty.exec = pty_exec
-    environment = NeMoGymSandboxEnvironment(sandbox, logs_dir=SimpleNamespace(), pty_session="seeded-pty")
+    environment = NeMoGymSandboxEnvironment(
+        sandbox, logs_dir=SimpleNamespace(), pty_session="seeded-pty", session_id="session-1"
+    )
 
     await environment.exec("tmux new-session")
 
@@ -168,6 +172,8 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
         sandbox_provider="opensandbox",
         sandbox_timeout=10,
     )
+    set_level = MagicMock()
+    monkeypatch.setattr(app_module.harbor_logger, "setLevel", set_level)
     server = Terminus2Agent(config=config, server_client=MagicMock(spec=ServerClient))
     sandbox_calls = []
 
@@ -221,24 +227,23 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
     monkeypatch.setattr(app_module, "AgentContext", FakeContext)
     monkeypatch.setattr(Terminus2Agent, "base_url_for_run", lambda *_args, **_kwargs: "http://model")
     monkeypatch.setattr(app_module, "get_server_url", lambda _: "http://model")
-    set_level = MagicMock()
-    monkeypatch.setattr(app_module.harbor_logger, "setLevel", set_level)
 
     async def request_json():
         return {"task_id": "task"}
 
-    request = SimpleNamespace(json=request_json)
-    response = await server._execute(
+    request = SimpleNamespace(json=request_json, session={app_module.SESSION_ID_KEY: "session-1"})
+    response, terminus2_completed = await server._execute(
         request,
         NeMoGymResponseCreateParamsNonStreaming(input="solve this"),
         sandbox,
         "seeded-pty",
     )
 
+    assert terminus2_completed is True
     assert response.output[-1].content[0].text == "done"
     assert response.usage.input_tokens == 4
     assert response.usage.output_tokens == 3
-    if debug:
+    if not debug:
         set_level.assert_called_once_with(logging.WARNING)
     else:
         set_level.assert_not_called()
