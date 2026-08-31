@@ -3,10 +3,10 @@
 # benchmark — run as a native Gym responses_api_agents server instead of proxied through remote_agent to
 # an externally-hosted FastAPI service.
 #
-#   gym env start --resources-server reasoning_gym/reasoning_gym_deepagents_agent_model_server \
+#   gym env start --resources-server reasoning_gym/reasoning_gym_langchain_deepagents_agent_model_server \
 #       --model-type inference_provider/openrouter
-#   gym eval run --no-serve --agent reasoning_gym_deepagents_agent_model_server \
-#       --input resources_servers/reasoning_gym/data/example.jsonl --output /tmp/deepagents_agent_rg.jsonl
+#   gym eval run --no-serve --agent reasoning_gym_langchain_deepagents_agent_model_server \
+#       --input resources_servers/reasoning_gym/data/example.jsonl --output /tmp/langchain_deepagents_agent_rg.jsonl
 
 reasoning_gym:
   resources_servers:
@@ -17,9 +17,9 @@ reasoning_gym:
       description: In-tree deepagents (LangChain) agent for reasoning gym tasks, via a Gym model server.
       value: Side-by-side comparison point against examples/langchain_deepagent's remote_agent version.
 
-reasoning_gym_deepagents_agent_model_server:
+reasoning_gym_langchain_deepagents_agent_model_server:
   responses_api_agents:
-    deepagents_agent:
+    langchain_deepagents_agent:
       entrypoint: reasoning_search_agent.py
       resources_server:
         type: resources_servers

@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Concrete deepagents_agent instance: the exact same TavilySearch-based deepagents graph as
+"""Concrete langchain_deepagents_agent instance: the exact same TavilySearch-based deepagents graph as
 examples/langchain_deepagent, wired in-tree instead of via remote_agent. Reused across both the
 reasoning_gym and tavily_search combo configs, matching how the remote_agent version already reuses one
 agent object across both its configs today (see claude_code_agent/simple_agent for the repo-wide
@@ -24,7 +24,7 @@ from deepagents import create_deep_agent
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_tavily import TavilySearch
 
-from responses_api_agents.deepagents_agent.app import DeepAgentsAgent, DeepAgentsAgentConfig
+from responses_api_agents.langchain_deepagents_agent.app import DeepAgentsAgent, DeepAgentsAgentConfig
 
 
 SYSTEM_PROMPT = "Answer the user, then restate your final answer wrapped in <answer></answer> tags."

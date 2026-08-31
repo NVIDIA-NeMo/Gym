@@ -58,7 +58,7 @@ from nemo_gym.server_utils import get_response_json, raise_for_status, rollout_p
 from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig
 
 
-_request_context: ContextVar[dict] = ContextVar("deepagents_agent_request_context")
+_request_context: ContextVar[dict] = ContextVar("langchain_deepagents_agent_request_context")
 
 
 class DeepAgentsAgentConfig(SimpleAgentConfig):

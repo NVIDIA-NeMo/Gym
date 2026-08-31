@@ -50,11 +50,11 @@ provider credentials of its own (it reaches `model_server`, not a provider direc
 
 ```bash
 # reasoning_gym
-gym env start --resources-server reasoning_gym/reasoning_gym_deepagents_agent_model_server \
+gym env start --resources-server reasoning_gym/reasoning_gym_langchain_deepagents_agent_model_server \
     --model-type inference_provider/openrouter
 
 # tavily_search
-gym env start --resources-server tavily_search/tavily_search_deepagents_agent_model_server \
+gym env start --resources-server tavily_search/tavily_search_langchain_deepagents_agent_model_server \
     --model-type inference_provider/openrouter
 ```
 
@@ -65,9 +65,9 @@ talks to directly, so reward numbers are comparable. Any other `responses_api_mo
 ### Run the agent
 
 ```bash
-gym eval run --no-serve --agent reasoning_gym_deepagents_agent_model_server \
+gym eval run --no-serve --agent reasoning_gym_langchain_deepagents_agent_model_server \
     --input resources_servers/reasoning_gym/data/example.jsonl \
-    --output /tmp/deepagents_agent_rg.jsonl
+    --output /tmp/langchain_deepagents_agent_rg.jsonl
 ```
 
 Expect a `mean/reward` comparable to `examples/langchain_deepagent`'s documented baseline (1.0 over the

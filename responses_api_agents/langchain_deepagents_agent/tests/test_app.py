@@ -30,7 +30,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
 )
 from nemo_gym.server_utils import ServerClient
-from responses_api_agents.deepagents_agent.app import (
+from responses_api_agents.langchain_deepagents_agent.app import (
     DeepAgentsAgent,
     DeepAgentsAgentConfig,
     _request_context,
@@ -40,7 +40,7 @@ from responses_api_agents.deepagents_agent.app import (
     to_langchain_ai_message,
     to_responses,
 )
-from responses_api_agents.deepagents_agent.reasoning_search_agent import (
+from responses_api_agents.langchain_deepagents_agent.reasoning_search_agent import (
     ReasoningSearchDeepAgent,
     ReasoningSearchDeepAgentConfig,
 )
@@ -129,7 +129,7 @@ def test_to_langchain_ai_message_extracts_text_and_tool_calls():
 def test_bind_tools_unnests_chat_completions_shape_into_responses_shape():
     from langchain_core.tools import tool
 
-    from responses_api_agents.deepagents_agent.app import GymResponsesChatModel
+    from responses_api_agents.langchain_deepagents_agent.app import GymResponsesChatModel
 
     @tool
     def search(q: str) -> str:

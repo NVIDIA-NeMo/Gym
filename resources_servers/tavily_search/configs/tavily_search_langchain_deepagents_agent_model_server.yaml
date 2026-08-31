@@ -2,10 +2,10 @@
 # tavily_search_judge_openai_model.yaml (resources server + judge_model + an in-tree agent composing with
 # --model-type at launch).
 #
-#   gym env start --resources-server tavily_search/tavily_search_deepagents_agent_model_server \
+#   gym env start --resources-server tavily_search/tavily_search_langchain_deepagents_agent_model_server \
 #       --model-type inference_provider/openrouter
-#   gym eval run --no-serve --agent tavily_search_deepagents_agent_model_server \
-#       --input resources_servers/tavily_search/data/example.jsonl --output /tmp/deepagents_agent_tavily.jsonl
+#   gym eval run --no-serve --agent tavily_search_langchain_deepagents_agent_model_server \
+#       --input resources_servers/tavily_search/data/example.jsonl --output /tmp/langchain_deepagents_agent_tavily.jsonl
 
 tavily_search_resources_server:
   resources_servers:
@@ -30,9 +30,9 @@ judge_model:
       openai_api_key: ${search_judge_model_api_key}
       openai_model: ${search_judge_model_name}
 
-tavily_search_deepagents_agent_model_server:
+tavily_search_langchain_deepagents_agent_model_server:
   responses_api_agents:
-    deepagents_agent:
+    langchain_deepagents_agent:
       entrypoint: reasoning_search_agent.py
       resources_server:
         type: resources_servers
