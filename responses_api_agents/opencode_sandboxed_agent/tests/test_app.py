@@ -458,7 +458,6 @@ class TestOpenCodeSandboxedAgent:
         sandbox._handle = SandboxHandle(sandbox_id="connected-sandbox", provider_name="opensandbox", raw=None)
         sandbox.exec = AsyncMock(
             side_effect=[
-                SimpleNamespace(stdout="OpenCode run finished", stderr="", return_code=0, error_type=None),
                 SimpleNamespace(stdout='[{"id": "session-id"}]', stderr="", return_code=0, error_type=None),
                 SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
                 SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
@@ -552,15 +551,15 @@ class TestOpenCodeSandboxedAgent:
         assert sandbox_records[0].wall_time_s is None
         assert "sandbox_lifecycle_timing_unavailable" in {gap.code for gap in result.ng_agent_observations.gaps}
         assert "sandbox_cleanup_failed" not in {gap.code for gap in result.ng_agent_observations.gaps}
-        run_env = sandbox.exec.await_args_list[0].kwargs["env"]
-        session_list_env = sandbox.exec.await_args_list[1].kwargs["env"]
-        export_env = sandbox.exec.await_args_list[2].kwargs["env"]
-        assert run_env["XDG_DATA_HOME"].startswith("/tmp/nemo-gym-opencode-")
-        assert session_list_env["XDG_DATA_HOME"] == run_env["XDG_DATA_HOME"]
-        assert export_env["XDG_DATA_HOME"] == run_env["XDG_DATA_HOME"]
+        session_list_env = sandbox.exec.await_args_list[0].kwargs["env"]
+        export_env = sandbox.exec.await_args_list[1].kwargs["env"]
+        remote_data_home = session_list_env["XDG_DATA_HOME"]
+        assert remote_data_home.startswith("/tmp/nemo-gym-opencode-")
+        assert f"XDG_DATA_HOME={remote_data_home}" in sandbox.pty.exec.await_args.kwargs["command"]
+        assert export_env["XDG_DATA_HOME"] == remote_data_home
         assert (
             "opencode export session-id > /tmp/opencode_export.json"
-            in sandbox.exec.await_args_list[2].kwargs["command"]
+            in sandbox.exec.await_args_list[1].kwargs["command"]
         )
         assert not hasattr(request.state, "_ng_observation_invocation_id")
         assert server._sandbox_id_to_run_result == {}

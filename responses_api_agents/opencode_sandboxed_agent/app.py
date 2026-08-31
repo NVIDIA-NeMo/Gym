@@ -750,8 +750,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # diff`, which would sweep this transcript into the patch.
         export_remote_fpath = f"/tmp/opencode_{export_fname}"
         try:
+            session_env = {"XDG_DATA_HOME": remote_data_home} if remote_data_home is not None else None
             session_list_result = await sandbox.exec(
-                command="export PATH=$HOME/.opencode/bin:$PATH && opencode session list --format json"
+                command="export PATH=$HOME/.opencode/bin:$PATH && opencode session list --format json",
+                env=session_env,
             )
             if session_list_result.return_code != 0:
                 raise RuntimeError(
@@ -763,7 +765,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 command=(
                     "export PATH=$HOME/.opencode/bin:$PATH "
                     f"&& opencode export {quote(session_id)} > {quote(export_remote_fpath)}"
-                )
+                ),
+                env=session_env,
             )
         except Exception:
             export_result = None
