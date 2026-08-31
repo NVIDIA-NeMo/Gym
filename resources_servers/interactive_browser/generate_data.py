@@ -82,7 +82,9 @@ SYSTEM = (
 TASKS = [
     ("Navigate from the home page to the About page, then finish.", {"url_contains": "about.html"}),
     ("Go to the form page, type 'neo' as the username, submit, then finish.", {"dom_contains": "Welcome neo"}),
-    ("Open the About page, read the secret code, report it via finish(answer=...).", {"dom_contains": "ALPHA-42"}),
+    # Graded on the reported answer, not on the page: `ALPHA-42` is printed on
+    # about.html, so `dom_contains` would score a rollout that merely navigated there.
+    ("Open the About page, read the secret code, report it via finish(answer=...).", {"answer_equals": "ALPHA-42"}),
     ("From the home page, reach the form page, then finish there.", {"url_contains": "form.html"}),
     ("Stay on the home page and finish immediately.", {"url_contains": "index.html"}),
 ]
@@ -92,7 +94,8 @@ TASKS = [
 # explicitly published for this kind of use.
 REMOTE_INITIAL_URL = "https://example.com/"
 REMOTE_TASKS = [
-    ("Report the page's main heading via finish(answer=...).", {"dom_contains": "Example Domain"}),
+    # Same reason as the About-page task: the heading is on the page either way.
+    ("Report the page's main heading via finish(answer=...).", {"answer_equals": "Example Domain"}),
     ("Follow the 'More information' link, then finish.", {"url_contains": "iana.org"}),
     ("Navigate to https://www.iana.org/help/example-domains and finish there.", {"url_contains": "example-domains"}),
 ]

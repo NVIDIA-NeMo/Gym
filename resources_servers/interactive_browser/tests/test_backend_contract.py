@@ -112,6 +112,26 @@ async def test_isolated_state_between_episodes(backend_config):
 
 
 @pytest.mark.asyncio
+async def test_storage_does_not_carry_between_episodes(backend_config):
+    """Two tabs in one context also have different URLs, so URLs prove nothing.
+
+    Storage is what actually separates two rollouts: a login one episode performs
+    must not be visible to the next, or the next episode's reward is not its own.
+    """
+    first = create_backend(backend_config)
+    second = create_backend(backend_config)
+    await first.open(_url("index.html"))
+    await first.write_storage("episode_one", "secret")
+    await second.open(_url("index.html"))
+    try:
+        assert await first.read_storage("episode_one") == "secret"
+        assert await second.read_storage("episode_one") is None
+    finally:
+        await first.close()
+        await second.close()
+
+
+@pytest.mark.asyncio
 async def test_driving_a_closed_backend_raises(backend_config):
     b = create_backend(backend_config)
     await b.open(_url("index.html"))
