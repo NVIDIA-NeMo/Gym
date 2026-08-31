@@ -34,9 +34,13 @@ LEGACY_SOURCE_URL = (
 LEGACY_SOURCE_SHA256 = "69b19fd86c23f1a500244a3724e039aa7ca6a1223d03e11eb10e308d4f11c488"  # pragma: allowlist secret
 LEGACY_SOURCE_FPATH = BENCHMARK_DIR / "data" / "WebVoyager_data.jsonl"
 NATIVE_V3_SOURCE_COMMIT = "6a2977939b157b0ab9de7799bb089c721f1ac115"  # pragma: allowlist secret
+NATIVE_V3_SOURCE_URL = (
+    f"https://raw.githubusercontent.com/jayl940712/webarena_benchmarks/{NATIVE_V3_SOURCE_COMMIT}/webvoyager.jsonl"
+)
 NATIVE_V3_SOURCE_SHA256 = (
     "f635a9b27fa1980a63b39bbf64ae8e9e766159cb70fa765451d3d3c0b948ff98"  # pragma: allowlist secret
 )
+NATIVE_V3_SOURCE_FPATH = BENCHMARK_DIR / "data" / "webvoyager_native_v3_source.jsonl"
 
 PROFILE_CONFIGS = {
     "legacy": (
@@ -59,20 +63,20 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _download_legacy_source(destination: Path = LEGACY_SOURCE_FPATH) -> Path:
-    """Materialize the pinned official 643-task source inside Gym's ignored data cache."""
+def _download_source(*, url: str, sha256: str, destination: Path, label: str) -> Path:
+    """Materialize one hash-pinned source inside Gym's ignored data cache."""
 
-    if destination.is_file() and _sha256(destination) == LEGACY_SOURCE_SHA256:
-        print(f"Using cached official WebVoyager source: {destination}", flush=True)
+    if destination.is_file() and _sha256(destination) == sha256:
+        print(f"Using cached {label}: {destination}", flush=True)
         return destination
 
     destination.parent.mkdir(parents=True, exist_ok=True)
-    print(f"Downloading official WebVoyager source from {LEGACY_SOURCE_URL}", flush=True)
-    with urllib.request.urlopen(LEGACY_SOURCE_URL, timeout=60) as response:
+    print(f"Downloading {label} from {url}", flush=True)
+    with urllib.request.urlopen(url, timeout=60) as response:
         payload = response.read()
     digest = hashlib.sha256(payload).hexdigest()
-    if digest != LEGACY_SOURCE_SHA256:
-        raise ValueError(f"official WebVoyager source hash mismatch: expected {LEGACY_SOURCE_SHA256}, got {digest}")
+    if digest != sha256:
+        raise ValueError(f"{label} hash mismatch: expected {sha256}, got {digest}")
 
     temporary_path: Path | None = None
     try:
@@ -86,6 +90,28 @@ def _download_legacy_source(destination: Path = LEGACY_SOURCE_FPATH) -> Path:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
     return destination
+
+
+def _download_legacy_source(destination: Path = LEGACY_SOURCE_FPATH) -> Path:
+    """Materialize the pinned official 643-task source."""
+
+    return _download_source(
+        url=LEGACY_SOURCE_URL,
+        sha256=LEGACY_SOURCE_SHA256,
+        destination=destination,
+        label="official WebVoyager source",
+    )
+
+
+def _download_native_v3_source(destination: Path = NATIVE_V3_SOURCE_FPATH) -> Path:
+    """Materialize the pinned maintained 552-task source."""
+
+    return _download_source(
+        url=NATIVE_V3_SOURCE_URL,
+        sha256=NATIVE_V3_SOURCE_SHA256,
+        destination=destination,
+        label="maintained WebVoyager source",
+    )
 
 
 def prepare(source: str | Path | None = None, output: str | Path = OUTPUT_FPATH) -> Path:
@@ -108,10 +134,14 @@ def prepare(source: str | Path | None = None, output: str | Path = OUTPUT_FPATH)
     return Path(output)
 
 
-def prepare_native(source: str | Path, output: str | Path) -> Path:
-    """Prepare the pinned maintained population for Nano Omni native runs."""
+def prepare_native(
+    source: str | Path | None = None,
+    output: str | Path = NATIVE_OUTPUT_FPATH,
+) -> Path:
+    """Prepare the pinned maintained population for native runs."""
 
-    source_path = Path(source)
+    configured_source = source or os.environ.get("WEBVOYAGER_SOURCE_JSONL")
+    source_path = Path(configured_source).expanduser() if configured_source else _download_native_v3_source()
     digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
     if digest != NATIVE_V3_SOURCE_SHA256:
         raise ValueError(f"native WebVoyager source hash mismatch: expected {NATIVE_V3_SOURCE_SHA256}, got {digest}")
@@ -204,10 +234,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.profile == "native_v3":
-        source = args.source or os.environ.get("WEBVOYAGER_SOURCE_JSONL")
-        if not source:
-            parser.error("--profile native_v3 requires --source or WEBVOYAGER_SOURCE_JSONL")
-        prepared = prepare_native(source, args.output or NATIVE_OUTPUT_FPATH)
+        prepared = prepare_native(args.source, args.output or NATIVE_OUTPUT_FPATH)
     else:
         prepared = prepare(args.source, args.output or OUTPUT_FPATH)
     if not args.no_env:

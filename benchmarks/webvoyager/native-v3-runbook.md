@@ -52,22 +52,14 @@ Do not run the native profile on macOS. PyAutoGUI captures and controls the
 shared X display, and one resource-server process therefore supports exactly
 one live browser session.
 
-## 3. Fetch and verify the 552-task dataset
+## 3. Resolve the pinned 552-task dataset
 
-```bash
-export WEBVOYAGER_DATA_ROOT="$PWD/.cache/webvoyager-dataset"
-git clone https://github.com/jayl940712/webarena_benchmarks.git "$WEBVOYAGER_DATA_ROOT"
-git -C "$WEBVOYAGER_DATA_ROOT" checkout --detach 6a2977939b157b0ab9de7799bb089c721f1ac115
-export WEBVOYAGER_SOURCE_JSONL="$WEBVOYAGER_DATA_ROOT/webvoyager.jsonl"
-
-test "$(sha256sum "$WEBVOYAGER_SOURCE_JSONL" | awk '{print $1}')" = \
-  "f635a9b27fa1980a63b39bbf64ae8e9e766159cb70fa765451d3d3c0b948ff98"  # pragma: allowlist secret
-test "$(wc -l < "$WEBVOYAGER_SOURCE_JSONL" | tr -d ' ')" = "552"
-```
-
-The same lock is machine-readable in `native_v3_source_lock.json`.
-`prepare.py` repeats both the hash and task-count checks before writing Gym
-records.
+No separate repository checkout is required. In step 6, `prepare.py` downloads
+the root `webvoyager.jsonl` file directly from the commit recorded in
+`native_v3_source_lock.json`, caches it in the benchmark's gitignored `data`
+directory, and validates both its SHA-256 and 552-task denominator. To use an
+existing offline copy instead, set `WEBVOYAGER_SOURCE_JSONL` or pass
+`--source /path/to/webvoyager.jsonl`; the same validation still applies.
 
 ## 4. Configure the policy endpoint
 
@@ -167,7 +159,6 @@ From the Gym repository root:
 ```bash
 ./.venv/bin/python benchmarks/webvoyager/prepare.py \
   --profile native_v3 \
-  --source "$WEBVOYAGER_SOURCE_JSONL" \
   --rollout-output "$PWD/results/webvoyager/full/rollouts.jsonl" \
   --force-env
 

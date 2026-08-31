@@ -50,6 +50,21 @@ def _legacy_source_rows(count: int = 643) -> bytes:
     return ("\n".join(rows) + "\n").encode()
 
 
+def _native_source_rows(count: int = 552) -> bytes:
+    rows = (
+        json.dumps(
+            {
+                "web_name": "Allrecipes",
+                "id": f"Allrecipes--{index}",
+                "ques": f"Find recipe {index}",
+                "web": "https://www.allrecipes.com/",
+            }
+        )
+        for index in range(count)
+    )
+    return ("\n".join(rows) + "\n").encode()
+
+
 def test_prepare_downloads_and_reuses_pinned_official_legacy_source(monkeypatch, tmp_path) -> None:
     payload = _legacy_source_rows()
     destination = tmp_path / "WebVoyager_data.jsonl"
@@ -86,6 +101,62 @@ def test_prepare_legacy_profile_is_self_contained_and_enforces_population(monkey
     source.write_bytes(_legacy_source_rows(642))
     with pytest.raises(ValueError, match="exactly 643 tasks"):
         webvoyager_prepare.prepare(output=output)
+
+
+def test_prepare_downloads_and_reuses_pinned_native_source(monkeypatch, tmp_path) -> None:
+    payload = _native_source_rows()
+    destination = tmp_path / "webvoyager_native_v3_source.jsonl"
+    calls = []
+    monkeypatch.setattr(webvoyager_prepare, "NATIVE_V3_SOURCE_SHA256", hashlib.sha256(payload).hexdigest())
+    monkeypatch.setattr(
+        webvoyager_prepare.urllib.request,
+        "urlopen",
+        lambda url, timeout: calls.append((url, timeout)) or _DownloadResponse(payload),
+    )
+
+    assert webvoyager_prepare._download_native_v3_source(destination) == destination
+    assert destination.read_bytes() == payload
+    assert calls == [(webvoyager_prepare.NATIVE_V3_SOURCE_URL, 60)]
+
+    monkeypatch.setattr(
+        webvoyager_prepare.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: pytest.fail("a valid cached source must not be downloaded again"),
+    )
+    assert webvoyager_prepare._download_native_v3_source(destination) == destination
+
+
+def test_prepare_native_profile_is_self_contained_and_enforces_population(monkeypatch, tmp_path) -> None:
+    source = tmp_path / "webvoyager.jsonl"
+    payload = _native_source_rows()
+    source.write_bytes(payload)
+    output = tmp_path / "prepared.jsonl"
+    monkeypatch.delenv("WEBVOYAGER_SOURCE_JSONL", raising=False)
+    monkeypatch.setattr(webvoyager_prepare, "NATIVE_V3_SOURCE_SHA256", hashlib.sha256(payload).hexdigest())
+    monkeypatch.setattr(webvoyager_prepare, "_download_native_v3_source", lambda: source)
+
+    assert webvoyager_prepare.prepare_native(output=output) == output
+    assert len(output.read_text(encoding="utf-8").splitlines()) == 552
+
+    payload = _native_source_rows(551)
+    source.write_bytes(payload)
+    monkeypatch.setattr(webvoyager_prepare, "NATIVE_V3_SOURCE_SHA256", hashlib.sha256(payload).hexdigest())
+    with pytest.raises(ValueError, match="exactly 552 tasks"):
+        webvoyager_prepare.prepare_native(output=output)
+
+
+def test_native_v3_source_lock_matches_the_automatic_download() -> None:
+    lock_path = Path(__file__).parents[1] / "native_v3_source_lock.json"
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+
+    assert lock == {
+        "repository": "https://github.com/jayl940712/webarena_benchmarks",
+        "commit": webvoyager_prepare.NATIVE_V3_SOURCE_COMMIT,
+        "path": "webvoyager.jsonl",
+        "raw_url": webvoyager_prepare.NATIVE_V3_SOURCE_URL,
+        "sha256": webvoyager_prepare.NATIVE_V3_SOURCE_SHA256,
+        "task_count": 552,
+    }
 
 
 def test_native_v3_policy_preserves_history_thinking() -> None:

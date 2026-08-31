@@ -115,19 +115,14 @@ The native profile additionally requires:
 - a vision-capable judge;
 - an isolated X display and browser profile for every concurrent worker.
 
-### Fetch the pinned task population
+### Resolve the pinned task population
 
-```bash
-export WEBVOYAGER_DATA_ROOT="$PWD/.cache/webvoyager-dataset"
-git clone https://github.com/jayl940712/webarena_benchmarks.git "$WEBVOYAGER_DATA_ROOT"
-git -C "$WEBVOYAGER_DATA_ROOT" checkout --detach \
-  6a2977939b157b0ab9de7799bb089c721f1ac115  # pragma: allowlist secret
-export WEBVOYAGER_SOURCE_JSONL="$WEBVOYAGER_DATA_ROOT/webvoyager.jsonl"
-
-test "$(sha256sum "$WEBVOYAGER_SOURCE_JSONL" | awk '{print $1}')" = \
-  "f635a9b27fa1980a63b39bbf64ae8e9e766159cb70fa765451d3d3c0b948ff98"  # pragma: allowlist secret
-test "$(grep -c . "$WEBVOYAGER_SOURCE_JSONL")" = "552"
-```
+No separate repository checkout is required. The prepare command below
+downloads only the root `webvoyager.jsonl` file from the pinned
+`jayl940712/webarena_benchmarks` commit, caches it under the benchmark's
+gitignored `data` directory, and verifies its SHA-256 and 552-task denominator.
+For an existing offline copy, pass `--source /path/to/webvoyager.jsonl` or set
+`WEBVOYAGER_SOURCE_JSONL`; validation remains mandatory.
 
 ### Configure external services
 
@@ -166,7 +161,6 @@ CapSolver cannot connect to a worker-local address.
 ```bash
 ./.venv/bin/python benchmarks/webvoyager/prepare.py \
   --profile native_v3 \
-  --source "$WEBVOYAGER_SOURCE_JSONL" \
   --rollout-output "$PWD/results/webvoyager/full/rollouts.jsonl" \
   --force-env
 

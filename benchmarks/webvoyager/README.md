@@ -49,6 +49,13 @@ reuse an existing verified source cache instead, set
 `WEBVOYAGER_SOURCE_JSONL` or pass `--source` when invoking `prepare.py`
 directly.
 
+The native profile is self-contained at the dataset layer as well. Running
+`prepare.py --profile native_v3` downloads only the pinned root
+`webvoyager.jsonl` file from `jayl940712/webarena_benchmarks`, verifies its
+SHA-256 and 552-task denominator, and caches it under
+`benchmarks/webvoyager/data`. Use `--source` or
+`WEBVOYAGER_SOURCE_JSONL` only to select an existing offline copy.
+
 For an OSWorld-style runnable composition, invoke the script directly. It
 validates/prepares the selected profile and writes a private mode-`0600`,
 gitignored `benchmarks/webvoyager/env.yaml`. Credentials remain process

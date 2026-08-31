@@ -146,7 +146,9 @@ the BrowserGym-compatible route can call the same policy endpoint.
 The operational form of this checklist, including exact commands and pass
 criteria, is maintained in [native-v3-runbook.md](native-v3-runbook.md).
 
-1. Set `WEBVOYAGER_SOURCE_JSONL` and run the native prepare script.
+1. Run the native prepare script. It downloads the pinned 552-task source and
+   verifies its SHA-256 automatically. Use `WEBVOYAGER_SOURCE_JSONL` only for
+   an existing offline copy.
 2. Point `POLICY_BASE_URL` at a compatible external endpoint, or prepare the
    public local-serving assets above and set
    `NANO_V3_REASONING_PARSER_PLUGIN`. Record explicit tokenizer/template
@@ -184,7 +186,6 @@ used by the root repository:
 cd /path/to/Gym
 uv lock --check
 uv sync --frozen --extra dev
-export WEBVOYAGER_SOURCE_JSONL=/path/to/pinned/webvoyager.jsonl
 ./.venv/bin/python benchmarks/webvoyager/prepare.py \
   --profile native_v3 \
   --force-env
