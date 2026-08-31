@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import hashlib
 import json
 import stat
 import sys
@@ -9,6 +10,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from benchmarks.webvoyager import prepare as webvoyager_prepare
 from benchmarks.webvoyager.prepare import REPO_ROOT, write_env
 from benchmarks.webvoyager.prepare import main as prepare_main
 from benchmarks.webvoyager.summarize_native_v3 import (
@@ -17,6 +19,73 @@ from benchmarks.webvoyager.summarize_native_v3 import (
     summarize,
     write_missing_rows,
 )
+
+
+class _DownloadResponse:
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self.payload
+
+
+def _legacy_source_rows(count: int = 643) -> bytes:
+    rows = (
+        json.dumps(
+            {
+                "web_name": "ArXiv",
+                "id": f"ArXiv--{index}",
+                "ques": f"Find paper {index}",
+                "web": "https://arxiv.org/",
+            }
+        )
+        for index in range(count)
+    )
+    return ("\n".join(rows) + "\n").encode()
+
+
+def test_prepare_downloads_and_reuses_pinned_official_legacy_source(monkeypatch, tmp_path) -> None:
+    payload = _legacy_source_rows()
+    destination = tmp_path / "WebVoyager_data.jsonl"
+    calls = []
+    monkeypatch.setattr(webvoyager_prepare, "LEGACY_SOURCE_SHA256", hashlib.sha256(payload).hexdigest())
+    monkeypatch.setattr(
+        webvoyager_prepare.urllib.request,
+        "urlopen",
+        lambda url, timeout: calls.append((url, timeout)) or _DownloadResponse(payload),
+    )
+
+    assert webvoyager_prepare._download_legacy_source(destination) == destination
+    assert destination.read_bytes() == payload
+    assert calls == [(webvoyager_prepare.LEGACY_SOURCE_URL, 60)]
+
+    monkeypatch.setattr(
+        webvoyager_prepare.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: pytest.fail("a valid cached source must not be downloaded again"),
+    )
+    assert webvoyager_prepare._download_legacy_source(destination) == destination
+
+
+def test_prepare_legacy_profile_is_self_contained_and_enforces_population(monkeypatch, tmp_path) -> None:
+    source = tmp_path / "WebVoyager_data.jsonl"
+    source.write_bytes(_legacy_source_rows())
+    output = tmp_path / "prepared.jsonl"
+    monkeypatch.delenv("WEBVOYAGER_SOURCE_JSONL", raising=False)
+    monkeypatch.setattr(webvoyager_prepare, "_download_legacy_source", lambda: source)
+
+    assert webvoyager_prepare.prepare(output=output) == output
+    assert len(output.read_text(encoding="utf-8").splitlines()) == 643
+
+    source.write_bytes(_legacy_source_rows(642))
+    with pytest.raises(ValueError, match="exactly 643 tasks"):
+        webvoyager_prepare.prepare(output=output)
 
 
 def test_native_v3_policy_preserves_history_thinking() -> None:

@@ -5,6 +5,8 @@ the maintained native 552-task population, start with the
 [native WebVoyager end-to-end runbook](native-v3-runbook.md). It identifies
 the exact dataset and public model-serving assets, required external services,
 commands, logs, and denominator checks.
+The published [WebVoyager evaluation tutorial](https://docs.nvidia.com/nemo/gym/main/tutorials/evaluation-tutorials/webvoyager)
+covers both supported profiles.
 
 The first Gym profile runs the 643 official WebVoyager tasks through
 `browsergym/openended`. It preserves the upstream action surface (`Click`,
@@ -39,8 +41,13 @@ uv sync --frozen --extra dev
 ```
 
 The last command is Gym's standard dataset-only preparation API. The default
-source is `../WebVoyager/data/WebVoyager_data.jsonl`; set
-`WEBVOYAGER_SOURCE_JSONL` when the source checkout lives elsewhere.
+path downloads the official 643-task source from the pinned
+`MinorJerry/WebVoyager` revision into the gitignored
+`benchmarks/webvoyager/data/WebVoyager_data.jsonl`, verifies its SHA-256, and
+then writes `webvoyager_benchmark.jsonl`. No sibling checkout is required. To
+reuse an existing verified source cache instead, set
+`WEBVOYAGER_SOURCE_JSONL` or pass `--source` when invoking `prepare.py`
+directly.
 
 For an OSWorld-style runnable composition, invoke the script directly. It
 validates/prepares the selected profile and writes a private mode-`0600`,

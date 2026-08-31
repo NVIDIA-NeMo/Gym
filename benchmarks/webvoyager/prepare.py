@@ -9,6 +9,8 @@ import hashlib
 import json
 import os
 import shlex
+import tempfile
+import urllib.request
 from pathlib import Path
 
 from nemo_gym.web.datasets import (
@@ -25,7 +27,12 @@ OUTPUT_FPATH = BENCHMARK_DIR / "data" / "webvoyager_benchmark.jsonl"
 NATIVE_OUTPUT_FPATH = BENCHMARK_DIR / "data" / "webvoyager_native_v3.jsonl"
 DEFAULT_ENV_FPATH = BENCHMARK_DIR / "env.yaml"
 DEFAULT_ROLLOUT_FPATH = REPO_ROOT / "results" / "webvoyager" / "rollouts.jsonl"
-DEFAULT_SOURCE = BENCHMARK_DIR.parents[2] / "WebVoyager" / "data" / "WebVoyager_data.jsonl"
+LEGACY_SOURCE_REVISION = "5a7896738c10bfb8b9edccce6bb0e0411f8ae569"  # pragma: allowlist secret
+LEGACY_SOURCE_URL = (
+    f"https://raw.githubusercontent.com/MinorJerry/WebVoyager/{LEGACY_SOURCE_REVISION}/data/WebVoyager_data.jsonl"
+)
+LEGACY_SOURCE_SHA256 = "69b19fd86c23f1a500244a3724e039aa7ca6a1223d03e11eb10e308d4f11c488"  # pragma: allowlist secret
+LEGACY_SOURCE_FPATH = BENCHMARK_DIR / "data" / "WebVoyager_data.jsonl"
 NATIVE_V3_SOURCE_COMMIT = "6a2977939b157b0ab9de7799bb089c721f1ac115"  # pragma: allowlist secret
 NATIVE_V3_SOURCE_SHA256 = (
     "f635a9b27fa1980a63b39bbf64ae8e9e766159cb70fa765451d3d3c0b948ff98"  # pragma: allowlist secret
@@ -48,9 +55,54 @@ PROFILE_AGENTS = {
 }
 
 
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _download_legacy_source(destination: Path = LEGACY_SOURCE_FPATH) -> Path:
+    """Materialize the pinned official 643-task source inside Gym's ignored data cache."""
+
+    if destination.is_file() and _sha256(destination) == LEGACY_SOURCE_SHA256:
+        print(f"Using cached official WebVoyager source: {destination}", flush=True)
+        return destination
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    print(f"Downloading official WebVoyager source from {LEGACY_SOURCE_URL}", flush=True)
+    with urllib.request.urlopen(LEGACY_SOURCE_URL, timeout=60) as response:
+        payload = response.read()
+    digest = hashlib.sha256(payload).hexdigest()
+    if digest != LEGACY_SOURCE_SHA256:
+        raise ValueError(f"official WebVoyager source hash mismatch: expected {LEGACY_SOURCE_SHA256}, got {digest}")
+
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=destination.parent, prefix=f".{destination.name}.", delete=False
+        ) as handle:
+            handle.write(payload)
+            temporary_path = Path(handle.name)
+        temporary_path.replace(destination)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+    return destination
+
+
 def prepare(source: str | Path | None = None, output: str | Path = OUTPUT_FPATH) -> Path:
-    source_path = Path(source or os.environ.get("WEBVOYAGER_SOURCE_JSONL", DEFAULT_SOURCE))
-    rows = [adapt_webvoyager_record(record) for record in load_json_records(source_path)]
+    """Prepare the official 643-task BrowserGym-compatible profile.
+
+    ``gym eval prepare --benchmark webvoyager`` calls this function without
+    arguments. In that case it downloads an immutable upstream source into the
+    benchmark's gitignored data directory. Operators can still provide an
+    explicit source path for an already-populated cache.
+    """
+
+    configured_source = source or os.environ.get("WEBVOYAGER_SOURCE_JSONL")
+    source_path = Path(configured_source).expanduser() if configured_source else _download_legacy_source()
+    records = load_json_records(source_path)
+    if len(records) != 643:
+        raise ValueError(f"BrowserGym-compatible WebVoyager requires exactly 643 tasks, got {len(records)}")
+    rows = [adapt_webvoyager_record(record) for record in records]
     count = write_jsonl(rows, output)
     print(f"Wrote {count} WebVoyager tasks to {output}", flush=True)
     return Path(output)
