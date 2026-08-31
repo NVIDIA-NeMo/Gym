@@ -17,6 +17,7 @@ terminus_2_sandboxed_agent:
       tmux_pane_width: 160
       tmux_pane_height: 40
       dump_trajectory: false
+      debug: false
       model_context_limit: 1000000
       model_output_limit: null
 

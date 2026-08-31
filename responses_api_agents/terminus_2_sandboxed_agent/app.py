@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import logging
 import tempfile
 from pathlib import Path
 from time import time
@@ -15,6 +16,7 @@ from harbor.agents.terminus_2 import Terminus2
 from harbor.llms.base import BaseLLM, LLMResponse
 from harbor.models.agent.context import AgentContext
 from harbor.models.metric.usage_info import UsageInfo
+from harbor.utils.logger import logger as harbor_logger
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
@@ -56,6 +58,7 @@ class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
     tmux_pane_width: int
     tmux_pane_height: int
     dump_trajectory: bool = False
+    debug: bool = False
     model_context_limit: int = 1_000_000
     model_output_limit: int | None = None
     sandbox_provider: str
@@ -228,6 +231,9 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
         self._session_sandboxes: dict[str, tuple[AsyncSandbox, SandboxPtySession]] = {}
+
+        if self.config.debug:
+            harbor_logger.setLevel(logging.WARNING)
 
     async def _connect_sandbox(self, sandbox_id: str, pty_session_id: str) -> tuple[AsyncSandbox, SandboxPtySession]:
         provider = create_provider(resolve_provider_config(self.config.sandbox_provider, get_global_config_dict()))

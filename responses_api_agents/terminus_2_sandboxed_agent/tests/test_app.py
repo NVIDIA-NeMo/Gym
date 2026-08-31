@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import logging
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -8,7 +9,6 @@ import pytest
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
-    NeMoGymAsyncOpenAIClient,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -76,13 +76,6 @@ async def test_sandbox_environment_uses_seeded_pty_for_stateful_commands():
 
 def test_agent_implements_required_responses_endpoint():
     assert not getattr(Terminus2Agent, "__abstractmethods__", set())
-
-
-def test_nemo_gym_async_openai_client_alias_is_available():
-    from nemo_gym import NeMoGymAsyncOpenAIClient as exported_client
-
-    assert NeMoGymAsyncOpenAIClient.__name__ == "NeMoGymAsyncOpenAI"
-    assert exported_client is NeMoGymAsyncOpenAIClient
 
 
 @pytest.mark.asyncio
@@ -156,7 +149,8 @@ async def test_nemo_gym_llm_records_every_responses_request_and_output():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("dump_trajectory", [False, True])
-async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_trajectory):
+@pytest.mark.parametrize("debug", [False, True])
+async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_trajectory, debug):
     config = Terminus2AgentConfig(
         host="0.0.0.0",
         port=8080,
@@ -170,6 +164,7 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
         tmux_pane_width=160,
         tmux_pane_height=40,
         dump_trajectory=dump_trajectory,
+        debug=debug,
         sandbox_provider="opensandbox",
         sandbox_timeout=10,
     )
@@ -226,6 +221,8 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
     monkeypatch.setattr(app_module, "AgentContext", FakeContext)
     monkeypatch.setattr(Terminus2Agent, "base_url_for_run", lambda *_args, **_kwargs: "http://model")
     monkeypatch.setattr(app_module, "get_server_url", lambda _: "http://model")
+    set_level = MagicMock()
+    monkeypatch.setattr(app_module.harbor_logger, "setLevel", set_level)
 
     async def request_json():
         return {"task_id": "task"}
@@ -241,6 +238,10 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
     assert response.output[-1].content[0].text == "done"
     assert response.usage.input_tokens == 4
     assert response.usage.output_tokens == 3
+    if debug:
+        set_level.assert_called_once_with(logging.WARNING)
+    else:
+        set_level.assert_not_called()
     assert sandbox_calls == [
         ("mkdir -p /logs/agent", {"cwd": None, "env": None, "timeout_s": None, "user": "root"}),
         ("tmux setup", {"session": "seeded-pty", "timeout_s": None}),
