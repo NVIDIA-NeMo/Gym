@@ -605,6 +605,14 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
         ),
     )
 
+    route_failures_to_sidecar: bool = Field(
+        default=False,
+        description=(
+            "Record a failed agent /run as a failures-sidecar row and keep going, instead of ending "
+            "the run. The failed rollouts are then absent from the rollouts jsonl and from the "
+            "score, which is reported over fewer rollouts than were dispatched."
+        ),
+    )
     rollout_collection_driver: Optional[str] = Field(
         default=None,
         description=(
@@ -828,6 +836,22 @@ def _truncated_body(body: Optional[bytes]) -> Optional[str]:
     return text[:_MAX_FAILURE_BODY_CHARS] + ("…" if len(body) > _MAX_FAILURE_BODY_CHARS else "")
 
 
+def _latest_failure_rows(failures_fpaths: List[Path]) -> Dict[Tuple[Any, Any], Dict[str, Any]]:
+    """The last attempt recorded for each rollout across the failures sidecars."""
+    latest_by_key: Dict[Tuple[Any, Any], Dict[str, Any]] = {}
+    for fpath in failures_fpaths:
+        if not fpath.exists():
+            continue
+        with fpath.open("rb") as f:
+            for line_no, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                row = loads_jsonl_line(line, fpath, line_no)
+                latest_by_key[(row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME))] = row
+    return latest_by_key
+
+
 def _failure_rows_counted_as_zero(
     failures_fpaths: List[Path], failure_classes: List[str], scored_keys: set
 ) -> List[Dict[str, Any]]:
@@ -845,18 +869,7 @@ def _failure_rows_counted_as_zero(
     if not failure_classes:
         return []
 
-    latest_by_key: Dict[Tuple[Any, Any], Dict[str, Any]] = {}
-    for fpath in failures_fpaths:
-        if not fpath.exists():
-            continue
-        with fpath.open("rb") as f:
-            for line_no, line in enumerate(f, 1):
-                line = line.strip()
-                if not line:
-                    continue
-                row = loads_jsonl_line(line, fpath, line_no)
-                latest_by_key[(row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME))] = row
-
+    latest_by_key = _latest_failure_rows(failures_fpaths)
     wanted = set(failure_classes)
     counted = []
     for key, row in latest_by_key.items():
@@ -868,6 +881,23 @@ def _failure_rows_counted_as_zero(
         scored.setdefault("reward", 0.0)
         counted.append(scored)
     return counted
+
+
+def _coverage_report(expected: int, scored: int, failure_counts: Counter, failures_hint: Any) -> str:
+    """State how much of the input the score covers, for the runs where it is not all of it.
+
+    Silence here is what makes a partial run look complete, so this reports against the
+    materialized input rather than the rollouts one hop happened to dispatch.
+    """
+    missing = expected - scored
+    if missing <= 0:
+        return ""
+    routed = ", ".join(f"{count} {name}" for name, count in sorted(failure_counts.items()))
+    routed = f"{routed} routed this run; " if routed else ""
+    return (
+        f"\nRollouts missing from the score: {missing} of {expected} materialized ({routed}see {failures_hint})"
+        f"\nMetrics cover: {scored} of {expected} rollouts"
+    )
 
 
 class RolloutCollectionHelper(BaseModel):
@@ -1311,10 +1341,19 @@ class RolloutCollectionHelper(BaseModel):
         dispatched_per_agent = Counter(counts_left)
         start_time = time()
 
+        if config.route_failures_to_sidecar:
+            print(
+                "route_failures_to_sidecar is on: a failed agent /run becomes a sidecar row instead of "
+                "ending the run, and its rollout leaves the score.",
+                flush=True,
+            )
+
         results_file = output_fpath.open("ab")
         failures_file = failures_fpath.open("ab")
         failure_counts: Counter = Counter()
-        for future in self.run_examples(input_rows, semaphore=semaphore, route_failures_to_sidecar=True):
+        for future in self.run_examples(
+            input_rows, semaphore=semaphore, route_failures_to_sidecar=config.route_failures_to_sidecar
+        ):
             row, result = await future
 
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
@@ -1402,6 +1441,14 @@ class RolloutCollectionHelper(BaseModel):
                 # Non-kill_shaped failure → sidecar. The aggregator only reads
                 # the main jsonl, so this keeps win-rate uncontaminated.
                 failure_counts[failure_class] += 1
+                # Every dropped rollout says so as it happens, whichever layer classified it.
+                # tqdm.write keeps the line off the progress bar it would otherwise collide with.
+                detail = str(result.get("_ng_failure_message") or result.get("error") or "")[:200]
+                tqdm.write(
+                    "🚨 [rollout_collection] rollout dropped from the score: "
+                    f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)} "
+                    f"class={failure_class} error={detail}"
+                )
                 failures_file.write(serialized + b"\n")
                 failures_file.flush()
             else:
@@ -1480,18 +1527,11 @@ class RolloutCollectionHelper(BaseModel):
         results_file.close()
         failures_file.close()
 
-        coverage = ""
-        if failure_counts:
-            coverage = (
-                f"\nCoverage: {sum(failure_counts.values())} of {len(input_rows)} dispatched rollouts failed "
-                f"{dict(failure_counts)}, {len(persisted_results)} completed in total. "
-                f"Failure rows: {failures_fpath}"
+        if input_rows and not persisted_results:
+            raise RuntimeError(
+                f"None of the {len(input_rows)} dispatched rollouts produced a result "
+                f"{dict(failure_counts)}. Inspect {failures_fpath}; the run has no score to report."
             )
-            if input_rows and not persisted_results:
-                raise RuntimeError(
-                    f"None of the {len(input_rows)} dispatched rollouts produced a result "
-                    f"{dict(failure_counts)}. Inspect {failures_fpath}; the run has no score to report."
-                )
         if owned_token_source is not None:
             await owned_token_source.close()
 
@@ -1508,6 +1548,7 @@ class RolloutCollectionHelper(BaseModel):
         # Compute and write aggregate metrics via /aggregate_metrics using only the
         # rows written to the main rollouts jsonl so runtime aggregation matches
         # `gym eval aggregate`.
+        counted: List[Dict] = []
         if config.disable_aggregation:
             print(
                 "Skipping aggregate-metrics computation because disable_aggregation=True. "
@@ -1516,7 +1557,7 @@ class RolloutCollectionHelper(BaseModel):
             aggregate_metrics_fpath = None
         else:
             print("Computing aggregate metrics")
-            counted = _failure_rows_counted_as_zero(
+            counted[:] = _failure_rows_counted_as_zero(
                 [failures_fpath],
                 config.count_failure_classes_as_zero,
                 {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in persisted_results},
@@ -1527,6 +1568,22 @@ class RolloutCollectionHelper(BaseModel):
                 )
             aggregate_metrics_fpath = await self._call_aggregate_metrics(
                 persisted_results + counted, persisted_rows + counted, output_fpath
+            )
+
+        expected_rollouts = (
+            sum(1 for _ in config.materialized_jsonl_fpath.open("rb"))
+            if config.materialized_jsonl_fpath.exists()
+            else len(input_rows) + len(persisted_results)
+        )
+        scored_rollouts = len(persisted_results) + len(counted)
+        coverage = _coverage_report(expected_rollouts, scored_rollouts, failure_counts, failures_fpath)
+        if get_exporters():  # pragma: no cover
+            export_metrics(
+                {
+                    "coverage/expected": expected_rollouts,
+                    "coverage/scored": scored_rollouts,
+                    "coverage/missing": expected_rollouts - scored_rollouts,
+                }
             )
 
         print(f"""Finished rollout collection! View results at:
@@ -1810,9 +1867,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         but run-level knobs (``agent_map``, ``fan_out``, ``num_repeats``) are NOT applied — call
         ``preprocess_examples`` first if you need them.
 
-        ``route_failures_to_sidecar`` is set by managed collection (``run_from_config``), where a
-        failed `/run` becomes a failure row instead of ending every rollout still in flight.
-        Direct callers such as NeMo-RL leave it off and keep receiving the exception.
+        ``route_failures_to_sidecar`` makes a failed `/run` a failure row instead of an exception
+        that ends every rollout still in flight. It defaults off because those rollouts then leave
+        the score.
         """
         server_client = self.setup_server_client(head_server_config)
         self.resolve_task_sources(examples, server_client.global_config_dict)
@@ -1983,10 +2040,12 @@ class RolloutAggregationHelper(BaseModel):
                 for r in results:
                     out.write(orjson.dumps(r) + b"\n")
 
+        failures_fpaths = [failures_path_for(Path(path)) for path in input_paths]
+        scored_keys = {(r.get(TASK_INDEX_KEY_NAME), r.get(ROLLOUT_INDEX_KEY_NAME)) for r in results}
         counted = _failure_rows_counted_as_zero(
-            [failures_path_for(Path(path)) for path in input_paths],
+            failures_fpaths,
             config.count_failure_classes_as_zero,
-            {(r.get(TASK_INDEX_KEY_NAME), r.get(ROLLOUT_INDEX_KEY_NAME)) for r in results},
+            scored_keys,
         )
         if config.count_failure_classes_as_zero:
             print(f"Counting {len(counted)} failure row(s) as scored zeros: {config.count_failure_classes_as_zero}")
@@ -1996,9 +2055,32 @@ class RolloutAggregationHelper(BaseModel):
         scored = results + counted
         aggregate_metrics_fpath = await helper._call_aggregate_metrics(scored, scored, output_fpath)
 
+        # The shards' own sidecars say which rollouts never made it into the files just scored.
+        counted_keys = {(r.get(TASK_INDEX_KEY_NAME), r.get(ROLLOUT_INDEX_KEY_NAME)) for r in counted}
+        dropped = Counter(
+            row.get(NG_FAILURE_CLASS_KEY) or "unknown"
+            for key, row in _latest_failure_rows(failures_fpaths).items()
+            if key not in scored_keys and key not in counted_keys
+        )
+        scored_rollouts = len(results) + len(counted)
+        coverage = _coverage_report(
+            scored_rollouts + sum(dropped.values()),
+            scored_rollouts,
+            dropped,
+            "the shards' _failures.jsonl sidecars",
+        )
+        if get_exporters():  # pragma: no cover
+            export_metrics(
+                {
+                    "coverage/expected": scored_rollouts + sum(dropped.values()),
+                    "coverage/scored": scored_rollouts,
+                    "coverage/missing": sum(dropped.values()),
+                }
+            )
+
         print(f"""Finished rollout aggregation! View results at:
 Merged rollouts: {output_fpath if config.merge_shards else "<not merged>"}
-Aggregate metrics: {aggregate_metrics_fpath}""")
+Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         if not config.disable_health_check:
             from nemo_gym.rollout_health import format_health_report, run_health_checks
