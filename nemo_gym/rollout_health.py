@@ -119,7 +119,12 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
     turns_observed = trajectory_observed and not _trajectory_has_gap(trajectory, "turns_unavailable")
     model_calls_observed = trajectory_observed and not _trajectory_has_any_gap(trajectory, _INCOMPLETE_MODEL_CALL_GAPS)
     calls = _normalized_trajectory_calls(trajectory) if trajectory_observed else []
-    bindings = _bind_policy_calls(trajectory, calls) if trajectory_observed else _bind_policy_calls({}, [])
+    turn_bindings = _bind_policy_calls(trajectory, calls) if trajectory_observed else _bind_policy_calls({}, [])
+    owned_bindings = (
+        _bind_policy_calls(trajectory, calls, include_invocations=True)
+        if trajectory_observed
+        else _bind_policy_calls({}, [], include_invocations=True)
+    )
     findings: list[Finding] = []
     unobserved: list[str] = []
 
@@ -154,7 +159,8 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
         if CheckInput.AGENT_TURNS in spec.reads and not turns_observed:
             unobserved.append(spec.id)
             continue
-        if CheckInput.BOUND_CALLS in spec.reads:
+        bindings = owned_bindings if CheckInput.OWNED_MODEL_CALLS in spec.reads else turn_bindings
+        if CheckInput.BOUND_CALLS in spec.reads or CheckInput.OWNED_MODEL_CALLS in spec.reads:
             if not model_calls_observed:
                 unobserved.append(spec.id)
                 continue
@@ -208,9 +214,9 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
         findings=findings,
         unobserved=unobserved,
         capture_observed=bool(calls),
-        policy_calls_observed=bindings.complete,
+        policy_calls_observed=turn_bindings.complete,
         model_calls=len(calls),
-        successful_model_calls=sum(_is_successful(call) for call in bindings.matched_calls),
+        successful_model_calls=sum(_is_successful(call) for call in turn_bindings.matched_calls),
         model_call_errors=len(failed),
         errors_by_status=dict(errors_by_status),
         ended_on_error=bool(calls and _is_failed(calls[-1])),
