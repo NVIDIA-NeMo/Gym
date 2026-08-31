@@ -112,10 +112,9 @@ class RemoteCDPBackend(PlaywrightConnectedBackend):
         self._handle = handle
         browser = await playwright.chromium.connect_over_cdp(handle.cdp_url, timeout=self._connect_timeout_s * 1000)
         try:
-            # A remote browser usually ships with a default context; borrow it
-            # rather than closing it on teardown.
-            if browser.contexts:
-                return browser, browser.contexts[0], False
+            # Always a fresh context, never the browser's default one. Borrowing the
+            # default made every rollout on a shared endpoint share cookies and storage,
+            # so state from one episode was visible to the next.
             return browser, await browser.new_context(), True
         except Exception:
             await browser.close()

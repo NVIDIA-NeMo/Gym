@@ -114,12 +114,22 @@ class BrowserVerifyRequest(BaseVerifyRequest):
 
 
 class _SessionState:
-    __slots__ = ("backend", "answer", "gt")
+    __slots__ = ("backend", "answer", "gt", "finished_url", "finished_text")
 
     def __init__(self, backend: BrowserBackend, gt: Dict[str, Any]):
         self.backend = backend
         self.answer: Optional[str] = None
         self.gt = gt
+        # The page as it was the first time the model said it was done. `done` is a
+        # hint the agent loop does not enforce, so an episode can keep navigating
+        # after finishing; grading the live page would then score whatever it
+        # wandered onto. None until the model finishes, and never overwritten.
+        self.finished_url: Optional[str] = None
+        self.finished_text: Optional[str] = None
+
+    @property
+    def finished(self) -> bool:
+        return self.finished_url is not None
 
 
 class InteractiveBrowserResourcesServer(SimpleResourcesServer):
@@ -226,7 +236,17 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
         st = self._state(request)
         if st is None:
             return self._no_session()
-        st.answer = body.answer
+        if not st.finished:
+            # First finish wins: the reward reflects the state the model committed to.
+            st.answer = body.answer
+            try:
+                obs = await st.backend.observe(max_elements=0)
+                st.finished_url = await st.backend.current_url()
+                st.finished_text = obs.title + " " + await st.backend.text()
+            except Exception:
+                # A browser that died at the moment of finishing leaves no snapshot;
+                # `_score` falls back to the live page and reports if that fails too.
+                logger.warning("could not snapshot the page at finish", exc_info=True)
         return ToolResponse(observation="", done=True)
 
     # ----- reward -------------------------------------------------------- #
@@ -277,17 +297,21 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
             # Answered from state the episode already produced; no browser call needed.
             return float((st.answer or "").strip() == str(gt["answer_equals"]).strip())
         try:
-            if "final_url" in gt:
-                return float(await st.backend.current_url() == gt["final_url"])
-            if "url_contains" in gt:
-                return float(gt["url_contains"] in await st.backend.current_url())
-            if "dom_contains" in gt:
-                # Check title + full visible page text (not just interactive elements),
-                # so non-interactive DOM text (e.g. a <p>) is matched too.  Only the
-                # title is used from the observation, so skip the element scan.
+            # Grade what the model committed to, not where the episode drifted after.
+            if st.finished:
+                url, text = st.finished_url, st.finished_text
+            else:
+                # The model never finished, so the live page is the only page there is.
                 obs = await st.backend.observe(max_elements=0)
-                haystack = (obs.title + " " + await st.backend.text()).lower()
-                return float(str(gt["dom_contains"]).lower() in haystack)
+                url, text = await st.backend.current_url(), obs.title + " " + await st.backend.text()
+            if "final_url" in gt:
+                return float(url == gt["final_url"])
+            if "url_contains" in gt:
+                return float(gt["url_contains"] in url)
+            if "dom_contains" in gt:
+                # Title + full visible page text, not just interactive elements, so
+                # non-interactive DOM text (e.g. a <p>) is matched too.
+                return float(str(gt["dom_contains"]).lower() in text.lower())
         except Exception as exc:
             raise _ScoringUnavailable(f"browser unreachable while scoring: {type(exc).__name__}: {exc}") from exc
         # Fail loudly rather than scoring 0: a dataset whose verifier_metadata
