@@ -93,7 +93,6 @@ GYM_ROOT=/path/to/Gym
 PRIVATE_CONFIG=/path/to/private/inferencehub-env.yaml
 
 "$GYM_ROOT/.venv/bin/gym" eval run \
-  --config benchmarks/webvoyager/config.yaml \
   --config "$PRIVATE_CONFIG" \
   --config benchmarks/webvoyager/configs/inferencehub_same_model.yaml \
   --config benchmarks/webvoyager/configs/arxiv13_smoke.yaml \
