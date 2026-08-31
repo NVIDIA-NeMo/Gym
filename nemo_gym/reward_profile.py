@@ -32,7 +32,35 @@ from wandb import Histogram
 from nemo_gym.config_types import AggregateMetrics, BaseNeMoGymCLIConfig
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
+    AVG_SAMPLE_STD_DEV_SUFFIX,
+    CI_HIGH_95_ACROSS_REPEATS_PREFIX,
+    CI_HIGH_95_PREFIX,
+    CI_LOW_95_ACROSS_REPEATS_PREFIX,
+    CI_LOW_95_PREFIX,
+    HISTOGRAM_STAT_NAME,
+    MAX_ACROSS_REPEATS_PREFIX,
+    MAX_PREFIX,
+    MAX_STAT_NAME,
+    MEAN_ACROSS_REPEATS_PREFIX,
+    MEAN_PREFIX,
+    MEAN_STAT_NAME,
+    MEDIAN_ACROSS_REPEATS_PREFIX,
+    MEDIAN_PREFIX,
+    MEDIAN_STAT_NAME,
+    MIN_ACROSS_REPEATS_PREFIX,
+    MIN_PREFIX,
+    MIN_STAT_NAME,
+    P25_PREFIX,
+    P75_PREFIX,
     ROLLOUT_INDEX_KEY_NAME,
+    SE_ACROSS_REPEATS_PREFIX,
+    SEM_PREFIX,
+    STAT_SEPARATOR,
+    STD_ACROSS_REPEATS_PREFIX,
+    STD_DEV_ACROSS_RUNS_SUFFIX,
+    STD_ERR_ACROSS_RUNS_SUFFIX,
+    STD_PREFIX,
+    STD_STAT_NAME,
     TASK_INDEX_KEY_NAME,
 )
 
@@ -177,7 +205,14 @@ class RewardProfiler:
         return Histogram(data)
 
     def describe_dataframe(self, df: DataFrame) -> DataFrame:
-        stat_index = ["mean", "max", "min", "median", "std", "histogram"]
+        stat_index = [
+            MEAN_STAT_NAME,
+            MAX_STAT_NAME,
+            MIN_STAT_NAME,
+            MEDIAN_STAT_NAME,
+            STD_STAT_NAME,
+            HISTOGRAM_STAT_NAME,
+        ]
         d: List[Series] = [
             df.mean(),
             df.max(),
@@ -264,18 +299,18 @@ class RewardProfiler:
                 sem = std / n**0.5
                 entry.update(
                     {
-                        f"mean/{col}": mean,
-                        f"median/{col}": float(col_data.median()),
-                        f"std/{col}": std,
-                        f"sem/{col}": sem,
-                        f"min/{col}": float(col_data.min()),
-                        f"max/{col}": float(col_data.max()),
-                        f"p25/{col}": float(col_data.quantile(0.25)),
-                        f"p75/{col}": float(col_data.quantile(0.75)),
+                        f"{MEAN_PREFIX}{col}": mean,
+                        f"{MEDIAN_PREFIX}{col}": float(col_data.median()),
+                        f"{STD_PREFIX}{col}": std,
+                        f"{SEM_PREFIX}{col}": sem,
+                        f"{MIN_PREFIX}{col}": float(col_data.min()),
+                        f"{MAX_PREFIX}{col}": float(col_data.max()),
+                        f"{P25_PREFIX}{col}": float(col_data.quantile(0.25)),
+                        f"{P75_PREFIX}{col}": float(col_data.quantile(0.75)),
                     }
                 )
                 if ci := self._confidence_interval(mean, sem, n):
-                    entry[f"ci_low_95/{col}"], entry[f"ci_high_95/{col}"] = ci
+                    entry[f"{CI_LOW_95_PREFIX}{col}"], entry[f"{CI_HIGH_95_PREFIX}{col}"] = ci
             repeat_metrics.append(entry)
 
         incomplete_repeats = [entry for entry in repeat_metrics if entry["missing_count"] > 0]
@@ -305,7 +340,7 @@ class RewardProfiler:
 
         df = DataFrame.from_records(repeat_level_metrics)
         df["agent_name"] = df[AGENT_REF_KEY_NAME].apply(lambda ref: ref["name"])
-        numeric_cols = [c for c in df.select_dtypes(include="number").columns if c.startswith("mean/")]
+        numeric_cols = [c for c in df.select_dtypes(include="number").columns if c.startswith(MEAN_PREFIX)]
 
         aggregated_metrics = []
         for agent_name, group in df.groupby("agent_name"):
@@ -318,14 +353,17 @@ class RewardProfiler:
                 mean = float(col_data.mean())
                 std = float(col_data.std(ddof=1)) if n > 1 else 0.0
                 se = std / n**0.5
-                entry[f"mean_across_repeats/{col}"] = mean
-                entry[f"median_across_repeats/{col}"] = float(col_data.median())
-                entry[f"std_across_repeats/{col}"] = std
-                entry[f"min_across_repeats/{col}"] = float(col_data.min())
-                entry[f"max_across_repeats/{col}"] = float(col_data.max())
-                entry[f"se_across_repeats/{col}"] = se
+                entry[f"{MEAN_ACROSS_REPEATS_PREFIX}{col}"] = mean
+                entry[f"{MEDIAN_ACROSS_REPEATS_PREFIX}{col}"] = float(col_data.median())
+                entry[f"{STD_ACROSS_REPEATS_PREFIX}{col}"] = std
+                entry[f"{MIN_ACROSS_REPEATS_PREFIX}{col}"] = float(col_data.min())
+                entry[f"{MAX_ACROSS_REPEATS_PREFIX}{col}"] = float(col_data.max())
+                entry[f"{SE_ACROSS_REPEATS_PREFIX}{col}"] = se
                 if ci := self._confidence_interval(mean, se, n):
-                    entry[f"ci_low_95_across_repeats/{col}"], entry[f"ci_high_95_across_repeats/{col}"] = ci
+                    (
+                        entry[f"{CI_LOW_95_ACROSS_REPEATS_PREFIX}{col}"],
+                        entry[f"{CI_HIGH_95_ACROSS_REPEATS_PREFIX}{col}"],
+                    ) = ci
             aggregated_metrics.append(entry)
         return aggregated_metrics
 
@@ -623,8 +661,8 @@ def compute_pass_majority_metrics(
                     variance = sum((x - mean_val) ** 2 for x in run_averages) / (len(run_averages) - 1)
                     std_dev = math.sqrt(variance)
                     std_err = std_dev / math.sqrt(len(run_averages))
-                    metrics[f"pass@1[avg-of-{k}]/{name}/std_dev_across_runs"] = std_dev
-                    metrics[f"pass@1[avg-of-{k}]/{name}/std_err_across_runs"] = std_err
+                    metrics[f"pass@1[avg-of-{k}]/{name}{STD_DEV_ACROSS_RUNS_SUFFIX}"] = std_dev
+                    metrics[f"pass@1[avg-of-{k}]/{name}{STD_ERR_ACROSS_RUNS_SUFFIX}"] = std_err
 
     return metrics, all_score_dicts, score_names, max_k
 
@@ -655,7 +693,9 @@ def add_avg_sample_std_dev(
                     task_var = sum((v - task_mean) ** 2 for v in vals) / (len(vals) - 1)
                     sample_std_devs.append(math.sqrt(task_var))
             if sample_std_devs:
-                metrics[f"pass@1[avg-of-{k}]/{name}/avg_sample_std_dev"] = sum(sample_std_devs) / len(sample_std_devs)
+                metrics[f"pass@1[avg-of-{k}]/{name}{AVG_SAMPLE_STD_DEV_SUFFIX}"] = sum(sample_std_devs) / len(
+                    sample_std_devs
+                )
 
 
 def compute_subset_metrics(
@@ -723,7 +763,11 @@ def highest_k_metrics(
         highest_k_metrics(am, "pass@1[avg-of-{k}]", exclude_names=["no_answer"])
         # → {"pass@1[avg-of-32]/accuracy": 94.5, "pass@1[avg-of-32]/symbolic_accuracy": 93.2}
     """
-    stat_suffixes = {"std_dev_across_runs", "std_err_across_runs", "avg_sample_std_dev"}
+    stat_suffixes = {
+        STD_DEV_ACROSS_RUNS_SUFFIX.lstrip(STAT_SEPARATOR),
+        STD_ERR_ACROSS_RUNS_SUFFIX.lstrip(STAT_SEPARATOR),
+        AVG_SAMPLE_STD_DEV_SUFFIX.lstrip(STAT_SEPARATOR),
+    }
 
     # Build regex from pattern: "pass@{k}" → r"^pass@(\d+)/(.+)$"
     escaped = re.escape(pattern).replace(r"\{k\}", r"(\d+)")
@@ -785,7 +829,7 @@ class AggregateMetricsMixin:
 
         Default: all mean/* entries from agent_metrics.
         """
-        return {k: v for k, v in agent_metrics.items() if k.startswith("mean/")}
+        return {k: v for k, v in agent_metrics.items() if k.startswith(MEAN_PREFIX)}
 
 
 def _group_by_task(verify_responses: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
@@ -972,7 +1016,7 @@ def compute_aggregate_metrics(
     if get_key_metrics_fn:
         key_metrics = get_key_metrics_fn(serialized_agent)
     else:
-        key_metrics = {k: v for k, v in serialized_agent.items() if k.startswith("mean/")}
+        key_metrics = {k: v for k, v in serialized_agent.items() if k.startswith(MEAN_PREFIX)}
 
     ng_perf_records = [vr["ng_perf"] for vr in verify_responses if isinstance(vr.get("ng_perf"), dict)]
 
