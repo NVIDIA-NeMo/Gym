@@ -108,6 +108,11 @@ class NeMoGymSandboxEnvironment:
             import sys
 
             print(f"TMUX NEW SESSION RESULT: {result}", file=sys.stderr)
+        if "tmux-3.4" in command:
+            import sys
+
+            print(f"TMUX INSTALL RESULT: {result}", file=sys.stderr)
+
         return SimpleNamespace(
             stdout=result.stdout or "",
             stderr=result.stderr or "",
