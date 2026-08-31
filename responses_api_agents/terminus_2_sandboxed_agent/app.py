@@ -81,11 +81,12 @@ class Terminus2AgentVerifyResponse(BaseVerifyResponse):
 class NeMoGymSandboxEnvironment:
     """The Harbor environment surface used by Terminus 2, backed by AsyncSandbox."""
 
-    def __init__(self, sandbox: AsyncSandbox, logs_dir: Path, pty_session: SandboxPtySession | None = None):
+    def __init__(self, sandbox: AsyncSandbox, logs_dir: Path, pty_session: SandboxPtySession, session_id: str):
         self._sandbox = sandbox
         self._pty_session = pty_session
         self.default_user = None
         self.trial_paths = SimpleNamespace(agent_dir=logs_dir)
+        self.session_id = session_id
 
     async def exec(
         self,
@@ -262,7 +263,9 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         )
 
         with tempfile.TemporaryDirectory(prefix="nemo-gym-terminus-2-") as log_dir:
-            environment = NeMoGymSandboxEnvironment(sandbox, Path(log_dir), pty_session)
+            environment = NeMoGymSandboxEnvironment(
+                sandbox, Path(log_dir), pty_session, request.session[SESSION_ID_KEY]
+            )
             context = AgentContext()
             agent = NeMoGymTerminus2(
                 logs_dir=Path(log_dir),
