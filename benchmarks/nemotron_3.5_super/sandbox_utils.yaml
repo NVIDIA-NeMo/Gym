@@ -32,12 +32,24 @@ opencode_sandboxed_agent_swebench_pro:
       remote_opencode_binary_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64
       remote_opencode_musl_binary_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64-musl-v1.17.11
 
+
+terminus_2_sandboxed_agent_terminal_bench_2_1:
+  _inherit_from: terminus_2_sandboxed_agent
+  responses_api_agents:
+    terminus_2_sandboxed_agent:
+      remote_tmux_binary_path: /mnt/s3-data/data/bxyu/tmux/tmux-3.7c-linux-x86_64
 terminus_2_sandboxed_terminal_bench_2_1_resources_server:
   resources_servers:
     terminal_bench_2_1:
       sandbox_config:
         metadata:
           nemo.nvidia.com/resources: custom
+
+opencode_sandboxed_agent_terminal_bench_2_1:
+  _inherit_from: opencode_sandboxed_agent
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      remote_tmux_binary_path: /mnt/s3-data/data/bxyu/tmux/tmux-3.7c-linux-x86_64
 opencode_terminal_bench_2_1_resources_server:
   resources_servers:
     terminal_bench_2_1:
