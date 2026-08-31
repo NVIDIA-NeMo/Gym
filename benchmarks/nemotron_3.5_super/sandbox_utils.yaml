@@ -39,7 +39,6 @@ opencode_terminal_bench_2_1_resources_server:
           nemo.nvidia.com/resources: custom
 
 terminus_2_sandboxed_agent_terminal_bench_2_1:
-  _inherit_from: terminus_2_sandboxed_agent
   responses_api_agents:
     terminus_2_sandboxed_agent:
       remote_tmux_binary_path: /mnt/s3-data/data/bxyu/tmux/tmux-3.7c-linux-x86_64
