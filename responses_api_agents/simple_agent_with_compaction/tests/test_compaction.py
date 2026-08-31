@@ -4,6 +4,7 @@
 import subprocess
 import sys
 
+from nemo_gym.token_metadata_codec import encode_token_list
 from responses_api_agents.simple_agent_with_compaction.compaction import (
     ContextGuardConfig,
     ContextMeasurements,
@@ -711,6 +712,42 @@ def test_capture_observed_completion_preserves_exact_evidence_and_media_order():
     assert observed.policy_output_spans[0].end == 2
     assert [item.media_id for item in observed.media_occurrences] == list(view.media_ids)
     assert observed.evidence_source == "generation_response"
+
+
+def test_capture_observed_completion_accepts_token_envelopes():
+    history = SemanticHistory("rollout-envelope-evidence")
+    history.append_items([_observation("initial")], turn_id=0, is_initial_context=True)
+    view = materialize_history_view(
+        history,
+        IdentityHistoryPolicy().plan(history, decision_turn=1),
+    )
+    observed = capture_observed_completion(
+        [
+            {
+                "role": "assistant",
+                "type": "message",
+                "content": "answer",
+                "prompt_token_ids": encode_token_list([1, 2], "i32"),
+                "generation_token_ids": encode_token_list([3, 4], "i32"),
+                "generation_log_probs": encode_token_list([-0.5, -0.25], "f32"),
+            }
+        ],
+        rollout_id=history.rollout_id,
+        turn_id=1,
+        media_ids=view.media_ids,
+        policy_decision=view.decision,
+        prepared_request_id="prepared-request-1",
+        context_epoch=0,
+        segment_index=0,
+        segment_id="segment-0",
+        expected_append_compatible=False,
+        compaction_event_id=None,
+        generation_contract_id="generation-contract-1",
+    )
+
+    assert observed.prompt_token_ids == (1, 2)
+    assert observed.sampled_token_ids == (3, 4)
+    assert observed.sampled_logprobs == (-0.5, -0.25)
 
 
 def test_capture_observed_completion_rejects_misaligned_logprobs():

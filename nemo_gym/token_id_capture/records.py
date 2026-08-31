@@ -32,6 +32,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from nemo_gym.token_metadata_codec import decode_token_list
+
 
 # These fields carry token metadata on a served response.
 # ``routed_experts`` is optional for MoE backends.
@@ -312,4 +314,13 @@ def extract_token_fields(response_json: dict) -> dict | None:
     missing = [field for field in required if source.get(field) is None]
     if missing:
         raise ValueError(f"partial token metadata is missing: {', '.join(missing)}")
-    return {field: source.get(field) for field in TOKEN_FIELDS}
+    info = {field: source.get(field) for field in TOKEN_FIELDS}
+    # Capture records store decoded lists.
+    for field, expected_dtypes in (
+        ("prompt_token_ids", ("i32",)),
+        ("generation_token_ids", ("i32",)),
+        ("generation_log_probs", ("f32", "f64")),
+    ):
+        if isinstance(info[field], str):
+            info[field] = decode_token_list(info[field], expected_dtypes)
+    return info

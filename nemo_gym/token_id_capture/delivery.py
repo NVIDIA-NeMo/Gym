@@ -38,6 +38,7 @@ import warnings
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.token_id_capture.consumer import trajectories_from_source
 from nemo_gym.token_id_capture.protocols import TokenSource
+from nemo_gym.token_metadata_codec import decode_token_list
 
 
 # Attach token-capture health to each rollout record.
@@ -66,7 +67,18 @@ def rollout_carries_token_ids(result: dict) -> bool:
     response = result.get("response")
     if not isinstance(response, dict):
         return False
-    return any(isinstance(item, dict) and item.get("generation_token_ids") for item in (response.get("output") or []))
+    return any(isinstance(item, dict) and _carries_generated_tokens(item) for item in (response.get("output") or []))
+
+
+def _carries_generated_tokens(item: dict) -> bool:
+    """Return whether an output item has a non-empty generation."""
+    value = item.get("generation_token_ids")
+    if isinstance(value, str):
+        try:
+            return len(decode_token_list(value, ("i32",))) > 0
+        except ValueError:
+            return False
+    return bool(value)
 
 
 def _unusable(result: dict, error: str, message: str) -> dict:

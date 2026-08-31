@@ -29,6 +29,8 @@ from typing import Any, Literal, Mapping, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from nemo_gym.token_metadata_codec import decode_token_list
+
 
 BUILTIN_SEMANTIC_PART_KINDS = frozenset(
     {
@@ -900,9 +902,9 @@ def capture_observed_completion(
         )
 
     evidence = evidence_items[0]
-    prompt_token_ids = tuple(evidence["prompt_token_ids"])
-    sampled_token_ids = tuple(evidence["generation_token_ids"])
-    sampled_logprobs = tuple(evidence["generation_log_probs"])
+    prompt_token_ids = tuple(decode_token_list(evidence["prompt_token_ids"], ("i32",)))
+    sampled_token_ids = tuple(decode_token_list(evidence["generation_token_ids"], ("i32",)))
+    sampled_logprobs = tuple(decode_token_list(evidence["generation_log_probs"], ("f32", "f64")))
     required_prefix = tuple(required_prefix_token_ids or ())
     if required_prefix and prompt_token_ids[: len(required_prefix)] != required_prefix:
         raise RuntimeError(
