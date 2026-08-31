@@ -15,8 +15,6 @@
 name: Unit tests
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
   workflow_call:
     inputs:
       base-ref:

@@ -1,19 +1,14 @@
-# Refer to the params in responses_api_models/local_vllm_model/configs/Qwen/Qwen3-235B-A22B-Instruct-2507-FP8.yaml
-Qwen3-235B-A22B-Instruct-2507-FP8:
+# Judge: a hosted reasoning model, independent of the policy under test. Keeping
+# the judge off the policy endpoint stops a weak policy from grading itself.
+judge_model:
   responses_api_models:
     vllm_model:
       entrypoint: app.py
-      model: Qwen3-235B-A22B-Instruct-2507-FP8
-      replace_developer_role_with_system: true
+      base_url: https://inference-api.nvidia.com/v1
+      model: nvidia/zai-org/glm-5.1
+      api_key: ${oc.select:inference_api_key,null}
       return_token_id_information: false
       uses_reasoning_parser: true
-
-# ported from gym-gitlab b66e37c6: same as policy_model but does NOT feed reasoning back into history
-policy_model_no_interleaved_reasoning:
-  _copy: policy_model
-  responses_api_models:
-    vllm_model:
-      uses_interleaved_reasoning: false
 
 browsecomp_benchmark_resources_server:
   resources_servers:
@@ -21,16 +16,21 @@ browsecomp_benchmark_resources_server:
       entrypoint: app.py
       domain: agent
       debug: false
-      # Search/browse backend: "tavily" (default) or "exa". Override per-run with
-      # ++...browsecomp_advanced_harness.search_provider=exa (+ exa_api_key=[...]).
-      search_provider: tavily
+      # Search/browse backend. Override per-run with
+      # ++...browsecomp_advanced_harness.search_provider=tavily (+ tavily_api_key=[...]).
+      search_provider: exa
+      # Results per query. 10 is the Exa reference value; the Tavily path uses 5.
+      max_results: 10
+      # Supplied per-run as a sharded key list so concurrent runs do not collide
+      # on provider rate limits. Null here; the launcher injects the real shard.
+      exa_api_key: ${oc.select:exa_api_key,null}
       # terminal mode: search/browse write pages to a per-session disk workspace
       # and the read-only bash_command tool is exposed for the model to grep/read them.
       workspace: per_session
       use_judge: true
       judge_model_server:
         type: responses_api_models
-        name: policy_model
+        name: judge_model
       judge_responses_create_params:
         input: []
       verified: false
@@ -40,15 +40,18 @@ browsecomp_benchmark_agent:
     browsecomp_agent:
       entrypoint: app.py
       max_steps: 400
-      keep_rounds: 9999
       nudge_steps: true
       max_context_tokens: 196608
-      context_reset_pct: 0.3
-      # token-based reset (50k standard); >0 overrides max_context_tokens*context_reset_pct
+      # token-based reset (50k standard)
       context_reset_tokens: 50000
       context_reset_keep_rounds: 3
-      max_run_retries: 3
+      # Per-sample retries: run() re-runs the responses+verify loop this many
+      # times when the model returns empty output after <think> stripping.
+      max_run_retries: 1
       max_reset_count: null
+      # Durable progress board pinned to the system prompt, maintained by the
+      # update_progress tool and rebuilt at every context reset.
+      progress: true
       # Set to a directory to record per-reset + final conversation snapshots
       # under {snap_dir}/sample_{task_index}/attempt_{attempt}_*.jsonl. Off when null.
       snap_dir: null
@@ -60,7 +63,7 @@ browsecomp_benchmark_agent:
         name: browsecomp_benchmark_resources_server
       model_server:
         type: responses_api_models
-        name: policy_model_no_interleaved_reasoning
+        name: policy_model
       datasets:
       - name: browsecomp
         type: benchmark
