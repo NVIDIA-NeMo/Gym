@@ -910,7 +910,11 @@ class TestRolloutCollection:
         assert orjson.loads(orjson.dumps(result)) == result
 
     async def test_run_from_config_routes_agent_failure_to_sidecar_and_out_of_metrics(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        empty_global_config: MagicMock,
     ) -> None:
         """End to end: one 500 and one success, through the real dispatch and aggregation path."""
         input_jsonl_fpath = tmp_path / "input.jsonl"
@@ -964,6 +968,14 @@ class TestRolloutCollection:
         )
         agent_metrics = orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"]
         assert agent_metrics["mean/reward"] == 1.0
+
+        # The run says the setting is on, names each dropped rollout once, and closes with the count.
+        printed = capsys.readouterr().out
+        assert "route_failures_to_sidecar is on" in printed
+        assert printed.count("rollout dropped from the score") == 1
+        assert "Rollouts missing from the score: 1 of 2 materialized" in printed
+        assert "Metrics cover: 1 of 2 rollouts" in printed
+        assert str(_failures_path_for(output_jsonl_fpath)) in printed
 
     async def test_run_from_config_resume_retries_an_agent_failure_row(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
@@ -1245,47 +1257,99 @@ class TestRolloutCollection:
             or not _failures_path_for(output_jsonl_fpath).read_bytes()
         )
 
-    async def test_run_from_config_says_loudly_that_routing_is_on_and_when_it_fires(
+    async def test_run_from_config_reports_rollouts_dropped_by_the_agent_with_routing_off(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
         empty_global_config: MagicMock,
     ) -> None:
-        """Silent routing is what makes the numbers misleading, so the run says it three times."""
+        """Agents route their own failures whatever this flag says, so those are announced too."""
         input_jsonl_fpath = tmp_path / "input.jsonl"
         input_jsonl_fpath.write_text(
             "\n".join(
-                json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my_agent"}, "x": i})
+                json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my agent name"}, "x": i})
                 for i in range(2)
             )
             + "\n"
         )
         output_jsonl_fpath = tmp_path / "output.jsonl"
 
-        async def post(server_name: str, url_path: str, json, **kwargs):
-            if url_path == "/run":
-                if json["x"] == 0:
-                    raise http_error(500, "unhandled tool-call json")
-                return FakeResponse(200, {"reward": 1.0})
-            return FakeResponse(200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump())
+        class Helper(RolloutCollectionHelper):
+            def run_examples(self, examples: list[dict], *args, **kwargs):
+                assert kwargs["route_failures_to_sidecar"] is False
+                futures = []
+                for example in examples:
+                    future = Future()
+                    scored = {"reward": 1.0}
+                    judge_failed = {"reward": 0.0, NG_FAILURE_CLASS_KEY: "judge_failed", "error": "judge 503"}
+                    future.set_result((example, scored if example["x"] == 0 else judge_failed))
+                    futures.append(future)
+                return futures
 
-        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+                return None
 
         config = RolloutCollectionConfig(
             input_jsonl_fpath=str(input_jsonl_fpath),
             output_jsonl_fpath=str(output_jsonl_fpath),
-            route_failures_to_sidecar=True,
             disable_health_check=True,
         )
-        await RolloutCollectionHelper().run_from_config(config)
+        await Helper().run_from_config(config)
 
         printed = capsys.readouterr().out
-        # Announced before dispatch, once per routed failure, and again with the closing artifacts.
-        assert "route_failures_to_sidecar=TRUE. A failed agent /run will NOT stop this run." in printed
-        assert "🚨 [route_failures_to_sidecar] this rollout FAILED and is excluded from the score" in printed
-        assert "1 of 2 dispatched rollouts failed" in printed
-        assert "EXCLUDED from the metrics above, which cover 1 completed rollouts" in printed
+        assert "route_failures_to_sidecar is on" not in printed
+        assert printed.count("rollout dropped from the score") == 1
+        assert "class=judge_failed" in printed
+        assert "judge 503" in printed
+        assert "Rollouts missing from the score: 1 of 2 materialized" in printed
+
+    async def test_run_from_config_reports_coverage_against_the_materialized_input_on_resume(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        empty_global_config: MagicMock,
+    ) -> None:
+        """A resumed hop dispatches little and can still be missing rollouts from earlier hops."""
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+        materialized_fpath = tmp_path / "output_materialized_inputs.jsonl"
+        rows = [
+            {
+                "responses_create_params": {"input": []},
+                AGENT_REF_KEY_NAME: {"name": "my agent name"},
+                TASK_INDEX_KEY_NAME: task_index,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+            }
+            for task_index in range(3)
+        ]
+        materialized_fpath.write_bytes(b"\n".join(orjson.dumps(row) for row in rows) + b"\n")
+        # Two rollouts are already scored, and the third is out of attempts, so this hop runs nothing.
+        output_jsonl_fpath.write_bytes(b"\n".join(orjson.dumps({**row, "reward": 1.0}) for row in rows[:2]) + b"\n")
+        _failures_path_for(output_jsonl_fpath).write_bytes(
+            orjson.dumps({**rows[2], NG_FAILURE_CLASS_KEY: AGENT_RUN_ERROR_FAILURE_CLASS, NG_TERMINAL_KEY: True})
+            + b"\n"
+        )
+
+        class Helper(RolloutCollectionHelper):
+            def run_examples(self, examples: list[dict], *args, **kwargs):
+                assert examples == []
+                return []
+
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+                return None
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(tmp_path / "input.jsonl"),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            resume_from_cache=True,
+            disable_health_check=True,
+        )
+        await Helper().run_from_config(config)
+
+        printed = capsys.readouterr().out
+        assert "Rollouts missing from the score: 1 of 3 materialized" in printed
+        assert "Metrics cover: 2 of 3 rollouts" in printed
 
     def test_preprocess_rows_with_prompt_config(self, tmp_path: Path) -> None:
         """prompt_config builds responses_create_params.input from template."""
