@@ -24,3 +24,16 @@ The agent calls the configured model server exclusively through the Responses
 API. Its returned response contains every model request and response from the
 Terminus trajectory. Set `dump_trajectory: true` to also have Harbor write its
 per-turn JSON trajectory files; it is `false` by default.
+
+## Download and mount Tmux binary
+```bash
+curl -fL \
+  -o tmux-3.7c-linux-x86_64.tar.gz \
+  https://github.com/tmux/tmux-builds/releases/download/v3.7c/tmux-3.7c-linux-x86_64.tar.gz
+tar -xzf tmux-3.7c-linux-x86_64.tar.gz
+mv tmux tmux-3.7c-linux-x86_64
+
+# e.g. copy to mounted S3 bucket
+aws s3 cp tmux-3.7c-linux-x86_64 \
+  s3://tmux/tmux-3.7c-linux-x86_64
+```
