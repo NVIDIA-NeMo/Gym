@@ -103,6 +103,11 @@ class NeMoGymSandboxEnvironment:
             result = await self._sandbox.pty.exec(command, session=self._pty_session, timeout_s=timeout_sec)
         else:
             result = await self._sandbox.exec(command, cwd=cwd, env=env, timeout_s=timeout_sec, user=user)
+        # TODO @bxyu-nvidia: Remove
+        if "tmux new-session" in command:
+            import sys
+
+            print(f"TMUX NEW SESSION RESULT: {result}", file=sys.stderr)
         return SimpleNamespace(
             stdout=result.stdout or "",
             stderr=result.stderr or "",
