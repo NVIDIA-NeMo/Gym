@@ -105,6 +105,7 @@ class OpenSandboxPtySession:
         headers: dict[str, str],
         request_timeout_s: float | None,
         owned: bool = True,
+        takeover: bool = False,
     ) -> None:
         self._client = client
         self._ws = ws
@@ -115,6 +116,10 @@ class OpenSandboxPtySession:
         # Attached sessions belong to whoever created them: closing one detaches
         # rather than ending it.
         self._owned = owned
+        # True when the initial socket was dialed with takeover=1: a policy
+        # violation then means execd is still evicting a dead peer, not that
+        # another client legitimately owns the session.
+        self._takeover = takeover
         self.mode: str | None = None
         self.replay_offset: int | None = None
         self._output: asyncio.Queue[bytes | None] = asyncio.Queue()
@@ -220,11 +225,12 @@ class OpenSandboxPtySession:
                 if self._ws.close_code == WS_CLOSE_TAKEN_OVER:
                     break
                 if self._ws.close_code == WS_CLOSE_POLICY_VIOLATION:
-                    # On reattach, this is a race: execd hasn't torn down the
+                    # After a reattach — or on an initial socket dialed with
+                    # takeover=1 — this is a race: execd hasn't torn down the
                     # dead TCP peer yet. Retry with _PTY_TAKEOVER_RETRY_DELAYS
-                    # to wait out the eviction. On the initial socket this means
-                    # another client owns the session, so break immediately.
-                    if not reattached or takeover_retries >= len(_PTY_TAKEOVER_RETRY_DELAYS):
+                    # to wait out the eviction. Otherwise another client owns
+                    # the session, so break immediately.
+                    if not (reattached or self._takeover) or takeover_retries >= len(_PTY_TAKEOVER_RETRY_DELAYS):
                         break
                     await asyncio.sleep(_PTY_TAKEOVER_RETRY_DELAYS[takeover_retries])
                     takeover_retries += 1
@@ -599,6 +605,7 @@ async def attach_pty_session(
         headers=headers,
         request_timeout_s=request_timeout_s,
         owned=False,
+        takeover=takeover,
     )
 
 
@@ -641,6 +648,7 @@ async def _start_session(
     headers: dict[str, str],
     request_timeout_s: float | None,
     owned: bool = True,
+    takeover: bool = False,
 ) -> OpenSandboxPtySession:
     session = OpenSandboxPtySession(
         client=client,
@@ -650,6 +658,7 @@ async def _start_session(
         headers=headers,
         request_timeout_s=request_timeout_s,
         owned=owned,
+        takeover=takeover,
     )
     try:
         await session._wait_connected(request_timeout_s)

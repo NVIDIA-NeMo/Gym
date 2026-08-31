@@ -957,6 +957,38 @@ async def test_policy_violation_on_initial_socket_does_not_reattach(monkeypatch:
     await session.close()
 
 
+async def test_policy_violation_on_initial_takeover_socket_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 1008 on an initial socket dialed with takeover=1 is the dead-peer race
+    (execd hasn't evicted the previous, dirtily-dropped client yet); the pump
+    must wait out _PTY_TAKEOVER_RETRY_DELAYS and succeed, exactly as on reattach."""
+    monkeypatch.setattr(pty_module, "_PTY_RETRY_DELAYS", ())
+    monkeypatch.setattr(pty_module, "_PTY_TAKEOVER_RETRY_DELAYS", (0,))
+    monkeypatch.setattr(pty_module.OpenSandboxPtySession, "_reattach_socket", _REAL_REATTACH)
+
+    # Initial takeover attach: server closes with 1008 before any frame.
+    race = FakeWs([], close_code=pty_module.WS_CLOSE_POLICY_VIOLATION)
+    race.closed = True
+    # Retry: server evicted the dead peer; session attaches from offset 0.
+    good = FakeWs([CONNECTED, _binary(b"\x01ab"), _text({"type": "exit", "exit_code": 0})])
+    good.closed = True
+
+    client = FakeHttpClient(ws=[race, good])
+    session = OpenSandboxPtySession(
+        client=client,  # type: ignore[arg-type]
+        ws=await client.ws_connect("ws://server/base/pty/s-1/ws?takeover=1", headers={}),
+        session_id="s-1",
+        session_url="http://server/base/pty/s-1",
+        headers={},
+        request_timeout_s=5.0,
+        owned=False,
+        takeover=True,
+    )
+    assert await session.read() == b"ab", "session must attach after waiting out the eviction race"
+    assert await session.wait_exit() == 0
+    assert len(client.ws_calls) == 2, "initial takeover 1008 + 1 successful retry"
+    await session.close()
+
+
 async def test_takeover_close_does_not_reattach(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(pty_module, "_PTY_RETRY_DELAYS", (0,))
     monkeypatch.setattr(pty_module.OpenSandboxPtySession, "_reattach_socket", _REAL_REATTACH)
