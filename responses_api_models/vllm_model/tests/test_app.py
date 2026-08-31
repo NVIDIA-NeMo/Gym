@@ -84,6 +84,32 @@ def lineage_index():
     return _TEST_LINEAGE.index
 
 
+def test_strip_hosted_only_tool_fields_pops_strict() -> None:
+    body_dict = {
+        "tools": [
+            {"type": "function", "function": {"name": "get_weather", "strict": True}},
+            {"type": "custom", "custom": {"name": "not_a_function"}},
+        ]
+    }
+    VLLMModel._strip_hosted_only_tool_fields(body_dict)
+    assert "strict" not in body_dict["tools"][0]["function"]
+    assert body_dict["tools"][0]["function"]["name"] == "get_weather"
+    assert body_dict["tools"][1] == {"type": "custom", "custom": {"name": "not_a_function"}}
+
+    # Tolerates absent tools.
+    VLLMModel._strip_hosted_only_tool_fields({})
+
+
+def test_preprocess_chat_completion_create_params_strips_strict(monkeypatch: MonkeyPatch) -> None:
+    server = TestApp()._setup_server(monkeypatch)
+    body_dict = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [{"type": "function", "function": {"name": "get_weather", "strict": True}}],
+    }
+    body_dict = server._preprocess_chat_completion_create_params(MagicMock(), body_dict)
+    assert "strict" not in body_dict["tools"][0]["function"]
+
+
 def test_transport_io_writer_keeps_full_payload(monkeypatch: MonkeyPatch, tmp_path) -> None:
     log_path = tmp_path / "model-io-transport.jsonl"
     monkeypatch.setenv("NEMO_GYM_VLLM_TRANSPORT_LOG", str(log_path))
