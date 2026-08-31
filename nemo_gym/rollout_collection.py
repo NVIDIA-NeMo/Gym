@@ -61,10 +61,11 @@ from nemo_gym.global_config import (
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
-    agents_by_resources_server,
     allowed_agents_for,
+    dataset_agent_pins,
     get_global_config_dict,
     pairing_override_enabled,
+    resolve_dataset_agent,
 )
 from nemo_gym.path_utils import failures_path_for
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
@@ -81,6 +82,8 @@ from nemo_gym.rollout_observability import (
     TrajectoryToolCall,
     TrajectoryTurn,
 )
+from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
+from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
 _failures_path_for = failures_path_for  # Backwards-compatible alias
@@ -1176,6 +1179,19 @@ class RolloutCollectionHelper(BaseModel):
         return input_rows, rows, results, result_strs
 
     async def run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
+        """Collect rollouts for a whole config. Wrapped in the run-scoped `job` span.
+
+        This is the driver side of an evaluation run and the outermost span Gym produces,
+        so every rollout it dispatches is a descendant of it. `job` is in the `default`
+        preset but deliberately not in `per_rollout`, where each rollout is meant to be
+        its own bounded root trace.
+        """
+        if not is_span_group_enabled(GymSpanGroup.JOB):
+            return await self._run_from_config(config)
+        with managed_span(GymSpanGroup.JOB, "gym.job"):
+            return await self._run_from_config(config)
+
+    async def _run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
         failures_fpath = failures_path_for(output_fpath)
 
@@ -1288,7 +1304,7 @@ class RolloutCollectionHelper(BaseModel):
         warned_malformed_rollout_id = False
 
         # Intermediate status printing
-        pcts_to_print = list(range(1, 100)) + [99.5]
+        pcts_to_print = list(range(1, 100)) + [99.5, 100]
         agent_name_to_metrics = defaultdict(Counter)
         agent_name_to_counts = defaultdict(int)
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in input_rows)
@@ -1450,12 +1466,14 @@ class RolloutCollectionHelper(BaseModel):
                 tqdm.write(print_str)
 
                 if get_exporters():
-                    step_metrics = {
-                        f"progress/{agent_name}/reward": round(
+                    step_metrics = {"progress/total/rollouts_per_min": rollouts_per_min}
+                    for agent_name, metrics in agent_name_to_metrics.items():
+                        step_metrics[f"progress/{agent_name}/reward"] = round(
                             100 * metrics["reward"] / agent_name_to_counts[agent_name], 2
                         )
-                        for agent_name, metrics in agent_name_to_metrics.items()
-                    }
+                        step_metrics[f"progress/{agent_name}/reward_lower_bound"] = round(
+                            100 * metrics["reward"] / (counts_left[agent_name] + agent_name_to_counts[agent_name]), 2
+                        )
 
                     export_metrics(step_metrics, step=int(current_pct))
 
@@ -1641,14 +1659,11 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
     def resolve_task_sources(examples: List[Dict], global_config_dict: DictConfig) -> None:
         """Stamp an agent_ref onto every row that carries only a task_source.
 
-        task_source names the config instance that declared the row's dataset. Resolution against
-        the merged config, first match wins:
-        - the instance is an agent (self-contained environment) -> route to it directly;
-        - the instance is a resources server -> route to the unique agent whose
-          resources_server.name edge points at it (inversion of the edge every agent
-          config already declares);
-        - zero or 2+ candidate agents, or an unknown/non-routable instance -> hard error
-          (2+ names +agent_map as the disambiguator).
+        task_source names the config instance that declared the row's dataset. Resolution is
+        :func:`~nemo_gym.global_config.resolve_dataset_agent` — the same rules benchmark
+        discovery uses, so dispatch can never disagree with the listing. Conflicting `agent:`
+        pins across one instance's datasets are a hard error (rows carry only the instance
+        name), as are unknown/non-routable instances; +agent_map is the disambiguator.
 
         Rows that already have an agent_ref are left untouched, so this is a no-op on legacy
         datasets and on already-resolved (materialized) rows. Runs before any dispatch.
@@ -1676,8 +1691,6 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         if not unresolved:
             return
 
-        agents_by_rs = agents_by_resources_server(global_config_dict)
-
         resolution: Dict[str, str] = {}
         errors: List[str] = []
         for ts in sorted(unresolved):
@@ -1689,19 +1702,18 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 )
             elif not isinstance(block, DictConfig):
                 errors.append(f"{ts!r}: not a server instance")
-            elif "responses_api_agents" in block:
-                resolution[ts] = ts
-            elif "resources_servers" in block:
-                candidates = agents_by_rs.get(ts, [])
-                if len(candidates) == 1:
-                    resolution[ts] = candidates[0]
-                elif not candidates:
-                    errors.append(f"{ts!r}: no agent in the running config references this resources server")
-                else:
+            elif "responses_api_agents" in block or "resources_servers" in block:
+                pins = dataset_agent_pins(global_config_dict, ts)
+                if len(pins) > 1:
                     errors.append(
-                        f"{ts!r}: {len(candidates)} agents reference this resources server "
-                        f"({sorted(candidates)}); pass +agent_map={{{ts}: <agent>}} to pick one"
+                        f"{ts!r}: its datasets pin conflicting agents ({sorted(pins)}), which task_source "
+                        f"alone cannot tell apart; pass +agent_map={{{ts}: <agent>}} to pick one"
                     )
+                    continue
+                try:
+                    resolution[ts] = resolve_dataset_agent(global_config_dict, ts, pin=pins[0] if pins else None)
+                except ConfigError as e:
+                    errors.append(f"{ts!r}: {e}")
             else:
                 errors.append(f"{ts!r}: instance is not an agent or resources server (datasets cannot route here)")
 
