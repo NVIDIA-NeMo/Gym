@@ -123,6 +123,7 @@ class PlaywrightConnectedBackend(BrowserBackend):
         self._context = None
         self._owns_context = False
         self._released = False
+        self._own_page = None
         self._driver: Optional[PlaywrightPageDriver] = None
 
     # ----- subclass hooks -------------------------------------------------- #
@@ -147,21 +148,26 @@ class PlaywrightConnectedBackend(BrowserBackend):
         self._pw = await async_playwright().start()
         try:
             self._browser, self._context, self._owns_context = await self._connect(self._pw)
-            page = await self._context.new_page()
+            self._own_page = await self._context.new_page()
+            self._driver = PlaywrightPageDriver(self._own_page)
+            # Inside the guard: a failed initial navigation is as likely as a failed
+            # connect (a bad URL, DNS, a timeout), and it would otherwise strand a
+            # browser process and, for a remote backend, the provider session too.
+            if initial_url:
+                await self.goto(initial_url)
         except Exception:
             # `open()` failing must not strand a Playwright process or a
             # provider session: unwind everything we managed to take.
             await self.close()
             raise
-        self._driver = PlaywrightPageDriver(page)
-        if initial_url:
-            await self.goto(initial_url)
 
     async def close(self) -> None:
         try:
-            closers = [self._browser]
+            # The page is closed even when the context is borrowed, so a backend that
+            # does not own its context still leaves no tab behind.
+            closers = [self._own_page, self._browser]
             if self._owns_context:
-                closers.insert(0, self._context)
+                closers.insert(1, self._context)
             for closer in closers:
                 try:
                     if closer is not None:
@@ -176,7 +182,7 @@ class PlaywrightConnectedBackend(BrowserBackend):
                 except Exception as exc:
                     LOGGER.warning("Failed to stop playwright: %r", exc)
         finally:
-            self._browser = self._context = self._pw = None
+            self._own_page = self._browser = self._context = self._pw = None
             self._driver = None
             # `open()` unwinds through close() on failure, and the server closes
             # again on verify/re-seed: release exactly once regardless.
@@ -207,3 +213,11 @@ class PlaywrightConnectedBackend(BrowserBackend):
 
     async def text(self) -> str:
         return await self._page().text()
+
+    # ----- storage, for tests that assert episodes stay separate ----------- #
+    async def write_storage(self, key: str, value: str) -> None:
+        """Write to this origin's ``localStorage``, which a browser context owns."""
+        await self._own_page.evaluate("([k, v]) => localStorage.setItem(k, v)", [key, value])
+
+    async def read_storage(self, key: str) -> Optional[str]:
+        return await self._own_page.evaluate("(k) => localStorage.getItem(k)", key)
