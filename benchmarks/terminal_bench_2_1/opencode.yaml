@@ -5,6 +5,11 @@ config_paths:
 
 opencode_terminal_bench_2_1_resources_server:
   _inherit_from: terminal_bench_2_1_resources_server
+  resources_servers:
+    terminal_bench_2_1:
+      # @bxyu-nvidia: Try reducing the pty size since opencode doesn't need it.
+      pty_rows: 24
+      pty_cols: 80
 
 opencode_sandboxed_agent_terminal_bench_2_1:
   _inherit_from: opencode_sandboxed_agent

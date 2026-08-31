@@ -9,6 +9,10 @@ terminal_bench_2_1_resources_server:          # instance name — how agents/CLI
       evaluation_timeout: 1800
       is_verifying_golden_patch: false
 
+      # rows=40 and cols=160 are default from Terminus 2.1
+      pty_rows: 40
+      pty_cols: 160
+
       sandbox_provider: sandbox
       sandbox_config:
         ttl_s: 18000
