@@ -99,19 +99,10 @@ class NeMoGymSandboxEnvironment:
         env: dict[str, str] | None = None,
         **_: Any,
     ) -> Any:
-        if cwd is None and env is None and user is None:
+        if cwd is None and env is None:
             result = await self._sandbox.pty.exec(command, session=self._pty_session, timeout_s=timeout_sec)
         else:
             result = await self._sandbox.exec(command, cwd=cwd, env=env, timeout_s=timeout_sec, user=user)
-        # TODO @bxyu-nvidia: Remove
-        import sys
-
-        if "tmux new-session" in command:
-            print(f"TMUX NEW SESSION RESULT: {result}", file=sys.stderr)
-        elif "tmux-3.4" in command:
-            print(f"TMUX INSTALL RESULT: {result}", file=sys.stderr)
-        elif result.return_code != 0:
-            print(f"COMMAND FAILED: {command} {result}", file=sys.stderr)
 
         return SimpleNamespace(
             stdout=result.stdout or "",
