@@ -293,9 +293,11 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
 
             await environment.exec("mkdir -p /logs/agent", user="root")
             if self.config.remote_tmux_binary_path:
+                # We add the /usr/local/bin path at the end to not supersede and pre-existing orderings.
                 tmux_install_result = await sandbox.pty.exec(
                     f"""mkdir -p /usr/local/bin \
-&& mv {self.config.remote_tmux_binary_path} /usr/local/bin/tmux \
+&& cp {self.config.remote_tmux_binary_path} /usr/local/bin/tmux \
+&& export PATH=$PATH:/usr/local/bin \
 && tmux -V""",
                     session=pty_session,
                 )
