@@ -625,7 +625,7 @@ async def _connect_ws(
         except aiohttp.WSServerHandshakeError as e:
             if e.status not in (502, 503) or delay is None:
                 raise
-        except (aiohttp.ClientConnectorError, asyncio.TimeoutError):
+        except (aiohttp.ClientConnectorError, aiohttp.ServerDisconnectedError, asyncio.TimeoutError):
             if delay is None:
                 raise
         await asyncio.sleep(delay)

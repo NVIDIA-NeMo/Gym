@@ -544,6 +544,28 @@ async def test_attach_pty_session_query(takeover: bool, since: int | None, expec
     await session.close()
 
 
+async def test_connect_ws_retries_server_disconnected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ServerDisconnectedError during WS upgrade is transient; _connect_ws must retry."""
+    import aiohttp
+
+    from nemo_gym.sandbox.providers.opensandbox.pty import attach_pty_session
+
+    monkeypatch.setattr(pty_module, "_PTY_RETRY_DELAYS", (0,))
+    client = FakeHttpClient(
+        ws=[FakeWs([CONNECTED])],
+        ws_error=[aiohttp.ServerDisconnectedError()],
+    )
+    session = await attach_pty_session(
+        client=client,  # type: ignore[arg-type]
+        base_url="http://server/base",
+        headers={},
+        session_id="s-1",
+        request_timeout_s=5.0,
+    )
+    assert len(client.ws_calls) == 2, "first call raised ServerDisconnected; second should succeed"
+    await session.close()
+
+
 async def test_attach_pty_session_failure_closes_client() -> None:
     from nemo_gym.sandbox.providers.opensandbox.pty import attach_pty_session
 
