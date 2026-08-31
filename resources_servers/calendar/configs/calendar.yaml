@@ -6,16 +6,6 @@ calendar:
       verified: false
       description: Multi-turn calendar scheduling dataset. User states events and constraints in natural language; model schedules events to satisfy all constraints.
       value: Improve multi-turn instruction following capabilities
-calendar_simple_agent:
-  responses_api_agents:
-    simple_agent:
-      entrypoint: app.py
-      resources_server:
-        type: resources_servers
-        name: calendar
-      model_server:
-        type: responses_api_models
-        name: policy_model
       datasets:
       - name: train
         type: train
@@ -34,3 +24,13 @@ calendar_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/calendar/data/example.jsonl
+calendar_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: calendar
+      model_server:
+        type: responses_api_models
+        name: policy_model

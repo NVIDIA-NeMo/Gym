@@ -96,11 +96,6 @@ def process_task(task: dict, fallback_id: str = "unknown") -> dict[str, Any]:
     record = {
         "uuid": str(task_id),
         "task_id": task_id,
-        # Agent reference - tells NeMo-Gym which agent to route this to
-        "agent_ref": {
-            "type": "responses_api_agents",
-            "name": "multichallenge_simple_agent",
-        },
         # Input messages wrapped in responses_create_params (required by gym eval run)
         "responses_create_params": {
             "input": build_input_messages(task),

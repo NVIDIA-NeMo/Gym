@@ -148,38 +148,53 @@ class ServerInfo:
         return f"<a href='{self.readme_path}'>README</a>"
 
 
-def visit_agent_datasets(data: dict) -> AgentDatasetsMetadata:  # pragma: no cover
+def visit_agent_datasets(data: dict) -> AgentDatasetsMetadata:
     agent = AgentDatasetsMetadata()
     if not isinstance(data, dict):
         return agent
-    for v1 in data.values():
+    instances_with_datasets: set = set()
+    implicit_source_agents: list = []
+    for instance_name, v1 in data.items():
         if not isinstance(v1, dict):
             continue
-        v2 = v1.get("responses_api_agents")
-        if not isinstance(v2, dict):
-            continue
-        for v3 in v2.values():
-            if not isinstance(v3, dict):
+        # Datasets are declared on the resources server; agent blocks are still
+        # scanned for configs that predate the decoupling.
+        for section in ("resources_servers", "responses_api_agents"):
+            v2 = v1.get(section)
+            if not isinstance(v2, dict):
                 continue
-            datasets = v3.get("datasets")
-            if isinstance(datasets, list):
-                for entry in datasets:
-                    if isinstance(entry, dict):
-                        agent.types.append(entry.get("type"))
-                        if entry.get("type") == "train":
-                            agent.license = entry.get("license")
-                            source = entry.get("source")
-                            if isinstance(source, dict) and source.get("type") == "huggingface":
-                                agent.huggingface_repo_id = source.get("repo_id")
+            for v3 in v2.values():
+                if not isinstance(v3, dict):
+                    continue
+                datasets = v3.get("datasets")
+                if isinstance(datasets, list):
+                    instances_with_datasets.add(instance_name)
+                    for entry in datasets:
+                        if isinstance(entry, dict):
+                            agent.types.append(entry.get("type"))
+                            if entry.get("type") == "train":
+                                agent.license = entry.get("license")
+                                source = entry.get("source")
+                                if isinstance(source, dict) and source.get("type") == "huggingface":
+                                    agent.huggingface_repo_id = source.get("repo_id")
 
-                            # Backward compatibility for configs that still use the
-                            # deprecated parallel identifier fields.
-                            if not agent.huggingface_repo_id:
-                                hf_id = entry.get("huggingface_identifier")
-                                if isinstance(hf_id, dict):
-                                    agent.huggingface_repo_id = hf_id.get("repo_id")
-            elif v3.get("harbor_datasets") or v3.get("vf_env_id"):
-                agent.types.append("train")
+                                # Backward compatibility for configs that still use the
+                                # deprecated parallel identifier fields.
+                                if not agent.huggingface_repo_id:
+                                    hf_id = entry.get("huggingface_identifier")
+                                    if isinstance(hf_id, dict):
+                                        agent.huggingface_repo_id = hf_id.get("repo_id")
+                elif v3.get("harbor_datasets") or v3.get("vf_env_id"):
+                    implicit_source_agents.append(v3)
+    # Harbor/verifiers agents provide their own task source; count that as trainable data
+    # (appended once) unless the agent's own environment already declares datasets — on the
+    # agent block itself or on the resources server its `resources_server.name` edge points at.
+    for v3 in implicit_source_agents:
+        rs_ref = v3.get("resources_server")
+        rs_name = rs_ref.get("name") if isinstance(rs_ref, dict) else None
+        if rs_name not in instances_with_datasets:
+            agent.types.append("train")
+            break
     return agent
 
 

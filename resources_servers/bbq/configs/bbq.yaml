@@ -60,7 +60,7 @@ bbq:
         seed: 42
         max_tokens: 4096
 
-      judge_system_message: null
+      judge_system_message:
 
       # === TWO-JUDGE PROMPTS (Reward 1 and Reward 2) ===
       # answer_check + explanation_quality_check, versioned; both calls
@@ -79,6 +79,11 @@ bbq:
       judge_max_attempts: 3
       judge_retry_backoff_seconds: 2.0
 
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/bbq/data/example.jsonl
+        num_repeats: 1
 bbq_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -90,8 +95,3 @@ bbq_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/bbq/data/example.jsonl
-        num_repeats: 1

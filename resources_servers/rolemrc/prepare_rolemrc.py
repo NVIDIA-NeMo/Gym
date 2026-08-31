@@ -54,8 +54,6 @@ _MESSAGES_FIELDS = ("question", "conversations", "prompt", "messages")
 _REFERENCE_FIELDS = ("reference", "chosen", "answer", "target")
 
 _DATA_DIR = Path(__file__).parent / "data"
-_REFERENCE_AGENT = "rolemrc_simple_agent"
-_JUDGE_AGENT = "rolemrc_judge_simple_agent"
 
 
 def _read_jsonl(path: str) -> List[Dict[str, Any]]:
@@ -104,7 +102,7 @@ def _row_messages(row: Dict[str, Any]) -> List[Dict[str, str]]:
     return _normalize_messages(raw_turns)
 
 
-def _to_task(row: Dict[str, Any], agent_name: str) -> Dict[str, Any]:
+def _to_task(row: Dict[str, Any]) -> Dict[str, Any]:
     messages = _row_messages(row)
     reference = _pick_field(row, _REFERENCE_FIELDS) or ""
     task = row.get("task", "")
@@ -113,7 +111,6 @@ def _to_task(row: Dict[str, Any], agent_name: str) -> Dict[str, Any]:
         "reference": str(reference),
         "task": task,
         "dimension": _task_dimension(task),
-        "agent_ref": {"type": "responses_api_agents", "name": agent_name},
     }
 
 
@@ -128,8 +125,8 @@ def _write_jsonl(path: Path, rows: List[Dict[str, Any]]) -> None:
 def main() -> None:
     rows = _load_rolemrc()
 
-    reference_rows = [_to_task(row, _REFERENCE_AGENT) for row in rows]
-    judge_rows = [_to_task(row, _JUDGE_AGENT) for row in rows if row.get("task") in _EVALUATION_CONFIG]
+    reference_rows = [_to_task(row) for row in rows]
+    judge_rows = [_to_task(row) for row in rows if row.get("task") in _EVALUATION_CONFIG]
 
     _write_jsonl(_DATA_DIR / "test.jsonl", reference_rows)
     _write_jsonl(_DATA_DIR / "test_judge.jsonl", judge_rows)

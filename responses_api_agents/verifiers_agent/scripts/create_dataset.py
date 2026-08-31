@@ -87,10 +87,6 @@ def main():
                 "responses_create_params": {
                     "input": row["prompt"],
                 },
-                "agent_ref": {
-                    "type": "responses_api_agents",
-                    "name": "verifiers_agent",
-                },
                 "question": row["prompt"][-1]["content"] if row["prompt"] else "",
                 "answer": row.get("answer", ""),
                 "task": row.get("task", ""),

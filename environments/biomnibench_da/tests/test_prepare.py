@@ -108,7 +108,7 @@ def test_prepare_docker_bind_compose(minimal_source: Path, tmp_path: Path) -> No
     rows = [json.loads(line) for line in rollout_input.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert len(rows) == 1
     assert rows[0]["instance_id"] == "biomnibench_da::da-1-3-r001"
-    assert rows[0]["agent_ref"] == {"name": "harbor_agent"}
+    assert "agent_ref" not in rows[0]  # routing is a run-time lookup (dataset-decoupling)
 
 
 def test_prepare_singularity_staging(minimal_source: Path, tmp_path: Path) -> None:

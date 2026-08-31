@@ -7,6 +7,18 @@ workplace_assistant:
       description: Workplace assistant multi-step tool-using environment
       value: Improve multi-step tool use capability
 
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: environments/workplace_assistant/data/train.jsonl
+        license: Apache 2.0
+      - name: validation
+        type: validation
+        jsonl_fpath: environments/workplace_assistant/data/validation.jsonl
+        license: Apache 2.0
+      - name: example
+        type: example
+        jsonl_fpath: environments/workplace_assistant/data/example.jsonl
 workplace_assistant_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -18,15 +30,3 @@ workplace_assistant_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-        - name: train
-          type: train
-          jsonl_fpath: environments/workplace_assistant/data/train.jsonl
-          license: Apache 2.0
-        - name: validation
-          type: validation
-          jsonl_fpath: environments/workplace_assistant/data/validation.jsonl
-          license: Apache 2.0
-        - name: example
-          type: example
-          jsonl_fpath: environments/workplace_assistant/data/example.jsonl

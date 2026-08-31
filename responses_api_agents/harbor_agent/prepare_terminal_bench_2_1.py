@@ -70,7 +70,6 @@ def prepare() -> Path:
             row = {
                 "instance_id": f"{DATASET_ALIAS}::{task_name}",
                 "responses_create_params": RESPONSES_CREATE_PARAMS,
-                "agent_ref": {"name": "harbor_agent"},
             }
             f.write(json.dumps(row) + "\n")
 

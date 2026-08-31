@@ -16,6 +16,19 @@ spider2_lite_resources_server:
       description: Text-to-SQL with execution-based evaluation on Spider 2.0-Lite (135 SQLite tasks). Binary reward based on result-set equivalence.
       value: Improve text-to-SQL capabilities for real-world enterprise queries using execution-based binary reward without an LLM judge.
 
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/spider2_lite/data/example.jsonl
+        license: Creative Commons Attribution-ShareAlike 4.0 International
+      - name: spider2_lite_sqlite_validation
+        type: validation
+        jsonl_fpath: resources_servers/spider2_lite/data/spider2_lite_sqlite_validation.jsonl
+        gitlab_identifier:
+          dataset_name: spider2_lite_sqlite
+          version: 0.0.1
+          artifact_fpath: spider2_lite_sqlite_validation.jsonl
+        license: Creative Commons Attribution-ShareAlike 4.0 International
 spider2_lite_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -26,16 +39,3 @@ spider2_lite_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-        - name: example
-          type: example
-          jsonl_fpath: resources_servers/spider2_lite/data/example.jsonl
-          license: Creative Commons Attribution-ShareAlike 4.0 International
-        - name: spider2_lite_sqlite_validation
-          type: validation
-          jsonl_fpath: resources_servers/spider2_lite/data/spider2_lite_sqlite_validation.jsonl
-          gitlab_identifier:
-            dataset_name: spider2_lite_sqlite
-            version: 0.0.1
-            artifact_fpath: spider2_lite_sqlite_validation.jsonl
-          license: Creative Commons Attribution-ShareAlike 4.0 International

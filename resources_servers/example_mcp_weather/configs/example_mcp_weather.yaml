@@ -7,6 +7,10 @@ example_mcp_weather:
       expose_tools_over_mcp: true
       description: Claude Code MCP smoke test — a plain HTTP weather tool route auto-exposed over MCP
 
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/example_mcp_weather/data/example.jsonl
 example_mcp_weather_claude_code_agent:
   responses_api_agents:
     claude_code_agent:
@@ -17,17 +21,13 @@ example_mcp_weather_claude_code_agent:
       concurrency: 1
       model: claude-sonnet-4-6
       anthropic_api_key: ${anthropic_api_key}
-      anthropic_base_url: null
+      anthropic_base_url:
       max_turns: 10
       timeout: 300
-      system_prompt: null
-      allowed_tools: null
-      disallowed_tools: null
-      claude_code_version: null
+      system_prompt:
+      allowed_tools:
+      disallowed_tools:
+      claude_code_version:
       bare: true
-      mcp_config: null
-      settings: null
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/example_mcp_weather/data/example.jsonl
+      mcp_config:
+      settings:

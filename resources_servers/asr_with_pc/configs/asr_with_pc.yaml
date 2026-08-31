@@ -7,6 +7,11 @@ asr_with_pc:
       value: Improve transcription quality with structural detail
       verified: false
       task_type: ASR-PC
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/asr_with_pc/data/example.jsonl
+        license: Creative Commons Attribution 4.0 International
 asr_with_pc_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -18,8 +23,3 @@ asr_with_pc_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/asr_with_pc/data/example.jsonl
-        license: Creative Commons Attribution 4.0 International

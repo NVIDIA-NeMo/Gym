@@ -25,6 +25,21 @@ longmemeval:
       judge_max_retries: 5
       judge_retry_base_delay: 1.0
 
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/longmemeval/data/example.jsonl
+        license: MIT
+      # Build with `python resources_servers/longmemeval/prepare_longmemeval.py`.
+      - name: oracle
+        type: validation
+        jsonl_fpath: resources_servers/longmemeval/data/oracle.jsonl
+        license: MIT
+
+# Null defaults so OmegaConf resolves ${judge_*} without CLI overrides.
+# Recommended judge: gpt-4o-mini (upstream default). Must stay at end of file
+# for update_env_list.py. policy_* are intentionally NOT defaulted here: the
+# policy model is supplied by whichever model-server config is composed in.
 judge_model:
   responses_api_models:
     openai_model:
@@ -43,21 +58,6 @@ longmemeval_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/longmemeval/data/example.jsonl
-        license: MIT
-      # Build with `python resources_servers/longmemeval/prepare_longmemeval.py`.
-      - name: oracle
-        type: validation
-        jsonl_fpath: resources_servers/longmemeval/data/oracle.jsonl
-        license: MIT
-
-# Null defaults so OmegaConf resolves ${judge_*} without CLI overrides.
-# Recommended judge: gpt-4o-mini (upstream default). Must stay at end of file
-# for update_env_list.py. policy_* are intentionally NOT defaulted here: the
-# policy model is supplied by whichever model-server config is composed in.
-judge_base_url: null
-judge_api_key: null
-judge_model_name: null
+judge_base_url:
+judge_api_key:
+judge_model_name:

@@ -86,7 +86,6 @@ class DeNovoSWEDataProcessor:
         require_passed_ptp: bool = True,
         skip_submodule_uninitialized: bool = True,
         skip_binary_archive: bool = False,
-        agent_ref_name: str = "swe_agents_val",
         split: str = "test",
         model: str = "model",
         temperature: float = 1.0,
@@ -99,7 +98,6 @@ class DeNovoSWEDataProcessor:
         self.require_passed_ptp = require_passed_ptp
         self.skip_submodule_uninitialized = skip_submodule_uninitialized
         self.skip_binary_archive = skip_binary_archive
-        self.agent_ref_name = agent_ref_name
         self.split = split
         self.model = model
         self.temperature = temperature
@@ -188,7 +186,6 @@ class DeNovoSWEDataProcessor:
                 "top_p": self.top_p,
                 "max_output_tokens": self.max_output_tokens,
             },
-            "agent_ref": {"type": "responses_api_agents", "name": self.agent_ref_name},
             # SWE-bench-style top-level mirrors.
             "instance_id": instance_id,
             "repo": instance_dict["repo"],
@@ -229,7 +226,6 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Skip instances that ship test_binary_archive_b64 (less likely to grade cleanly).",
     )
-    p.add_argument("--agent-ref-name", default="swe_agents_val")
     p.add_argument("--split", default="test")
     p.add_argument("--model", default="model")
     p.add_argument("--temperature", type=float, default=1.0)
@@ -251,7 +247,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         limit=args.limit,
         sort_by=args.sort_by,
         skip_binary_archive=args.skip_binary_archive,
-        agent_ref_name=args.agent_ref_name,
         split=args.split,
         model=args.model,
         temperature=args.temperature,

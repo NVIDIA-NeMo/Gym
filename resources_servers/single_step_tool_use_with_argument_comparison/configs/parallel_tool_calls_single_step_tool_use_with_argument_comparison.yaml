@@ -87,6 +87,13 @@ parallel_tool_calls_single_step_tool_use_with_argument_comparison_resources_serv
         parallel_tool_call_reward_mode: f1
       verified: false
       description: Parallel tool-call verification; the model must emit the expected set of tool calls in a single turn, in any order.
+      datasets:
+      # Five rows covering what the verifier distinguishes: three parallel calls, two parallel
+      # calls of one tool, two parallel calls across two tools, one single call, and one message.
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/single_step_tool_use_with_argument_comparison/data/parallel_example.jsonl
+        num_repeats: 1
 parallel_tool_calls_single_step_tool_use_with_argument_comparison_agent:
   responses_api_agents:
     tool_simulation_agent:
@@ -100,10 +107,3 @@ parallel_tool_calls_single_step_tool_use_with_argument_comparison_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      # Five rows covering what the verifier distinguishes: three parallel calls, two parallel
-      # calls of one tool, two parallel calls across two tools, one single call, and one message.
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/single_step_tool_use_with_argument_comparison/data/parallel_example.jsonl
-        num_repeats: 1

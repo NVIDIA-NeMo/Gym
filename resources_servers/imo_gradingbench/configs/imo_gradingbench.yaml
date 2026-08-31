@@ -7,6 +7,10 @@ imo_gradingbench:
       description: "Four-class grading of math proofs — the policy model reads a problem plus a candidate proof and emits one of correct / almost / partial / incorrect as the last word."
       value: "Improve the IMO-GradingBench benchmark and proof-grading skill."
 
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/imo_gradingbench/data/example.jsonl
 imo_gradingbench_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -17,7 +21,3 @@ imo_gradingbench_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-        - name: example
-          type: example
-          jsonl_fpath: resources_servers/imo_gradingbench/data/example.jsonl

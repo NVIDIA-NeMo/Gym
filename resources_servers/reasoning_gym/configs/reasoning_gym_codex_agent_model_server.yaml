@@ -22,6 +22,10 @@ reasoning_gym:
       description: Codex agent harness for reasoning gym tasks, via a Gym model server's /v1/responses
       value: Showcase Codex running against any Gym model backend
 
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/reasoning_gym/data/example.jsonl
 reasoning_gym_codex_agent_model_server:
   responses_api_agents:
     codex_agent:
@@ -35,14 +39,10 @@ reasoning_gym_codex_agent_model_server:
       concurrency: 32
       model: ${policy_model_name}
       openai_api_key: EMPTY  # pragma: allowlist secret
-      openai_base_url: null
+      openai_base_url:
       sandbox_mode: danger-full-access
       timeout: 600
       codex_version: 0.144.4
       system_prompt: |
         You are a precise reasoning assistant. You can run shell commands to use Python for calculations.
         For every problem: think step by step, use code to verify when helpful, and state your final answer clearly.
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/reasoning_gym/data/example.jsonl

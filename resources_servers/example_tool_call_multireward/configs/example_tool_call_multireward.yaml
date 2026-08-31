@@ -6,6 +6,10 @@ example_tool_call_multireward:
       verified: false
       description: Single tool call scored on decoupled correctness / schema_valid / format rewards (multi-reward, for GDPO)
       value: Reference pattern for multi-reward (GDPO) agentic RL with decoupled per-objective rewards
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/example_tool_call_multireward/data/example.jsonl
 example_tool_call_multireward_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -16,7 +20,3 @@ example_tool_call_multireward_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/example_tool_call_multireward/data/example.jsonl

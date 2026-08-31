@@ -4,6 +4,11 @@ ruler_resources_server:
       entrypoint: app.py
       domain: other
       verified: false
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/ruler/data/example.jsonl
+        num_repeats: 1
 ruler_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -14,8 +19,3 @@ ruler_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/ruler/data/example.jsonl
-        num_repeats: 1

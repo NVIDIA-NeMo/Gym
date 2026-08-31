@@ -7,16 +7,6 @@ spartqa:
       description: SpartQA spatial reasoning, CO (choose-object) question type; four candidate answers per question (two story objects, "both of them", "none of them"); reward = 1 iff the answer resolves to the single gold label.
       value: Improve spatial and relational reasoning over described scenes.
 
-spartqa_simple_agent:
-  responses_api_agents:
-    simple_agent:
-      entrypoint: app.py
-      resources_server:
-        type: resources_servers
-        name: spartqa
-      model_server:
-        type: responses_api_models
-        name: policy_model
       datasets:
       - name: example
         type: example
@@ -27,3 +17,13 @@ spartqa_simple_agent:
         type: validation
         jsonl_fpath: resources_servers/spartqa/data/spartqa_test.jsonl
         license: CC-BY-SA-4.0
+spartqa_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: spartqa
+      model_server:
+        type: responses_api_models
+        name: policy_model

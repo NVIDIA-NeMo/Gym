@@ -9,7 +9,6 @@ import json
 from pathlib import Path
 
 
-AGENT_NAME = "langgraph_parallel_thinking_math_agent"
 DATASET_NAME = "YouJiacheng/DAPO-Math-17k-dedup"
 
 
@@ -18,7 +17,6 @@ def format_entry_to_nemo_gym(example: dict) -> dict:
         "responses_create_params": {"input": example["prompt"]},
         "question": example["prompt"][0]["content"],
         "expected_answer": example["reward_model"]["ground_truth"],
-        "agent_ref": {"type": "responses_api_agents", "name": AGENT_NAME},
     }
 
 

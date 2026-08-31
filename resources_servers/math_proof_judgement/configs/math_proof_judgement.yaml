@@ -7,6 +7,10 @@ math_proof_judgement:
       description: "Binary judgement of math proofs — the policy model reads a problem plus a candidate proof and outputs Judgement: Yes/No."
       value: "Improve the NVIDIA ProofBench judge benchmark and math-proof verification skill."
 
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/math_proof_judgement/data/example.jsonl
 math_proof_judgement_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -17,7 +21,3 @@ math_proof_judgement_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-        - name: example
-          type: example
-          jsonl_fpath: resources_servers/math_proof_judgement/data/example.jsonl

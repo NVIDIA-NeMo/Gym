@@ -7,6 +7,10 @@ reasoning_gym:
       description: Codex agent harness for reasoning gym tasks
       value: Evaluate model capabilities in the Codex agent harness
 
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/reasoning_gym/data/example.jsonl
 reasoning_gym_codex_agent:
   responses_api_agents:
     codex_agent:
@@ -27,7 +31,3 @@ reasoning_gym_codex_agent:
       system_prompt: |
         You are a precise reasoning assistant. You can run shell commands to use Python for calculations.
         For every problem: think step by step, use code to verify when helpful, and state your final answer clearly.
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/reasoning_gym/data/example.jsonl

@@ -92,7 +92,6 @@ def test_materialize_preserves_rollout_and_scenario_order(tmp_path: Path) -> Non
         "customer_scenario",
         "source_artifacts",
         "responses_create_params",
-        "agent_ref",
     }
     assert rows[0]["tools"] == [
         {
@@ -117,10 +116,7 @@ def test_materialize_preserves_rollout_and_scenario_order(tmp_path: Path) -> Non
         "rollout-a_ng_t4_r2_a1_scenario_000001",
         "rollout-b_scenario_000000",
     ]
-    assert rows[0]["agent_ref"] == {
-        "type": "responses_api_agents",
-        "name": "conversational_tool_use_agent",
-    }
+    assert "agent_ref" not in rows[0]  # routing is a run-time lookup (dataset-decoupling)
     assert rows[0]["profile"] == "general"
     assert rows[0]["domain_name"] == "order support"
     assert rows[0]["source_artifacts"] == {

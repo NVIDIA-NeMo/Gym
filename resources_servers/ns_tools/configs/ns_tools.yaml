@@ -12,22 +12,22 @@ ns_tools:
   resources_servers:
     ns_tools:
       entrypoint: app.py
-      
+
       # Default verifier for samples without explicit verifier_type
       default_verifier: math_with_judge
-      
+
       # Map of verifier names to server references
       # Add more verifiers here as needed (e.g., xlam_fc, mcqa)
       verifiers:
         math_with_judge:
           type: resources_servers
           name: math_with_judge
-      
+
       # NeMo Skills tools to load
       # DirectPythonTool is the preferred python tool path: it calls the sandbox directly
       nemo_skills_tools:
-        - nemo_skills.mcp.servers.python_tool::DirectPythonTool
-      
+      - nemo_skills.mcp.servers.python_tool::DirectPythonTool
+
       # Per-tool configuration overrides
       nemo_skills_tool_overrides:
         DirectPythonTool:
@@ -40,12 +40,17 @@ ns_tools:
 
       # Disable session replay after sandbox worker restarts (improves stability)
       disable_session_restore: true
-      
+
       domain: agent
       verified: false
       description: NeMo Skills tool execution with math verification
 
 # Agent configuration
+      datasets:
+      - name: example
+        type: example
+        license: Apache 2.0
+        jsonl_fpath: resources_servers/ns_tools/data/example.jsonl
 ns_tools_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -57,8 +62,3 @@ ns_tools_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-        - name: example
-          type: example
-          license: Apache 2.0
-          jsonl_fpath: resources_servers/ns_tools/data/example.jsonl

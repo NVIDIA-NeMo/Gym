@@ -1,5 +1,5 @@
 config_paths:
-  - resources_servers/bigcodebench/configs/bigcodebench.yaml
+- resources_servers/bigcodebench/configs/bigcodebench.yaml
 
 bigcodebench_benchmark_simple_agent:
   responses_api_agents:

@@ -126,7 +126,6 @@ class DeepSWEDataProcessor:
         images_dir: Optional[Path | str] = None,
         require_image: bool = True,
         exclude_broken_baseline: bool = False,
-        agent_ref_name: str = "swe_agents_val",
         split: str = "test",
         model: str = "model",
         temperature: float = 1.0,
@@ -137,7 +136,6 @@ class DeepSWEDataProcessor:
         self.images_dir = Path(images_dir) if images_dir is not None else None
         self.require_image = require_image
         self.exclude_broken_baseline = exclude_broken_baseline
-        self.agent_ref_name = agent_ref_name
         self.split = split
         self.model = model
         self.temperature = temperature
@@ -249,7 +247,6 @@ class DeepSWEDataProcessor:
                 "top_p": self.top_p,
                 "max_output_tokens": self.max_output_tokens,
             },
-            "agent_ref": {"type": "responses_api_agents", "name": self.agent_ref_name},
             # Top-level convenience mirrors (match the SWE-bench JSONL layout).
             "instance_id": task_id,
             "repo": instance_dict["repo"],
@@ -300,7 +297,6 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Drop tasks in KNOWN_BROKEN_BASELINE (e.g. langchain). Off by default — the full set is emitted.",
     )
-    p.add_argument("--agent-ref-name", default="swe_agents_val", help="agent_ref.name baked into each row.")
     p.add_argument("--split", default="test")
     p.add_argument("--model", default="model")
     p.add_argument("--temperature", type=float, default=1.0)
@@ -317,7 +313,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         images_dir=args.images_dir,
         require_image=not args.no_require_image,
         exclude_broken_baseline=args.exclude_broken_baseline,
-        agent_ref_name=args.agent_ref_name,
         split=args.split,
         model=args.model,
         temperature=args.temperature,

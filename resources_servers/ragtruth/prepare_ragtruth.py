@@ -63,7 +63,6 @@ _LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1"
 _FETCH_TIMEOUT_S = 300.0
 
 _DATA_DIR = Path(__file__).parent / "data"
-_AGENT = "ragtruth_simple_agent"
 
 # task_type -> (output split filename). Order matches upstream's QA/Summary/Data2txt.
 _TASK_SPLITS: Tuple[Tuple[str, str], ...] = (
@@ -249,7 +248,6 @@ def _to_task(row: Dict[str, Any]) -> Dict[str, Any]:
         "responses_create_params": {"input": [{"role": "user", "content": prompt}]},
         "task_type": row["task_type"],
         "is_halu": row["is_halu"],
-        "agent_ref": {"type": "responses_api_agents", "name": _AGENT},
     }
 
 

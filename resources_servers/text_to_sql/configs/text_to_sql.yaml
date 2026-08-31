@@ -15,7 +15,7 @@ text_to_sql_resources_server:
         name: policy_model
       judge_responses_create_params:
         input: []
-      judge_endpoint_max_concurrency: null
+      judge_endpoint_max_concurrency:
       judge_equal_label: "[[A=B]]"
       judge_not_equal_label: "[[A!=B]]"
 
@@ -29,6 +29,11 @@ text_to_sql_resources_server:
       description: Text-to-SQL generation with LLM-as-a-judge equivalence checking
       value: Improve text-to-SQL capabilities across multiple dialects
 
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/text_to_sql/data/example.jsonl
+        license: Creative Commons Attribution 4.0 International
 text_to_sql_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -39,8 +44,3 @@ text_to_sql_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/text_to_sql/data/example.jsonl
-        license: Creative Commons Attribution 4.0 International

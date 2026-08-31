@@ -11,9 +11,12 @@ proof_verification:
       max_tokens: 100000
       assert_think_end: false
       domain: math
-      description: Proof verification scored against ground truth and meta-verifier
-        agreement
+      description: Proof verification scored against ground truth and meta-verifier agreement
       verified: false
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/proof_verification/data/example.jsonl
 proof_verification_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -24,7 +27,3 @@ proof_verification_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/proof_verification/data/example.jsonl

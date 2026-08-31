@@ -7,6 +7,14 @@ reasoning_gym:
       description: Prime Agent harness with reasoning gym tasks
       value: Improve reasoning capabilities with Prime Agent
 
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: environments/prime_agent_reasoning_gym/data/train.jsonl
+        license: Apache 2.0
+      - name: example
+        type: example
+        jsonl_fpath: environments/prime_agent_reasoning_gym/data/example.jsonl
 prime_agent_reasoning_gym_agent:
   responses_api_agents:
     prime_agent:
@@ -24,11 +32,3 @@ prime_agent_reasoning_gym_agent:
       timeout: 600
       system_prompt: |
         Reason carefully and use IPython when helpful. Put only the final answer in \boxed{}.
-      datasets:
-      - name: train
-        type: train
-        jsonl_fpath: environments/prime_agent_reasoning_gym/data/train.jsonl
-        license: Apache 2.0
-      - name: example
-        type: example
-        jsonl_fpath: environments/prime_agent_reasoning_gym/data/example.jsonl

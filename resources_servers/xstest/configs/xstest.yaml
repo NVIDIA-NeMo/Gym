@@ -16,6 +16,10 @@ xstest_resources_server:
       judge_endpoint_max_concurrency: 64
       judge_prompt_template_fpath: prompt_templates/wildguard_judge.txt
       judge_output_format: wildguard
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/xstest/data/example.jsonl
 allenai_wildguard_model_server:
   responses_api_models:
     local_vllm_model:
@@ -24,7 +28,7 @@ allenai_wildguard_model_server:
       return_token_id_information: false
       uses_reasoning_parser: false
       debug: false
-      hf_home: null
+      hf_home:
       vllm_serve_env_vars:
         VLLM_RAY_DP_PACK_STRATEGY: strict
       vllm_serve_kwargs:
@@ -44,7 +48,3 @@ xstest_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/xstest/data/example.jsonl

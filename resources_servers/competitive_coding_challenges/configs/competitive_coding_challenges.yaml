@@ -12,6 +12,10 @@ competitive_coding_challenges_resources_server:
       shared_dir: ${oc.env:SHARED_TEMP_DIR,/tmp}
       reward_mode: binary
       verified: false
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/competitive_coding_challenges/data/example.jsonl
 competitive_coding_challenges_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -22,7 +26,3 @@ competitive_coding_challenges_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/competitive_coding_challenges/data/example.jsonl

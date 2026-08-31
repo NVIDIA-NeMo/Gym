@@ -9,6 +9,11 @@ terminal_multi_harness_agent006_resources_server:
       verified: false
       description: Agent006 harness structured-action verifier for next-step pivot RL.
 
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/terminal_multi_harness/data/example.jsonl
+        num_repeats: 1
 terminal_multi_harness_agent006_agent:
   responses_api_agents:
     tool_simulation_agent:
@@ -19,8 +24,3 @@ terminal_multi_harness_agent006_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/terminal_multi_harness/data/example.jsonl
-        num_repeats: 1

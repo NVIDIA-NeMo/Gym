@@ -33,6 +33,18 @@ abstention:
       correct_reward: 1.0
       incorrect_reward: 0.0
 
+      datasets:
+      - name: hotpotqa_train
+        type: train
+        jsonl_fpath: resources_servers/abstention/data/hotpotqa_train.jsonl
+        license: Creative Commons Attribution-ShareAlike 4.0 International
+      - name: hotpotqa_val
+        type: validation
+        jsonl_fpath: resources_servers/abstention/data/hotpotqa_val.jsonl
+        license: Creative Commons Attribution-ShareAlike 4.0 International
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/abstention/data/example.jsonl
 abstention_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -43,15 +55,3 @@ abstention_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-        - name: hotpotqa_train
-          type: train
-          jsonl_fpath: resources_servers/abstention/data/hotpotqa_train.jsonl
-          license: Creative Commons Attribution-ShareAlike 4.0 International
-        - name: hotpotqa_val
-          type: validation
-          jsonl_fpath: resources_servers/abstention/data/hotpotqa_val.jsonl
-          license: Creative Commons Attribution-ShareAlike 4.0 International
-        - name: example
-          type: example
-          jsonl_fpath: resources_servers/abstention/data/example.jsonl

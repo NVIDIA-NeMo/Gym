@@ -17,6 +17,10 @@ browsecomp_advanced_harness_resources_server:
       description: Model uses search tools to satisfy a user query.
       value: Measure agentic search capability
 
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/browsecomp_advanced_harness/data/example.jsonl
 judge_model:
   responses_api_models:
     vllm_model:
@@ -37,7 +41,3 @@ browsecomp_advanced_harness_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/browsecomp_advanced_harness/data/example.jsonl

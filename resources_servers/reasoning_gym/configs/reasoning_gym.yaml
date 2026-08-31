@@ -6,6 +6,14 @@ reasoning_gym:
       verified: true
       description: Over 100 tasks including algebra, arithmetic, computation, cognition, geometry, graph theory, logic, and many common games.
       value: Improve robustness, generalization, broad knowledge and reasoning
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/reasoning_gym/data/Nemotron-RL-ReasoningGym-v1_train.jsonl
+        huggingface_identifier:
+          repo_id: nvidia/Nemotron-RL-ReasoningGym-v1
+          artifact_fpath: data/train.jsonl
+        license: Creative Commons Attribution 4.0 International
 reasoning_gym_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -16,11 +24,3 @@ reasoning_gym_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: train
-        type: train
-        jsonl_fpath: resources_servers/reasoning_gym/data/Nemotron-RL-ReasoningGym-v1_train.jsonl
-        huggingface_identifier:
-          repo_id: nvidia/Nemotron-RL-ReasoningGym-v1
-          artifact_fpath: data/train.jsonl
-        license: Creative Commons Attribution 4.0 International

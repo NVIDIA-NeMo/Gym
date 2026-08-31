@@ -175,8 +175,4 @@ def make_gym_record(
         "source_format": source_format,
         "num_turns": num_turns,
         "source_record_id": source_record_id,
-        "agent_ref": {
-            "type": "responses_api_agents",
-            "name": "structured_outputs_v3_simple_agent",
-        },
     }

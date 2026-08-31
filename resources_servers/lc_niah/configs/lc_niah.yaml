@@ -18,6 +18,10 @@ lc_niah:
       description: Answer-correctness reward gated by low reasoning/input overlap
       value: Reward correct answers while discouraging copying the prompt into reasoning
 
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/lc_niah/data/example.jsonl
 lc_niah_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -28,7 +32,3 @@ lc_niah_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/lc_niah/data/example.jsonl

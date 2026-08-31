@@ -46,13 +46,7 @@ GYM_IDENTITY_KEYS = (
 )
 
 
-class ScenarioGenerationAgentRef(BaseModel):
-    type: str = "responses_api_agents"
-    name: str = "conversational_tool_use_scenario_generation"
-
-
 class ScenarioGenerationInput(BaseModel):
-    agent_ref: ScenarioGenerationAgentRef = Field(default_factory=ScenarioGenerationAgentRef)
     id: str | None = None
     responses_create_params: dict[str, Any]
     profile: PolicyToolProfile

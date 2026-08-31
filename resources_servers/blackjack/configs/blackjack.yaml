@@ -7,6 +7,10 @@ blackjack:
       verified: false
       description: Blackjack. Model hits or stands. Reward +1 win, 0 draw, -1 loss/bust.
       value: Example gymnasium-style multi-step environment
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/blackjack/data/example.jsonl
 blackjack_gymnasium_agent:
   responses_api_agents:
     gymnasium_agent:
@@ -18,7 +22,3 @@ blackjack_gymnasium_agent:
         type: responses_api_models
         name: policy_model
       max_steps: 5
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/blackjack/data/example.jsonl

@@ -7,6 +7,12 @@ grl_sokoban:
       verified: false
       description: Single-box Sokoban in Gymnasium API style.
       value: Model emits one move per turn until the puzzle is solved.
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/grl_sokoban/data/example.jsonl
+        num_repeats: 1
+        license: Apache 2.0
 grl_sokoban_gymnasium_agent:
   responses_api_agents:
     gymnasium_agent:
@@ -18,9 +24,3 @@ grl_sokoban_gymnasium_agent:
         type: responses_api_models
         name: policy_model
       max_steps: 20
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/grl_sokoban/data/example.jsonl
-        num_repeats: 1
-        license: Apache 2.0

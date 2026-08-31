@@ -7,6 +7,12 @@ ruler2_resources_server:
       description: Long-context RULER v2 verifier with WER-fallback soft string match across 3 match types plus a multichoice route
       value: Improve long-context retrieval, multi-key/multi-value needle search, and document-grounded QA
 
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/ruler2/data/example.jsonl
+        num_repeats: 1
+        license: Apache 2.0
 ruler2_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -17,9 +23,3 @@ ruler2_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/ruler2/data/example.jsonl
-        num_repeats: 1
-        license: Apache 2.0

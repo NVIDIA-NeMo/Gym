@@ -25,6 +25,9 @@ bigcodebench_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
+      # Stays on the agent: benchmarks/bigcodebench/config.yaml adds a second agent on this
+      # resources server, and non-benchmark datasets have no `agent:` pin to disambiguate an
+      # RS-declared task_source in that closure.
       datasets:
       - name: example
         type: example

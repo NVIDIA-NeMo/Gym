@@ -9,6 +9,10 @@ openenv_coding_resources_server:
       action_class: "coding_env.models.CodeAction"
       is_mcp: false
 
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/openenv/data/coding/example.jsonl
 openenv_coding_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -19,7 +23,3 @@ openenv_coding_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/openenv/data/coding/example.jsonl

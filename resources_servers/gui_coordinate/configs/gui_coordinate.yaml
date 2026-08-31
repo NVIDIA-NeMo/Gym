@@ -6,6 +6,10 @@ gui_coordinate:
       verified: false
       description: GUI coordinate grounding verifier for visual pointing tasks
       value: Verify GUI coordinate predictions using smooth quadratic reward based on Euclidean distance
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/gui_coordinate/data/example.jsonl
 gui_coordinate_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -16,7 +20,3 @@ gui_coordinate_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/gui_coordinate/data/example.jsonl

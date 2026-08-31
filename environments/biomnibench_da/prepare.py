@@ -158,7 +158,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--agent-name",
         default=DEFAULT_AGENT_NAME,
-        help=f"agent_ref.name written into rollout input rows (default: {DEFAULT_AGENT_NAME}).",
+        help=f"agent name recorded in the materialization manifest (default: {DEFAULT_AGENT_NAME}).",
     )
     parser.add_argument(
         "--environment-type",
@@ -248,7 +248,6 @@ def build_rollout_input_rows(
         {
             "instance_id": f"{dataset_name}::{task['name']}",
             "responses_create_params": {"input": []},
-            "agent_ref": {"name": agent_name},
         }
         for task in registry_tasks
     ]

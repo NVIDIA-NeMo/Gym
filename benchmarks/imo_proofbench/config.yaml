@@ -1,5 +1,5 @@
 config_paths:
-  - resources_servers/imo_proofbench_judge/configs/imo_proofbench_judge.yaml
+- resources_servers/imo_proofbench_judge/configs/imo_proofbench_judge.yaml
 
 imo_proofbench_imo_proofbench_judge_simple_agent:
   _inherit_from: imo_proofbench_judge_simple_agent
