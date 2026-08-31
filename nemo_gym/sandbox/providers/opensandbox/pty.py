@@ -385,11 +385,16 @@ class OpenSandboxPtySession:
         """
         token = f"NGPTY{uuid.uuid4().hex[:12]}"
         needle = f"{token}:".encode()
-        # Marker from two literals so the echo cannot match it; brace group
-        # keeps shell state while putting stdin at EOF (see _run_in_pty_session
-        # in the api module for the same discipline).
+        # Markers from two literals so the echo cannot match them; both
+        # printfs sit inside the brace group so echoed input and prompts land
+        # before the start marker and the status marker directly follows the
+        # output (see _run_in_pty_session in the api module for the same
+        # discipline). The group keeps shell state while putting stdin at EOF.
         await self.write(
-            f"{{ {command}\n}} </dev/null\nprintf '%s%s:%s\\n' '{token[:5]}' '{token[5:]}' \"$?\"\n".encode()
+            f"{{ printf '%s%s\\n' '{token[:5]}' '{token[5:]}S'\n"
+            f"{command}\n"
+            f"printf '%s%s:%s\\n' '{token[:5]}' '{token[5:]}' \"$?\"\n"
+            f"}} </dev/null\n".encode()
         )
         buffer = bytearray()
         while True:
@@ -416,6 +421,12 @@ class OpenSandboxPtySession:
             await asyncio.sleep(poll_interval_s)
             await self.reattach()
         output, _, trailing = bytes(buffer).partition(needle)
+        # Drop the echoed input and prompts: real output starts on the line
+        # after the start marker. (The marker can be missing if the retained
+        # window evicted it while detached; keep the prefix then.)
+        _, seen_start, after_start = output.partition(f"{token}S".encode())
+        if seen_start:
+            output = after_start.partition(b"\n")[2]
         while b"\n" not in trailing:
             # The status digits can straddle the chunk that carried the marker.
             chunk = await self.read(timeout_s=5.0)

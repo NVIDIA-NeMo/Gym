@@ -62,14 +62,21 @@ def _pty_timeout_result(command: str, timeout_s: float | int | None, *, reusable
 
 
 async def _run_in_pty_session(session: SandboxPtySession, command: str) -> SandboxExecResult:
-    """Run ``command`` in a live session, delimited by a unique marker."""
+    """Run ``command`` in a live session, delimited by unique markers."""
     token = f"NGPTY{uuid.uuid4().hex[:12]}"
-    # The marker is assembled from two literals so the shell's echo of this
-    # line cannot itself match the marker we scan for. The brace group keeps
-    # shell state while putting stdin at EOF: the session's stdin never ends,
-    # so a stdin-reading command would block forever and eat the marker line.
+    # Markers are assembled from two literals so the shell's echo of the typed
+    # lines cannot match what we scan for. Both printfs live inside the brace
+    # group: every echoed input line and prompt lands before the start marker,
+    # and the status marker follows the output with no prompt in between, so
+    # the slice between the markers is the command's output alone. The group
+    # keeps shell state while putting stdin at EOF: the session's stdin never
+    # ends, so a stdin-reading command would block forever and eat the marker
+    # line.
     await session.write(
-        f"{{ {command}\n}} </dev/null\nprintf '%s%s:%s\\n' '{token[:5]}' '{token[5:]}' \"$?\"\n".encode()
+        f"{{ printf '%s%s\\n' '{token[:5]}' '{token[5:]}S'\n"
+        f"{command}\n"
+        f"printf '%s%s:%s\\n' '{token[:5]}' '{token[5:]}' \"$?\"\n"
+        f"}} </dev/null\n".encode()
     )
 
     needle = f"{token}:".encode()
@@ -81,6 +88,11 @@ async def _run_in_pty_session(session: SandboxPtySession, command: str) -> Sandb
         buffer.extend(chunk)
 
     stdout, _, trailing = bytes(buffer).partition(needle)
+    # Drop the echoed input and prompts: real output starts on the line after
+    # the start marker.
+    _, seen_start, after_start = stdout.partition(f"{token}S".encode())
+    if seen_start:
+        stdout = after_start.partition(b"\n")[2]
     while b"\n" not in trailing:
         # The status digits can straddle the chunk that carried the marker.
         chunk = await session.read()

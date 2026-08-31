@@ -1240,8 +1240,10 @@ class _LaunchWs(FakeWs):
     async def send_bytes(self, data: bytes) -> None:
         await super().send_bytes(data)
         self._state["launch"] = data
-        quoted = data.decode().splitlines()[-1].split("'")
-        self._state["marker"] = f"{quoted[3]}{quoted[5]}:0\r\n".encode()
+        quoted = data.decode().splitlines()[-2].split("'")
+        token = quoted[3] + quoted[5]
+        self._state["start"] = f"{token}S\r\n".encode()
+        self._state["marker"] = f"{token}:0\r\n".encode()
 
 
 class _ReplayWs(FakeWs):
@@ -1255,7 +1257,7 @@ class _ReplayWs(FakeWs):
     async def __anext__(self) -> SimpleNamespace:
         if not self._messages and not self._state.get("served"):
             self._state["served"] = True
-            payload = b"work-output\n" + self._state["marker"]
+            payload = self._state["start"] + b"work-output\n" + self._state["marker"]
             return _binary(b"\x03" + struct.pack(">Q", self._offset) + payload)
         return await super().__anext__()
 
