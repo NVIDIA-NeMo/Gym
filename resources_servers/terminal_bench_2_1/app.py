@@ -188,8 +188,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         eval_sandbox = AsyncSandbox(resolved_sandbox_provider)
         await eval_sandbox.start(eval_sandbox_spec)
 
-        # rows=40 and cols=160 are default from Terminus 2.1
-        pty_session = await eval_sandbox.pty.create(rows=40, cols=160)
+        pty_session = await eval_sandbox.pty.create()
 
         return eval_sandbox, pty_session
 
