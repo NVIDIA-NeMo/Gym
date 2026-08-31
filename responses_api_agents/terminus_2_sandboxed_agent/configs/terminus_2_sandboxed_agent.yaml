@@ -10,7 +10,7 @@ terminus_2_sandboxed_agent:
         type: responses_api_models
         name: policy_model
 
-      max_turns: 100
+      max_turns: null
       parser_name: json
       enable_summarize: true
       proactive_summarization_threshold: 8000
@@ -18,7 +18,7 @@ terminus_2_sandboxed_agent:
       tmux_pane_height: 40
       dump_trajectory: false
       debug: false
-      model_context_limit: 1000000
+      model_context_limit: 262144
       model_output_limit: null
 
       sandbox_provider: sandbox
