@@ -1615,6 +1615,13 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 # re-judges the existing deliverable and overwrites the cache.
                 print(f"[stirrup] ignoring invalid cached verify result: {cache_path}", flush=True)
                 return None
+            if cached.get(NG_FAILURE_CLASS_KEY):
+                # A classified failure (terminal or not) is not a judgement.
+                # Replaying a cached reference_missing/eval_missing verdict
+                # would permanently delete the battle from ELO evidence even
+                # after the environment fault is repaired.
+                print(f"[stirrup] ignoring cached failure-classed verify result: {cache_path}", flush=True)
+                return None
             return cached
         except Exception as exc:
             print(f"[stirrup] warning: could not read cached verify result {cache_path}: {exc}", flush=True)
@@ -1636,6 +1643,10 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
         """
         cache_path = _verify_cache_path(deliverables_dir, reference_ids, verify_cache_namespace)
         if cache_path is None:
+            return
+        if verify_result.get(NG_FAILURE_CLASS_KEY):
+            # Failures are retry state, not judgements; persisting one would
+            # make _read_cached_verify replay it forever on re-judging runs.
             return
         try:
             import json as _json

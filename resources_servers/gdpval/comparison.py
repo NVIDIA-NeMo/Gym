@@ -800,6 +800,12 @@ def build_file_section(
             return
         if remaining <= 0:
             text_omitted = True
+            if _is_lossy_transport_marker(value):
+                # Loss markers are what preflight_judge_transport scans for; a
+                # marker swallowed by the text budget would let a request that
+                # silently lost an attachment pass as eligible.
+                section.append(dict(block))
+                text_used += len(value)
             return
         shown = _bounded_text(value, remaining, text_marker)
         if len(shown) < len(value):
@@ -889,8 +895,18 @@ def build_file_section(
         info = FILE_TYPE_MAP.get(full_path.suffix.lower().lstrip(".")) or {}
         av_identity: tuple[int, str] | None = None
         if info.get("type") in {"AUDIO", "VIDEO"}:
-            av_identity = _av_identity(full_path)
-            retained_as = retained_av_payloads.get(av_identity)
+            try:
+                # Identity exists only to deduplicate retained payloads; never
+                # hash a file the per-file cap already excludes from attachment.
+                if full_path.stat().st_size <= MAX_FILE_BYTES_FOR_JUDGE:
+                    av_identity = _av_identity(full_path)
+            except OSError as exc:
+                _append_block(
+                    {"type": "text", "text": f"[attachment unavailable for {file_name}: {exc.__class__.__name__}]"}
+                )
+                no_files = False
+                return
+            retained_as = retained_av_payloads.get(av_identity) if av_identity is not None else None
             if retained_as is not None:
                 _append_block(
                     {
@@ -1769,9 +1785,18 @@ def apply_native_pdf_overflow(
 
 _LOSSY_TRANSPORT_PREFIXES = (
     "[attachment omitted",
+    "[attachment unavailable",
     "[oversize:",
     "[truncated: rendered",
 )
+
+
+def _is_lossy_transport_marker(text: str) -> bool:
+    """Whether a text block records lost attachment content."""
+    if text.startswith(_LOSSY_TRANSPORT_PREFIXES):
+        return True
+    first_line = text.splitlines()[0] if text else ""
+    return first_line.startswith("[page ") and " omitted" in first_line
 
 
 def preflight_judge_transport(
@@ -1790,7 +1815,7 @@ def preflight_judge_transport(
     for message in messages:
         for block in message.get("content") or []:
             text = str(block.get("text", ""))
-            if text.startswith(_LOSSY_TRANSPORT_PREFIXES):
+            if _is_lossy_transport_marker(text):
                 markers.append(text.splitlines()[0][:240])
     create_kwargs = merge_create_kwargs(
         {

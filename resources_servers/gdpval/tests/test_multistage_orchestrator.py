@@ -3214,18 +3214,27 @@ class TestReferenceMissingIsTerminal:
     """
 
     def test_generic_terminal_flag_is_honoured(self) -> None:
+        from nemo_gym.rollout_collection import NG_TERMINAL_KEY, _is_terminal_failure
+
+        assert _is_terminal_failure({NG_TERMINAL_KEY: True}) is True
+
+    def test_environment_faults_are_revalidated_on_resume(self) -> None:
+        # reference_missing/eval_missing are terminal within a run (retrying
+        # cannot make the file appear) but the tree can be repaired between
+        # runs, so resume re-dispatches them for a cheap /verify recheck.
         from nemo_gym.rollout_collection import (
             NG_FAILURE_CLASS_KEY,
             NG_TERMINAL_KEY,
             _is_terminal_failure,
         )
-        from resources_servers.gdpval.app import REFERENCE_MISSING_FAILURE_CLASS
+        from resources_servers.gdpval.app import (
+            EVAL_MISSING_FAILURE_CLASS,
+            REFERENCE_MISSING_FAILURE_CLASS,
+        )
 
-        row = {
-            NG_FAILURE_CLASS_KEY: REFERENCE_MISSING_FAILURE_CLASS,
-            NG_TERMINAL_KEY: True,
-        }
-        assert _is_terminal_failure(row) is True
+        for failure_class in (REFERENCE_MISSING_FAILURE_CLASS, EVAL_MISSING_FAILURE_CLASS):
+            row = {NG_FAILURE_CLASS_KEY: failure_class, NG_TERMINAL_KEY: True}
+            assert _is_terminal_failure(row) is False
 
     def test_timeout_stays_retryable(self) -> None:
         from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, _is_terminal_failure

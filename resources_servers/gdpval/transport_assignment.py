@@ -37,10 +37,19 @@ _BINARY_EXTENSIONS = {
     ".aif",
     ".aiff",
     ".mp4",
+    ".m4v",
     ".mov",
     ".mkv",
     ".webm",
     ".avi",
+    ".wmv",
+    ".flv",
+    ".mpeg",
+    ".mpg",
+    ".3gp",
+    ".oga",
+    ".opus",
+    ".wma",
 }
 _AV_EXTENSIONS = {
     ".wav",
@@ -50,13 +59,22 @@ _AV_EXTENSIONS = {
     ".m4a",
     ".aac",
     ".ogg",
+    ".oga",
+    ".opus",
+    ".wma",
     ".aif",
     ".aiff",
     ".mp4",
+    ".m4v",
     ".mov",
     ".mkv",
     ".webm",
     ".avi",
+    ".wmv",
+    ".flv",
+    ".mpeg",
+    ".mpg",
+    ".3gp",
 }
 _IGNORED_NAMES = {
     "finish_params.json",
@@ -72,6 +90,10 @@ class Footprint:
     max_file_bytes: int
     has_av: bool
     file_count: int
+    # A directory whose archive contents could not be enumerated. Its true
+    # footprint is unknown, so every pair using it is costed incompatible
+    # instead of aborting the whole planning pass.
+    defective: bool = False
 
 
 @dataclass(frozen=True)
@@ -149,6 +171,7 @@ def _has_valid_finish_marker(repeat_dirs: Sequence[Path]) -> bool:
 
 def _footprint(directory: Path, *, include_reference_files: bool = True) -> Footprint:
     artifacts: list[_BinaryArtifact] = []
+    defective = False
     # Match app.py exactly: the submission directory and its optional
     # reference_files directory are built as two semantic sections. Reference
     # assets recurse below reference_files; candidate run-state subdirectories
@@ -162,7 +185,12 @@ def _footprint(directory: Path, *, include_reference_files: bool = True) -> Foot
             continue
         suffix = path.suffix.lower()
         if suffix == ".zip":
-            with zipfile.ZipFile(path, "r") as archive:
+            try:
+                archive_context = zipfile.ZipFile(path, "r")
+            except (zipfile.BadZipFile, OSError):
+                defective = True
+                continue
+            with archive_context as archive:
                 for info in archive.infolist():
                     member = Path(info.filename.replace("\\", "/"))
                     if (
@@ -208,7 +236,7 @@ def _footprint(directory: Path, *, include_reference_files: bool = True) -> Foot
     maximum = max((artifact.size for artifact in retained), default=0)
     count = len(retained)
     has_av = any(artifact.suffix in _AV_EXTENSIONS for artifact in retained)
-    return Footprint(raw_bytes=raw, max_file_bytes=maximum, has_av=has_av, file_count=count)
+    return Footprint(raw_bytes=raw, max_file_bytes=maximum, has_av=has_av, file_count=count, defective=defective)
 
 
 def _pair_cost(
@@ -218,18 +246,27 @@ def _pair_cost(
     max_file_bytes: int,
     max_raw_bytes: int,
     max_wire_bytes: int,
+    max_section_raw_bytes: int,
     framing_reserve_bytes: int,
 ) -> PairCost:
+    if candidate.defective or reference.defective:
+        return PairCost(False, 0, 0, 0, ("corrupt_archive",))
     raw = candidate.raw_bytes + reference.raw_bytes
     maximum = max(candidate.max_file_bytes, reference.max_file_bytes)
+    # Each judge section is built under its own raw budget; a directory over
+    # that share emits an omission marker at dispatch regardless of media type,
+    # which preflight then rejects for every judge.
+    section_reasons = []
+    if max(candidate.raw_bytes, reference.raw_bytes) > max_section_raw_bytes:
+        section_reasons.append("section_raw_over_cap")
     # Audio/video is routed only to Gemini, so its native base64 request is the
     # binding case. PDF/image-only tasks retain GPT raster and native-PDF paths;
     # their exact provider request is gated later by the resource server.
     if not (candidate.has_av or reference.has_av):
-        reasons = ("file_over_cap",) if maximum > max_file_bytes else ()
+        reasons = tuple((["file_over_cap"] if maximum > max_file_bytes else []) + section_reasons)
         return PairCost(not reasons, raw, raw, maximum, reasons)
     wire = 4 * math.ceil(raw / 3) + framing_reserve_bytes
-    reasons_list = []
+    reasons_list = list(section_reasons)
     if maximum > max_file_bytes:
         reasons_list.append("file_over_cap")
     if raw > max_raw_bytes:
@@ -356,9 +393,20 @@ def make_assignment_repair(
     if not all_references or any(not path.is_dir() for path in all_references.values()):
         raise ValueError("one or more reference transport views are unreadable")
 
-    max_file_bytes = int(config.get("max_file_bytes", 320 * 1024 * 1024))
-    max_raw_bytes = int(config.get("max_raw_bytes", 315 * 1024 * 1024))
-    max_wire_bytes = int(config.get("max_wire_bytes", 420 * 1024 * 1024))
+    # Defaults come from the judge-side enforcement constants so the plan-time
+    # model cannot silently drift from what dispatch actually rejects. Campaign
+    # configs may still override every knob.
+    from resources_servers.gdpval.comparison import (
+        MAX_FILE_BYTES_FOR_JUDGE,
+        MAX_SECTION_RAW_ATTACHMENT_BYTES_FOR_JUDGE,
+        MAX_TOTAL_RAW_ATTACHMENT_BYTES_FOR_JUDGE,
+        MAX_TOTAL_SERIALIZED_REQUEST_BYTES_FOR_JUDGE,
+    )
+
+    max_file_bytes = int(config.get("max_file_bytes", MAX_FILE_BYTES_FOR_JUDGE))
+    max_raw_bytes = int(config.get("max_raw_bytes", MAX_TOTAL_RAW_ATTACHMENT_BYTES_FOR_JUDGE))
+    max_wire_bytes = int(config.get("max_wire_bytes", MAX_TOTAL_SERIALIZED_REQUEST_BYTES_FOR_JUDGE))
+    max_section_raw_bytes = int(config.get("max_section_raw_bytes", MAX_SECTION_RAW_ATTACHMENT_BYTES_FOR_JUDGE))
     framing_reserve_bytes = int(config.get("framing_reserve_bytes", 4 * 1024 * 1024))
     footprint_cache: dict[tuple[str, str, bool, bool], list[Footprint]] = {}
 
@@ -393,8 +441,25 @@ def make_assignment_repair(
         if missing:
             raise ValueError(f"stage selected unknown reference transport views: {missing}")
         costs: dict[tuple[str, str], PairCost] = {}
+        unrepairable_tasks: list[str] = []
         for task_id in sorted(original):
-            candidates = footprints(candidate_root, task_id)
+            try:
+                candidates = footprints(candidate_root, task_id)
+            except ValueError:
+                # No candidate deliverable yet (fresh run: repair fires at
+                # stage planning, before any rollout exists). The repair cannot
+                # reason about this task; pin it to its original reference.
+                unrepairable_tasks.append(task_id)
+                for reference_id in references:
+                    pinned = reference_id == original[task_id]
+                    costs[(task_id, reference_id)] = PairCost(
+                        compatible=pinned,
+                        wire_bytes=0,
+                        raw_bytes=0,
+                        max_file_bytes=0,
+                        reasons=() if pinned else ("candidate_deliverable_missing",),
+                    )
+                continue
             for reference_id in references:
                 references_for_task = footprints(
                     all_references[reference_id],
@@ -418,6 +483,7 @@ def make_assignment_repair(
                         max_file_bytes=max_file_bytes,
                         max_raw_bytes=max_raw_bytes,
                         max_wire_bytes=max_wire_bytes,
+                        max_section_raw_bytes=max_section_raw_bytes,
                         framing_reserve_bytes=framing_reserve_bytes,
                     )
                     for candidate in candidates
@@ -470,10 +536,12 @@ def make_assignment_repair(
                 "max_file_bytes": max_file_bytes,
                 "max_raw_bytes": max_raw_bytes,
                 "max_wire_bytes": max_wire_bytes,
+                "max_section_raw_bytes": max_section_raw_bytes,
                 "framing_reserve_bytes": framing_reserve_bytes,
             },
             "reference_counts": dict(sorted(Counter(original.values()).items())),
             "initially_incompatible": initially_incompatible,
+            "unrepairable_tasks": unrepairable_tasks,
             "changes": changes,
         }
         return repaired, receipt

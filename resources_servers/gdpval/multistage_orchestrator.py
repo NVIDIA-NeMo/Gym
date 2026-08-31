@@ -285,7 +285,11 @@ def _partial_stage_outcome(
     for reference_id in reference_ids:
         planned = planned_per_reference[reference_id]
         if planned <= 0:
-            return None
+            # Balanced assignment gives a reference zero tasks whenever
+            # num_tasks < num_models. A reference with nothing planned has no
+            # coverage floor to violate; it contributes no evidence.
+            per_reference_success_fractions[reference_id] = 1.0
+            continue
         success_fraction_for_reference = judged_per_reference[reference_id] / planned
         per_reference_success_fractions[reference_id] = success_fraction_for_reference
         if (
@@ -429,8 +433,17 @@ def compute_fingerprint(
 
     component_types = {"responses_api_agents", "responses_api_models", "resources_servers"}
 
+    # Connection endpoints and credentials change across allocations (head-node
+    # IPs, rotated keys) without affecting any judgment, and secrets should not
+    # be hashed into persisted state at all. Only fields at the top level of a
+    # server config are stripped; nested config remains fingerprint-relevant.
+    connection_fields = {"host", "port"}
+
+    def is_connection_field(name: str) -> bool:
+        return name in connection_fields or name.endswith("_api_key") or name.endswith("_base_url")
+
     def jsonable_runtime_block(block: Mapping[str, Any]) -> Dict[str, Any]:
-        """Serialize a component block without process-local bind addresses."""
+        """Serialize a component block without endpoints or credentials."""
         result: Dict[str, Any] = {}
         for key, value in block.items():
             key = str(key)
@@ -448,7 +461,7 @@ def compute_fingerprint(
                     {
                         str(field): field_value
                         for field, field_value in server_config.items()
-                        if str(field) not in {"host", "port"}
+                        if not is_connection_field(str(field))
                     }
                     if isinstance(server_config, Mapping)
                     else server_config
@@ -1564,14 +1577,34 @@ def _atomic_filter_jsonl(path: Path, keep: Callable[[Mapping[str, Any]], bool]) 
 
 
 def _prune_downstream_files(output_fpath: str | Path, restart_stage: int) -> None:
-    """Remove persisted main/sidecar rows after ``restart_stage`` atomically."""
+    """Move persisted main/sidecar rows after ``restart_stage`` to a quarantine file.
+
+    Pruned rows are completed provider evidence; a restart decision must never
+    destroy them. Each prune appends the dropped rows to a timestamped
+    ``.pruned.<ns>`` sibling before atomically rewriting the source.
+    """
     output_fpath = Path(output_fpath)
 
     def keep(record: Mapping[str, Any]) -> bool:
         return int(record.get("stage_index", 0) or 0) <= restart_stage
 
-    _atomic_filter_jsonl(output_fpath, keep)
-    _atomic_filter_jsonl(failures_path_for(output_fpath), keep)
+    stale_suffix = f".pruned.{time.time_ns()}"
+    for path in (output_fpath, failures_path_for(output_fpath)):
+        if not path.exists():
+            continue
+        dropped: list[bytes] = []
+        with path.open("rb") as handle:
+            for line in handle:
+                stripped = line.strip()
+                if stripped and not keep(orjson.loads(stripped)):
+                    dropped.append(stripped)
+        if dropped:
+            quarantine = path.with_name(path.name + stale_suffix)
+            with quarantine.open("wb") as out:
+                out.write(b"\n".join(dropped) + b"\n")
+                out.flush()
+                os.fsync(out.fileno())
+        _atomic_filter_jsonl(path, keep)
 
 
 def load_persisted_rows(output_fpath: str | Path) -> Dict[int, List[Dict[str, Any]]]:
@@ -2107,10 +2140,19 @@ def _prepare_resume(
 
     if reason is not None:
         print(f"[multistage-elo] starting fresh: {reason}", file=sys.stderr, flush=True)
-        output_fpath.unlink(missing_ok=True)
-        failures_path_for(output_fpath).unlink(missing_ok=True)
-        journal_fpath.unlink(missing_ok=True)
-        aggregate_metrics_path_for(output_fpath).unlink(missing_ok=True)
+        # Completed judged rollouts are expensive provider evidence. A stale
+        # fingerprint must never destroy them: set them aside recoverably.
+        stale_suffix = f".stale.{time.time_ns()}"
+        for stale in (
+            output_fpath,
+            failures_path_for(output_fpath),
+            journal_fpath,
+            aggregate_metrics_path_for(output_fpath),
+        ):
+            if stale.exists():
+                quarantined = stale.with_name(stale.name + stale_suffix)
+                stale.replace(quarantined)
+                print(f"[multistage-elo] quarantined stale state: {quarantined}", file=sys.stderr, flush=True)
     else:
         print("[multistage-elo] resuming multi-stage run from cache (fingerprint match)", file=sys.stderr, flush=True)
     return build_file_resume(output_fpath, journal_fpath, fingerprint)

@@ -369,6 +369,12 @@ class GDPValVerifyRequest(BaseVerifyRequest):
 # nemo_gym: the harness only needs the generic terminal flag, and the class name
 # is GDPVal vocabulary.
 REFERENCE_MISSING_FAILURE_CLASS = "reference_missing"
+EVAL_MISSING_FAILURE_CLASS = "eval_missing"
+TRANSPORT_INELIGIBLE_FAILURE_CLASS = "transport_ineligible"
+
+
+class TransportIneligibleError(ValueError):
+    """Every judge was excluded by deterministic media/transport eligibility."""
 
 
 class GDPValVerifyResponse(GDPValVerifyRequest, BaseVerifyResponse):
@@ -498,6 +504,17 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     raster_dpi_tiers=tuple(member.raster_dpi_tiers),
                     max_serialized_request_bytes=member.max_serialized_request_bytes,
                 )
+            )
+        # Transport routing (needed/sections_by_judge, per-judge receipts, and
+        # vote pooling) all key on the resolved name. Two members collapsing to
+        # one name would silently send one judge the other's payload
+        # representation and merge their votes.
+        names = [judge.name for judge in judges]
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        if duplicates:
+            raise ValueError(
+                "judge panel members must resolve to unique names (set an explicit "
+                f"'name' on members sharing a model): duplicates={duplicates}"
             )
         return judges
 
@@ -774,12 +791,19 @@ class GDPValResourcesServer(SimpleResourcesServer):
             print(f"[gdpval] eval deliverable missing for task {body.task_id}", flush=True)
             if self.config.strict_comparison_trials:
                 raise RuntimeError(f"strict comparison trial contract failed for task {body.task_id}: eval_missing")
+            # Terminal for the same reason as reference_missing above: a
+            # zero-reward success row carries no battle evidence, is rejected by
+            # the coverage gate, and permanently gates the key on resume. A
+            # classified terminal failure is instead re-validated on resume.
             return GDPValVerifyResponse(
                 **body.model_dump(),
                 reward=0.0,
                 verify_mode="comparison",
                 judge_response={"error": "eval_missing"},
-                loss=True,
+                **{
+                    NG_FAILURE_CLASS_KEY: EVAL_MISSING_FAILURE_CLASS,
+                    NG_TERMINAL_KEY: True,
+                },
             )
 
         if self.config.preconvert_office_to_pdf:
@@ -860,6 +884,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
         # every reference that judged successfully.
         ref_errors: Dict[str, List[str]] = {}
         attempted_matchups = 0
+        transport_ineligible_matchups = 0
         last_error: Optional[Exception] = None
         # Cache each semantic side independently by representation and DPI.
         # Native sections are also the exact source for provider-cap preflight.
@@ -868,13 +893,21 @@ class GDPValResourcesServer(SimpleResourcesServer):
         async def _section(path: Optional[Path], mode: str, render_dpi: int) -> List[dict]:
             key = (str(path) if path is not None else "<none>", mode, render_dpi)
             if key not in section_cache:
+                # In raster mode a PDF longer than judge_pdf_max_pages would
+                # otherwise carry a DPI-independent truncation marker that
+                # excludes the judge at every tier. Render up to the request
+                # image budget; genuinely over-budget documents still truncate
+                # and are excluded on real caps.
+                page_cap = self.config.judge_pdf_max_pages
+                if mode == "images_and_text":
+                    page_cap = max(page_cap, self.config.judge_max_images_per_request)
                 section_cache[key] = await asyncio.to_thread(
                     build_file_section,
                     str(path) if path is not None else None,
                     clean_up_list,
                     media_mode=mode,
                     render_dpi=render_dpi,
-                    max_pages=self.config.judge_pdf_max_pages,
+                    max_pages=page_cap,
                     include_text=self.config.judge_pdf_include_text,
                     audio_capable=audio_capable,
                     video_capable=video_capable,
@@ -938,7 +971,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                             "submission_a": await _section(ref_dir, "native_pdf", render_dpi),
                             "submission_b": await _section(eval_task_dir, "native_pdf", render_dpi),
                         }
-                        native_stats = _native_pdf_stats(*native.values())
+                        native_stats = await asyncio.to_thread(_native_pdf_stats, *native.values())
                         estimated_images = native_stats["pages"] + _image_count(*native.values())
                         overflow_judges = [
                             judge for judge in matchup_judges if judge.media_mode == "native_pdf_overflow_images"
@@ -961,7 +994,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
                                 raise ValueError(
                                     f"overflow judges require one explicit native PDF byte cap, got {byte_caps}"
                                 )
-                            overflow_plan = plan_native_pdf_overflow(
+                            overflow_plan = await asyncio.to_thread(
+                                plan_native_pdf_overflow,
                                 native,
                                 native_page_cap=caps.pop(),
                                 native_pdf_bytes_per_document=byte_caps.pop(),
@@ -976,7 +1010,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                             overflow_plan=overflow_plan,
                         )
                         if not matchup_judges:
-                            raise ValueError("media routing excluded every judge")
+                            raise TransportIneligibleError("media routing excluded every judge")
 
                         sections_by_judge: Dict[str, Dict[str, List[dict]]] = {}
                         transport_receipts: Dict[str, Dict[str, Any]] = {}
@@ -987,7 +1021,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                         while True:
                             active = [judge for judge in matchup_judges if judge.name not in failed_names]
                             if not active:
-                                raise ValueError("transport preflight excluded every judge")
+                                raise TransportIneligibleError("transport preflight excluded every judge")
                             schedule = preview_trial_judges(active, self.config.num_comparison_trials, rng)
                             needed = {judge.name: judge for judge in schedule}
                             new_failure = False
@@ -1109,12 +1143,22 @@ class GDPValResourcesServer(SimpleResourcesServer):
                             result["native_pdf_overflow"] = overflow_plan
                     except Exception as e:  # noqa: BLE001 — isolate per-matchup judge failures
                         last_error = e
+                        if isinstance(e, TransportIneligibleError):
+                            transport_ineligible_matchups += 1
                         ref_errors.setdefault(ref_id, []).append(f"{ref_dir.name}: {e!r}")
                         print(
                             f"[gdpval] judge failed for task {body.task_id} ref {ref_id}/{ref_dir.name}: {e!r}",
                             flush=True,
                         )
                         continue
+                    finally:
+                        # Reference-side payloads are matchup-local; only the
+                        # eval side repeats across matchups. Evicting the rest
+                        # bounds cache residency to one matchup plus the eval
+                        # sections instead of every reference x repeat.
+                        eval_key_prefix = str(eval_task_dir)
+                        for cache_key in [k for k in section_cache if k[0] != eval_key_prefix]:
+                            section_cache.pop(cache_key, None)
                     # ``run_trials`` casts submission_a=ref, submission_b=eval, so
                     # ``win_count_b`` is eval wins.
                     ref_wins += result["win_count_b"]
@@ -1156,6 +1200,22 @@ class GDPValResourcesServer(SimpleResourcesServer):
         # it as a failure (matches pre-resilience behavior) rather than emitting
         # a fake neutral reward that would pollute the metrics.
         if attempted_matchups > 0 and not per_reference:
+            if transport_ineligible_matchups == attempted_matchups:
+                # Deterministic eligibility exclusion of every judge on every
+                # matchup: retrying the same payload cannot succeed, so a
+                # generic 500 would only burn attempts and silently drop the
+                # task. Terminal within the run; re-validated on resume (caps,
+                # renderers, or panel config may change between runs).
+                return GDPValVerifyResponse(
+                    **body.model_dump(),
+                    reward=0.0,
+                    verify_mode="comparison",
+                    judge_response={"error": "transport_ineligible", "ref_errors": ref_errors},
+                    **{
+                        NG_FAILURE_CLASS_KEY: TRANSPORT_INELIGIBLE_FAILURE_CLASS,
+                        NG_TERMINAL_KEY: True,
+                    },
+                )
             raise RuntimeError(
                 f"all {attempted_matchups} judge matchup(s) failed for task {body.task_id}; last error: {last_error!r}"
             )

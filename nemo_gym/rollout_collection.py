@@ -270,6 +270,12 @@ def _is_terminal_failure(record: Dict[str, Any]) -> bool:
     failure_class = record.get(NG_FAILURE_CLASS_KEY)
     if failure_class == "timeout_exceeded":
         return False
+    if failure_class in ("reference_missing", "eval_missing", "transport_ineligible"):
+        # Environment faults: the deliverable tree can be repaired after the
+        # run (remounted reference view, restored eval dir). Terminal within a
+        # run, but re-validated on resume; the /verify recheck is cheap and the
+        # normal max-attempt cap still bounds re-dispatch.
+        return False
     if failure_class == "skipped":
         return True
     return bool(record.get(NG_TERMINAL_KEY))

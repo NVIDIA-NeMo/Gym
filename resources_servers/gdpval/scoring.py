@@ -67,6 +67,21 @@ PERMANENT_JUDGE_ERROR_MARKERS = (
     "too many tokens",
 )
 
+# Throttle signals veto a permanent classification: provider 429 bodies often
+# contain permanent-sounding phrases ("you have sent too many tokens this
+# minute") yet succeed on retry. Misclassifying a throttle as permanent stamps
+# the trial terminal and silently drops the task from the benchmark.
+THROTTLE_ERROR_MARKERS = (
+    "http 429",
+    "error code: 429",
+    "status code: 429",
+    "too many requests",
+    "rate limit",
+    "rate-limit",
+    "retry-after",
+    "retry after",
+)
+
 JUDGE_REQUEST_TIMEOUT_SECONDS = float(os.environ.get("GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS", "1800"))
 
 
@@ -74,7 +89,10 @@ def is_permanent_judge_error(error: BaseException | str) -> bool:
     """Whether retrying the same judge request is guaranteed to fail again."""
 
     if isinstance(error, str):
-        return any(marker in error.lower() for marker in PERMANENT_JUDGE_ERROR_MARKERS)
+        lowered = error.lower()
+        if any(marker in lowered for marker in THROTTLE_ERROR_MARKERS):
+            return False
+        return any(marker in lowered for marker in PERMANENT_JUDGE_ERROR_MARKERS)
 
     parts: list[str] = []
     seen: set[int] = set()
@@ -85,7 +103,10 @@ def is_permanent_judge_error(error: BaseException | str) -> bool:
             continue
         seen.add(id(current))
         parts.append(str(current))
-        if getattr(current, "status", None) == 413 or getattr(current, "status_code", None) == 413:
+        statuses = {getattr(current, "status", None), getattr(current, "status_code", None)}
+        if 429 in statuses:
+            return False
+        if 413 in statuses:
             return True
         for attr in ("response_content", "body"):
             value = getattr(current, attr, None)
@@ -99,6 +120,8 @@ def is_permanent_judge_error(error: BaseException | str) -> bool:
             pending.append(current.__context__)
 
     text = "\n".join(parts).lower()
+    if any(marker in text for marker in THROTTLE_ERROR_MARKERS):
+        return False
     return any(marker in text for marker in PERMANENT_JUDGE_ERROR_MARKERS)
 
 
