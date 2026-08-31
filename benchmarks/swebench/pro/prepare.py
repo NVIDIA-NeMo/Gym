@@ -38,7 +38,7 @@ BENCHMARK_DIR = Path(__file__).parent.parent
 DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "swebench_pro_benchmark.jsonl"
 UPSTREAM_CACHE_DIR = DATA_DIR / "swebench_pro_upstream"
-PROMPT_TEMPLATE = Path(__file__).with_name("prompt.txt").read_text(encoding="utf-8")
+PROMPT_TEMPLATE = (Path(__file__).parent / "prompt.txt").read_text(encoding="utf-8")
 
 
 def render_prompt(row: Mapping[str, Any]) -> str:

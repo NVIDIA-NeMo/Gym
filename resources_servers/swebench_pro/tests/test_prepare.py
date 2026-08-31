@@ -43,8 +43,8 @@ def dataset_row(instance_id: str = "instance_example", dockerhub_tag: str = "exa
         "patch": "patch",
         "test_patch": "",
         "problem_statement": "Fix it",
-        "requirements": "Preserve existing behavior",
-        "interface": "add helper()",
+        "requirements": "The fix must preserve existing behavior",
+        "interface": "A new public method",
         "repo_language": "python",
         "fail_to_pass": '["new_test"]',
         "pass_to_pass": '["old_test"]',
@@ -66,9 +66,10 @@ def test_enrich_row_embeds_pinned_evaluator_assets(tmp_path) -> None:
     assert row["evaluator_commit"] == UPSTREAM_COMMIT
     prompt = row["responses_create_params"]["input"][0]["content"]
     assert "I've uploaded a code repository in the directory /app" in prompt
-    assert "Requirements:\nPreserve existing behavior" in prompt
-    assert "New interfaces introduced:\nadd helper()" in prompt
-    assert "{{" not in prompt
+    assert "<pr_description>\nFix it" in prompt
+    assert "Requirements:\nThe fix must preserve existing behavior" in prompt
+    assert "New interfaces introduced:\nA new public method" in prompt
+    assert "{problem_statement}" not in prompt
 
 
 def test_prepare_writes_self_contained_jsonl(tmp_path) -> None:

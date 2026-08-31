@@ -60,6 +60,12 @@ def request_body() -> dict:
     }
 
 
+def fake_pty(session_id: str = "pty-session") -> SimpleNamespace:
+    """A stand-in for ``sandbox.pty``; seed_session opens a terminal for the agent."""
+    session = SimpleNamespace(session_id=session_id, close=AsyncMock())
+    return SimpleNamespace(create=AsyncMock(return_value=session))
+
+
 def make_server(*, golden: bool, apply_anti_cheating: bool = True) -> SWEBenchProResourcesServer:
     config = SWEBenchProResourcesServerConfig(
         host="0.0.0.0",
@@ -84,7 +90,9 @@ def test_golden_patch_verify_and_cleanup(monkeypatch: MonkeyPatch) -> None:
             completed=True,
             resolved=True,
             patch_applied=True,
-            test_results={"tests": []},
+            test_results={
+                "tests": [{"name": "new_test", "status": "PASSED"}, {"name": "old_test", "status": "PASSED"}]
+            },
         )
     )
     monkeypatch.setattr(server, "_create_sandbox", create)
@@ -111,7 +119,9 @@ def test_normal_verify_extracts_agent_patch(monkeypatch: MonkeyPatch) -> None:
             completed=True,
             resolved=False,
             patch_applied=True,
-            test_results={"tests": []},
+            test_results={
+                "tests": [{"name": "new_test", "status": "FAILED"}, {"name": "old_test", "status": "PASSED"}]
+            },
             test_output="test run output",
         )
     )
@@ -159,6 +169,7 @@ async def test_seed_session_applies_shared_anti_cheat_setup(monkeypatch: MonkeyP
     server = make_server(golden=False)
     sandbox = SimpleNamespace(
         _handle=SimpleNamespace(sandbox_id="sandbox-id"),
+        pty=fake_pty(),
         upload=AsyncMock(),
         exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="", stderr="")),
     )
@@ -170,10 +181,12 @@ async def test_seed_session_applies_shared_anti_cheat_setup(monkeypatch: MonkeyP
 
     expected_script = Path(__file__).parents[2] / "swebench" / "anti_cheat_setup.sh"
     sandbox.upload.assert_awaited_once_with(expected_script, "/app/anti_cheat_setup.sh")
-    sandbox.exec.assert_awaited_once_with(
-        "git reset --hard && WORKING_DIRECTORY=/app bash anti_cheat_setup.sh && rm anti_cheat_setup.sh",
-        timeout_s=600,
+    # anti-cheat first, then normalize the container, then snapshot its untracked files
+    assert sandbox.exec.await_count == 3
+    assert sandbox.exec.await_args_list[0].args[0] == (
+        "git reset --hard && WORKING_DIRECTORY=/app bash anti_cheat_setup.sh && rm anti_cheat_setup.sh"
     )
+    assert sandbox.exec.await_args_list[0].kwargs["timeout_s"] == 600
     assert response.sandbox_handle == "sandbox-id"
     assert server._session_id_to_sandbox["session"] is sandbox
 
@@ -183,6 +196,7 @@ async def test_seed_session_can_skip_anti_cheat_setup(monkeypatch: MonkeyPatch) 
     server = make_server(golden=False, apply_anti_cheating=False)
     sandbox = SimpleNamespace(
         _handle=SimpleNamespace(sandbox_id="sandbox-id"),
+        pty=fake_pty(),
         upload=AsyncMock(),
         exec=AsyncMock(),
     )
@@ -193,7 +207,8 @@ async def test_seed_session_can_skip_anti_cheat_setup(monkeypatch: MonkeyPatch) 
     await server.seed_session(request, body)
 
     sandbox.upload.assert_not_awaited()
-    sandbox.exec.assert_not_awaited()
+    # anti-cheat is skipped, but the container is still normalized and snapshotted
+    assert sandbox.exec.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -213,6 +228,138 @@ async def test_extract_model_patch_includes_commits_and_untracked_files() -> Non
     assert "git -C /app --no-pager diff abc123" in command
     sandbox.stop.assert_awaited_once()
     assert "session" not in server._session_id_to_sandbox
+
+
+@pytest.mark.asyncio
+async def test_extract_model_patch_drops_untracked_files_the_image_already_shipped() -> None:
+    """Artifacts the task image ships are not the agent's work and break `git apply`."""
+    artifact = (
+        "diff --git a/dump.rdb b/dump.rdb\nnew file mode 100644\n--- /dev/null\n+++ b/dump.rdb\n@@ -0,0 +1 @@\n+x\n"
+    )
+    fix = "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-old\n+new\n"
+    server = make_server(golden=False)
+    sandbox = SimpleNamespace(
+        exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout=artifact + fix, stderr="")),
+        stop=AsyncMock(),
+    )
+    server._session_id_to_sandbox["session"] = sandbox
+    server._session_id_to_pristine_untracked["session"] = frozenset({"dump.rdb"})
+
+    patch = await server._extract_model_patch("session", "abc123")
+
+    assert patch == fix
+    assert "session" not in server._session_id_to_pristine_untracked
+
+
+@pytest.mark.asyncio
+async def test_seed_session_normalizes_the_agent_environment_before_snapshotting() -> None:
+    """The agent runs the same suites, so it needs the same repaired container the verifier gets.
+
+    Order matters: normalization deletes stale files, so the untracked baseline must be
+    taken afterwards or it records paths that no longer exist.
+    """
+    server = make_server(golden=False)
+    calls: list[str] = []
+
+    async def record(command, *args, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(return_code=0, stdout="", stderr="")
+
+    sandbox = SimpleNamespace(
+        exec=record,
+        upload=AsyncMock(),
+        stop=AsyncMock(),
+        _handle=SimpleNamespace(sandbox_id="sandbox-id"),
+        pty=fake_pty(),
+    )
+    server._create_sandbox = AsyncMock(return_value=sandbox)
+    request = SimpleNamespace(session={SESSION_ID_KEY: "session"})
+
+    await server.seed_session(request, SWEBenchProSeedSessionRequest.model_validate(request_body()))
+
+    normalize = next(i for i, c in enumerate(calls) if "Xvfb" in c)
+    snapshot = next(i for i, c in enumerate(calls) if "ls-files --others" in c)
+    assert normalize < snapshot, calls
+
+
+@pytest.mark.asyncio
+async def test_seed_session_survives_a_container_it_cannot_normalize() -> None:
+    server = make_server(golden=False)
+
+    async def boom(command, *args, **kwargs):
+        if "Xvfb" in command:
+            raise RuntimeError("exec failed")
+        return SimpleNamespace(return_code=0, stdout="", stderr="")
+
+    sandbox = SimpleNamespace(
+        exec=boom,
+        upload=AsyncMock(),
+        stop=AsyncMock(),
+        _handle=SimpleNamespace(sandbox_id="sandbox-id"),
+        pty=fake_pty(),
+    )
+    server._create_sandbox = AsyncMock(return_value=sandbox)
+    request = SimpleNamespace(session={SESSION_ID_KEY: "session"})
+
+    # A container that cannot be normalized is still worth running.
+    await server.seed_session(request, SWEBenchProSeedSessionRequest.model_validate(request_body()))
+    assert server._session_id_to_sandbox["session"] is sandbox
+
+
+@pytest.mark.asyncio
+async def test_seed_session_returns_the_pty_session_the_agent_attaches_to() -> None:
+    """The agent needs both ids; given only one it silently builds its own sandbox instead."""
+    server = make_server(golden=False)
+    sandbox = SimpleNamespace(
+        exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="", stderr="")),
+        upload=AsyncMock(),
+        stop=AsyncMock(),
+        _handle=SimpleNamespace(sandbox_id="sandbox-id"),
+        pty=fake_pty("pty-id"),
+    )
+    server._create_sandbox = AsyncMock(return_value=sandbox)
+    request = SimpleNamespace(session={SESSION_ID_KEY: "session"})
+
+    response = await server.seed_session(request, SWEBenchProSeedSessionRequest.model_validate(request_body()))
+
+    assert response.sandbox_handle == "sandbox-id"
+    assert response.pty_session_id == "pty-id"
+    sandbox.pty.create.assert_awaited_once()
+    assert server._session_id_to_pty["session"].session_id == "pty-id"
+
+
+@pytest.mark.asyncio
+async def test_extract_model_patch_closes_the_pty_before_stopping_the_sandbox() -> None:
+    """A session that outlives its sandbox leaks its connection to the sandbox API."""
+    server = make_server(golden=False)
+    order: list[str] = []
+    session = SimpleNamespace(session_id="pty-id", close=AsyncMock(side_effect=lambda: order.append("close")))
+    sandbox = SimpleNamespace(
+        exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="", stderr="")),
+        stop=AsyncMock(side_effect=lambda: order.append("stop")),
+    )
+    server._session_id_to_sandbox["session"] = sandbox
+    server._session_id_to_pty["session"] = session
+
+    await server._extract_model_patch("session", "abc123")
+
+    assert order == ["close", "stop"], "the terminal must be closed before its sandbox goes away"
+    assert "session" not in server._session_id_to_pty
+
+
+@pytest.mark.asyncio
+async def test_pristine_untracked_files_lists_and_tolerates_failure() -> None:
+    server = make_server(golden=False)
+    listing = SimpleNamespace(return_code=0, stdout="dump.rdb\nappendonlydir/appendonly.aof.manifest\n\n", stderr="")
+    sandbox = SimpleNamespace(exec=AsyncMock(return_value=listing))
+
+    assert await server.pristine_untracked_files(sandbox) == frozenset(
+        {"dump.rdb", "appendonlydir/appendonly.aof.manifest"}
+    )
+    assert "ls-files --others --exclude-standard" in sandbox.exec.await_args.args[0]
+
+    failing = SimpleNamespace(exec=AsyncMock(return_value=SimpleNamespace(return_code=1, stdout="", stderr="boom")))
+    assert await server.pristine_untracked_files(failing) == frozenset()
 
 
 @pytest.mark.asyncio

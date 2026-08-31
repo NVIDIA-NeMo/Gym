@@ -11,6 +11,13 @@ swebench_pro_resources_server:
       apply_anti_cheating: true
       is_verifying_golden_patch: false
       prefetch_go_modules: true
+      # Container repairs applied before the task's own test script runs; see
+      # verification.py:ENVIRONMENT_REPAIRS.
+      environment_repairs:
+        - stale_database_state
+        - core_dump_limit
+        - dependency_cache
+        - xvfb_cache
 
       sandbox_provider: sandbox
       sandbox_config:
@@ -39,6 +46,14 @@ swebench_pro_example_resources_server:
       image_repository: docker.io/jefzda/sweap-images
       is_verifying_golden_patch: true
       prefetch_go_modules: true
+      # Container repairs applied before the task's own test script runs; see
+      # verification.py:ENVIRONMENT_REPAIRS. Listed here so a run can drop one and measure
+      # whether it was earning its place.
+      environment_repairs:
+        - stale_database_state
+        - core_dump_limit
+        - dependency_cache
+        - xvfb_cache
 
       sandbox_provider: sandbox
       sandbox_config:

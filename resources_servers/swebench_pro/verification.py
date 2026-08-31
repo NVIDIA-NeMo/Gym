@@ -38,6 +38,7 @@ import ast
 import json
 import re
 import shlex
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -71,6 +72,8 @@ class VerificationInputs:
     instance_dockerfile: str = ""
     repo_language: str = ""
     prefetch_go_modules: bool = False
+    # None means the default set; an explicit tuple (even empty) is honoured.
+    environment_repairs: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -120,6 +123,181 @@ def strip_binary_hunks(patch: str) -> str:
     return "".join(kept)
 
 
+# NeMo Gym additions below: patch extraction, resilient application, container repairs
+# and verdict classification. Measurements and rejected alternatives: tools/README.md.
+
+
+def patch_section_path(section: str) -> str | None:
+    """Return the repository-relative path one ``diff --git`` section targets."""
+    a_path: str | None = None
+    b_path: str | None = None
+    for line in section.splitlines():
+        if line.startswith("@@"):
+            break
+        if line.startswith("--- ") and a_path is None:
+            value = line[4:].strip()
+            a_path = None if value == "/dev/null" else value.removeprefix("a/")
+        elif line.startswith("+++ ") and b_path is None:
+            value = line[4:].strip()
+            b_path = None if value == "/dev/null" else value.removeprefix("b/")
+
+    if b_path or a_path:
+        return b_path or a_path
+
+    header = re.match(r"^diff --git a/(.+?) b/(.+)$", section.splitlines()[0] if section else "")
+    return header.group(2) if header else None
+
+
+def drop_patch_sections(patch: str, paths: Iterable[str]) -> str:
+    """Drop the diff sections targeting ``paths``; see the notes above."""
+    dropped = set(paths)
+    if not patch or not dropped:
+        return patch
+
+    kept: list[str] = []
+    for section in re.split(r"(?=^diff --git )", patch, flags=re.MULTILINE):
+        if not section.strip():
+            continue
+        path = patch_section_path(section)
+        if path is not None and path in dropped:
+            continue
+        kept.append(section)
+
+    return "".join(kept)
+
+
+# The sandbox daemon exports its own OTEL_* config into every command; tests read it.
+SCRUB_HARNESS_ENV = """# NeMo Gym change: drop the sandbox daemon's telemetry env, which leaks into tasks.
+for ng_env_var in $(env | sed -n 's/^\\(OTEL_[A-Za-z0-9_]*\\)=.*/\\1/p'); do
+  unset "$ng_env_var"
+done"""
+
+
+WARM_XVFB_CACHE = """if command -v Xvfb >/dev/null 2>&1; then
+  Xvfb :121 -screen 0 800x600x16 -nolisten tcp >/tmp/ng_xvfb_warmup.log 2>&1 &
+  ng_xvfb_pid=$!
+  for _ in $(seq 1 60); do
+    if [ -e /tmp/.X121-lock ]; then break; fi
+    sleep 0.5
+  done
+  kill "$ng_xvfb_pid" 2>/dev/null || true
+  wait "$ng_xvfb_pid" 2>/dev/null || true
+  rm -f /tmp/.X121-lock
+fi"""
+
+
+DROP_STALE_DATABASE_STATE = """# NeMo Gym change: drop stale redis state the task image shipped.
+for ng_stale in dump.rdb appendonly.aof appendonlydir; do
+  if [ -e "$ng_stale" ] && [ -z "$(git ls-files -- "$ng_stale")" ]; then
+    rm -rf "$ng_stale"
+  fi
+done"""
+
+
+DISABLE_CORE_DUMPS = """ulimit -c 0 2>/dev/null || true"""
+
+
+WARM_DEPENDENCY_CACHE = """ng_warm=""
+for ng_dir in node_modules vendor .venv venv third_party node_modules/.bin; do
+  if [ -d "$ng_dir" ]; then ng_warm="$ng_warm $ng_dir"; fi
+done
+if [ -n "$ng_warm" ]; then
+  timeout 180 sh -c "find $ng_warm -type f -print0 2>/dev/null | xargs -0 -r -P 4 -n 256 cat" >/dev/null 2>&1 || true
+fi"""
+
+
+# Container repairs, keyed so any can be dropped and re-measured; see tools/README.md.
+ENVIRONMENT_REPAIRS: dict[str, str] = {
+    "stale_database_state": DROP_STALE_DATABASE_STATE,
+    "core_dump_limit": DISABLE_CORE_DUMPS,
+    "dependency_cache": WARM_DEPENDENCY_CACHE,
+    "xvfb_cache": WARM_XVFB_CACHE,
+}
+DEFAULT_ENVIRONMENT_REPAIRS: tuple[str, ...] = tuple(ENVIRONMENT_REPAIRS)
+# Only repairs that outlive a single command are useful in the agent container.
+AGENT_ENVIRONMENT_REPAIRS: tuple[str, ...] = ("stale_database_state", "dependency_cache", "xvfb_cache")
+
+
+def build_environment_repairs(names: Iterable[str]) -> str:
+    """Concatenate the named repairs in their canonical order."""
+    requested = set(names)
+    unknown = requested - set(ENVIRONMENT_REPAIRS)
+    if unknown:
+        raise ValueError(f"Unknown environment repairs: {sorted(unknown)}")
+    selected = [body for key, body in ENVIRONMENT_REPAIRS.items() if key in requested]
+    if not selected:
+        return "# NeMo Gym change: all environment repairs disabled for this run."
+    header = "# NeMo Gym change: repair host properties that break tests; see verification.py."
+    return "\n".join([header, *selected])
+
+
+# The agent runs the same suites, so its container needs the same repairs.
+def build_seed_normalization(names: Iterable[str]) -> str:
+    """The repairs worth applying to the agent container, as one script."""
+    selected = [n for n in names if n in AGENT_ENVIRONMENT_REPAIRS]
+    return "cd /app 2>/dev/null || exit 0\n" + build_environment_repairs(selected)
+
+
+# `git apply` is all-or-nothing, so retry excluding the paths it reported, then GNU patch.
+APPLY_PATCH_FUNCTION = """# NeMo Gym change: apply the patch resiliently instead of `git apply -v <patch>`.
+apply_patch() {
+  if [ ! -s /workspace/patch.diff ]; then
+    echo "NG_APPLY: patch is empty, nothing to apply"
+    return 0
+  fi
+  if git apply -v --whitespace=nowarn /workspace/patch.diff 2>/workspace/apply_strict.log; then
+    cat /workspace/apply_strict.log
+    echo "NG_APPLY: applied cleanly"
+    return 0
+  fi
+  cat /workspace/apply_strict.log
+  ng_exclude_args=()
+  while IFS= read -r ng_path; do
+    if [ -n "$ng_path" ]; then
+      ng_exclude_args+=("--exclude=$ng_path")
+    fi
+  done < <(sed -n 's/^error: \\(.*\\): already exists in working directory$/\\1/p' /workspace/apply_strict.log)
+  if [ ${#ng_exclude_args[@]} -gt 0 ]; then
+    if git apply -v --whitespace=nowarn "${ng_exclude_args[@]}" /workspace/patch.diff 2>/workspace/apply_excluded.log; then
+      cat /workspace/apply_excluded.log
+      echo "NG_APPLY: applied after excluding pre-existing container artifacts: ${ng_exclude_args[*]}"
+      return 0
+    fi
+    cat /workspace/apply_excluded.log
+  fi
+  if command -v patch >/dev/null 2>&1; then
+    if patch -p1 --batch --fuzz=5 -i /workspace/patch.diff >/workspace/apply_fuzz.log 2>&1; then
+      cat /workspace/apply_fuzz.log
+      echo "NG_APPLY: applied with GNU patch fallback"
+      return 0
+    fi
+    cat /workspace/apply_fuzz.log
+  fi
+  echo "NG_APPLY: failed to apply patch"
+  return 1
+}"""
+
+
+def inconclusive_reason(result: VerificationResult, sample: dict[str, Any]) -> str | None:
+    """Say why a verification produced no verdict, or ``None`` if it produced one."""
+    if not result.completed:
+        return f"evaluation did not complete ({result.error or 'unknown error'})"
+    if result.test_results is None:
+        return "parser produced no usable output"
+
+    reported = {test["name"] for test in result.test_results.get("tests") or []}
+    required = set(parse_string_list(sample["fail_to_pass"])) | set(parse_string_list(sample["pass_to_pass"]))
+    if not required:
+        return None
+    if not reported:
+        return "parser reported no tests at all"
+
+    unobserved = required - reported
+    if unobserved:
+        return f"{len(unobserved)} of {len(required)} graded tests never reported an outcome"
+    return None
+
+
 def create_entryscript(sample: dict[str, Any]) -> str:
     """Create the upstream in-container evaluation script."""
     before_repo_set_cmd = sample["before_repo_set_cmd"].strip().split("\n")[-1]
@@ -136,6 +314,10 @@ def create_entryscript(sample: dict[str, Any]) -> str:
 if [ -f go.mod ]; then
   go mod download
 fi"""
+    requested_repairs = sample.get("environment_repairs")
+    environment_repairs = build_environment_repairs(
+        DEFAULT_ENVIRONMENT_REPAIRS if requested_repairs is None else requested_repairs
+    )
     # NeMo Gym change: Dockerfiles are embedded in the prepared row instead of read from an upstream checkout.
     base_dockerfile = sample["base_dockerfile"]
     instance_dockerfile = sample["instance_dockerfile"]
@@ -153,15 +335,18 @@ fi"""
     env_cmds = "\n".join(env_cmds)
 
     entry_script = f"""
+{SCRUB_HARNESS_ENV}
 {env_cmds}
 # apply patch
 cd /app
 git reset --hard {base_commit}
 git checkout {base_commit}
-git apply -v /workspace/patch.diff
+{APPLY_PATCH_FUNCTION}
+apply_patch
 # NeMo Gym change: retain patch application status for the structured verification response.
 PATCH_APPLY_STATUS=$?
 {before_repo_set_cmd}
+{environment_repairs}
 {go_module_prefetch_cmd}
 # run test and save stdout and stderr to separate files
 bash /workspace/run_script.sh {selected_test_files_to_run} > /workspace/stdout.log 2> /workspace/stderr.log
