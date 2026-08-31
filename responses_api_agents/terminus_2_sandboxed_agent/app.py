@@ -99,7 +99,7 @@ class NeMoGymSandboxEnvironment:
         env: dict[str, str] | None = None,
         **_: Any,
     ) -> Any:
-        if self._pty_session is not None and cwd is None and env is None and user is None:
+        if cwd is None and env is None and user is None:
             result = await self._sandbox.pty.exec(command, session=self._pty_session, timeout_s=timeout_sec)
         else:
             result = await self._sandbox.exec(command, cwd=cwd, env=env, timeout_s=timeout_sec, user=user)
