@@ -123,3 +123,15 @@ benchmark are correspondingly noisier; report mean@5.
 - `gym eval run --no-serve` aborts the batch on a terminal `/run` error; reruns with
   `--resume` complete exactly the missing tasks. A continue-on-error
   collection mode would remove the manual resume step.
+- The published task split references two tools the published container images do not
+  expose, so 2 of 649 oracle tasks convert with one fewer tool than they select
+  (`convert_tasks.py` logs each as `Task selected_tools not found in snapshots`):
+  `list_team_apps` is a pluralization mismatch for the image's `list_teams_apps`, and
+  `remove_channel_member` is a genuine gap — the image has `add_channel_member` and
+  team-level `remove_team_member`, but no channel-level removal. Neither is snapshot
+  staleness: all seven images carry a single `latest` tag pushed 2026-03-17, four months
+  before the 2026-07-07 snapshots, and none has been pushed since, so a fresh capture
+  reproduces the same result. Bound on the headline metric: if both tasks fail outright,
+  `teams` loses 2/61 (3.3pp) and `macro_success_rate`, a mean over 8 domains, loses
+  0.41pp. Every number in this document was produced against these same snapshots and
+  images, so the mismatch is present on both sides of every comparison here.
