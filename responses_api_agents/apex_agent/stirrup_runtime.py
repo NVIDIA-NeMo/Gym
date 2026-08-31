@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import os
 import shutil
@@ -236,30 +237,19 @@ def install_tool_argument_coercion(agent_cls: Any) -> None:
     agent_cls.run_tool = run_tool_with_argument_coercion
 
 
-def _schema_contains_ref(node: Any) -> bool:
-    """True when any dict anywhere in node carries a string-valued "$ref" key."""
-    if isinstance(node, dict):
-        return any(
-            (key == "$ref" and isinstance(value, str)) or _schema_contains_ref(value) for key, value in node.items()
-        )
-    if isinstance(node, list):
-        return any(_schema_contains_ref(item) for item in node)
-    return False
-
-
-def inline_schema_refs(schema: Any) -> Any:
-    """Return a copy of a JSON schema with $refs resolved inline; input is never mutated.
+def annotate_schema_ref_types(schema: Any) -> Any:
+    """Return a copy of a JSON schema with each $ref site annotated with its definition's type.
 
     Local refs ("#/$defs/<name>" or "#/definitions/<name>") are resolved against the
-    schema's own root table of the matching spelling; non-local or unresolvable refs
-    stay as-is. Sibling keys next to a $ref overlay the resolved definition (siblings
-    win on conflict). Cyclic refs (direct or indirect) are left as $ref nodes, so
-    self-referential schemas neither hang nor blow the stack. The $defs/definitions
-    tables are dropped only when no $ref remains outside them. Every dict and list in
-    the result is rebuilt, so the output shares no mutable state with the input (each
-    inline site of the same definition is an independent copy). Acyclic ref chains can
-    still multiply nodes (each inline site is a copy), so expansion is capped by a node
-    budget; past it the original schema is returned unchanged. Never raises: any
+    schema's own root table of the matching spelling; when the resolved definition
+    carries a "type" (following bare-ref chains, with cycles terminated) and the ref
+    node has no "type" of its own, that type is copied onto the ref node. Nothing else
+    is copied: a type sibling equal to the definition's type is a conjunctive no-op
+    under JSON Schema 2020-12 (and ignored under draft-07), so the schema's semantics
+    are provably unchanged. $refs and the $defs/definitions tables stay intact, and
+    ref sites inside the tables are annotated too. Non-local or unresolvable refs pass
+    through unchanged. Every dict and list in the result is rebuilt, so the input is
+    never mutated and the output shares no mutable state with it. Never raises: any
     unexpected error returns the original schema.
     """
     try:
@@ -270,32 +260,44 @@ def inline_schema_refs(schema: Any) -> Any:
             table = schema.get(table_key)
             if isinstance(table, dict):
                 for name, definition in table.items():
-                    definition_tables[f"#/{table_key}/{name}"] = definition
+                    # RFC 6901 pointer escaping so a def named "a/b" cannot
+                    # shadow the pointer path $defs -> a -> b.
+                    escaped = name.replace("~", "~0").replace("/", "~1")
+                    definition_tables[f"#/{table_key}/{escaped}"] = definition
 
-        budget = [50_000]
+        def resolve_ref_type(ref: Any) -> str | list[Any] | None:
+            """Follow a ref (through bare-ref chains) to its definition's "type", or None."""
+            visited: set[str] = set()
+            while isinstance(ref, str) and ref in definition_tables and ref not in visited:
+                visited.add(ref)
+                definition = definition_tables[ref]
+                if not isinstance(definition, dict):
+                    return None
+                if "type" in definition:
+                    def_type = definition["type"]
+                    return copy.deepcopy(def_type) if isinstance(def_type, (str, list)) else None
+                ref = definition.get("$ref")
+            return None
 
-        def resolve(node: Any, expanding: frozenset[str]) -> Any:
-            budget[0] -= 1
-            if budget[0] < 0:
-                raise RecursionError("schema expansion budget exceeded")
+        # Values of these keywords are instance DATA, not schemas; a data dict
+        # that happens to carry a "$ref" key must never gain a "type".
+        data_keywords = {"const", "enum", "default", "examples"}
+
+        def annotate(node: Any) -> Any:
             if isinstance(node, list):
-                return [resolve(item, expanding) for item in node]
+                return [annotate(item) for item in node]
             if not isinstance(node, dict):
                 return node
-            ref = node.get("$ref")
-            if isinstance(ref, str) and ref in definition_tables and ref not in expanding:
-                resolved = resolve(definition_tables[ref], expanding | {ref})
-                siblings = {key: resolve(value, expanding) for key, value in node.items() if key != "$ref"}
-                if isinstance(resolved, dict):
-                    return {**resolved, **siblings}
-                if not siblings:
-                    return resolved
-                # A non-dict definition cannot merge with sibling keys; keep the ref node.
-            return {key: resolve(value, expanding) for key, value in node.items()}
+            rebuilt = {
+                key: copy.deepcopy(value) if key in data_keywords else annotate(value) for key, value in node.items()
+            }
+            if "type" not in rebuilt:
+                ref_type = resolve_ref_type(node.get("$ref"))
+                if ref_type is not None:
+                    rebuilt["type"] = ref_type
+            return rebuilt
 
-        result = resolve(schema, frozenset())
-        stripped = {key: value for key, value in result.items() if key not in ("$defs", "definitions")}
-        return result if _schema_contains_ref(stripped) else stripped
+        return annotate(schema)
     except Exception:
         return schema
 
@@ -304,29 +306,33 @@ def inline_schema_refs(schema: Any) -> Any:
 # wire schema's properties[key].type; a property site that is a bare
 # {"$ref": "#/$defs/..."} carries no inline "type", so the parser
 # string-encodes the whole object server-side before the agent ever sees it.
-# Dereferencing $refs at the client boundary removes that trigger
-# (install_tool_argument_coercion stays as the safety net for parsers that
-# string-encode regardless of schema). ChatCompletionsClient and LiteLLMClient
+# Copying only the resolved definition's type onto the ref site removes that
+# trigger without changing what the schema accepts: fully inlining a $ref and
+# merging its sibling keys would alter 2020-12 conjunctive semantics when a
+# sibling conflicts with the definition, while a type sibling equal to the
+# definition's type is a conjunctive no-op (and ignored under draft-07).
+# install_tool_argument_coercion stays as the safety net for parsers that
+# string-encode regardless of schema. ChatCompletionsClient and LiteLLMClient
 # bind to_openai_tools via `from stirrup.clients.utils import ...`, so
 # rebinding stirrup.clients.utils alone is not enough — each client module's
 # own namespace binding must be rebound too.
-def install_tool_schema_inlining() -> None:
-    """Patch stirrup's to_openai_tools so tool schemas reach the wire with $refs inlined."""
+def install_tool_schema_type_annotation() -> None:
+    """Patch stirrup's to_openai_tools so $ref sites in wire tool schemas carry an inline type."""
     import stirrup.clients.utils as stirrup_client_utils
 
     original_to_openai_tools = stirrup_client_utils.to_openai_tools
-    if getattr(original_to_openai_tools, "_apex_schema_inline_patch", False):
+    if getattr(original_to_openai_tools, "_apex_schema_type_patch", False):
         return
 
-    def to_openai_tools_with_inlined_refs(tools: Any) -> list[dict[str, Any]]:
+    def to_openai_tools_with_annotated_ref_types(tools: Any) -> list[dict[str, Any]]:
         entries = original_to_openai_tools(tools)
         for entry in entries:
             function = entry.get("function") if isinstance(entry, dict) else None
             if isinstance(function, dict) and isinstance(function.get("parameters"), dict):
-                function["parameters"] = inline_schema_refs(function["parameters"])
+                function["parameters"] = annotate_schema_ref_types(function["parameters"])
         return entries
 
-    to_openai_tools_with_inlined_refs._apex_schema_inline_patch = True
+    to_openai_tools_with_annotated_ref_types._apex_schema_type_patch = True
 
     client_modules: list[Any] = [stirrup_client_utils]
     with suppress(Exception):
@@ -339,7 +345,7 @@ def install_tool_schema_inlining() -> None:
         client_modules.append(litellm_client_module)
     for module in client_modules:
         if hasattr(module, "to_openai_tools"):
-            module.to_openai_tools = to_openai_tools_with_inlined_refs
+            module.to_openai_tools = to_openai_tools_with_annotated_ref_types
 
 
 def replace_tool_images_for_text_only_model(
@@ -658,7 +664,7 @@ async def run_stirrup_rollout(
     from stirrup.tools.mcp import MCPConfig, MCPToolProvider, StreamableHttpServerConfig
 
     install_tool_argument_coercion(Agent)
-    install_tool_schema_inlining()
+    install_tool_schema_type_annotation()
 
     class ToolNameParams(BaseModel):
         name: Annotated[str, Field(description="Exact MCP tool name from list_tools.")]
@@ -815,7 +821,7 @@ async def run_stirrup_rollout(
                 detail = {
                     "name": tool.name,
                     "description": tool.description,
-                    "parameters": inline_schema_refs(tool.parameters.model_json_schema()),
+                    "parameters": annotate_schema_ref_types(tool.parameters.model_json_schema()),
                     "active": self._active(tool.name),
                 }
                 return ToolResult(
