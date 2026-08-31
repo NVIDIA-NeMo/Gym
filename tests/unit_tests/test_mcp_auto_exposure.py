@@ -55,7 +55,13 @@ from nemo_gym.mcp_auto_exposure import (  # noqa: E402
     install_auto_exposure,
     maybe_auto_expose,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient, SimpleServer  # noqa: E402
+from nemo_gym.server_utils import (  # noqa: E402
+    SESSION_ID_KEY,
+    ExceptionHandlingMiddleware,
+    ServerClient,
+    SessionIDMiddleware,
+    SimpleServer,
+)
 
 
 RPC_HEADERS = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
@@ -528,6 +534,36 @@ def test_refuses_custom_middleware():
         return await call_next(request)
 
     with pytest.raises(ValueError, match="non-Gym middleware"):
+        install_auto_exposure(server, app)
+
+
+def test_accepts_exact_direct_dispatch_middleware_classes():
+    server = _server()
+    app = server.setup_webserver()
+    server.setup_exception_middleware(app)
+
+    install_auto_exposure(server, app)
+
+    middleware_classes = {middleware.cls for middleware in app.user_middleware}
+    assert SessionIDMiddleware in middleware_classes
+    assert ExceptionHandlingMiddleware in middleware_classes
+
+
+def test_refuses_unknown_middleware_from_server_utils_module():
+    class UnknownMiddleware:
+        __module__ = "nemo_gym.server_utils"
+
+        def __init__(self, app):
+            self.app = app
+
+        async def __call__(self, scope, receive, send):
+            await self.app(scope, receive, send)
+
+    server = _server()
+    app = server.setup_webserver()
+    app.add_middleware(UnknownMiddleware)
+
+    with pytest.raises(ValueError, match=r"nemo_gym\.server_utils\.UnknownMiddleware"):
         install_auto_exposure(server, app)
 
 

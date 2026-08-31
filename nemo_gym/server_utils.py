@@ -53,6 +53,7 @@ from omegaconf import DictConfig, OmegaConf, open_dict
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 from requests.exceptions import ConnectionError
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from nemo_gym import WORKING_DIR
 from nemo_gym.config_types import (
@@ -564,6 +565,96 @@ def _has_injected_global_config_env() -> bool:
 SESSION_ID_KEY = "session_id"
 
 
+class SessionIDMiddleware:
+    """Add a stable Gym session ID to each HTTP request.
+
+    ``SessionMiddleware`` must wrap this middleware so ``scope["session"]`` is available.
+    Non-HTTP scopes pass through unchanged.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        session = scope["session"]
+        session_id = session.get(SESSION_ID_KEY)
+        if session_id is None:
+            session_id = str(uuid4())
+        # Assignment marks the session as modified.
+        # SessionMiddleware therefore persists the ID on every response.
+        session[SESSION_ID_KEY] = session_id
+
+        await self.app(scope, receive, send)
+
+
+class ExceptionHandlingMiddleware:
+    """Convert pre-response exceptions into Gym's JSON 500 responses.
+
+    Exceptions propagate after ``http.response.start`` because the status and headers are committed.
+    Non-HTTP scopes pass through unchanged.
+    """
+
+    def __init__(self, app: ASGIApp, server: "SimpleServer") -> None:
+        self.app = app
+        self.server = server
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        response_started = False
+
+        async def send_wrapper(message: Message) -> None:
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_wrapper)
+            return
+        except ClientResponseError as e:
+            if response_started:
+                raise
+            assert hasattr(e, "response_content"), (
+                "Please use `nemo_gym.server_utils.raise_for_status` for HTTP exceptions!"
+            )
+
+            response_content = f"Hit an exception in {self.server.get_session_middleware_key()} calling an inner server: {e.response_content}"
+            if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
+                print(response_content)
+
+            response = JSONResponse(content=response_content, status_code=500)
+        except CancelledError:
+            if response_started:
+                raise
+            response = JSONResponse(content="An unknown error occurred", status_code=500)
+        except Exception as e:
+            if response_started:
+                raise
+            print(
+                f"""🚨 Caught an exception printed above in {self.server.config.name} ({self.server.__class__.__name__}). If you expect this to be fed back into this model, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception
+Formatted exception: {format_exc()}
+repr(e): {repr(e)}"""
+            )
+            response = JSONResponse(content=repr(e), status_code=500)
+        except:  # noqa: E722
+            if response_started:
+                raise
+            print_exc()
+            print(
+                f"""🚨 Caught an unknown exception printed above in {self.server.config.name} ({self.server.__class__.__name__}). If you expect this to be fed back into this model, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"""
+            )
+            response = JSONResponse(content="An unknown error occurred", status_code=500)
+
+        await response(scope, receive, send)
+
+
 class BaseServer(BaseModel):
     """
     All instances of BaseServer are queryable using ServerClient.
@@ -757,53 +848,16 @@ class SimpleServer(BaseServer):
             return
         app.state.nemo_gym_session_middleware_installed = True
 
-        # The multiple middleware execution order described in https://fastapi.tiangolo.com/tutorial/middleware/#multiple-middleware-execution-order
-        # Says that if you register middlewares A and then B,
-        # - at request time: They execute B first then A
-        # - at response time: They return to A first and then B
-        # So for adding session IDs, that middleware must run after SessionMiddleware, so it must be registered before it.
-
-        @app.middleware("http")
-        async def add_session_id(request: Request, call_next):  # pragma: no cover
-            # Always assign so Starlette 1.0+ marks session.modified=True and re-sends Set-Cookie.
-            request.session[SESSION_ID_KEY] = request.session.get(SESSION_ID_KEY, str(uuid4()))
-
-            response: Response = await call_next(request)
-            return response
+        # Middleware added later runs first.
+        # SessionMiddleware must populate the session before SessionIDMiddleware reads it.
+        app.add_middleware(SessionIDMiddleware)
 
         session_middleware_key = self.get_session_middleware_key()
         app.add_middleware(SessionMiddleware, secret_key=session_middleware_key, session_cookie=session_middleware_key)
 
-    def setup_exception_middleware(self, app: FastAPI) -> None:  # pragma: no cover
-        @app.middleware("http")
-        async def exception_handling_middleware(request: Request, call_next):
-            try:
-                return await call_next(request)
-            except ClientResponseError as e:
-                assert hasattr(e, "response_content"), (
-                    "Please use `nemo_gym.server_utils.raise_for_status` for HTTP exceptions!"
-                )
-
-                response_content = f"Hit an exception in {self.get_session_middleware_key()} calling an inner server: {e.response_content}"
-                if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
-                    print(response_content)
-
-                return JSONResponse(content=response_content, status_code=500)
-            except CancelledError:
-                return JSONResponse(content="An unknown error occurred", status_code=500)
-            except Exception as e:
-                print(
-                    f"""🚨 Caught an exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception
-Formatted exception: {format_exc()}
-repr(e): {repr(e)}"""
-                )
-                return JSONResponse(content=repr(e), status_code=500)
-            except:
-                print_exc()
-                print(
-                    f"""🚨 Caught an unknown exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"""
-                )
-                return JSONResponse(content="An unknown error occurred", status_code=500)
+    def setup_exception_middleware(self, app: FastAPI) -> None:
+        # This middleware is registered last and handles failures from the full request stack.
+        app.add_middleware(ExceptionHandlingMiddleware, server=self)
 
     def setup_profiling(self, app: FastAPI, profiling_config: ProfilingMiddlewareConfig) -> None:  # pragma: no cover
         base_profile_dir = WORKING_DIR / profiling_config.profiling_results_dirpath / self.get_session_middleware_key()
