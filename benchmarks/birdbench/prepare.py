@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+
 """Prepare BIRD benchmark data.
 
 Per-row output schema: ``{question, gt_sql, sql_context, difficulty, db_id, id}``.
