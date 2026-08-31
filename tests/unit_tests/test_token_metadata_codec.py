@@ -270,6 +270,13 @@ class TestModelValidation:
         complete = {"role": "assistant", "content": "hi", **_envelope_fields()}
         NeMoGymResponseCreateParamsNonStreaming.model_validate({"input": [complete]})
 
+    def test_response_rejects_partial_envelope_metadata(self) -> None:
+        fields = _envelope_fields()
+        del fields["prompt_token_ids"]
+
+        with pytest.raises(ValidationError, match="must include all required fields"):
+            NeMoGymResponse.model_validate(_response_dict(fields))
+
     def test_chat_params_accept_envelope_training_messages(self) -> None:
         NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
             {"messages": [{"role": "assistant", "content": "hi", **_envelope_fields()}]}

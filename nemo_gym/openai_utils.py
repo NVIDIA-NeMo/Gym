@@ -223,6 +223,15 @@ def _validate_atomic_token_metadata(value: Any) -> Any:
     return value
 
 
+def _validate_atomic_token_envelopes(value: Any) -> Any:
+    """Validate envelope metadata before an output union can discard it."""
+    if not isinstance(value, dict):
+        return value
+    if not any(isinstance(value.get(field), str) for field in REQUIRED_TOKEN_METADATA_FIELDS):
+        return value
+    return _validate_atomic_token_metadata(value)
+
+
 ########################################
 # Responses API inputs
 ########################################
@@ -747,7 +756,7 @@ NeMoGymResponseOutputItem = Annotated[
         NeMoGymResponseReasoningItemForTraining,
     ],
     BeforeValidator(_require_response_output_item_type),
-    BeforeValidator(_validate_atomic_token_metadata),
+    BeforeValidator(_validate_atomic_token_envelopes),
 ]
 
 
