@@ -82,6 +82,7 @@ from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
 _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG: bool = False
+_UPSTREAM_ERROR_LOG_BODY_CHARS = 2000
 
 
 class _PickleSafeRequestInfo(NamedTuple):
@@ -302,6 +303,33 @@ def _redacted_url(url: str) -> str:
     The path is the useful part for a trace; the query is a leak waiting to happen.
     """
     return url.split("?", 1)[0]
+
+
+def _format_upstream_error_body(content: Any) -> str:
+    """Render a bounded upstream error body without hiding its useful traceback."""
+    if isinstance(content, bytes):
+        prefix = content[: _UPSTREAM_ERROR_LOG_BODY_CHARS * 4].decode("utf-8", errors="replace")
+        truncated = len(content) > _UPSTREAM_ERROR_LOG_BODY_CHARS * 4
+    else:
+        prefix = str(content)
+        truncated = False
+
+    truncated = truncated or len(prefix) > _UPSTREAM_ERROR_LOG_BODY_CHARS
+    return prefix[:_UPSTREAM_ERROR_LOG_BODY_CHARS] + ("…" if truncated else "")
+
+
+def _format_upstream_error_log(server_name: str, error: ClientResponseError) -> str:
+    request_info = error.request_info
+    upstream_url = getattr(request_info, "real_url", None)
+    if upstream_url is None:
+        upstream_url = getattr(request_info, "url", None)
+    upstream_url = _redacted_url(str(upstream_url)) if upstream_url is not None else "unknown"
+    return (
+        "🚨 [upstream_request_failed] "
+        f"server={server_name} method={getattr(request_info, 'method', 'unknown')} "
+        f"url={upstream_url} status={error.status}\n"
+        f"Response content: {_format_upstream_error_body(error.response_content)}"
+    )
 
 
 async def _request_with_retries(
@@ -785,8 +813,7 @@ class SimpleServer(BaseServer):
                 )
 
                 response_content = f"Hit an exception in {self.get_session_middleware_key()} calling an inner server: {e.response_content}"
-                if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
-                    print(response_content)
+                print(_format_upstream_error_log(self.get_session_middleware_key(), e), flush=True)
 
                 return JSONResponse(content=response_content, status_code=500)
             except CancelledError:
