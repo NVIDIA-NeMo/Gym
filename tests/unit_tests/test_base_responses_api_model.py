@@ -156,6 +156,7 @@ def test_capture_store_raises_on_malformed_nonblank_json(tmp_path):
 def test_build_model_call_record_from_exchange():
     exchange = {
         "model_call_id": "call-1",
+        "client_session_id": "session-1",
         "dialect": "responses",
         "model_ref": {"type": "responses_api_models", "name": "srv"},
         "started_at": 100.0,
@@ -182,6 +183,7 @@ def test_build_model_call_record_from_exchange():
     rec = build_model_call_record(exchange, call_index=3)
     assert rec.model_call_id == "call-1"
     assert rec.response_id == "resp-1"
+    assert rec.client_session_id == "session-1"
     assert rec.call_index == 3
     assert rec.model_ref is not None and rec.model_ref.name == "srv"
     assert rec.model == "m"
@@ -199,6 +201,7 @@ def test_build_model_call_record_from_exchange():
     assert {
         "model_call_id",
         "response_id",
+        "client_session_id",
         "call_index",
         "model_ref",
         "model",
@@ -262,6 +265,21 @@ def test_build_model_call_record_tolerates_malformed_nested_shapes():
     assert record.tool_calls == []
 
 
+@pytest.mark.parametrize(
+    "headers,expected",
+    [
+        ([], None),
+        ([(b"X-Session-Id", b"session-1")], "session-1"),
+        ([(b"x-session-id", b"session-1"), (b"X-Session-Id", b"session-1")], "session-1"),
+        ([(b"x-session-id", b"session-1"), (b"x-session-id", b"session-2")], None),
+    ],
+)
+def test_unique_request_header_requires_one_value(headers, expected):
+    from nemo_gym.base_responses_api_model import _unique_request_header
+
+    assert _unique_request_header(headers, b"x-session-id") == expected
+
+
 def test_capture_is_durable_before_stream_terminal_event_is_sent(tmp_path):
     import asyncio
 
@@ -298,7 +316,7 @@ def test_capture_is_durable_before_stream_terminal_event_is_sent(tmp_path):
                 "type": "http",
                 "path": "/ng-rollout/fast-rollout/v1/messages",
                 "raw_path": b"/ng-rollout/fast-rollout/v1/messages",
-                "headers": [],
+                "headers": [(b"x-session-id", b"opencode-session")],
             },
             receive,
             send,
@@ -306,6 +324,8 @@ def test_capture_is_durable_before_stream_terminal_event_is_sent(tmp_path):
     )
 
     assert durable_call_counts == [0, 1, 1]
+    [call] = read_model_call_records(store, "fast-rollout")
+    assert call.client_session_id == "opencode-session"
 
 
 def test_capture_retains_partial_stream_when_downstream_raises(tmp_path):
@@ -1359,6 +1379,34 @@ def test_merge_capture_attaches_metrics_without_raw_payloads(tmp_path):
     assert attached_call["response"] == exchange["response"]
     assert attached_call["request_raw"] == "malformed request"
     assert attached_call["response_raw"] == "malformed response"
+
+
+def test_merge_capture_owns_opencode_calls_by_client_session(tmp_path):
+    from nemo_gym.base_responses_api_model import CaptureStore, merge_model_call_capture_into_record
+
+    store = CaptureStore(tmp_path)
+    exchange = _capture_exchange(
+        "chat",
+        "A",
+        {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+        {"id": "resp-A", "choices": [{"finish_reason": "stop", "message": {"content": "ok"}}]},
+    )
+    exchange["client_session_id"] = "opencode-root"
+    store.record("0-0", exchange)
+    record = {
+        "_ng_task_index": 0,
+        "_ng_rollout_index": 0,
+        "ng_agent_observations": {
+            "source": "opencode",
+            "records": [{"kind": "agent_invocation", "invocation_id": "opencode-root"}],
+        },
+    }
+
+    merge_model_call_capture_into_record(record, [tmp_path])
+
+    [reference] = record["ng_agent_observations"]["records"][0]["model_calls"]
+    assert reference["model_call_id"] == "call-A"
+    assert record["ng_agent_observations"]["gaps"] == []
 
 
 def test_merge_capture_reports_missing_capture(tmp_path):
