@@ -285,7 +285,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         """
         if body.get("stream") is not True:
             params = _validate_chat_params(body)
-            return _orjson_dispatch_response(await self._invoke_chat_completions(request, params))
+            # return _orjson_dispatch_response(await self._invoke_chat_completions(request, params))
+            return await self._invoke_chat_completions(request, params)
 
         cleaned, include_usage = sanitize_streaming_chat_body(body)
         params = _validate_chat_params(cleaned)
