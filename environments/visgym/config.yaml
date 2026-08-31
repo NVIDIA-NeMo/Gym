@@ -1,0 +1,45 @@
+visgym_resources_server:
+  resources_servers:
+    visgym:
+      entrypoint: app.py
+      domain: games
+      verified: false
+      description: Env-id-parametric wrapper around VisGym visual environments.
+      value: Train visual reasoning policies through stateful, multi-turn image interactions.
+      task_jsonl_fpaths: []
+      image_format: PNG
+      image_jpeg_quality: 90
+      skip_images: false
+      enforce_horizon_cap: true
+      return_transitions: false
+      include_env_feedback: true
+      render_on_missing_image: true
+visgym_agent:
+  responses_api_agents:
+    visgym_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: visgym_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 35
+      done_if_no_boxed_answer: true
+      unboxed_action_regex: "^\\('(?:move|stop)',\\s*(?:[0-3]|'stop')\\)$"
+      return_transitions: false
+      system_prompt: |-
+        You control a visual maze one move at a time. Inspect the current image
+        and choose only the single best immediate move. Think inside <think> in
+        at most one short sentence and 25 words. Close with </think>. On the
+        last line, put exactly one legal VisGym action tuple in \boxed{...}.
+        If the blue circle is already on the red target, emit
+        ('stop', 'stop') instead of another move.
+      re_emit_rules_each_turn: true
+      rules_summary_template: |-
+        Reason briefly about only the next move, then put one legal action in
+        \boxed{...}. If the blue circle is on the target, emit ('stop', 'stop').
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/visgym/data/maze_2d_easy_example.jsonl

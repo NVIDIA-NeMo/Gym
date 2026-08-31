@@ -1,0 +1,93 @@
+# Reasoning-on counterpart to visgym_requested_direct_action_agent.yaml, for
+# training a thinking model across the blended VisGym environments.
+#
+# Two things this config states that the direct-action one does not, both
+# measured against the real environments:
+#
+#   1. These environments score on termination only. jigsaw, sliding_block,
+#      colorization, mental_rotation_*, zoom_in_puzzle and the mazes all end
+#      with `if terminated: reward = self._compute_reward()`, and terminated is
+#      set by the stop action. Solving the task and continuing to act scores
+#      exactly zero, and no environment prompt says so.
+#   2. A thinking model needs its trace to close before it can emit an action.
+#      The per-turn budget lives in each task row's max_output_tokens; generate
+#      the manifests at the same value as the policy's max_new_tokens.
+visgym_resources_server:
+  resources_servers:
+    visgym:
+      entrypoint: app.py
+      domain: games
+      verified: false
+      description: "Env-id-parametric wrapper around VisGym visual environments."
+      task_jsonl_fpaths: []
+      image_format: "PNG"
+      image_jpeg_quality: 90
+      skip_images: false
+      enforce_horizon_cap: true
+      return_transitions: false
+      include_env_feedback: true
+      render_on_missing_image: true
+visgym_agent:
+  responses_api_agents:
+    visgym_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: visgym_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      # Above the largest horizon_cap in the blend (maze_2d_7x7 at 20), so the
+      # per-task cap is what ends an episode rather than this backstop.
+      max_steps: 22
+      # A turn that runs out of tokens mid-thought costs a retry at a larger
+      # budget, not the whole episode. Nothing here cuts the trace off and
+      # demands an action: a coerced action is not a sample of the policy being
+      # trained, so it would teach the output format rather than let the policy
+      # learn to deliberate less. The system prompt asks for a short trace and
+      # says that running out of room scores nothing for the whole episode;
+      # reward is what should teach brevity.
+      done_if_no_boxed_answer: false
+      max_no_boxed_truncation_retries: 1
+      no_boxed_truncation_retry_factor: 1.5
+      # Any legal VisGym tuple: ('move', ...), ('rotate', ...), ('reorder', ...),
+      # ('mark', ...), ('guess', ...), ('turn', ...), ('stop', 'stop').
+      unboxed_action_regex: "^\\('[a-z_]+',\\s*.+\\)$"
+      return_transitions: false
+      system_prompt: |-
+        You are solving a visual puzzle one action at a time. Read the
+        environment instructions in the first message and inspect the current
+        image. Think inside <think> in at most one short sentence and 25 words:
+        do not narrate the image, enumerate alternatives, plan future turns or
+        restate the instructions. Close with </think>. On the last line, write
+        \boxed{ immediately followed by exactly one legal action tuple, then
+        write }. Nothing may follow the action. An action is mandatory on every
+        turn, even when uncertain.
+        Keep the trace short. You have a limited token budget each turn, and a
+        turn that runs out of room before you write the action scores nothing
+        at all -- for the whole episode, not just that turn. Spending fewer
+        words is therefore worth more than being sure: commit to your first
+        reading of the image, and if two readings seem possible pick the more
+        likely one and act. Do not re-examine, do not second-guess, and do not
+        write "wait", "actually" or "let me reconsider". You get a fresh image
+        and another turn after every action, so a quick imperfect action beats
+        a careful one you never finish.
+        The episode is only scored when you end it: as soon as the task looks
+        solved, emit ('stop', 'stop') instead of another action. Continuing to
+        act after solving it scores nothing.
+      re_emit_rules_each_turn: true
+      rules_summary_template: |-
+        Use at most 25 words inside <think> about only the next action. Commit
+        to your first reading; do not reconsider. Close with </think>. On the
+        last line write \boxed{, one legal action tuple, and }. Nothing may
+        follow it. If the task already looks solved, the correct action is
+        ('stop', 'stop').
+      datasets:
+        # Keep the checked-in config runnable from a clean checkout. Generate
+        # the requested multi-environment blend with
+        # `python environments/visgym/prepare.py multienv
+        # --max-output-tokens 2048`, then point this dataset at the generated
+        # combined manifest for training.
+        - name: maze_2d_example
+          type: example
+          jsonl_fpath: data/maze_2d_easy_example.jsonl
