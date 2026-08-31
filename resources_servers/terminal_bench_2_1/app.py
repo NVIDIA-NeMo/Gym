@@ -39,8 +39,6 @@ class TerminalBench21ResourcesServerConfig(BaseResourcesServerConfig):
     # Sandbox config
     sandbox_provider: str
     sandbox_config: Dict[str, Any]
-    pty_rows: int
-    pty_cols: int
 
     debug: bool = False
 
@@ -191,7 +189,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         await eval_sandbox.start(eval_sandbox_spec)
 
         # rows=40 and cols=160 are default from Terminus 2.1
-        pty_session = await eval_sandbox.pty.create(rows=self.config.pty_rows, cols=self.config.pty_cols)
+        pty_session = await eval_sandbox.pty.create(rows=40, cols=160)
 
         return eval_sandbox, pty_session
 
