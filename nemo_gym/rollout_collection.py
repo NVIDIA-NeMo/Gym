@@ -150,6 +150,7 @@ AGENT_REQUEST_FAILED_FAILURE_CLASS = "agent_request_failed"
 AGENT_RUN_ERROR_FAILURE_CLASS = "agent_run_error"
 _NO_RESULT_FAILURE_CLASSES = frozenset({AGENT_REQUEST_FAILED_FAILURE_CLASS, AGENT_RUN_ERROR_FAILURE_CLASS})
 NG_TRAJECTORY_KEY = "ng_trajectory"
+_LOUD_RULE = "=" * 100
 NG_PERF_KEY = "ng_perf"
 _NG_ROLLOUT_LATENCY_MS_KEY = "_ng_rollout_latency_ms"
 _MODEL_CALL_PAYLOAD_KEYS = ("request", "response", "request_raw", "response_raw")
@@ -605,6 +606,15 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
         ),
     )
 
+    route_failures_to_sidecar: bool = Field(
+        default=False,
+        description=(
+            "Let a failed agent /run become a failures-sidecar row instead of ending the run. The "
+            "failed rollouts are then missing from the rollouts jsonl and from the score, which is "
+            "reported over a smaller denominator than the run was asked for, so this is off unless "
+            "you ask for it and the run says so loudly when it is on."
+        ),
+    )
     rollout_collection_driver: Optional[str] = Field(
         default=None,
         description=(
@@ -1311,10 +1321,23 @@ class RolloutCollectionHelper(BaseModel):
         dispatched_per_agent = Counter(counts_left)
         start_time = time()
 
+        if config.route_failures_to_sidecar:
+            print(
+                f"{_LOUD_RULE}\n"
+                "route_failures_to_sidecar=TRUE. A failed agent /run will NOT stop this run.\n"
+                "Failed rollouts go to the failures sidecar, stay out of the rollouts jsonl, and are\n"
+                "EXCLUDED from the metrics. A run with failures therefore reports its score over fewer\n"
+                "rollouts than it dispatched. Every routed failure is logged below.\n"
+                f"{_LOUD_RULE}",
+                flush=True,
+            )
+
         results_file = output_fpath.open("ab")
         failures_file = failures_fpath.open("ab")
         failure_counts: Counter = Counter()
-        for future in self.run_examples(input_rows, semaphore=semaphore, route_failures_to_sidecar=True):
+        for future in self.run_examples(
+            input_rows, semaphore=semaphore, route_failures_to_sidecar=config.route_failures_to_sidecar
+        ):
             row, result = await future
 
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
@@ -1481,11 +1504,15 @@ class RolloutCollectionHelper(BaseModel):
         failures_file.close()
 
         coverage = ""
-        if failure_counts:
+        if failure_counts or config.route_failures_to_sidecar:
             coverage = (
-                f"\nCoverage: {sum(failure_counts.values())} of {len(input_rows)} dispatched rollouts failed "
-                f"{dict(failure_counts)}, {len(persisted_results)} completed in total. "
-                f"Failure rows: {failures_fpath}"
+                f"\n{_LOUD_RULE}\n"
+                f"route_failures_to_sidecar={'TRUE' if config.route_failures_to_sidecar else 'false'}. "
+                f"{sum(failure_counts.values())} of {len(input_rows)} dispatched rollouts failed "
+                f"{dict(failure_counts)} and are EXCLUDED from the metrics above, which cover "
+                f"{len(persisted_results)} completed rollouts.\n"
+                f"Failure rows: {failures_fpath}\n"
+                f"{_LOUD_RULE}"
             )
             if input_rows and not persisted_results:
                 raise RuntimeError(
@@ -1810,9 +1837,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         but run-level knobs (``agent_map``, ``fan_out``, ``num_repeats``) are NOT applied — call
         ``preprocess_examples`` first if you need them.
 
-        ``route_failures_to_sidecar`` is set by managed collection (``run_from_config``), where a
-        failed `/run` becomes a failure row instead of ending every rollout still in flight.
-        Direct callers such as NeMo-RL leave it off and keep receiving the exception.
+        ``route_failures_to_sidecar`` makes a failed `/run` a failure row instead of an exception
+        that ends every rollout still in flight. It is off unless asked for, because the failed
+        rollouts then leave the score, and managed collection passes the run's own setting.
         """
         server_client = self.setup_server_client(head_server_config)
         self.resolve_task_sources(examples, server_client.global_config_dict)
@@ -1847,7 +1874,15 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     # The status comes from the error when it carries one, and from the response
                     # when the body was the part that failed.
                     status = getattr(e, "status", None) or getattr(res, "status", None)
-                    return row, _agent_request_failure_row(e, status)
+                    failure = _agent_request_failure_row(e, status)
+                    print(
+                        "🚨 [route_failures_to_sidecar] this rollout FAILED and is excluded from the score: "
+                        f"class={failure[NG_FAILURE_CLASS_KEY]} status={status} "
+                        f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)} "
+                        f"error={(failure['_ng_failure_message'] or '')[:200]}",
+                        flush=True,
+                    )
+                    return row, failure
 
         return tqdm.as_completed(
             map(_post_subroutine, examples),

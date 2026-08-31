@@ -938,6 +938,7 @@ class TestRolloutCollection:
         config = RolloutCollectionConfig(
             input_jsonl_fpath=str(input_jsonl_fpath),
             output_jsonl_fpath=str(output_jsonl_fpath),
+            route_failures_to_sidecar=True,
             disable_health_check=True,
         )
         results = await RolloutCollectionHelper().run_from_config(config)
@@ -1106,6 +1107,7 @@ class TestRolloutCollection:
         config = RolloutCollectionConfig(
             input_jsonl_fpath=str(input_jsonl_fpath),
             output_jsonl_fpath=str(output_jsonl_fpath),
+            route_failures_to_sidecar=True,
             count_failure_classes_as_zero=counted_classes,
             disable_health_check=True,
         )
@@ -1138,6 +1140,7 @@ class TestRolloutCollection:
         config = RolloutCollectionConfig(
             input_jsonl_fpath=str(input_jsonl_fpath),
             output_jsonl_fpath=str(output_jsonl_fpath),
+            route_failures_to_sidecar=True,
             disable_health_check=True,
         )
 
@@ -1216,6 +1219,73 @@ class TestRolloutCollection:
 
         assert isinstance(result["_ng_rollout_latency_ms"], float)
         assert result["_ng_rollout_latency_ms"] >= 0
+
+    async def test_run_from_config_does_not_route_failures_unless_asked(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """Dropping failed rollouts shrinks the denominator, so it never happens unasked."""
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my_agent"}}) + "\n"
+        )
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+        install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(500)))
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            disable_health_check=True,
+        )
+
+        with pytest.raises(ClientResponseError):
+            await RolloutCollectionHelper().run_from_config(config)
+
+        assert (
+            not _failures_path_for(output_jsonl_fpath).exists()
+            or not _failures_path_for(output_jsonl_fpath).read_bytes()
+        )
+
+    async def test_run_from_config_says_loudly_that_routing_is_on_and_when_it_fires(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        empty_global_config: MagicMock,
+    ) -> None:
+        """Silent routing is what makes the numbers misleading, so the run says it three times."""
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            "\n".join(
+                json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my_agent"}, "x": i})
+                for i in range(2)
+            )
+            + "\n"
+        )
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+
+        async def post(server_name: str, url_path: str, json, **kwargs):
+            if url_path == "/run":
+                if json["x"] == 0:
+                    raise http_error(500, "unhandled tool-call json")
+                return FakeResponse(200, {"reward": 1.0})
+            return FakeResponse(200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump())
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            route_failures_to_sidecar=True,
+            disable_health_check=True,
+        )
+        await RolloutCollectionHelper().run_from_config(config)
+
+        printed = capsys.readouterr().out
+        # Announced before dispatch, once per routed failure, and again with the closing artifacts.
+        assert "route_failures_to_sidecar=TRUE. A failed agent /run will NOT stop this run." in printed
+        assert "🚨 [route_failures_to_sidecar] this rollout FAILED and is excluded from the score" in printed
+        assert "1 of 2 dispatched rollouts failed" in printed
+        assert "EXCLUDED from the metrics above, which cover 1 completed rollouts" in printed
 
     def test_preprocess_rows_with_prompt_config(self, tmp_path: Path) -> None:
         """prompt_config builds responses_create_params.input from template."""
