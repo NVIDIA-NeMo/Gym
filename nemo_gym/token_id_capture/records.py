@@ -319,7 +319,7 @@ def extract_token_fields(response_json: dict) -> dict | None:
     for field, expected_dtypes in (
         ("prompt_token_ids", ("i32",)),
         ("generation_token_ids", ("i32",)),
-        ("generation_log_probs", ("f32", "f64")),
+        ("generation_log_probs", ("f64",)),
     ):
         if isinstance(info[field], str):
             info[field] = decode_token_list(info[field], expected_dtypes)

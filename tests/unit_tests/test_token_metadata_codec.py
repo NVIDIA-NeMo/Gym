@@ -52,7 +52,7 @@ from nemo_gym.token_metadata_codec import (
 
 PTOKS = [101, 102, 103]
 GTOKS = [7, 9]
-LPS = [-0.125, -0.5]  # exact in float32, so f32 round trips verbatim
+LPS = [-0.125, -0.5]
 
 
 class TestCodecRoundTrip:
@@ -60,7 +60,6 @@ class TestCodecRoundTrip:
         ("values", "dtype", "expected"),
         [
             ([0, 1, -1, 2**31 - 1, -(2**31)], "i32", "ngtok1:i32:AAAAAAEAAAD/////////fwAAAIA="),
-            ([0.0, -0.5, 1.5], "f32", "ngtok1:f32:AAAAAAAAAL8AAMA/"),
             ([0.0, -0.5, 1.5], "f64", "ngtok1:f64:AAAAAAAAAAAAAAAAAADgvwAAAAAAAPg/"),
         ],
     )
@@ -80,15 +79,8 @@ class TestCodecRoundTrip:
         assert envelope.startswith(f"{TOKEN_ENVELOPE_PREFIX}f64:")
         assert decode_token_list(envelope) == values
 
-    def test_f32_round_trip_is_close(self) -> None:
-        values = [-0.1, -2.302585092994046, -1e-7, -15.75]
-        decoded = decode_token_list(encode_token_list(values, "f32"))
-        assert len(decoded) == len(values)
-        for original, restored in zip(values, decoded):
-            assert abs(restored - original) <= 1e-6 * abs(original)
-
     def test_empty_list_round_trips(self) -> None:
-        for dtype in ("i32", "f32", "f64"):
+        for dtype in ("i32", "f64"):
             assert decode_token_list(encode_token_list([], dtype)) == []
 
     def test_decode_passes_plain_lists_through(self) -> None:
@@ -123,7 +115,7 @@ class TestCodecErrors:
 
     def test_decode_rejects_unknown_dtype(self) -> None:
         with pytest.raises(ValueError, match="unsupported token-metadata dtype"):
-            decode_token_list(f"{TOKEN_ENVELOPE_PREFIX}i64:AAAA")
+            decode_token_list(f"{TOKEN_ENVELOPE_PREFIX}f32:AAAA")
 
     def test_decode_rejects_incomplete_header(self) -> None:
         with pytest.raises(ValueError, match="header must end"):
@@ -152,7 +144,7 @@ class TestItemHelpers:
 
     def test_encode_then_decode_restores_lists_in_place(self) -> None:
         item = self._item()
-        encode_output_item_token_fields(item, float_dtype="f64")
+        encode_output_item_token_fields(item)
         assert is_token_envelope(item["prompt_token_ids"])
         assert is_token_envelope(item["generation_token_ids"])
         assert item["generation_log_probs"].startswith(f"{TOKEN_ENVELOPE_PREFIX}f64:")
@@ -165,10 +157,10 @@ class TestItemHelpers:
         assert item["generation_token_ids"] == GTOKS
         assert item["generation_log_probs"] == LPS
 
-    def test_encode_defaults_to_f32_and_is_idempotent(self) -> None:
+    def test_encode_uses_f64_and_is_idempotent(self) -> None:
         item = self._item()
         encode_output_item_token_fields(item)
-        assert item["generation_log_probs"].startswith(f"{TOKEN_ENVELOPE_PREFIX}f32:")
+        assert item["generation_log_probs"].startswith(f"{TOKEN_ENVELOPE_PREFIX}f64:")
         encoded_once = dict(item)
         encode_output_item_token_fields(item)
         assert item == encoded_once
@@ -180,13 +172,9 @@ class TestItemHelpers:
         decode_output_item_token_fields(item)
         assert item == {"type": "message", "content": []}
 
-    def test_encode_rejects_invalid_float_dtype(self) -> None:
-        with pytest.raises(ValueError, match="float_dtype must be"):
-            encode_output_item_token_fields(self._item(), float_dtype="i32")
-
     def test_decode_enforces_field_dtypes(self) -> None:
         item = self._item()
-        item["prompt_token_ids"] = encode_token_list([1.0], "f32")
+        item["prompt_token_ids"] = encode_token_list([1.0], "f64")
         with pytest.raises(ValueError, match="dtype must be"):
             decode_output_item_token_fields(item)
 
@@ -201,7 +189,7 @@ def _envelope_fields() -> dict:
     return {
         "prompt_token_ids": encode_token_list(PTOKS, "i32"),
         "generation_token_ids": encode_token_list(GTOKS, "i32"),
-        "generation_log_probs": encode_token_list(LPS, "f32"),
+        "generation_log_probs": encode_token_list(LPS, "f64"),
     }
 
 
@@ -420,20 +408,20 @@ class TestEndpointEncoding:
         response = _response_dict(
             {"prompt_token_ids": PTOKS, "generation_token_ids": GTOKS, "generation_log_probs": LPS}
         )
-        _encode_token_metadata_in_place(response, "base64_f32")
+        _encode_token_metadata_in_place(response, "base64")
         [item] = response["output"]
         assert decode_token_list(item["prompt_token_ids"], ("i32",)) == PTOKS
-        assert decode_token_list(item["generation_log_probs"], ("f32",)) == LPS
+        assert decode_token_list(item["generation_log_probs"], ("f64",)) == LPS
 
     def test_responses_route_serves_envelopes_while_capture_retains_lists(self, tmp_path) -> None:
-        client = _client(tmp_path, "base64_f32")
+        client = _client(tmp_path, "base64")
         resp = client.post("/ng-rollout/enc-a/training-token-capture/v1/responses", json={"input": "hi"})
         assert resp.status_code == 200
         [item] = resp.json()["output"]
         assert item["prompt_token_ids"] == encode_token_list(PTOKS, "i32")
         assert item["generation_token_ids"] == encode_token_list(GTOKS, "i32")
-        assert item["generation_log_probs"].startswith(f"{TOKEN_ENVELOPE_PREFIX}f32:")
-        assert decode_token_list(item["generation_log_probs"]) == LPS  # exact in f32
+        assert item["generation_log_probs"] == encode_token_list(LPS, "f64")
+        assert decode_token_list(item["generation_log_probs"]) == LPS
         assert item["content"][0]["text"] == "hi"
 
         # Capture ran before encoding, so the recorded entry holds the raw lists.
@@ -442,16 +430,8 @@ class TestEndpointEncoding:
         assert entry.generation_token_ids == GTOKS
         assert entry.generation_log_probs == LPS
 
-    def test_responses_route_f64_envelope_is_bit_exact(self, tmp_path) -> None:
-        client = _client(tmp_path, "base64_f64")
-        resp = client.post("/ng-rollout/enc-b/training-token-capture/v1/responses", json={"input": "hi"})
-        assert resp.status_code == 200
-        [item] = resp.json()["output"]
-        assert item["generation_log_probs"] == encode_token_list(LPS, "f64")
-        assert decode_token_list(item["generation_log_probs"]) == LPS
-
     def test_chat_route_serves_envelopes(self, tmp_path) -> None:
-        client = _client(tmp_path, "base64_f32")
+        client = _client(tmp_path, "base64")
         resp = client.post(
             "/ng-rollout/enc-c/training-token-capture/v1/chat/completions",
             json={"messages": [{"role": "user", "content": "hi"}]},
@@ -478,6 +458,17 @@ class TestEndpointEncoding:
         assert item["prompt_token_ids"] == PTOKS
         assert item["generation_token_ids"] == GTOKS
         assert item["generation_log_probs"] == LPS
+
+    @pytest.mark.parametrize("encoding", ["base64_f32", "base64_f64"])
+    def test_precision_specific_modes_are_rejected(self, encoding) -> None:
+        with pytest.raises(ValidationError):
+            BaseResponsesAPIModelConfig(
+                host="",
+                port=0,
+                entrypoint="",
+                name="",
+                token_metadata_encoding=encoding,
+            )
 
     def test_encoding_defaults_to_json(self) -> None:
         config = BaseResponsesAPIModelConfig(host="", port=0, entrypoint="", name="")

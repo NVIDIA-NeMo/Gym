@@ -729,7 +729,7 @@ def test_capture_observed_completion_accepts_token_envelopes():
                 "content": "answer",
                 "prompt_token_ids": encode_token_list([1, 2], "i32"),
                 "generation_token_ids": encode_token_list([3, 4], "i32"),
-                "generation_log_probs": encode_token_list([-0.5, -0.25], "f32"),
+                "generation_log_probs": encode_token_list([-0.5, -0.25], "f64"),
             }
         ],
         rollout_id=history.rollout_id,

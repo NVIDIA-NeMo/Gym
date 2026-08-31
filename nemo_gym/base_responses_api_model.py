@@ -193,15 +193,16 @@ def _encode_token_metadata_in_place(response: Any, encoding: str) -> None:
     """Encode token metadata after capture and before transport."""
     if encoding == "json":
         return
-    float_dtype = encoding.removeprefix("base64_")
+    if encoding != "base64":
+        raise ValueError(f"unsupported token metadata encoding {encoding!r}")
     for item in _token_bearing_items(response):
         if isinstance(item, dict):
-            encode_output_item_token_fields(item, float_dtype=float_dtype)
+            encode_output_item_token_fields(item)
             continue
         for field, dtype in (
             ("prompt_token_ids", "i32"),
             ("generation_token_ids", "i32"),
-            ("generation_log_probs", float_dtype),
+            ("generation_log_probs", "f64"),
         ):
             value = getattr(item, field, None)
             if isinstance(value, list):
@@ -211,10 +212,10 @@ def _encode_token_metadata_in_place(response: Any, encoding: str) -> None:
 class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
     # Select the token-metadata representation on served responses.
     # JSON preserves numeric lists.
-    # Base64 modes encode token IDs as i32 and log probabilities as the selected float dtype.
-    # Enable a base64 mode only when the downstream harness accepts envelope strings.
+    # Base64 encodes token IDs as i32 and log probabilities as f64.
+    # Enable base64 only when the downstream harness accepts envelope strings.
     # Harnesses that parse raw Chat Completions token lists require JSON.
-    token_metadata_encoding: Literal["json", "base64_f32", "base64_f64"] = "json"
+    token_metadata_encoding: Literal["json", "base64"] = "json"
 
 
 class BaseResponsesAPIModel(BaseServer):

@@ -171,7 +171,7 @@ def _validate_token_id_envelope(value: str) -> str:
 
 
 def _validate_log_prob_envelope(value: str) -> str:
-    token_envelope_dtype(value, ("f32", "f64"))
+    token_envelope_dtype(value, ("f64",))
     return value
 
 

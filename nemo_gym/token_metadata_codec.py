@@ -16,7 +16,7 @@
 
 The wire format is ``ngtok1:<dtype>:<base64>``.
 Token IDs use little-endian ``i32`` values.
-Log probabilities use little-endian ``f32`` or ``f64`` values.
+Log probabilities use little-endian ``f64`` values.
 Decoders also accept plain lists.
 """
 
@@ -98,17 +98,15 @@ def decode_token_list(value: Union[str, list], expected_dtypes: Iterable[str] | 
     return unpacked.tolist()
 
 
-def encode_output_item_token_fields(item_dict: Dict[str, Any], float_dtype: str = "f32") -> None:
+def encode_output_item_token_fields(item_dict: Dict[str, Any]) -> None:
     """Encode token-metadata lists on an output item in place."""
-    if float_dtype not in ("f32", "f64"):
-        raise ValueError(f"float_dtype must be 'f32' or 'f64', got {float_dtype!r}")
     for field in ("prompt_token_ids", "generation_token_ids"):
         value = item_dict.get(field)
         if isinstance(value, list):
             item_dict[field] = encode_token_list(value, "i32")
     value = item_dict.get("generation_log_probs")
     if isinstance(value, list):
-        item_dict["generation_log_probs"] = encode_token_list(value, float_dtype)
+        item_dict["generation_log_probs"] = encode_token_list(value, "f64")
 
 
 def decode_output_item_token_fields(item_dict: Dict[str, Any]) -> None:
@@ -116,7 +114,7 @@ def decode_output_item_token_fields(item_dict: Dict[str, Any]) -> None:
     for field, expected_dtypes in (
         ("prompt_token_ids", ("i32",)),
         ("generation_token_ids", ("i32",)),
-        ("generation_log_probs", ("f32", "f64")),
+        ("generation_log_probs", ("f64",)),
     ):
         value = item_dict.get(field)
         if isinstance(value, str):
@@ -138,4 +136,4 @@ def _int32_typecode() -> str:
     raise RuntimeError("no 4-byte signed integer array typecode on this platform")  # pragma: no cover
 
 
-_TYPECODES = {"i32": _int32_typecode(), "f32": "f", "f64": "d"}
+_TYPECODES = {"i32": _int32_typecode(), "f64": "d"}
