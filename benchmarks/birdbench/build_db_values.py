@@ -29,6 +29,7 @@ Usage::
 
 import argparse
 import json
+import re
 import sqlite3
 from pathlib import Path
 from sqlite3 import Cursor
@@ -298,30 +299,100 @@ def _column_types(cur: Cursor, table_name: str) -> Dict[str, str]:
     return {row[1]: row[2] for row in cur.fetchall()}
 
 
-def _column_descriptions(description_dir: Path, table_name: str) -> Dict[str, str]:
-    """{original_column_name: description} from BIRD's ``database_description/<table>.csv``.
-
-    ``original_column_name`` is the real, queryable SQLite identifier -- used to align CSV
-    rows to actual columns. The description is the CSV's ``column_name`` (a cleaned/renamed
-    label BIRD provides), falling back to ``column_description`` (a full sentence) when
-    ``column_name`` is blank, which it is for a large fraction of rows.
+def _read_description_rows(description_dir: Path, table_name: str):
+    """Yields ``(original_column_name, column_name, column_description, value_description)``
+    from BIRD's ``database_description/<table>.csv``, one tuple per row with a non-blank
+    ``original_column_name`` (the real, queryable SQLite identifier -- used elsewhere to align
+    CSV rows to actual columns).
     """
     csv_path = description_dir / f"{table_name}.csv"
     if not csv_path.exists():
-        return {}
+        return
 
     import csv as csv_module
 
-    descriptions: Dict[str, str] = {}
     # BIRD's CSVs aren't all clean UTF-8 -- replace undecodable bytes rather than crash.
     with open(csv_path, encoding="utf-8-sig", errors="replace", newline="") as f:
         for row in csv_module.DictReader(f):
             original_column_name = (row.get("original_column_name") or "").strip()
             if not original_column_name:
                 continue
-            column_name = (row.get("column_name") or "").strip()
-            descriptions[original_column_name] = column_name or (row.get("column_description") or "").strip()
-    return descriptions
+            yield (
+                original_column_name,
+                _clean_text(row.get("column_name") or ""),
+                _clean_text(row.get("column_description") or ""),
+                _clean_text(row.get("value_description") or ""),
+            )
+
+
+def _column_descriptions(description_dir: Path, table_name: str) -> Dict[str, str]:
+    """{original_column_name: description}: the CSV's ``column_name`` (a cleaned/renamed
+    label BIRD provides), falling back to ``column_description`` (a full sentence) when
+    ``column_name`` is blank, which it is for a large fraction of rows.
+    """
+    return {
+        original: column_name or column_description
+        for original, column_name, column_description, _value_description in _read_description_rows(
+            description_dir, table_name
+        )
+    }
+
+
+_CONTROL_CHARS_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+
+def _clean_text(text: str) -> str:
+    """Strip C0/C1 control characters and collapse whitespace/newlines to single spaces.
+
+    BIRD's CSVs occasionally contain mojibake control characters (e.g. U+0095) where a
+    bullet-point separator clearly was intended -- pure noise in a model-facing prompt, not
+    a case of guessing at data meaning, so safe to clean up rather than pass through verbatim.
+    """
+    return " ".join(_CONTROL_CHARS_PATTERN.sub(" ", text).split())
+
+
+def _ensure_trailing_punctuation(text: str) -> str:
+    text = text.rstrip()
+    if text and text[-1] not in ".,":
+        text += "."
+    return text
+
+
+def _append_value_description(description: str, value_description: str) -> str:
+    if not value_description:
+        return description
+    if not description:
+        return value_description
+    return f"{_ensure_trailing_punctuation(description)} {value_description}"
+
+
+def _column_descriptions_with_value_hints(description_dir: Path, table_name: str) -> Dict[str, str]:
+    """Like ``_column_descriptions``, with BIRD's ``value_description`` (e.g. what a coded
+    value like ``'+'`` means) appended when present, ensuring the base description ends with
+    "." or "," first so the two read as separate clauses rather than running together.
+    """
+    result: Dict[str, str] = {}
+    for original, column_name, column_description, value_description in _read_description_rows(
+        description_dir, table_name
+    ):
+        result[original] = _append_value_description(column_name or column_description, value_description)
+    return result
+
+
+def _primary_key_columns(cur: Cursor, table_name: str) -> set:
+    cur.execute(f"PRAGMA table_info('{table_name}')")
+    return {row[1] for row in cur.fetchall() if row[5]}  # row[5] = pk (0 if not, else its position in the PK)
+
+
+def _all_foreign_keys(cur: Cursor, table_names: List[str]) -> List[str]:
+    """["table.from_col = ref_table.to_col", ...] across every table in this database."""
+    foreign_keys: List[str] = []
+    for table_name in table_names:
+        cur.execute(f"PRAGMA foreign_key_list('{table_name}')")
+        for row in cur.fetchall():
+            ref_table, from_col, to_col = row[2], row[3], row[4]
+            foreign_keys.append(f"{table_name}.{from_col} = {ref_table}.{to_col}")
+    return foreign_keys
 
 
 def _select_column_values(
@@ -372,6 +443,141 @@ def build_yaml_context(
     return yaml.safe_dump(doc, sort_keys=False, allow_unicode=True)
 
 
+def _render_scalar(value: Any) -> str:
+    """Emit ``value`` unquoted unless quoting is genuinely necessary (embedded newline, empty
+    string, or leading/trailing whitespace that plain rendering would silently drop) -- see
+    ``build_yaml_context_v3``'s docstring for why this doesn't just defer to a YAML dumper.
+    """
+    if not isinstance(value, str):
+        return str(value)
+    if value == "" or "\n" in value or value != value.strip():
+        return json.dumps(value)
+    return value
+
+
+def build_yaml_context_v3(
+    table_names: List[str],
+    column_types_by_table: Dict[str, Dict[str, str]],
+    primary_keys_by_table: Dict[str, set],
+    descriptions_by_table: Dict[str, Dict[str, str]],
+    values_by_column: Dict[Tuple[str, str], List[Any]],
+    foreign_keys: List[str],
+) -> str:
+    """Like ``build_yaml_context`` (v1), plus a primary-key marker per column and a trailing
+    "#### Foreign key" section:
+
+        #### Tables
+        - column_name:
+            data_type: TEXT (primary key)
+            description: ...
+            values:
+            - value1
+            - value2
+
+        #### Foreign key
+        - table1.column1 = table2.column2
+
+    "(primary key)" is appended to ``data_type`` only for actual primary-key columns --
+    matches how SQL DDL itself writes it (``TYPE PRIMARY KEY``, right after the type) -- rather
+    than a separate ``is primary: true/false`` field that would otherwise say "false" on every
+    non-PK column, needlessly inflating every table's token count.
+
+    The "#### Tables"/"#### Foreign key" headers keep the foreign-key list visually and
+    structurally separate from the table list, rather than appearing as just another
+    same-level list entry that could be mistaken for a table.
+
+    Hand-formatted rather than rendered via ``yaml.safe_dump``, for the same reason as
+    ``build_yaml_context_v2``: a real YAML dumper would quote-and-escape any scalar
+    containing ``": "`` (common in these descriptions, e.g. "commonsense evidence: ..."),
+    which is unnecessary since nothing downstream parses this text as YAML. Quoting here is
+    minimal -- only when a value would otherwise be ambiguous or malformed on the page (an
+    embedded newline, an empty value, or stray leading/trailing whitespace).
+    """
+    lines: List[str] = ["#### Tables"]
+    for table_name in table_names:
+        lines.append(f"- {table_name}:")
+        pk_columns = primary_keys_by_table.get(table_name, set())
+        for column_name, data_type in column_types_by_table[table_name].items():
+            description = descriptions_by_table.get(table_name, {}).get(column_name, "")
+            values = values_by_column.get((table_name, column_name), [])
+            type_display = f"{data_type} (primary key)" if column_name in pk_columns else data_type
+            lines.append(f"  - {column_name}:")
+            lines.append(f"      data_type: {type_display}")
+            lines.append(f"      description: {_render_scalar(description)}")
+            lines.append("      values:")
+            lines.extend(f"      - {_render_scalar(v)}" for v in values)
+    if foreign_keys:
+        lines.append("")
+        lines.append("#### Foreign key")
+        lines.extend(f"- {fk}" for fk in foreign_keys)
+    return "\n".join(lines)
+
+
+def _format_column_entry_compact(
+    data_type: str, values: List[Any], is_primary_key: bool, is_composite_key: bool, description: str
+) -> str:
+    """"data_type, (example: [...]), is primary key, description" -- "(example: ...)" is
+    omitted when there are no sampled values. The primary-key marker distinguishes a
+    single-column key (that column's values are genuinely unique) from a column that's only
+    one member of a multi-column key (unique as a tuple with its co-members, not on its own).
+
+    Renders the example list via ``json.dumps`` (double-quoted elements) rather than Python's
+    ``str()`` (single-quoted) -- this only matters because of the deliberately-unquoted,
+    not-strictly-YAML rendering in ``build_yaml_context_v2``: with no outer quoting to escape
+    against, whichever quote style the list uses is what actually shows up in the prompt.
+    """
+    parts = [data_type]
+    if values:
+        parts.append(f"(example: {json.dumps(values)})")
+    if is_primary_key:
+        parts.append("is part of a composite primary key" if is_composite_key else "is primary key")
+    if description:
+        parts.append(description)
+    return ", ".join(parts)
+
+
+def build_yaml_context_v2(
+    table_names: List[str],
+    column_types_by_table: Dict[str, Dict[str, str]],
+    primary_keys_by_table: Dict[str, set],
+    descriptions_by_table: Dict[str, Dict[str, str]],
+    values_by_column: Dict[Tuple[str, str], List[Any]],
+    foreign_keys: List[str],
+) -> str:
+    """Per-table, per-column compact schema, plus a trailing ``foreign_keys`` block.
+
+    Each column is one ``column_name: data_type, (example: [...]), is primary key,
+    description`` line instead of a nested mapping -- avoids repeating "data_type:"/
+    "description:" keys on every column, which cost tokens for no benefit once the column
+    count gets large.
+
+    Deliberately hand-formatted (YAML-*styled*, not YAML-*validated*) rather than rendered
+    via ``yaml.safe_dump``: the column line inherently contains ``": "`` inside "(example:
+    ...)", which is ambiguous for a plain YAML scalar, so a real YAML dumper is forced to wrap
+    the whole line in quotes and escape any quote characters inside it -- e.g. every example
+    value's quote mark doubled (``''Sarratore''``). Nothing downstream parses this text as
+    YAML (the model just reads it as text), so that safety isn't worth the readability cost.
+    """
+    lines: List[str] = []
+    for table_name in table_names:
+        lines.append(f"- {table_name}:")
+        pk_columns = primary_keys_by_table.get(table_name, set())
+        is_composite_key = len(pk_columns) > 1
+        for column_name, data_type in column_types_by_table[table_name].items():
+            entry = _format_column_entry_compact(
+                data_type,
+                values_by_column.get((table_name, column_name), []),
+                column_name in pk_columns,
+                is_composite_key,
+                descriptions_by_table.get(table_name, {}).get(column_name, ""),
+            )
+            lines.append(f"  - {column_name}: {entry}")
+    if foreign_keys:
+        lines.append("- foreign_keys:")
+        lines.extend(f"  - {fk}" for fk in foreign_keys)
+    return "\n".join(lines)
+
+
 # --------------------------------------------------------------------------------------
 # Orchestration
 # --------------------------------------------------------------------------------------
@@ -387,6 +593,11 @@ class DbHandle:
         self.column_names_by_table = {t: _column_names(cur, t) for t in self.table_names}
         self.column_types_by_table = {t: _column_types(cur, t) for t in self.table_names}
         self.descriptions_by_table = {t: _column_descriptions(description_dir, t) for t in self.table_names}
+        self.descriptions_with_hints_by_table = {
+            t: _column_descriptions_with_value_hints(description_dir, t) for t in self.table_names
+        }
+        self.primary_keys_by_table = {t: _primary_key_columns(cur, t) for t in self.table_names}
+        self.foreign_keys = _all_foreign_keys(cur, self.table_names)
         self.sampled_values = _sample_table_values(cur, self.table_names)
         corpus = _collect_column_values(cur, self.table_names)
         self.retriever = _build_retriever(corpus) if corpus else None
@@ -406,6 +617,30 @@ class DbHandle:
         values_by_column = _select_column_values(self.sampled_values, relevant_hits)
         return build_yaml_context(
             self.table_names, self.column_types_by_table, self.descriptions_by_table, values_by_column
+        )
+
+    def yaml_v2_context_for_question(self, question: str) -> str:
+        relevant_hits = self.relevant_hits_for_question(question)
+        values_by_column = _select_column_values(self.sampled_values, relevant_hits)
+        return build_yaml_context_v2(
+            self.table_names,
+            self.column_types_by_table,
+            self.primary_keys_by_table,
+            self.descriptions_with_hints_by_table,
+            values_by_column,
+            self.foreign_keys,
+        )
+
+    def yaml_v3_context_for_question(self, question: str) -> str:
+        relevant_hits = self.relevant_hits_for_question(question)
+        values_by_column = _select_column_values(self.sampled_values, relevant_hits)
+        return build_yaml_context_v3(
+            self.table_names,
+            self.column_types_by_table,
+            self.primary_keys_by_table,
+            self.descriptions_by_table,
+            values_by_column,
+            self.foreign_keys,
         )
 
 

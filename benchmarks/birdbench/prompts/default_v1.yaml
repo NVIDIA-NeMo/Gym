@@ -1,4 +1,5 @@
 # Prompt used for text-to-SQL.
+# Prompts adapted from 
 
 system: You are a data science expert. Below, you are provided with a database schema and a natural 
         language question. Your task is to understand the schema and generate a valid SQL query to answer the question.
@@ -9,25 +10,8 @@ user: |-
   SQLite
 
   ### Database Schema:
-  The database schema below is organized into two sections, "#### Tables" and "#### Foreign key".
-
-  The "#### Tables" section lists every table in the database as a list, where each table is followed by a list of its columns. Each column entry
-  has the structure:
-
-  column_name:
-    data_type: data_type
-    description: column description
-    values:
-    - value1
-    - value2
-
-  where we have column name followed by data type (e.g., TEXT), a free-form description about the column and its value, and a list of some values
-  from the given column. If the column is (part of) the table's primary key, "(primary key)" is appended to its data type, e.g. "TEXT (primary key)".
-
-  The "#### Foreign key" section lists foreign key relationships between one table's column and another table's column. E.g., table1.column1 =
-  table2.column2 means the column 1 of table 1 has a foreign key relationship to column 2 of table 2.
-
   {sql_context}
+  This schema describes the database's structure, including tables, columns, primary keys, foreign keys, and any relevant relationships or constraints.
 
   ### Question:
   {question}
