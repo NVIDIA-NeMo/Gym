@@ -62,7 +62,7 @@ rolemrc_judge_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/rolemrc/data/example_judge.jsonl
-        license: Creative Commons Attribution 4.0 International
+        license: MIT
       # Build with `python resources_servers/rolemrc/prepare_rolemrc.py`.
       - name: test
         type: validation
@@ -70,7 +70,7 @@ rolemrc_judge_simple_agent:
         huggingface_identifier:
           repo_id: Junrulu/RoleMRC
           artifact_fpath: roleMRC_test.jsonl
-        license: Creative Commons Attribution 4.0 International
+        license: MIT
 
 # Null defaults so OmegaConf resolves ${judge_*} without CLI overrides (needed
 # for config listing / `gym list benchmarks`). Recommended judge: gpt-4.1.

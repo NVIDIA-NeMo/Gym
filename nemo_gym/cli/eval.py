@@ -51,6 +51,7 @@ from nemo_gym.global_config import (
     GlobalConfigDictParserConfig,
     get_first_server_config_dict,
     get_global_config_dict,
+    resolve_dataset_agent,
 )
 
 
@@ -214,11 +215,17 @@ def prepare_benchmark() -> None:
     )
     prepare_benchmark_config = PrepareBenchmarkConfig.model_validate(global_config_dict)
 
+    # A benchmark dataset may be declared by an agent block (legacy) or a resources server
+    # block (decoupled layout). `resolve_dataset_agent` is the same resolver rollout dispatch
+    # uses, so preparation and rollout always agree.
     benchmarks_dict: Dict[str, BenchmarkConfig] = dict()
     inspected_server_instances: List[str] = []
     for server_instance_name in global_config_dict:
         server_config = global_config_dict[server_instance_name]
-        if not isinstance(server_config, (dict, DictConfig)) or "responses_api_agents" not in server_config:
+        if not isinstance(server_config, (dict, DictConfig)):
+            continue
+        is_agent = "responses_api_agents" in server_config
+        if not is_agent and "resources_servers" not in server_config:
             continue
 
         inspected_server_instances.append(server_instance_name)
@@ -243,10 +250,17 @@ def prepare_benchmark() -> None:
 
         dataset = datasets[0]
 
-        benchmarks_dict[server_instance_name] = BenchmarkConfig(
+        try:
+            agent_name = resolve_dataset_agent(global_config_dict, str(server_instance_name), pin=dataset.agent)
+        except ConfigError as e:
+            raise ConfigError(f"Benchmark dataset {dataset.name!r}: {e}") from e
+
+        # Keyed by the declaring instance: two declarations may resolve to the same agent, and
+        # keying by agent would silently drop all but the last.
+        benchmarks_dict[str(server_instance_name)] = BenchmarkConfig(
             name=dataset.name,
             path=Path(""),
-            agent_name=server_instance_name,
+            agent_name=agent_name,
             num_repeats=dataset.num_repeats,
             dataset=dataset,
         )
@@ -511,16 +525,17 @@ def reward_profile():  # pragma: no cover
     results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
 
     rp = RewardProfiler()
-    group_level_metrics, agent_level_metrics = rp.profile_from_data(
+    group_level_metrics, agent_level_metrics, repeat_level_metrics = rp.profile_from_data(
         rows, results, allow_partial_rollouts=config.allow_partial_rollouts
     )
     completion_summary = rp.profile_completion_summary(rows, results)
-    reward_profiling_fpath, agent_level_metrics_fpath = rp.write_to_disk(
-        group_level_metrics, agent_level_metrics, Path(config.rollouts_jsonl_fpath)
+    reward_profiling_fpath, agent_level_metrics_fpath, repeat_level_metrics_fpath = rp.write_to_disk(
+        group_level_metrics, agent_level_metrics, repeat_level_metrics, Path(config.rollouts_jsonl_fpath)
     )
 
     print(f"""Profiling outputs:
 Reward profile completion: {completion_summary["completed_rollout_rows"]}/{completion_summary["expected_rollout_rows"]} rollout rows ({completion_summary["reward_profile_completion_pct"]:.2f}%)
 Input rows: {completion_summary["total_input_rows"]} total; {completion_summary["complete_input_rows"]} complete; {completion_summary["partial_input_rows"]} partial; {completion_summary["missing_input_rows"]} without rollouts dropped from output.
 Reward profiling outputs: {reward_profiling_fpath}
-Agent-level metrics: {agent_level_metrics_fpath}""")
+Agent-level metrics: {agent_level_metrics_fpath}
+Repeat-level metrics: {repeat_level_metrics_fpath}""")

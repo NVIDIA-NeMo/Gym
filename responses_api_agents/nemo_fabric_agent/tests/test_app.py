@@ -24,6 +24,7 @@ from responses_api_agents.nemo_fabric_agent.app import (
     NeMoFabricAgentRunRequest,
     _content_text,
     _extract_request_input,
+    _fabric_output_items,
     _mapping,
     _normalized_usage,
     _skill_paths,
@@ -392,3 +393,101 @@ def test_responses_forwards_rollout_id_and_invalid_cwd_is_rejected(tmp_path: Pat
 
     assert result is expected
     assert agent._create_response.await_args.kwargs == {"rollout_id": "rollout-7"}
+
+
+def test_fabric_output_items_preserve_tool_calls() -> None:
+    """A harness tool call must reach the Responses trajectory, not just fabric_result."""
+    output = {
+        "response": "final",
+        "messages": [
+            {"role": "human", "content": "q"},
+            {"role": "ai", "content": "", "tool_calls": [{"id": "call-1", "name": "task", "args": {"a": 1}}]},
+            {"role": "tool", "content": "subagent result"},
+            {"role": "ai", "content": "final"},
+        ],
+    }
+    items = [item.model_dump() for item in _fabric_output_items(output, "final")]
+    assert [item["type"] for item in items] == ["function_call", "function_call_output", "message"]
+    assert items[0]["name"] == "task"
+    assert items[0]["arguments"] == '{"a": 1}'
+    assert items[0]["call_id"] == items[1]["call_id"] == "call-1"
+    assert items[1]["output"] == "subagent result"
+    assert items[2]["content"][0]["text"] == "final"
+
+
+def test_fabric_output_items_single_turn_is_one_message() -> None:
+    """No tool calls must still yield exactly one assistant message (no duplication)."""
+    output = {"response": "42", "messages": [{"role": "human", "content": "q"}, {"role": "ai", "content": "42"}]}
+    items = [item.model_dump() for item in _fabric_output_items(output, "42")]
+    assert [item["type"] for item in items] == ["message"]
+    assert items[0]["content"][0]["text"] == "42"
+
+
+def test_fabric_output_items_reads_openai_tool_call_shape() -> None:
+    """hermes reports {call_id, function: {name, arguments}} rather than LangChain's {id, name, args}."""
+    output = {
+        "response": "done",
+        "messages": [
+            {"role": "user", "content": "q"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"call_id": "c9", "function": {"name": "execute_code", "arguments": '{"code": "1+1"}'}}
+                ],
+            },
+            {"role": "tool", "content": "2"},
+            {"role": "assistant", "content": "done"},
+        ],
+    }
+    items = [item.model_dump() for item in _fabric_output_items(output, "done")]
+    assert [item["type"] for item in items] == ["function_call", "function_call_output", "message"]
+    assert items[0]["name"] == "execute_code"
+    assert items[0]["arguments"] == '{"code": "1+1"}'
+    assert items[0]["call_id"] == items[1]["call_id"] == "c9"
+
+
+def test_turns_used_counts_assistant_messages_when_adapter_reports_none() -> None:
+    output = {
+        "messages": [
+            {"role": "human", "content": "q"},
+            {"role": "ai", "content": "", "tool_calls": [{"id": "c1", "name": "t", "args": {}}]},
+            {"role": "tool", "content": "r"},
+            {"role": "ai", "content": "done"},
+        ],
+        "usage": {"completion_tokens": 10, "prompt_tokens": 20},
+    }
+    assert _turns_used(output) == 2
+
+
+def test_turns_used_prefers_adapter_reported_count() -> None:
+    output = {
+        "api_calls": 4,
+        "messages": [{"role": "ai", "content": "x"}],
+    }
+    assert _turns_used(output) == 4
+
+
+def test_fabric_output_items_reads_claude_sdk_event_blocks() -> None:
+    """Claude SDK content blocks carry no ``type``; they are identified by their keys."""
+    output = {
+        "response": "done",
+        "events": [
+            {"type": "SystemMessage", "message": {"content": None}},
+            {
+                "type": "AssistantMessage",
+                "message": {"content": [{"id": "tu1", "name": "Bash", "input": {"command": "echo hi"}}]},
+            },
+            {
+                "type": "UserMessage",
+                "message": {"content": [{"tool_use_id": "tu1", "content": "hi", "is_error": False}]},
+            },
+            {"type": "AssistantMessage", "message": {"content": [{"text": "done"}]}},
+        ],
+    }
+    items = [item.model_dump() for item in _fabric_output_items(output, "done")]
+    assert [item["type"] for item in items] == ["function_call", "function_call_output", "message"]
+    assert items[0]["name"] == "Bash"
+    assert items[0]["arguments"] == '{"command": "echo hi"}'
+    assert items[0]["call_id"] == items[1]["call_id"] == "tu1"
+    assert items[1]["output"] == "hi"
