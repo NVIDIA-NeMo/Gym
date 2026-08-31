@@ -458,8 +458,8 @@ class TestOpenCodeSandboxedAgent:
         sandbox._handle = SandboxHandle(sandbox_id="connected-sandbox", provider_name="opensandbox", raw=None)
         sandbox.exec = AsyncMock(
             side_effect=[
+                SimpleNamespace(stdout='[{"id": "session-id"}]', stderr="", return_code=0, error_type=None),
                 SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
-                SimpleNamespace(stdout="/workspace\n"),
                 SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
             ]
         )
@@ -475,7 +475,7 @@ class TestOpenCodeSandboxedAgent:
         monkeypatch.setattr("responses_api_agents.opencode_sandboxed_agent.app.quote", local_quote)
 
         async def download(remote_path: str, local_path: Path) -> None:
-            if remote_path == "/workspace/export.json":
+            if remote_path == "/tmp/opencode_export.json":
                 local_path.write_text(json.dumps(opencode_export_test_data))
             else:
                 assert remote_path.endswith("/opencode/nemo-gym-observations.db")
@@ -551,8 +551,16 @@ class TestOpenCodeSandboxedAgent:
         assert sandbox_records[0].wall_time_s is None
         assert "sandbox_lifecycle_timing_unavailable" in {gap.code for gap in result.ng_agent_observations.gaps}
         assert "sandbox_cleanup_failed" not in {gap.code for gap in result.ng_agent_observations.gaps}
-        export_env = sandbox.exec.await_args_list[0].kwargs["env"]
-        assert export_env["XDG_DATA_HOME"].startswith("/tmp/nemo-gym-opencode-")
+        session_list_env = sandbox.exec.await_args_list[0].kwargs["env"]
+        export_env = sandbox.exec.await_args_list[1].kwargs["env"]
+        remote_data_home = session_list_env["XDG_DATA_HOME"]
+        assert remote_data_home.startswith("/tmp/nemo-gym-opencode-")
+        assert f"XDG_DATA_HOME={remote_data_home}" in sandbox.pty.exec.await_args.kwargs["command"]
+        assert export_env["XDG_DATA_HOME"] == remote_data_home
+        assert (
+            "opencode export session-id > /tmp/opencode_export.json"
+            in sandbox.exec.await_args_list[1].kwargs["command"]
+        )
         assert not hasattr(request.state, "_ng_observation_invocation_id")
         assert server._sandbox_id_to_run_result == {}
         assert not (tmp_path / "results" / "session-1" / "opencode.db").exists()
