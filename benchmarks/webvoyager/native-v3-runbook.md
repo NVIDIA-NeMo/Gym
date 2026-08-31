@@ -61,7 +61,7 @@ git -C "$WEBVOYAGER_DATA_ROOT" checkout --detach 6a2977939b157b0ab9de7799bb089c7
 export WEBVOYAGER_SOURCE_JSONL="$WEBVOYAGER_DATA_ROOT/webvoyager.jsonl"
 
 test "$(sha256sum "$WEBVOYAGER_SOURCE_JSONL" | awk '{print $1}')" = \
-  "f635a9b27fa1980a63b39bbf64ae8e9e766159cb70fa765451d3d3c0b948ff98"
+  "f635a9b27fa1980a63b39bbf64ae8e9e766159cb70fa765451d3d3c0b948ff98"  # pragma: allowlist secret
 test "$(wc -l < "$WEBVOYAGER_SOURCE_JSONL" | tr -d ' ')" = "552"
 ```
 
@@ -101,9 +101,9 @@ tool-call parser:
 ```bash
 export NANO_ASSET_ROOT="$PWD/.cache/nano-omni-v3-assets"
 export NANO_MODEL_REPO="nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16"
-export NANO_MODEL_REVISION="24e67ea000b7c2837fc8f9488aa2008524fac8ba"
+export NANO_MODEL_REVISION="24e67ea000b7c2837fc8f9488aa2008524fac8ba"  # pragma: allowlist secret
 export NANO_PARSER_REPO="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
-export NANO_PARSER_REVISION="f6aca92089793f4bc9ece522ffbb5365d38b5113"
+export NANO_PARSER_REVISION="f6aca92089793f4bc9ece522ffbb5365d38b5113"  # pragma: allowlist secret
 
 hf download "$NANO_MODEL_REPO" \
   --revision "$NANO_MODEL_REVISION" \
