@@ -297,6 +297,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                 tmux_install_result = await sandbox.pty.exec(
                     f"""mkdir -p /usr/local/bin \
 && cp {self.config.remote_tmux_binary_path} /usr/local/bin/tmux \
+&& chmod +x /usr/local/bin/tmux \
 && export PATH=$PATH:/usr/local/bin \
 && tmux -V""",
                     session=pty_session,
