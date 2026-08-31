@@ -21,6 +21,7 @@ from unittest.mock import MagicMock
 import pytest
 from app import (
     BrowserVerifyRequest,
+    FinishRequest,
     InteractiveBrowserConfig,
     InteractiveBrowserResourcesServer,
     _SessionState,
@@ -44,12 +45,24 @@ class _DeadBackend:
 
 
 class _LiveBackend:
-    def __init__(self, url: str):
+    """A browser the episode can keep driving after it says it is done."""
+
+    def __init__(self, url: str, text: str = ""):
         self._url = url
+        self._text = text
         self.closed = 0
+
+    def navigate(self, url: str, text: str = "") -> None:
+        self._url, self._text = url, text
 
     async def current_url(self):
         return self._url
+
+    async def text(self):
+        return self._text
+
+    async def observe(self, max_elements: int = 50):
+        return SimpleNamespace(title="")
 
     async def close(self):
         self.closed += 1
@@ -144,3 +157,53 @@ def test_a_request_carrying_a_response_field_does_not_break_construction():
 
     assert dumped["reward"] == 1.0
     assert dumped["failure_reason"] is None
+
+
+def _finish(server, request, answer=""):
+    return asyncio.run(server.browser_finish(request, FinishRequest(answer=answer)))
+
+
+def test_a_rollout_that_keeps_browsing_after_finishing_keeps_its_reward():
+    """`done` is a hint the agent loop does not enforce, so the episode runs on.
+
+    Grading the live page would score whatever the model wandered onto after it
+    committed, turning a solved task into a zero.
+    """
+    server = _server()
+    backend = _LiveBackend("https://example.com/about.html")
+    server._session_id_to_state["rollout-1"] = _SessionState(backend=backend, gt={"url_contains": "about.html"})
+    request = _request()
+
+    _finish(server, request)
+    backend.navigate("https://example.com/index.html")  # the model double-checks
+
+    dumped = asyncio.run(server.verify(request, _body())).model_dump()
+
+    assert dumped["reward"] == 1.0
+
+
+def test_an_episode_that_never_finishes_is_graded_on_the_live_page():
+    server = _server()
+    server._session_id_to_state["rollout-1"] = _SessionState(
+        backend=_LiveBackend("https://example.com/about.html"), gt={"url_contains": "about.html"}
+    )
+
+    dumped = asyncio.run(server.verify(_request(), _body())).model_dump()
+
+    assert dumped["reward"] == 1.0
+
+
+def test_only_the_first_finish_is_graded():
+    """A second finish must not let the model revise a committed answer."""
+    server = _server()
+    backend = _LiveBackend("https://example.com/about.html")
+    server._session_id_to_state["rollout-1"] = _SessionState(backend=backend, gt={"url_contains": "about.html"})
+    request = _request()
+
+    _finish(server, request, answer="first")
+    backend.navigate("https://example.com/index.html")
+    _finish(server, request, answer="second")
+
+    state = server._session_id_to_state["rollout-1"]
+    assert state.answer == "first"
+    assert "about.html" in state.finished_url
