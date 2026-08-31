@@ -8,17 +8,14 @@ import tempfile
 from pathlib import Path
 from time import time
 from types import SimpleNamespace
-from typing import Any, Tuple, override
+from typing import Any, Tuple
 from uuid import uuid4
 
 from fastapi import Request
 from harbor.agents.terminus_2 import Terminus2
-from harbor.agents.terminus_2.tmux_session import TmuxSession
-from harbor.environments.base import BaseEnvironment
 from harbor.llms.base import BaseLLM, LLMResponse
 from harbor.models.agent.context import AgentContext
 from harbor.models.metric.usage_info import UsageInfo
-from harbor.models.trial.paths import EnvironmentPaths
 from harbor.utils.logger import logger as harbor_logger
 from pydantic import ConfigDict, Field
 
@@ -67,7 +64,6 @@ class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_provider: str
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_timeout: float
-    tool_install_timeout_sec: int
 
 
 class Terminus2AgentRunRequest(BaseRunRequest):
@@ -87,21 +83,12 @@ class Terminus2AgentVerifyResponse(BaseVerifyResponse):
 class NeMoGymSandboxEnvironment:
     """The Harbor environment surface used by Terminus 2, backed by AsyncSandbox."""
 
-    def __init__(
-        self,
-        sandbox: AsyncSandbox,
-        logs_dir: Path,
-        pty_session: SandboxPtySession,
-        session_id: str,
-        is_in_setup: bool = False,
-    ):
+    def __init__(self, sandbox: AsyncSandbox, logs_dir: Path, pty_session: SandboxPtySession, session_id: str):
         self._sandbox = sandbox
         self._pty_session = pty_session
         self.default_user = None
         self.trial_paths = SimpleNamespace(agent_dir=logs_dir)
         self.session_id = session_id
-
-        self.is_in_setup = is_in_setup
 
     async def exec(
         self,
@@ -116,11 +103,15 @@ class NeMoGymSandboxEnvironment:
             result = await self._sandbox.pty.exec(command, session=self._pty_session, timeout_s=timeout_sec)
         else:
             result = await self._sandbox.exec(command, cwd=cwd, env=env, timeout_s=timeout_sec, user=user)
+        # TODO @bxyu-nvidia: Remove
+        import sys
 
-        if self.is_in_setup and result.return_code != 0:
-            print(f"""Command failed during Terminus2 setup!
-Command: {command}
-Result: {result}""")
+        if "tmux new-session" in command:
+            print(f"TMUX NEW SESSION RESULT: {result}", file=sys.stderr)
+        elif "tmux-3.4" in command:
+            print(f"TMUX INSTALL RESULT: {result}", file=sys.stderr)
+        elif result.return_code != 0:
+            print(f"COMMAND FAILED: {command} {result}", file=sys.stderr)
 
         return SimpleNamespace(
             stdout=result.stdout or "",
@@ -231,12 +222,9 @@ class NeMoGymLLM(BaseLLM):
 class NeMoGymTerminus2(Terminus2):
     """Terminus 2 with NeMo Gym model calls and optional Harbor file trajectories."""
 
-    def __init__(
-        self, *args: Any, llm: NeMoGymLLM, dump_trajectory: bool, tool_install_timeout_sec: int, **kwargs: Any
-    ):
+    def __init__(self, *args: Any, llm: NeMoGymLLM, dump_trajectory: bool, **kwargs: Any):
         self._nemo_gym_llm = llm
         self._dump_trajectory_enabled = dump_trajectory
-        self._tool_install_timeout_sec = tool_install_timeout_sec
         super().__init__(*args, **kwargs)
 
     def _init_llm(self, *args: Any, **kwargs: Any) -> BaseLLM:
@@ -248,32 +236,6 @@ class NeMoGymTerminus2(Terminus2):
     def _dump_trajectory_with_continuation_index(self, continuation_index: int) -> None:
         if self._dump_trajectory_enabled:
             super()._dump_trajectory_with_continuation_index(continuation_index)
-
-    @override
-    async def setup(self, environment: BaseEnvironment) -> None:
-        if self._record_terminal_session:
-            local_recording_path = environment.trial_paths.agent_dir / "recording.cast"
-            remote_recording_path = EnvironmentPaths.agent_dir / "recording.cast"
-        else:
-            local_recording_path = None
-            remote_recording_path = None
-
-        self._session = TmuxSession(
-            session_name=self.name(),
-            environment=environment,
-            logging_path=EnvironmentPaths.agent_dir / "terminus_2.pane",
-            local_asciinema_recording_path=local_recording_path,
-            remote_asciinema_recording_path=remote_recording_path,
-            pane_width=self._tmux_pane_width,
-            pane_height=self._tmux_pane_height,
-            extra_env=self._extra_env,
-            user=environment.default_user,
-        )
-
-        # @bxyu-nvidia: Parameterize this to increase since we see some package install timeouts at the default 120s
-        self._session._TOOL_INSTALL_TIMEOUT_SEC = self._tool_install_timeout_sec
-
-        await self._session.start()
 
 
 class Terminus2Agent(SimpleResponsesAPIAgent):
@@ -329,13 +291,10 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                 record_terminal_session=False,
                 llm=llm,
                 dump_trajectory=self.config.dump_trajectory,
-                tool_install_timeout_sec=self.config.tool_install_timeout_sec,
             )
 
             await environment.exec("mkdir -p /logs/agent", user="root")
-            environment.is_in_setup = True
             await agent.setup(environment)
-            environment.is_in_setup = False
 
             try:
                 async with asyncio.timeout(self.config.sandbox_timeout):

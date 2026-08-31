@@ -20,7 +20,6 @@ terminus_2_sandboxed_agent:
       debug: false
       model_context_limit: 262144
       model_output_limit: null
-      tool_install_timeout_sec: 240
 
       sandbox_provider: sandbox
       sandbox_timeout: 10800  # 3 hrs
