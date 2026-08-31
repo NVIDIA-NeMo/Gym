@@ -60,6 +60,8 @@ rollouts_fpath=\${ROLLOUTS_FPATH:-results/\$experiment_name.jsonl}
 # port_range_low, port_range_high: Move into ephemeral ports
 gym eval run \
     $@ \
+    --config benchmarks/nemotron_3.5_super/sandbox_utils.yaml \
+    --config benchmarks/nemotron_3.5_super/policy_model_override.yaml \
     +wandb_project=$USER-gym-eval \
     +wandb_name=\$experiment_name \
     +uv_venv_dir=/opt/uv_venvs \
