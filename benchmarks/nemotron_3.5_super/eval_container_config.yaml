@@ -117,6 +117,7 @@ opencode_sandboxed_agent_swebench_pro:
   responses_api_agents:
     opencode_sandboxed_agent:
       datasets: []
+
 ########################################
 # END Nvidia-specific configs.
 ########################################

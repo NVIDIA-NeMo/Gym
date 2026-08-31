@@ -42,7 +42,6 @@ opencode_sandboxed_agent_terminal_bench_2_1:
           prepare_script: benchmarks/terminal_bench_2_1/prepare.py
           num_repeats: 8
 
-
 opencode_sandboxed_agent_swebench_pro:
   responses_api_agents:
     opencode_sandboxed_agent:
