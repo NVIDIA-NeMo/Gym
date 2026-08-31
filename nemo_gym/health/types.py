@@ -55,6 +55,8 @@ class CheckInput(str, Enum):
     AGENT_TURNS = "agent_turns"
     # Canonical model calls joined in memory to explicit TrajectoryTurn references.
     BOUND_CALLS = "bound_calls"
+    # Canonical model calls joined to explicit AgentInvocation or TrajectoryTurn references.
+    OWNED_MODEL_CALLS = "owned_model_calls"
     # Runner-derived rollout verdicts grouped by task for task-level reduction.
     REPEAT_VERDICTS = "repeat_verdicts"
     # Runner-derived RolloutDigest objects grouped by task for task-level reduction.
@@ -143,6 +145,7 @@ class _CallBindings:
     matched_calls: tuple[dict[str, Any], ...]
     missing_references: tuple[str, ...]
     duplicated_references: tuple[tuple[str, int], ...]
+    terminal_ordered: bool = True
 
     @property
     def observed(self) -> bool:

@@ -133,7 +133,7 @@ def test_check_ids_encode_subject_without_replacing_evaluation_scope() -> None:
     assert by_id["task_consistently_unhealthy"].evaluation_scope == health.CheckScope.TASK
     assert by_id["task_consistently_unhealthy"].subject == health.CheckSubject.TASK
     assert by_id["trajectory_capture_mismatch"].reads == frozenset(
-        {health.CheckInput.RECORD, health.CheckInput.TRAJECTORY, health.CheckInput.BOUND_CALLS}
+        {health.CheckInput.RECORD, health.CheckInput.TRAJECTORY, health.CheckInput.OWNED_MODEL_CALLS}
     )
     assert by_id["agent_turn_hollow"].reads == frozenset(
         {health.CheckInput.RECORD, health.CheckInput.TRAJECTORY, health.CheckInput.AGENT_TURNS}
@@ -141,6 +141,73 @@ def test_check_ids_encode_subject_without_replacing_evaluation_scope() -> None:
     assert by_id["rollout_token_count_mismatch"].reads == frozenset(
         {health.CheckInput.RECORD, health.CheckInput.TRAJECTORY, health.CheckInput.BOUND_CALLS}
     )
+
+
+def test_invocation_owned_calls_are_observed_without_turns(tmp_path: Path) -> None:
+    record = _record(0, 0, include_turn=False)
+    record["ng_trajectory"]["invocations"] = [
+        {"kind": "agent_invocation", "invocation_id": "root", "model_calls": [{"model_call_id": "c1"}]}
+    ]
+    record["ng_trajectory"]["gaps"] = [{"code": "turns_unavailable"}]
+    rollout_path = _write_fixture(tmp_path, [(record, [_call()])])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    invocation_checks = {
+        "model_call_zero_completion_tokens",
+        "model_call_missing_token_counts",
+        "trajectory_capture_mismatch",
+        "model_call_failed",
+        "model_call_runaway_generation",
+    }
+    assert not invocation_checks & set(digest.unobserved)
+    assert set(digest.unobserved) == {
+        "rollout_missing_agent_turns",
+        "agent_turn_hollow",
+        "rollout_token_count_mismatch",
+    }
+    assert digest.verdict == "unobserved"
+
+
+@pytest.mark.parametrize(
+    "check,refs,call",
+    [
+        ("model_call_zero_completion_tokens", [{"model_call_id": "c1"}], _call(tokens_out=0)),
+        ("model_call_missing_token_counts", [{"model_call_id": "c1"}], _call(tokens_out=None)),
+        ("trajectory_capture_mismatch", [{"model_call_id": "missing"}], _call()),
+        ("model_call_failed", [{"model_call_id": "c1"}], _call(status_code=500)),
+        ("model_call_runaway_generation", [{"model_call_id": "c1"}], _call(finish_reason="length", response={})),
+    ],
+)
+def test_invocation_owned_call_checks_fire_without_turns(
+    tmp_path: Path, check: str, refs: list[dict], call: dict
+) -> None:
+    record = _record(0, 0, include_turn=False)
+    record["ng_trajectory"]["invocations"] = [
+        {"kind": "agent_invocation", "invocation_id": "root", "model_calls": refs}
+    ]
+    record["ng_trajectory"]["gaps"] = [{"code": "turns_unavailable"}]
+    rollout_path = _write_fixture(tmp_path, [(record, [call])])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    assert check in {finding.check for finding in digest.findings}
+    assert digest.verdict == "unhealthy"
+    if check == "model_call_failed":
+        [finding] = [finding for finding in digest.findings if finding.check == check]
+        assert finding.detail["terminal"] is False
+
+
+def test_turn_and_invocation_reference_evaluate_one_call(tmp_path: Path) -> None:
+    record = _record(0, 0)
+    record["ng_trajectory"]["invocations"] = [
+        {"kind": "agent_invocation", "invocation_id": "root", "model_calls": [{"model_call_id": "c1"}]}
+    ]
+    rollout_path = _write_fixture(tmp_path, [(record, [_call(tokens_out=0)])])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    assert [finding.check for finding in digest.findings].count("model_call_zero_completion_tokens") == 1
 
 
 def test_all_registered_semantic_checks_fire_on_synthetic_artifacts(tmp_path: Path) -> None:
