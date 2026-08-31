@@ -31,9 +31,9 @@ Usage::
     # or read a pre-downloaded local file:
     ROLEMRC_LOCAL_JSONL=/path/roleMRC_test.jsonl python .../prepare_rolemrc.py
 
-The schema mirrors the upstream loader: the messages field is the first present
-of (question, conversations, prompt, messages); the gold reply is the first
-present of (reference, chosen, answer, target).
+Field names vary across releases of the dataset, so the messages field is taken
+as the first present of (question, conversations, prompt, messages) and the gold
+reply as the first present of (reference, chosen, answer, target).
 """
 
 from __future__ import annotations
@@ -52,15 +52,14 @@ _HF_TEST_FILE = "roleMRC_test.jsonl"
 _LOCAL_PATH_ENV = "ROLEMRC_LOCAL_JSONL"
 _ALLOW_DRIFT_ENV = "ROLEMRC_ALLOW_DATASET_DRIFT"
 
-# Task histogram of the upstream ``roleMRC_test.jsonl`` (verified against the
-# real file): 14 slices of 100 rows = the paper's "1.4k testing samples", with
-# four slices split into base / -special-content / -special-format / -refused
-# variants that still sum to 100 each.
+# Task histogram of ``roleMRC_test.jsonl``: 14 slices of 100 rows = the paper's
+# "1.4k testing samples", with four slices split into base / -special-content /
+# -special-format / -refused variants that still sum to 100 each.
 #
-# This is asserted on every prep run so a truncated download or a silently
-# revised upstream split fails loudly instead of shifting the scores. The judge
-# denominators are derived from it, and they are what the published
-# ``AvgWeighted`` is computed over -- see ``app.py:_judge_rollups``.
+# Asserted on every prep run so a truncated download or a revised dataset fails
+# loudly instead of quietly shifting the scores. The judge denominators are
+# derived from it, and ``AvgWeighted`` is computed over them -- see
+# ``app.py:_judge_rollups``.
 _EXPECTED_TASK_COUNTS: Dict[str, int] = {
     "role_related_mrc_answer_no_narration": 100,
     "role_related_mrc_answer_no_narration-refused": 20,
@@ -136,17 +135,23 @@ def _row_messages(row: Dict[str, Any]) -> List[Dict[str, str]]:
     return _normalize_messages(raw_turns)
 
 
-def _to_task(row: Dict[str, Any], agent_name: str) -> Dict[str, Any]:
+def _to_task(row: Dict[str, Any], agent_name: str, *, carry_conversation: bool = False) -> Dict[str, Any]:
     messages = _row_messages(row)
     reference = _pick_field(row, _REFERENCE_FIELDS) or ""
     task = row.get("task", "")
-    return {
+    task_row: Dict[str, Any] = {
         "responses_create_params": {"input": messages},
         "reference": str(reference),
         "task": task,
         "dimension": _task_dimension(task),
         "agent_ref": {"type": "responses_api_agents", "name": agent_name},
     }
+    if carry_conversation:
+        # The judge prompt quotes the whole conversation, and `verifier_metadata`
+        # is the one field an external runner is guaranteed to forward to
+        # /verify intact (see _conversation_messages in app.py).
+        task_row["verifier_metadata"] = {"conversation": messages}
+    return task_row
 
 
 def _write_jsonl(path: Path, rows: List[Dict[str, Any]]) -> None:
@@ -188,14 +193,16 @@ def main() -> None:
 
     problems = check_task_histogram(rows)
     if problems:
-        message = "RoleMRC: dataset does not match the expected upstream split:\n" + "\n".join(problems)
+        message = "RoleMRC: dataset does not match the expected split:\n" + "\n".join(problems)
         if os.environ.get(_ALLOW_DRIFT_ENV):
             print(f"{message}\n(continuing: {_ALLOW_DRIFT_ENV} is set)")
         else:
             raise SystemExit(f"{message}\n\nSet {_ALLOW_DRIFT_ENV}=1 to build anyway.")
 
     reference_rows = [_to_task(row, _REFERENCE_AGENT) for row in rows]
-    judge_rows = [_to_task(row, _JUDGE_AGENT) for row in rows if row.get("task") in _EVALUATION_CONFIG]
+    judge_rows = [
+        _to_task(row, _JUDGE_AGENT, carry_conversation=True) for row in rows if row.get("task") in _EVALUATION_CONFIG
+    ]
 
     _write_jsonl(_DATA_DIR / "test.jsonl", reference_rows)
     _write_jsonl(_DATA_DIR / "test_judge.jsonl", judge_rows)

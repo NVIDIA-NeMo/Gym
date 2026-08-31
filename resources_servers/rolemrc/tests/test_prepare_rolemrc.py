@@ -14,9 +14,9 @@
 # limitations under the License.
 """Tests for the dataset integrity guard in ``prepare_rolemrc.py``.
 
-The guard exists because a truncated download or a silently revised upstream
-split would shift every score without failing anything — and because the judge
-denominators (and therefore ``AvgWeighted``) are derived from this histogram.
+The guard exists because a truncated download or a revised dataset would shift
+every score without failing anything — and because the judge denominators (and
+therefore ``AvgWeighted``) are derived from this histogram.
 """
 
 from __future__ import annotations
@@ -116,7 +116,7 @@ class TestJudgeCallCounts:
 
 class TestRowTransform:
     def test_normalize_messages_lowercases_roles(self) -> None:
-        """The raw dataset ships 'System'/'User'/'Assistant'; upstream lowercases them.
+        """The raw dataset ships 'System'/'User'/'Assistant'.
 
         app.py's judge prompt builder matches on lowercase roles, so a missed
         normalization would silently drop turns from the judge conversation.
@@ -181,6 +181,22 @@ class TestMain:
         assert len((tmp_path / "data" / "test.jsonl").read_text().strip().splitlines()) == 1400
         assert len((tmp_path / "data" / "test_judge.jsonl").read_text().strip().splitlines()) == 1400
 
+    def test_judge_rows_carry_the_conversation_reference_rows_do_not(self, tmp_path, monkeypatch) -> None:
+        """Judge rows carry the conversation for runners that drop
+        ``responses_create_params``; reference rows score off ``reference``."""
+        rows = [self._raw_row(t) for t, n in _EXPECTED.items() for _ in range(n)]
+        src = self._fixture(tmp_path, rows)
+        monkeypatch.setenv("ROLEMRC_LOCAL_JSONL", str(src))
+        monkeypatch.setattr(prepare_rolemrc, "_DATA_DIR", tmp_path / "data")
+        prepare_rolemrc.main()
+
+        judge = [json.loads(x) for x in (tmp_path / "data" / "test_judge.jsonl").read_text().splitlines()]
+        assert all(r["verifier_metadata"]["conversation"] == r["responses_create_params"]["input"] for r in judge)
+        assert all(any(m["role"] == "system" for m in r["verifier_metadata"]["conversation"]) for r in judge)
+
+        reference = [json.loads(x) for x in (tmp_path / "data" / "test.jsonl").read_text().splitlines()]
+        assert all("verifier_metadata" not in r for r in reference)
+
     def test_aborts_on_dataset_drift(self, tmp_path, monkeypatch) -> None:
         src = self._fixture(tmp_path, [self._raw_row("role_related_mrc_answer_no_narration")])
         monkeypatch.setenv("ROLEMRC_LOCAL_JSONL", str(src))
@@ -188,7 +204,7 @@ class TestMain:
         monkeypatch.setattr(prepare_rolemrc, "_DATA_DIR", tmp_path / "data")
         with pytest.raises(SystemExit) as excinfo:
             prepare_rolemrc.main()
-        assert "does not match the expected upstream split" in str(excinfo.value)
+        assert "does not match the expected split" in str(excinfo.value)
         assert not (tmp_path / "data").exists()
 
     def test_drift_override_continues(self, tmp_path, monkeypatch, capsys) -> None:

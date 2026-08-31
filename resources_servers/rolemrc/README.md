@@ -5,7 +5,7 @@ and answers questions about supplied passages while respecting the character's
 knowledge range, speech style, and instruction priority.
 
 Source dataset: [`Junrulu/RoleMRC`](https://huggingface.co/datasets/Junrulu/RoleMRC)
-(`roleMRC_test.jsonl`). Upstream eval: `RoleMRC/evaluation/{evaluation,llm_judge}.py`.
+(`roleMRC_test.jsonl`).
 
 ## Two scoring modes
 
@@ -13,7 +13,7 @@ Selected by `config.mode`; one app, two configs.
 
 | Config | `mode` | Reward | Notes |
 |--------|--------|--------|-------|
-| `configs/rolemrc.yaml` | `reference` | ROUGE-L vs the gold reply | BLEU / METEOR / BERTScore ride along on the verify response. BLEU is unsmoothed 4-gram BLEU matching upstream's `evaluate.load("bleu")`, so a response with no matching 4-gram scores exactly 0. |
+| `configs/rolemrc.yaml` | `reference` | ROUGE-L vs the gold reply | BLEU / METEOR / BERTScore ride along on the verify response. BLEU is unsmoothed 4-gram BLEU, so a response with no matching 4-gram scores exactly 0. |
 | `configs/rolemrc_judge.yaml` | `judge` | mean 0/1 over relevant aspects | One judge call per aspect, per the row's `task` (see `_EVALUATION_CONFIG`). |
 
 The five judge aspects are `knowledge_range`, `style_compliance`,
@@ -26,7 +26,7 @@ Results are broken down by RoleMRC **dimension** (`on_scene_dialogue`,
 
 > **Reasoning models:** verify() strips a leading `<think>…</think>` block
 > before scoring. When serving a reasoning model, also run the policy server
-> with `--reasoning-parser <name>` so reasoning is split off upstream.
+> with `--reasoning-parser <name>` so reasoning is split off before it arrives.
 
 ## Metrics
 
@@ -99,9 +99,9 @@ above the published value. `AvgSimple` and `AvgS(noMT)` are
 count-independent, so the headline metric is unaffected and directly comparable.
 
 The expected split is pinned in `prepare_rolemrc.py:_EXPECTED_TASK_COUNTS` and
-asserted on every prep run, so a truncated download or a revised upstream split
-fails loudly instead of quietly shifting the scores. Override with
-`ROLEMRC_ALLOW_DATASET_DRIFT=1` if upstream legitimately changes.
+asserted on every prep run, so a truncated download or a revised dataset fails
+loudly instead of quietly shifting the scores. Override with
+`ROLEMRC_ALLOW_DATASET_DRIFT=1` if the dataset legitimately changes.
 
 ## Prepare the dataset
 
@@ -118,7 +118,7 @@ pre-downloaded file instead of fetching from the Hub.
 
 ## BERTScore
 
-`include_bertscore: true` (default) matches the upstream benchmark but
+`include_bertscore: true` (default) completes the reported metric set but
 downloads a roberta-large checkpoint on first use. Set it to `false` (and drop
 `bert-score` from `requirements.txt`) for a lightweight ROUGE/BLEU/METEOR-only
 reward signal.
@@ -130,6 +130,19 @@ both judge configs and wired by the `+judge_base_url` / `+judge_api_key` /
 `+judge_model_name` overrides. It is deliberately separate from `policy_model`
 (the model under test) — sharing the two means the model grades its own output.
 
+### Judge API surface (`judge_api`)
+
+`judge_api: chat_completions` (the default) posts the aspect prompts to
+`/v1/chat/completions`, with the body from `judge_chat_completion_create_params`.
+`judge_api: responses` posts to `/v1/responses` instead, using
+`judge_responses_create_params`.
+
+**This is not a cosmetic choice.** On byte-identical prompts the same judge
+scored `judge/avg_simple_no_mt` 0.55 through `/v1/chat/completions` and 0.31
+through `/v1/responses`, losing the rubric clauses that require noticing an
+override. Runs that are compared against each other must all use the same
+surface; `chat_completions` is the default for that reason.
+
 ### Reasoning judges
 
 A reasoning judge (gpt-5.x and friends) needs two departures from the gpt-4.1
@@ -137,14 +150,17 @@ defaults, both config-only:
 
 - **Drop `temperature` / `top_p`.** Reasoning models reject them outright
   (`Unsupported parameter: 'top_p' is not supported with this model`). Only
-  params actually set in `judge_responses_create_params` are sent, so deleting
-  the lines is enough; per run, `~<instance>.…judge_responses_create_params.top_p`
-  does the same. Such a judge samples at the provider's defaults, so its verdicts
-  are not reproducible the way a temperature-0 judge's are.
-- **Pin `reasoning.effort`.** The model server validates the reply into
-  `NeMoGymResponse`, whose allowed values come from the pinned `openai` SDK, and
-  a newer provider default (`effort: "none"`) 500s every call — scoring the run
-  0. The reply echoes the request, so asking for a value the SDK knows avoids it.
+  params actually set in `judge_chat_completion_create_params` are sent, and
+  explicit nulls are dropped, so deleting the lines is enough.  Such a judge
+  samples at the provider's defaults, so its verdicts are not reproducible the
+  way a temperature-0 judge's are.
+- **Pin `reasoning_effort`.** The model server validates the reply against the
+  pinned `openai` SDK, and a newer provider default (`effort: "none"`) 500s
+  every call — scoring the run 0. The reply echoes the request, so asking for a
+  value the SDK knows avoids it; `low` is the usual choice.
+- **Leave budget headroom.** A reasoning judge spends `max_completion_tokens`
+  on reasoning tokens *before* emitting the score. 2048 is enough; at 1024 it
+  still answers cleanly but reads the rubric too literally.
 
 To reuse the policy model as the judge anyway (cheap smoke tests, no second
 endpoint available), set `judge_model_server.name` back to `policy_model` and

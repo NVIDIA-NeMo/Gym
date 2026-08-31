@@ -24,6 +24,7 @@ from pytest import approx, fixture
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import (
+    NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
@@ -41,6 +42,7 @@ from resources_servers.rolemrc.app import (
     _compute_bleu,
     _compute_meteor,
     _compute_rouge,
+    _conversation_messages,
     _ensure_nltk_data,
     _extract_nested_content,
     _input_messages,
@@ -75,6 +77,26 @@ def _make_response(text: str) -> NeMoGymResponse:
 
 
 def _judge_response_bytes(text: str) -> bytes:
+    """A `/v1/chat/completions` reply — the default `judge_api`."""
+    return json.dumps(
+        {
+            "id": "chatcmpl",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "judge_model",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": text},
+                }
+            ],
+        }
+    ).encode()
+
+
+def _judge_responses_api_bytes(text: str) -> bytes:
+    """A `/v1/responses` reply — only for `judge_api: responses`."""
     return json.dumps(_make_response(text).model_dump()).encode()
 
 
@@ -112,20 +134,38 @@ class TestStripThink:
 
 
 class TestParseJudgeScore:
+    """Strip `Score:`, then the remainder must be a bare integer or it is bad."""
+
     def test_one(self) -> None:
-        assert _parse_judge_score("Score: 1") == 1
+        assert _parse_judge_score("Score: 1") == (1, False)
 
     def test_zero(self) -> None:
-        assert _parse_judge_score("Score: 0") == 0
+        assert _parse_judge_score("Score: 0") == (0, False)
 
     def test_bare_number(self) -> None:
-        assert _parse_judge_score("1") == 1
+        assert _parse_judge_score("1") == (1, False)
 
-    def test_unparseable_defaults_zero(self) -> None:
-        assert _parse_judge_score("no number here") == 0
+    def test_surrounding_whitespace_is_tolerated(self) -> None:
+        assert _parse_judge_score("\n 1 \n") == (1, False)
 
-    def test_float_rounds(self) -> None:
-        assert _parse_judge_score("Score: 0.9") == 1
+    def test_unparseable_is_a_bad_response_scored_zero(self) -> None:
+        assert _parse_judge_score("no number here") == (0, True)
+
+    def test_prose_around_the_digit_is_bad_not_one(self) -> None:
+        # A regex search would score this 1; a bare-integer parse rejects it.
+        assert _parse_judge_score("The score is 1") == (0, True)
+
+    def test_float_is_bad_not_rounded(self) -> None:
+        # int("0.9") raises, so a float verdict is a bad response, not a 1.
+        assert _parse_judge_score("Score: 0.9") == (0, True)
+
+    def test_out_of_range_integer_is_not_clamped(self) -> None:
+        # The parsed integer is used as-is, so an out-of-range verdict rides
+        # through to the aspect mean instead of being silently capped.
+        assert _parse_judge_score("2") == (2, False)
+
+    def test_empty(self) -> None:
+        assert _parse_judge_score("") == (0, True)
 
 
 class TestJudgePromptBuilding:
@@ -141,8 +181,21 @@ class TestJudgePromptBuilding:
         assert 'LLM Response: "Yo."' in text
 
     def test_extract_nested_content_strips_lead(self) -> None:
+        # The lead-in has no trailing space, so the space it did not consume
+        # stays in the rendered prompt: `** end every reply…**`.
         sys = "You are a bot. You must end every reply with 'Indeed'."
-        assert _extract_nested_content(sys) == "end every reply with 'Indeed'"
+        assert _extract_nested_content(sys) == " end every reply with 'Indeed'"
+
+    def test_extract_nested_content_strips_one_trailing_period(self) -> None:
+        assert _extract_nested_content("A bot. You will add a joke..") == " add a joke."
+
+    def test_extract_nested_content_replaces_lead_anywhere(self) -> None:
+        # Lead-ins are replaced wherever they occur, not just as a prefix.
+        assert _extract_nested_content("A bot. Answer, and You must be terse") == "Answer, and  be terse"
+
+    def test_extract_nested_content_falls_back_without_a_sentence_split(self) -> None:
+        # No `". "` to split on: fall back to the whole string rather than raise.
+        assert _extract_nested_content("You will be terse") == " be terse"
 
     def test_two_aspects_for_answer_with_narration(self) -> None:
         prompts = _build_judge_prompts(
@@ -180,8 +233,16 @@ def _judge_config() -> RoleMRCResourcesServerConfig:
         name="rolemrc",
         mode="judge",
         judge_model_server=ModelServerRef(type="responses_api_models", name="judge_model"),
-        judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        judge_chat_completion_create_params=NeMoGymChatCompletionCreateParamsNonStreaming(messages=[]),
     )
+
+
+def _judge_config_responses_api() -> RoleMRCResourcesServerConfig:
+    config = _judge_config()
+    config.judge_api = "responses"
+    config.judge_chat_completion_create_params = None
+    config.judge_responses_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[])
+    return config
 
 
 class TestServerConstruction:
@@ -326,7 +387,7 @@ class TestAggregation:
         assert metrics["aspect/style_compliance/count"] == 2
 
     def test_compute_metrics_aggregates_auto_metrics(self) -> None:
-        """Upstream reports a corpus mean for every reference metric, not just the reward."""
+        """Every reference metric gets a corpus mean, not just the reward."""
         server = RoleMRCResourcesServer(config=_reference_config(), server_client=MagicMock(spec=ServerClient))
         tasks = [
             [{"reward": 0.2, "dimension": "on_scene_dialogue", "rouge1": 0.4, "bleu": 0.02, "meteor": 0.3}],
@@ -447,6 +508,48 @@ class TestInputMessages:
     def test_object_items(self) -> None:
         params = SimpleNamespace(input=[SimpleNamespace(role="User", content="q")])
         assert _input_messages(params) == [{"role": "user", "content": "q"}]
+
+
+class TestConversationMessages:
+    """A runner that does not deliver ``responses_create_params`` to /verify must
+    still get the conversation, via ``verifier_metadata``."""
+
+    CONVERSATION = [
+        {"role": "system", "content": "You are a helpful AI assistant. You must shout"},
+        {"role": "user", "content": "hi"},
+    ]
+
+    def _body(self, **extra: object) -> SimpleNamespace:
+        degenerate = SimpleNamespace(input=[{"role": "user", "content": ""}])
+        return SimpleNamespace(responses_create_params=degenerate, **extra)
+
+    def test_prefers_verifier_metadata_over_degenerate_params(self) -> None:
+        body = self._body(verifier_metadata={"conversation": self.CONVERSATION})
+        assert _conversation_messages(body) == self.CONVERSATION
+
+    def test_falls_back_to_params_when_metadata_absent(self) -> None:
+        assert _conversation_messages(self._body()) == [{"role": "user", "content": ""}]
+
+    @pytest.mark.parametrize("meta", [None, {}, {"conversation": []}, {"conversation": None}, "nope"])
+    def test_falls_back_on_unusable_metadata(self, meta: object) -> None:
+        body = self._body(verifier_metadata=meta)
+        assert _conversation_messages(body) == [{"role": "user", "content": ""}]
+
+    def test_system_instruction_survives_into_the_judge_prompt(self) -> None:
+        """The regression: without this the nested rubric renders as ``(****)``."""
+        body = self._body(verifier_metadata={"conversation": self.CONVERSATION})
+        msgs = _conversation_messages(body)
+        system = next(m["content"] for m in msgs if m["role"] == "system")
+        prompts = dict(
+            _build_judge_prompts(
+                "role_related_mrc_answer_with_narration-special-format",
+                _build_conversation_text(msgs),
+                system,
+                "HI",
+            )
+        )
+        assert "(****)" not in prompts["nested_instruction"]
+        assert "** shout**" in prompts["nested_instruction"]
 
 
 class TestResponseText:
@@ -763,7 +866,9 @@ class TestJudgeSamplingParams:
 
     def _server(self, **params: object) -> tuple[RoleMRCResourcesServer, MagicMock]:
         config = _judge_config()
-        config.judge_responses_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[], **params)
+        config.judge_chat_completion_create_params = NeMoGymChatCompletionCreateParamsNonStreaming(
+            messages=[], **params
+        )
         mock = MagicMock(spec=ServerClient)
         return RoleMRCResourcesServer(config=config, server_client=mock), mock
 
@@ -796,3 +901,101 @@ class TestJudgeSamplingParams:
         payload = await self._payload(server, mock)
         assert "temperature" not in payload
         assert payload["top_p"] == 1.0
+
+    async def test_reasoning_effort_and_budget_reach_the_endpoint(self) -> None:
+        """A reasoning judge sends `reasoning_effort` + `max_completion_tokens`."""
+        server, mock = self._server(reasoning_effort="low", max_completion_tokens=2048, n=1)
+        payload = await self._payload(server, mock)
+        assert payload["reasoning_effort"] == "low"
+        assert payload["max_completion_tokens"] == 2048
+        assert payload["n"] == 1
+
+
+# ── Judge API surface ────────────────────────────────────────────────────
+
+
+class TestJudgeApiSurface:
+    """`judge_api` picks the surface the aspect prompts are posted to; the two
+    score the same model differently, so the default must not drift."""
+
+    def _request(self) -> RoleMRCVerifyRequest:
+        return RoleMRCVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=_make_response("a reply"),
+            task="role_related_mrc_answer_no_narration",  # one aspect, one call
+        )
+
+    async def test_default_posts_chat_completions_with_a_user_message(self) -> None:
+        config = _judge_config()
+        assert config.judge_api == "chat_completions"
+        mock = MagicMock(spec=ServerClient)
+        server = RoleMRCResourcesServer(config=config, server_client=mock)
+        resp = AsyncMock()
+        resp.read = AsyncMock(return_value=_judge_response_bytes("1"))
+        mock.post = AsyncMock(return_value=resp)
+
+        result = await server.verify(self._request())
+
+        call = mock.post.await_args_list[0].kwargs
+        assert call["url_path"] == "/v1/chat/completions"
+        assert call["json"]["messages"][0]["role"] == "user"
+        assert "knowledge range" in call["json"]["messages"][0]["content"]
+        assert "input" not in call["json"]
+        assert result.reward == approx(1.0)
+
+    async def test_responses_api_mode_still_works(self) -> None:
+        mock = MagicMock(spec=ServerClient)
+        server = RoleMRCResourcesServer(config=_judge_config_responses_api(), server_client=mock)
+        resp = AsyncMock()
+        resp.read = AsyncMock(return_value=_judge_responses_api_bytes("1"))
+        mock.post = AsyncMock(return_value=resp)
+
+        result = await server.verify(self._request())
+
+        call = mock.post.await_args_list[0].kwargs
+        assert call["url_path"] == "/v1/responses"
+        assert call["json"]["input"][0]["role"] == "user"
+        assert result.reward == approx(1.0)
+
+    def test_missing_params_for_the_selected_surface_is_rejected(self) -> None:
+        config = _judge_config()
+        config.judge_chat_completion_create_params = None
+        config.judge_responses_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[])
+        with pytest.raises(ValueError, match="judge_chat_completion_create_params"):
+            RoleMRCResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+# ── Response text handed to the judge ────────────────────────────────────
+
+
+class TestJudgeSeesReasoningStrippedText:
+    async def _judged_response_text(self, generation: str) -> str:
+        mock = MagicMock(spec=ServerClient)
+        server = RoleMRCResourcesServer(config=_judge_config(), server_client=mock)
+        resp = AsyncMock()
+        resp.read = AsyncMock(return_value=_judge_response_bytes("1"))
+        mock.post = AsyncMock(return_value=resp)
+        await server.verify(
+            RoleMRCVerifyRequest(
+                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+                response=_make_response(generation),
+                task="role_related_mrc_answer_no_narration",
+            )
+        )
+        return mock.post.await_args_list[0].kwargs["json"]["messages"][0]["content"]
+
+    async def test_think_trace_is_dropped(self) -> None:
+        prompt = await self._judged_response_text("<think>secret</think>the answer")
+        assert "secret" not in prompt
+        assert "the answer" in prompt
+
+    async def test_channel_marker_is_dropped(self) -> None:
+        # '<channel|>' is an end tag too; _strip_think alone would not cut it.
+        prompt = await self._judged_response_text("analysis noise<channel|>the answer")
+        assert "analysis noise" not in prompt
+        assert "the answer" in prompt
+
+    async def test_full_response_is_sent_not_the_500_char_log_field(self) -> None:
+        long_answer = "word " * 400
+        prompt = await self._judged_response_text(long_answer)
+        assert long_answer.strip() in prompt
