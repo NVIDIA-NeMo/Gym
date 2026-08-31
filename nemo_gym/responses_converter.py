@@ -299,12 +299,6 @@ class ResponsesConverter(BaseModel):
                 tool_dict.pop("type", None)
                 tool_dict.pop("defer_loading", None)
                 if tool_type == "function":
-                    # `strict` is a Responses/OpenAI-hosted enforcement flag with no Chat
-                    # Completions semantics on self-hosted engines: vLLM's FunctionDefinition
-                    # keeps it and chat templates that render unknown function keys (e.g.
-                    # Nemotron's render_extra_keys) inject it into the prompt, perturbing
-                    # every tool-bearing request. Drop it, as before the openai 2.44 pin.
-                    tool_dict.pop("strict", None)
                     tool_dict = {key: value for key, value in tool_dict.items() if value is not None}
                     converted_tool = NeMoGymChatCompletionToolParam(
                         type="function",
