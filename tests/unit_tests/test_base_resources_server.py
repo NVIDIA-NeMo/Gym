@@ -16,6 +16,7 @@ import asyncio
 from unittest.mock import MagicMock
 
 from nemo_gym.base_resources_server import (
+    RESERVED_MCP_TOOL_NAMES,
     BaseCloseSessionRequest,
     BaseCloseSessionResponse,
     BaseMultiRewardVerifyResponse,
@@ -126,3 +127,11 @@ class TestSessionLifecycle:
         server.forget_session("s1")
         server.forget_session("s1")  # idempotent
         assert "s1" not in server._session_last_seen
+
+    def test_close_session_is_never_offered_to_the_model(self) -> None:
+        """A policy that could call it could end its own episode's resources mid-rollout."""
+        server = _resources_server()
+        server.setup_webserver()
+
+        assert "close_session" in RESERVED_MCP_TOOL_NAMES
+        assert "close_session" not in {tool.name for tool in server.mcp_tools([], None) or []}
