@@ -678,6 +678,7 @@ class ModelCallRecord(BaseModel):
     # Unique server-generated identity for each persisted call.
     model_call_id: Optional[str] = None
     response_id: Optional[str] = None
+    client_session_id: Optional[str] = None
 
     # Durable append order, not a causal or semantic order for concurrent calls.
     call_index: int
@@ -755,6 +756,9 @@ def build_model_call_record(exchange: dict[str, Any], *, call_index: int) -> Mod
     return ModelCallRecord(
         model_call_id=exchange.get("model_call_id"),
         response_id=response.get("id") if isinstance(response.get("id"), str) else None,
+        client_session_id=(
+            exchange.get("client_session_id") if isinstance(exchange.get("client_session_id"), str) else None
+        ),
         call_index=call_index,
         model_ref=exchange.get("model_ref"),
         model=model if isinstance(model, str) else None,
@@ -847,6 +851,11 @@ def _headers_content_type(headers: list) -> bytes:
         if key.lower() == b"content-type":
             return value
     return b""
+
+
+def _unique_request_header(headers: list, name: bytes) -> Optional[str]:
+    values = {value.decode("latin-1") for key, value in headers if key.lower() == name and value}
+    return values.pop() if len(values) == 1 else None
 
 
 def _consume_terminal_sse_event(buffer: bytearray, dialect: str) -> Optional[str]:
@@ -1108,6 +1117,7 @@ def _record(
     model_server_name: Optional[str],
     request_bytes: bytes,
     *,
+    client_session_id: Optional[str] = None,
     rollout_id: str,
     model_call_id: str,
     started_at: float,
@@ -1146,6 +1156,8 @@ def _record(
             "request": request_body,
             "response": response_body,
         }
+        if client_session_id is not None:
+            exchange["client_session_id"] = client_session_id
         if request_raw is not None:
             exchange["request_raw"] = request_raw
         if response_raw is not None:
@@ -1246,6 +1258,7 @@ class _CaptureMiddleware:
 
         rollout_id = rollout_from_path
         model_call_id = uuid4().hex
+        client_session_id = _unique_request_header(scope.get("headers") or [], b"x-session-id")
 
         # Give the model server a token sink keyed to this call.
         # The sink records token ids from the complete response.
@@ -1339,6 +1352,7 @@ class _CaptureMiddleware:
                     dialect,
                     self._model_server_name,
                     bytes(request_body),
+                    client_session_id=client_session_id,
                     rollout_id=rollout_id,
                     model_call_id=model_call_id,
                     started_at=started_at,
@@ -1405,6 +1419,7 @@ class _CaptureMiddleware:
                 dialect,
                 model_server_name,
                 request_bytes,
+                client_session_id=client_session_id,
                 rollout_id=rollout_id,
                 model_call_id=model_call_id,
                 started_at=started_at,

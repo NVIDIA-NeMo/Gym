@@ -158,6 +158,32 @@ def test_join_model_calls_resolves_exact_references_and_reports_unowned_calls() 
     assert [gap.detail for gap in ownership_gaps] == ["direct_provider", "capture:call-2:call_index=1"]
 
 
+def test_join_model_calls_uses_exact_opencode_session_ownership() -> None:
+    bundle = AgentObservationBundle(
+        source="opencode",
+        records=[
+            AgentInvocation(invocation_id="root"),
+            AgentInvocation(invocation_id="child", parent_invocation_id="root"),
+        ],
+    )
+    calls = [
+        ModelCallRecord(model_call_id="call-root", client_session_id="root", call_index=0),
+        ModelCallRecord(model_call_id="call-child", client_session_id="child", call_index=1),
+        ModelCallRecord(model_call_id="call-unknown", client_session_id="unknown", call_index=2),
+    ]
+
+    joined = join_model_call_observations(bundle, calls)
+    joined_again = join_model_call_observations(joined, calls)
+
+    assert joined_again.model_dump() == joined.model_dump()
+    invocations = {record.invocation_id: record for record in joined.records if isinstance(record, AgentInvocation)}
+    assert [reference.model_call_id for reference in invocations["root"].model_calls] == ["call-root"]
+    assert [reference.model_call_id for reference in invocations["child"].model_calls] == ["call-child"]
+    assert [gap.detail for gap in joined.gaps if gap.code == "model_call_ownership_unavailable"] == [
+        "capture:call-unknown:call_index=2"
+    ]
+
+
 def test_join_model_calls_does_not_guess_ambiguous_response_ids() -> None:
     model_ref = ModelServerRef(name="policy", type="responses_api_models")
     bundle = AgentObservationBundle(
