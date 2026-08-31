@@ -103,6 +103,10 @@ from resources_servers.gdpval.multistage_elo import (
 # return ``(row, result)`` pairs (result == the agent's /run response, i.e. the
 # GDPVal verify response). Injected so tests can avoid real servers.
 RolloutRunner = Callable[[List[Dict[str, Any]]], Awaitable[List[Tuple[Dict[str, Any], Dict[str, Any]]]]]
+AssignmentRepair = Callable[
+    [int, Sequence[str], Mapping[str, str]],
+    Tuple[Dict[str, str], Dict[str, Any]],
+]
 
 
 @dataclass
@@ -506,6 +510,12 @@ def compute_fingerprint(
             for name, block in resolved_global_config.items()
             if isinstance(block, Mapping) and component_types.intersection(block)
         }
+        # Transport-assignment repair rewrites which reference each task is
+        # judged against, so its settings must invalidate journals like any
+        # other planner input. Absent config hashes exactly as before.
+        transport_repair = (resolved_global_config.get("multistage") or {}).get("transport_assignment_repair")
+        if transport_repair is not None:
+            payload["transport_assignment_repair"] = jsonable(transport_repair)
     encoded = orjson.dumps(payload, option=orjson.OPT_SORT_KEYS)
     return hashlib.sha256(encoded).hexdigest()
 
@@ -771,6 +781,8 @@ def tag_results(
         out[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
         if ATTEMPT_INDEX_KEY_NAME in row:
             out[ATTEMPT_INDEX_KEY_NAME] = row[ATTEMPT_INDEX_KEY_NAME]
+        if "verify_cache_namespace" in row:
+            out["verify_cache_namespace"] = row["verify_cache_namespace"]
         out["stage_index"] = stage_index
         if expected_final_stage_index is not None:
             out["expected_final_stage_index"] = expected_final_stage_index
@@ -800,6 +812,7 @@ async def run_multistage_stages(
     on_event: Optional[Callable[[str, dict], None]] = None,
     resume: Optional[StageResume] = None,
     dispatch_longest_first: bool = False,
+    assignment_repair: Optional[AssignmentRepair] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Run every stage and return ``(all_result_rows, stage_summaries)``.
 
@@ -960,7 +973,14 @@ async def run_multistage_stages(
             }
 
         reference_ids, task_ids, task_reference_ids, replayed = _plan_stage(
-            index, stage, reference_elos, eval_elo, stage_task_sets, multistage_config, resume
+            index,
+            stage,
+            reference_elos,
+            eval_elo,
+            stage_task_sets,
+            multistage_config,
+            resume,
+            assignment_repair,
         )
 
         stage_rows = build_stage_rows(
@@ -1222,6 +1242,7 @@ def _plan_stage(
     stage_task_sets: Sequence[Sequence[str]],
     multistage_config: MultiStageRunConfig,
     resume: Optional[StageResume],
+    assignment_repair: Optional[AssignmentRepair] = None,
 ) -> Tuple[List[str], List[str], Dict[str, str], bool]:
     """Return ``(reference_ids, task_ids, task_reference_ids, replayed)`` for a stage.
 
@@ -1258,19 +1279,30 @@ def _plan_stage(
         rng=rng,
         balanced=stage.partial_completion is not None,
     )
-    if resume is not None:
-        resume.on_plan(
+    repair_receipt: Optional[Dict[str, Any]] = None
+    if assignment_repair is not None:
+        task_reference_ids, repair_receipt = assignment_repair(
             index,
-            {
-                "stage_index": index,
-                "status": "planned",
-                "reference_ids": list(reference_ids),
-                "task_ids": list(task_ids),
-                "task_reference_ids": task_reference_ids,
-                "seed": stage.seed,
-                "prior_eval_elo": eval_elo,
-            },
+            reference_ids,
+            task_reference_ids,
         )
+        if set(task_reference_ids) != set(task_ids):
+            raise ValueError("transport assignment repair changed the stage task set")
+        if any(reference_id not in reference_ids for reference_id in task_reference_ids.values()):
+            raise ValueError("transport assignment repair selected a reference outside the stage")
+    if resume is not None:
+        plan = {
+            "stage_index": index,
+            "status": "planned",
+            "reference_ids": list(reference_ids),
+            "task_ids": list(task_ids),
+            "task_reference_ids": task_reference_ids,
+            "seed": stage.seed,
+            "prior_eval_elo": eval_elo,
+        }
+        if repair_receipt is not None:
+            plan["transport_assignment_repair"] = repair_receipt
+        resume.on_plan(index, plan)
     return list(reference_ids), task_ids, task_reference_ids, False
 
 
@@ -2016,6 +2048,13 @@ async def run_e2e_multistage(
         row["verify_cache_namespace"] = fingerprint
     resume = _prepare_resume(rollout_collection_config, output_fpath, journal_fpath, fingerprint)
 
+    assignment_repair = None
+    transport_config = (global_config_dict.get("multistage") or {}).get("transport_assignment_repair")
+    if isinstance(transport_config, Mapping) and transport_config.get("enabled"):
+        from resources_servers.gdpval.transport_assignment import make_assignment_repair
+
+        assignment_repair = make_assignment_repair(global_config_dict, transport_config)
+
     all_results, stage_summaries = await run_multistage_stages(
         multistage_config,
         reference_elos,
@@ -2025,6 +2064,7 @@ async def run_e2e_multistage(
         on_event=_log_event,
         resume=resume,
         dispatch_longest_first=bool(getattr(rollout_collection_config, "dispatch_longest_first", False)),
+        assignment_repair=assignment_repair,
     )
 
     print(latency_tracker.summary())
