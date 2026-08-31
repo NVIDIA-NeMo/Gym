@@ -38,7 +38,7 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
 )
-from nemo_gym.path_utils import failures_path_for
+from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for
 from nemo_gym.rollout_collection import (
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
@@ -661,7 +661,7 @@ async def _call_aggregate_metrics(
     export_metrics(metrics_to_log)
 
     # Write single file with all agents
-    metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
+    metrics_fpath = aggregate_metrics_path_for(output_fpath)
     metrics_fpath.write_bytes(orjson.dumps(all_agent_metrics, option=orjson.OPT_INDENT_2))
 
     return metrics_fpath
