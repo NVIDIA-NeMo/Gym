@@ -289,7 +289,9 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             )
 
             await environment.exec("mkdir -p /logs/agent", user="root")
-            tmux_install_result = await sandbox.pty.exec("apt update && apt install -y tmux", session=pty_session)
+            tmux_install_result = await sandbox.pty.exec(
+                "apt update && apt install -y tmux", session=pty_session, timeout_s=240
+            )
             assert tmux_install_result.return_code == 0, tmux_install_result
             await agent.setup(environment)
 
