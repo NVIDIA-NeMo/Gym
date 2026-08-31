@@ -1,8 +1,14 @@
 # Native Nano Omni v3 WebVoyager
 
+For copyable setup, preparation, one-task smoke, full-population execution,
+and reconciliation commands, use the
+[native WebVoyager end-to-end runbook](native-v3-runbook.md). This document is
+the detailed protocol and reproducibility reference.
+
 This profile reproduces the maintained screenshot/tool-call WebVoyager route
 inside NeMo Gym. It is separate from `benchmarks/webvoyager/config.yaml`, which
-continues to provide the public Selenium/BrowserGym-compatible baseline.
+continues to provide the public BrowserGym-compatible baseline. The original
+Selenium runner is not included.
 
 ## Code path
 
@@ -133,9 +139,12 @@ image and the native browser tool schemas, confirm that the endpoint returns a
 standard `tool_calls` entry with an allowed function name and JSON arguments,
 then complete a one-task rollout before scaling out. This serving contract is
 independent of the browser backend. The native Playwright/PyAutoGUI route and
-the legacy Selenium/BrowserGym route can call the same policy endpoint.
+the BrowserGym-compatible route can call the same policy endpoint.
 
 ## Required run inputs
+
+The operational form of this checklist, including exact commands and pass
+criteria, is maintained in [native-v3-runbook.md](native-v3-runbook.md).
 
 1. Set `WEBVOYAGER_SOURCE_JSONL` and run the native prepare script.
 2. Point `POLICY_BASE_URL` at a compatible external endpoint, or prepare the
@@ -289,4 +298,4 @@ outbound policy request. The final source generation also passed production
 agent/browser imports, 5 focused agent regressions, and all 14 CAPTCHA
 regressions in the target Linux/Enroot runtime. This evidence applies only to
 the maintained native 552-task profile; it does not claim equivalent coverage
-for the legacy 643-task BrowserGym route, WebArena, or VisualWebArena.
+for the BrowserGym-compatible 643-task route, WebArena, or VisualWebArena.

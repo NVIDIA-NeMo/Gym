@@ -1,5 +1,11 @@
 # WebVoyager
 
+For a copyable path from a clean Gym checkout through a one-task smoke run and
+the maintained native 552-task population, start with the
+[native WebVoyager end-to-end runbook](native-v3-runbook.md). It identifies
+the exact dataset and public model-serving assets, required external services,
+commands, logs, and denominator checks.
+
 The first Gym profile runs the 643 official WebVoyager tasks through
 `browsergym/openended`. It preserves the upstream action surface (`Click`,
 `Type`, `Scroll`, `Wait`, `GoBack`, `Google`, `ANSWER`) with a safe translation
@@ -9,8 +15,10 @@ scored by the separate WebVoyager VLM judge.
 The maintained 552-task Nano Omni screenshot/tool-call route is a separate
 profile documented in [native-v3.md](native-v3.md). It uses headed Chromium,
 coordinate actions, the native Gemini judge contract, a US proxy, and
-CapSolver. Do not combine its 552-task score or runtime requirements with this
-legacy 643-task BrowserGym profile.
+CapSolver. Do not combine its 552-task score or runtime requirements with the
+BrowserGym-compatible 643-task profile. The internal CLI profile name
+`legacy` refers to this BrowserGym-compatible path; it does not mean that the
+original Selenium runner is included.
 
 For evaluation and RL collection, judging is per episode: the agent releases
 the browser after retaining the final evidence, then obtains a binary reward
